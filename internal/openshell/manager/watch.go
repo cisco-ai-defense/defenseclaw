@@ -209,15 +209,21 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if host == "" {
 			return
 		}
-		m.markWork(b, at, harnessActivity(harnessName, r.Binary))
-		if !r.Denied() && !r.Allowed() {
-			return
-		}
 		// The harness's own background request around the proxy is refused
 		// as expected and is none of the agent's doing: it is audited, but
 		// neither counted as a blocked site nor shown on the feed, where
-		// triage's rejection of its proposal explains it once.
+		// triage's rejection of its proposal explains it once, and it is no
+		// sign of work (the Codex TUI makes it at start, before any prompt).
 		fetch := r.Denied() && harnessFetchDenial(harnessName, r, host)
+		ofHarness := harnessActivity(harnessName, r.Binary)
+		if !fetch {
+			m.markWork(b, at, ofHarness)
+		} else if ofHarness {
+			m.markActive(b, at)
+		}
+		if !r.Denied() && !r.Allowed() {
+			return
+		}
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
 			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),

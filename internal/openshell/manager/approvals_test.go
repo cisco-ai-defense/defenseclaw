@@ -161,6 +161,14 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 0 {
 		t.Fatalf("the tip download counted as %d blocked sites", got.Egress.Blocked)
 	}
+	// Nor is it harness work: an idle Codex TUI makes it before any prompt,
+	// and work without hooks raises the hooks-unreachable alarm.
+	e.m.mu.Lock()
+	firstWork := e.m.boxes[sb.Name].reach.firstWork
+	e.m.mu.Unlock()
+	if !firstWork.IsZero() {
+		t.Fatal("the tip download counted as harness work")
+	}
 	for _, ev := range e.m.ActivitySince(0, sb.Name) {
 		if ev.Kind == sandboxapi.ActivityEgressBlocked {
 			t.Fatalf("the tip download's denial is on the feed: %+v", ev)
@@ -189,6 +197,12 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
 	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 1 {
 		t.Fatalf("a curl's denial counted as %d blocked sites, want 1", got.Egress.Blocked)
+	}
+	e.m.mu.Lock()
+	firstWork = e.m.boxes[sb.Name].reach.firstWork
+	e.m.mu.Unlock()
+	if firstWork.IsZero() {
+		t.Fatal("a curl's connection did not count as harness work")
 	}
 	curl := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443))
 	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
