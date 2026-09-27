@@ -254,11 +254,14 @@ func LoadFile(p string) (*Pack, error) {
 
 // checkPackOwnership refuses a pack file that another local user wrote or
 // could replace. The file and its directory must be owned by the current
-// user or root, and neither may be world-writable, with one exception: a
-// root-owned file may sit in a sticky world-writable directory, where no
-// other user can replace it. A file of the user's own in such a directory
-// (for example under /tmp) is refused, because the directory's contents are
-// not the user's to vouch for.
+// user or root, and neither may be writable by its group or by every user,
+// with one exception: a root-owned file may sit in a sticky directory others
+// can write to, where no other user can replace it. A file of the user's own
+// in such a directory (for example under /tmp) is refused, because the
+// directory's contents are not the user's to vouch for. On Linux the group
+// write bit also reflects a POSIX ACL that grants write to a named user or
+// group (the ACL mask); macOS ACLs, which leave the mode bits alone, are not
+// inspected.
 func checkPackOwnership(file string, info fs.FileInfo) error {
 	uid := currentUID()
 	owner, ok := fileOwner(info)
@@ -270,6 +273,8 @@ func checkPackOwnership(file string, info fs.FileInfo) error {
 			"the pack file is owned by another user (uid %d); only packs you or root own are loaded", owner)
 	case info.Mode().Perm()&0o002 != 0:
 		return packErr(file, "", "world_writable", "the pack file is writable by every user; run chmod o-w on it")
+	case info.Mode().Perm()&0o020 != 0:
+		return packErr(file, "", "group_writable", "the pack file is writable by its group; run chmod g-w on it")
 	}
 	dir, err := os.Stat(filepath.Dir(file))
 	if err != nil {
@@ -283,13 +288,15 @@ func checkPackOwnership(file string, info fs.FileInfo) error {
 		// The directory's owner can replace any file in it.
 		return packErr(file, "", "foreign_owner",
 			"the pack directory is owned by another user (uid %d); keep packs in a directory you or root own", dirOwner)
-	case dir.Mode().Perm()&0o002 == 0:
+	case dir.Mode().Perm()&0o022 == 0:
 		return nil
-	case dir.Mode()&fs.ModeSticky == 0:
+	case dir.Mode()&fs.ModeSticky == 0 && dir.Mode().Perm()&0o002 != 0:
 		return packErr(file, "", "world_writable", "the pack directory is writable by every user; run chmod o-w on it")
+	case dir.Mode()&fs.ModeSticky == 0:
+		return packErr(file, "", "group_writable", "the pack directory is writable by its group; run chmod g-w on it")
 	case owner != 0:
 		return packErr(file, "", "world_writable",
-			"the pack is in a directory every user can write to; move it to a directory only you can write to")
+			"the pack is in a directory other users can write to; move it to a directory only you can write to")
 	}
 	return nil
 }

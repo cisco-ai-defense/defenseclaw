@@ -161,6 +161,12 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 	}
 	_, err := LoadFile(teamDir)
 	wantPackError(t, err, "world_writable", "")
+	// Group members are other local users too.
+	if err := os.Chmod(file, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadFile(teamDir)
+	wantPackError(t, err, "group_writable", "")
 	if err := os.Chmod(file, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +176,14 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 	}
 	_, err = LoadFile(teamDir)
 	wantPackError(t, err, "world_writable", "")
+	if err := os.Chmod(teamDir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadFile(teamDir)
+	wantPackError(t, err, "group_writable", "")
+	if _, err := Load("team", root); err == nil {
+		t.Fatal("a named pack in a group-writable directory loaded")
+	}
 
 	// A sticky world-writable directory (like /tmp) is not the user's to
 	// vouch for: only a root-owned pack loads from it.
@@ -181,7 +195,7 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 	}
 	fakeOwners(t, func(fs.FileInfo) int { return testUID })
 	_, err = LoadFile(teamDir)
-	if e := wantPackError(t, err, "world_writable", ""); !strings.Contains(e.Reason, "every user can write to") {
+	if e := wantPackError(t, err, "world_writable", ""); !strings.Contains(e.Reason, "other users can write to") {
 		t.Fatalf("sticky directory: %v", e)
 	}
 	fakeOwners(t, func(info fs.FileInfo) int {
