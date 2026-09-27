@@ -809,6 +809,7 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 	// use the proxy): the empirical stray-outbound set of this run.
 	if logs, err := liveOpenShell(t, time.Minute, nil, "logs", sandboxName, "-n", "1000", "--source", "sandbox"); err == nil {
 		denied := map[string]int{}
+		var samples []string
 		for _, line := range strings.Split(logs, "\n") {
 			if !strings.Contains(line, "DENIED") {
 				continue
@@ -816,8 +817,14 @@ func runLiveHookOnlyHarness(t *testing.T, h *harness.Spec, dataDir, repo string,
 			for _, m := range liveDestinationRE.FindAllString(line, -1) {
 				denied[m]++
 			}
+			if strings.Contains(line, connector.SandboxIngressHost) && len(samples) < 2 {
+				samples = append(samples, liveTail(line, 400))
+			}
 		}
-		t.Logf("%s destinations OpenShell denied: %v", h.Name, denied)
+		t.Logf("%s destinations OpenShell denied: %v (front ingress %d, egress proxy %d, mock %d)", h.Name, denied, ingressPort, egressPort, mockPort)
+		for _, line := range samples {
+			t.Logf("denied: %s", line)
+		}
 	}
 
 	events := recorder.snapshot()
