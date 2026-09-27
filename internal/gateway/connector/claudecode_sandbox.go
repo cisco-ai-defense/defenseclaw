@@ -143,6 +143,12 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 // Claude silently drops a whole drop-in that carries one schema-invalid
 // field, so the document holds only keys verified against Claude Code 2.1.x
 // and the image build's hook-fire probe proves the hooks actually run.
+//
+// Claude's own bubblewrap sandbox is pinned off (sandbox.enabled, a boolean
+// in the 2.1.156 settings schema): it cannot nest inside OpenShell, and a
+// project or user setting that enabled it, with sandbox.failIfUnavailable,
+// would stop the harness at startup. The hook-fire probe plants exactly
+// that in its hostile user and project settings.
 func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 	hookCommand := path.Join(SandboxHookDir, "claude-code-hook.sh")
 	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, nil, rt.opts)
@@ -159,6 +165,7 @@ func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 		"otelHeadersHelper":                 claudeCodeSandboxOtelHelperPath,
 		"hooks":                             hooks,
 		"env":                               env,
+		"sandbox":                           map[string]interface{}{"enabled": false},
 	}
 	body, err := json.MarshalIndent(policy, "", "  ")
 	if err != nil {
@@ -230,6 +237,10 @@ func verifyClaudeCodeSandboxDropIn(dropIn []byte, rt resolvedSandboxTarget) erro
 	}
 	if only, _ := source.settings["allowManagedHooksOnly"].(bool); !only {
 		return fmt.Errorf("verify Claude Code sandbox managed settings: allowManagedHooksOnly is not true")
+	}
+	sandbox, _ := source.settings["sandbox"].(map[string]interface{})
+	if enabled, ok := sandbox["enabled"].(bool); !ok || enabled {
+		return fmt.Errorf("verify Claude Code sandbox managed settings: Claude's own sandbox is not pinned off")
 	}
 	env, _ := source.settings["env"].(map[string]interface{})
 	pinned := make([]string, 0, len(claudeCodeSandboxPinnedEnv))

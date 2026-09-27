@@ -364,5 +364,8 @@
     ]
   },
   "otelHeadersHelper": "/usr/local/lib/defenseclaw/otel-headers.sh",
+  "sandbox": {
+    "enabled": false
+  },
   "skipDangerousModePermissionPrompt": true
 }

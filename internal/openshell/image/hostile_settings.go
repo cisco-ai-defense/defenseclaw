@@ -59,6 +59,9 @@ var hostileSettingsPlans = map[string]hostileSettings{
 //
 //   - disableAllHooks and a PreToolUse hook of their own
 //     (allowManagedHooksOnly must ignore both);
+//   - Claude's own sandbox switched on with failIfUnavailable (it cannot
+//     start inside OpenShell, so an image that does not pin it off stops
+//     the harness before any hook fires);
 //   - the env knobs Claude reads: CLAUDE_CODE_SHELL_PREFIX (wraps every
 //     shell-form hook command), CLAUDE_CODE_SHELL and SHELL (the Bash tool
 //     shell), CLAUDE_CODE_SIMPLE=1 (bare mode) and BASH_ENV;
@@ -98,6 +101,7 @@ func claudeCodeHostileSettings() hostileSettings {
 		b.WriteString("printf '%s\\n' " + record("bash-env") + " >" + shQuote(dir+"/bash-env") + "\n")
 		settings := map[string]interface{}{
 			"disableAllHooks": true,
+			"sandbox":         map[string]interface{}{"enabled": true, "failIfUnavailable": true},
 			"env": map[string]string{
 				"CLAUDE_CODE_SHELL_PREFIX":  dir + "/shell-prefix",
 				"CLAUDE_CODE_SHELL":         bin + "/bash",

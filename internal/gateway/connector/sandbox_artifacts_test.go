@@ -242,11 +242,16 @@ func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 	if dropIn == nil {
 		t.Fatal("drop-in missing")
 	}
-	allowed := map[string]bool{"allowManagedHooksOnly": true, "skipDangerousModePermissionPrompt": true, "otelHeadersHelper": true, "hooks": true, "env": true}
+	allowed := map[string]bool{"allowManagedHooksOnly": true, "skipDangerousModePermissionPrompt": true, "otelHeadersHelper": true, "hooks": true, "env": true, "sandbox": true}
 	for key := range dropIn {
 		if !allowed[key] {
 			t.Errorf("drop-in carries unreviewed key %q (Claude drops a whole drop-in with one invalid field)", key)
 		}
+	}
+	// Claude's own sandbox cannot nest inside OpenShell: pinned off, with
+	// no other sandbox key (each one is a schema risk).
+	if sandbox, ok := dropIn["sandbox"].(map[string]interface{}); !ok || len(sandbox) != 1 || sandbox["enabled"] != false {
+		t.Errorf("drop-in sandbox = %#v, want exactly {\"enabled\": false}", dropIn["sandbox"])
 	}
 	env := dropIn["env"].(map[string]interface{})
 	for key, want := range map[string]string{
@@ -328,9 +333,12 @@ func TestVerifyClaudeCodeSandboxDropInRejectsTampering(t *testing.T) {
 		"shell-prefix-set": mutate(func(d map[string]interface{}) {
 			d["env"].(map[string]interface{})["CLAUDE_CODE_SHELL_PREFIX"] = "/sandbox/wrap.sh"
 		}),
-		"shell-unpinned":    mutate(func(d map[string]interface{}) { delete(d["env"].(map[string]interface{}), "SHELL") }),
-		"simple-mode-on":    mutate(func(d map[string]interface{}) { d["env"].(map[string]interface{})["CLAUDE_CODE_SIMPLE"] = "1" }),
-		"env-block-missing": mutate(func(d map[string]interface{}) { delete(d, "env") }),
+		"shell-unpinned":       mutate(func(d map[string]interface{}) { delete(d["env"].(map[string]interface{}), "SHELL") }),
+		"simple-mode-on":       mutate(func(d map[string]interface{}) { d["env"].(map[string]interface{})["CLAUDE_CODE_SIMPLE"] = "1" }),
+		"env-block-missing":    mutate(func(d map[string]interface{}) { delete(d, "env") }),
+		"own-sandbox-unpinned": mutate(func(d map[string]interface{}) { delete(d, "sandbox") }),
+		"own-sandbox-on":       mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": true} }),
+		"own-sandbox-string":   mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": "false"} }),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
