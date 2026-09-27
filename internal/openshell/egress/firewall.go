@@ -27,6 +27,14 @@ import (
 // configuration into DeciderOptions.Block patterns, so a destination the
 // operator denies for the host is denied for sandboxes too.
 //
+// Only deny rules carry over. The host firewall's default_action and
+// allowlist are not a sandbox egress allowlist and are ignored: they scope
+// what the DefenseClaw host itself may reach (the default configuration
+// denies everything but DefenseClaw's model, registry and inspection
+// endpoints), which would leave a sandbox almost nothing. Sandbox egress is
+// narrowed by the network profile instead (allowlist mode with the curated
+// allowlist feed) and by openshell.egress.allow.
+//
 // Only outbound TCP-capable deny rules with a destination apply. A rule
 // scoped to a port or port range applies when it covers one of ports (the
 // proxy's destination ports) and then blocks the destination outright,

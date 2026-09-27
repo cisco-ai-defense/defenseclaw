@@ -57,9 +57,22 @@ func TestFirewallBlockPatterns(t *testing.T) {
 	d := mustDecider(t, DeciderOptions{Block: got})
 	checkDecision(t, d, testPrincipal, "x.bad.example.net", 443, decisionWant{category: CategoryOperatorBlock, source: SourceOperator})
 
-	// The shipped default firewall config converts cleanly.
-	if got := FirewallBlockPatterns(firewall.DefaultFirewallConfig(), nil); !slices.Contains(got, "169.254.169.254") {
+	// The shipped default firewall config converts cleanly. It denies by
+	// default and allowlists DefenseClaw's own endpoints; neither the
+	// default action nor the allowlist carries over to sandboxes.
+	def := firewall.DefaultFirewallConfig()
+	got = FirewallBlockPatterns(def, nil)
+	if !slices.Contains(got, "169.254.169.254") {
 		t.Errorf("default firewall config = %v", got)
+	}
+	for _, host := range slices.Concat(def.Allowlist.Domains, def.Allowlist.IPs) {
+		if slices.Contains(got, host) {
+			t.Errorf("allowlisted %s became a sandbox block pattern", host)
+		}
+	}
+	denyAll := &firewall.FirewallConfig{DefaultAction: "deny", Allowlist: firewall.AllowlistConfig{Domains: []string{"api.github.com"}}}
+	if got := FirewallBlockPatterns(denyAll, nil); len(got) != 0 {
+		t.Errorf("default_action deny with an allowlist = %v, want no patterns", got)
 	}
 }
 
