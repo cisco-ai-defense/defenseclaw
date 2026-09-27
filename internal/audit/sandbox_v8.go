@@ -120,7 +120,7 @@ const (
 type SandboxIdentity struct {
 	// ID is the OpenShell sandbox ID; empty until the gateway accepted it.
 	ID string
-	// Name is the DefenseClaw sandbox name (dc-<harness>-<repo>-<rand4>).
+	// Name is the DefenseClaw sandbox name (by default <folder>-<rand4>).
 	// Every record except gateway-wide health requires it.
 	Name string
 	// Connector is the harness connector (claudecode, codex, ...). It becomes

@@ -237,10 +237,10 @@ the launch banner, and the harness's normal interface takes over your
 terminal:
 
 ```text
-  Starting a Claude Code sandbox… (the first run builds its image, about 3 GB)
+  Starting a Claude Code sandbox… (building its image first: about 3 GB, a few minutes)
 
-Sandbox dc-claude-myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
-  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo` restores it
+Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + blocklist
+  Project   ~/code/myapp → /work/myapp (live)   snapshot taken → `defenseclaw sandbox undo myapp-7f3a` restores it
   Hidden    .env  certs/dev.pem  (secret files appear empty inside; --unmask PATH to share)
   Protected .git/hooks .git/config .git/config.worktree (read-only)
             Not visible: everything else on this machine
@@ -253,9 +253,9 @@ Sandbox dc-claude-myapp-7f3a · Claude Code · skip-permissions ON · network: o
 
 | Line | What it tells you |
 | --- | --- |
-| `Sandbox dc-claude-myapp-7f3a · …` | The sandbox name (`dc-<harness>-<folder>-<random>` unless you pass `--name`), the harness, and the permissions mode. `skip-permissions ON` means the harness runs with its own prompts off (`--dangerously-skip-permissions` for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex). With `--safe` it reads `skip-permissions OFF (harness prompts kept)`. |
+| `Sandbox myapp-7f3a · …` | The sandbox name (`<folder>-<random>`, the folder name cut to fit OpenShell's 19 characters, unless you pass `--name`), the harness, and the permissions mode. `skip-permissions ON` means the harness runs with its own prompts off (`--dangerously-skip-permissions` for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex). With `--safe` it reads `skip-permissions OFF (harness prompts kept)`. |
 | `network: …` | `open + blocklist` for the default `open` profile, `allowlist (balanced)`, or `provider hosts only (strict)`. |
-| `Project` | Your folder and where it appears inside (`/work/<folder>`). `(live)` means the agent edits your folder directly. The snapshot is what undo restores. A copy-mode run shows `(copy)` and the `pull` command instead. |
+| `Project` | Your folder and where it appears inside (`/work/<folder>`). `(live)` means the agent edits your folder directly. The snapshot is what undo restores; a resumed sandbox that kept an earlier undo point says `undo point from 14:02 kept` instead. A copy-mode run shows `(copy)` and the `pull` command instead. |
 | `Hidden` | Secret files that appear empty inside: `.env`, keys and certificates, cloud and Docker credentials, and similar. Committed templates such as `.env.example` stay visible. `--unmask PATH` shares one. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook or a config setting that would run on your machine the next time you use git. |
 | `Not visible` | Nothing else on your machine is in the sandbox. |
@@ -311,11 +311,11 @@ defenseclaw sandbox activity -f
 ```
 
 ```text
-14:02:11 dc-claude-myapp-7f3a ✓ registry.npmjs.org
-14:02:13 dc-claude-myapp-7f3a ✓ docs.python.org
-14:02:20 dc-claude-myapp-7f3a ✗ webhook.site (webhook_catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox dc-claude-myapp-7f3a
-14:05:48 dc-claude-myapp-7f3a ? ask ap_5f2c9a1e7b3d4c60: the sandbox asks to reach port 5432 on your machine  → defenseclaw sandbox approve dc-claude-myapp-7f3a ap_5f2c9a1e7b3d4c60
-14:06:02 dc-claude-myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
+14:02:11 myapp-7f3a ✓ registry.npmjs.org
+14:02:13 myapp-7f3a ✓ docs.python.org
+14:02:20 myapp-7f3a ✗ webhook.site (webhook_catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+14:05:48 myapp-7f3a ? ask ap_5f2c9a1e7b3d4c60: the sandbox asks to reach port 5432 on your machine  → defenseclaw sandbox approve myapp-7f3a ap_5f2c9a1e7b3d4c60
+14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
 
 Nothing in the feed waits for you except asks. `--sandbox NAME` limits the
@@ -359,7 +359,7 @@ If a block is a false positive, lift it for one sandbox or for every
 sandbox:
 
 ```bash
-defenseclaw sandbox unblock webhook.site --sandbox dc-claude-myapp-7f3a
+defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 defenseclaw sandbox unblock webhook.site --always
 ```
 
@@ -386,8 +386,8 @@ flags.
 
 ```bash
 defenseclaw sandbox approvals
-defenseclaw sandbox approve dc-claude-myapp-7f3a ap_5f2c9a1e7b3d4c60
-defenseclaw sandbox reject dc-claude-myapp-7f3a ap_5f2c9a1e7b3d4c60
+defenseclaw sandbox approve myapp-7f3a ap_5f2c9a1e7b3d4c60
+defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60
 ```
 
 `defenseclaw sandbox approvals --watch` keeps the list open. `--always` keeps a decision for
@@ -430,7 +430,7 @@ denied it, means the workload likely killed or bypassed its hook. That is
 reported as a HIGH `hook_tamper` finding in telemetry and in the feed:
 
 ```text
-14:09:31 dc-claude-myapp-7f3a ⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)
+14:09:31 myapp-7f3a ⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)
 ```
 
 What happens next is the pack's `hooks.on_tamper` setting:
@@ -488,9 +488,9 @@ run code on your machine, and a choice:
 
 ```text
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 sites contacted (1 request blocked) · 8 files changed (+212 −37)
-⚠ Changed files that can run code on your machine: package.json#scripts.postinstall, .envrc  → review before running
+⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff
-  Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-myapp-7f3a   delete: defenseclaw sandbox delete dc-claude-myapp-7f3a
+  Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
 ```
 
 - **Enter** or `y` keeps the changes.
@@ -501,6 +501,12 @@ The sandbox is then stopped, not deleted, so you can resume it later.
 `--rm` deletes it instead. `--yes` keeps the changes without asking, and
 `openshell.workdir.on_exit` (`ask`, `keep` or `undo`) sets the default for
 every run. With no changes, nothing is asked.
+
+Keeping the changes (Enter, `y`, `--yes`, or `on_exit: keep`) makes them
+the base of the next session: its start takes a fresh snapshot. A session
+whose changes nobody kept (a detached or headless run, or one without a
+terminal to ask on) leaves its undo point in place, so the next start keeps
+it and `undo` still reverts every session since.
 
 ### What the review flags
 
@@ -514,19 +520,20 @@ open, build, install, commit or push. Files git ignores are checked too.
 | High | npm lifecycle scripts (`postinstall` and the like), new filter, diff or merge drivers in `.gitattributes`, `.envrc`, editor tasks and settings (`.vscode/`), IDE run configurations, dev containers, git hook managers (`.husky/`, `.pre-commit-config.yaml`), package-manager config (`.npmrc`), Python tooling (`setup.py`, `conftest.py`, `pyproject.toml`), build files (`Makefile`, Gradle, Maven, CMake), new executables, and paths in the pack's `workspace.review` list. |
 | Medium | Other npm scripts and dependency changes, CI definitions, container builds, version-manager files, a secret-like file created or changed, a changed dependency directory, and ignore-rule changes that hide paths. |
 
-The risk line lists the medium and worse flags. The changed files are also
-scanned for secrets and insecure code.
+The risk line names each file with a medium or worse flag once, and the
+review lists each file on one line with all its reasons. The changed files
+are also scanned for secrets and insecure code.
 
 Look again at any time, with the full list and the diff:
 
 ```bash
-defenseclaw sandbox review dc-claude-myapp-7f3a --diff
+defenseclaw sandbox review myapp-7f3a --diff
 ```
 
 ```text
-  dc-claude-myapp-7f3a: 8 files changed (+212 −37)
-  ⚠ Changed files that can run code on your machine: package.json#scripts.postinstall, .envrc  → review before running
-    HIGH     package.json#scripts.postinstall — npm lifecycle script changed (runs automatically on install): node scripts/setup.js
+  myapp-7f3a: 8 files changed (+212 −37)
+  ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
+    HIGH     package.json — scripts.postinstall: npm lifecycle script changed (runs automatically on install): node scripts/setup.js
     HIGH     .envrc — sourced by direnv when you enter the folder
     CRITICAL src/settings.py:12 — clawshield-secrets: <the finding's title>
 ```
@@ -538,7 +545,7 @@ and, when the scanner reports one, the line.
 ### Undo the session
 
 ```bash
-defenseclaw sandbox undo dc-claude-myapp-7f3a
+defenseclaw sandbox undo myapp-7f3a
 ```
 
 Undo shows what it will restore and asks first. It stops the sandbox
@@ -595,15 +602,15 @@ folder until you bring the work back. At the end of the session you choose
 how:
 
 ```text
-Bring the changes back? [A] apply (3-way)  [b] branch dc/dc-codex-myapp-1c2d  [p] patch file  [s] skip
+Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch file  [s] skip
 ```
 
 Or later, with `pull`:
 
 ```bash
-defenseclaw sandbox pull dc-codex-myapp-1c2d --apply
-defenseclaw sandbox pull dc-codex-myapp-1c2d --branch
-defenseclaw sandbox pull dc-codex-myapp-1c2d --patch-out fix.patch
+defenseclaw sandbox pull myapp-1c2d --apply
+defenseclaw sandbox pull myapp-1c2d --branch
+defenseclaw sandbox pull myapp-1c2d --patch-out fix.patch
 ```
 
 | Flag | Effect |
@@ -648,7 +655,9 @@ defenseclaw sandbox run codex --copy --name docs
 ```
 
 Each one's work can then come back as its own branch (`dc/fix-tests`,
-`dc/docs`). Names use lowercase letters, digits and `-`.
+`dc/docs`). Names use at most 19 lowercase letters, digits and `-`
+(OpenShell's limit). A name another sandbox has is refused before anything
+is copied, with the command that resumes that sandbox.
 
 ### Run in the background
 
@@ -659,18 +668,24 @@ defenseclaw sandbox run claude --detach --prompt "fix the failing tests"
 ```
 
 ```text
-  ✓ Claude Code is running in the background in dc-claude-myapp-7f3a
-  follow:  defenseclaw sandbox logs dc-claude-myapp-7f3a -f
-  watch:   defenseclaw sandbox activity -f --sandbox dc-claude-myapp-7f3a
-  review:  defenseclaw sandbox review dc-claude-myapp-7f3a   undo: defenseclaw sandbox undo dc-claude-myapp-7f3a
-  stop:    defenseclaw sandbox stop dc-claude-myapp-7f3a
+  ✓ Claude Code is running in the background in myapp-7f3a
+  follow:  defenseclaw sandbox logs myapp-7f3a -f
+  watch:   defenseclaw sandbox activity -f --sandbox myapp-7f3a
+  review:  defenseclaw sandbox review myapp-7f3a   undo: defenseclaw sandbox undo myapp-7f3a
+  stop:    defenseclaw sandbox stop myapp-7f3a
 ```
 
-`defenseclaw sandbox logs <name>` shows the run's output while the sandbox
-runs (`-f` follows it, `-n` sets the number of lines), and its exit status
-once it finished. A detached run has no end-of-session prompt: use `review`
-and `undo`, or `pull` in copy mode. `--detach` cannot be combined with
-`--rm`.
+`defenseclaw sandbox logs <name>` shows the run's output (`-f` follows it
+until the run ends, `-n` sets the number of lines) and says whether the run
+is still going, finished (with its exit status) or was interrupted. A
+detached Claude Code run streams its events, so the log grows as it works.
+`stop` asks first while a detached run is still going (`--yes` skips the
+question), marks the run interrupted and keeps its log on your machine, so
+`logs` still shows it once the sandbox is stopped. A detached run has no
+end-of-session prompt: use `review` and `undo`, or `pull` in copy mode.
+Because nobody kept its changes, the next start keeps the undo point from
+before the run, so `undo` still reverts it. `--detach` cannot be combined
+with `--rm`.
 
 ### Add a reference folder
 
@@ -876,21 +891,21 @@ wrappers.
 
 ```bash
 defenseclaw sandbox list
-defenseclaw sandbox status dc-claude-myapp-7f3a
-defenseclaw sandbox connect dc-claude-myapp-7f3a
+defenseclaw sandbox status myapp-7f3a
+defenseclaw sandbox connect myapp-7f3a
 ```
 
 ```text
-NAME                  HARNESS      PHASE    MODE   PROFILE  UPTIME  HOOKS                PROJECT
-dc-claude-myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 blocked  ~/code/myapp
+NAME        HARNESS      PHASE    MODE   PROFILE  UPTIME  HOOKS                PROJECT
+myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 blocked  ~/code/myapp
 ```
 
 | Command | What it does |
 | --- | --- |
-| `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead. |
+| `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead, and `--prompt TEXT` runs one prompt headless, without a terminal. A session stops only a sandbox it started, and leaves a sandbox whose detached run is still going running. |
 | `defenseclaw sandbox exec <name> -- <command>` | Run one command in a running sandbox, through its egress proxy. |
-| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. |
-| `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder, in which case the old snapshot is kept so `undo` still reverts them; `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
+| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not) and keeps the run's log. |
+| `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder and you did not keep them at the end of that session, in which case the old snapshot is kept so `undo` still reverts them; it says which. `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
 | `defenseclaw sandbox delete <name>` | Delete sandboxes with their credentials and, unless `--keep-snapshot`, their undo snapshot. |
 | `defenseclaw sandbox status` | The sandbox subsystem: OpenShell, the gateway, the listeners, the policy, and how many sandboxes run. With a name, one sandbox in detail. |
 

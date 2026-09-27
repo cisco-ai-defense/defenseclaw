@@ -388,7 +388,10 @@ Resumes a sandbox: it starts the sandbox if it is stopped, then attaches the
 harness to your terminal, or a shell with `--shell`. A harness session ends
 the same way as a `run` session. A `--shell` session just returns when the
 shell exits, with status `0`: there is no end-of-session summary or review,
-the sandbox keeps running, and `--rm` doesn't apply. Needs a terminal.
+the sandbox keeps running, and `--rm` doesn't apply. Needs a terminal,
+except with `--prompt TEXT` (or the harness's own print flag after `--`),
+which runs one prompt headless. A session stops the sandbox at its end only
+when it started it, and leaves one whose detached run is still going running.
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a
@@ -428,7 +431,10 @@ defenseclaw sandbox exec fix-tests --no-tty -- git status --short
 
 ### `sandbox logs`
 
-Shows the output of a detached run (`run --detach`) while the sandbox runs.
+Shows the output of a detached run (`run --detach`) and whether the run is
+still going, finished (with its exit status) or was interrupted. `-f` follows
+the output until the run ends. Once the sandbox is stopped, it shows the log
+`stop` kept on this machine.
 
 ```bash
 defenseclaw sandbox logs fix-tests -f
@@ -480,7 +486,10 @@ defenseclaw sandbox status myapp-7f3a --output json
 
 ### `sandbox stop`
 
-Stops a sandbox. It is kept, so `start` or `connect` can resume it.
+Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
+detached run is still going, `stop` asks first on a terminal (`--yes` skips
+the question; without a terminal it warns), marks the run interrupted and
+keeps its log for `sandbox logs`.
 
 ```bash
 defenseclaw sandbox stop myapp-7f3a
@@ -498,10 +507,13 @@ Starts a stopped sandbox as a new session. A mounted project gets a fresh
 snapshot only when nothing would be lost: there is no snapshot yet, the last
 one was undone, or the folder hasn't changed since it. If an earlier
 session's changes are still in the folder, the old snapshot is kept, so
-`undo` can still revert them, and the activity feed says so.
-`--new-snapshot` accepts those changes and takes a fresh snapshot;
-`--no-snapshot` always keeps the old one. A sandbox that is already running
-is refused. Attach to it with `connect`.
+`undo` can still revert them, and the activity feed says so. Changes you
+kept at the end of a session ("Keep changes?", `--yes` or `on_exit: keep`)
+count as accepted: the next `start` or `connect` takes a fresh snapshot.
+`--new-snapshot` accepts the changes and takes a fresh snapshot;
+`--no-snapshot` always keeps the old one. `start` says which undo point
+applies. A sandbox that is already running is left as it is. Attach to it
+with `connect`.
 
 ```bash
 defenseclaw sandbox start myapp-7f3a

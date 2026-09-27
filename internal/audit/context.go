@@ -52,7 +52,7 @@ type CorrelationEnvelope struct {
 	Connector string
 	// SandboxID and SandboxName identify the OpenShell sandbox whose
 	// binding authenticated the request (the OpenShell sandbox ID and the
-	// DefenseClaw dc-<harness>-<repo>-<rand4> name). They are stamped only
+	// DefenseClaw sandbox name, by default <folder>-<rand4>). They are stamped only
 	// from the authenticated sandbox binding, never from request headers or
 	// payloads, and are empty for host traffic. Sandbox-aware v8 families
 	// such as the hook decision project them onto their correlation.sandbox

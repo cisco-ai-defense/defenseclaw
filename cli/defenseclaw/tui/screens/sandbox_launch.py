@@ -205,7 +205,7 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
                 value=self.folder, placeholder="a project folder, e.g. ~/code/myapp", id="sandbox-launch-folder"
             )
             yield Static("Name (optional)", classes="sandbox-launch-label")
-            yield Input(placeholder="dc-<harness>-<folder>-<random>", id="sandbox-launch-name")
+            yield Input(placeholder="<folder>-<random>", id="sandbox-launch-name")
             yield Static("Network profile", classes="sandbox-launch-label")
             yield Select(
                 tuple((option, option) for option in (_PACK_DEFAULT, *SANDBOX_PROFILES)),
