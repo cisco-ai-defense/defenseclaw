@@ -680,7 +680,11 @@ func (m *Manager) principal(bindingID, sandboxID, name string, d *egress.Decider
 func (m *Manager) reserve(name string) (*box, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.boxes[name]; ok {
+	if old, ok := m.boxes[name]; ok {
+		if old.retained {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+				"the name %s holds the kept undo snapshot of a deleted sandbox; `defenseclaw sandbox delete %s` drops it (undo first to restore the folder)", name, name)
+		}
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "a sandbox named %s already exists", name)
 	}
 	b := &box{rec: record{Name: name}, creating: true, seenChunks: map[string]struct{}{}}

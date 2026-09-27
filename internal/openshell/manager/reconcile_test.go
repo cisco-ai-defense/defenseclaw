@@ -57,8 +57,26 @@ func TestReconcileGarbageCollectsDeletedSandboxes(t *testing.T) {
 	if slices.Contains(e.ws.deleted, "gonebox") {
 		t.Fatal("reconcile deleted the snapshot of a sandbox the user deleted elsewhere")
 	}
+	// The kept snapshot stays reachable: the box is retained for undo,
+	// review and delete, and a second pass leaves it alone.
+	got, err := e.m.Get(context.Background(), "gonebox")
+	if err != nil || got.Phase != "deleted" || got.Snapshot == nil {
+		t.Fatalf("retained box = %+v, %v", got, err)
+	}
+	if err := e.m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Undo(context.Background(), "gonebox", sandboxapi.UndoRequest{}); err != nil {
+		t.Fatalf("undo of the retained box: %v", err)
+	}
+	if _, err := e.m.Delete(context.Background(), "gonebox", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.ws.deleted, "gonebox") {
+		t.Fatal("delete of the retained box kept its snapshot")
+	}
 	if _, err := e.m.Get(context.Background(), "gonebox"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		t.Fatalf("box survived: %v", err)
+		t.Fatalf("box survived its delete: %v", err)
 	}
 	var reconciled bool
 	for _, ev := range e.tel.lifecycle {
@@ -188,8 +206,8 @@ func TestWatcherEventsAndGC(t *testing.T) {
 	}
 	e.watch.end(sb.Name, stream.ErrSandboxNotFound)
 	eventually(t, "garbage collection", func() bool {
-		_, err := e.m.Get(context.Background(), sb.Name)
-		return sandboxapi.IsCode(err, sandboxapi.CodeNotFound)
+		got, err := e.m.Get(context.Background(), sb.Name)
+		return err == nil && got.Phase == "deleted"
 	})
 	if names := e.providers(); len(names) != 0 {
 		t.Fatalf("providers left: %v", names)

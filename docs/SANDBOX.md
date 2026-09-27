@@ -944,7 +944,13 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 <data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
 <data_dir>/sandboxes/bindings.json           ingress bindings
 <data_dir>/sandboxes/images.json             overlay image records
+<data_dir>/sandboxes/manager/<name>.json     the daemon's sandbox record
 ```
+
+A mounted sandbox deleted with `--keep-snapshot`, or deleted outside
+DefenseClaw, keeps its snapshot and a retained record: it stays listed with
+phase `deleted`, `undo` and `review` still work on it, and `delete` drops the
+snapshot. Until then its name cannot be reused.
 
 Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
 digits and `-`, at most 63 characters, starting and ending with a letter or

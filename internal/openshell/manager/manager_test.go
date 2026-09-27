@@ -568,6 +568,45 @@ func TestDeleteKeepSnapshot(t *testing.T) {
 	if slices.Contains(e.ws.deleted, "keepbox") {
 		t.Fatal("snapshot deleted despite keep_snapshot")
 	}
+	// The kept snapshot is reachable under the sandbox's name, across a
+	// daemon restart too, until the box is deleted.
+	e.m = e.newManager()
+	got, err := e.m.Get(context.Background(), "keepbox")
+	if err != nil || got.Phase != "deleted" || got.Snapshot == nil {
+		t.Fatalf("kept box = %+v, %v", got, err)
+	}
+	if st, _ := e.m.Status(context.Background()); st.Sandboxes != 0 {
+		t.Fatalf("status counts the kept snapshot as a sandbox: %d", st.Sandboxes)
+	}
+	if _, err := e.m.Start(context.Background(), "keepbox", sandboxapi.StartRequest{}); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("start of a deleted sandbox: %v", err)
+	}
+	if _, err := e.m.Create(context.Background(), sandboxapi.CreateRequest{Name: "keepbox", Harness: "claudecode", Project: e.project}); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+		t.Fatalf("create over the kept snapshot: %v", err)
+	}
+	if _, err := e.m.Review(context.Background(), "keepbox", sandboxapi.ReviewRequest{}); err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if _, err := e.m.Undo(context.Background(), "keepbox", sandboxapi.UndoRequest{Stop: true, Restart: true}); err != nil || !slices.Contains(e.ws.undone, "keepbox") {
+		t.Fatalf("undo: %v", err)
+	}
+	if _, err := e.m.Delete(context.Background(), "keepbox", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.ws.deleted, "keepbox") {
+		t.Fatal("delete kept the snapshot")
+	}
+	if _, err := e.m.Get(context.Background(), "keepbox"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("box survived: %v", err)
+	}
+	if p, _ := e.m.records.path("keepbox"); fileExists(p) {
+		t.Fatal("the record survived the delete")
+	}
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func TestUndoAndReview(t *testing.T) {

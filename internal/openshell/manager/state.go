@@ -127,6 +127,11 @@ type record struct {
 	// (mount mode). Copies of a record share it, so it is replaced, never
 	// changed in place.
 	Guard *guardRecord `json:"guard,omitempty"`
+
+	// Retained marks a sandbox that is gone (deleted with --keep-snapshot,
+	// or outside DefenseClaw) whose record is kept only for its
+	// pre-session snapshot: undo, review and delete still reach it.
+	Retained bool `json:"retained,omitempty"`
 }
 
 type recordStore struct {

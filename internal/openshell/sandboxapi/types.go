@@ -153,9 +153,11 @@ type Sandbox struct {
 	Harness string `json:"harness"`
 	// HarnessName is the display name (Claude Code).
 	HarnessName string `json:"harness_name,omitempty"`
-	// Phase is the OpenShell phase, lowercased (ready, stopped, ...), or
+	// Phase is the OpenShell phase, lowercased (ready, stopped, ...),
 	// "missing" when DefenseClaw still holds state for a sandbox OpenShell
-	// no longer has.
+	// no longer has, or "deleted" for a sandbox that is gone but whose
+	// pre-session snapshot is kept (delete --keep-snapshot, or deleted
+	// outside DefenseClaw): only undo, review and delete apply to it.
 	Phase       string `json:"phase"`
 	Pack        string `json:"pack,omitempty"`
 	PackDigest  string `json:"pack_digest,omitempty"`
@@ -331,7 +333,8 @@ type Violation struct {
 // DeleteRequest is the optional body of DELETE /sandboxes/{name}.
 type DeleteRequest struct {
 	// KeepSnapshot keeps the pre-session snapshot (and so undo) after the
-	// sandbox is gone.
+	// sandbox is gone: the sandbox stays listed with phase "deleted" for
+	// undo, review and a later delete, which drops the snapshot.
 	KeepSnapshot bool `json:"keep_snapshot,omitempty"`
 }
 

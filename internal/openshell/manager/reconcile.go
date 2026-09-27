@@ -38,7 +38,7 @@ func (m *Manager) loadRecords() error {
 		if r.Owner != "" && r.Owner != m.opts.Owner {
 			continue
 		}
-		b := &box{rec: *r, seenChunks: map[string]struct{}{}}
+		b := &box{rec: *r, seenChunks: map[string]struct{}{}, retained: r.Retained}
 		m.boxes[r.Name] = b
 		for _, pattern := range r.Unblocks {
 			_ = m.unblocks.Add(egress.Unblock{Pattern: pattern, SandboxID: scopeID(r.ID, r.Name)})
@@ -95,7 +95,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	m.mu.Lock()
 	var gone []*box
 	for name, b := range m.boxes {
-		if _, ok := live[name]; !ok && !b.creating && !b.deleted {
+		if _, ok := live[name]; !ok && !b.creating && !b.deleted && !b.retained {
 			gone = append(gone, b)
 		}
 	}
@@ -148,7 +148,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 			// or kept by the pass above) owns its providers.
 			m.mu.Lock()
 			b := m.boxes[p.Labels[LabelSandbox]]
-			held := b != nil && !b.deleted
+			held := b != nil && !b.deleted && !b.retained
 			m.mu.Unlock()
 			if held {
 				continue
@@ -209,6 +209,14 @@ func (m *Manager) adopt(sb *openshell.Sandbox) *box {
 		m.mu.Unlock()
 		return b
 	}
+	if b.retained {
+		// The name is held by the kept snapshot of an earlier sandbox; the
+		// live one is left alone until that is deleted.
+		m.mu.Unlock()
+		m.logf("sandbox %s exists in OpenShell, but the name holds the kept snapshot of a deleted sandbox; "+
+			"run `defenseclaw sandbox delete %s` to drop the snapshot and adopt it", sb.Name, sb.Name)
+		return nil
+	}
 	b.sb, b.missing = sb, false
 	if b.rec.ID == "" {
 		b.rec.ID = sb.ID
@@ -260,11 +268,20 @@ func (m *Manager) gc(ctx context.Context, gw *Gateway, b *box) {
 	m.mu.Lock()
 	b.missing = true
 	m.mu.Unlock()
-	_, warnings := m.cleanup(ctx, gw, b, true)
+	// The user deleted the sandbox elsewhere, but the project folder may
+	// still hold what its agent did: its snapshot is kept, and so is the
+	// box, for undo, review and delete.
+	_, warnings, retained := m.cleanup(ctx, gw, b, true)
 	for _, w := range warnings {
 		m.logf("release %s: %s", name, w)
 	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseDeleted, audit.SandboxTriggerReconcile, false, nil, nil)
+	if retained {
+		m.logf("sandbox %s: its pre-session snapshot is kept; `defenseclaw sandbox undo %s` restores the folder, "+
+			"`defenseclaw sandbox delete %s` drops it", name, name, name)
+		m.retire(b)
+		return
+	}
 	m.forget(b)
 }
 

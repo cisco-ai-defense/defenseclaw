@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -95,7 +96,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, b := range m.boxes {
-		if b.deleted {
+		if b.deleted || b.retained {
 			continue
 		}
 		st.Sandboxes++
@@ -118,7 +119,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 		if sbs, err := gw.Client.ListSandboxes(ctx, m.managedSelector()); err == nil {
 			m.mu.Lock()
 			for _, sb := range sbs {
-				if b := m.boxes[sb.Name]; b != nil && !b.creating {
+				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained {
 					b.sb, b.missing = sb, false
 				}
 			}
@@ -151,7 +152,10 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	if err != nil {
 		return nil, err
 	}
-	if gw, err := m.gateway(ctx); err == nil {
+	m.mu.Lock()
+	retained := b.retained
+	m.mu.Unlock()
+	if gw, err := m.gateway(ctx); err == nil && !retained {
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
 		switch {
@@ -177,11 +181,27 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 		return nil, err
 	}
 	defer unlock()
+	if err := m.refuseRetained(b); err != nil {
+		return nil, err
+	}
 	if err := m.stop(ctx, b); err != nil {
 		return nil, err
 	}
 	v := m.viewOf(b)
 	return &v, nil
+}
+
+// refuseRetained refuses what needs a live sandbox on a retained box (a
+// deleted sandbox whose snapshot is kept).
+func (m *Manager) refuseRetained(b *box) error {
+	m.mu.Lock()
+	retained, name := b.retained, b.rec.Name
+	m.mu.Unlock()
+	if !retained {
+		return nil
+	}
+	return sandboxapi.Errorf(sandboxapi.CodeConflict,
+		"sandbox %s was deleted; only its pre-session snapshot is kept (undo, review or delete it)", name)
 }
 
 func (m *Manager) stop(ctx context.Context, b *box) error {
@@ -242,6 +262,9 @@ func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRe
 		return nil, err
 	}
 	defer unlock()
+	if err := m.refuseRetained(b); err != nil {
+		return nil, err
+	}
 	if err := m.start(ctx, b, req); err != nil {
 		return nil, err
 	}
@@ -411,6 +434,12 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 		return nil, err
 	}
 	defer unlock()
+	m.mu.Lock()
+	retained := b.retained
+	m.mu.Unlock()
+	if retained {
+		return m.deleteRetained(ctx, b, req)
+	}
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return nil, err
@@ -431,8 +460,35 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	m.stopWatch(b)
 	resp := &sandboxapi.DeleteResponse{Name: name, Deleted: true}
-	resp.Providers, resp.Warnings = m.cleanup(ctx, gw, b, req.KeepSnapshot)
+	resp.Providers, resp.Warnings, retained = m.cleanup(ctx, gw, b, req.KeepSnapshot)
 	m.lifecycle(ctx, b, audit.SandboxPhaseDeleted, audit.SandboxTriggerDelete, false, nil, nil)
+	if retained {
+		// The kept snapshot stays reachable: undo, review and delete find
+		// it under the sandbox's name.
+		m.retire(b)
+		return resp, nil
+	}
+	m.forget(b)
+	return resp, nil
+}
+
+// deleteRetained drops what is left of a deleted sandbox whose snapshot was
+// kept: the snapshot and the record.
+func (m *Manager) deleteRetained(ctx context.Context, b *box, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
+	if req.KeepSnapshot {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
+			"sandbox %s was deleted already and only its snapshot is left; delete it without --keep-snapshot to drop that", name)
+	}
+	resp := &sandboxapi.DeleteResponse{Name: name, Deleted: true}
+	if err := m.ws.DeleteSnapshot(ctx, m.opts.DataDir, name); err != nil && !errors.Is(err, workspace.ErrSnapshotNotFound) {
+		return nil, workspaceError(err)
+	}
+	if err := m.removeRecord(b); err != nil {
+		resp.Warnings = append(resp.Warnings, err.Error())
+	}
 	m.forget(b)
 	return resp, nil
 }
@@ -456,8 +512,11 @@ func (m *Manager) deleteFailed(ctx context.Context, gw *Gateway, b *box) {
 }
 
 // cleanup releases everything a gone sandbox held. It is shared by Delete
-// and by reconciliation of sandboxes deleted outside DefenseClaw.
-func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot bool) (providers, warnings []string) {
+// and by reconciliation of sandboxes deleted outside DefenseClaw. With
+// keepSnapshot, a mounted project's pre-session snapshot and the sandbox's
+// record stay, and retained reports it: the caller retires the box, so
+// undo, review and delete still reach the snapshot.
+func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot bool) (providers, warnings []string, retained bool) {
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
@@ -484,17 +543,20 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	m.dropApprovals(rec.Name)
 	if rec.WorkdirMode == config.OpenShellWorkdirMount {
 		warn(m.ws.ReleaseMount(m.opts.DataDir, rec.Name))
-		if !keepSnapshot {
-			if err := m.ws.DeleteSnapshot(ctx, m.opts.DataDir, rec.Name); err != nil && !errors.Is(err, workspace.ErrSnapshotNotFound) {
-				warn(err)
-			}
+		if keepSnapshot {
+			snap, err := m.ws.LoadSnapshot(m.opts.DataDir, rec.Name)
+			retained = err == nil && snap != nil
+		} else if err := m.ws.DeleteSnapshot(ctx, m.opts.DataDir, rec.Name); err != nil && !errors.Is(err, workspace.ErrSnapshotNotFound) {
+			warn(err)
 		}
 	} else if err := m.ws.DeleteCopy(m.opts.DataDir, rec.Name); err != nil && !errors.Is(err, workspace.ErrCopyNotFound) {
 		warn(err)
 	}
 	warn(m.removeRunConfig(rec.Name))
-	warn(m.removeRecord(b))
-	return providers, warnings
+	if !retained {
+		warn(m.removeRecord(b))
+	}
+	return providers, warnings, retained
 }
 
 // sandboxProviders lists the providers DefenseClaw created for a sandbox:
@@ -519,6 +581,23 @@ func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record)
 	return out
 }
 
+// retire keeps a gone sandbox's box for its pre-session snapshot only: the
+// record drops everything that belonged to the live sandbox and is saved
+// as retained, so the snapshot stays reachable across restarts. Callers
+// ran cleanup (which released the rest) and hold b.op.
+func (m *Manager) retire(b *box) {
+	m.mu.Lock()
+	b.retained, b.missing = true, false
+	b.sb, b.eff, b.decider, b.cred = nil, nil, nil, egress.Credential{}
+	b.rec.Retained = true
+	b.rec.BindingID, b.rec.Providers, b.rec.EgressUser, b.rec.Cursor, b.rec.Unblocks = "", nil, "", "", nil
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.logf("keep the snapshot record of %s: %v", b.rec.Name, err)
+	}
+	m.refreshEgress()
+}
+
 func (m *Manager) forget(b *box) {
 	m.mu.Lock()
 	b.deleted = true
@@ -539,28 +618,34 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 	}
 	defer unlock()
 	m.mu.Lock()
-	rec := b.rec
+	rec, retained := b.rec, b.retained
 	m.mu.Unlock()
 	if rec.WorkdirMode != config.OpenShellWorkdirMount {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "undo applies to mounted projects; a copy-mode sandbox never changed the folder")
 	}
-	// Ask OpenShell whether the agent can still write to the folder.
+	// Ask OpenShell whether the agent can still write to the folder. A
+	// retained box has no sandbox left (a live one under its name is
+	// another sandbox), so there is nothing to stop or restart.
 	running := false
-	if gw, err := m.gateway(ctx); err == nil {
-		sb, err := gw.Client.GetSandbox(ctx, name)
+	if !retained {
+		gw, err := m.gateway(ctx)
 		switch {
 		case err == nil:
-			m.mu.Lock()
-			b.sb = sb
-			m.mu.Unlock()
-			running = !stoppedPhase(sb.Status.Phase)
-		case !openshell.IsNotFound(err):
-			if !req.Preview {
-				return nil, upstream("look up sandbox "+name, err)
+			sb, err := gw.Client.GetSandbox(ctx, name)
+			switch {
+			case err == nil:
+				m.mu.Lock()
+				b.sb = sb
+				m.mu.Unlock()
+				running = !stoppedPhase(sb.Status.Phase)
+			case !openshell.IsNotFound(err):
+				if !req.Preview {
+					return nil, upstream("look up sandbox "+name, err)
+				}
 			}
+		case !req.Preview:
+			return nil, err
 		}
-	} else if !req.Preview {
-		return nil, err
 	}
 	resp := &sandboxapi.UndoResponse{Name: name}
 	if running && !req.Preview {

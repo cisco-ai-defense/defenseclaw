@@ -322,7 +322,8 @@ func (a *App) resumable(ctx context.Context, api API, project, harnessName strin
 	}
 	var cands []sandboxapi.Sandbox
 	for _, sb := range list {
-		if sb.Project == project && sb.Harness == harnessName && !sb.Orphaned && sb.Phase != "missing" && sb.Phase != "deleting" {
+		if sb.Project == project && sb.Harness == harnessName && !sb.Orphaned && sb.Phase != "missing" && sb.Phase != "deleting" &&
+			sb.Phase != "deleted" {
 			cands = append(cands, sb)
 		}
 	}

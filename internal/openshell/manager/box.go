@@ -60,7 +60,11 @@ type box struct {
 	// it was created with are unknown, so it fails closed (see
 	// errUnrecorded) and its record is never written.
 	unrecorded bool
-	started    time.Time
+	// retained marks a gone sandbox kept only for its pre-session snapshot
+	// (record.Retained, see retire): it has no binding, providers or
+	// credential, and only Get, Review, Undo and Delete apply to it.
+	retained bool
+	started  time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
@@ -311,6 +315,8 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.HarnessName = spec.DisplayName
 	}
 	switch {
+	case b.retained:
+		v.Phase = string(audit.SandboxPhaseDeleted)
 	case b.missing:
 		v.Phase = "missing"
 	case b.sb != nil:

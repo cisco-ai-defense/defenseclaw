@@ -102,7 +102,7 @@ func (m *Manager) refreshEgress() {
 	m.cfgSeen = cfg
 	boxes := make([]*box, 0, len(m.boxes))
 	for _, b := range m.boxes {
-		if !b.creating && !b.deleted {
+		if !b.creating && !b.deleted && !b.retained {
 			boxes = append(boxes, b)
 		}
 	}
@@ -206,6 +206,9 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	)
 	if req.Sandbox != "" {
 		if b, err = m.box(req.Sandbox); err != nil {
+			return nil, err
+		}
+		if err := m.refuseRetained(b); err != nil {
 			return nil, err
 		}
 		if eff, err = m.resolveBox(b); err != nil {
