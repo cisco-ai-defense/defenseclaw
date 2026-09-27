@@ -1,0 +1,260 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package manager
+
+import (
+	"context"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+)
+
+// box is the manager's live state of one sandbox. rec is persisted; the
+// rest is rebuilt from OpenShell and the ingress after a restart.
+type box struct {
+	// op serializes lifecycle operations (create, start, stop, delete,
+	// undo) on this sandbox. It is taken before Manager.mu, never under it.
+	op sync.Mutex
+
+	// The fields below are guarded by Manager.mu.
+	rec      record
+	sb       *openshell.Sandbox
+	eff      *packs.Effective
+	cred     egress.Credential
+	phase    audit.SandboxPhase
+	creating bool
+	deleted  bool
+	orphaned bool
+	missing  bool
+	started  time.Time
+
+	watchCancel context.CancelFunc
+	watchDone   chan struct{}
+
+	hooks       hookStats
+	activeAt    time.Time
+	silentSince time.Time
+	silenceSent bool
+	seenChunks  map[string]struct{}
+	blocked     int
+}
+
+type hookStats struct {
+	lastHook    time.Time
+	lastOTLP    time.Time
+	lastNotify  time.Time
+	requests    int64
+	toolCalls   int64
+	toolBlocked int64
+	lastBlocked string
+}
+
+var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// identity is the correlation.sandbox group for the box. Callers hold
+// Manager.mu.
+func (b *box) identity() audit.SandboxIdentity {
+	id := audit.SandboxIdentity{
+		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness,
+		Runtime: audit.SandboxRuntimeOpenShell, Driver: audit.SandboxDriverDocker,
+		Profile: b.rec.Profile, Pack: b.rec.Pack, Phase: b.phase, WorkdirMode: b.rec.WorkdirMode,
+	}
+	if imageDigestPattern.MatchString(b.rec.ImageID) {
+		id.ImageDigest = b.rec.ImageID
+	}
+	if b.sb != nil {
+		id.PolicyVersion = b.sb.Status.CurrentPolicyVersion
+	}
+	return id
+}
+
+// auditPhase maps an OpenShell phase onto the telemetry vocabulary.
+func auditPhase(p openshell.SandboxPhase) audit.SandboxPhase {
+	switch p {
+	case openshell.PhaseProvisioning:
+		return audit.SandboxPhaseProvisioning
+	case openshell.PhaseStarting:
+		return audit.SandboxPhaseStarting
+	case openshell.PhaseReady:
+		return audit.SandboxPhaseReady
+	case openshell.PhaseStopping:
+		return audit.SandboxPhaseStopping
+	case openshell.PhaseStopped:
+		return audit.SandboxPhaseStopped
+	case openshell.PhaseCompleted:
+		return audit.SandboxPhaseCompleted
+	case openshell.PhaseError:
+		return audit.SandboxPhaseError
+	case openshell.PhaseDeleting:
+		return audit.SandboxPhaseDeleting
+	default:
+		return audit.SandboxPhaseUnknown
+	}
+}
+
+// lifecycle records a phase transition (and the matching feed event) unless
+// the box is already in phase and force is unset. Callers must not hold
+// Manager.mu.
+func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhase, trigger audit.SandboxLifecycleTrigger,
+	force bool, cond *audit.SandboxCondition, exit *int32) {
+	m.mu.Lock()
+	if b.phase == phase && !force {
+		m.mu.Unlock()
+		return
+	}
+	previous := b.phase
+	if previous == "" && b.rec.Phase != "" {
+		previous = audit.SandboxPhase(b.rec.Phase)
+	}
+	b.phase = phase
+	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
+		b.started = m.now()
+	}
+	b.rec.Phase = string(phase)
+	id := b.identity()
+	rec := b.rec
+	m.mu.Unlock()
+	if previous == phase {
+		previous = ""
+	}
+	ev := audit.SandboxLifecycleEvent{
+		Sandbox: id, PreviousPhase: previous, Trigger: trigger, ExitCode: exit, Condition: cond, Timestamp: m.now(),
+	}
+	if err := m.tel.RecordSandboxLifecycle(ctx, ev); err != nil {
+		m.logf("lifecycle telemetry for %s: %v", rec.Name, err)
+	}
+	if phase != audit.SandboxPhaseDeleted {
+		_ = m.records.save(&rec)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{
+		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
+		Message: lifecycleMessage(rec.Name, phase),
+	})
+}
+
+func lifecycleMessage(name string, phase audit.SandboxPhase) string {
+	switch phase {
+	case audit.SandboxPhaseCreating:
+		return "creating sandbox " + name
+	case audit.SandboxPhaseReady:
+		return "sandbox " + name + " is ready"
+	case audit.SandboxPhaseStopped:
+		return "sandbox " + name + " stopped"
+	case audit.SandboxPhaseDeleted:
+		return "sandbox " + name + " deleted"
+	case audit.SandboxPhaseError:
+		return "sandbox " + name + " failed"
+	default:
+		return "sandbox " + name + " is " + string(phase)
+	}
+}
+
+// viewOf renders the API form of a box.
+func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
+	m.mu.Lock()
+	v := m.view(b)
+	proxy := m.proxy
+	bindingID := b.rec.BindingID
+	m.mu.Unlock()
+	m.decorate(&v, proxy, bindingID)
+	return v
+}
+
+// decorate adds what view leaves out because it needs I/O or other locks:
+// the proxy's byte counts and the snapshot. Callers must not hold
+// Manager.mu.
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string) {
+	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
+		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
+			v.Egress.Destinations++
+			v.Egress.BytesUp += d.BytesUp
+			v.Egress.BytesDown += d.BytesDown
+			v.Egress.Blocked += int(d.Blocked)
+		}
+	}
+	if snap, err := m.ws.LoadSnapshot(m.opts.DataDir, v.Name); err == nil && snap != nil {
+		info := &sandboxapi.SnapshotInfo{Kind: string(snap.Kind), CreatedAt: snap.CreatedAt}
+		if snap.Git != nil {
+			info.Ref = snap.Git.Ref
+		}
+		if snap.UndoneAt != nil {
+			info.UndoneAt = *snap.UndoneAt
+		}
+		v.Snapshot = info
+	}
+}
+
+// view renders the locked part of a box's API form. Callers hold
+// Manager.mu and call decorate after releasing it.
+func (m *Manager) view(b *box) sandboxapi.Sandbox {
+	r := b.rec
+	v := sandboxapi.Sandbox{
+		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
+		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: r.Yolo,
+		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
+		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
+		CreatedAt: r.CreatedAt, Workspace: r.Workspace, Violations: r.Violations, Warnings: r.Warnings,
+		Orphaned: b.orphaned,
+		Launch:   sandboxapi.Launch{Yolo: r.Yolo, CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+	}
+	if spec, ok := harness.Get(r.Harness); ok {
+		v.HarnessName = spec.DisplayName
+	}
+	switch {
+	case b.missing:
+		v.Phase = "missing"
+	case b.sb != nil:
+		v.Phase = strings.ToLower(string(b.sb.Status.Phase))
+		v.ExitCode = b.sb.Status.ExitCode
+		if v.ID == "" {
+			v.ID = b.sb.ID
+		}
+		for _, ep := range b.sb.Status.EndpointStatuses {
+			v.Endpoints = append(v.Endpoints, sandboxapi.Endpoint{
+				Host: ep.Host, Ports: ep.Ports, Path: ep.Path, Result: string(ep.LastResult), ReportedAt: ep.LastReportedAt,
+			})
+		}
+	case b.creating:
+		v.Phase = string(audit.SandboxPhaseCreating)
+	default:
+		v.Phase = string(audit.SandboxPhaseUnknown)
+	}
+	if b.phase == audit.SandboxPhaseReady && !b.started.IsZero() {
+		v.StartedAt = b.started
+		v.UptimeSeconds = int64(m.now().Sub(b.started) / time.Second)
+	}
+	v.Hooks = sandboxapi.HookCoverage{
+		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
+		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, LastBlocked: b.hooks.lastBlocked,
+		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
+	}
+	for _, a := range m.approvals {
+		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {
+			v.PendingApprovals++
+		}
+	}
+	v.Egress.Blocked = b.blocked
+	return v
+}
