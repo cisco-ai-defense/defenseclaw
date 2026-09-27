@@ -22,15 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // ExecRequest is one non-interactive command inside a sandbox. Stdin is
@@ -78,17 +74,24 @@ type Transport interface {
 	Downloader
 }
 
-// CLI implements Transport with the upstream `openshell` binary. Every
-// call names the gateway and workspace explicitly and reads stdin from
-// /dev/null.
+// CLI implements Transport with the upstream `openshell` binary, through
+// the invocations openshell.CLI builds. Every call names a validated
+// gateway and workspace explicitly, puts "--" before its positionals,
+// reads stdin from /dev/null, and runs without the OPENSHELL_ variables
+// that could point the binary at another gateway (openshell.Environ): a
+// copy of the project is uploaded to, and results are read from, only the
+// gateway the caller chose.
 type CLI struct {
-	// Binary is the openshell executable ("openshell" on PATH by default).
+	// Binary is the openshell executable (openshell.DefaultBinary on PATH
+	// by default).
 	Binary string
-	// Gateway is the registered gateway name (-g); "" uses the CLI's
-	// active gateway.
+	// Gateway is the registered gateway name (-g), normally the one
+	// openshell.Discover validated. Required: without it the binary would
+	// use whatever gateway the environment or `gateway select` made
+	// active.
 	Gateway string
-	// Workspace is the OpenShell workspace (--workspace); "" is the CLI
-	// default.
+	// Workspace is the OpenShell workspace (--workspace), by default
+	// openshell.DefaultWorkspace.
 	Workspace string
 	// TransferTimeout bounds each upload or download (default 10 min).
 	TransferTimeout time.Duration
@@ -108,68 +111,43 @@ const (
 	maxExecOutput          = 16 << 20
 )
 
-var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-func (c *CLI) binary() string {
-	if c.Binary != "" {
-		return c.Binary
-	}
-	return "openshell"
+// upstream is the openshell package's argv builder for c. It refuses an
+// empty or invalid gateway, workspace or sandbox name.
+func (c *CLI) upstream() openshell.CLI {
+	return openshell.CLI{Binary: c.Binary, Gateway: c.Gateway, Workspace: c.Workspace}
 }
 
-func (c *CLI) scope() []string {
-	var out []string
-	if c.Gateway != "" {
-		out = append(out, "-g", c.Gateway)
+// UploadArgv is `openshell sandbox upload` of localPath into remoteDir,
+// without .gitignore filtering: a staged copy must arrive whole.
+func (c *CLI) UploadArgv(sandbox, localPath, remoteDir string) ([]string, error) {
+	inv, err := c.upstream().Upload(sandbox, localPath, remoteDir, false)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
 	}
-	if c.Workspace != "" {
-		out = append(out, "--workspace", c.Workspace)
-	}
-	return out
+	return inv.Argv, nil
 }
 
-// UploadArgv is `openshell sandbox upload` for localPath into remoteDir.
-func (c *CLI) UploadArgv(sandbox, localPath, remoteDir string) []string {
-	argv := []string{c.binary(), "sandbox", "upload"}
-	argv = append(argv, c.scope()...)
-	return append(argv, "--no-git-ignore", sandbox, localPath, remoteDir)
-}
-
-// DownloadArgv is `openshell sandbox download` for remotePath into localDir.
-func (c *CLI) DownloadArgv(sandbox, remotePath, localDir string) []string {
-	argv := []string{c.binary(), "sandbox", "download"}
-	argv = append(argv, c.scope()...)
-	return append(argv, sandbox, remotePath, localDir)
+// DownloadArgv is `openshell sandbox download` of remotePath into localDir.
+func (c *CLI) DownloadArgv(sandbox, remotePath, localDir string) ([]string, error) {
+	inv, err := c.upstream().Download(sandbox, remotePath, localDir)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+	return inv.Argv, nil
 }
 
 // ExecArgv is `openshell sandbox exec` without a TTY or login shell.
 func (c *CLI) ExecArgv(sandbox string, req ExecRequest) ([]string, error) {
-	if len(req.Argv) == 0 {
+	if len(req.Argv) == 0 || req.Argv[0] == "" {
 		return nil, errors.New("workspace: exec needs a command")
 	}
-	argv := []string{c.binary(), "sandbox", "exec"}
-	argv = append(argv, c.scope()...)
-	argv = append(argv, "-n", sandbox, "--no-tty", "--no-login-shell")
-	if req.Workdir != "" {
-		argv = append(argv, "--workdir", req.Workdir)
+	inv, err := c.upstream().Exec(sandbox, req.Argv, openshell.CLIExecOptions{
+		WorkDir: req.Workdir, Timeout: c.execTimeout(req), Env: req.Env,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
 	}
-	if t := c.execTimeout(req); t > 0 {
-		argv = append(argv, "--timeout", strconv.Itoa(int((t+time.Second-1)/time.Second)))
-	}
-	keys := make([]string, 0, len(req.Env))
-	for k := range req.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		v := req.Env[k]
-		if !envKeyRE.MatchString(k) || strings.ContainsAny(v, "\x00\n") {
-			return nil, fmt.Errorf("workspace: invalid exec environment entry %q", k)
-		}
-		argv = append(argv, "--env", k+"="+v)
-	}
-	argv = append(argv, "--")
-	return append(argv, req.Argv...), nil
+	return inv.Argv, nil
 }
 
 func (c *CLI) execTimeout(req ExecRequest) time.Duration {
@@ -191,12 +169,20 @@ func (c *CLI) transferTimeout() time.Duration {
 
 // Upload implements Uploader.
 func (c *CLI) Upload(ctx context.Context, sandbox, localPath, remoteDir string) error {
-	return c.transfer(ctx, "upload", c.UploadArgv(sandbox, localPath, remoteDir))
+	argv, err := c.UploadArgv(sandbox, localPath, remoteDir)
+	if err != nil {
+		return err
+	}
+	return c.transfer(ctx, "upload", argv)
 }
 
 // Download implements Downloader.
 func (c *CLI) Download(ctx context.Context, sandbox, remotePath, localDir string) error {
-	return c.transfer(ctx, "download", c.DownloadArgv(sandbox, remotePath, localDir))
+	argv, err := c.DownloadArgv(sandbox, remotePath, localDir)
+	if err != nil {
+		return err
+	}
+	return c.transfer(ctx, "download", argv)
 }
 
 func (c *CLI) transfer(ctx context.Context, what string, argv []string) error {
@@ -264,20 +250,20 @@ func (c *CLI) exec(ctx context.Context, argv []string) ([]byte, []byte, int, err
 	return runProcess(ctx, argv)
 }
 
-// runProcess runs argv with stdin from /dev/null and bounded output.
+// runProcess runs argv as openshell.Invocation.Command prepares it: stdin
+// from the null device, a bounded wait for inherited pipes, and the
+// environment without the gateway-selecting OPENSHELL_ variables. Output
+// is bounded.
 func runProcess(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
-	devnull, err := os.Open(os.DevNull)
+	cmd, cancel, err := openshell.Invocation{Argv: argv}.Command(ctx)
 	if err != nil {
 		return nil, nil, -1, err
 	}
-	defer devnull.Close()
-	cmd := processutil.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdin = devnull
+	defer cancel()
 	var stdout, stderr limitedBuffer
 	stdout.limit, stderr.limit = maxExecOutput, 1<<20
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.WaitDelay = 5 * time.Second
 	err = cmd.Run()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && ctx.Err() == nil {

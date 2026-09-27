@@ -29,15 +29,23 @@ var _ Transport = (*CLI)(nil)
 
 func TestCLIArgv(t *testing.T) {
 	c := &CLI{Binary: "/usr/bin/openshell", Gateway: "openshell", Workspace: "default"}
-	if got := strings.Join(c.UploadArgv("f1-x", "/stage/myapp", "/sandbox/work"), " "); got !=
-		"/usr/bin/openshell sandbox upload -g openshell --workspace default --no-git-ignore f1-x /stage/myapp /sandbox/work" {
+	argv, err := c.UploadArgv("f1-x", "/stage/myapp", "/sandbox/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(argv, " "); got !=
+		"/usr/bin/openshell sandbox upload -g openshell --workspace default --color never --no-git-ignore -- f1-x /stage/myapp /sandbox/work" {
 		t.Fatalf("upload argv = %s", got)
 	}
-	if got := strings.Join(c.DownloadArgv("f1-x", "/sandbox/.dc/result.bundle", "/tmp/pull"), " "); got !=
-		"/usr/bin/openshell sandbox download -g openshell --workspace default f1-x /sandbox/.dc/result.bundle /tmp/pull" {
+	argv, err = c.DownloadArgv("f1-x", "/sandbox/.dc/result.bundle", "/tmp/pull")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(argv, " "); got !=
+		"/usr/bin/openshell sandbox download -g openshell --workspace default --color never -- f1-x /sandbox/.dc/result.bundle /tmp/pull" {
 		t.Fatalf("download argv = %s", got)
 	}
-	argv, err := c.ExecArgv("f1-x", ExecRequest{
+	argv, err = c.ExecArgv("f1-x", ExecRequest{
 		Argv: []string{"sh", "-c", "echo hi"}, Workdir: "/sandbox", Timeout: 1500 * time.Millisecond,
 		Env: map[string]string{"B": "2", "A": "1"},
 	})
@@ -45,14 +53,16 @@ func TestCLIArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := strings.Join(argv, " "); got !=
-		"/usr/bin/openshell sandbox exec -g openshell --workspace default -n f1-x --no-tty --no-login-shell --workdir /sandbox --timeout 2 --env A=1 --env B=2 -- sh -c echo hi" {
+		"/usr/bin/openshell sandbox exec -g openshell --workspace default --color never --name f1-x --workdir /sandbox --timeout 2 --no-tty --no-login-shell --env A=1 --env B=2 -- sh -c echo hi" {
 		t.Fatalf("exec argv = %s", got)
 	}
-	bare := &CLI{}
-	if got := strings.Join(bare.UploadArgv("s", "/a", "/b"), " "); got != "openshell sandbox upload --no-git-ignore s /a /b" {
-		t.Fatalf("default binary argv = %s", got)
+	// The workspace defaults to openshell's; the binary to the one on PATH.
+	bare := &CLI{Gateway: "gw"}
+	if argv, err := bare.UploadArgv("s", "/a", "/b"); err != nil || strings.Join(argv, " ") !=
+		"openshell sandbox upload -g gw --workspace default --color never --no-git-ignore -- s /a /b" {
+		t.Fatalf("default binary argv = %q, %v", argv, err)
 	}
-	for _, env := range []map[string]string{{"BAD-KEY": "x"}, {"K": "line\nbreak"}} {
+	for _, env := range []map[string]string{{"BAD-KEY": "x"}, {"K": "line\nbreak"}, {"K": "cr\rhere"}} {
 		if _, err := c.ExecArgv("s", ExecRequest{Argv: []string{"true"}, Env: env}); err == nil {
 			t.Fatalf("env %v accepted", env)
 		}
@@ -60,11 +70,70 @@ func TestCLIArgv(t *testing.T) {
 	if _, err := c.ExecArgv("s", ExecRequest{}); err == nil {
 		t.Fatal("empty command accepted")
 	}
+	if _, err := c.ExecArgv("s", ExecRequest{Argv: []string{"true"}, Workdir: "relative"}); err == nil {
+		t.Fatal("relative workdir accepted")
+	}
+	// Names that are not DNS labels never reach the binary as positionals.
+	for _, bad := range []string{"-g", "Upper", "a b", ""} {
+		if _, err := c.UploadArgv(bad, "/a", "/b"); err == nil {
+			t.Fatalf("sandbox %q accepted", bad)
+		}
+	}
+}
+
+// TestCLIRequiresAnExplicitGateway: without -g the openshell binary uses
+// whichever gateway is active or named by the environment, so an unset or
+// malformed gateway is refused before anything runs.
+func TestCLIRequiresAnExplicitGateway(t *testing.T) {
+	for _, c := range []*CLI{{}, {Gateway: "-bad"}, {Gateway: "gw", Workspace: "../ws"}} {
+		ran := 0
+		c.run = func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+			ran++
+			return nil, nil, 0, nil
+		}
+		if err := c.Upload(bg, "s", "/a", "/b"); err == nil {
+			t.Errorf("%+v: upload accepted", c)
+		}
+		if err := c.Download(bg, "s", "/a", "/b"); err == nil {
+			t.Errorf("%+v: download accepted", c)
+		}
+		if _, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}}); err == nil {
+			t.Errorf("%+v: exec accepted", c)
+		}
+		if ran != 0 {
+			t.Errorf("%+v: ran the binary %d times", c, ran)
+		}
+	}
+}
+
+// TestRunProcessScrubsGatewayEnvironment: the variables that would point
+// the openshell binary at another gateway, or turn off TLS verification,
+// never reach it.
+func TestRunProcessScrubsGatewayEnvironment(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	for _, k := range []string{"OPENSHELL_GATEWAY", "OPENSHELL_GATEWAY_ENDPOINT", "OPENSHELL_GATEWAY_INSECURE", "OPENSHELL_WORKSPACE"} {
+		t.Setenv(k, "marker")
+	}
+	t.Setenv("DC_WORKSPACE_TEST_KEEP", "kept")
+	ctx, cancel := context.WithTimeout(bg, 10*time.Second)
+	defer cancel()
+	script := `for k in OPENSHELL_GATEWAY OPENSHELL_GATEWAY_ENDPOINT OPENSHELL_GATEWAY_INSECURE OPENSHELL_WORKSPACE; do ` +
+		`eval "v=\${$k-unset}"; printf '%s=%s\n' "$k" "$v"; done; printf 'keep=%s\n' "$DC_WORKSPACE_TEST_KEEP"`
+	stdout, stderr, code, err := runProcess(ctx, []string{"sh", "-c", script})
+	if err != nil || code != 0 {
+		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr)
+	}
+	want := "OPENSHELL_GATEWAY=unset\nOPENSHELL_GATEWAY_ENDPOINT=unset\nOPENSHELL_GATEWAY_INSECURE=unset\nOPENSHELL_WORKSPACE=unset\nkeep=kept\n"
+	if string(stdout) != want {
+		t.Fatalf("child environment:\n%s", stdout)
+	}
 }
 
 func TestCLIExecRetriesSilentFailures(t *testing.T) {
 	calls := 0
-	c := &CLI{run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	c := &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		calls++
 		if calls == 1 {
 			return nil, nil, 255, nil // the post-create flake: no output at all
@@ -110,7 +179,7 @@ func TestCLIExecRetriesSilentFailures(t *testing.T) {
 }
 
 func TestCLIExecTimesOutAndRespectsCancel(t *testing.T) {
-	c := &CLI{ExecTimeout: time.Millisecond, Attempts: 1, run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	c := &CLI{Gateway: "gw", ExecTimeout: time.Millisecond, Attempts: 1, run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		<-ctx.Done()
 		return nil, nil, -1, ctx.Err()
 	}}
@@ -126,7 +195,7 @@ func TestCLIExecTimesOutAndRespectsCancel(t *testing.T) {
 }
 
 func TestCLITransferErrors(t *testing.T) {
-	c := &CLI{run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
+	c := &CLI{Gateway: "gw", run: func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		return nil, []byte("line1\nError: × ssh tar extract exited with status 2\n"), 1, nil
 	}}
 	err := c.Upload(bg, "s", "/a", "/work")

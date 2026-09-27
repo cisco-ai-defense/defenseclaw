@@ -51,7 +51,24 @@ func liveCLI(t *testing.T) *CLI {
 	if _, err := runProcessOK("openshell", "--version"); err != nil {
 		t.Skip("openshell CLI not available: ", err)
 	}
-	return &CLI{Gateway: os.Getenv("DEFENSECLAW_OPENSHELL_GATEWAY"), ExecTimeout: 90 * time.Second}
+	gw := os.Getenv("DEFENSECLAW_OPENSHELL_GATEWAY")
+	if gw == "" {
+		gw = "openshell"
+	}
+	return &CLI{Gateway: gw, ExecTimeout: 90 * time.Second}
+}
+
+// liveArgv is `openshell <verbs> -g <gateway> --workspace <ws>` for the
+// sandbox create and delete calls CLI does not wrap.
+func liveArgv(cli *CLI, verbs ...string) []string {
+	bin, ws := cli.Binary, cli.Workspace
+	if bin == "" {
+		bin = openshell.DefaultBinary
+	}
+	if ws == "" {
+		ws = openshell.DefaultWorkspace
+	}
+	return append(append([]string{bin}, verbs...), "-g", cli.Gateway, "--workspace", ws)
 }
 
 func runProcessOK(argv ...string) (string, error) {
@@ -82,8 +99,7 @@ func createLive(t *testing.T, cli *CLI, name, policy string, driverConfig string
 	if err := os.WriteFile(policyPath, []byte(policy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	argv := []string{cli.binary(), "sandbox", "create"}
-	argv = append(argv, cli.scope()...)
+	argv := liveArgv(cli, "sandbox", "create")
 	argv = append(argv, "--name", name, "--from", liveImage(), "--policy", policyPath,
 		"--detach", "--no-auto-providers", "-o", "json")
 	if driverConfig != "" {
@@ -109,8 +125,7 @@ func createLive(t *testing.T, cli *CLI, name, policy string, driverConfig string
 }
 
 func (s *liveSandbox) delete() {
-	argv := []string{s.cli.binary(), "sandbox", "delete"}
-	argv = append(argv, s.cli.scope()...)
+	argv := liveArgv(s.cli, "sandbox", "delete")
 	if _, err := runProcessOK(append(argv, s.name)...); err != nil {
 		s.t.Logf("delete %s: %v", s.name, err)
 	}
