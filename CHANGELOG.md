@@ -103,7 +103,10 @@ deleted.
 - **Breaking:** telemetry and audit: removes the `metric.defenseclaw.openshell.exit`
   metric family (instrument `defenseclaw.openshell.exit`) and its
   `defenseclaw.metric.command` attribute, and retires the `init-sandbox` audit
-  action.
+  action. A route selector that still names the `init-sandbox` action or the
+  `defenseclaw.openshell.exit` event name keeps compiling: the value stays in
+  the selector, where it matches nothing, and the effective plan carries a
+  `retired_selector_value` warning so it can be removed.
 - Removes the seven environment variables whose only consumers were deleted:
   the legacy installer's binary-digest, manifest-digest, and unpinned-download
   variables; the launcher scripts' broad-regex namespace cleanup opt-in and

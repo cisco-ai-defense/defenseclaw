@@ -607,6 +607,20 @@ func compileObservabilityV8AdvancedRoutes(source []ObservabilityV8RouteSource, p
 	return result, nil
 }
 
+// Route selector values whose producers were removed. A config written for an
+// earlier release keeps compiling: the value stays in the selector, so the
+// route keeps its meaning (it can no longer match anything, whereas dropping
+// the value could widen an actions or event_names list to "any"), and the
+// plan carries a retired_selector_value warning. Map values say why.
+var (
+	retiredObservabilityV8SelectorActions = map[observability.ProducerKey]string{
+		"init-sandbox": "the legacy openshell-sandbox integration was removed",
+	}
+	retiredObservabilityV8SelectorEventNames = map[observability.EventName]string{
+		"defenseclaw.openshell.exit": "the legacy openshell-sandbox integration was removed",
+	}
+)
+
 func compileObservabilityV8Selector(source ObservabilityV8SelectorSource, path string, buckets []ObservabilityV8EffectiveBucket) (ObservabilityV8EffectiveSelector, error) {
 	selectedBuckets, wildcard, err := compileObservabilityV8BucketSelector(source.Buckets, false, path+".buckets")
 	if err != nil {
@@ -643,12 +657,18 @@ func compileObservabilityV8Selector(source ObservabilityV8SelectorSource, path s
 		if _, gateway := observability.GatewayEventClassification(action); gateway {
 			continue
 		}
-		if _, audit := observability.AuditActionClassification(action); !audit {
+		if _, audit := observability.AuditActionClassification(action); audit {
+			continue
+		}
+		if _, retired := retiredObservabilityV8SelectorActions[action]; !retired {
 			return ObservabilityV8EffectiveSelector{}, fmt.Errorf("%s.actions: unregistered action %q", path, action)
 		}
 	}
 	for _, eventName := range source.EventNames {
-		if eventName != "*" && !observability.IsRegisteredEventName(eventName) {
+		if eventName == "*" || observability.IsRegisteredEventName(eventName) {
+			continue
+		}
+		if _, retired := retiredObservabilityV8SelectorEventNames[eventName]; !retired {
 			return ObservabilityV8EffectiveSelector{}, fmt.Errorf("%s.event_names: unregistered event name %q", path, eventName)
 		}
 	}
@@ -1679,6 +1699,25 @@ func compileObservabilityV8Warnings(
 			continue
 		}
 		base := "observability.destinations[" + destination.Name + "]"
+		for _, route := range destination.Routes {
+			routeBase := base + ".routes[" + route.Name + "].selector"
+			for _, action := range route.Selector.Actions {
+				if reason, retired := retiredObservabilityV8SelectorActions[action]; retired {
+					warnings = append(warnings, ObservabilityV8Warning{
+						Code: "retired_selector_value", Path: routeBase + ".actions",
+						Summary: fmt.Sprintf("action %q is retired (%s) and matches nothing; remove it", action, reason),
+					})
+				}
+			}
+			for _, eventName := range route.Selector.EventNames {
+				if reason, retired := retiredObservabilityV8SelectorEventNames[eventName]; retired {
+					warnings = append(warnings, ObservabilityV8Warning{
+						Code: "retired_selector_value", Path: routeBase + ".event_names",
+						Summary: fmt.Sprintf("event name %q is retired (%s) and matches nothing; remove it", eventName, reason),
+					})
+				}
+			}
+		}
 		if destination.Transport.TLS != nil && (destination.Transport.TLS.Insecure || destination.Transport.TLS.InsecureSkipVerify) {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "tls_verification_disabled", Path: base + ".tls",
