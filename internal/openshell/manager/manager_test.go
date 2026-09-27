@@ -51,14 +51,14 @@ func TestCreateMountMode(t *testing.T) {
 	e.ws.masked = []workspace.MaskedPath{{Rel: ".env", Reason: "name"}}
 	e.run()
 	sb := e.create(sandboxapi.CreateRequest{
-		Name: "dc-claude-myapp-1a2b",
+		Name: "claude-myapp-1a2b",
 		LLM:  &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"}},
 		Credentials: []sandboxapi.CredentialBinding{
 			{Name: "STRIPE_API_KEY", Value: "stripe-secret", Host: "api.stripe.com"},
 		},
 		Env: map[string]string{"MY_FLAG": "1"},
 	})
-	if sb.Name != "dc-claude-myapp-1a2b" || sb.Phase != "ready" || sb.WorkdirMode != "mount" || sb.Workdir != "/work/myapp" {
+	if sb.Name != "claude-myapp-1a2b" || sb.Phase != "ready" || sb.WorkdirMode != "mount" || sb.Workdir != "/work/myapp" {
 		t.Fatalf("sandbox = %+v", sb)
 	}
 	if sb.Profile != "open" || !sb.Yolo || sb.Pack != "open" || sb.Launch.CredentialProfile != profiles.AnthropicID {
@@ -210,8 +210,21 @@ func TestCreateMountMode(t *testing.T) {
 func TestCreateGeneratesName(t *testing.T) {
 	e := newEnv(t, nil)
 	sb := e.create(sandboxapi.CreateRequest{})
-	if !strings.HasPrefix(sb.Name, "dc-claude-myapp-") || !openshell.ValidSandboxName(sb.Name) {
+	if !strings.HasPrefix(sb.Name, "myapp-") || !openshell.ValidNewSandboxName(sb.Name) {
 		t.Fatalf("generated name %q", sb.Name)
+	}
+}
+
+// The daemon refuses a name OpenShell 0.1.1 would refuse, before anything
+// is created.
+func TestCreateRefusesNamesOverOpenShellsLimit(t *testing.T) {
+	e := newEnv(t, nil)
+	_, err := e.m.Create(context.Background(), sandboxapi.CreateRequest{Name: "dc-claude-m1-calc-7500", Harness: "claudecode", Project: e.project})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || !strings.Contains(err.Error(), "at most 19 characters") {
+		t.Fatalf("Create = %v", err)
+	}
+	if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 0 {
+		t.Fatalf("create calls = %d", n)
 	}
 }
 
@@ -844,21 +857,39 @@ func TestGatewayUnavailable(t *testing.T) {
 	}
 }
 
+// Generated names fit OpenShell 0.1.1's 19-character limit whatever the
+// folder is called (the manual test's m1-calc folder once produced
+// dc-claude-m1-calc-7500, which OpenShell refused).
 func TestComposeName(t *testing.T) {
-	for _, tc := range []struct{ harness, project, want string }{
-		{"claudecode", "/home/u/code/myapp", "dc-claude-myapp-7f3a"},
-		{"codex", "/x/My App_2", "dc-codex-my-app-2-7f3a"},
-		{"claudecode", "/x/" + strings.Repeat("a", 80), "dc-claude-" + strings.Repeat("a", 48) + "-7f3a"},
-		{"claudecode", "", "dc-claude-project-7f3a"},
-		{"claudecode", "/x/---", "dc-claude-project-7f3a"},
+	for _, tc := range []struct{ project, want string }{
+		{"/home/u/code/myapp", "myapp-7f3a"},
+		{"/home/u/m1-calc", "m1-calc-7f3a"},
+		{"/x/My App_2", "my-app-2-7f3a"},
+		{"/x/defenseclaw-openshell", "defenseclaw-op-7f3a"},
+		{"/x/" + strings.Repeat("a", 80), strings.Repeat("a", 14) + "-7f3a"},
+		// A cut that ends in '-' drops it.
+		{"/x/abcdefghijklm-nopq", "abcdefghijklm-7f3a"},
+		{"", "project-7f3a"},
+		{"/x/---", "project-7f3a"},
+		{"/x/.hidden", "hidden-7f3a"},
 	} {
-		got := composeName(tc.harness, tc.project, "7f3a")
-		if got != tc.want || !openshell.ValidSandboxName(got) {
-			t.Errorf("composeName(%q, %q) = %q, want %q", tc.harness, tc.project, got, tc.want)
+		got := composeName(tc.project, "7f3a")
+		if got != tc.want || !openshell.ValidNewSandboxName(got) {
+			t.Errorf("composeName(%q) = %q, want %q (at most %d characters)", tc.project, got, tc.want, openshell.MaxSandboxNameLen)
 		}
 	}
-	if n, err := GenerateName("claudecode", "/x/app"); err != nil || !openshell.ValidSandboxName(n) {
-		t.Fatalf("GenerateName = %q, %v", n, err)
+	for _, project := range []string{"/x/app", "/x/" + strings.Repeat("z", 40), "/"} {
+		if n, err := GenerateName(project); err != nil || !openshell.ValidNewSandboxName(n) || workspace.ValidateName(n) != nil {
+			t.Fatalf("GenerateName(%q) = %q, %v", project, n, err)
+		}
+	}
+	// The providers named after a sandbox stay within OpenShell's provider
+	// names (a 39-character provider name was accepted live).
+	longest := strings.Repeat("a", openshell.MaxSandboxNameLen)
+	for _, p := range []string{providerName(longest, roleIngress, 0), providerName(longest, roleCredential, 15)} {
+		if len(p) > 39 {
+			t.Errorf("provider name %q is %d characters", p, len(p))
+		}
 	}
 }
 

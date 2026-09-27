@@ -70,49 +70,36 @@ func (m *Manager) managedSelector() map[string]string {
 
 var dnsUnsafe = regexp.MustCompile(`[^a-z0-9-]+`)
 
-// harnessShort is the harness's short name in generated sandbox names.
-func harnessShort(harness string) string {
-	switch harness {
-	case "claudecode":
-		return "claude"
-	default:
-		return harness
-	}
-}
+// nameSuffixLen is the "-<rand4>" of a generated name.
+const nameSuffixLen = 5
 
-// GenerateName returns dc-<harness>-<repo>-<rand4>, a valid DNS-label
-// sandbox name. repo is shortened to fit.
-func GenerateName(harness, project string) (string, error) {
+// GenerateName returns <repo>-<rand4>: the launch folder's name, shortened
+// to fit, and four random hex digits. It is a name OpenShell creates
+// (openshell.ValidNewSandboxName: at most 19 characters, so there is no
+// room for a dc- prefix or the harness). The sandbox carries its harness
+// and DefenseClaw ownership as labels (LabelHarness, LabelManaged), and
+// `sandbox list` shows the harness.
+func GenerateName(project string) (string, error) {
 	var buf [2]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("generate sandbox name: %w", err)
 	}
-	return composeName(harness, project, hex.EncodeToString(buf[:])), nil
+	return composeName(project, hex.EncodeToString(buf[:])), nil
 }
 
-func composeName(harness, project, suffix string) string {
-	h := dnsUnsafe.ReplaceAllString(strings.ToLower(harnessShort(harness)), "-")
-	repo := "project"
+func composeName(project, suffix string) string {
+	repo := ""
 	if project != "" {
 		repo = strings.ToLower(workspace.RepoName(project))
 	}
 	repo = strings.Trim(dnsUnsafe.ReplaceAllString(repo, "-"), "-")
+	if room := openshell.MaxSandboxNameLen - nameSuffixLen; len(repo) > room {
+		repo = strings.TrimRight(repo[:room], "-")
+	}
 	if repo == "" {
 		repo = "project"
 	}
-	room := 63 - len("dc-") - len(h) - len(suffix) - 2
-	if room < 1 {
-		h = h[:min(len(h), 20)]
-		room = 63 - len("dc-") - len(h) - len(suffix) - 2
-	}
-	if len(repo) > room {
-		repo = strings.Trim(repo[:room], "-")
-	}
-	name := "dc-" + h + "-" + repo + "-" + suffix
-	if !openshell.ValidSandboxName(name) {
-		name = "dc-" + h + "-" + suffix
-	}
-	return name
+	return repo + "-" + suffix
 }
 
 func providerName(sandbox, role string, i int) string {

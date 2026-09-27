@@ -182,7 +182,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		// Stage first: a project that cannot be copied (too large, a
 		// secret that cannot be held back) fails before a sandbox exists.
 		if req.Name == "" {
-			if req.Name, err = manager.GenerateName(spec.Name, project); err != nil {
+			if req.Name, err = manager.GenerateName(project); err != nil {
 				return err
 			}
 		}
@@ -206,7 +206,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 			CommandName + " pull` brings its changes back")
 		copyMode, req.Copy = true, true
 		if req.Name == "" {
-			if req.Name, err = manager.GenerateName(spec.Name, project); err != nil {
+			if req.Name, err = manager.GenerateName(project); err != nil {
 				return err
 			}
 		}
@@ -402,8 +402,8 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
 	}
-	if req.Name != "" && !openshell.ValidSandboxName(req.Name) {
-		return req, llmChoice{}, fmt.Errorf("--name %q: use lowercase letters, digits and '-' (at most 63)", req.Name)
+	if req.Name != "" && !openshell.ValidNewSandboxName(req.Name) {
+		return req, llmChoice{}, fmt.Errorf("--name %q: use at most 19 lowercase letters, digits and '-'", req.Name)
 	}
 	reserved := map[string]bool{}
 	for _, c := range o.Credentials {

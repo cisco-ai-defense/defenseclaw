@@ -367,7 +367,7 @@ A few rules the flags follow:
 | `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
 | `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini. |
 | `--memory` | text |  | Memory limit, for example 4Gi. |
-| `--name` | text |  | Sandbox name (default `dc-<harness>-<folder>-<random>`). |
+| `--name` | text |  | Sandbox name, at most 19 lowercase letters, digits and '-' (default `<folder>-<random>`). |
 | `--new` | switch |  | Start a new sandbox even when one already holds this folder. |
 | `--no-build` | switch |  | Fail instead of building a missing harness image. |
 | `--no-mcp` | switch |  | Leave the harness's MCP servers behind. |

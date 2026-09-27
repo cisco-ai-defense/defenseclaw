@@ -214,7 +214,7 @@ harness.`,
 		}),
 	}
 	f := cmd.Flags()
-	f.StringVar(&o.Name, "name", "", "sandbox name (default dc-<harness>-<folder>-<random>)")
+	f.StringVar(&o.Name, "name", "", "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)")
 	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull")
 	f.BoolVar(&o.Safe, "safe", false, "keep the harness's own permission prompts (skip-permissions off)")
 	f.StringVar(&o.Pack, "pack", "", "sandbox policy pack (open, balanced, strict, or a custom pack)")

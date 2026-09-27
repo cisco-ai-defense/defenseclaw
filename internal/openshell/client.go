@@ -239,6 +239,17 @@ var (
 // names safe as CLI positionals.
 func ValidSandboxName(name string) bool { return sandboxNamePattern.MatchString(name) }
 
+// MaxSandboxNameLen is the longest sandbox name OpenShell 0.1.1 creates: its
+// gateway refuses longer ones ("name exceeds maximum length (22 > 19)").
+// Sandboxes are still addressed by any ValidSandboxName.
+const MaxSandboxNameLen = 19
+
+// ValidNewSandboxName reports whether OpenShell creates a sandbox of this
+// name: a ValidSandboxName of at most MaxSandboxNameLen characters.
+func ValidNewSandboxName(name string) bool {
+	return len(name) <= MaxSandboxNameLen && ValidSandboxName(name)
+}
+
 func checkSandboxName(name string) error {
 	if !ValidSandboxName(name) {
 		return fmt.Errorf("%w: sandbox %q", ErrInvalidName, name)

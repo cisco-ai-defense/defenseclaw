@@ -180,6 +180,31 @@ func TestNamesAndLabelsAreValidatedBeforeAnyCall(t *testing.T) {
 	}
 }
 
+// OpenShell 0.1.1 refuses to create a sandbox whose name is longer than 19
+// characters ("name exceeds maximum length (20 > 19)", measured on the
+// host); existing sandboxes are addressed by any DNS label.
+func TestValidNewSandboxName(t *testing.T) {
+	if openshell.MaxSandboxNameLen != 19 {
+		t.Fatalf("MaxSandboxNameLen = %d, want OpenShell 0.1.1's 19", openshell.MaxSandboxNameLen)
+	}
+	for name, want := range map[string]bool{
+		"m1-calc-7500":           true,
+		strings.Repeat("a", 19):  true,
+		strings.Repeat("a", 20):  false,
+		"dc-claude-m1-calc-7500": false,
+		"Upper":                  false,
+		"-rf":                    false,
+		"":                       false,
+	} {
+		if got := openshell.ValidNewSandboxName(name); got != want {
+			t.Errorf("ValidNewSandboxName(%q) = %t, want %t", name, got, want)
+		}
+	}
+	if !openshell.ValidSandboxName(strings.Repeat("a", 63)) {
+		t.Error("a 63-character sandbox must stay addressable")
+	}
+}
+
 func TestWaitReadyReportsConfigurationRejection(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()

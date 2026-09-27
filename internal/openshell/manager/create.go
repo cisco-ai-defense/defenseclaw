@@ -138,13 +138,13 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		if name, err = GenerateName(harnessName, project); err != nil {
+		if name, err = GenerateName(project); err != nil {
 			return nil, err
 		}
 	}
-	if !openshell.ValidSandboxName(name) || workspace.ValidateName(name) != nil {
+	if !openshell.ValidNewSandboxName(name) || workspace.ValidateName(name) != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
-			"sandbox name %q must be lowercase letters, digits and '-', at most 63 characters", name)
+			"sandbox name %q must be lowercase letters, digits and '-', at most %d characters", name, openshell.MaxSandboxNameLen)
 	}
 	b, err := m.reserve(name, project, mode)
 	if err != nil {
