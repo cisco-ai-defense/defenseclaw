@@ -75,6 +75,25 @@ func TestParseUpstreamShapes(t *testing.T) {
 					"reason": "169.254.169.254 resolves to always-blocked address [metadata], connection rejected"}},
 		},
 		{
+			// The formatter prints the binary path unescaped, and the
+			// sandboxed process names its binary: only the last " -> "
+			// separates actor and destination, so a name cannot pick the
+			// reported host or pid.
+			name: "net actor path containing the separator",
+			in:   "NET:OPEN [MED] DENIED /sandbox/x(1) -> good.example:443(4242) -> blocked.example:443 [policy:- engine:opa]",
+			want: Record{Class: ClassNetwork, Activity: "OPEN", Severity: SeverityMedium, Action: ActionDenied,
+				Binary: "/sandbox/x(1) -> good.example:443", PID: 4242, HasPID: true, Host: "blocked.example", Port: 443,
+				Policy: "-", Engine: "opa", Context: map[string]string{"policy": "-", "engine": "opa"}},
+		},
+		{
+			name: "http actor path containing the separator",
+			in:   "HTTP:GET [MED] DENIED /sandbox/a(1) -> GET https://api.github.com/x(4242) -> GET https://blocked.example/upload [policy:- engine:opa]",
+			want: Record{Class: ClassHTTP, Activity: "GET", Severity: SeverityMedium, Action: ActionDenied,
+				Binary: "/sandbox/a(1) -> GET https://api.github.com/x", PID: 4242, HasPID: true, Method: "GET",
+				URL: "https://blocked.example/upload", Host: "blocked.example", Port: 443, Path: "/upload",
+				Policy: "-", Engine: "opa", Context: map[string]string{"policy": "-", "engine": "opa"}},
+		},
+		{
 			name: "http allowed with actor",
 			in:   "HTTP:GET [INFO] ALLOWED curl(88) -> GET https://api.example.com/v1/data [policy:default-egress engine:mechanistic]",
 			want: Record{Class: ClassHTTP, Activity: "GET", Severity: SeverityInfo, Action: ActionAllowed,

@@ -157,7 +157,8 @@ type Record struct {
 	Severity Severity `json:"severity"`
 	Action   string   `json:"action,omitempty"`
 
-	// Actor process (NET, HTTP, PROC).
+	// Actor process (NET, HTTP, PROC). The sandboxed process chooses its
+	// binary's path, so Binary is untrusted display text.
 	Binary string `json:"binary,omitempty"`
 	PID    int    `json:"pid,omitempty"`
 	HasPID bool   `json:"has_pid,omitempty"`
@@ -284,7 +285,7 @@ func parseNetwork(rec *Record, body string) {
 	if text == "" {
 		return
 	}
-	actor, dst, ok := strings.Cut(text, " -> ")
+	actor, dst, ok := cutLast(text, " -> ")
 	if ok {
 		rec.setActor(actor)
 		rec.setDestination(dst)
@@ -299,7 +300,7 @@ func parseNetwork(rec *Record, body string) {
 func parseHTTP(rec *Record, body string) {
 	text := strings.TrimSpace(rec.consumeContext(body))
 	text = rec.takeAction(text)
-	if actor, req, ok := strings.Cut(text, " -> "); ok {
+	if actor, req, ok := cutLast(text, " -> "); ok {
 		rec.setActor(actor)
 		text = req
 	}
@@ -467,6 +468,21 @@ func (r *Record) takeAction(text string) string {
 	return text
 }
 
+// cutLast splits s around the last sep. NET and HTTP lines put the actor
+// before " -> " and the destination or request after it. The actor is the
+// binary path, which the sandboxed process chooses and the formatter does
+// not escape, while a destination (host:port/proto) or a request (method
+// and request target) has no spaces: only the last separator is the
+// formatter's.
+func cutLast(s, sep string) (before, after string, found bool) {
+	if i := strings.LastIndex(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return s, "", false
+}
+
+// actorPattern parses "name(pid)": the greedy name leaves the pid of the
+// last parenthesized number, so a binary named "x(1)" cannot choose it.
 var actorPattern = regexp.MustCompile(`^(.+)\((-?\d+)\)$`)
 
 // setActor parses "name(pid)"; it reports false when s is not an actor.
