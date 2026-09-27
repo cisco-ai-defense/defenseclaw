@@ -165,6 +165,16 @@ func answer(stdout, stderr string, code int) func(context.Context) ([]byte, []by
 	return func(context.Context) ([]byte, []byte, int, error) { return []byte(stdout), []byte(stderr), code, nil }
 }
 
+// late is answer after the attempt outlived a one-nanosecond timeout: two
+// clock reads in a row can be equal, so an instant answer may not count as
+// having come after it.
+func late(stdout, stderr string, code int) func(context.Context) ([]byte, []byte, int, error) {
+	return func(context.Context) ([]byte, []byte, int, error) {
+		time.Sleep(time.Millisecond)
+		return []byte(stdout), []byte(stderr), code, nil
+	}
+}
+
 func TestCLIExecWrapsTheCommandInTimeout(t *testing.T) {
 	s := &scriptedCLI{answers: []func(context.Context) ([]byte, []byte, int, error){answer("ok\n", "", 0)}}
 	if _, err := s.cli().Exec(bg, "s", ExecRequest{Argv: []string{"git", "status"}, Timeout: 90 * time.Second}); err != nil {
@@ -209,9 +219,9 @@ func TestCLIExecRetriesOnlyIdempotentSilence(t *testing.T) {
 		{"persistent silence returns the status", true, 3, answers{answer("", "", 1)}, 3, 1, nil},
 		// OpenShell reports 124 when its --timeout or the sandbox's
 		// timeout(1) fired; the command may still be finishing.
-		{"a silent 124 after the timeout is not retried", true, 0, answers{answer("", "", 124), answer("ok\n", "", 0)}, 1, 0, openshell.ErrExecTimeout},
-		{"a silent 124 is not retried either way", false, 0, answers{answer("", "", 124), answer("ok\n", "", 0)}, 1, 0, openshell.ErrExecTimeout},
-		{"a killed command is a timeout", true, 0, answers{answer("", "", 137)}, 1, 0, openshell.ErrExecTimeout},
+		{"a silent 124 after the timeout is not retried", true, 0, answers{late("", "", 124), answer("ok\n", "", 0)}, 1, 0, openshell.ErrExecTimeout},
+		{"a silent 124 is not retried either way", false, 0, answers{late("", "", 124), answer("ok\n", "", 0)}, 1, 0, openshell.ErrExecTimeout},
+		{"a killed command is a timeout", true, 0, answers{late("", "", 137)}, 1, 0, openshell.ErrExecTimeout},
 		{"a missing timeout(1) is reported", true, 0, answers{answer("", "sh: 1: timeout: not found", 127)}, 1, 0, openshell.ErrNoSandboxTimeout},
 		{"a binary that cannot start is not retried", true, 0, answers{func(context.Context) ([]byte, []byte, int, error) {
 			return nil, nil, -1, errors.New("fork failed")
