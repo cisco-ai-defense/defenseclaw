@@ -750,8 +750,10 @@ protected in place, for example when `.git` is a symbolic link, the git
 directory lives outside the folder (a linked worktree or submodule checkout),
 `core.worktree` is set, `core.hooksPath` is the project itself or leaves it
 through a link, there are more than 32 submodule git directories, or there
-are more than 256 secret files to mask. A secret scan that cannot finish
-(more than 250,000 entries) refuses the mount.
+are more than 256 secret files to mask. The API answers such a create with
+the `needs_copy` code, and `sandbox run` falls back to copy mode, saying why.
+A secret scan that cannot finish (more than 250,000 entries) refuses the
+mount.
 
 ### Secret masks
 

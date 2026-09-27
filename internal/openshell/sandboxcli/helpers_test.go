@@ -77,6 +77,8 @@ type fakeDaemon struct {
 	// timeline records the order of the steps of a run, shared with the
 	// other fakes of a testApp.
 	timeline *timeline
+	// refuseCreate, when set, may refuse a create request.
+	refuseCreate func(req sandboxapi.CreateRequest) *sandboxapi.Error
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -262,6 +264,14 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(body, &req); err != nil {
 			fail(sandboxapi.CodeInvalid, err.Error())
 			return
+		}
+		if d.refuseCreate != nil {
+			if e := d.refuseCreate(req); e != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(e.HTTPStatus())
+				_ = json.NewEncoder(w).Encode(e)
+				return
+			}
 		}
 		name := req.Name
 		if name == "" {

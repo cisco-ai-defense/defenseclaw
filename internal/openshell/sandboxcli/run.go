@@ -180,6 +180,27 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	a.println()
 	a.note("Starting a " + spec.DisplayName + " sandbox… (the first run builds its image, about 3 GB)")
 	sb, err := api.Create(ctx, req)
+	if err != nil && !copyMode && sandboxapi.IsCode(err, sandboxapi.CodeNeedsCopy) {
+		// A linked worktree, a git directory outside the folder and the
+		// like cannot be protected in place: the run falls back to copy
+		// mode, saying why.
+		why := sandboxapi.AsError(err).Detail
+		if why == "" {
+			why = sandboxapi.AsError(err).Message
+		}
+		a.warn(a.tildePath(project) + " cannot be mounted live (" + why + "); running it in copy mode: the agent works on a copy, and `" +
+			CommandName + " pull` brings its changes back")
+		copyMode, req.Copy = true, true
+		if req.Name == "" {
+			if req.Name, err = manager.GenerateName(spec.Name, project); err != nil {
+				return err
+			}
+		}
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o); err != nil {
+			return err
+		}
+		sb, err = api.Create(ctx, req)
+	}
 	if err != nil {
 		return apiError(err)
 	}

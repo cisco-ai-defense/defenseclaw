@@ -778,7 +778,7 @@ func realProject(p string) (string, error) {
 func workspaceError(err error) error {
 	switch {
 	case errors.Is(err, workspace.ErrNeedsCopy):
-		return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "this project cannot be mounted live; run it with --copy", Detail: err.Error()}
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy", Detail: err.Error()}
 	case errors.Is(err, workspace.ErrUnsafeSource):
 		return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: "DefenseClaw refuses to mount this folder", Detail: err.Error()}
 	case errors.Is(err, workspace.ErrScanIncomplete):

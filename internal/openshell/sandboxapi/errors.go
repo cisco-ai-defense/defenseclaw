@@ -34,6 +34,10 @@ const (
 	CodeNotFound    = "not_found"
 	// CodeConflict: the sandbox exists already or is in the wrong phase.
 	CodeConflict = "conflict"
+	// CodeNeedsCopy: the project cannot be mounted live (a linked worktree,
+	// a git directory outside the folder, and the like; Detail says why);
+	// it can run in copy mode.
+	CodeNeedsCopy = "needs_copy"
 	// CodeAdminViolation: openshell.admin refused the request ("blocked by
 	// your organization's DefenseClaw policy").
 	CodeAdminViolation = "admin_violation"
@@ -89,7 +93,7 @@ func StatusForCode(code string) int {
 		return http.StatusBadRequest
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodeConflict, CodeImageUnavailable:
+	case CodeConflict, CodeNeedsCopy, CodeImageUnavailable:
 		return http.StatusConflict
 	case CodeAdminViolation, CodePolicyViolation:
 		return http.StatusForbidden

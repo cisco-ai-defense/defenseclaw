@@ -391,7 +391,7 @@ func TestCreateRollsBackEachStep(t *testing.T) {
 		{"image missing", func(e *harnessEnv) { e.images.err = ErrImageMissing }, sandboxapi.CodeImageUnavailable, false, false, false},
 		{"image build fails", func(e *harnessEnv) { e.images.err = errors.New("docker build failed") }, sandboxapi.CodeImageUnavailable, false, false, false},
 		{"mount refused", func(e *harnessEnv) { e.ws.planErr = &workspace.SourceError{Path: "/", Reason: "root"} }, sandboxapi.CodePolicyViolation, false, false, false},
-		{"needs copy", func(e *harnessEnv) { e.ws.planErr = workspace.ErrNeedsCopy }, sandboxapi.CodeConflict, false, false, false},
+		{"needs copy", func(e *harnessEnv) { e.ws.planErr = workspace.ErrNeedsCopy }, sandboxapi.CodeNeedsCopy, false, false, false},
 		{"snapshot fails", func(e *harnessEnv) { e.ws.snapErr = errors.New("disk full") }, sandboxapi.CodeInternal, true, false, true},
 		{"profile import fails", func(e *harnessEnv) { e.importer.err = errors.New("lint failed") }, sandboxapi.CodeUpstream, true, true, true},
 		{"provider create fails", func(e *harnessEnv) {

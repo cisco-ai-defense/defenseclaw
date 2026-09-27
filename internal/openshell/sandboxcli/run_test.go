@@ -477,6 +477,35 @@ func TestPlainFolderCopyHasNoBranchChoice(t *testing.T) {
 	}
 }
 
+// TestRunFallsBackToCopyMode pins the plan's fallback: a project the
+// daemon cannot mount live (a linked worktree, a git directory outside the
+// folder) runs in copy mode, with an explanation, instead of failing.
+func TestRunFallsBackToCopyMode(t *testing.T) {
+	ta := newTestApp(t, "a\n")
+	ta.env["OPENAI_API_KEY"] = "sk-openai-test"
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		if req.Copy {
+			return nil
+		}
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy",
+			Detail: "the git directory is outside the project (a linked worktree)"}
+	}
+	if err := ta.Run(context.Background(), RunOptions{Harness: "codex", Name: "wt"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	creates := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)
+	if len(creates) != 2 || strings.Contains(string(creates[0].Body), `"copy":true`) || !strings.Contains(string(creates[1].Body), `"copy":true`) {
+		t.Fatalf("create calls = %d, want a live mount and then a copy", len(creates))
+	}
+	if want := []string{"stage wt", "upload wt"}; len(ta.copy.steps) < 2 || !slices.Equal(ta.copy.steps[:2], want) {
+		t.Fatalf("copy steps = %v, want %v first", ta.copy.steps, want)
+	}
+	if out := ta.output(); !strings.Contains(out, "cannot be mounted live (the git directory is outside the project (a linked worktree))") ||
+		!strings.Contains(out, "copy mode") {
+		t.Fatalf("output does not explain the fallback:\n%s", out)
+	}
+}
+
 func TestRunOffersResume(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.daemon.add(sandboxapi.Sandbox{Name: "dc-claude-proj-old", Harness: "claudecode", HarnessName: "Claude Code", Phase: "stopped",
