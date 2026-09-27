@@ -74,8 +74,10 @@ func TestOpenHandsTrustedShellArgs(t *testing.T) {
 		{"sdk-terminal-action", "terminal", `{"command":"echo hi > /tmp/x","is_input":false,"timeout":null,"reset":false,"kind":"TerminalAction"}`, true},
 		{"model-labels", "terminal", `{"command":"echo hi > /tmp/x","security_risk":"LOW","summary":"write","timeout":30}`, true},
 		{"command-only", "terminal", `{"command":"echo hi > /tmp/x"}`, true},
-		{"input-to-running-process", "terminal", `{"command":"echo hi > /tmp/x","is_input":true}`, false},
-		{"reset", "terminal", `{"command":"echo hi > /tmp/x","reset":true}`, false},
+		// Input to the running process is judged as a shell command.
+		{"input-to-running-process", "terminal", `{"command":"echo hi > /tmp/x","is_input":true}`, true},
+		{"reset", "terminal", `{"command":"echo hi > /tmp/x","reset":true}`, true},
+		{"input-flag-not-bool", "terminal", `{"command":"echo hi > /tmp/x","is_input":"yes"}`, false},
 		{"other-kind", "terminal", `{"command":"echo hi > /tmp/x","kind":"FileEditorAction"}`, false},
 		{"unknown-field", "terminal", `{"command":"echo hi > /tmp/x","cwd":"/"}`, false},
 		{"duplicate-command", "terminal", `{"command":"echo hi > /tmp/x","command":"ls"}`, false},
@@ -123,4 +125,34 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 			t.Fatalf("%s: projection = %s, cwd %q, %t", args, got, cwd, ok)
 		}
 	}
+}
+
+func TestAntigravityCommandInputArgs(t *testing.T) {
+	project := func(tool string, args json.RawMessage) (json.RawMessage, bool) {
+		out, cwd, ok := AntigravityTrustedShellArgs(tool, args)
+		if cwd != "" {
+			t.Errorf("send_command_input returned cwd %q", cwd)
+		}
+		return out, ok
+	}
+	checkTrustedShellArgs(t, project, `{"CommandLine":"echo hi > /tmp/x"}`, []trustedShellArgsCase{
+		{"input", "send_command_input", `{"CommandId":"c1","Input":"echo hi > /tmp/x","WaitMs":500}`, true},
+		{"labels-and-unknown-fields", "send_command_input", `{"CommandId":"c1","Input":"echo hi > /tmp/x","Terminate":false,"toolSummary":"s","Extra":1}`, true},
+		{"terminate-only", "send_command_input", `{"CommandId":"c1","Terminate":true}`, false},
+		{"empty-input", "send_command_input", `{"CommandId":"c1","Input":"  "}`, false},
+		{"input-not-string", "send_command_input", `{"CommandId":"c1","Input":["echo"]}`, false},
+		{"duplicate-input", "send_command_input", `{"Input":"ls","Input":"echo hi > /tmp/x"}`, false},
+	})
+}
+
+func TestHermesTrustedShellArgs(t *testing.T) {
+	checkTrustedShellArgs(t, HermesTrustedShellArgs, `{"command":"echo hi > /tmp/x"}`, []trustedShellArgsCase{
+		{"submit", "process", `{"action":"submit","session_id":"p1","data":"echo hi > /tmp/x"}`, true},
+		{"write", "process", `{"action":"write","session_id":"p1","data":"echo hi > /tmp/x"}`, true},
+		{"poll", "process", `{"action":"poll","session_id":"p1"}`, false},
+		{"kill-with-data", "process", `{"action":"kill","session_id":"p1","data":"echo hi > /tmp/x"}`, false},
+		{"no-data", "process", `{"action":"submit","session_id":"p1"}`, false},
+		{"duplicate-data", "process", `{"action":"submit","data":"ls","data":"echo hi > /tmp/x"}`, false},
+		{"other-tool", "terminal", `{"action":"submit","data":"echo hi > /tmp/x"}`, false},
+	})
 }

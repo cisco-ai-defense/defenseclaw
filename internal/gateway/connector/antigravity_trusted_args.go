@@ -43,6 +43,10 @@ import (
 // RunPersistent booleans, and the model's labels and the terminal ID
 // strings; each optional field may also be null.
 func AntigravityTrustedShellArgs(toolName string, args json.RawMessage) (projected json.RawMessage, cwd string, ok bool) {
+	if strings.TrimSpace(toolName) == "send_command_input" {
+		out, ok := antigravityCommandInputArgs(args)
+		return out, "", ok
+	}
 	if strings.TrimSpace(toolName) != "run_command" || antigravityValidateUniqueJSON(args) != nil {
 		return args, "", false
 	}
@@ -95,4 +99,32 @@ func AntigravityTrustedShellArgs(toolName string, args json.RawMessage) (project
 		return args, "", false
 	}
 	return out, cwd, true
+}
+
+// antigravityCommandInputArgs projects an agy send_command_input call (text
+// written to the stdin of a command run_command started: CommandId, Input,
+// WaitMs, Terminate and the model's labels) onto {"CommandLine": Input}, so
+// the input is judged as a shell command: the running command is often a
+// shell, and unprojected the call had no command facts at all, so a
+// CRITICAL command rule allowed it. Only Input is read; the other fields
+// never change what reaches the process, so the projection judges the
+// input whatever else the call carries (keys must still be unique). A call
+// without input text (Terminate alone) is left alone.
+func antigravityCommandInputArgs(args json.RawMessage) (json.RawMessage, bool) {
+	if antigravityValidateUniqueJSON(args) != nil {
+		return args, false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
+		return args, false
+	}
+	var input string
+	if raw, ok := fields["Input"]; !ok || json.Unmarshal(raw, &input) != nil || strings.TrimSpace(input) == "" {
+		return args, false
+	}
+	out, err := encodeTrustedShellArgs(map[string]string{"CommandLine": input})
+	if err != nil {
+		return args, false
+	}
+	return out, true
 }

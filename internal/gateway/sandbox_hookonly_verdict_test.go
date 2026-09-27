@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -71,8 +73,9 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	if got, cwd := agentHookTrustedActionArgs("hermes", "terminal", args); string(got) != string(args) || cwd != "" {
 		t.Errorf("hermes terminal args = %s (cwd %q), want passthrough", got, cwd)
 	}
-	if got, _ := agentHookTrustedActionArgs("openhands", "terminal", json.RawMessage(`{"command":"ls","is_input":true}`)); string(got) != `{"command":"ls","is_input":true}` {
-		t.Errorf("input to a running process was projected: %s", got)
+	// Input to a running process is judged as shell input.
+	if got, _ := agentHookTrustedActionArgs("openhands", "terminal", json.RawMessage(`{"command":"ls","is_input":true}`)); string(got) != `{"command":"ls"}` {
+		t.Errorf("input to a running process was not projected: %s", got)
 	}
 	// The tool call's directory replaces the session's, mapped the same way
 	// (on the host: an existing absolute directory, symlinks resolved).
@@ -113,7 +116,7 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 	})
 	const command = "echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt"
 	want := "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		connector, version, contract, path, body, tool string
 		headers                                        []string
 		// output checks the harness-specific rendering of the block.
@@ -157,6 +160,23 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 				}
 			},
 		},
+		// Text sent to a running process is judged as shell input.
+		{
+			connector: "openhands", version: "1.16.0", contract: "openhands-hooks-v1", path: "/api/v1/openhands/hook", tool: "terminal",
+			body: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"` + command + `","is_input":true,` +
+				`"timeout":null,"reset":false,"kind":"TerminalAction"},"session_id":"c1c2b756-f8e9-4e9d-97d0-2c27ecb6c3d1","working_dir":"/work/app"}`,
+		},
+		{
+			connector: "antigravity", version: "1.2.12", contract: "antigravity-hooks-v2", path: "/api/v1/antigravity/hook", tool: "send_command_input",
+			headers: []string{"X-DefenseClaw-Antigravity-Event", "PreToolUse"},
+			body: `{"conversationId":"c1","workspacePaths":["/work/app"],"stepIdx":4,"toolCall":{"name":"send_command_input","args":{` +
+				`"CommandId":"cmd-1","Input":"` + command + `","WaitMs":500,"toolSummary":"type","toolAction":"Typing"}}}`,
+		},
+		{
+			connector: "hermes", version: "0.19.0", contract: "hermes-hooks-v1", path: "/api/v1/hermes/hook", tool: "process",
+			body: `{"hook_event_name":"pre_tool_call","tool_name":"process","tool_input":{"action":"submit","session_id":"proc_1","data":"` + command + `"},` +
+				`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_2","task_id":"t1"}}`,
+		},
 		{
 			connector: "omnigent", version: "0.13.0", contract: "omnigent-custom-policy-v1", path: "/api/v1/omnigent/hook", tool: "sys_os_shell",
 			body: `{"hook_event_name":"PreToolUse","omnigent_event_type":"tool_call","agent_name":"OmniGent","agent_type":"omnigent",` +
@@ -164,9 +184,9 @@ func TestSandboxHookOnlyShellCallsAreJudged(t *testing.T) {
 				`"tool_name":"sys_os_shell","tool_input":{"command":"` + command + `"}}`,
 		},
 	} {
-		t.Run(tc.connector, func(t *testing.T) {
+		t.Run(tc.connector+"-"+tc.tool, func(t *testing.T) {
 			_, token, err := f.store.Mint(sandboxauth.Spec{
-				SandboxName: "dc-" + tc.connector + "-app", Connector: tc.connector,
+				SandboxName: "dc-" + tc.connector + "-" + strings.ReplaceAll(tc.tool, "_", "-") + "-" + strconv.Itoa(i), Connector: tc.connector,
 				AgentVersion: tc.version, HookContractID: tc.contract, PolicyProfile: "open",
 				Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirMount,
 					Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: project}}},

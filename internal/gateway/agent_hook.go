@@ -2075,6 +2075,17 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 		strings.EqualFold(strings.TrimSpace(toolName), "sys_os_shell") {
 		return "shell"
 	}
+	// Text sent to a running process is judged as shell input (see
+	// agentHookTrustedActionArgs): agy's send_command_input as run_command
+	// input, Hermes' process tool (write, submit) as a shell command.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "send_command_input") {
+		return "run_command"
+	}
+	if strings.EqualFold(strings.TrimSpace(connectorName), "hermes") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "process") {
+		return "shell"
+	}
 	return toolName
 }
 
@@ -2082,7 +2093,10 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 // sees. OpenHands' terminal tool and agy's run_command report execution
 // controls and model labels next to the command;
 // connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
-// project them onto the plain shell shape when that is exact. The recorded
+// project them onto the plain shell shape when that is exact. Text a tool
+// sends to a running process (OpenHands terminal input, agy
+// send_command_input, Hermes process write and submit) is projected the same
+// way, so it is judged as shell input rather than not at all. The recorded
 // ToolArgs never change.
 //
 // cwd is the directory the tool call names for its command (agy's Cwd), or
@@ -2099,6 +2113,10 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 	case "antigravity":
 		if out, dir, ok := connector.AntigravityTrustedShellArgs(toolName, args); ok {
 			return out, dir
+		}
+	case "hermes":
+		if out, ok := connector.HermesTrustedShellArgs(toolName, args); ok {
+			return out, ""
 		}
 	}
 	return args, ""

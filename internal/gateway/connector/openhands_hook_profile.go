@@ -47,9 +47,16 @@ var openHandsHookEvents = map[string]string{
 //
 // The projection is exact or refused (ok false, arguments unchanged): every
 // key must be unique and known, the command a string, is_input and reset
-// false or null (is_input sends the text to a running process instead of
-// starting a command), timeout a number or null, kind "TerminalAction", and
+// booleans or null, timeout a number or null, kind "TerminalAction", and
 // the model's security_risk and summary labels strings or null.
+//
+// With is_input true the text goes to the process running in the terminal
+// instead of starting a command. That process is usually the terminal's
+// shell (or a program the agent started, which the text can reach the
+// shell through), so the input is judged as a shell command either way:
+// left unprojected it had no command facts, and a CRITICAL command rule
+// allowed it. Input that is not a command (a "y" answering a prompt)
+// matches no command rule.
 func OpenHandsTrustedShellArgs(toolName string, args json.RawMessage) (json.RawMessage, bool) {
 	if strings.TrimSpace(toolName) != "terminal" || antigravityValidateUniqueJSON(args) != nil {
 		return args, false
@@ -67,7 +74,7 @@ func OpenHandsTrustedShellArgs(toolName string, args json.RawMessage) (json.RawM
 		case "command":
 		case "is_input", "reset":
 			var flag *bool
-			if json.Unmarshal(raw, &flag) != nil || (flag != nil && *flag) {
+			if json.Unmarshal(raw, &flag) != nil {
 				return args, false
 			}
 		case "timeout":
