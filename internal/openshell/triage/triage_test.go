@@ -653,13 +653,36 @@ func TestClassifyResolvesNames(t *testing.T) {
 		t.Fatalf("names are not looked up fully qualified: %s", lookups)
 	}
 
-	// Approved rules are re-checked the same way.
+	// Approved rules are re-checked the same way (RecheckResolved): every
+	// dial-time refusal counts, a private answer included, which only the
+	// user may approve; a name that does not resolve now, or one judged as
+	// named, does not.
+	for _, tc := range []struct {
+		eff  *packs.Effective
+		host string
+		want Reason
+	}{
+		{open, "cdn.example.org", ""},
+		{open, "rebind.example.org", ReasonResolvesToHost},
+		{open, "mixed.example.org", ReasonResolvesToHost},
+		{open, "lan.example.org", ReasonPrivateNetwork},
+		{noUnblock, "lan.example.org", ReasonAdmin},
+		{allowed, "db.corp-tools.example", ""},
+		{balanced, "rebind.example.org", ReasonResolvesToHost},
+		{blockedAddr, "feedaddr.example.org", ReasonBlocklisted},
+		{adminAddr, "feedaddr.example.org", ReasonAdmin},
+		{open, "gone.example.org", ""},
+		{open, "host.openshell.internal", ""},
+		{open, "93.184.216.34", ""},
+	} {
+		pol := testPolicy(tc.eff)
+		pol.Resolver = r
+		if got := RecheckResolved(ctx, proposal(tc.host, 443), pol); got != tc.want {
+			t.Errorf("RecheckResolved(%s) = %q, want %q", tc.host, got, tc.want)
+		}
+	}
 	pol := testPolicy(open)
 	pol.Resolver = r
-	if !ResolvesToHost(ctx, proposal("rebind.example.org", 443), pol) || ResolvesToHost(ctx, proposal("lan.example.org", 443), pol) ||
-		ResolvesToHost(ctx, proposal("gone.example.org", 443), pol) || ResolvesToHost(ctx, proposal("host.openshell.internal", 5432), pol) {
-		t.Fatal("ResolvesToHost misjudged an approved rule")
-	}
 	// A canceled context never approves: the proposal waits.
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()

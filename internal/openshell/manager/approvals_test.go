@@ -886,6 +886,52 @@ func TestReconcileRemovesRulesThatResolveToThisMachine(t *testing.T) {
 	}
 }
 
+// TestPrivateAnswerRemovesAutomaticRules pins that a rule DefenseClaw
+// approved on its own goes once its name resolves to a private network,
+// which only the user approves (the agent asks again), while a rule the user
+// approved for a private answer stays.
+func TestPrivateAnswerRemovesAutomaticRules(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	ctx := context.Background()
+	auto := approvedRule(t, e, "lanbox", "cdn.rebind.example.org")
+	const own = "allow_db_lan_example_org_443"
+	e.dns.set("db.lan.example.org", "10.0.0.5")
+	id := addChunk(e, "lanbox", chunk(own, "db.lan.example.org", 443))
+	e.watch.push(t, "lanbox", stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, "lanbox", 1)
+	if asks[0].Host != "db.lan.example.org" {
+		t.Fatalf("ask = %+v", asks[0])
+	}
+	if _, err := e.m.DecideApproval(ctx, asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the user's approval applied", func() bool { return chunkStatus(e, "lanbox", id) == "approved" })
+
+	// Unchanged answers keep both.
+	e.m.enforceAll(ctx)
+	if !hasRule(e, "lanbox", auto) || !hasRule(e, "lanbox", own) {
+		t.Fatal("a pass with unchanged DNS answers removed an approved rule")
+	}
+	e.dns.set("cdn.rebind.example.org", "192.168.1.20")
+	e.m.enforceAll(ctx)
+	if hasRule(e, "lanbox", auto) {
+		t.Fatal("the automatic rule whose name now resolves to a private network survived")
+	}
+	if !hasRule(e, "lanbox", own) {
+		t.Fatal("the rule the user approved for a private network was removed")
+	}
+	var recorded bool
+	e.tel.mu.Lock()
+	for _, p := range e.tel.policy {
+		recorded = recorded || (p.Operation == audit.SandboxPolicyRuleRemove && p.Target == auto && p.Reason == policyReasonApprovalRequired)
+	}
+	e.tel.mu.Unlock()
+	if !recorded {
+		t.Fatal("no rule_remove record for the automatic rule")
+	}
+}
+
 // TestRemovedRulesAreAudited pins the mandatory log.policy.updated records
 // of one enforcement pass that removes several approved rules, some the
 // administrator now blocks and some that resolve to this machine: one

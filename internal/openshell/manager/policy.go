@@ -323,10 +323,13 @@ func resourceViolation(applied *packs.Resources, max config.OpenShellResourcesCo
 // approved on its own that the policy now leaves to the user (a stricter
 // approvals or network mode, such as an administrator's required strict
 // pack, a destination off the allow list, an unblock taken back; see
-// triage.ApprovesAutomatically), and names that now resolve to this
-// machine (the proxy's dial-time guard, re-applied on every reconcile).
-// Approved rules bypass the egress proxy, so an administrator change or a
-// changed DNS answer must reach them too. Only triaged rules (allow_*) are
+// triage.ApprovesAutomatically), and names that now resolve where the
+// proxy's dial-time rules refuse (triage.RecheckResolved, on every
+// reconcile): to this machine, to an address a block list or the
+// administrator refuses, or, for a rule DefenseClaw approved on its own,
+// to a private network, which only the user approves. Approved rules
+// bypass the egress proxy, so an administrator change or a changed DNS
+// answer must reach them too. Only triaged rules (allow_*) are
 // judged; DefenseClaw renders its own and the provider rules. The user's
 // own approvals keep what the policy still lets the user approve. A nil
 // eff means no policy binds the sandbox at all (not even the
@@ -371,6 +374,7 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			continue
 		}
 		p := triage.FromChunk(name, openshell.PolicyChunk{RuleName: ruleName, ProposedRule: &rule})
+		automatic := origins[ruleName] == actorAutomatic
 		switch {
 		case eff == nil:
 			unbound = append(unbound, ruleName)
@@ -378,12 +382,29 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			removed = append(removed, ruleName)
 		case blocklisted(decider, pol.Principal, p):
 			blocked = append(blocked, ruleName)
-		case origins[ruleName] == actorAutomatic && !triage.ApprovesAutomatically(ctx, p, pol):
+		case automatic && !triage.ApprovesAutomatically(ctx, p, pol):
 			unapproved = append(unapproved, ruleName)
-		case triage.ResolvesToHost(dnsCtx, p, pol):
-			rebound = append(rebound, ruleName)
 		default:
-			continue
+			// What the names resolve to now, as the proxy would check it
+			// at dial time: a direct rule has no such check.
+			switch triage.RecheckResolved(dnsCtx, p, pol) {
+			case triage.ReasonResolvesToHost:
+				rebound = append(rebound, ruleName)
+			case triage.ReasonAdmin:
+				removed = append(removed, ruleName)
+			case triage.ReasonBlocklisted:
+				blocked = append(blocked, ruleName)
+			case triage.ReasonPrivateNetwork:
+				// Only the user approves a private network: a rule
+				// DefenseClaw approved on its own for a name that now
+				// resolves to one asks again.
+				if !automatic {
+					continue
+				}
+				unapproved = append(unapproved, ruleName)
+			default:
+				continue
+			}
 		}
 		ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: ruleName}})
 	}

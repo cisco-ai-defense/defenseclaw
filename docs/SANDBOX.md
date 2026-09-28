@@ -269,8 +269,14 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   or a sandbox policy that does not resolve), an automatic approval is
   triaged again later, and your own approval is retried three times, then
   comes back to you as a pending ask. The proposal is not rejected.
-- Every reconcile, about every 5 minutes, removes approved rules whose
-  names now resolve to this machine.
+- Every reconcile, about every 5 minutes, looks every approved rule's
+  names up again (`triage.RecheckResolved`) and removes rules whose names
+  now resolve to this machine, to an address a block list or the
+  administrator refuses, or to a private network while
+  `openshell.admin.allow_unblock` is `false`. A rule DefenseClaw approved on
+  its own whose name now resolves to a private network is removed too: only
+  you approve a private network, and the agent's next direct connection
+  asks you. A rule you approved yourself stays.
 - Every configuration change and every reconcile removes approved rules
   the policy now refuses: destinations the administrator blocked or left off
   an allow-only list, and destinations a block list (yours or the pack's) or

@@ -836,21 +836,34 @@ func lookupTransient(err error) bool {
 	return errors.As(err, &dnsErr) && !dnsErr.IsNotFound
 }
 
-// ResolvesToHost reports a proposal (typically a rule approved earlier)
-// with a destination name that now resolves to this machine or what only it
-// reaches, which a direct rule must never lead to whoever approved it.
-// Host-local names and IP literals are judged as named by CheckProposal; a
-// name that does not resolve does not count.
-func ResolvesToHost(ctx context.Context, p Proposal, pol Policy) bool {
+// RecheckResolved holds the destination names of a proposal (typically a
+// rule approved earlier, whose names may resolve elsewhere by now) to the
+// proxy's dial-time address rules, applied to what they resolve to now, as
+// Classify does. It returns why a name fails, most severe first, or ""
+// when every name passes or does not resolve now:
+//
+//   - ReasonResolvesToHost: this machine or what only it reaches, which a
+//     direct rule must never lead to, whoever approved it;
+//   - ReasonAdmin: an address the administrator's policy refuses (a blocked
+//     range, or a private address while openshell.admin.allow_unblock is
+//     false);
+//   - ReasonBlocklisted: an address on a block list or the blocklist feed;
+//   - ReasonPrivateNetwork: a private network address, which only the user
+//     may approve (Classify asks): a rule DefenseClaw approved on its own
+//     keeps no authority over it.
+//
+// Host-local names and IP literals are judged as named (CheckProposal,
+// ApprovesAutomatically).
+func RecheckResolved(ctx context.Context, p Proposal, pol Policy) Reason {
 	if pol.Effective == nil {
-		return false
+		return ""
 	}
 	decider, err := pol.decider()
 	if err != nil {
-		return false
+		return ""
 	}
-	for _, ep := range p.Endpoints {
-		host := NormalizeHost(ep.Host)
+	var worst Reason
+	for _, host := range destinationHosts(p) {
 		if host == "" || IsHostLocal(host) {
 			continue
 		}
@@ -865,16 +878,36 @@ func ResolvesToHost(ctx context.Context, p Proposal, pol Policy) bool {
 		}
 		probe := decider.DecideHost(pol.Principal, host)
 		probe.Allowed = true
-		if chk := decider.CheckAddrs(pol.Principal, probe, addrs); chk.Category == egress.CategoryHostInternal {
-			return true
+		chk := decider.CheckAddrs(pol.Principal, probe, addrs)
+		if chk.Allowed {
+			continue
+		}
+		var reason Reason
+		switch {
+		case chk.Category == egress.CategoryHostInternal:
+			reason = ReasonResolvesToHost
+		case chk.Category == egress.CategoryPrivateNetwork && !decider.UnblocksAllowed():
+			reason = ReasonAdmin
+		case chk.Category == egress.CategoryPrivateNetwork:
+			reason = ReasonPrivateNetwork
+		case chk.Category == egress.CategoryAdminBlock:
+			reason = ReasonAdmin
+		default:
+			reason = ReasonBlocklisted
+		}
+		if recheckRank[reason] > recheckRank[worst] {
+			worst = reason
 		}
 	}
-	return false
+	return worst
 }
+
+// recheckRank orders RecheckResolved's reasons by severity.
+var recheckRank = map[Reason]int{ReasonPrivateNetwork: 1, ReasonBlocklisted: 2, ReasonAdmin: 3, ReasonResolvesToHost: 4}
 
 // ApprovesAutomatically reports whether pol approves the destinations of p
 // on its own (Classify's Approve for its endpoints and allowed_ips), judged
-// as named: no name is looked up, what names resolve to is ResolvesToHost's
+// as named: no name is looked up, what names resolve to is RecheckResolved's
 // to re-check. A rule DefenseClaw approved on its own keeps no authority
 // once this no longer holds: the approvals mode or the network mode became
 // stricter (an administrator's required pack or minimum profile), the
