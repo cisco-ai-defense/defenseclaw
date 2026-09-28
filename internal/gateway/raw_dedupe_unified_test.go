@@ -79,7 +79,7 @@ func TestRememberHookRawEvents_KindClassification(t *testing.T) {
 }
 
 // TestRememberHookRawEvents_GenericConnector covers the additive
-// coverage PR 6 unlocks: hermes / cursor / windsurf / geminicli /
+// coverage PR 6 unlocks: hermes / cursor /
 // copilot previously had no raw event IDs flowing into their audit
 // envelopes. With the unified helper they get the same dedup
 // signature as codex / claudecode.

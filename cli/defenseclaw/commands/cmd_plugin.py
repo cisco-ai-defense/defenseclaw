@@ -455,7 +455,7 @@ def _active_plugin_connectors(app: AppContext) -> list[str]:
             names = [
                 n
                 for n in cfg.active_connectors()
-                if n and not connector_paths.is_cleanup_only(n)
+                if n
             ]
             if names:
                 return names
@@ -464,7 +464,7 @@ def _active_plugin_connectors(app: AppContext) -> list[str]:
     if hasattr(cfg, "active_connector"):
         active = cfg.active_connector()
         if active:
-            return [] if connector_paths.is_cleanup_only(active) else [active]
+            return [active]
     return ["openclaw"]
 
 

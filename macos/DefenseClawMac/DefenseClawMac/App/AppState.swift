@@ -1749,7 +1749,7 @@ final class AppState {
             return "\(name) connector has seen 0 hook events after \(formatted) - normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
         case "omnigent":
             return "\(name) connector has seen 0 policy events after \(formatted) - normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-        case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
+        case "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "amp":
             return "\(name) connector has seen 0 hook events after \(formatted) - verify connector hook setup if this persists"
         default:
             return "\(name) connector has seen 0 requests after \(formatted) - verify your agent is dialing the gateway port (gateway.port)"

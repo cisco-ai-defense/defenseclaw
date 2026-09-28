@@ -431,7 +431,7 @@ t_opencode_standalone_rejects_invalid_version_output() {
 
 t_unknown_connector() {
   local got
-  got="$(discover_agent_version geminicli "$(mktest_tmp)" 2>/dev/null || true)"
+  got="$(discover_agent_version retired-example "$(mktest_tmp)" 2>/dev/null || true)"
   assert_eq "${got}" "" "unknown connector returns empty string"
 }
 

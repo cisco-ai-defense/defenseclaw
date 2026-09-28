@@ -687,7 +687,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 }
 
 // emitAgentHookLLMEvent is the LLM-event emitter for the six
-// hook-only connectors (hermes, cursor, windsurf, geminicli,
+// hook-only connectors (hermes, cursor,
 // copilot, openhands). It mirrors emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
@@ -1135,8 +1135,7 @@ func canonicalHookLifecycleEvent(event string) string {
 	case "postcompact", "sessioncompacted":
 		return "compact_end"
 	case "stop", "stopfailure", "agentstop", "afteragent", "afteragentresponse",
-		"postllmcall", "postinvocation", "sessionidle", "teammateidle",
-		"postcascaderesponse", "postcascaderesponsewithtranscript", "agentend":
+		"postllmcall", "postinvocation", "sessionidle", "teammateidle", "agentend":
 		return "turn_end"
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt",
 		"prellmcall", "beforeagent", "beforemodel", "preinvocation", "agentstart":
@@ -1399,7 +1398,7 @@ func hookLifecyclePhase(rawEvent, lifecycleEvent, lifecycleState string) string 
 	case "prellmcall", "beforemodel", "preinvocation":
 		return "model"
 	case "postllmcall", "aftermodel", "postinvocation", "afteragentresponse",
-		"postcascaderesponse", "postcascaderesponsewithtranscript", "stop", "agentstop", "agentend":
+		"stop", "agentstop", "agentend":
 		return "responding"
 	case "permissionrequest":
 		return "approval"
@@ -2007,7 +2006,7 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 
 func connectorNeedsInferredDelegation(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "antigravity", "devin", "geminicli", "openhands":
+	case "antigravity", "devin", "openhands":
 		return true
 	default:
 		return false
@@ -2272,7 +2271,6 @@ func (a *APIServer) emitHookToolSpan(
 func isModelCompletionEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "postllmcall", "afteragentresponse", "aftermodel", "postinvocation",
-		"postcascaderesponse", "postcascaderesponsewithtranscript",
 		// Amp agent.end carries the projected final assistant response. Keep
 		// it result-like for post-output guardrail scanning, but classify it
 		// as a completion first in emitAgentHookLLMEvent so it closes the

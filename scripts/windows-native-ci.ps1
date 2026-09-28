@@ -4259,11 +4259,6 @@ function Get-NativeConnectorBackupMarkers([string]$DataRoot, [string]$Connector)
                 'connector_backups\cursor\hooks.json.json'
             )
         }
-        # Retired Windsurf/Cascade is accepted only as an old backup namespace
-        # so uninstall can restore bytes owned by a pre-Devin installation.
-        'windsurf' {
-            @('connector_backups\windsurf\config.json')
-        }
         'antigravity' {
             @('connector_backups\antigravity\hooks.json.json')
         }
@@ -4300,11 +4295,6 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
         @(Get-NativeConnectorBackupMarkers $DataRoot 'cursor').Count -ne 0) {
         $required += 'cursor'
     }
-    # Preserve cleanup authority for a pre-Devin Cascade backup, but never
-    # treat the retired connector as configured or selectable.
-    if (@(Get-NativeConnectorBackupMarkers $DataRoot 'windsurf').Count -ne 0) {
-        $required += 'windsurf'
-    }
     foreach ($connector in $required) {
         # Setup intentionally classifies uninstall work from the configured
         # roster as well as active state and backup markers. Exact connector
@@ -4319,9 +4309,7 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
 
 function Assert-NativeConnectorBackupMarkersConsumed([string]$DataRoot) {
     $remaining = [Collections.Generic.List[string]]::new()
-    # The final legacy entry proves uninstall consumed old Cascade restoration
-    # custody without exposing Windsurf as a current connector.
-    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor', 'windsurf')) {
+    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor')) {
         foreach ($relativePath in @(Get-NativeConnectorBackupMarkers $DataRoot $connector)) {
             $remaining.Add("$connector/$relativePath")
         }
@@ -5237,8 +5225,6 @@ function Assert-WizardConnectorHealth(
         throw "wizard doctor did not validate the selected native hook: $($hookRows | ConvertTo-Json -Compress -Depth 5)"
     }
     $expectedHookTarget = if ($Specification.Connector -eq 'amp') {
-        [string]$Specification.ConfigPath
-    } elseif ($Specification.Connector -eq 'geminicli') {
         [string]$Specification.ConfigPath
     } elseif ($Specification.Connector -eq 'cursor') {
         Join-Path ([Environment]::GetEnvironmentVariable('DEFENSECLAW_HOME')) 'hooks\cursor-hook.ps1'
@@ -6208,17 +6194,6 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
                         @(0, 1) 120 | Out-Null
                 } catch {
                     Write-Warning "setup acceptance $configuredConnector teardown cleanup failed: $($_.Exception.Message)"
-                }
-            }
-            # Retired Windsurf/Cascade is not a setup target. Invoke its
-            # compatibility teardown only when an old restoration marker proves
-            # that a pre-Devin installation still owns cleanup work.
-            if (@(Get-NativeConnectorBackupMarkers $dataRoot 'windsurf').Count -ne 0) {
-                try {
-                    Invoke-Installed $gateway @('connector', 'teardown', '--connector', 'windsurf') `
-                        @(0, 1) 120 | Out-Null
-                } catch {
-                    Write-Warning "legacy Cascade teardown cleanup failed: $($_.Exception.Message)"
                 }
             }
         }
@@ -7873,20 +7848,15 @@ function Invoke-Contract {
     $devinConfig = Join-Path $devinHome 'config.json'
     $devinCLIHome = [IO.Path]::GetFullPath((Join-Path $localAppData 'devin\cli')).TrimEnd('\')
     $devinExecutable = Join-Path $devinCLIHome 'bin\devin.exe'
-    $geminiCLIHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'gemini-cli-home')).TrimEnd('\')
-    $geminiConfigHome = Join-Path $geminiCLIHome '.gemini'
-    $geminiSettings = Join-Path $geminiConfigHome 'settings.json'
     $openCodePluginDir = Join-Path $openCodeHome 'plugins'
     $null = Assert-WindowsNativePathsDisjoint @(
         $contractHome, $codexHome, $claudeHome, $copilotHome, $hermesHome,
-        $openCodeHome, $geminiCLIHome
+        $openCodeHome
     )
     $defaultCodexHome = Join-Path $contractHome '.codex'
     $defaultClaudeHome = Join-Path $contractHome '.claude'
-    $defaultGeminiSettings = Join-Path $contractHome '.gemini\settings.json'
     $defaultCursorHome = Join-Path $contractHome '.cursor'
     $defaultHermesHome = Join-Path $contractHome 'AppData\Local\hermes'
-    $profileGeminiSettings = Join-Path $realProfile '.gemini\settings.json'
     $defaultOpenCodeHome = Join-Path $contractHome '.config\opencode'
     try {
         if ($disposableGithubRunner) {
@@ -7903,8 +7873,7 @@ function Invoke-Contract {
             $ampHome,
             $cursorHome,
             $hermesHome,
-            $openCodeHome,
-            $geminiCLIHome
+            $openCodeHome
         )) {
             [IO.Directory]::CreateDirectory($path) | Out-Null
             Protect-TestDirectory $path
@@ -7953,12 +7922,6 @@ function Invoke-Contract {
         $env:DEFENSECLAW_CURSOR_CONFIG_HOME = $cursorHome
         $env:HERMES_HOME = $hermesHome
         $env:OPENCODE_CONFIG_DIR = $openCodeHome
-        # Gemini CLI treats GEMINI_CLI_HOME as a home root and appends .gemini.
-        # Setup must capture that official vendor root while ignoring hostile
-        # obsolete/private config-dir inputs.
-        $env:GEMINI_CLI_HOME = $geminiCLIHome
-        $env:GEMINI_CONFIG_DIR = Join-Path $contractProfileRoot 'hostile-obsolete-gemini-config'
-        $env:DEFENSECLAW_GEMINI_CONFIG_HOME = Join-Path $contractProfileRoot 'hostile-private-gemini-config'
         foreach ($name in @(
             'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
             'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
@@ -7995,33 +7958,16 @@ function Invoke-Contract {
         }
         $contractInstallState = Get-Content -LiteralPath $contractInstallStatePath `
             -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-        $installStatePropertyNames = @($contractInstallState.PSObject.Properties.Name)
-        foreach ($retiredProperty in @(
-            'gemini_cli_home', 'gemini_config_dir',
-            'windsurf_user_home', 'windsurf_hooks_path'
-        )) {
-            if ($installStatePropertyNames -contains $retiredProperty) {
-                throw "fresh native Setup install state retained deprecated connector custody: $retiredProperty"
-            }
-        }
         if ([string]$contractInstallState.devin_config_dir -cne $devinHome -or
             [string]$contractInstallState.devin_executable -cne $devinExecutable) {
             throw 'fresh native Setup install state did not bind Devin to its exact current-user fixed paths'
         }
-        # Retired connector variables are hostile ambient input, not fresh
-        # install custody. Remove them before the active connector contract.
-        Remove-Item Env:GEMINI_CLI_HOME -ErrorAction SilentlyContinue
-        Remove-Item Env:GEMINI_CONFIG_DIR -ErrorAction SilentlyContinue
-        Remove-Item Env:DEFENSECLAW_GEMINI_CONFIG_HOME -ErrorAction SilentlyContinue
 
         if ((Test-Path -LiteralPath $defaultCodexHome) -or
             (Test-Path -LiteralPath $defaultClaudeHome) -or
             (Test-Path -LiteralPath (Join-Path $defaultCursorHome 'hooks.json')) -or
             (Test-Path -LiteralPath $devinConfig) -or
             (Test-Path -LiteralPath $defaultHermesHome) -or
-            (Test-Path -LiteralPath $profileGeminiSettings) -or
-            (Test-Path -LiteralPath $geminiSettings) -or
-            (Test-Path -LiteralPath $defaultGeminiSettings) -or
             (Test-Path -LiteralPath $defaultOpenCodeHome)) {
             throw 'contract installation touched a default connector home before connector setup'
         }
@@ -8050,7 +7996,6 @@ function Invoke-Contract {
             (Join-Path $defaultCursorHome 'hooks.json'),
             $devinConfig,
             $defaultHermesHome,
-            $defaultGeminiSettings,
             $defaultOpenCodeHome
         )
         if ($Connector -eq 'cursor') {
@@ -8087,7 +8032,6 @@ function Invoke-Contract {
             devin = $devinConfig
             hermes = Join-Path $hermesHome 'config.yaml'
             antigravity = Join-Path $contractHome '.gemini\config\hooks.json'
-            geminicli = $geminiSettings
             opencode = Join-Path $openCodeHome 'plugins\defenseclaw.js'
         }
         $unrelatedConfigs = @(

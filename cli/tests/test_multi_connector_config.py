@@ -231,7 +231,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("openhands"), "action")
         self.assertFalse(g.effective_enabled("openhands"))
         # Genuinely-absent connector still falls through to the global.
-        self.assertEqual(g.effective_mode("windsurf"), "observe")
+        self.assertEqual(g.effective_mode("retired-example"), "observe")
 
     def test_effective_enabled(self):
         # Mirrors Go EffectiveEnabled: default True; False only on an
@@ -248,7 +248,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertTrue(g.effective_enabled("claudecode"))
         self.assertTrue(g.effective_enabled("cursor"))
         # Unknown / empty / single-connector all default True.
-        self.assertTrue(g.effective_enabled("windsurf"))
+        self.assertTrue(g.effective_enabled("retired-example"))
         self.assertTrue(g.effective_enabled(""))
         self.assertTrue(GuardrailConfig(connector="codex").effective_enabled("codex"))
 
@@ -619,42 +619,6 @@ class TestResolveListConnector(unittest.TestCase):
         message = str(cm.exception)
         self.assertIn("Configured connectors: codex", message)
         self.assertNotIn("Active connectors:", message)
-
-    def test_cleanup_only_connector_is_rejected_with_antigravity_migration(self):
-        import click
-        from defenseclaw.commands import resolve_list_connector
-
-        app = self._app(connector="geminicli")
-        with self.assertRaises(click.UsageError) as cm:
-            resolve_list_connector(app, "")
-        message = str(cm.exception)
-        self.assertIn("cleanup-only", message)
-        self.assertIn("Antigravity", message)
-        self.assertIn("setup remove geminicli --yes", message)
-
-    def test_asset_fanout_skips_cleanup_only_connector(self):
-        from defenseclaw.commands import resolve_list_connectors
-
-        app = self._app(
-            connector="codex",
-            connectors=["codex", "geminicli", "cursor"],
-        )
-        self.assertEqual(
-            resolve_list_connectors(app, ""),
-            ["codex", "cursor"],
-        )
-
-    def test_explicit_cleanup_only_connector_is_rejected_in_mixed_roster(self):
-        import click
-        from defenseclaw.commands import resolve_list_connectors
-
-        app = self._app(
-            connector="codex",
-            connectors=["codex", "geminicli"],
-        )
-        with self.assertRaises(click.UsageError) as cm:
-            resolve_list_connectors(app, "gemini-cli")
-        self.assertIn("Antigravity", str(cm.exception))
 
 
 if __name__ == "__main__":

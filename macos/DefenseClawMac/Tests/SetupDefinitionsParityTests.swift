@@ -238,7 +238,6 @@ struct SetupDefinitionsParityTests {
     private static func includesOnlyCanonicalDevinAcrossSetupAndCatalogSurfaces() {
         expect(TUIWizards.connectors.contains("devin"), "Devin appears in the native connector picker")
         expect(TUIWizards.hookConnectors.contains("devin"), "Devin is treated as a hook connector")
-        expect(!TUIWizards.connectors.contains("windsurf"), "legacy Windsurf is not selectable")
 
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let sourceRoot = testsDirectory.deletingLastPathComponent().appendingPathComponent("DefenseClawMac")
@@ -258,8 +257,6 @@ struct SetupDefinitionsParityTests {
             scanner.contains("p(\".config\", \"devin\", \"config.json\")"),
             "native catalog retains legacy Devin MCP read compatibility"
         )
-        expect(!scanner.localizedCaseInsensitiveContains("windsurf"),
-               "native catalog has no public Windsurf surface")
     }
 
     private static func bundledSkillsRemainDiscoveryOnlyAcrossNativeCatalogSurfaces() {

@@ -147,7 +147,7 @@ func TestReadActiveConnectorStateDistinguishesEmptyWithoutSuppressingGuards(t *t
 	if err != nil || !exists || names != nil {
 		t.Fatalf("explicit empty state = (%v, %v, %v), want (nil, true, nil)", names, exists, err)
 	}
-	if ConnectorExplicitlyInactive(dir, "geminicli") {
+	if ConnectorExplicitlyInactive(dir, "openhands") {
 		t.Fatal("empty active set globally suppressed an unrelated connector")
 	}
 }
@@ -167,8 +167,8 @@ func TestMarkConnectorInactiveIsScopedAndRestorable(t *testing.T) {
 	if !ConnectorExplicitlyInactive(dir, "cursor") {
 		t.Fatal("cursor did not receive an inactive tombstone")
 	}
-	if ConnectorExplicitlyInactive(dir, "geminicli") {
-		t.Fatal("unrelated geminicli was suppressed")
+	if ConnectorExplicitlyInactive(dir, "openhands") {
+		t.Fatal("unrelated openhands was suppressed")
 	}
 	if got := LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex"}) {
 		t.Fatalf("active connectors = %v, want [codex]", got)
@@ -191,11 +191,11 @@ func TestMarkConnectorInactiveRecoversCorruptStateAndRestoresExactBytes(t *testi
 	if err := os.WriteFile(path, original, 0o600); err != nil {
 		t.Fatalf("write corrupt state: %v", err)
 	}
-	restore, err := MarkConnectorInactive(dir, "geminicli")
+	restore, err := MarkConnectorInactive(dir, "openhands")
 	if err != nil {
 		t.Fatalf("MarkConnectorInactive: %v", err)
 	}
-	if !ConnectorExplicitlyInactive(dir, "geminicli") {
+	if !ConnectorExplicitlyInactive(dir, "openhands") {
 		t.Fatal("corrupt state was not replaced by scoped tombstone")
 	}
 	if ConnectorExplicitlyInactive(dir, "codex") {

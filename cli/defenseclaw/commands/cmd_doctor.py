@@ -57,7 +57,7 @@ try:  # Python 3.11+; the project supports 3.10 via its pinned fallback.
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
 
-from defenseclaw import credential_provenance, rulepack_validation, ux
+from defenseclaw import credential_provenance, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import openclaw_needs_interception_advisory
 from defenseclaw.connector_paths import (
@@ -1444,7 +1444,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             "intentionally does not implement or claim that surface",
             r=r,
         )
-    elif connector in {"hermes", "devin", "geminicli", "openhands"}:
+    elif connector in {"hermes", "devin", "openhands"}:
         _emit(
             "warn",
             "Human approval",
@@ -4010,7 +4010,6 @@ _HOOK_HEALTH_LABELS = {
     "hermes": "Hermes hooks (fail-open)",
     "cursor": "Cursor hooks",
     "devin": "Devin hooks",
-    "geminicli": "Gemini CLI hooks (deprecated)",
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
     "omnigent": "OmniGent policy",
@@ -5476,15 +5475,7 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
     connector (multi-connector installs) instead of probing only the
     primary. Unknown connectors are skipped silently (no new failure row).
     """
-    if connector == "geminicli":
-        r.record(
-            "warn",
-            "Gemini CLI (deprecated)",
-            "New setup is retired; remove existing managed state and use Antigravity",
-            reason_code="connector_deprecated",
-            remediation="defenseclaw setup remove geminicli --yes",
-        )
-    elif connector == "openclaw":
+    if connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
     elif connector == "claudecode":
         _check_claudecode_hooks(cfg, r)
@@ -6085,9 +6076,6 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "copilot",
         "openhands",
         "antigravity",
-        # Retained only so Doctor handles an already-configured, deprecated
-        # Gemini CLI install as hook-driven while the operator removes it.
-        "geminicli",
         "opencode",
         "amp",
         "omnigent",
@@ -9365,8 +9353,6 @@ _CONNECTOR_LABELS = {
     "hermes": "Hermes",
     "cursor": "Cursor",
     "devin": "Devin",
-    "windsurf": "Retired Cascade (cleanup only)",
-    "geminicli": "Gemini CLI (deprecated; use Antigravity)",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
@@ -9978,9 +9964,6 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
         # Older native-Windows builds named the receipt after hooks.json.
         os.path.join("connector_backups", "cursor", "hooks.json.json"),
     ),
-    "geminicli": (
-        os.path.join("connector_backups", "geminicli", "config.json"),
-    ),
     "hermes": (
         os.path.join("connector_backups", "hermes", "config.yaml.json"),
         os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),
@@ -10001,9 +9984,8 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "devin": (
         os.path.join("connector_backups", "devin", "config.json"),
     ),
-    "windsurf": (
-        os.path.join("connector_backups", "windsurf", "config.json"),
-    ),
+    # A retired connector ID's setup backup is residue an older release left.
+    **legacy_connector.BACKUP_MARKERS,
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),

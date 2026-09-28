@@ -166,9 +166,9 @@ func TestSanitizeRouteForTelemetry(t *testing.T) {
 		want string
 	}{
 		{
-			name: "geminicli logs path-token redacted",
-			in:   "/otlp/geminicli/sk-dc-supersecret-master-token/v1/logs",
-			want: "/otlp/geminicli/_token_/v1/logs",
+			name: "omnigent logs path-token redacted",
+			in:   "/otlp/omnigent/sk-dc-supersecret-master-token/v1/logs",
+			want: "/otlp/omnigent/_token_/v1/logs",
 		},
 		{
 			name: "metrics signal redacted",
@@ -182,8 +182,8 @@ func TestSanitizeRouteForTelemetry(t *testing.T) {
 		},
 		{
 			name: "url-escaped token still scrubbed",
-			in:   "/otlp/geminicli/sk%2Ddc%2Dabc/v1/logs",
-			want: "/otlp/geminicli/_token_/v1/logs",
+			in:   "/otlp/omnigent/sk%2Ddc%2Dabc/v1/logs",
+			want: "/otlp/omnigent/_token_/v1/logs",
 		},
 		{
 			name: "non-otlp route untouched",
@@ -197,8 +197,8 @@ func TestSanitizeRouteForTelemetry(t *testing.T) {
 		},
 		{
 			name: "malformed otlp path untouched",
-			in:   "/otlp/geminicli/v1/logs",
-			want: "/otlp/geminicli/v1/logs",
+			in:   "/otlp/omnigent/v1/logs",
+			want: "/otlp/omnigent/v1/logs",
 		},
 	}
 	for _, tc := range cases {

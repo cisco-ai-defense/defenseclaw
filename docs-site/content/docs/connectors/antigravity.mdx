@@ -219,13 +219,13 @@ managed registration remains:
 defenseclaw setup guardrail --disable
 ```
 
-## Retired Gemini CLI cleanup boundary
+## Configuration boundary
 
-Gemini CLI setup is deprecated. Existing DefenseClaw-managed Gemini CLI state
-may still exist under `~/.gemini`, so Antigravity lifecycle operations keep a
-separate ownership boundary. Installing, repairing, or removing Antigravity
-must not restore or remove retired Gemini CLI entries; remove those explicitly
-with `defenseclaw setup remove geminicli --yes`.
+Antigravity setup, repair, and removal write only
+`~/.gemini/config/hooks.json` (on Windows,
+`%USERPROFILE%\.gemini\config\hooks.json`). MCP commands you run yourself,
+such as `defenseclaw mcp set`, edit `~/.gemini/config/mcp_config.json`.
+DefenseClaw never edits `~/.gemini/settings.json`.
 
 Google's [changelog](https://antigravity.google/changelog) records relevant
 Windows and hook transitions: v1.0.8 corrected the shared

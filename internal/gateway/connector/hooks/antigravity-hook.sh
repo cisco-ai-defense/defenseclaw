@@ -47,7 +47,7 @@ fi
 # missing-token branch so the bypass goes through
 # defenseclaw_handle_missing_token and honors
 # DEFENSECLAW_STRICT_AVAILABILITY (matches claude-code-hook /
-# codex-hook / geminicli-hook).
+# codex-hook).
 . "${HOOK_DIR}/_hardening.sh"
 {{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process

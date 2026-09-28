@@ -203,8 +203,7 @@ Setup records validated `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`,
 plus `HERMES_HOME` when Hermes is selected. Antigravity uses the
 `%USERPROFILE%\.gemini\config` home. A predecessor custom path is retained only as
 internal custody long enough to restore its exact file and migrate the managed
-registration to the official path. Setup records the two `.gemini` ownership
-boundaries independently so repair, rollback, and teardown cannot cross them.
+registration to the official path.
 Cursor publishes no configuration-home
 environment variable, so Setup records its exact configuration home
 internally. Devin setup records `%APPDATA%\devin` and the exact admitted CLI
@@ -338,9 +337,7 @@ optional network operations, not offline guarantees.
 
 Normal uninstall removes product-owned application files, the maintenance
 cache, Installed Apps registration, the owned user `PATH` entry, the owned Run
-value, and supported connector wiring. Gemini teardown removes only
-DefenseClaw-owned groups and telemetry fields from its recorded `settings.json`
-and never touches Antigravity's nested `config\hooks.json`. For Hermes, teardown removes only the
+value, and supported connector wiring. For Hermes, teardown removes only the
 owned handlers and marker or restores the pre-Setup `config.yaml` bytes exactly;
 an unresolved current or previous home is retained for deferred cleanup rather
 than declared clean. It preserves

@@ -28,7 +28,6 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.connector_paths import KNOWN_CONNECTORS as RUNTIME_CONNECTORS
-from defenseclaw.platform_support import DEPRECATED_CONNECTORS
 from defenseclaw.registries.manifest import (
     KNOWN_CONNECTORS,
     KNOWN_TRANSPORTS,
@@ -252,7 +251,7 @@ class TestMcpEntries(unittest.TestCase):
             )
 
     def test_unknown_or_deprecated_connector_rejected(self):
-        for connector in ("fake", "geminicli"):
+        for connector in ("fake", "retired-example"):
             with self.subTest(connector=connector), self.assertRaises(ManifestError):
                 parse_manifest(
                     json.dumps(
@@ -432,13 +431,12 @@ class TestKnownConstants(unittest.TestCase):
         )
 
     def test_known_connectors_match_runtime(self):
-        # Published manifests can route only into active connectors. Runtime
-        # recognition also includes deprecated names needed for exact cleanup.
-        self.assertEqual(KNOWN_CONNECTORS, set(RUNTIME_CONNECTORS) - DEPRECATED_CONNECTORS)
+        # Published manifests route only into connectors the runtime ships.
+        self.assertEqual(KNOWN_CONNECTORS, set(RUNTIME_CONNECTORS))
 
     def test_schema_connector_enums_match_runtime(self):
         doc = json.loads(REGISTRY_SCHEMA.read_text(encoding="utf-8"))
-        expected = (set(RUNTIME_CONNECTORS) - DEPRECATED_CONNECTORS) | {None}
+        expected = set(RUNTIME_CONNECTORS) | {None}
         enums = {
             "default_connector": doc["properties"]["default_connector"]["enum"],
             "skill.connector": doc["$defs"]["skill_entry"]["properties"]["connector"]["enum"],

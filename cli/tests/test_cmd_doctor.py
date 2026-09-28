@@ -642,12 +642,12 @@ class DoctorGuardrailTests(unittest.TestCase):
                 enabled=True,
                 model="",
                 port=4000,
-                connector="geminicli",
+                connector="cursor",
             ),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
         )
-        cfg.claw.mode = "geminicli"
+        cfg.claw.mode = "cursor"
         result = _DoctorResult()
 
         _check_guardrail_proxy(cfg, result)
@@ -664,7 +664,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         # GuardrailConfig in this fixture leaves ``gc.mode`` at the
         # canonical ``"observe"`` default, so we expect the observe
         # variant of the message here.
-        self.assertIn("hook-driven for geminicli", result.checks[0]["detail"])
+        self.assertIn("hook-driven for cursor", result.checks[0]["detail"])
         self.assertIn("mode=observe", result.checks[0]["detail"])
         self.assertIn("proxy port intentionally closed", result.checks[0]["detail"])
 
@@ -2734,8 +2734,8 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        detail = _guardrail_proxy_intentionally_closed(self._cfg(["geminicli"]))
-        self.assertIn("hook-driven for geminicli", detail)
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["cursor"]))
+        self.assertIn("hook-driven for cursor", detail)
         self.assertIn("mode=observe", detail)
         self.assertIn("proxy port intentionally closed", detail)
 

@@ -124,6 +124,75 @@ deleted.
   rewrites DefenseClaw's own entries in place; entries the operator added
   are left as they are. Measured against kiro-cli 2.24.1 on Linux.
 
+### Renamed and removed connectors
+
+- **Windsurf → Devin.** Windsurf is now Devin Desktop (Cognition). The
+  `windsurf` connector is gone; the `devin` connector covers Devin CLI and
+  Devin Desktop's default Devin Local agent, which share one hook config.
+  Configs and DefenseClaw-installed hooks move to `devin` automatically on
+  `defenseclaw upgrade`, on gateway restart, or on `defenseclaw setup devin`:
+  `windsurf` in `guardrail.connector`, `claw.mode`, and every per-connector
+  block (`guardrail`, `asset_policy`, `application_protection`, and
+  `observability` `connectors`) becomes `devin` (an existing `devin` block
+  wins), the gateway
+  removes only DefenseClaw's own entries from `~/.codeium/windsurf/hooks.json`,
+  deletes `windsurf-hook.sh`/`.ps1` and `connector_backups/windsurf/`, clears
+  the old ID from the lock and active-connector state, and logs one line
+  describing the move. Devin inventory also reads the pre-rename Devin Desktop
+  rule and skill locations the vendor still loads. Devin CLI and Devin Local
+  are protected; conversations in Devin Desktop's legacy Cascade agent are not.
+- **Gemini CLI removed.** Use the Antigravity connector instead.
+  `defenseclaw upgrade` removes `geminicli` from `config.yaml` when another
+  connector is configured (and warns, leaving the file unchanged, when it was
+  the only one). On its next start the gateway drops `geminicli` from its lock
+  and active-connector state and deletes DefenseClaw's
+  `hooks/geminicli-hook.sh`/`.ps1` and `hooks/.otlp-geminicli.token`; Gemini CLI
+  then treats the missing hook as a non-blocking error. DefenseClaw never edits
+  `~/.gemini`; clean it up once by hand, then set up Antigravity:
+  1. Only if Gemini CLI was the only connector, or the package was replaced
+     without `defenseclaw upgrade`: run `defenseclaw setup remove geminicli
+     --yes` (no `--force` needed even when it is the last connector), or delete
+     `geminicli` from `guardrail.connectors` / `guardrail.connector` in
+     `~/.defenseclaw/config.yaml`.
+  2. In `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`;
+     on Windows `%USERPROFILE%\.gemini\settings.json`), under `hooks`, for each
+     of `SessionStart`, `SessionEnd`, `BeforeAgent`, `AfterAgent`,
+     `BeforeModel`, `AfterModel`, `BeforeToolSelection`, `BeforeTool`,
+     `AfterTool`, `PreCompress`, and `Notification`, delete every group whose
+     `hooks[]` has `"name": "defenseclaw"`. Remove any event key left empty.
+  3. If `telemetry.otlpEndpoint` contains `/otlp/geminicli/`, delete the
+     `telemetry` object or restore your own values.
+  4. Do not touch `~/.gemini/config/` (Antigravity).
+  5. Delete `~/.defenseclaw/connector_backups/geminicli/` (and the hook script
+     and token above if they are still there).
+  6. Run `defenseclaw-gateway restart`.
+  7. Run `defenseclaw setup antigravity` (or set up any other connector).
+
+  Until the gateway restarts after `geminicli` has left `config.yaml`, the old
+  hook script still calls a removed endpoint; if it was installed with
+  `guardrail.hook_fail_mode: closed`, every Gemini CLI action is blocked. The
+  telemetry schemas no longer accept `geminicli`, so rows an older release
+  exported with that value do not validate on re-export.
+- **Connectors a build no longer ships no longer block boot.** A lock-only or
+  previously active connector that no built-in connector or plugin provides
+  now has its DefenseClaw lock state, hook scripts, and OTLP token dropped
+  (with a WARN and an audit event); agent config files are never edited. When
+  plugin discovery fails, unresolved names are kept and retried instead. The
+  0.8.11 upgrade migration removes such names from `config.yaml` when another
+  connector remains. An unknown `guardrail.connector` still fails boot and
+  points at the upgrade notes. `defenseclaw setup remove` and
+  `defenseclaw uninstall` handle such names without aborting, and
+  `setup remove` does not require `--force` when such a name is the last
+  connector.
+- **Native Windows state from pre-release builds.** Setup and the uninstaller
+  accept install state from pre-release native builds that selected Windsurf;
+  repair and upgrade move the selection to `devin`. Native Windows installs
+  made from pre-release main builds that selected Gemini CLI must be
+  uninstalled with their original build before installing this release.
+- **Devin on macOS.** Devin hooks are registered in `~/.config/devin/config.json`
+  (or `$XDG_CONFIG_HOME/devin`) on macOS, where the Devin CLI reads them,
+  instead of `~/Library/Application Support/devin`.
+
 ### Observability v8
 
 - Defaults an omitted `observability.local.retention_days` to a rolling seven-day

@@ -342,7 +342,7 @@ func TestIsBuiltinCursorConnector(t *testing.T) {
 	if !IsBuiltinCursorConnector(NewCursorConnector()) {
 		t.Fatal("built-in Cursor connector was not recognized")
 	}
-	if IsBuiltinCursorConnector(NewWindsurfConnector()) || IsBuiltinCursorConnector(nil) {
+	if IsBuiltinCursorConnector(NewDevinConnector()) || IsBuiltinCursorConnector(nil) {
 		t.Fatal("non-Cursor connector was recognized as built-in Cursor")
 	}
 }

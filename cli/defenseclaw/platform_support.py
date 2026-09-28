@@ -47,18 +47,6 @@ PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 # Kept as an empty set so taxonomy tests can still subtract ACP-only names.
 # Kiro is a regular connector with native ACP support, not an ACP-only agent.
 ACP_ONLY_CONNECTORS: frozenset[str] = frozenset()
-DEPRECATED_CONNECTORS: frozenset[str] = frozenset({"geminicli", "windsurf"})
-
-_DEPRECATED_REASONS: dict[str, str] = {
-    "geminicli": (
-        "Gemini CLI integration is deprecated; use the Antigravity connector. "
-        "Existing managed Gemini CLI state remains removable through teardown and uninstall."
-    ),
-    "windsurf": (
-        "Windsurf/Cascade is retired; use Devin. Existing authenticated "
-        "Windsurf state remains recognizable only for upgrade and uninstall cleanup."
-    ),
-}
 
 LOCAL_OBSERVABILITY_UNSUPPORTED_REASON = "Bundled local observability is unavailable on this operating system."
 LOCAL_SPLUNK_UNSUPPORTED_REASON = "Bundled Local Splunk is unavailable on this operating system."
@@ -113,7 +101,6 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "live certification, cloud Devin, proxy, native OTLP, and managed higher-layer "
         "enforcement are not covered.",
     ),
-    "geminicli": ConnectorPlatformSupport(UNSUPPORTED, _DEPRECATED_REASONS["geminicli"]),
     "copilot": ConnectorPlatformSupport(
         SUPPORTED,
         "The DefenseClaw GitHub Copilot CLI integration is supported on native Windows x64; "
@@ -215,11 +202,8 @@ def connector_platform_support(
     """Return the status and reason for *name* on *os_name*.
 
     Unknown/plugin connectors require separate native Windows certification.
-    Deprecated built-ins are unavailable on every operating system.
     """
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
-    if name in DEPRECATED_CONNECTORS:
-        return ConnectorPlatformSupport(UNSUPPORTED, _DEPRECATED_REASONS[name])
     if resolved_os == "windows":
         return WINDOWS_CONNECTOR_SUPPORT.get(
             name,

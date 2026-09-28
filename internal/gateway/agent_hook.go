@@ -739,7 +739,7 @@ func (a *APIServer) hookDecisionMeta(
 // shape onto the wire JSON shape each connector's agent CLI
 // expects. The fixed agentHookResponse JSON tag for HookOutput
 // ("hook_output") works for generic hookOnly connectors
-// (hermes/cursor/devin/geminicli/copilot) but Claude Code and
+// (hermes/cursor/devin/copilot) but Claude Code and
 // Codex agents expect "claude_code_output" and "codex_output"
 // respectively. Rendering as a map[string]interface{} lets us pick
 // the right top-level key per connector while keeping
@@ -2513,10 +2513,6 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		}
 	case "cursor":
 		return connector.CursorHookOutput(req.HookEventName, action, reason, additional)
-	case "windsurf":
-		if action == "block" {
-			return map[string]interface{}{"message": reason}
-		}
 	case "devin":
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}
@@ -2528,13 +2524,6 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 					"hookEventName": req.HookEventName, "additionalContext": additional,
 				}}
 			}
-		}
-	case "geminicli":
-		if action == "block" {
-			return map[string]interface{}{"decision": "deny", "reason": reason}
-		}
-		if action == "alert" && additional != "" {
-			return map[string]interface{}{"systemMessage": additional}
 		}
 	case "copilot":
 		return copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
@@ -2782,7 +2771,7 @@ func isResultLikeEvent(event string) bool {
 		// it through tool_result inspection. It stays non-blockable: it
 		// is absent from hermes BlockEvents, so verdicts demote to
 		// would_block.
-		"postllmcall", "postcascaderesponse", "postcascaderesponsewithtranscript",
+		"postllmcall",
 		// opencode plugin hook: tool.execute.after fires after a tool
 		// returns; observe-only telemetry routed as a tool_result.
 		"toolexecuteafter", "toolresult", "agentend":

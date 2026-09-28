@@ -57,7 +57,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import config as config_module
-from defenseclaw import ux
+from defenseclaw import legacy_connector, ux
 from defenseclaw.commands import windows_native_uninstall
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -92,7 +92,6 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
         os.path.join("connector_backups", "cursor", "config.json"),
         os.path.join("connector_backups", "cursor", "hooks.json.json"),
     ),
-    "geminicli": (os.path.join("connector_backups", "geminicli", "config.json"),),
     "hermes": (
         os.path.join("connector_backups", "hermes", "config.yaml.json"),
         os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),
@@ -106,7 +105,9 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "opencode": (os.path.join("connector_backups", "opencode", "config.json"),),
     "openhands": (os.path.join("connector_backups", "openhands", "config.json"),),
     "devin": (os.path.join("connector_backups", "devin", "config.json"),),
-    "windsurf": (os.path.join("connector_backups", "windsurf", "config.json"),),
+    # A retired connector ID's setup backup still selects gateway teardown,
+    # which Go resolves through connector.RetiredConnector.
+    **legacy_connector.BACKUP_MARKERS,
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
@@ -1230,6 +1231,17 @@ def _connector_teardown(plan: UninstallPlan) -> None:
             )
             if teardown_ok:
                 continue
+            if name != "openclaw" and _gateway_connector_is_unknown(name, plan=plan):
+                # An older release registered this connector and this build no
+                # longer ships it, so nothing can tear it down. Its leftover
+                # agent-side hook entries are documented for manual removal;
+                # they must not block uninstalling DefenseClaw itself.
+                ux.warn(
+                    f"{name} is not a connector this DefenseClaw build ships; skipping its "
+                    "host teardown. Remove any DefenseClaw hook entries from that agent's "
+                    "config by hand (see Upgrade → Renamed and removed connectors in the docs)."
+                )
+                continue
             ux.warn(f"gateway connector teardown for {name} reported errors — see output above")
             if name != "openclaw":
                 raise click.ClickException(
@@ -1247,6 +1259,41 @@ def _connector_teardown(plan: UninstallPlan) -> None:
             "Upgrade defenseclaw-gateway to v0.7+ (introduces 'connector teardown') "
             "and re-run 'defenseclaw uninstall'."
         )
+
+
+# ``defenseclaw-gateway connector verify`` exits 2 for a connector name its
+# registry cannot resolve (a config error), distinct from 1 for residue.
+_GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2
+
+
+def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None = None) -> bool:
+    """Report whether the gateway registry does not know *connector* at all.
+
+    Only an explicit "unknown connector" verdict returns True; a missing
+    gateway, a launch failure, or residue all return False so the caller keeps
+    its fail-closed abort.
+    """
+    gw = plan.gateway_path if plan is not None and plan.gateway_path else shutil.which("defenseclaw-gateway")
+    if gw is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [
+                gw,
+                "connector",
+                "verify",
+                "--connector",
+                connector,
+                *(["--data-dir", plan.data_dir] if plan is not None else []),
+            ],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == _GATEWAY_UNKNOWN_CONNECTOR_EXIT and "unknown connector" in (proc.stderr or "")
 
 
 def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | None = None) -> bool:

@@ -2558,7 +2558,7 @@ connection.close()
         'cursor', 'devin', 'hermes', 'omnigent', 'opencode'
     )
     $excludedContractConnectors = @(
-        'geminicli', 'openhands', 'openclaw', 'windsurf', 'zeptoclaw'
+        'openhands', 'openclaw', 'zeptoclaw'
     )
     $genericContractConnectors = if ($connectorMatrix.Success) {
         @($connectorMatrix.Groups[1].Value -split '\s*,\s*')
@@ -3445,8 +3445,7 @@ connection.close()
         $setupAcceptanceFunction -notmatch '\(@\(\$roster \| Sort-Object\) -join "`0"\)\) \{' -and
         $setupAcceptanceFunction -match 'Assert-NativeConnectorCleanupAuthorityPresent \$dataRoot \$repairedRoster' -and
         $setupAcceptanceFunction -match 'Assert-NativeConnectorBackupMarkersConsumed \$dataRoot' -and
-        $setupAcceptanceFunction -match 'foreach \(\$configuredConnector in @\(''codex'', ''claudecode'', ''amp'', ''copilot'', ''cursor'', ''antigravity''\)\)' -and
-        $setupAcceptanceFunction -match "Get-NativeConnectorBackupMarkers \`$dataRoot 'windsurf'") `
+        $setupAcceptanceFunction -match 'foreach \(\$configuredConnector in @\(''codex'', ''claudecode'', ''amp'', ''copilot'', ''cursor'', ''antigravity''\)\)') `
         'packaged Setup preserves and migrates the exact staged connector roster with complete supported cleanup custody'
     Assert-True ($setupAcceptanceFunction -match '\$cachedSetup' -and
         $setupAcceptanceFunction -match 'Join-Path \$cacheRoot ''DefenseClawSetup-x64\.exe''' -and
@@ -3727,12 +3726,6 @@ connection.close()
     Assert-True ($liveWorkflowText -notmatch '(?m)^  windows-(harness-static|contract):') 'deterministic Windows jobs moved out of live radar'
     Assert-True ($ciWorkflowText -notmatch '(?m)^  windows-(hook-path|installer-smoke):') 'legacy partial Windows jobs were removed'
     Assert-True ($harnessText -notmatch '(?i)\bwsl(?:\.exe)?\b|git bash|/bin/|Get-Command\s+(?:jq|tail|curl)|Invoke-Tool\s+''(?:jq|tail|curl)''') 'native harness has no WSL, Git Bash, or Unix utility dependency'
-    $packagedConnectorHomes = [regex]::Match(
-        $harnessText,
-        '(?s)function Assert-PackagedConnectorHomes\b.*?(?=\nfunction Get-StableHookRuntimeExecutable\b)'
-    ).Value
-    Assert-True ($packagedConnectorHomes -notmatch '(?i)windsurf|cascade|geminicli|gemini cli') `
-        'packaged connector-home setup exposes no retired Windsurf/Cascade or Gemini CLI binding'
     $setupOtlpFixture = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Start-SetupAcceptanceOtlpCollector\b.*?(?=\nfunction Stop-SetupAcceptanceOtlpCollector\b)'
@@ -3888,10 +3881,6 @@ connection.close()
         $packagedHomeGuard -match 'packaged Amp home must be a strict child' -and
         $packagedHomeGuard -match '\$env:HERMES_HOME = \$homes\[5\]') `
         'packaged connector homes are authentic, contained, existing, and non-reparse'
-    Assert-True ($nativeWorkflowText -notmatch '(?i)geminicli|gemini cli' -and
-        $wizardHarnessText -notmatch '(?i)geminicli|gemini cli' -and
-        $standardUserCIText -notmatch "ValidateSet\([^)]*geminicli") `
-        'Gemini CLI is absent from active Windows workflow and setup-selection surfaces'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
     $dangerousCommandContract = [regex]::Match(
         $harnessText,
@@ -5009,10 +4998,9 @@ connection.close()
         $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''hermes-home''' -and
         $nativeHarnessText -match 'Join-Path \$contractProfileRoot ''opencode-home''' -and
         $nativeHarnessText -match '\$openCodePluginDir = Join-Path \$openCodeHome ''plugins''' -and
-        $nativeHarnessText -match '(?s)Assert-WindowsNativePathsDisjoint @\(\s*\$contractHome, \$codexHome, \$claudeHome, \$copilotHome, \$hermesHome,\s*\$openCodeHome, \$geminiCLIHome\s*\)' -and
-        $nativeHarnessText -notmatch '\$officialWindsurfConfig' -and
+        $nativeHarnessText -match '(?s)Assert-WindowsNativePathsDisjoint @\(\s*\$contractHome, \$codexHome, \$claudeHome, \$copilotHome, \$hermesHome,\s*\$openCodeHome\s*\)' -and
         $contractInstall -ge 0) `
-        'connector contract keeps active connector homes and legacy Gemini cleanup custody disjoint without a Windsurf target'
+        'connector contract keeps active connector homes disjoint'
     foreach ($homeAssignment in @(
         '$env:CODEX_HOME = $codexHome',
         '$env:CLAUDE_CONFIG_DIR = $claudeHome',
@@ -5025,11 +5013,6 @@ connection.close()
         Assert-True ($homeCapture -ge 0 -and $homeCapture -lt $contractInstall) `
             "connector contract captures recorded home before native Setup: $homeAssignment"
     }
-    Assert-True ($contractFunction -match 'fresh native Setup install state retained deprecated connector custody' -and
-        $contractFunction -match "'gemini_cli_home', 'gemini_config_dir'" -and
-        $contractFunction -match "'windsurf_user_home', 'windsurf_hooks_path'" -and
-        $contractFunction -notmatch '\$contractInstallState\.(gemini_cli_home|gemini_config_dir|windsurf_user_home|windsurf_hooks_path)') `
-        'connector contract rejects fresh retired Gemini/Windsurf custody without dereferencing absent state properties'
     $contractCleanupTry = $contractFunction.IndexOf('    try {', [StringComparison]::Ordinal)
     $contractProfileCreate = $contractFunction.IndexOf(
         '[IO.Directory]::CreateDirectory($path)',

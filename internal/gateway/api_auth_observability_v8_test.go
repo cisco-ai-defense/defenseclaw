@@ -335,14 +335,14 @@ func TestOTLPPathAuthenticationFailureKeepsSpecializedTelemetryOwner(t *testing.
 	fixture := newSidecarRuntimeFixture(t, true)
 	api := configuredAPIAuthenticationServer("gateway-token")
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeGeminiCLI: "scoped-token",
+		connector.OTLPScopeOmnigent: "scoped-token",
 	})
 	api.bindOTLPObservabilityRuntime(fixture.runtime)
 	handler := api.tokenAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("invalid scoped path token reached handler")
 	}))
 	request := httptest.NewRequest(
-		http.MethodPost, "/otlp/geminicli/path-token-secret/v1/logs", strings.NewReader(`{"resourceLogs":[]}`),
+		http.MethodPost, "/otlp/omnigent/path-token-secret/v1/logs", strings.NewReader(`{"resourceLogs":[]}`),
 	)
 	request.RemoteAddr = "127.0.0.1:4242"
 	response := httptest.NewRecorder()
@@ -374,7 +374,7 @@ func TestAPIAuthenticationFailureV8ExportsGeneratedRouteAndReasonMetrics(t *test
 		gatewaylog.ErrCodeAuthMissingToken, "missing_token",
 	)
 	otlpRequest := httptest.NewRequest(
-		http.MethodPost, "/otlp/geminicli/path-token-secret/v1/logs", nil,
+		http.MethodPost, "/otlp/omnigent/path-token-secret/v1/logs", nil,
 	)
 	api.emitHTTPAuthFailure(
 		otlpRequest.Context(), otlpRequest, "untrusted-otlp-route-value",

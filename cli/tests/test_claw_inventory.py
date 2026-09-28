@@ -3240,40 +3240,6 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
 
         self.assertEqual({row["id"] for row in agents}, {"global-reviewer"})
 
-    def test_gemini_agents_are_cleanup_only_and_not_discovered(self):
-        cfg = _make_cfg_for_connector(self.tmp, "geminicli")
-        bound = Path(self.tmp) / "authenticated" / ".gemini"
-        hostile = Path(self.tmp) / "hostile-home"
-        workspace = Path(self.tmp) / "pinned-workspace"
-        unrelated = Path(self.tmp) / "unrelated-cwd"
-        cfg.claw.workspace_dir = str(workspace)
-
-        definitions = (
-            (bound / "agents" / "user-agent.md", "user-agent"),
-            (workspace / ".gemini" / "agents" / "project-agent.md", "project-agent"),
-            (hostile / ".gemini" / "agents" / "ambient-agent.md", "ambient-agent"),
-            (unrelated / ".gemini" / "agents" / "cwd-agent.md", "cwd-agent"),
-        )
-        for path, name in definitions:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"---\nname: {name}\n---\n", encoding="utf-8")
-
-        with patch.dict(
-            os.environ,
-            {
-                "HOME": str(hostile),
-                "USERPROFILE": str(hostile),
-                "GEMINI_CONFIG_DIR": str(hostile / "vendor-override"),
-                "DEFENSECLAW_GEMINI_CONFIG_HOME": str(bound),
-            },
-            clear=False,
-        ), patch("defenseclaw.connector_paths.Path.home", return_value=hostile), patch(
-            "os.getcwd", return_value=str(unrelated)
-        ):
-            agents = _agents_for_connector("geminicli", cfg)
-
-        self.assertEqual(agents, [])
-
     def test_cursor_inventory_recurses_skills_rules_and_agents_with_precedence(self):
         cfg = _make_cfg_for_connector(self.tmp, "cursor")
         home = Path(self.tmp) / "home"

@@ -32,6 +32,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import BinaryIO
 
+from defenseclaw.retired_install_state import (
+    RETIRED_INSTALL_STATE_CONNECTORS,
+    RETIRED_INSTALL_STATE_FIELDS,
+)
+
 _LOCAL_APP_DATA_FOLDER_ID = "f1b32785-6fba-4fcf-9d55-7b8e7f157091"
 _PROFILE_FOLDER_ID = "5e6c858f-0e22-4760-9afe-ea3317b67173"
 _SETUP_NAME = "DefenseClawSetup-x64.exe"
@@ -91,16 +96,14 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "cursor_home",
         "devin_config_dir",
         "devin_executable",
-        "windsurf_user_home",
-        "windsurf_hooks_path",
         "antigravity_config_dir",
-        "gemini_cli_home",
-        "gemini_config_dir",
         "opencode_config_dir",
         "omnigent_config_home",
         "hermes_home",
         "transaction_id",
     }
+    # Pre-release builds may still carry retired connectors' bindings.
+    | RETIRED_INSTALL_STATE_FIELDS
 )
 _PAYLOAD_MANIFEST_FIELDS = frozenset(
     {
@@ -481,14 +484,13 @@ def _validate_install_state(
             "copilot",
             "cursor",
             "devin",
-            "geminicli",
             "hermes",
             "kiro",
             "omnigent",
-            "windsurf",
             "opencode",
             "none",
         }
+        | RETIRED_INSTALL_STATE_CONNECTORS
         or state.get("mode") not in {"observe", "action"}
         or state.get("unsigned_local_artifact") is not False
         or state.get("release_signing_required") is not True
@@ -502,28 +504,9 @@ def _validate_install_state(
             os.path.abspath(expected)
         ):
             raise NativeWindowsUninstallRefusal(f"Native installer state has an unexpected {field.replace('_', ' ')}.")
-    gemini_cli_home = state.get("gemini_cli_home")
-    gemini_config_dir = state.get("gemini_config_dir")
-    for field, value in (
-        ("gemini_cli_home", gemini_cli_home),
-        ("gemini_config_dir", gemini_config_dir),
-    ):
-        if field in state and (
-            not isinstance(value, str)
-            or value.strip() != value
-            or not os.path.isabs(value)
-            or os.path.normpath(value) != value
-            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
-        ):
-            raise NativeWindowsUninstallRefusal(f"Native installer state has an invalid {field.replace('_', ' ')}.")
-    # Pre-GEMINI_CLI_HOME states can carry only gemini_config_dir. Once the
-    # vendor root exists, however, the pair is closed and must describe exactly
-    # <GEMINI_CLI_HOME>/.gemini.
-    if "gemini_cli_home" in state and (
-        "gemini_config_dir" not in state
-        or os.path.normcase(os.path.join(gemini_cli_home, ".gemini")) != os.path.normcase(gemini_config_dir)
-    ):
-        raise NativeWindowsUninstallRefusal("Native installer state has an inconsistent Gemini CLI home binding.")
+    for field in RETIRED_INSTALL_STATE_FIELDS & fields:
+        if not isinstance(state.get(field), str):
+            raise NativeWindowsUninstallRefusal("Native installer state has an invalid retired connector binding.")
     return version, source_commit
 
 

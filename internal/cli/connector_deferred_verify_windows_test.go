@@ -229,24 +229,6 @@ func TestDeferredUninstallVerifyAuthenticatesWithoutV8Config(t *testing.T) {
 	}
 }
 
-func TestDeferredUninstallVerifyAuthenticatesGeminiPreviousHomeCandidate(t *testing.T) {
-	fixture := newDeferredVerifyFixture(t)
-	fixture.record.VerifiedConnectors = []string{"geminicli"}
-	fixture.journal.Transaction.PreviousConnectors = []string{"geminicli"}
-	fixture.journal.Transaction.PreviousClaudeConfigDir = ""
-	fixture.journal.Transaction.PreviousGeminiConfigDir = fixture.configHome
-	fixture.write(t)
-	withDeferredVerifyFixtureGlobals(t, fixture)
-	connectorFlagName = "geminicli"
-	if err := fixture.command.Flags().Set("connector", "geminicli"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := validateDeferredUninstallConnectorVerify(fixture.command); err != nil {
-		t.Fatalf("authenticated Gemini previous-home candidate rejected: %v", err)
-	}
-}
-
 func TestDeferredVerifyProcessStartIdentityIsCanonical(t *testing.T) {
 	tests := []struct {
 		value string

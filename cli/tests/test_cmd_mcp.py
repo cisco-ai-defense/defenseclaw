@@ -1171,7 +1171,7 @@ class TestMCPScan(MCPCommandTestBase):
     def test_set_errors_only_when_no_connector_supports_writes(self, mock_set):
         from defenseclaw.connector_paths import MCPWriteUnsupportedError
 
-        self.app.cfg.active_connectors = lambda: ["windsurf", "zeptoclaw"]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp", "zeptoclaw"]  # type: ignore[method-assign]
         mock_set.side_effect = MCPWriteUnsupportedError("no MCP write surface")
 
         result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])

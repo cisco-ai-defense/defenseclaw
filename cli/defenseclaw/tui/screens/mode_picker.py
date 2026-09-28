@@ -60,10 +60,10 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ),
     ModeChoice(
         "devin",
-        "Devin CLI",
+        "Devin",
         "d",
         False,
-        "native lifecycle hooks; MCP, skills, and rules discovery; no native OTLP",
+        "Devin CLI + Devin Desktop (Devin Local) hooks; MCP, skills, and rules discovery",
     ),
     ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),

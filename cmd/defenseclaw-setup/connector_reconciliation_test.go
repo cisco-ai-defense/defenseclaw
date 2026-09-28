@@ -27,31 +27,6 @@ func TestAntigravityDefaultCleanupHomeIsNarrowGeminiConfigDirectory(t *testing.T
 	}
 }
 
-func TestGeminiAndAntigravityCleanupHomesRemainDisjoint(t *testing.T) {
-	profile := t.TempDir()
-	geminiHome := filepath.Join(profile, ".gemini")
-	antigravityHome := filepath.Join(geminiHome, "config")
-	transaction := setupTransaction{
-		DataRoot:                     filepath.Join(profile, ".defenseclaw"),
-		PreviousGeminiConfigDir:      geminiHome,
-		GeminiConfigDir:              geminiHome,
-		PreviousAntigravityConfigDir: antigravityHome,
-		AntigravityConfigDir:         antigravityHome,
-	}
-
-	geminiHomes := connectorCleanupHomes(transaction, "geminicli")
-	if !reflect.DeepEqual(geminiHomes, []string{geminiHome}) {
-		t.Fatalf("Gemini cleanup homes = %v, want only %q", geminiHomes, geminiHome)
-	}
-	antigravityHomes := connectorCleanupHomes(transaction, "antigravity")
-	if !reflect.DeepEqual(antigravityHomes, []string{antigravityHome}) {
-		t.Fatalf("Antigravity cleanup homes = %v, want only %q", antigravityHomes, antigravityHome)
-	}
-	if samePath(geminiHomes[0], antigravityHomes[0]) {
-		t.Fatal("Gemini and Antigravity cleanup custody collapsed to one home")
-	}
-}
-
 func TestConnectorReconciliationRecordsAndClearsPerConfigHome(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -436,21 +411,6 @@ func TestConnectorCleanupHomesDoesNotAddDefaultFallbackWithManagedBinding(t *tes
 	}
 }
 
-func TestConnectorCleanupHomesNeverInfersWindsurfProfileFromDataRoot(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	boundProfile := filepath.Join(root, "bound-profile")
-	ambientProfile := filepath.Join(root, "ambient-profile")
-	homes := connectorCleanupHomes(setupTransaction{
-		DataRoot:                 filepath.Join(ambientProfile, ".defenseclaw"),
-		PreviousWindsurfUserHome: boundProfile,
-		WindsurfUserHome:         boundProfile,
-	}, "windsurf")
-	if !reflect.DeepEqual(homes, []string{boundProfile}) {
-		t.Fatalf("Windsurf cleanup homes = %v, want only bound profile %q", homes, boundProfile)
-	}
-}
-
 func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -461,7 +421,6 @@ func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 		"amp":        filepath.Join(root, ".config", "amp"),
 		"copilot":    filepath.Join(root, ".copilot"),
 		"cursor":     filepath.Join(root, ".cursor"),
-		"geminicli":  filepath.Join(root, ".gemini"),
 	} {
 		if got := connectorDefaultHomeBesideDataRoot(dataRoot, connectorName); !samePath(got, want) {
 			t.Fatalf("%s default home = %q, want %q", connectorName, got, want)
@@ -473,7 +432,7 @@ func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 	}{
 		{dataRoot: filepath.Join(root, "data"), name: "codex"},
 		{dataRoot: ".defenseclaw", name: "codex"},
-		{dataRoot: dataRoot, name: "windsurf"},
+		{dataRoot: dataRoot, name: "retired-example"},
 		{dataRoot: dataRoot, name: "hermes"},
 		{dataRoot: dataRoot, name: "openclaw"},
 	} {
@@ -607,19 +566,17 @@ func TestReconcilePreservedConnectorsRefreshesEntireExistingRoster(t *testing.T)
 	transaction := setupTransaction{
 		ID:                           strings.Repeat("a", 32),
 		DataRoot:                     filepath.Join(root, "data"),
-		PreviousConnectors:           []string{"codex", "claudecode", "copilot", "cursor", "windsurf", "antigravity", "opencode"},
+		PreviousConnectors:           []string{"codex", "claudecode", "copilot", "cursor", "antigravity", "opencode"},
 		PreviousCodexHome:            filepath.Join(root, "codex"),
 		PreviousClaudeConfigDir:      filepath.Join(root, "claude"),
 		PreviousCopilotHome:          filepath.Join(root, "copilot"),
 		PreviousCursorHome:           filepath.Join(root, "cursor"),
-		PreviousWindsurfUserHome:     filepath.Join(root, "windsurf-profile"),
 		PreviousAntigravityConfigDir: filepath.Join(root, ".gemini", "config"),
 		PreviousOpenCodeConfigDir:    filepath.Join(root, "opencode"),
 		CodexHome:                    filepath.Join(root, "codex"),
 		ClaudeConfigDir:              filepath.Join(root, "claude"),
 		CopilotHome:                  filepath.Join(root, "copilot"),
 		CursorHome:                   filepath.Join(root, "cursor"),
-		WindsurfUserHome:             filepath.Join(root, "windsurf-profile"),
 		AntigravityConfigDir:         filepath.Join(root, ".gemini", "config"),
 		OpenCodeConfigDir:            filepath.Join(root, "opencode"),
 	}
@@ -634,11 +591,11 @@ func TestReconcilePreservedConnectorsRefreshesEntireExistingRoster(t *testing.T)
 			return nil
 		},
 	)
-	want := "codex:reconcile:PRESERVED=1,claudecode:reconcile:PRESERVED=1,copilot:reconcile:PRESERVED=1,cursor:reconcile:PRESERVED=1,windsurf:reconcile:PRESERVED=1,antigravity:reconcile:PRESERVED=1,opencode:reconcile:PRESERVED=1"
+	want := "codex:reconcile:PRESERVED=1,claudecode:reconcile:PRESERVED=1,copilot:reconcile:PRESERVED=1,cursor:reconcile:PRESERVED=1,antigravity:reconcile:PRESERVED=1,opencode:reconcile:PRESERVED=1"
 	if got := strings.Join(calls, ","); got != want {
 		t.Fatalf("preserved connector calls = %q, want %q", got, want)
 	}
-	if len(recorder.attempts) != 7 || len(recorder.failures) != 0 {
+	if len(recorder.attempts) != 6 || len(recorder.failures) != 0 {
 		t.Fatalf("preserved connector reconciliation = %+v", recorder)
 	}
 }
@@ -665,8 +622,7 @@ func TestReconcilePreservedAntigravityMigratesCustomCustodyToOfficialHome(t *tes
 		currentEnv,
 		func(_, _, connector, action string, env []string) error {
 			home := envValue(env, "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME")
-			if envValue(env, "ANTIGRAVITY_CONFIG_DIR") != "" ||
-				envValue(env, "GEMINI_CONFIG_DIR") != "" {
+			if envValue(env, "ANTIGRAVITY_CONFIG_DIR") != "" {
 				t.Fatalf("invented Antigravity vendor environment survived: %v", env)
 			}
 			calls = append(calls, connector+":"+action+":"+home)
