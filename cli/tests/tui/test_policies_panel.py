@@ -99,7 +99,6 @@ async def test_activate_strict_from_the_policies_panel(tmp_path, monkeypatch) ->
         await pilot.press("down", "down", "enter")  # strict → picker
         await pilot.press("enter")  # choose strict
         await pilot.press("enter")  # consequence: activate
-        await pilot.press("enter")  # command preview: run
         await until(pilot, lambda: bool(runs))
         await until(pilot, lambda: len(reads) >= 2)
     assert runs == [("defenseclaw", ("policy", "activate", "strict"))]
@@ -115,7 +114,6 @@ async def test_switch_one_connectors_rule_pack_to_strict(tmp_path, monkeypatch) 
         await pilot.press("2", "enter")  # strict → validate
         await until(pilot, lambda: bool(captured))
         await pilot.press("enter")  # consequence: use
-        await pilot.press("enter")  # command preview: run
         await until(pilot, lambda: bool(runs))
     assert captured == [("defenseclaw", ("guardrail", "validate-pack", "/p/guardrail/strict", "--json"))]
     assert runs == [("defenseclaw", ("guardrail", "use-pack", "strict", "--connector", "codex"))]

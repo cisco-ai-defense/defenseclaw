@@ -276,7 +276,9 @@ class PolicyPanelMixin:
         if confirmed is None:
             self._set_status("Policy unchanged.")  # type: ignore[attr-defined]
             return
-        await self._confirm_and_run_intent(activate_intent(name))  # type: ignore[attr-defined]
+        # The consequence modal already showed the exact command, so run it
+        # now rather than asking a third time in the generic preview.
+        await self._run_policy_intent(activate_intent(name))
 
     async def _validate_rule_pack(self, path: str) -> PackValidation:
         from defenseclaw.tui import app as app_module
@@ -312,7 +314,12 @@ class PolicyPanelMixin:
         if confirmed is None:
             self._set_status("Rule pack unchanged.")  # type: ignore[attr-defined]
             return
-        await self._confirm_and_run_intent(use_pack_intent(choice.pack, choice.connector))  # type: ignore[attr-defined]
+        await self._run_policy_intent(use_pack_intent(choice.pack, choice.connector))
+
+    async def _run_policy_intent(self, intent: Any) -> None:
+        await self._run_command(  # type: ignore[attr-defined]
+            getattr(intent, "binary", "defenseclaw"), tuple(intent.args), display_name=intent.label
+        )
 
 
 class PolicyConsequenceScreen(ConsequenceModalScreen):
@@ -362,7 +369,7 @@ def policy_change_modal(active: Any | None, chosen: Any) -> ConsequenceModalMode
                 action_id="activate",
                 hotkey="a",
                 label=f"Activate {rich_escape(chosen.name)}",
-                description="Shows the command before it runs.",
+                description="Runs the command shown above.",
                 variant="error" if weaker else "primary",
                 danger=bool(weaker),
             ),
@@ -407,7 +414,7 @@ def rule_pack_change_modal(model: PoliciesPanelModel, choice: RulePackChoice) ->
                 action_id="use",
                 hotkey="u",
                 label=f"Use {rich_escape(choice.name)}",
-                description="Shows the command before it runs.",
+                description="Runs the command shown above.",
                 variant="error" if weaker else "primary",
                 danger=weaker,
             ),
