@@ -314,6 +314,8 @@ guardrail:
   mode: action                 # observe | action
   scanner_mode: local          # local | remote | both
   rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
+  block_at: ""                 # CRITICAL | HIGH | MEDIUM | LOW; empty -> the rule pack's level
+  alert_at: ""                 # same values; never above block_at
   port: 4000                   # guardrail proxy port
   block_message: ""            # custom; empty -> default
   detection_strategy: regex_only  # regex_only | regex_judge | judge_first
@@ -355,6 +357,7 @@ guardrail:
       hook_fail_mode: closed   # open | closed; inherits guardrail.hook_fail_mode
       block_message: ""        # custom; inherits guardrail.block_message
       rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict  # inherits guardrail.rule_pack_dir
+      block_at: HIGH           # inherits guardrail.block_at, then the rule pack's level
       hilt:
         enabled: true
         min_severity: HIGH
@@ -785,6 +788,8 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `hook_fail_mode` | `open` \| `closed` | `guardrail.hook_fail_mode` |
 | `block_message` | string | `guardrail.block_message` |
 | `rule_pack_dir` | path | `guardrail.rule_pack_dir` |
+| `block_at` | `CRITICAL` \| `HIGH` \| `MEDIUM` \| `LOW` (any case) — lowest severity that blocks | `guardrail.block_at`, then the rule pack's level |
+| `alert_at` | same values — lowest severity that alerts; never above the block level | `guardrail.alert_at`, then the rule pack's level |
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
 
 `claw.mode` becomes **`multi`** automatically once more than one connector is active. That sentinel is mirrored onto the OTel resource attribute `defenseclaw.claw.mode`, so a fan-out gateway is distinguishable from a single-connector one in dashboards and SIEM. The singular `guardrail.connector` is untouched and still drives single-connector installs — the map is purely additive. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).

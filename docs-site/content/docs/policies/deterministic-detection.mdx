@@ -14,7 +14,8 @@ DefenseClaw separates **detection evidence** from **blocking authority**. A
 regex, CEL expression, YARA signature, or correlated sequence can create a
 finding, but an authenticated tool call can be denied only when a complete,
 same-rule deterministic proof reaches an enforcement-capable connector surface
-and the active profile maps its severity to `block`.
+and the active profile, or a [`guardrail.block_at`](#profile-posture) level,
+maps its severity to `block`.
 
 This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
@@ -244,7 +245,8 @@ mutated sequences cannot complete an enforcement proof.
 
 “Enforcement-capable” means the chain can set the enforcement-safe result bit;
 the connector must still be synchronous and block-capable, the same-rule proof
-gate must accept it, and the active profile must map the severity to `block`.
+gate must accept it, and the active profile (or the connector's
+[block level](#profile-posture)) must map the severity to `block`.
 
 ## Profile posture
 
@@ -264,6 +266,30 @@ deployments. Connector capability still controls whether `block` can become a
 native deny; unsupported surfaces retain the finding and audit action without
 claiming prevention. See [Defaults](/docs/defaults) for the complete operator
 configuration.
+
+To change these levels without switching packs, set `guardrail.block_at` and
+`guardrail.alert_at` to `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`: the lowest
+severity that blocks, and the lowest that alerts. Set them globally, or for one
+connector under `guardrail.connectors.<name>`. A connector's own value wins
+over the global one, and the global one wins over the pack's level. The alert
+level never ends up above the block level, so anything that blocks also
+alerts, and `CRITICAL` always blocks.
+
+```yaml
+guardrail:
+  block_at: HIGH           # every connector blocks HIGH and CRITICAL
+  connectors:
+    codex:
+      block_at: CRITICAL   # except codex, which blocks only CRITICAL
+      alert_at: MEDIUM
+```
+
+The levels apply wherever this table does: hook decisions such as tool calls,
+and the guardrail proxy's checks of tool calls in LLM responses. Human approval
+only ever applies below the block level: anything at or above it blocks without
+asking. The pack decides everything else, such as which rules run, and the
+named policy's thresholds for LLM traffic through the guardrail proxy don't
+change.
 
 ### Low-noise rollout
 
