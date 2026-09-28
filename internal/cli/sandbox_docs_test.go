@@ -22,11 +22,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // The sandbox CLI reference page holds one generated block per command of
@@ -222,6 +225,51 @@ func TestSandboxCLIReferenceDocs(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1" && out.String() != text {
 		if err := os.WriteFile(page, []byte(out.String()), 0o644); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// TestSandboxDocsExitStatuses: the exit statuses the sandbox commands
+// define beyond 0 and 1 (a `pull --apply` that fell back to a branch and a
+// patch, a session none of whose hooks reached DefenseClaw) are in the CLI
+// reference's exit-status list and in the sandbox guide's.
+func TestSandboxDocsExitStatuses(t *testing.T) {
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	docs := filepath.Join(filepath.Dir(filename), "..", "..", "docs-site", "content", "docs")
+	read := func(rel, from, to string) string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(docs, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, after, ok := strings.Cut(string(raw), from)
+		if !ok {
+			t.Fatalf("%s has no %q", rel, from)
+		}
+		part, _, _ := strings.Cut(after, to)
+		return strings.Join(strings.Fields(part), " ")
+	}
+	reference := read(filepath.Join("reference", sandboxDocsPage), "- **Exit status.**", "\n- ")
+	guide := read(filepath.Join("setup", "sandbox.mdx"), "Exit statuses:", "\n\n")
+	for _, c := range []struct {
+		code      int
+		reference string
+		guide     string
+	}{
+		{sandboxcli.ExitPullConflict, "`pull --apply` exits `4`", "4 means `pull --apply`"},
+		{sandboxcli.ExitHooksUnreachable, "exit `69`", "69 means"},
+	} {
+		if code := strconv.Itoa(c.code); !strings.Contains(c.reference, code) || !strings.Contains(c.guide, code) {
+			t.Fatalf("exit status %d: the expected wording %q / %q is stale", c.code, c.reference, c.guide)
+		}
+		if !strings.Contains(reference, c.reference) {
+			t.Errorf("%s: the exit-status list lacks %q:\n%s", sandboxDocsPage, c.reference, reference)
+		}
+		if !strings.Contains(guide, c.guide) {
+			t.Errorf("sandbox.mdx: the exit statuses lack %q:\n%s", c.guide, guide)
 		}
 	}
 }

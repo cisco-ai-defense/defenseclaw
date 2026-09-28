@@ -671,7 +671,7 @@ defenseclaw sandbox pull myapp-1c2d --patch-out fix.patch
 
 | Flag | Effect |
 | --- | --- |
-| `--apply` | Merge the changes into your working tree (3-way). On a conflict nothing is touched, and the changes land on a branch and in a patch file instead. |
+| `--apply` | Merge the changes into your working tree (3-way). On a conflict, or with git older than 2.38, nothing is touched: the changes land on a branch and in a patch file instead, and `pull` exits 4. |
 | `--branch` | Put the changes on branch `dc/<name>` without touching your checkout. `--branch-name` picks another name. |
 | `--patch-out FILE` | Write the changes to a patch file. |
 | `--accept-sensitive` | Bring back changes that can run code on your machine without asking. |
@@ -1103,9 +1103,10 @@ section, and skips them while `openshell.enabled` is off.
 | Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. |
 
 Exit statuses: 3 means the platform or deployment is unsupported (Windows,
-WSL2, `managed_enterprise`, or running as root), 69 means no hook of the
-session reached DefenseClaw, and a harness's own non-zero status is passed
-through.
+WSL2, `managed_enterprise`, or running as root), 4 means `pull --apply` left
+your working tree alone and put the changes on a branch and in a patch file
+(a conflict, or git older than 2.38), 69 means no hook of the session reached
+DefenseClaw, and a harness's own non-zero status is passed through.
 
 ## Legacy sandbox cleanup
 

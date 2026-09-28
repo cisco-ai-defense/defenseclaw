@@ -66,9 +66,12 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   Antigravity, OpenHands, OmniGent, GitHub Copilot CLI) and was never
   prompted is not counted, unless the daemon saw it work without hooks.
   `logs` does the same when it reports a finished detached run none of
-  whose hooks reached DefenseClaw. An interrupted command returns `130`
-  (Ctrl-C at the end-of-session question too), and an unsupported platform
-  or setup returns `3`.
+  whose hooks reached DefenseClaw. `pull --apply` exits `4` when it could not
+  merge in place (a conflict, or git older than 2.38) and left your working
+  tree alone: the changes went to a patch file and, in a git project, to a
+  `dc/<name>` branch instead. An interrupted command returns `130` (Ctrl-C at
+  the end-of-session question too), and an unsupported platform or setup
+  returns `3`.
 
 | Command | What it does |
 | --- | --- |
@@ -800,6 +803,13 @@ tags the session moved are put back too, unless you pass `--keep-refs`. The
 session's own state is kept in a commit, and the command `undo` prints
 (`git -C FOLDER checkout COMMIT -- .`) brings its files back.
 
+For a copy-mode sandbox, which changes your folder only through
+`pull --apply`, `undo` reverts the last `pull --apply` instead, after the
+same preview and question. Edits you made since the apply stay; when they
+overlap the apply, undo changes nothing and names the files. It neither stops
+nor starts the sandbox, and `--restart` and `--keep-refs` don't apply. A
+branch or patch file the work went to is yours to delete.
+
 ```bash
 defenseclaw sandbox undo myapp-7f3a --preview
 defenseclaw sandbox undo myapp-7f3a --yes --restart
@@ -823,8 +833,11 @@ can run code on your machine, and files held back from the sandbox. Choose
 one mode to bring the work back: `--apply` (a
 3-way merge into your working tree), `--branch` (branch `dc/<name>`) or
 `--branch-name NAME`, or `--patch-out FILE`. A folder that is not a git
-repository has no branch mode. Changes that can run code on your machine need
-your confirmation, or `--accept-sensitive` without a terminal.
+repository has no branch mode. When `--apply` cannot merge in place (a
+conflict, or git older than 2.38), it leaves your working tree alone and
+exits `4`: the changes go to `<name>.patch` in your folder and, in a git
+project, to branch `dc/<name>`. Changes that can run code on your machine
+need your confirmation, or `--accept-sensitive` without a terminal.
 
 ```bash
 defenseclaw sandbox pull fix-tests
