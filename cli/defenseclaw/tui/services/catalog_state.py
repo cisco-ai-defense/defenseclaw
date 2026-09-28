@@ -513,6 +513,23 @@ class CatalogListModel(Generic[RowT]):
             return False
         return any(action.key == key and not action.disabled for action in actions())
 
+    def direct_action(self, key: str, *, origin: str) -> CatalogPanelAction:
+        """Run the s/b/a/u shortcut for the selected row, or say why not.
+
+        A key that doesn't apply (``b`` on an already-blocked skill) used to
+        do nothing at all, with no message.
+        """
+
+        row = self.selected()
+        if row is None:
+            return CatalogPanelAction(True, hint="Select a row first.")
+        if not self.action_key_available(key):
+            name = getattr(row, "display_name", "") or getattr(row, "name", "") or "this row"
+            status = getattr(row, "status", "") or "in its current state"
+            word = _DIRECT_KEY_WORDS.get(key, key)
+            return CatalogPanelAction(True, hint=f"Can't {word} {name}: it is {status}. Press o for its actions.")
+        return CatalogPanelAction(True, self.action_intent(key, origin=origin))  # type: ignore[attr-defined]
+
     def select_row(self, index: int) -> RowT | None:
         self.set_cursor(index)
         return self.selected()
@@ -686,10 +703,7 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="skills") if self.selected() and self.action_key_available(key) else None
-            )
-            return CatalogPanelAction(True, intent)
+            return self.direct_action(key, origin="skills")
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
@@ -784,10 +798,7 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="mcps") if self.selected() and self.action_key_available(key) else None
-            )
-            return CatalogPanelAction(True, intent)
+            return self.direct_action(key, origin="mcps")
         if key in {"n", "+"}:
             return CatalogPanelAction(True, open_mcp_set_form=True)
         if key == "r":
@@ -886,12 +897,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"b", "a", "u"}:
-            intent = (
-                self.action_intent(key, origin="plugins")
-                if self.selected() and self.action_key_available(key)
-                else None
-            )
-            return CatalogPanelAction(True, intent)
+            return self.direct_action(key, origin="plugins")
         if key == "r":
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         return CatalogPanelAction(False)
@@ -1939,6 +1945,9 @@ _STATUS_COLOR: Mapping[str, str] = {
 }
 
 
+_DIRECT_KEY_WORDS: Mapping[str, str] = {"s": "scan", "b": "block", "a": "allow", "u": "unblock"}
+
+
 def _esc(value: object) -> str:
     """Escape row data (names, commands, reasons) for the Rich-markup detail pane."""
 
@@ -2146,13 +2155,20 @@ def _action_legend(actions: tuple[CatalogMenuAction, ...]) -> str:
 
     if not actions:
         return "  [dim]No actions available for this row.[/]"
+    # Only s/b/a/u are row shortcuts; the rest are in the o menu. Listing
+    # "[d] Disable" or "[q] Quarantine" here promised keys that did nothing
+    # (or, for n and r, did something else).
+    direct = tuple(action for action in actions if action.key in _DIRECT_KEY_WORDS)
+    menu_only = [action.label for action in actions if action.key not in _DIRECT_KEY_WORDS and not action.disabled]
     chunks: list[str] = []
-    for action in actions:
+    for action in direct:
         # ``[s] Scan`` must be escaped: Rich reads ``[s]``/``[b]``/``[i]`` as
         # style tags and ``[a]``/``[q]`` as invalid ones, which dropped the
         # whole detail pane to unstyled text with raw markup showing.
         label = f"{_esc(f'[{action.key}]')} {_esc(action.label)}"
         chunks.append(f"[dim]{label}[/]" if action.disabled else label)
+    if menu_only:
+        chunks.append("\\[o] more: " + _esc(", ".join(menu_only)))
     return "  [dim]Actions:[/] " + "  ·  ".join(chunks)
 
 

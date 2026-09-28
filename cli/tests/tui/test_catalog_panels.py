@@ -831,7 +831,8 @@ def test_skill_detail_pane_renders_decisions_scan_and_action_legend() -> None:
     # The legend should surface the actual shortcut keys, not a vague
     # "press o for menu" hint. Blocked status exposes Unblock so the
     # operator can recover without spelunking through the action menu.
-    assert "[s] Scan" in out and "[i] Info" in out
+    # s/b/a/u are row shortcuts; the rest are listed as the o menu.
+    assert "[s] Scan" in out and "[o] more: Info" in out
     assert "[u] Unblock" in out
 
 
@@ -873,7 +874,8 @@ def test_mcp_detail_pane_renders_transport_url_and_command() -> None:
     assert "Command    uvx mcp-server-context7" in out
     # MCP legend should expose the unset-target hint via mcp_actions
     # under the action key list.
-    assert "[s] Scan" in out and "[i] Info" in out
+    # s/b/a/u are row shortcuts; the rest are listed as the o menu.
+    assert "[s] Scan" in out and "[o] more: Info" in out
 
 
 def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
@@ -899,8 +901,8 @@ def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
     assert "Version    1.2.0" in out
     assert "Origin     builtin" in out
     assert "Scan       [#FBBF24]MEDIUM[/] · 2 findings" in out
-    # Enabled plugin should expose the Disable action shortcut.
-    assert "[d] Disable" in out
+    # Enabled plugin offers Disable (from the o menu, not a row key).
+    assert "Disable" in out.split("[o] more:")[1]
 
 
 def test_catalog_summary_text_is_one_header_line() -> None:

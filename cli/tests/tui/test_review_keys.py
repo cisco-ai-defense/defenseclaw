@@ -150,3 +150,24 @@ async def test_agent_commands_reload_ai_discovery_or_runtime(tmp_path) -> None:
     await app._handle_successful_command("defenseclaw", ("agent", "discovery", "runtime", "enable", "--yes"))
 
     assert loads == ["ai", "runtime"]
+
+
+def test_row_keys_that_do_not_apply_say_why() -> None:
+    from defenseclaw.tui.services.catalog_state import SkillRow, SkillsPanelModel
+
+    model = SkillsPanelModel()
+    model.apply_loaded([SkillRow(name="beta", status="blocked")])
+
+    action = model.handle_key("b")
+
+    assert action.handled and action.intent is None
+    assert "beta" in action.hint and "blocked" in action.hint
+
+
+def test_detail_legend_lists_only_keys_that_work() -> None:
+    from defenseclaw.tui.services.catalog_state import SkillRow, catalog_detail_text
+
+    legend = catalog_detail_text(SkillRow(name="alpha", status="blocked")).splitlines()[-1]
+
+    assert "[i]" not in legend and "[q]" not in legend and "[n]" not in legend
+    assert "[o] more:" in legend
