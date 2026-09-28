@@ -26,6 +26,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
@@ -105,6 +106,20 @@ var refusedHomeTrees = []string{
 	".local/state/openshell", ".defenseclaw", ".openshell", ".terraform.d",
 	".oci", ".m2", ".gradle", "Library",
 }
+
+// Home-relative directories where agent harnesses keep the settings,
+// hooks, MCP servers, skills and credentials they load on this machine.
+// A sandboxed agent that could write one could run code the next time the
+// harness starts outside the sandbox, and the review of such a folder sees
+// only project-relative names ("settings.json"), so none is ever shared
+// (credentialTrees). Those under ~/.config are covered by ".config".
+// Devin Desktop still reads its pre-rename folders (legacyconnector).
+var harnessHomeTrees = append([]string{
+	".claude", ".codex", ".cursor", ".copilot", ".gemini",
+	".devin", ".amp", ".opencode", ".hermes", ".openhands",
+	".kiro", ".omnigent", ".openclaw", ".agents",
+	".local/share/opencode", ".local/share/amp",
+}, legacyconnector.InventoryDotDirs...)
 
 // ValidateSource checks that path may be bind-mounted into a sandbox and
 // describes its git layout. A *SourceError means never; a *NeedsCopyError
@@ -191,11 +206,15 @@ func validateShareable(path string, opts SourceOptions) (string, []string, error
 		}
 	}
 	for _, t := range credentialTrees(home) {
+		holds := "credentials or sandbox state"
+		if t.harness {
+			holds = "an agent's settings, hooks and credentials"
+		}
 		switch {
 		case within(real, t.path):
-			return "", nil, &SourceError{Path: real, Reason: "it is inside " + abbreviateHome(t.name, home) + ", which holds credentials or sandbox state"}
+			return "", nil, &SourceError{Path: real, Reason: "it is inside " + abbreviateHome(t.name, home) + ", which holds " + holds}
 		case within(t.path, real):
-			return "", nil, &SourceError{Path: real, Reason: "it contains " + abbreviateHome(t.name, home) + ", which holds credentials or sandbox state"}
+			return "", nil, &SourceError{Path: real, Reason: "it contains " + abbreviateHome(t.name, home) + ", which holds " + holds}
 		}
 	}
 	protected := append([]string(nil), opts.Protected...)
@@ -223,45 +242,55 @@ func validateShareable(path string, opts SourceOptions) (string, []string, error
 }
 
 // credentialTree is a refused credential or state directory: path is
-// compared, name is what the refusal shows.
-type credentialTree struct{ path, name string }
+// compared, name is what the refusal shows; harness marks an agent
+// harness's home (harnessHomeTrees).
+type credentialTree struct {
+	path, name string
+	harness    bool
+}
 
 // credentialTrees lists the directories no share may be inside of or
-// contain: refusedHomeTrees below home, their XDG base-directory homes
-// ($XDG_CONFIG_HOME stands for ~/.config, $XDG_DATA_HOME/{keyrings,
-// openshell} and $XDG_STATE_HOME/openshell for their ~/.local variants),
-// and the OpenShell config directory as openshell.UserConfigDir resolves
-// it. Each is listed as named and, when that differs, with its symbolic
-// links resolved: a dotfile manager may link ~/.config elsewhere, and the
-// share itself is always a resolved path.
+// contain: refusedHomeTrees and harnessHomeTrees below home, their XDG
+// base-directory homes ($XDG_CONFIG_HOME stands for ~/.config,
+// $XDG_DATA_HOME/{keyrings,openshell,opencode,amp} and
+// $XDG_STATE_HOME/openshell for their ~/.local variants), and the
+// OpenShell config directory as openshell.UserConfigDir resolves it. Each
+// is listed as named and, when that differs, with its symbolic links
+// resolved: a dotfile manager may link ~/.config elsewhere, and the share
+// itself is always a resolved path.
 func credentialTrees(home string) []credentialTree {
 	var out []credentialTree
-	add := func(p string) {
+	add := func(p string, harness bool) {
 		if p == "" || !filepath.IsAbs(p) {
 			return
 		}
 		p = filepath.Clean(p)
-		out = append(out, credentialTree{path: p, name: p})
+		out = append(out, credentialTree{path: p, name: p, harness: harness})
 		if r := resolveExisting(p); r != p {
-			out = append(out, credentialTree{path: r, name: p})
+			out = append(out, credentialTree{path: r, name: p, harness: harness})
 		}
 	}
 	if home != "" {
 		for _, rel := range refusedHomeTrees {
-			add(filepath.Join(home, rel))
+			add(filepath.Join(home, rel), false)
+		}
+		for _, rel := range harnessHomeTrees {
+			add(filepath.Join(home, rel), true)
 		}
 	}
 	// The XDG spec ignores relative values; so does this.
-	add(os.Getenv("XDG_CONFIG_HOME"))
+	add(os.Getenv("XDG_CONFIG_HOME"), false)
 	if data := os.Getenv("XDG_DATA_HOME"); filepath.IsAbs(data) {
-		add(filepath.Join(data, "keyrings"))
-		add(filepath.Join(data, "openshell"))
+		add(filepath.Join(data, "keyrings"), false)
+		add(filepath.Join(data, "openshell"), false)
+		add(filepath.Join(data, "opencode"), true)
+		add(filepath.Join(data, "amp"), true)
 	}
 	if state := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(state) {
-		add(filepath.Join(state, "openshell"))
+		add(filepath.Join(state, "openshell"), false)
 	}
 	if dir, err := openshell.UserConfigDir(); err == nil {
-		add(dir)
+		add(dir, false)
 	}
 	return out
 }

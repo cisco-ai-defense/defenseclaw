@@ -34,6 +34,9 @@ func TestValidateSourceRefusalMatrix(t *testing.T) {
 	mustMkdir(t, filepath.Join(e.home, ".aws"))
 	mustMkdir(t, filepath.Join(e.home, ".config", "nvim"))
 	mustMkdir(t, filepath.Join(e.data, "sandboxes"))
+	for _, h := range []string{".claude/skills", ".codex", ".cursor", ".copilot", ".gemini/antigravity", ".agents", ".local/share/opencode"} {
+		mustMkdir(t, filepath.Join(e.home, filepath.FromSlash(h)))
+	}
 	link := filepath.Join(e.home, "code", "link")
 	if err := os.Symlink(e.project, link); err != nil {
 		t.Fatal(err)
@@ -57,6 +60,15 @@ func TestValidateSourceRefusalMatrix(t *testing.T) {
 		{"inside config", filepath.Join(e.home, ".config", "nvim"), ".config"},
 		{"data dir", e.data, ".defenseclaw"},
 		{"inside data dir", filepath.Join(e.data, "sandboxes"), ".defenseclaw"},
+		// A harness loads its settings and hooks from these on the host.
+		{"claude home", filepath.Join(e.home, ".claude"), "~/.claude, which holds an agent's settings"},
+		{"inside claude home", filepath.Join(e.home, ".claude", "skills"), "~/.claude"},
+		{"codex home", filepath.Join(e.home, ".codex"), "~/.codex"},
+		{"cursor home", filepath.Join(e.home, ".cursor"), "~/.cursor"},
+		{"copilot home", filepath.Join(e.home, ".copilot"), "~/.copilot"},
+		{"antigravity home", filepath.Join(e.home, ".gemini", "antigravity"), "~/.gemini"},
+		{"shared agent skills", filepath.Join(e.home, ".agents"), "~/.agents"},
+		{"opencode data", filepath.Join(e.home, ".local", "share", "opencode"), "~/.local/share/opencode"},
 		{"contains protected", e.root, "contains"},
 		{"inside protected", filepath.Join(protected, "inner"), "inside"},
 		{"symlinked component", link, "symbolic link"},
