@@ -40,8 +40,7 @@ import (
 // hostReport is a doctor report of a ready Linux host; edit adjusts it.
 func hostReport(edit func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
 	return func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
-		rep := &openshell.DoctorReport{CLIVersion: "0.1.1", DockerVersion: "29.4.0", GatewayVersion: "0.1.1"}
-		for _, c := range []openshell.Check{
+		rep := &openshell.DoctorReport{CLIVersion: "0.1.1", DockerVersion: "29.4.0", GatewayVersion: "0.1.1", Checks: []openshell.Check{
 			{ID: openshell.CheckIDPlatform, Title: "Platform", Status: openshell.StatusPass, Detail: "linux/arm64"},
 			{ID: openshell.CheckIDUser, Title: "User", Status: openshell.StatusPass},
 			{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass, Detail: "ABI 6"},
@@ -52,14 +51,84 @@ func hostReport(edit func(*openshell.DoctorReport)) func(context.Context, *opens
 			{ID: openshell.CheckIDMTLS, Title: "mTLS files", Status: openshell.StatusPass},
 			{ID: openshell.CheckIDGatewayVersion, Title: "Gateway version", Status: openshell.StatusPass},
 			{ID: openshell.CheckIDBindMounts, Title: "Bind mounts", Status: openshell.StatusWarn, Detail: "off"},
-		} {
-			rep.Checks = append(rep.Checks, c)
-		}
+		}}
 		if edit != nil {
 			edit(rep)
 		}
 		return rep
 	}
+}
+
+// mountsOn is a gateway that already allows bind mounts, so setup asks
+// nothing about them.
+var mountsOn = openshell.BindMounts{AllowDriverConfig: true, EnableBindMounts: true}
+
+// setupApp is a testApp on a ready host whose config.yaml holds extra;
+// settled also has the gateway allow bind mounts with OpenShell's telemetry
+// off, so setup asks about neither.
+func setupApp(t *testing.T, input, extra string, settled bool) *testApp {
+	t.Helper()
+	ta := newTestApp(t, input)
+	writeConfig(t, ta, extra)
+	ta.HostDoctor = hostReport(nil)
+	if settled {
+		ta.gateway.state.BindMounts = mountsOn
+		ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
+	}
+	return ta
+}
+
+// noCloseClient keeps the shared fake gateway open when a command closes
+// its client.
+type noCloseClient struct{ openshell.Client }
+
+func (noCloseClient) Close() error { return nil }
+
+// useGateway gives ta a fake OpenShell gateway.
+func useGateway(ta *testApp) (*openshelltest.Fake, openshell.Client) {
+	fake := openshelltest.New()
+	client := fake.Client(openshell.ClientOptions{})
+	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+		return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
+	}
+	return fake, client
+}
+
+// runningOn has n sandboxes of someone else run on ta's fake gateway.
+func runningOn(t *testing.T, ta *testApp, n int) {
+	t.Helper()
+	fake, client := useGateway(ta)
+	for i := range n {
+		name := "dc-claude-theirs-" + string(rune('a'+i))
+		if _, err := client.CreateSandbox(bg, name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{
+			Labels: map[string]string{manager.LabelManaged: "true", manager.LabelOwner: "someone-else"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fake.SetPhase(openshell.DefaultWorkspace, name, openshell.PhaseReady); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// importProfile imports the profile id renders for in, as specID if set.
+func importProfile(t *testing.T, client openshell.Client, id string, in profiles.Input, specID string) {
+	t.Helper()
+	p, err := profiles.Render(id, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if specID != "" {
+		p.Spec.ID = specID
+	}
+	if _, err := client.ImportProfiles(bg, []openshell.ProfileImportItem{{Profile: p.Spec, Source: "test"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readyImages is a hook-verified image of this install for Claude Code.
+func readyImages(ta *testApp) []image.Record {
+	return []image.Record{{Connector: "claudecode", HookFireVerified: true, UID: os.Getuid(), DefenseClawVersion: manager.ImageVersion(),
+		IngressPort: ta.Cfg.OpenShellIngressPort(), HarnessVersion: "2.1.156"}}
 }
 
 type fakeInstaller struct {
@@ -68,8 +137,7 @@ type fakeInstaller struct {
 }
 
 func (f *fakeInstaller) Install(context.Context) (*openshell.InstallResult, error) {
-	ok, err := f.consent(&openshell.InstallPlan{Release: "v0.1.1"})
-	if err != nil || !ok {
+	if ok, err := f.consent(&openshell.InstallPlan{Release: "v0.1.1"}); err != nil || !ok {
 		return nil, errors.New("declined")
 	}
 	f.ran = true
@@ -78,50 +146,31 @@ func (f *fakeInstaller) Install(context.Context) (*openshell.InstallResult, erro
 }
 
 func TestSetupNonInteractive(t *testing.T) {
-	ta := newTestApp(t, "")
+	ta := setupApp(t, "", "", false)
 	ta.IO.TTY = false
-	writeConfig(t, ta, "")
 	ta.Cfg.OpenShell.Enabled = false
-	ta.HostDoctor = hostReport(nil)
 	toml := filepath.Join(t.TempDir(), "gateway.toml")
-	if err := os.WriteFile(toml, []byte("[openshell.drivers.docker]\nenable_bind_mounts = true\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, toml, "[openshell.drivers.docker]\nenable_bind_mounts = true\n")
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml, Backup: toml + ".defenseclaw.bak"}}, Restarted: true}
-	// No sandbox runs on the gateway, so setup may restart it.
-	idle := openshelltest.New().Client(openshell.ClientOptions{})
-	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
-		return noCloseClient{idle}, &openshell.Registration{Name: "openshell"}, nil
-	}
-	err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, Yes: true, Wrappers: true})
-	if err != nil {
-		t.Fatalf("Setup: %v\n%s", err, ta.output())
-	}
+	useGateway(ta) // no sandbox runs on the gateway, so setup may restart it
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true, Wrappers: true}))
 	if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts || ta.gateway.planned[0].Env[openshell.EnvTelemetryEnabled] != "false" || ta.gateway.applied != 1 {
 		t.Fatalf("gateway plans = %+v, applied %d", ta.gateway.planned, ta.gateway.applied)
 	}
-	r, err := ta.loadReceipt()
-	if err != nil || len(r.GatewayFiles) != 1 || r.GatewayFiles[0].Backup != toml+".defenseclaw.bak" || r.GatewayFiles[0].SHA256 == "" {
+	if r, err := ta.loadReceipt(); err != nil || len(r.GatewayFiles) != 1 || r.GatewayFiles[0].Backup != toml+".defenseclaw.bak" || r.GatewayFiles[0].SHA256 == "" {
 		t.Fatalf("receipt = %+v, %v", r, err)
 	}
-	c := loadConfig(t, ta)
-	if !c.OpenShell.Enabled || !slices.Equal(c.OpenShell.Harnesses, []string{"claudecode", "codex"}) || c.OpenShell.UpstreamTelemetry {
+	if c := loadConfig(t, ta); !c.OpenShell.Enabled || !slices.Equal(c.OpenShell.Harnesses, []string{"claudecode", "codex"}) || c.OpenShell.UpstreamTelemetry {
 		t.Fatalf("config openshell = %+v", c.OpenShell)
 	}
 	if !slices.Equal(ta.images.built, []string{"claudecode", "codex"}) {
 		t.Fatalf("images built = %v", ta.images.built)
 	}
-	b, err := wrapper.Read(filepath.Join(ta.home, ".bashrc"))
-	if err != nil || !b.Has("claude") || !b.Has("codex") {
+	if b, err := wrapper.Read(filepath.Join(ta.home, ".bashrc")); err != nil || !b.Has("claude") || !b.Has("codex") {
 		t.Fatalf("wrappers = %+v, %v", b, err)
 	}
-	out := ta.output()
-	for _, want := range []string{"Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✓ OpenShell 0.1.1",
-		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("setup output lacks %q:\n%s", want, out)
-		}
-	}
+	has(t, ta.output(), "Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✓ OpenShell 0.1.1",
+		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
 // TestSetupLeavesTheGatewayRunningSandboxes pins that setup never restarts
@@ -130,33 +179,6 @@ func TestSetupNonInteractive(t *testing.T) {
 // `doctor --fix`, a terminal asks with no as the default, and
 // --restart-gateway restarts it.
 func TestSetupLeavesTheGatewayRunningSandboxes(t *testing.T) {
-	ctx := context.Background()
-	fake := openshelltest.New()
-	client := fake.Client(openshell.ClientOptions{})
-	for _, name := range []string{"dc-claude-theirs", "dc-codex-mine"} {
-		if _, err := client.CreateSandbox(ctx, name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{
-			Labels: map[string]string{manager.LabelManaged: "true", manager.LabelOwner: "someone-" + name}}); err != nil {
-			t.Fatal(err)
-		}
-		if err := fake.SetPhase(openshell.DefaultWorkspace, name, openshell.PhaseReady); err != nil {
-			t.Fatal(err)
-		}
-	}
-	setup := func(t *testing.T, input string, tty bool, o SetupOptions) *testApp {
-		t.Helper()
-		ta := newTestApp(t, input)
-		ta.IO.TTY = tty
-		writeConfig(t, ta, "")
-		ta.HostDoctor = hostReport(nil)
-		ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
-			return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
-		}
-		o.SkipImages, o.NoWrappers = true, true
-		if err := ta.Setup(ctx, o); err != nil {
-			t.Fatalf("Setup: %v\n%s", err, ta.output())
-		}
-		return ta
-	}
 	for _, tc := range []struct {
 		name    string
 		input   string
@@ -171,19 +193,21 @@ func TestSetupLeavesTheGatewayRunningSandboxes(t *testing.T) {
 		{"--restart-gateway", "", false, SetupOptions{NonInteractive: true, RestartGateway: true}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ta := setup(t, tc.input, tc.tty, tc.o)
+			ta := setupApp(t, tc.input, "", false)
+			ta.IO.TTY = tc.tty
+			runningOn(t, ta, 2)
+			o := tc.o
+			o.SkipImages, o.NoWrappers = true, true
+			ta.ok(t, ta.Setup(bg, o))
 			if len(ta.gateway.planned) != 1 || ta.gateway.applied != tc.applied {
 				t.Fatalf("gateway plans = %+v, applied %d, want %d\n%s", ta.gateway.planned, ta.gateway.applied, tc.applied, ta.output())
 			}
-			out := ta.output()
 			if tc.o.RestartGateway {
 				return
 			}
-			if !strings.Contains(out, "drops the connections of every sandbox on it, and 2 sandboxes run on it (dc-claude-theirs, dc-codex-mine)") {
-				t.Fatalf("output does not name the running sandboxes:\n%s", out)
-			}
-			if tc.applied == 0 && !strings.Contains(out, "skipped: the OpenShell gateway change above (it restarts the gateway; apply it with `defenseclaw sandbox doctor --fix`") {
-				t.Fatalf("output does not say how to apply the change later:\n%s", out)
+			has(t, ta.output(), "drops the connections of every sandbox on it, and 2 sandboxes run on it (dc-claude-theirs-a, dc-claude-theirs-b)")
+			if tc.applied == 0 {
+				has(t, ta.output(), "skipped: the OpenShell gateway change above (it restarts the gateway; apply it with `defenseclaw sandbox doctor --fix`")
 			}
 		})
 	}
@@ -195,22 +219,11 @@ func TestSetupLeavesTheGatewayRunningSandboxes(t *testing.T) {
 // restart the gateway, turn sandboxes on, and then fail at the wrapper
 // question.
 func TestSetupWithoutATerminalNeedsYesOrNonInteractive(t *testing.T) {
-	ta := newTestApp(t, "")
+	ta := setupApp(t, "", "", false)
 	ta.IO.TTY = false
-	writeConfig(t, ta, "")
-	before, err := os.ReadFile(ta.ConfigPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ta.HostDoctor = hostReport(nil)
-	idle := openshelltest.New().Client(openshell.ClientOptions{})
-	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
-		return noCloseClient{idle}, &openshell.Registration{Name: "openshell"}, nil
-	}
-	err = ta.Setup(context.Background(), SetupOptions{SkipImages: true})
-	if err == nil || !strings.Contains(err.Error(), "there is no terminal; pass --yes to accept the defaults, or --non-interactive") {
-		t.Fatalf("Setup without a terminal = %v\n%s", err, ta.output())
-	}
+	before, _ := os.ReadFile(ta.ConfigPath)
+	useGateway(ta)
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "there is no terminal; pass --yes to accept the defaults, or --non-interactive")
 	if len(ta.gateway.planned) != 0 || ta.gateway.applied != 0 {
 		t.Fatalf("gateway plans = %+v, applied %d; want none", ta.gateway.planned, ta.gateway.applied)
 	}
@@ -220,21 +233,15 @@ func TestSetupWithoutATerminalNeedsYesOrNonInteractive(t *testing.T) {
 }
 
 func TestSetupNeedsConsentToInstall(t *testing.T) {
-	ta := newTestApp(t, "")
+	ta := setupApp(t, "", "", false)
 	ta.IO.TTY = false
-	writeConfig(t, ta, "")
 	missing := hostReport(func(r *openshell.DoctorReport) {
 		r.CLIVersion = ""
 		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
 	})
 	ta.HostDoctor = missing
-	err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true})
-	if err == nil || !strings.Contains(err.Error(), "--install-openshell") {
-		t.Fatalf("Setup without consent = %v", err)
-	}
-	if !strings.Contains(ta.output(), "✗ OpenShell not installed") {
-		t.Fatalf("output:\n%s", ta.output())
-	}
+	wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true}), "--install-openshell")
+	has(t, ta.output(), "✗ OpenShell not installed")
 	inst := &fakeInstaller{}
 	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
 		inst.consent = consent
@@ -242,45 +249,34 @@ func TestSetupNeedsConsentToInstall(t *testing.T) {
 	}
 	calls := 0
 	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
-		calls++
-		if calls == 1 {
+		if calls++; calls == 1 {
 			return missing(ctx, d)
 		}
 		return hostReport(nil)(ctx, d)
 	}
-	if err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true}); err != nil {
-		t.Fatalf("Setup with --install-openshell: %v\n%s", err, ta.output())
-	}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true}))
 	if !inst.ran {
 		t.Fatal("the installer did not run")
 	}
 }
 
 func TestSetupStopsOnHostFailure(t *testing.T) {
-	ta := newTestApp(t, "")
-	writeConfig(t, ta, "")
+	ta := setupApp(t, "", "", false)
 	before, _ := os.ReadFile(ta.ConfigPath)
 	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
 		c := r.Get(openshell.CheckIDLandlock)
 		c.Status, c.Detail = openshell.StatusFail, "ABI 1 is older than 3"
 	})
-	err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true})
-	if err == nil || !strings.Contains(err.Error(), "Landlock") {
-		t.Fatalf("Setup = %v", err)
-	}
+	wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true}), "Landlock")
 	if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 		t.Fatal("a failed setup changed config.yaml")
 	}
 }
 
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
-	ta := newTestApp(t, "")
-	writeConfig(t, ta, "")
-	ta.HostDoctor = hostReport(nil)
+	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	if err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, NoMounts: true, SkipImages: true, Harnesses: []string{"codex"}}); err != nil {
-		t.Fatalf("Setup: %v\n%s", err, ta.output())
-	}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, SkipImages: true, Harnesses: []string{"codex"}}))
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
 	}
@@ -288,31 +284,24 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	if c.OpenShell.Workdir.Mode != "copy" || !slices.Equal(c.OpenShell.Harnesses, []string{"codex"}) {
 		t.Fatalf("config = %+v", c.OpenShell)
 	}
-
 	// Setup again, allowing the mounts this time: the copy mode the first
 	// setup recorded goes, so the answer takes effect.
 	ta.Cfg.OpenShell.Workdir.Mode = c.OpenShell.Workdir.Mode
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
-	if err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}); err != nil {
-		t.Fatalf("second Setup: %v\n%s", err, ta.output())
-	}
+	again := SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}
+	ta.ok(t, ta.Setup(bg, again))
 	if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts {
 		t.Fatalf("gateway plans = %+v", ta.gateway.planned)
 	}
 	if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != "" {
 		t.Fatalf("workdir.mode after allowing mounts = %q, want the pack's", c.OpenShell.Workdir.Mode)
 	}
-
 	// Mounts already on and a copy mode in the config: setup says why runs
 	// still copy.
-	ta.gateway.state.BindMounts = openshell.BindMounts{AllowDriverConfig: true, EnableBindMounts: true}
+	ta.gateway.state.BindMounts = mountsOn
 	ta.Cfg.OpenShell.Workdir.Mode = "copy"
-	if err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}); err != nil {
-		t.Fatalf("third Setup: %v\n%s", err, ta.output())
-	}
-	if !strings.Contains(ta.output(), "openshell.workdir.mode is copy") {
-		t.Fatalf("output:\n%s", ta.output())
-	}
+	ta.ok(t, ta.Setup(bg, again))
+	has(t, ta.output(), "openshell.workdir.mode is copy")
 }
 
 // TestSetupOnMacOSLeavesTelemetryAlone: the Homebrew gateway does not read
@@ -321,51 +310,140 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 func TestSetupOnMacOSLeavesTelemetryAlone(t *testing.T) {
 	for _, upstream := range []bool{false, true} {
 		// On a terminal: the bind mounts question and the restart it needs.
-		ta := newTestApp(t, "y\ny\n")
+		ta := setupApp(t, "y\ny\n", "", false)
 		ta.GOOS = "darwin"
-		writeConfig(t, ta, "")
-		ta.HostDoctor = hostReport(nil)
-		if err := ta.Setup(context.Background(), SetupOptions{SkipImages: true, NoWrappers: true, UpstreamTelemetry: upstream}); err != nil {
-			t.Fatalf("Setup: %v\n%s", err, ta.output())
+		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true, UpstreamTelemetry: upstream}))
+		if p := ta.gateway.planned; len(p) != 1 || !p[0].EnableBindMounts || len(p[0].Env) != 0 || len(p[0].UnsetEnv) != 0 {
+			t.Fatalf("upstream %t: gateway plans = %+v", upstream, p)
 		}
-		if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts ||
-			len(ta.gateway.planned[0].Env) != 0 || len(ta.gateway.planned[0].UnsetEnv) != 0 {
-			t.Fatalf("upstream %t: gateway plans = %+v", upstream, ta.gateway.planned)
+		lacks(t, ta.output(), "Disable OpenShell's anonymous usage telemetry?")
+		if note := strings.Contains(ta.output(), "telemetry stays on under Homebrew"); note == upstream {
+			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, note, ta.output())
 		}
-		out := ta.output()
-		if strings.Contains(out, "Disable OpenShell's anonymous usage telemetry?") {
-			t.Fatalf("upstream %t: setup asked about telemetry:\n%s", upstream, out)
+	}
+}
+
+// TestSetupTelemetryQuestionSaysItRestartsTheGateway pins that the
+// telemetry question says, before it is answered, that a yes edits
+// gateway.env and restarts the shared gateway, with what runs on it (manual
+// test R2-31). A saved openshell.upstream_telemetry: true (an earlier "keep
+// it") is not asked again, and not overwritten (R2-67).
+func TestSetupTelemetryQuestionSaysItRestartsTheGateway(t *testing.T) {
+	for _, tc := range []struct {
+		running, applied int
+		want             string
+	}{
+		{0, 1, "; no sandbox runs on it now) [Y/n]"},
+		// The restart question that follows answers no by default.
+		{2, 0, ", which drops the connections of the 2 sandboxes running on it) [Y/n]"},
+	} {
+		// The telemetry question (yes), then, with sandboxes running, the
+		// restart (no).
+		ta := setupApp(t, "\n\n", "", false)
+		ta.gateway.state.BindMounts = mountsOn
+		ta.gateway.state.EnvPath = filepath.Join(ta.home, ".config", "openshell", "gateway.env")
+		runningOn(t, ta, tc.running)
+		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+		has(t, ta.output(), "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway"+tc.want)
+		if len(ta.gateway.planned) != 1 || ta.gateway.planned[0].Env[openshell.EnvTelemetryEnabled] != "false" || ta.gateway.applied != tc.applied {
+			t.Fatalf("%d running: gateway plans = %+v, applied %d", tc.running, ta.gateway.planned, ta.gateway.applied)
 		}
-		if note := strings.Contains(out, "telemetry stays on under Homebrew"); note == upstream {
-			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, note, out)
+	}
+	ta := setupApp(t, "", "  upstream_telemetry: true\n", false)
+	ta.Cfg.OpenShell.UpstreamTelemetry = true
+	ta.gateway.state.BindMounts = mountsOn
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "OpenShell's anonymous usage telemetry stays on (openshell.upstream_telemetry is true in")
+	lacks(t, ta.output(), "Disable OpenShell's anonymous usage telemetry?")
+	if len(ta.gateway.planned) != 0 || !loadConfig(t, ta).OpenShell.UpstreamTelemetry {
+		t.Fatalf("setup changed the gateway (%+v) or the saved answer", ta.gateway.planned)
+	}
+}
+
+// TestSetupHarnessLines pins the harness part of setup: one line per
+// harness it sets up with the model credential or the next step, the
+// --harness hint, the others by the names the command line takes, and an
+// image question for a harness nobody named (manual test R2-34).
+func TestSetupHarnessLines(t *testing.T) {
+	ta := setupApp(t, "y\nn\n", "", true)
+	ta.env["ANTHROPIC_API_KEY"] = "sk-test"
+	ta.images.missing = map[string]bool{"claudecode": true, "codex": true}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
+	has(t, ta.output(),
+		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
+			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
+			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY or log in with `codex login --with-api-key`; or log in inside the sandbox\n"+
+			"  Other harnesses: agy, amp (not verified yet), copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands\n",
+		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
+		"Build the Codex image now?",
+		"skipped: the Codex image (the first `defenseclaw sandbox run codex` builds it, or `defenseclaw sandbox image build codex`)")
+	lacks(t, ta.output(), "[x]", "Credentials:")
+	if !slices.Equal(ta.images.built, []string{"claudecode"}) {
+		t.Fatalf("images built = %v, want only the one agreed to", ta.images.built)
+	}
+	// A harness named with --harness is asked for: its image is built
+	// without a question, and an image already built is only checked.
+	ta = setupApp(t, "", "", true)
+	ta.images.missing = map[string]bool{"codex": true}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true, Harnesses: []string{"codex"}}))
+	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
+		t.Fatalf("images built = %v:\n%s", ta.images.built, ta.output())
+	}
+	ta.out.Reset()
+	ta.images.built, ta.images.missing = nil, nil
+	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
+	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
+		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
+	}
+}
+
+// TestSetupHarnessAddsToTheConfiguredOnes pins that --harness adds to
+// openshell.harnesses instead of replacing it (manual test R2-72).
+func TestSetupHarnessAddsToTheConfiguredOnes(t *testing.T) {
+	ta := setupApp(t, "", "  harnesses: [opencode, copilot, kiro]\n", true)
+	ta.IO.TTY = false
+	ta.Cfg.OpenShell.Harnesses = []string{"opencode", "copilot", "kiro"}
+	for _, step := range []struct {
+		harness string
+		want    []string
+	}{
+		{"opencode", []string{"opencode", "copilot", "kiro"}},
+		{"claude", []string{"opencode", "copilot", "kiro", "claudecode"}},
+	} {
+		ta.ok(t, ta.fresh().Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true, NoWrappers: true, Harnesses: []string{step.harness}}))
+		if c := loadConfig(t, ta); !slices.Equal(c.OpenShell.Harnesses, step.want) {
+			t.Fatalf("after setup --harness %s, openshell.harnesses = %v, want %v", step.harness, c.OpenShell.Harnesses, step.want)
 		}
+	}
+	has(t, ta.output(), "  Set up before: copilot, kiro, opencode\n")
+}
+
+// TestSetupNamesKiroAsTyped pins that setup names a harness the way the
+// command line takes it, not by an internal command, and offers no shell
+// wrapper that would never run (manual test R2-73).
+func TestSetupNamesKiroAsTyped(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, Wrappers: true, Harnesses: []string{"kiro"}}))
+	has(t, ta.output(), "    Kiro CLI (kiro)  model credential none found: you log in inside the sandbox on the first run\n",
+		"Kiro CLI gets no shell wrapper: `kiro-cli` starts kiro-cli-chat itself, which a wrapper cannot catch; start it with `defenseclaw sandbox run kiro`",
+		"Done →  cd <project> && defenseclaw sandbox run kiro\n")
+	lacks(t, ta.output(), "run kiro-cli-chat", "`kiro-cli-chat` run sandboxed")
+	if _, err := os.Stat(filepath.Join(ta.home, ".bashrc")); !os.IsNotExist(err) {
+		t.Fatalf("setup installed a kiro-cli-chat wrapper: %v", err)
 	}
 }
 
 func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.HostDoctor = hostReport(nil)
-	ta.images.recs = []image.Record{{Connector: "claudecode", HookFireVerified: true, UID: os.Getuid(), DefenseClawVersion: manager.ImageVersion(),
-		IngressPort: ta.Cfg.OpenShellIngressPort(), HarnessVersion: "2.1.156"}}
+	ta.images.recs = readyImages(ta)
 	if _, err := wrapper.Enable(wrapper.Bash, filepath.Join(ta.home, ".bashrc"), "/nonexistent/defenseclaw-gateway", wrapper.Wrap{Command: "claude", Harness: "claude"}); err != nil {
 		t.Fatal(err)
 	}
-	err := ta.RunDoctor(context.Background(), DoctorOptions{})
-	var exit *ExitError
-	if !errors.As(err, &exit) || exit.Code != 1 {
-		t.Fatalf("doctor = %v, want exit 1 for the broken wrapper", err)
-	}
-	out := ta.output()
-	for _, want := range []string{"DefenseClaw daemon", "connected to OpenShell 0.1.1 gateway openshell", "Harness images",
-		"not built yet: codex", "calls /nonexistent/defenseclaw-gateway, which is missing", "Organization policy"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("doctor lacks %q:\n%s", want, out)
-		}
-	}
-	ta.out.Reset()
-	if err := ta.RunDoctor(context.Background(), DoctorOptions{Output: OutputJSON}); err != nil {
-		t.Fatalf("doctor --output json = %v", err)
-	}
+	wantExit(t, ta.RunDoctor(bg, DoctorOptions{}), 1) // the broken wrapper
+	has(t, ta.output(), "DefenseClaw daemon", "connected to OpenShell 0.1.1 gateway openshell", "Harness images",
+		"not built yet: codex", "calls /nonexistent/defenseclaw-gateway, which is missing", "Organization policy")
+	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
 	var rep struct {
 		OK     bool
 		Checks []openshell.Check
@@ -380,29 +458,19 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 // that reports none leaves the check nothing to compare.
 func TestDoctorComparesTheDaemonsOwnUID(t *testing.T) {
 	other := os.Getuid() + 1
-	for _, tc := range []struct {
-		name string
-		uid  *int
-	}{{"reported", &other}, {"not reported", nil}} {
-		t.Run(tc.name, func(t *testing.T) {
-			ta := newTestApp(t, "")
-			ta.daemon.status.DaemonUID = tc.uid
-			var got *int
-			ran := false
-			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
-				got, ran = d.DaemonUID, true
-				return hostReport(nil)(ctx, d)
-			}
-			_ = ta.RunDoctor(context.Background(), DoctorOptions{})
-			switch {
-			case !ran:
-				t.Fatal("the host checks did not run")
-			case tc.uid == nil && got != nil:
-				t.Fatalf("daemon uid = %d, want none", *got)
-			case tc.uid != nil && (got == nil || *got != *tc.uid):
-				t.Fatalf("daemon uid = %v, want %d", got, *tc.uid)
-			}
-		})
+	for _, uid := range []*int{&other, nil} {
+		ta := newTestApp(t, "")
+		ta.daemon.status.DaemonUID = uid
+		var got *int
+		ran := false
+		ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+			got, ran = d.DaemonUID, true
+			return hostReport(nil)(ctx, d)
+		}
+		_ = ta.RunDoctor(bg, DoctorOptions{})
+		if !ran || (uid == nil) != (got == nil) || (uid != nil && *got != *uid) {
+			t.Fatalf("ran %t: daemon uid = %v, want %v", ran, got, uid)
+		}
 	}
 }
 
@@ -410,66 +478,60 @@ func TestDoctorComparesTheDaemonsOwnUID(t *testing.T) {
 // sandboxes are turned off, and no image to build for a harness the
 // organization forbids.
 func TestDoctorVerdict(t *testing.T) {
-	ready := func(ta *testApp) {
-		ta.HostDoctor = hostReport(nil)
-		ta.images.recs = []image.Record{{Connector: "claudecode", HookFireVerified: true, UID: os.Getuid(), DefenseClawVersion: manager.ImageVersion(),
-			IngressPort: ta.Cfg.OpenShellIngressPort(), HarnessVersion: "2.1.156"}}
+	ta := newTestApp(t, "")
+	ta.HostDoctor, ta.images.recs = hostReport(nil), readyImages(ta)
+	ta.daemon.status.Enabled = false
+	ta.ok(t, ta.RunDoctor(bg, DoctorOptions{}))
+	has(t, ta.output(), "not ready for sandboxes yet: openshell.enabled is false: sandboxes are off (defenseclaw sandbox setup)")
+	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	var rep struct{ OK, Ready bool }
+	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || !rep.OK || rep.Ready {
+		t.Fatalf("doctor json ok/ready = %+v, %v", rep, err)
 	}
-	t.Run("sandboxes off", func(t *testing.T) {
-		ta := newTestApp(t, "")
-		ready(ta)
-		ta.daemon.status.Enabled = false
-		if err := ta.RunDoctor(context.Background(), DoctorOptions{}); err != nil {
-			t.Fatalf("doctor = %v", err)
-		}
-		out := ta.output()
-		if strings.Contains(out, "ready for sandboxes\n") && !strings.Contains(out, "not ready for sandboxes yet") {
-			t.Fatalf("doctor says ready while sandboxes are off:\n%s", out)
-		}
-		if !strings.Contains(out, "not ready for sandboxes yet: openshell.enabled is false: sandboxes are off (defenseclaw sandbox setup)") {
-			t.Fatalf("doctor verdict:\n%s", out)
-		}
-		ta.out.Reset()
-		if err := ta.RunDoctor(context.Background(), DoctorOptions{Output: OutputJSON}); err != nil {
-			t.Fatal(err)
-		}
-		var rep struct{ OK, Ready bool }
-		if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || !rep.OK || rep.Ready {
-			t.Fatalf("doctor json ok/ready = %+v, %v", rep, err)
-		}
-	})
-	t.Run("a forbidden harness", func(t *testing.T) {
-		ta := newTestApp(t, "")
-		ready(ta)
-		ta.Cfg.OpenShell.Admin.AllowedHarnesses = []string{"claudecode"}
-		if err := ta.RunDoctor(context.Background(), DoctorOptions{}); err != nil {
-			t.Fatalf("doctor = %v\n%s", err, ta.output())
-		}
-		out := ta.output()
-		if strings.Contains(out, "image build codex") || strings.Contains(out, "not built yet: codex") {
-			t.Fatalf("doctor suggests building a forbidden harness's image:\n%s", out)
-		}
-		if !strings.Contains(out, "hook-verified: claudecode 2.1.156; codex not allowed by your organization's policy (openshell.admin.allowed_harnesses)") ||
-			!strings.Contains(out, "ready for sandboxes") {
-			t.Fatalf("doctor output:\n%s", out)
-		}
-	})
+
+	ta = newTestApp(t, "")
+	ta.HostDoctor, ta.images.recs = hostReport(nil), readyImages(ta)
+	ta.Cfg.OpenShell.Admin.AllowedHarnesses = []string{"claudecode"}
+	ta.ok(t, ta.RunDoctor(bg, DoctorOptions{}))
+	has(t, ta.output(), "hook-verified: claudecode 2.1.156; codex not allowed by your organization's policy (openshell.admin.allowed_harnesses)",
+		"ready for sandboxes")
+	lacks(t, ta.output(), "image build codex", "not built yet: codex")
 }
 
+// TestDoctorWrapperHintNamesAConfiguredHarness pins that the doctor's
+// wrapper hint names a harness this install set up (manual test R2-44).
+func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
+	for _, tc := range []struct {
+		harnesses []string
+		want      string
+	}{
+		{nil, "none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)"},
+		{[]string{"kiro", "hermes", "openhands"}, "none (`defenseclaw sandbox enable hermes` makes `hermes` run sandboxed)"},
+		{[]string{"kiro"}, "none"},
+	} {
+		ta := newTestApp(t, "")
+		ta.Cfg.OpenShell.Harnesses = tc.harnesses
+		if c := ta.wrappersCheck(); c.Detail != tc.want {
+			t.Errorf("harnesses %v: wrappers check = %q, want %q", tc.harnesses, c.Detail, tc.want)
+		}
+	}
+}
+
+// Teardown removes what this install created and nothing else (not another
+// install's sandboxes and profiles, nor a gateway file the user edited
+// since); its dry run lists the plan and changes nothing.
 func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "  wrappers: [claudecode]\n")
-	ctx := context.Background()
 	owner, err := image.NewStore(ta.Cfg.DataDir).Owner()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := openshelltest.New()
-	client := fake.Client(openshell.ClientOptions{})
+	_, client := useGateway(ta)
 	ours := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: owner}
 	theirs := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: "someone-else"}
 	for name, labels := range map[string]map[string]string{"dc-claude-orphan": ours, "dc-claude-theirs": theirs} {
-		if _, err := client.CreateSandbox(ctx, name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
+		if _, err := client.CreateSandbox(bg, name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -478,116 +540,67 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	// ours to remove) and the legacy gateway-wide one of earlier releases.
 	ownPort := ta.Cfg.OpenShellIngressPort()
 	oldPort, otherPort := ownPort+1000, ownPort+2000
-	imports := []struct {
-		id string
-		in profiles.Input
-	}{
-		{profiles.IngressID, profiles.Input{IngressPort: ownPort}},
-		{profiles.IngressID, profiles.Input{IngressPort: oldPort}},
-		{profiles.IngressID, profiles.Input{IngressPort: otherPort}},
-		{profiles.LegacyIngressID, profiles.Input{IngressPort: 18000}},
-		{profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}},
+	for _, port := range []int{ownPort, oldPort, otherPort} {
+		importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: port}, "")
 	}
-	for i, im := range imports {
-		p, err := profiles.Render(im.id, im.in)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if i == 3 {
-			p.Spec.ID = profiles.LegacyIngressID
-		}
-		if _, err := client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: p.Spec, Source: "test"}}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: 18000}, profiles.LegacyIngressID)
+	importProfile(t, client, profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}, "")
 	for _, p := range []*openshell.Provider{
 		{Name: "dc-claude-orphan-ingress", Type: profiles.IngressProfileID(oldPort), Labels: ours, Spec: openshell.ProviderSpec{Credentials: map[string]string{"DEFENSECLAW_SANDBOX_TOKEN": "t"}}},
 		{Name: "dc-claude-theirs-llm", Type: profiles.AnthropicID, Labels: theirs, Spec: openshell.ProviderSpec{Credentials: map[string]string{"ANTHROPIC_API_KEY": "k"}}},
 	} {
-		if _, err := client.CreateProvider(ctx, p); err != nil {
+		if _, err := client.CreateProvider(bg, p); err != nil {
 			t.Fatal(err)
 		}
-	}
-	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
-		return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
 	}
 	ta.daemon.add(sampleSandbox("dc-claude-live"))
 	ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-1"}}
 	// Setup changed two gateway files; the user edited one since.
 	dir := t.TempDir()
 	kept, edited := filepath.Join(dir, "gateway.toml"), filepath.Join(dir, "gateway.env")
-	for _, p := range []string{kept, edited} {
-		if err := os.WriteFile(p, []byte("dc\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: kept, Backup: kept + ".bak"}, {Path: edited}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(edited, []byte("user edit\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, kept, "dc\n")
+	writeFile(t, edited, "dc\n")
+	ta.ok(t, ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: kept, Backup: kept + ".bak"}, {Path: edited}}}))
+	writeFile(t, edited, "user edit\n")
 	rc := filepath.Join(ta.home, ".bashrc")
 	if _, err := wrapper.Enable(wrapper.Bash, rc, "/usr/local/bin/defenseclaw-gateway", wrapper.Wrap{Command: "claude", Harness: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	// A staged copy an interrupted create left, which no record names.
-	leftover := filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale", "copy", "stage", "proj", "README.md")
-	if err := os.MkdirAll(filepath.Dir(leftover), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(leftover, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale", "copy", "stage", "proj", "README.md"), "x")
 
-	if err := ta.Teardown(ctx, TeardownOptions{DryRun: true}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(ta.output(), "leftover data     dc-claude-stale") {
-		t.Fatalf("dry run plan does not list the leftover data:\n%s", ta.output())
-	}
-	if !strings.Contains(ta.output(), "dc-claude-live, dc-claude-orphan") || strings.Contains(ta.output(), "dc-claude-theirs") {
-		t.Fatalf("dry run plan:\n%s", ta.output())
-	}
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
 	// The profiles, each labeled: this install's ingress ones, then the
 	// earlier release's gateway-wide one.
-	wantProfiles := "provider profiles " + profiles.IngressProfileID(ownPort) + ", " + profiles.IngressProfileID(oldPort) + " (this install's hook ingress)\n" +
-		"                    " + profiles.LegacyIngressID + " (from an earlier DefenseClaw release)\n  images "
-	if !strings.Contains(ta.output(), wantProfiles) {
-		t.Fatalf("dry run plan does not remove exactly these profiles:\n%s\ngot:\n%s", wantProfiles, ta.output())
-	}
-	if len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")) != 0 || len(ta.gateway.rollbacks) != 0 {
+	has(t, ta.output(), "leftover data     dc-claude-stale", "dc-claude-live, dc-claude-orphan",
+		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n"+
+			"                    "+profiles.LegacyIngressID+" (from an earlier DefenseClaw release)\n  images ")
+	lacks(t, ta.output(), "dc-claude-theirs")
+	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
 	}
 
-	if err := ta.Teardown(ctx, TeardownOptions{Yes: true}); err != nil {
-		t.Fatalf("Teardown: %v\n%s", err, ta.output())
-	}
-	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")); n != 1 {
-		t.Fatalf("daemon deletes = %d", n)
-	}
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true}))
+	ta.wantCalls(t, 1, "DELETE", "dc-claude-live")
 	if _, err := os.Stat(filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale")); !os.IsNotExist(err) {
 		t.Fatalf("the leftover data is still there: %v", err)
 	}
-	if _, err := client.GetSandbox(ctx, "dc-claude-orphan"); !openshell.IsNotFound(err) {
-		t.Fatalf("orphan sandbox left: %v", err)
-	}
-	if _, err := client.GetSandbox(ctx, "dc-claude-theirs"); err != nil {
-		t.Fatalf("another data dir's sandbox was deleted: %v", err)
-	}
-	if _, err := client.GetProvider(ctx, "dc-claude-orphan-ingress"); !openshell.IsNotFound(err) {
-		t.Fatalf("our provider left: %v", err)
-	}
-	for _, id := range []string{profiles.IngressProfileID(ownPort), profiles.IngressProfileID(oldPort), profiles.LegacyIngressID} {
-		if _, err := client.GetProfile(ctx, id); !openshell.IsNotFound(err) {
-			t.Fatalf("the unused ingress profile %s is left: %v", id, err)
+	for what, c := range map[string]struct {
+		err  error
+		gone bool
+	}{
+		"our orphan sandbox":                    {errOf(client.GetSandbox(bg, "dc-claude-orphan")), true},
+		"another data dir's sandbox":            {errOf(client.GetSandbox(bg, "dc-claude-theirs")), false},
+		"our provider":                          {errOf(client.GetProvider(bg, "dc-claude-orphan-ingress")), true},
+		"our ingress profile":                   {errOf(client.GetProfile(bg, profiles.IngressProfileID(ownPort))), true},
+		"our earlier port's ingress profile":    {errOf(client.GetProfile(bg, profiles.IngressProfileID(oldPort))), true},
+		"the legacy ingress profile":            {errOf(client.GetProfile(bg, profiles.LegacyIngressID)), true},
+		"another daemon's ingress profile":      {errOf(client.GetProfile(bg, profiles.IngressProfileID(otherPort))), false},
+		"a profile another provider still uses": {errOf(client.GetProfile(bg, profiles.AnthropicID)), false},
+	} {
+		if gone := openshell.IsNotFound(c.err); gone != c.gone || (!gone && c.err != nil) {
+			t.Errorf("%s: %v, want it gone: %t", what, c.err, c.gone)
 		}
-	}
-	if _, err := client.GetProfile(ctx, profiles.IngressProfileID(otherPort)); err != nil {
-		t.Fatalf("another daemon's ingress profile was deleted: %v", err)
-	}
-	if _, err := client.GetProfile(ctx, profiles.AnthropicID); err != nil {
-		t.Fatalf("a profile another provider uses was deleted: %v", err)
 	}
 	if !slices.Equal(ta.images.removed, []string{"defenseclaw/sandbox:claudecode-1"}) {
 		t.Fatalf("images removed = %v", ta.images.removed)
@@ -595,14 +608,55 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if len(ta.gateway.rollbacks) != 1 || len(ta.gateway.rollbacks[0].Files) != 1 || ta.gateway.rollbacks[0].Files[0].Path != kept {
 		t.Fatalf("rollbacks = %+v", ta.gateway.rollbacks)
 	}
-	if !strings.Contains(ta.output(), edited+" changed after DefenseClaw edited it") {
-		t.Fatalf("no notice for the edited gateway file:\n%s", ta.output())
-	}
+	has(t, ta.output(), edited+" changed after DefenseClaw edited it")
 	if b, _ := wrapper.Read(rc); len(b.Wraps) != 0 {
 		t.Fatalf("wrappers left: %+v", b)
 	}
 	if c := loadConfig(t, ta); c.OpenShell.Enabled || len(c.OpenShell.Wrappers) != 0 {
 		t.Fatalf("config after teardown = %+v", c.OpenShell)
+	}
+}
+
+// TestTeardownDryRunListsEveryStep pins the dry run a newcomer reads: every
+// step, "none" and "nothing to restore" included, the provider profiles
+// labeled by whose they are, and a closing "nothing was changed" (manual
+// test R2-40). A teardown with only openshell.enabled left turns it off.
+func TestTeardownDryRunListsEveryStep(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	_, client := useGateway(ta)
+	ownPort := ta.Cfg.OpenShellIngressPort()
+	claude := profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}
+	importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: ownPort}, "")
+	importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: ownPort + 1000}, "")
+	importProfile(t, client, profiles.AnthropicID, claude, "")
+	for _, id := range []string{"dc-cred-0001", "dc-cred-0002", "dc-cred-0003", "dc-cred-0004"} {
+		importProfile(t, client, profiles.AnthropicID, claude, id)
+	}
+	ta.daemon.add(sampleSandbox("dc-claude-live"))
+	ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-1"}}
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
+	has(t, ta.output(),
+		"  sandboxes         dc-claude-live\n",
+		"  providers         none\n",
+		"  provider profiles "+profiles.IngressProfileID(ownPort)+" (this install's hook ingress)\n"+
+			"                    "+profiles.AnthropicID+", 4 --credential profiles (dc-cred-…) (shared by every DefenseClaw install on this gateway "+
+			"and unused now; an install that needs one imports it again)\n",
+		"  images            defenseclaw/sandbox:claudecode-1\n",
+		"  gateway config    nothing to restore (setup recorded no change to it)\n",
+		"  shell wrappers    none\n",
+		"  config            turn openshell.enabled off in "+ta.ConfigPath+"\n",
+		"dry run: nothing was changed\n")
+	lacks(t, ta.output(), profiles.IngressProfileID(ownPort+1000))
+	if !loadConfig(t, ta).OpenShell.Enabled {
+		t.Fatal("the dry run changed the config")
+	}
+	// Only openshell.enabled is left: teardown still turns it off.
+	ta = newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true}))
+	if strings.Contains(ta.output(), "nothing to tear down") || loadConfig(t, ta).OpenShell.Enabled {
+		t.Fatalf("teardown left openshell.enabled on:\n%s", ta.output())
 	}
 }
 
@@ -619,29 +673,14 @@ func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	// The daemon's record: the data under the sandbox's directory is not an
 	// orphan's.
 	sandboxes := filepath.Join(ta.Cfg.DataDir, "sandboxes")
-	if err := os.MkdirAll(filepath.Join(sandboxes, "manager"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(sandboxes, "manager", "dc-claude-live.json"),
-		[]byte(`{"version":1,"name":"dc-claude-live","harness":"claudecode"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(sandboxes, "manager", "dc-claude-live.json"), `{"version":1,"name":"dc-claude-live","harness":"claudecode"}`)
 	dir, err := ta.cliStateDir("dc-claude-live")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "run.log"), []byte("what the agent printed\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := ta.Teardown(context.Background(), TeardownOptions{Yes: true, KeepImages: true}); err != nil {
-		t.Fatalf("Teardown: %v\n%s", err, ta.output())
-	}
-	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")); n != 1 {
-		t.Fatalf("daemon deletes = %d", n)
-	}
+	writeFile(t, filepath.Join(dir, "run.log"), "what the agent printed\n")
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
+	ta.wantCalls(t, 1, "DELETE", "dc-claude-live")
 	if _, err := os.Stat(filepath.Join(sandboxes, "dc-claude-live")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the sandbox's directory (and its kept run log) is still there: %v", err)
 	}
@@ -657,22 +696,14 @@ func TestTeardownWithoutDaemonOrGateway(t *testing.T) {
 	if got, want := ta.dataDir(), filepath.Dir(ta.ConfigPath); got != want {
 		t.Fatalf("data dir without a config = %s, want the fixture's %s", got, want)
 	}
-	if err := ta.Teardown(context.Background(), TeardownOptions{Yes: true}); err != nil {
-		t.Fatalf("Teardown: %v\n%s", err, ta.output())
-	}
-	if !strings.Contains(ta.output(), "nothing to tear down") {
-		t.Fatalf("output:\n%s", ta.output())
-	}
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true}))
+	has(t, ta.output(), "nothing to tear down")
 }
 
-// TestTeardownWithTheDaemonStopped pins that a teardown that deletes a
-// recorded sandbox on the gateway itself (no daemon runs) also removes
-// what the daemon's delete would have: the ingress binding, the run files
-// and the record, and that it drops recorded sandboxes the gateway no
-// longer has (a kept snapshot). A daemon that has sandboxes on but cannot
-// list them keeps its local state.
+// A teardown without the daemon also removes what the daemon's delete would
+// have (the ingress binding, the run files, the record), for the gone
+// sandboxes too; a daemon that is up but cannot list keeps its state.
 func TestTeardownWithTheDaemonStopped(t *testing.T) {
-	ctx := context.Background()
 	setup := func(t *testing.T) (*testApp, string, *sandboxauth.FileStore) {
 		ta := newTestApp(t, "")
 		writeConfig(t, ta, "")
@@ -680,14 +711,10 @@ func TestTeardownWithTheDaemonStopped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fake := openshelltest.New()
-		client := fake.Client(openshell.ClientOptions{})
+		_, client := useGateway(ta)
 		labels := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: owner}
-		if _, err := client.CreateSandbox(ctx, "dc-claude-live", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
+		if _, err := client.CreateSandbox(bg, "dc-claude-live", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
 			t.Fatal(err)
-		}
-		ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
-			return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
 		}
 		store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(ta.Cfg.DataDir), sandboxauth.WithRefreshInterval(0))
 		if err != nil {
@@ -702,34 +729,17 @@ func TestTeardownWithTheDaemonStopped(t *testing.T) {
 			"dc-claude-live": `{"version":1,"name":"dc-claude-live","harness":"claudecode","binding_id":"` + b.ID + `"}`,
 			"dc-claude-kept": `{"version":1,"name":"dc-claude-kept","harness":"claudecode","retained":true}`,
 		} {
-			if err := os.MkdirAll(filepath.Join(sandboxes, name, "run-config"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(sandboxes, name, "run-config", "settings.json"), []byte("{}"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Join(sandboxes, "manager"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(sandboxes, "manager", name+".json"), []byte(rec), 0o600); err != nil {
-				t.Fatal(err)
-			}
+			writeFile(t, filepath.Join(sandboxes, name, "run-config", "settings.json"), "{}")
+			writeFile(t, filepath.Join(sandboxes, "manager", name+".json"), rec)
 		}
 		return ta, b.ID, store
 	}
 	t.Run("stopped", func(t *testing.T) {
 		ta, id, store := setup(t)
 		ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
-		if err := ta.Teardown(ctx, TeardownOptions{Yes: true, KeepImages: true}); err != nil {
-			t.Fatalf("Teardown: %v\n%s", err, ta.output())
-		}
-		out := ta.output()
-		for _, want := range []string{"gone sandboxes    dc-claude-kept (kept snapshot)", "deleted sandbox dc-claude-live",
-			"removed what the gone sandbox dc-claude-kept left on this machine"} {
-			if !strings.Contains(out, want) {
-				t.Errorf("teardown output lacks %q:\n%s", want, out)
-			}
-		}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
+		has(t, ta.output(), "gone sandboxes    dc-claude-kept (kept snapshot)", "deleted sandbox dc-claude-live",
+			"removed what the gone sandbox dc-claude-kept left on this machine")
 		if left := manager.RecordedSandboxes(ta.Cfg.DataDir); len(left) != 0 {
 			t.Fatalf("records left: %+v", left)
 		}
@@ -751,9 +761,7 @@ func TestTeardownWithTheDaemonStopped(t *testing.T) {
 		ta.daemon.errors = map[string]*sandboxapi.Error{
 			http.MethodGet + " " + sandboxapi.PathSandboxes: {Code: sandboxapi.CodeUpstream, Message: "listing is down"},
 		}
-		if err := ta.Teardown(ctx, TeardownOptions{Yes: true, KeepImages: true}); err != nil {
-			t.Fatalf("Teardown: %v\n%s", err, ta.output())
-		}
+		ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
 		if left := manager.RecordedSandboxes(ta.Cfg.DataDir); len(left) != 2 {
 			t.Fatalf("records left = %+v; a daemon may still be managing them", left)
 		}
@@ -762,9 +770,3 @@ func TestTeardownWithTheDaemonStopped(t *testing.T) {
 		}
 	})
 }
-
-// noCloseClient keeps the shared fake gateway open when a command closes
-// its client.
-type noCloseClient struct{ openshell.Client }
-
-func (noCloseClient) Close() error { return nil }

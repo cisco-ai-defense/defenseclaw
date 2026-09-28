@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,7 +53,6 @@ type call struct {
 
 // fakeDaemon serves the sandbox REST API from memory.
 type fakeDaemon struct {
-	t   *testing.T
 	srv *httptest.Server
 
 	mu        sync.Mutex
@@ -135,7 +135,7 @@ func runsHarness(argv []string) bool {
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
-	d := &fakeDaemon{t: t, sandboxes: map[string]*sandboxapi.Sandbox{}, errors: map[string]*sandboxapi.Error{}}
+	d := &fakeDaemon{sandboxes: map[string]*sandboxapi.Sandbox{}, errors: map[string]*sandboxapi.Error{}}
 	d.status = sandboxapi.Status{Enabled: true, Available: true, IngressAddr: "127.0.0.1:18971", EgressAddr: "127.0.0.1:18972",
 		Gateway: &sandboxapi.Gateway{Name: "openshell", Endpoint: "https://127.0.0.1:17670", Workspace: "default", Version: "0.1.1", Healthy: true},
 		Pack:    "open", Profile: "open"}
@@ -506,7 +506,6 @@ type fakeImages struct {
 	recs    []image.Record
 	built   []string
 	removed []string
-	err     error
 	// missing are harnesses whose image is not built yet (Current).
 	missing map[string]bool
 }
@@ -520,9 +519,6 @@ func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
 func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, _ bool, _ io.Writer) (image.Record, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.err != nil {
-		return image.Record{}, false, f.err
-	}
 	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true}
 	f.built = append(f.built, spec.Name)
 	f.recs = append(f.recs, rec)
@@ -564,13 +560,10 @@ type fakeCopy struct {
 	applied  *workspace.ApplyResult
 	applyErr error
 	// undo is what UndoApply answers (ErrNothingApplied when nil).
-	undo    *workspace.UndoApplyResult
-	undoErr error
+	undo *workspace.UndoApplyResult
 	// pending is what PendingWork answers per sandbox, with an execer
-	// (running) or without one (stopped); pendingErr fails it.
-	pending        map[string]workspace.CopyWork
-	pendingStopped map[string]workspace.CopyWork
-	pendingErr     error
+	// (running) or without one (stopped).
+	pending, pendingStopped map[string]workspace.CopyWork
 }
 
 func (f *fakeCopy) Discard(_, name string) error {
@@ -581,9 +574,6 @@ func (f *fakeCopy) Discard(_, name string) error {
 func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.Execer) (workspace.CopyWork, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.pendingErr != nil {
-		return workspace.CopyWorkUnknown, f.pendingErr
-	}
 	if ex == nil {
 		return f.pendingStopped[name], nil
 	}
@@ -592,9 +582,6 @@ func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.E
 
 func (f *fakeCopy) UndoApply(_ context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {
 	f.step(fmt.Sprintf("undo-apply %s preview=%v", o.Name, o.Preview))
-	if f.undoErr != nil {
-		return nil, f.undoErr
-	}
 	if f.undo == nil {
 		return nil, workspace.ErrNothingApplied
 	}
@@ -699,9 +686,13 @@ type testApp struct {
 	execs    [][]string
 	// gitConfig answers App.GitConfig by key.
 	gitConfig map[string]string
+	// live is the stderr liveErr set.
+	live *lockedBuffer
 }
 
-func newTestApp(t *testing.T, input string) *testApp {
+// newTestApp is an App wired to fakes, whose daemon holds sandboxes and
+// whose terminal types input.
+func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *testApp {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -755,7 +746,338 @@ func newTestApp(t *testing.T, input string) *testApp {
 		// Never the developer's own git identity.
 		GitConfig: func(_ context.Context, _, key string) string { return ta.gitConfig[key] },
 	}
+	for _, sb := range sandboxes {
+		ta.daemon.add(sb)
+	}
 	return ta
 }
 
 func (ta *testApp) output() string { return ta.out.String() }
+
+// bg is the context the tests run commands in.
+var bg = context.Background()
+
+// errOf is the error of a call that also returns a value.
+func errOf[T any](_ T, err error) error { return err }
+
+const (
+	// sbName is the name the fake daemon gives a run's sandbox.
+	sbName = "dc-claude-proj-1a2b"
+	sbPath = sandboxapi.PathSandboxes + "/" + sbName
+)
+
+// ok stops the test if a command failed, with what it printed.
+func (ta *testApp) ok(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, ta.output())
+	}
+}
+
+// fresh empties ta's stdout for the command that follows:
+// ta.ok(t, ta.fresh().Status(...)).
+func (ta *testApp) fresh() *testApp {
+	ta.out.Reset()
+	return ta
+}
+
+// calls counts the fake daemon's requests to a sandbox endpoint: "box" (the
+// sandbox itself) or "box/stop".
+func (ta *testApp) calls(method, rel string) int { return len(ta.bodies(method, rel)) }
+
+// wantCalls stops the test unless the fake daemon got n requests to a
+// sandbox endpoint.
+func (ta *testApp) wantCalls(t *testing.T, n int, method, rel string) {
+	t.Helper()
+	if got := ta.calls(method, rel); got != n {
+		t.Fatalf("%s %s calls = %d, want %d\n%s", method, rel, got, n, ta.output())
+	}
+}
+
+// bodies are the bodies of the requests to a sandbox endpoint.
+func (ta *testApp) bodies(method, rel string) []string {
+	var out []string
+	for _, c := range ta.daemon.callsTo(method, sandboxapi.PathSandboxes+"/"+rel) {
+		out = append(out, string(c.Body))
+	}
+	return out
+}
+
+// creates counts the create requests the fake daemon got.
+func (ta *testApp) creates() int { return len(ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)) }
+
+// has fails the test unless s holds every want.
+func has(t *testing.T, s string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(s, w) {
+			t.Errorf("lacks %q:\n%s", w, s)
+		}
+	}
+}
+
+// lacks fails the test if s holds any of bad.
+func lacks(t *testing.T, s string, bad ...string) {
+	t.Helper()
+	for _, b := range bad {
+		if strings.Contains(s, b) {
+			t.Errorf("holds %q:\n%s", b, s)
+		}
+	}
+}
+
+// wantErr stops the test unless err holds every want.
+func wantErr(t *testing.T, err error, want ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("no error, want %q", want)
+	}
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Fatalf("err = %v, want %q", err, w)
+		}
+	}
+}
+
+func wantExit(t *testing.T, err error, code int) {
+	t.Helper()
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != code {
+		t.Fatalf("err = %v, want exit status %d", err, code)
+	}
+}
+
+// edit changes a sandbox of the fake daemon, as the daemon does during a
+// session.
+func (d *fakeDaemon) edit(name string, f func(*sandboxapi.Sandbox)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f(d.sandboxes[name])
+}
+
+func (ta *testApp) mustGet(t *testing.T, name string) *sandboxapi.Sandbox {
+	t.Helper()
+	ta.daemon.mu.Lock()
+	defer ta.daemon.mu.Unlock()
+	sb, ok := ta.daemon.sandboxes[name]
+	if !ok {
+		t.Fatalf("no sandbox %s", name)
+	}
+	cp := *sb
+	return &cp
+}
+
+// noChanges makes the fake review report an unchanged folder.
+func noChanges(ta *testApp) {
+	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+}
+
+func sampleSandbox(name string) sandboxapi.Sandbox {
+	return sandboxapi.Sandbox{
+		Name: name, ID: "sb-" + name, Harness: "claudecode", HarnessName: "Claude Code", Phase: "ready", Profile: "open",
+		Pack: "open", NetworkMode: "open", Yolo: true, WorkdirMode: "mount", Project: "/home/u/proj", Workdir: "/work/proj",
+		UptimeSeconds: 3700, Launch: sandboxapi.Launch{Yolo: true}, TamperTier: "managed", HookContract: "claude-code-hooks-v1",
+		Hooks:  sandboxapi.HookCoverage{LastHookAt: time.Now(), HookRequests: 9, ToolCalls: 4, ToolBlocked: 1, LastBlocked: "marker"},
+		Egress: sandboxapi.EgressStats{Destinations: 3, Blocked: 1, BytesUp: 2048, BytesDown: 1 << 20},
+	}
+}
+
+func copySandbox(name string) sandboxapi.Sandbox {
+	sb := sampleSandbox(name)
+	sb.WorkdirMode, sb.Workdir, sb.Phase = "copy", "/sandbox/work/proj", "stopped"
+	return sb
+}
+
+// folderSandbox is a sandbox that holds ta's project folder: a run there
+// offers to resume it.
+func folderSandbox(ta *testApp, phase string) sandboxapi.Sandbox {
+	sb := sampleSandbox("proj-0a1b")
+	sb.Phase, sb.Project, sb.CreatedAt = phase, ta.project, time.Now()
+	return sb
+}
+
+func createRequest(t *testing.T, d *fakeDaemon) sandboxapi.CreateRequest {
+	t.Helper()
+	calls := d.callsTo("POST", sandboxapi.PathSandboxes)
+	if len(calls) != 1 {
+		t.Fatalf("create calls = %d (calls: %v)", len(calls), d.paths())
+	}
+	var req sandboxapi.CreateRequest
+	if err := json.Unmarshal(calls[0].Body, &req); err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func harnessSpec(t *testing.T, name string) *harness.Spec {
+	t.Helper()
+	spec, ok := harness.Get(name)
+	if !ok {
+		t.Fatalf("no harness %s", name)
+	}
+	return spec
+}
+
+// writeConfig writes a minimal valid v8 config.yaml.
+func writeConfig(t *testing.T, ta *testApp, extra string) {
+	t.Helper()
+	body := "config_version: 8\ndata_dir: " + ta.Cfg.DataDir + "\ngateway:\n  host: 127.0.0.1\n  api_port: 18970\nopenshell:\n  enabled: true\n" + extra
+	if err := os.WriteFile(ta.ConfigPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func loadConfig(t *testing.T, ta *testApp) *config.Config {
+	t.Helper()
+	c, err := config.LoadRuntimeV8File(ta.ConfigPath)
+	if err != nil {
+		t.Fatalf("load %s: %v", ta.ConfigPath, err)
+	}
+	return c
+}
+
+// writeFile writes data to path, making its directory.
+func writeFile(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// isRunStatus reports whether cmd reads a detached run's status.
+func isRunStatus(cmd []string) bool {
+	return len(cmd) > 2 && cmd[0] == "sh" && strings.Contains(cmd[2], "latest.exit")
+}
+
+// runAnswers makes the fake sandbox report its latest detached run as state
+// (the run-state script's key=value answer), log as the run's log, and
+// answers everything else with success.
+func runAnswers(ta *testApp, state, log string) {
+	ta.stream.answer = func(argv []string) (int, string) {
+		cmd := sandboxCommand(argv)
+		switch {
+		case len(cmd) > 2 && cmd[0] == "sh" && cmd[2] == runStateScript:
+			return 0, state
+		case len(cmd) > 2 && cmd[0] == "sh" && (cmd[2] == runMarkScript || cmd[2] == runFollowScript):
+			return 0, log
+		case len(cmd) > 0 && cmd[0] == "tail":
+			return 0, log
+		}
+		return 0, ""
+	}
+}
+
+func ranScript(ta *testApp, script string) bool {
+	return slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
+		cmd := sandboxCommand(argv)
+		return len(cmd) > 2 && cmd[0] == "sh" && cmd[2] == script
+	})
+}
+
+// execSession splits a `sandbox exec` command into its session id and the
+// user's command, without the session shell and the sandbox-env wrapper.
+func execSession(cmd []string) (string, []string) {
+	if len(cmd) < 4 || cmd[0] != "/bin/sh" || cmd[1] != "-c" || cmd[2] != execSessionShell ||
+		!strings.HasPrefix(cmd[3], execSessionMark) {
+		return "", cmd
+	}
+	session, rest := strings.TrimPrefix(cmd[3], execSessionMark), cmd[4:]
+	if len(rest) > 0 && rest[0] == harness.SandboxEnvPath {
+		rest = rest[1:]
+	}
+	return session, rest
+}
+
+// lockedBuffer is a stderr the session's notice goroutines write while the
+// test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// liveErr gives ta a stderr that is safe to read during the session.
+func liveErr(ta *testApp) *lockedBuffer {
+	ta.live = &lockedBuffer{}
+	ta.IO.Err = ta.live
+	return ta.live
+}
+
+// waitFor polls cond until it holds or the test's patience runs out.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// runCase is a command of a fresh testApp (a run unless do says otherwise)
+// and what it must print.
+type runCase struct {
+	name  string
+	input string
+	setup func(*testApp)
+	// during runs while the harness owns the terminal.
+	during func(*testing.T, *testApp)
+	opts   RunOptions
+	do     func(*testApp) error
+	exit   int      // the exit status the command must end with, 0 for success
+	want   []string // in its output
+	not    []string // not in its output
+	// live and notLive are what stderr, written during the session, must
+	// and must not hold.
+	live, notLive []string
+	check         func(*testing.T, *testApp)
+}
+
+func runCases(t *testing.T, cases []runCase) {
+	t.Helper()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, c.input)
+			liveErr(ta)
+			if c.setup != nil {
+				c.setup(ta)
+			}
+			if c.during != nil {
+				ta.term.during = func() { c.during(t, ta) }
+			}
+			var err error
+			if c.do != nil {
+				err = c.do(ta)
+			} else {
+				err = ta.Run(bg, c.opts)
+			}
+			if c.exit != 0 {
+				wantExit(t, err, c.exit)
+			} else {
+				ta.ok(t, err)
+			}
+			has(t, ta.output(), c.want...)
+			lacks(t, ta.output(), c.not...)
+			has(t, ta.live.String(), c.live...)
+			lacks(t, ta.live.String(), c.notLive...)
+			if c.check != nil {
+				c.check(t, ta)
+			}
+		})
+	}
+}
