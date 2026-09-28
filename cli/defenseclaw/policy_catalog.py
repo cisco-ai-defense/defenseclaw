@@ -450,6 +450,9 @@ def pack_name_for_path(cfg: Any, path: str) -> tuple[str, str]:
     for preset in RULE_PACK_PRESETS:
         if any(_same_path(path, cand) for cand in _preset_candidates(cfg, preset)):
             return preset, "preset"
+    if is_protected_pack_path(path):
+        # protected-<scope>/<profile>: name it after the scope folder.
+        return os.path.basename(os.path.dirname(os.path.normpath(path))), "custom"
     base = os.path.basename(os.path.normpath(path)) if path else ""
     return (base or path), "custom"
 
@@ -817,13 +820,47 @@ def protection_packs(root: str | os.PathLike[str] | None = None) -> list[Protect
     return out
 
 
-def protected_pack_dir(cfg: Any, scope: str) -> str:
+#: Posture profiles the gateway derives from a rule-pack folder's name.
+PACK_PROFILES = ("default", "strict", "permissive")
+
+
+def pack_profile(path: str) -> str:
+    """The posture profile the gateway reads from a rule-pack folder name.
+
+    Mirrors ``guardrailProfileForDir`` in internal/gateway/decision.go: the
+    folder's base name decides tool-call block and alert levels; ``strict``
+    and ``permissive`` keep theirs, every other name reads as ``default``.
+    """
+    raw = (path or "").strip().rstrip("/\\")
+    if not raw:
+        return "default"
+    base = os.path.basename(os.path.normpath(raw)).lower()
+    return base if base in {"strict", "permissive"} else "default"
+
+
+def protected_pack_dir(cfg: Any, scope: str, profile: str = "default") -> str:
     """Where ``guardrail protection`` composes *scope*'s pack.
 
-    ``<policy_dir>/guardrail/protected-<scope>`` ("" without a policy dir).
+    ``<policy_dir>/guardrail/protected-<scope>/<profile>`` ("" without a
+    policy dir). The last folder is the base pack's profile because the
+    gateway takes tool-call block and alert levels from the folder name, so a
+    strict pack with opt-in packs layered on must still end in ``strict``.
     """
     root = _policy_root(cfg)
-    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}") if root else ""
+    if not root:
+        return ""
+    safe = profile if profile in PACK_PROFILES else "default"
+    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}", safe)
+
+
+def is_protected_pack_path(path: str) -> bool:
+    """True for a ``protected-<scope>/<profile>`` folder ``guardrail protection`` composes."""
+    if not path:
+        return False
+    norm = os.path.normpath(path)
+    return os.path.basename(os.path.dirname(norm)).startswith(PROTECTED_PACK_PREFIX) and (
+        os.path.basename(norm) in PACK_PROFILES
+    )
 
 
 def protection_pack_dir(name: str, root: str | os.PathLike[str] | None = None) -> str:
@@ -1205,6 +1242,7 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
 __all__ = [
     "BUILTIN_POLICY_NAMES",
     "COVERS_MAX_CHARS",
+    "PACK_PROFILES",
     "PROTECTED_PACK_PREFIX",
     "PROTECTION_MANIFEST",
     "RULE_PACK_PRESETS",
@@ -1236,6 +1274,8 @@ __all__ = [
     "packs_layered_in",
     "policy_file",
     "preset_pack_dir",
+    "is_protected_pack_path",
+    "pack_profile",
     "protected_pack_dir",
     "protection_pack_dir",
     "protection_packs",

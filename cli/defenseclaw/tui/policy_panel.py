@@ -888,10 +888,15 @@ def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> Conseq
 
 
 def composed_pack_path(model: PoliciesPanelModel, row: Any) -> str:
-    """Where ``guardrail protection enable`` composes the scope's pack."""
+    """Where ``guardrail protection enable`` composes the scope's pack.
+
+    ``protected-<scope>/<profile>``: the last folder keeps the base pack's
+    profile, which is where the gateway reads tool-call levels from.
+    """
     scope = str(getattr(row, "scope", "") or "global")
     root = model.policy_dir or "<policy dir>"
-    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}")
+    profile = pack_profile(str(getattr(row, "pack_path", "") or ""))
+    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}", profile)
 
 
 def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enable: bool) -> ConsequenceModalModel:
@@ -916,7 +921,7 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
         current_path = str(getattr(row, "pack_path", "") or "")
         base = str(getattr(row, "pack", "") or "-")
         target = composed_pack_path(model, row)
-        folder = os.path.join("guardrail", os.path.basename(target))
+        folder = os.path.join("guardrail", os.path.basename(os.path.dirname(target)), os.path.basename(target))
         details.append(
             f"Builds {folder} in your policy folder from {base} and the opt-in packs, checks it, "
             f"and switches {where} to it; a running gateway restarts."

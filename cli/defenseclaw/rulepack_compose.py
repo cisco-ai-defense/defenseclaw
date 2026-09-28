@@ -261,6 +261,16 @@ def stage_pack(
 
 def discard(staged: str) -> None:
     shutil.rmtree(staged, ignore_errors=True)
+    _prune_scope_dir(os.path.dirname(os.path.normpath(staged)))
+
+
+def _prune_scope_dir(parent: str) -> None:
+    """Remove an empty ``protected-<scope>`` folder left after a discard or removal."""
+    if os.path.basename(parent).startswith(policy_catalog.PROTECTED_PACK_PREFIX):
+        try:
+            os.rmdir(parent)  # only succeeds when empty
+        except OSError:
+            pass
 
 
 def install_pack(staged: str, final: str) -> None:
@@ -289,9 +299,15 @@ def remove_pack(path: str) -> bool:
     """Delete a composed pack directory (never anything without a manifest)."""
     if not path or os.path.islink(path) or not os.path.isdir(path) or not is_composed(path):
         return False
-    if not os.path.basename(os.path.normpath(path)).startswith(policy_catalog.PROTECTED_PACK_PREFIX):
+    norm = os.path.normpath(path)
+    if not (
+        policy_catalog.is_protected_pack_path(norm)
+        or os.path.basename(norm).startswith(policy_catalog.PROTECTED_PACK_PREFIX)
+    ):
         return False
     shutil.rmtree(path, ignore_errors=True)
+    if policy_catalog.is_protected_pack_path(norm):
+        _prune_scope_dir(os.path.dirname(norm))
     return not os.path.exists(path)
 
 

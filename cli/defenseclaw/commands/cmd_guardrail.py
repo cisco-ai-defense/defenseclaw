@@ -2815,7 +2815,7 @@ def protection() -> None:
       enable   layer a pack into a scope's rule pack
       disable  take it out again
 
-    Turning a pack on composes <policy_dir>/guardrail/protected-<scope>/ from
+    Turning a pack on composes <policy_dir>/guardrail/protected-<scope>/<profile>/ from
     the scope's current rule pack plus every pack that is on (Policy Creator's
     merge: a pack's rules replace base rules with the same id), validates it
     with the gateway's validator and switches the scope to it. A pack asserts
@@ -2935,7 +2935,7 @@ def protection_enable_cmd(
 ) -> None:
     """Turn opt-in protection pack NAME on, globally or for one connector.
 
-    Composes <policy_dir>/guardrail/protected-<scope>/ from the scope's base
+    Composes <policy_dir>/guardrail/protected-<scope>/<profile>/ from the scope's base
     pack plus every pack that's on, validates it (invalid: exit 1; validator
     unavailable: exit 2 unless --no-validate; nothing is switched either way)
     and points the scope at it. The global scope leaves per-connector packs
@@ -3063,7 +3063,11 @@ def _change_protection(
         )
     try:
         base_path, base_name = rulepack_compose.resolve_base(cfg, current.path)
-        final = policy_catalog.protected_pack_dir(cfg, rulepack_compose.protected_scope_name(scope))
+        # Keep the base's profile as the folder name: the gateway reads
+        # tool-call levels from it, so strict + opt-in packs stays strict.
+        final = policy_catalog.protected_pack_dir(
+            cfg, rulepack_compose.protected_scope_name(scope), policy_catalog.pack_profile(base_path)
+        )
         if not final:
             raise rulepack_compose.ComposeError("No policy directory is configured.")
     except rulepack_compose.ComposeError as exc:

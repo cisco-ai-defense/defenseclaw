@@ -168,7 +168,8 @@ def pack_profile(path: str) -> str:
 
     Mirrors ``guardrailProfileForDir``: the folder's base name, lowercased;
     ``strict`` and ``permissive`` keep their posture, ``balanced`` and every
-    other name (a custom or composed pack included) read as ``default``.
+    other custom name read as ``default``. A composed pack
+    (``protected-<scope>/<profile>``) ends in its base pack's profile.
     """
     raw = (path or "").strip().rstrip("/\\")
     if not raw:

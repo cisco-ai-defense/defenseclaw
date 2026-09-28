@@ -111,7 +111,7 @@ def test_enable_globally_composes_validates_then_switches(env) -> None:
     result = _run(app, "enable", DB, "--json")
     assert result.exit_code == 0, result.output
     payload = _json(result)
-    final = root / "protected-global"
+    final = root / "protected-global" / "default"
     assert payload == {
         "version": 1,
         "ok": True,
@@ -148,7 +148,7 @@ def test_second_pack_recomposes_from_the_recorded_base(env) -> None:
     app, root, _validator = env
     assert _run(app, "enable", CLOUD).exit_code == 0
     payload = _json(_run(app, "enable", PRIVACY, "--json"))
-    final = root / "protected-global"
+    final = root / "protected-global" / "default"
     assert payload["protection"] == [PRIVACY, CLOUD]  # catalog order
     manifest = json.loads((final / pc.PROTECTION_MANIFEST).read_text())
     assert manifest["base"] == os.path.realpath(root / "default")
@@ -157,14 +157,14 @@ def test_second_pack_recomposes_from_the_recorded_base(env) -> None:
     assert "tamper.cloud_audit_control_destruction" not in _rule_ids(final / "rules" / "commands.yaml")
     assert "tamper.cloud_audit_control_destruction" in _rule_ids(final / "rules" / "cloud-production.yaml")
     assert "PII-CARD-LABELED" in _rule_ids(final / "rules" / "enterprise-data.yaml")
-    assert [p.name for p in root.iterdir() if p.name.startswith(".")] == []  # no staging leftovers
+    assert [p.name for p in final.parent.iterdir() if p.name.startswith(".")] == []  # no staging leftovers
 
 
 def test_disable_keeps_the_rest_then_returns_to_the_base(env) -> None:
     app, root, _validator = env
     _run(app, "enable", DB)
     _run(app, "enable", K8S)
-    final = root / "protected-global"
+    final = root / "protected-global" / "default"
 
     payload = _json(_run(app, "disable", DB, "--json"))
     assert (payload["ok"], payload["protection"], payload["pack_path"]) == (True, [K8S], str(final))
@@ -173,7 +173,7 @@ def test_disable_keeps_the_rest_then_returns_to_the_base(env) -> None:
     payload = _json(_run(app, "disable", K8S, "--json"))
     assert (payload["protection"], payload["pack_path"], payload["validation"]) == ([], str(root / "default"), None)
     assert app.cfg.guardrail.rule_pack_dir == str(root / "default")
-    assert not final.exists()  # nothing uses the composed pack any more
+    assert not final.exists() and not final.parent.exists()  # nothing uses the composed pack any more
 
 
 def test_connector_scope_writes_only_that_override(env) -> None:
@@ -182,10 +182,10 @@ def test_connector_scope_writes_only_that_override(env) -> None:
     payload = _json(_run(app, "enable", K8S, "--connector", "codex", "--json"))
     assert payload["ok"] is True and payload["scope"] == "codex"
     gc = app.cfg.guardrail
-    assert gc.connectors["codex"].rule_pack_dir == str(root / "protected-codex")
+    assert gc.connectors["codex"].rule_pack_dir == str(root / "protected-codex" / "default")
     assert gc.connectors["claudecode"].rule_pack_dir == str(root / "permissive")
     assert gc.rule_pack_dir == str(root / "default")
-    manifest = json.loads((root / "protected-codex" / pc.PROTECTION_MANIFEST).read_text())
+    manifest = json.loads((root / "protected-codex" / "default" / pc.PROTECTION_MANIFEST).read_text())
     assert manifest["base_name"] == "default"  # it inherited the global pack
 
 
@@ -213,7 +213,7 @@ def test_inherited_composed_pack_is_recomposed_for_the_connector(env) -> None:
     _run(app, "enable", PRIVACY)
     payload = _json(_run(app, "enable", DB, "--connector", "codex", "--json"))
     assert payload["protection"] == [PRIVACY, DB]  # keeps what it inherited
-    manifest = json.loads((root / "protected-codex" / pc.PROTECTION_MANIFEST).read_text())
+    manifest = json.loads((root / "protected-codex" / "default" / pc.PROTECTION_MANIFEST).read_text())
     assert manifest["base"] == os.path.realpath(root / "default")
 
 
@@ -260,10 +260,10 @@ def test_noops_and_a_foreign_directory(env) -> None:
     app, root, _validator = env
     off = _json(_run(app, "disable", DB, "--json"))
     assert off["ok"] is True and off["protection"] == []
-    (root / "protected-global" / "rules").mkdir(parents=True)
+    (root / "protected-global" / "default" / "rules").mkdir(parents=True)
     result = _run(app, "enable", DB, "--json")
     assert result.exit_code == 1 and "wasn't composed" in _json(result)["message"]
-    assert not (root / "protected-global" / pc.PROTECTION_MANIFEST).exists()
+    assert not (root / "protected-global" / "default" / pc.PROTECTION_MANIFEST).exists()
     app.cfg.save.assert_not_called()
 
 
@@ -278,7 +278,7 @@ def test_list_json(env) -> None:
     assert payload["scopes"] == [
         {"scope": "global", "pack": "default", "path": str(root / "default"), "enabled": []},
         {"scope": "claudecode", "pack": "default", "path": str(root / "default"), "enabled": []},
-        {"scope": "codex", "pack": "protected-codex", "path": str(root / "protected-codex"), "enabled": [DB]},
+        {"scope": "codex", "pack": "protected-codex", "path": str(root / "protected-codex" / "default"), "enabled": [DB]},
     ]
     text = _run(app, "list")
     assert text.exit_code == 0 and DB in text.output
@@ -329,3 +329,17 @@ def test_audit_rejection_after_save_is_a_warning(env) -> None:
     result = _run(app, "enable", DB)
     assert result.exit_code == 0, result.output
     app.cfg.save.assert_called_once()
+
+
+def test_a_strict_base_stays_strict_after_layering(env) -> None:
+    # The gateway reads tool-call block/alert levels from the pack folder name
+    # (guardrailProfileForDir), so the composed folder must end in "strict".
+    app, root, _validator = env
+    _multi(app, codex=str(root / "strict"), claudecode="")
+    payload = _json(_run(app, "enable", K8S, "--connector", "codex", "--json"))
+    assert payload["ok"] is True
+    composed = root / "protected-codex" / "strict"
+    assert payload["pack_path"] == str(composed)
+    assert pc.pack_profile(payload["pack_path"]) == "strict"
+    assert app.cfg.guardrail.connectors["codex"].rule_pack_dir == str(composed)
+    assert pc.pack_name_for_path(app.cfg, str(composed)) == ("protected-codex", "custom")
