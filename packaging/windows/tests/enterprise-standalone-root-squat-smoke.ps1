@@ -230,6 +230,24 @@ try {
             }
             Reset-TestRoots
 
+            # Upgrade, Repair and Uninstall prepare an existing state root
+            # without rewriting its protected DACL, so the live gateway entry
+            # survives an action that fails before its transaction.
+            $vendorSecurity = [Security.AccessControl.DirectorySecurity]::new()
+            $vendorSecurity.SetSecurityDescriptorSddlForm($protected, [Security.AccessControl.AccessControlSections]::All)
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $vendor -AclObject $vendorSecurity
+            [void][IO.Directory]::CreateDirectory($state)
+            $gatewayStandIn = 'S-1-5-19'
+            Set-DefenseClawPathAcl -Path $state -Kind StateDirectory -GatewayServiceSID $gatewayStandIn
+            Initialize-DefenseClawManagedRoot -Path $state -Label 'StateRoot' -RequiredBase $Root -KeepProtectedAcl
+            $kept = @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $state).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+                    Microsoft.PowerShell.Core\Where-Object { $_.IdentityReference.Value -ceq $gatewayStandIn })
+            if ($kept.Count -ne 1) {
+                $failures.Add('preparing an existing state root removed the gateway entry')
+            }
+            Reset-TestRoots
+
             # Actions other than Install name the squatted root with a stable code.
             New-TestDirectory $vendor 'BU'
             try {

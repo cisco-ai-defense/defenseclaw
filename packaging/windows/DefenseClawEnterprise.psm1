@@ -3505,7 +3505,10 @@ function Initialize-DefenseClawManagedRoot {
         [switch]$AllowUsersRead,
         [switch]$PassThruCreationResult,
         [string]$StagingMarkerSID,
-        [switch]$DeferFinalAcl
+        [switch]$DeferFinalAcl,
+        # Keep an existing root's protected, administrator-controlled DACL
+        # instead of rewriting it to the bootstrap DACL (see below).
+        [switch]$KeepProtectedAcl
     )
     if ($DeferFinalAcl -and
         [string]::IsNullOrWhiteSpace($StagingMarkerSID)) {
@@ -3591,7 +3594,24 @@ function Initialize-DefenseClawManagedRoot {
     else {
         throw "$Label secure creation did not produce the requested root: $Path"
     }
-    Set-DefenseClawBootstrapRootAcl -Path $Path -AllowUsersRead:$AllowUsersRead
+    # A live deployment's InstallRoot and StateRoot carry the gateway
+    # service's read entry. Upgrade, Repair and Uninstall prepare them before
+    # their transaction; rewriting them to the bootstrap DACL there removed
+    # that entry, so an action that failed before its managed ACLs were
+    # applied again left a running gateway that could not start again. With
+    # -KeepProtectedAcl an existing protected DACL, already proven
+    # administrator-controlled above, is kept; an inherited one is replaced.
+    # PowerShell names are case-insensitive: this must not reuse the
+    # parameter's name.
+    $existingAclKept = $false
+    if ($KeepProtectedAcl -and -not $rootCreated) {
+        $existingAclKept = [bool](
+            Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+        ).AreAccessRulesProtected
+    }
+    if (-not $existingAclKept) {
+        Set-DefenseClawBootstrapRootAcl -Path $Path -AllowUsersRead:$AllowUsersRead
+    }
     Assert-DefenseClawPathAcl `
         -Path $Path `
         -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
@@ -24086,7 +24106,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -Path $layout.InstallRoot `
                 -Label 'InstallRoot' `
                 -RequiredBase $script:ProgramFiles `
-                -AllowUsersRead)
+                -AllowUsersRead `
+                -KeepProtectedAcl)
         }
         if ($null -ne $installPreparationIntent) {
             $stateRootCreatedForTransaction = [bool](
@@ -24104,7 +24125,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             [void](Initialize-DefenseClawManagedRoot `
                 -Path $layout.StateRoot `
                 -Label 'StateRoot' `
-                -RequiredBase $script:ProgramData)
+                -RequiredBase $script:ProgramData `
+                -KeepProtectedAcl)
         }
         New-DefenseClawLayoutDirectories -Layout $layout
         $pendingRecovery = Recover-DefenseClawPendingTransaction `
