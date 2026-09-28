@@ -92,6 +92,9 @@ type box struct {
 	blocked   int
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
+	// triageBusy is set while a triageNow poll runs; triageAgain asks it
+	// for one more pass.
+	triageBusy, triageAgain bool
 	// Proposal flood limits (see approvals.go): recent automatic
 	// approvals and recorded rejections, rejections not recorded in the
 	// current window, and rules approvals added since the last start.

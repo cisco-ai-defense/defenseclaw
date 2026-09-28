@@ -430,17 +430,23 @@ type fakeWatch struct {
 	handlers map[string]func(stream.Event)
 	ends     map[string]chan error
 	started  chan string
+	// gateways are the connections the watches ran on, in order.
+	gateways []*Gateway
+	// settle waits for what an event handed off (the draft poll of a
+	// draft or connected event), so push returns once it is done.
+	settle func(sandbox string)
 }
 
 func newFakeWatch() *fakeWatch {
 	return &fakeWatch{handlers: map[string]func(stream.Event){}, ends: map[string]chan error{}, started: make(chan string, 64)}
 }
 
-func (w *fakeWatch) watch(ctx context.Context, _ *Gateway, sandbox, _ string, _ func(string) error, handle func(stream.Event)) error {
+func (w *fakeWatch) watch(ctx context.Context, gw *Gateway, sandbox, _ string, _ func(string) error, handle func(stream.Event)) error {
 	end := make(chan error, 1)
 	w.mu.Lock()
 	w.handlers[sandbox] = handle
 	w.ends[sandbox] = end
+	w.gateways = append(w.gateways, gw)
 	w.mu.Unlock()
 	w.started <- sandbox
 	select {
@@ -451,7 +457,8 @@ func (w *fakeWatch) watch(ctx context.Context, _ *Gateway, sandbox, _ string, _ 
 	}
 }
 
-func (w *fakeWatch) push(t *testing.T, sandbox string, ev stream.Event) {
+// handler is the sandbox's current event handler.
+func (w *fakeWatch) handler(t *testing.T, sandbox string) func(stream.Event) {
 	t.Helper()
 	w.mu.Lock()
 	h := w.handlers[sandbox]
@@ -459,8 +466,17 @@ func (w *fakeWatch) push(t *testing.T, sandbox string, ev stream.Event) {
 	if h == nil {
 		t.Fatalf("no watcher for %s", sandbox)
 	}
+	return h
+}
+
+func (w *fakeWatch) push(t *testing.T, sandbox string, ev stream.Event) {
+	t.Helper()
+	h := w.handler(t, sandbox)
 	ev.Sandbox = sandbox
 	h(ev)
+	if w.settle != nil && (ev.Kind == stream.KindDraft || ev.Kind == stream.KindConnected) {
+		w.settle(sandbox)
+	}
 }
 
 func (w *fakeWatch) end(sandbox string, err error) {
@@ -702,11 +718,23 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 		})
 	}}
 	e.watch = newFakeWatch()
+	e.watch.settle = e.waitTriage
 	e.dns = newFakeDNS()
 	e.guard = newFakeGuard()
 	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1"}
 	e.m = e.newManager()
 	return e
+}
+
+// waitTriage waits until no draft poll of the sandbox runs (triageNow).
+func (e *harnessEnv) waitTriage(sandbox string) {
+	e.t.Helper()
+	eventually(e.t, "the draft poll of "+sandbox, func() bool {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		b := e.m.boxes[sandbox]
+		return b == nil || !b.triageBusy
+	})
 }
 
 func (e *harnessEnv) config() *config.Config {

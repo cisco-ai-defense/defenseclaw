@@ -190,14 +190,52 @@ func (m *Manager) scheduleTriage(b *box) {
 		gone := b.deleted
 		m.mu.Unlock()
 		if !gone && ctx.Err() == nil {
-			m.triageSandbox(ctx, b)
+			m.triageNow(b)
 		}
 	})
 }
 
-// triageSweep polls the drafts of every ready sandbox; draft notifications
-// on the stream are not guaranteed.
-func (m *Manager) triageSweep(ctx context.Context) {
+// triageNow polls a sandbox's drafts at once on a goroutine of its own.
+// The stream's receive loop and the Run loop hand their polls off to it:
+// a pass resolves the destinations the agent's proposals name (up to
+// triagePassBudget), which must hold neither the sandbox's event stream,
+// whose server drops what a lagging receiver misses, nor the Run loop's
+// reconciliation and checks, nor the other sandboxes' polls. A request
+// while a pass runs makes one more pass after it.
+func (m *Manager) triageNow(b *box) {
+	ctx := m.running()
+	if ctx == nil {
+		return
+	}
+	m.mu.Lock()
+	if b.deleted {
+		m.mu.Unlock()
+		return
+	}
+	if b.triageBusy {
+		b.triageAgain = true
+		m.mu.Unlock()
+		return
+	}
+	b.triageBusy = true
+	m.mu.Unlock()
+	go func() {
+		for {
+			m.triageSandbox(ctx, b)
+			m.mu.Lock()
+			again := b.triageAgain && !b.deleted && ctx.Err() == nil
+			b.triageAgain, b.triageBusy = false, again
+			m.mu.Unlock()
+			if !again {
+				return
+			}
+		}
+	}()
+}
+
+// triageSweep polls the drafts of every ready sandbox (triageNow); draft
+// notifications on the stream are not guaranteed.
+func (m *Manager) triageSweep() {
 	m.mu.Lock()
 	var ready []*box
 	for _, b := range m.boxes {
@@ -207,10 +245,7 @@ func (m *Manager) triageSweep(ctx context.Context) {
 	}
 	m.mu.Unlock()
 	for _, b := range ready {
-		if ctx.Err() != nil {
-			return
-		}
-		m.triageSandbox(ctx, b)
+		m.triageNow(b)
 	}
 }
 

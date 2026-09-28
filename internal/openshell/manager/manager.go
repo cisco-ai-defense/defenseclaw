@@ -197,9 +197,12 @@ type Manager struct {
 	runMu  sync.Mutex
 	runCtx context.Context
 
-	gwMu  sync.RWMutex
-	gw    *Gateway
-	gwErr error
+	gwMu sync.RWMutex
+	gw   *Gateway
+	// gwGone is closed when gw is dropped or closed: the watchers built on
+	// its stream connection end then and follow the next connection.
+	gwGone chan struct{}
+	gwErr  error
 	// gwErrAt paces reconnects: requests arriving within connectBackoff of
 	// a failed attempt get its error instead of dialing again.
 	gwErrAt time.Time
@@ -409,7 +412,7 @@ func (m *Manager) Run(ctx context.Context) error {
 			m.checkHookReach(ctx)
 		case <-drafts.C:
 			if m.gatewayUp() {
-				m.triageSweep(ctx)
+				m.triageSweep()
 			}
 		case <-reconcile.C:
 			if _, err := m.gateway(ctx); err != nil {
@@ -436,19 +439,27 @@ func minDuration(a, b time.Duration) time.Duration {
 
 // gateway returns the live connection, connecting when there is none.
 func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
+	gw, _, err := m.connection(ctx)
+	return gw, err
+}
+
+// connection is gateway with a channel that is closed once the connection
+// is dropped (dropGateway) or closed (closeGateway), for the work that
+// lives on it, such as a watcher's stream.
+func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, error) {
 	m.gwMu.RLock()
-	gw := m.gw
+	gw, gone := m.gw, m.gwGone
 	m.gwMu.RUnlock()
 	if gw != nil {
-		return gw, nil
+		return gw, gone, nil
 	}
 	m.gwMu.Lock()
 	defer m.gwMu.Unlock()
 	if m.gw != nil {
-		return m.gw, nil
+		return m.gw, m.gwGone, nil
 	}
 	if m.gwErr != nil && m.now().Sub(m.gwErrAt) < connectBackoff {
-		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", m.gwErr)
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", m.gwErr)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -462,19 +473,19 @@ func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
 		if m.opts.OnGateway != nil {
 			m.opts.OnGateway(err)
 		}
-		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", err)
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", err)
 	}
 	if m.gwErr != nil {
 		m.health(ctx, audit.SandboxHealthRestored, "", "")
 	} else {
 		m.health(ctx, audit.SandboxHealthReady, "", "")
 	}
-	m.gw, m.gwErr = gw, nil
+	m.gw, m.gwGone, m.gwErr = gw, make(chan struct{}), nil
 	if m.opts.OnGateway != nil {
 		m.opts.OnGateway(nil)
 	}
 	m.gwPort.Store(int64(gw.Port))
-	return gw, nil
+	return gw, m.gwGone, nil
 }
 
 // gatewayUp reports whether a gateway connection is held, without dialing.
@@ -492,6 +503,7 @@ func (m *Manager) dropGateway(gw *Gateway, err error) {
 	m.gwMu.Lock()
 	if m.gw == gw {
 		m.gw, m.gwErr, m.gwErrAt = nil, err, time.Time{}
+		m.goneLocked()
 		if gw.Close != nil {
 			_ = gw.Close()
 		}
@@ -506,6 +518,16 @@ func (m *Manager) closeGateway() {
 		_ = m.gw.Close()
 	}
 	m.gw = nil
+	m.goneLocked()
+}
+
+// goneLocked tells the work living on the connection that was just
+// dropped or closed that it is gone. Callers hold gwMu.
+func (m *Manager) goneLocked() {
+	if m.gwGone != nil {
+		close(m.gwGone)
+		m.gwGone = nil
+	}
 }
 
 func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, code gatewaylog.ErrorCode, summary string) {

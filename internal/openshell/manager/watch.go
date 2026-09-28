@@ -95,16 +95,22 @@ func (m *Manager) stopWatchers() {
 
 func (m *Manager) watchLoop(ctx context.Context, b *box, name string) {
 	for ctx.Err() == nil {
-		gw, err := m.gateway(ctx)
+		gw, gone, err := m.connection(ctx)
+		dropped := false
 		if err == nil {
 			m.mu.Lock()
 			cursor := b.rec.Cursor
 			m.mu.Unlock()
-			err = m.opts.Watch(ctx, gw, name, cursor, func(c string) error { return m.saveCursor(b, c) },
-				func(ev stream.Event) { m.handleEvent(ctx, b, ev) })
+			dropped, err = m.watchOn(ctx, gw, gone, b, name, cursor)
 		}
 		if ctx.Err() != nil {
 			return
+		}
+		if dropped {
+			// The connection the stream ran on was dropped (and closed): a
+			// watch on it would retry on a dead connection for good.
+			// Follow the next one at once; connection paces the redials.
+			continue
 		}
 		if errors.Is(err, stream.ErrSandboxNotFound) {
 			// Deleted outside DefenseClaw: reconcile releases what it held.
@@ -121,6 +127,28 @@ func (m *Manager) watchLoop(ctx context.Context, b *box, name string) {
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// watchOn runs one watch on gw until it ends, ctx ends or gw's connection
+// is dropped (gone closes), which dropped reports.
+func (m *Manager) watchOn(ctx context.Context, gw *Gateway, gone <-chan struct{}, b *box, name, cursor string) (dropped bool, err error) {
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-gone:
+			cancel()
+		case <-wctx.Done():
+		}
+	}()
+	err = m.opts.Watch(wctx, gw, name, cursor, func(c string) error { return m.saveCursor(b, c) },
+		func(ev stream.Event) { m.handleEvent(ctx, b, ev) })
+	select {
+	case <-gone:
+		return true, err
+	default:
+		return false, err
 	}
 }
 
@@ -146,17 +174,45 @@ func (m *Manager) handleEvent(ctx context.Context, b *box, ev stream.Event) {
 			m.ocsfEvent(ctx, b, *ev.Log.OCSF, ev.Time)
 		}
 	case stream.KindDraft:
-		m.triageSandbox(ctx, b)
+		// Off the receive loop: a pass resolves the destinations the
+		// agent's proposals name, which can take up to triagePassBudget,
+		// and a receiver that lags that long has its events dropped by
+		// OpenShell.
+		m.triageNow(b)
 	case stream.KindGap:
 		m.mu.Lock()
 		id := b.identity()
 		m.mu.Unlock()
 		_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellWatchFailed), ErrorSummary: "sandbox events were lost: " + ev.Gap.Reason, Timestamp: m.now()})
+	case stream.KindWarning:
+		m.streamWarning(ctx, b, ev.Warning)
 	case stream.KindConnected:
 		// A reconnect may have missed a draft notification.
-		m.triageSandbox(ctx, b)
+		m.triageNow(b)
 	}
+}
+
+// streamWarning reports a warning of the sandbox's stream: OpenShell's
+// (it dropped messages for a lagging receiver, say: the sandbox's events
+// are incomplete) as degraded health, the watcher's own (a cursor it could
+// not save) in the log.
+func (m *Manager) streamWarning(ctx context.Context, b *box, w *stream.Warning) {
+	if w == nil {
+		return
+	}
+	m.mu.Lock()
+	id := b.identity()
+	m.mu.Unlock()
+	msg := truncate(sandboxapi.DisplayText(w.Message), 400)
+	if w.Local {
+		m.logf("sandbox %s: watch: %s", id.Name, msg)
+		return
+	}
+	m.logf("%s: sandbox %s: OpenShell warned on its event stream: %s", gatewaylog.ErrCodeOpenShellWatchFailed, id.Name, msg)
+	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+		ErrorCode:    errorToken(gatewaylog.ErrCodeOpenShellWatchFailed),
+		ErrorSummary: truncate("OpenShell warned on the sandbox's event stream (its events may be incomplete): "+msg, 512), Timestamp: m.now()})
 }
 
 func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
