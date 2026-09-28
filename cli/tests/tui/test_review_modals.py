@@ -43,3 +43,21 @@ async def test_uninstall_wipe_shows_its_second_confirmation_at_80x24() -> None:
         assert all(len(line.rstrip()) <= 80 for line in text.splitlines())
         assert any(line.rstrip().endswith("╮") for line in text.splitlines()[:3])
     assert results == []
+
+
+async def test_all_three_toasts_are_visible() -> None:
+    from defenseclaw.tui.widgets.toasts import ToastManager, ToastStack
+
+    class Harness(App[None]):
+        def compose(self):
+            yield ToastStack(id="toasts")
+
+    app = Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        manager = ToastManager()
+        for message in ("first", "second", "third"):
+            manager.push("info", message)
+        app.query_one(ToastStack).render_items(manager.items)
+        await pilot.pause()
+        text = screen_text(app)
+        assert all(message in text for message in ("first", "second", "third"))
