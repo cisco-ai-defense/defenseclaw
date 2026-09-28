@@ -70,7 +70,33 @@ type sandboxRuntime struct {
 	// process holds right now.
 	listenMu  sync.Mutex
 	listening map[string]bool
+
+	// fleet, publish and tel are what containing a lost listener uses
+	// (the manager, its activity feed and the sandbox telemetry recorder);
+	// listenBudget bounds the egress bind retries (30s when zero) and
+	// recheck paces the containment (sandboxListenerRecheck when zero).
+	fleet        sandboxFleet
+	publish      func(sandboxapi.ActivityEvent)
+	tel          sandboxHealthRecorder
+	listenBudget time.Duration
+	recheck      time.Duration
 }
+
+// sandboxFleet is what containing a lost sandbox listener needs from the
+// manager.
+type sandboxFleet interface {
+	List(ctx context.Context) ([]sandboxapi.Sandbox, error)
+	Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error)
+}
+
+// sandboxHealthRecorder records durable sandbox subsystem health.
+type sandboxHealthRecorder interface {
+	RecordSandboxHealth(ctx context.Context, input audit.SandboxHealthEvent) error
+}
+
+// sandboxListenerRecheck is how often, while this process does not hold a
+// sandbox listener, it looks for running sandboxes to stop.
+const sandboxListenerRecheck = 15 * time.Second
 
 // setListening records whether this process holds one sandbox listener.
 func (rt *sandboxRuntime) setListening(part string, up bool) {
@@ -222,12 +248,16 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	mgr.AttachProxy(proxy)
 	api.SetSandboxController(mgr)
 	rt.manager, rt.proxy = mgr, proxy
+	feed := mgr.Feed()
+	rt.fleet, rt.tel = mgr, s.sandboxTelemetry()
+	rt.publish = func(ev sandboxapi.ActivityEvent) { feed.Publish(ev) }
 	return rt, nil
 }
 
 // run serves the API together with the sandbox listeners and manager until
-// ctx ends or the API stops. A sandbox listener that cannot start degrades
-// the sandbox subsystem (hooks fail closed) but never stops the API.
+// ctx ends or the API stops. A sandbox listener that cannot start, or
+// stops, degrades the sandbox subsystem and stops the running sandboxes
+// (containListenerLoss), but never stops the API.
 func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -270,15 +300,13 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 		defer wg.Done()
 		defer rt.setListening("ingress", false)
 		if err := rt.api.RunSandboxIngress(ctx); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, err)
-			report("ingress", err)
+			rt.listenerLost(ctx, "ingress", err, report)
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		if err := rt.serveEgress(ctx); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, err)
-			report("egress", err)
+			rt.listenerLost(ctx, "egress", err, report)
 		}
 	}()
 	go func() {
@@ -295,12 +323,113 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 	return err
 }
 
+// listenerLost handles the loss of the sandbox listener part (ingress or
+// egress): it reports the subsystem degraded, records the failure, and
+// contains it until ctx ends (containListenerLoss).
+func (rt *sandboxRuntime) listenerLost(ctx context.Context, part string, cause error, report func(string, error)) {
+	fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, cause)
+	report(part, fmt.Errorf("%w (running sandboxes are stopped until DefenseClaw holds this port again)", cause))
+	if rt.tel != nil {
+		_ = rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+			State:        audit.SandboxHealthFailed,
+			ErrorCode:    strings.ToLower(string(gatewaylog.ErrCodeOpenShellListenerFailed)),
+			ErrorSummary: "the sandbox " + part + " listener is not running: " + cause.Error(),
+			Timestamp:    time.Now(),
+		})
+	}
+	if rt.fleet == nil {
+		<-ctx.Done()
+		return
+	}
+	every := rt.recheck
+	if every <= 0 {
+		every = sandboxListenerRecheck
+	}
+	containListenerLoss(ctx, rt.fleet, rt.publish, part, every)
+}
+
+// containListenerLoss stops every sandbox that may be running, and does so
+// again every interval, until ctx ends, while this process does not hold
+// the sandbox listener part.
+//
+// OpenShell relays host.openshell.internal:<port> to whatever listens on
+// that host port, and nothing on the relay authenticates DefenseClaw: a
+// sandbox's hooks go there with its real ingress token, and its egress
+// with its proxy credential. While another program may hold one of the
+// ports, a running sandbox would ask that program for its verdicts, so it
+// is stopped. None can start meanwhile (listenersReady), a sandbox adopted
+// later is caught by the next pass, and starting one again rotates its
+// ingress token, so a token the other program saw is useless. The runtime
+// binds its listeners again when it restarts with the API.
+func containListenerLoss(ctx context.Context, fleet sandboxFleet, publish func(sandboxapi.ActivityEvent), part string, every time.Duration) {
+	if publish == nil {
+		publish = func(sandboxapi.ActivityEvent) {}
+	}
+	unstoppable := map[string]bool{}
+	for {
+		stopSandboxesWithoutListener(ctx, fleet, publish, part, unstoppable)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
+}
+
+// stopSandboxesWithoutListener is one containListenerLoss pass. A sandbox
+// that does not stop is reported once and tried again on the next pass.
+func stopSandboxesWithoutListener(ctx context.Context, fleet sandboxFleet, publish func(sandboxapi.ActivityEvent),
+	part string, unstoppable map[string]bool) {
+	sandboxes, err := fleet.List(ctx)
+	if err != nil {
+		return
+	}
+	why := "⚠ DefenseClaw is not holding its sandbox " + part + " port, so another program may receive this " +
+		"sandbox's hooks and credentials"
+	for _, sb := range sandboxes {
+		if ctx.Err() != nil {
+			return
+		}
+		switch audit.SandboxPhase(sb.Phase) {
+		case audit.SandboxPhaseProvisioning, audit.SandboxPhaseStarting, audit.SandboxPhaseReady, audit.SandboxPhaseUnknown:
+		default:
+			continue
+		}
+		if _, err := fleet.Stop(ctx, sb.Name); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if !unstoppable[sb.Name] {
+				unstoppable[sb.Name] = true
+				fmt.Fprintf(os.Stderr, "[sandbox] %s: stop %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, sb.Name, err)
+				publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: sb.Name, Severity: "CRITICAL",
+					Reason: sandboxListenerLostReason, Message: why + ", and DefenseClaw could not stop it: stop it yourself"})
+			}
+			continue
+		}
+		delete(unstoppable, sb.Name)
+		fmt.Fprintf(os.Stderr, "[sandbox] %s: stopped %s: the %s listener is not running\n",
+			gatewaylog.ErrCodeOpenShellListenerFailed, sb.Name, part)
+		publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: sb.Name, Severity: "CRITICAL",
+			Reason: sandboxListenerLostReason, Message: why + "; DefenseClaw stopped it. Free the port, run " +
+				"defenseclaw-gateway restart, then start the sandbox again"})
+	}
+}
+
+// sandboxListenerLostReason is the activity feed reason of a sandbox
+// stopped because a sandbox listener was lost.
+const sandboxListenerLostReason = "listener_lost"
+
 // serveEgress listens on the egress port (retrying briefly while a
 // previous listener releases it) and serves the proxy until ctx ends.
 func (rt *sandboxRuntime) serveEgress(ctx context.Context) error {
 	addr := rt.egressAddr
 	var ln net.Listener
-	deadline := time.Now().Add(30 * time.Second)
+	budget := rt.listenBudget
+	if budget <= 0 {
+		budget = 30 * time.Second
+	}
+	deadline := time.Now().Add(budget)
 	for {
 		var err error
 		ln, err = egress.Listen(addr)

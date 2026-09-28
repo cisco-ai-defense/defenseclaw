@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -28,9 +29,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -239,4 +242,229 @@ func TestSandboxRuntimeRefusesSandboxesWithoutItsListeners(t *testing.T) {
 	// past this check again.
 	_ = squatter.Close()
 	eventuallyTrue(t, func() bool { return rt.listenersReady() == nil })
+}
+
+// fakeSandboxFleet is a sandboxFleet over fixed phases. Stop stops a
+// sandbox unless failStops still counts failures for it.
+type fakeSandboxFleet struct {
+	mu        sync.Mutex
+	phases    map[string]string
+	failStops map[string]int
+	stopped   []string
+	listErr   error
+}
+
+func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	out := make([]sandboxapi.Sandbox, 0, len(f.phases))
+	for name, phase := range f.phases {
+		out = append(out, sandboxapi.Sandbox{Name: name, Phase: phase})
+	}
+	slices.SortFunc(out, func(a, b sandboxapi.Sandbox) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
+}
+
+func (f *fakeSandboxFleet) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failStops[name] > 0 {
+		f.failStops[name]--
+		return nil, errors.New("openshell unavailable")
+	}
+	f.phases[name] = "stopped"
+	f.stopped = append(f.stopped, name)
+	return &sandboxapi.Sandbox{Name: name, Phase: "stopped"}, nil
+}
+
+func (f *fakeSandboxFleet) stops() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.stopped)
+}
+
+func (f *fakeSandboxFleet) set(name, phase string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.phases[name] = phase
+}
+
+type sandboxFeedRecorder struct {
+	mu     sync.Mutex
+	events []sandboxapi.ActivityEvent
+}
+
+func (r *sandboxFeedRecorder) publish(ev sandboxapi.ActivityEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, ev)
+}
+
+func (r *sandboxFeedRecorder) snapshot() []sandboxapi.ActivityEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.events)
+}
+
+type sandboxHealthRecords struct {
+	mu     sync.Mutex
+	events []audit.SandboxHealthEvent
+}
+
+func (r *sandboxHealthRecords) RecordSandboxHealth(_ context.Context, ev audit.SandboxHealthEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, ev)
+	return nil
+}
+
+func (r *sandboxHealthRecords) snapshot() []audit.SandboxHealthEvent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.events)
+}
+
+// TestContainListenerLossStopsRunningSandboxes pins that while a sandbox
+// listener is not held every sandbox that may be running is stopped (a
+// sandbox that comes up later on the next pass), that each stop is on the
+// activity feed, and that a sandbox that does not stop is reported once and
+// tried again.
+func TestContainListenerLossStopsRunningSandboxes(t *testing.T) {
+	fleet := &fakeSandboxFleet{
+		phases: map[string]string{
+			"dc-ready": "ready", "dc-starting": "starting", "dc-provisioning": "provisioning", "dc-unknown": "unknown",
+			"dc-stopped": "stopped", "dc-missing": "missing", "dc-deleted": "deleted", "dc-error": "error",
+			"dc-stubborn": "ready",
+		},
+		failStops: map[string]int{"dc-stubborn": 3},
+	}
+	var feed sandboxFeedRecorder
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		containListenerLoss(ctx, fleet, feed.publish, "ingress", 5*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	eventuallyTrue(t, func() bool { return len(fleet.stops()) == 5 })
+	// A sandbox adopted after the loss, or started outside DefenseClaw.
+	fleet.set("dc-late", "ready")
+	eventuallyTrue(t, func() bool { return len(fleet.stops()) == 6 })
+	cancel()
+	<-done
+
+	got := fleet.stops()
+	slices.Sort(got)
+	want := []string{"dc-late", "dc-provisioning", "dc-ready", "dc-starting", "dc-stubborn", "dc-unknown"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("stopped = %v, want %v", got, want)
+	}
+	stoppedMsgs, failures := map[string]int{}, map[string]int{}
+	for _, ev := range feed.snapshot() {
+		if ev.Kind != sandboxapi.ActivityFinding || ev.Severity != "CRITICAL" || ev.Reason != sandboxListenerLostReason ||
+			!strings.Contains(ev.Message, "sandbox ingress port") {
+			t.Fatalf("feed event = %+v", ev)
+		}
+		if strings.Contains(ev.Message, "stop it yourself") {
+			failures[ev.Sandbox]++
+		} else {
+			stoppedMsgs[ev.Sandbox]++
+		}
+	}
+	if len(failures) != 1 || failures["dc-stubborn"] != 1 {
+		t.Fatalf("failed stops reported = %v, want dc-stubborn once", failures)
+	}
+	for _, name := range want {
+		if stoppedMsgs[name] != 1 {
+			t.Fatalf("stops reported = %v", stoppedMsgs)
+		}
+	}
+}
+
+// TestContainListenerLossEndsWithItsContext pins that containment returns
+// once the runtime stops, even while the manager cannot list sandboxes.
+func TestContainListenerLossEndsWithItsContext(t *testing.T) {
+	fleet := &fakeSandboxFleet{phases: map[string]string{"dc-ready": "ready"}, listErr: errors.New("not reconciled yet")}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		containListenerLoss(ctx, fleet, nil, "egress", time.Hour)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("containment did not end with its context")
+	}
+	if got := fleet.stops(); len(got) != 0 {
+		t.Fatalf("stopped = %v", got)
+	}
+}
+
+// TestSandboxRuntimeStopsSandboxesWhenAListenerIsLost pins that when
+// another program holds a sandbox listener port past the bind budget, the
+// running sandboxes are stopped (OpenShell would relay their egress, or
+// their hooks with the real ingress token, to that program), the subsystem
+// reports why, and a durable health record says the listener failed.
+func TestSandboxRuntimeStopsSandboxesWhenAListenerIsLost(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("sandboxes run on Linux and macOS only")
+	}
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Gateway.Token = "test-token"
+	cfg.Gateway.APIPort = freePort(t)
+	cfg.OpenShell.Enabled = true
+	cfg.OpenShell.IngressPort = freePort(t)
+	cfg.OpenShell.Gateway.Name = "defenseclaw-test-missing"
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer squatter.Close()
+	cfg.OpenShell.EgressPort = squatter.Addr().(*net.TCPAddr).Port
+	sc := &Sidecar{health: NewSidecarHealth(), logger: logger}
+	sc.cfgCurrent.Store(cfg)
+	api := NewAPIServer("127.0.0.1:0", sc.health, nil, store, logger, cfg)
+	rt, err := sc.newSandboxRuntime(api)
+	if err != nil || rt == nil {
+		t.Fatalf("runtime = %v, %v", rt, err)
+	}
+	if rt.fleet == nil || rt.publish == nil || rt.tel == nil {
+		t.Fatal("the runtime cannot contain a lost listener")
+	}
+	fleet := &fakeSandboxFleet{phases: map[string]string{"dc-claude-app": "ready", "dc-old": "stopped"}}
+	var feed sandboxFeedRecorder
+	var records sandboxHealthRecords
+	rt.fleet, rt.publish, rt.tel = fleet, feed.publish, &records
+	rt.listenBudget, rt.recheck = 50*time.Millisecond, 10*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- rt.run(ctx, func(ctx context.Context) error { <-ctx.Done(); return nil }) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	eventuallyTrue(t, func() bool { return slices.Equal(fleet.stops(), []string{"dc-claude-app"}) })
+	eventuallyTrue(t, func() bool {
+		snap := sc.health.Snapshot()
+		return snap.Sandbox != nil && snap.Sandbox.State == StateDegraded &&
+			strings.Contains(snap.Sandbox.LastError, "egress:") &&
+			strings.Contains(snap.Sandbox.LastError, "running sandboxes are stopped")
+	})
+	health := records.snapshot()
+	if len(health) != 1 || health[0].State != audit.SandboxHealthFailed || health[0].ErrorCode != "openshell_listener_failed" ||
+		!strings.Contains(health[0].ErrorSummary, "egress listener") {
+		t.Fatalf("health records = %+v", health)
+	}
+	if events := feed.snapshot(); len(events) != 1 || events[0].Sandbox != "dc-claude-app" || events[0].Severity != "CRITICAL" {
+		t.Fatalf("feed = %+v", events)
+	}
 }
