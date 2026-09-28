@@ -21,12 +21,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
 
 import click
 import yaml
 
-from defenseclaw import ux
+from defenseclaw import policy_catalog, ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
@@ -55,25 +54,6 @@ def _ensure_policies_dir(app: AppContext) -> str:
     d = _policies_dir(app)
     os.makedirs(d, exist_ok=True)
     return d
-
-
-def _list_policy_files(app: AppContext) -> list[str]:
-    """Return paths to all .yaml policy files (user dir + bundled)."""
-    files: list[str] = []
-    user_dir = _policies_dir(app)
-    if os.path.isdir(user_dir):
-        for name in os.listdir(user_dir):
-            if name.endswith(".yaml") and not name.startswith("."):
-                files.append(os.path.join(user_dir, name))
-
-    bundled = _bundled_policies_dir()
-    if os.path.isdir(bundled):
-        seen = {os.path.basename(f) for f in files}
-        for name in os.listdir(bundled):
-            if name.endswith(".yaml") and not name.startswith(".") and name not in seen:
-                files.append(os.path.join(bundled, name))
-
-    return sorted(files)
 
 
 def _load_policy(path: str) -> dict:
@@ -246,37 +226,40 @@ def create(
 # ---------------------------------------------------------------------------
 
 @policy.command("list")
+@click.option("--json", "json_out", is_flag=True, help="Print the policies as JSON.")
 @pass_ctx
-def list_policies(app: AppContext) -> None:
+def list_policies(app: AppContext, json_out: bool) -> None:
     """List all available policies (built-in and custom)."""
-    files = _list_policy_files(app)
+    policies = policy_catalog.list_named_policies(_policies_dir(app))
+    active = policy_catalog.active_policy_name(_policies_dir(app))
 
-    if not files:
+    if json_out:
+        click.echo(
+            json.dumps(
+                {"version": 1, "active": active, "policies": [p.to_json() for p in policies]},
+                indent=2,
+            )
+        )
+        return
+
+    if not policies:
         ux.warn("No policies found.")
         return
 
-    active = _get_active_policy_name(app)
-
     click.echo(f"{ux.bold('Available policies:')}")
     click.echo()
-    for path in files:
-        data = _load_policy(path)
-        pname = data.get("name", Path(path).stem)
-        desc = data.get("description", "")
-        is_builtin = path.startswith(_bundled_policies_dir())
-        is_active = pname == active
-
-        prefix = "  * " if is_active else "    "
-        label = ux.bold(pname)
+    for summary in policies:
+        prefix = "  * " if summary.active else "    "
+        label = ux.bold(summary.name)
         tag = ""
-        if is_builtin:
+        if summary.builtin:
             tag += ux.dim(" [built-in]")
-        if is_active:
+        if summary.active:
             tag += ux._style(" [active]", fg="green")
 
         click.echo(f"{prefix}{label}{tag}")
-        if desc:
-            click.echo(f"      {ux.dim(desc)}")
+        if summary.description:
+            click.echo(f"      {ux.dim(summary.description)}")
 
     click.echo()
     click.echo(f"  {ux.dim('Activate a policy:')} defenseclaw policy activate <name>")
@@ -289,13 +272,22 @@ def list_policies(app: AppContext) -> None:
 
 @policy.command()
 @click.argument("name")
+@click.option("--json", "json_out", is_flag=True, help="Print the policy summary as JSON.")
 @pass_ctx
-def show(app: AppContext, name: str) -> None:
+def show(app: AppContext, name: str, json_out: bool) -> None:
     """Show details of a policy."""
     path = _find_policy(app, name)
     if not path:
         click.echo(f"error: policy '{name}' not found", err=True)
         raise SystemExit(1)
+
+    if json_out:
+        summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app))
+        if summary is None:
+            click.echo(f"error: policy '{name}' could not be read", err=True)
+            raise SystemExit(1)
+        click.echo(json.dumps({"version": 1, "policy": summary.to_json()}, indent=2))
+        return
 
     data = _load_policy(path)
     pname = data.get("name", name)
