@@ -1207,8 +1207,9 @@ For both harnesses the allowed run is repeated with hostile user and project
 settings planted: every known way to switch the managed hooks off or divert
 them. The hooks must still fire, and none of the planted programs may run.
 `HookFireOptions.RunFiles` mounts a sandbox's per-run files into every probe
-container. `TestLiveRunConfig` (tag `openshell_integration`) uses it to prove
-the per-run configuration below against the real harnesses.
+container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
+`test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
+configuration below against the real harnesses.
 
 Kiro CLI has no model endpoint a mock can stand in for; its own
 scripted-response mode (`KIRO_MOCK_CHAT_RESPONSE`, with a placeholder
@@ -1595,7 +1596,8 @@ images stay unverified, so they are never selected for a sandbox.
 | OmniGent | 0.13.0 (PyPI, root-owned uv tool on a private CPython) | Server configuration `/etc/omnigent/config.yaml` through `OMNIGENT_CONFIG_HOME`; the launcher stops and stops reusing any recorded server or daemon started without it | managed | none (its policies decide) | Bedrock Mantle (default model `openai.gpt-oss-20b`), OpenAI API key (`--model` required), Anthropic API key (unverified) | verified (mock model) |
 
 OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
-(`TestLiveSandboxHookOnlyHarness` in `internal/gateway`), with the project
+(`TestLiveSandboxHookOnlyHarness` in `internal/gateway`, on branch
+`test/openshell-live`), with the project
 bind-mounted, the DefenseClaw hook ingress holding a real binding, and the
 DefenseClaw egress proxy, once against the E2E mock model and once against
 `anthropic.claude-haiku-4-5` on Bedrock Mantle through each harness's curated
@@ -1650,7 +1652,8 @@ version, binary realpaths and digests) but stay unverified: both CLIs need a
 vendor account before any agent turn and fire no hook without one.
 
 Hermes, OpenHands, Antigravity and OmniGent ran end to end through the
-DefenseClaw daemon (`TestSandboxHookOnlyHarness` in `test/e2e/openshell`)
+DefenseClaw daemon (`TestSandboxHookOnlyHarness` in `test/e2e/openshell`, on
+branch `test/openshell-live`)
 against the E2E mock model behind a `--credential` binding on
 `host.openshell.internal`: hooks (OmniGent: policy events) reached the
 ingress with the model key substituted, the marker command a test rule
@@ -2164,25 +2167,18 @@ until that is fixed.
 Policy, provider-profile, sandbox-artifact and hook golden files are
 regenerated with `DEFENSECLAW_UPDATE_GOLDEN=1`; review the diff.
 
-Live tests carry the `openshell_integration` build tag and need a local
-OpenShell 0.1.x gateway (with bind mounts enabled for the workspace tests):
-
-```bash
-go test -tags openshell_integration -run Live -v ./internal/openshell/
-go test -tags openshell_integration -run TestLive -v \
-  ./internal/openshell/workspace/
-DEFENSECLAW_E2E_DATA_DIR="$HOME/dc-e2e" \
-DEFENSECLAW_E2E_IMAGE_REPO=e-defenseclaw-sandbox \
-  go test -tags openshell_integration -run TestLiveOverlay -v -timeout 60m \
-  ./internal/openshell/image/
-```
-
-`DEFENSECLAW_OPENSHELL_GATEWAY` and `DEFENSECLAW_OPENSHELL_IMAGE` pick the
-gateway registration and sandbox image for the workspace test;
-`DEFENSECLAW_E2E_HOOKFIRE_RELAY_SINK` also verifies each overlay in relay mode.
-The live tests create short-lived, prefixed sandboxes and delete them. Mock
-model servers and harness scenarios for end-to-end runs are in
-[`../test/e2e/openshell/`](../test/e2e/openshell/).
+Live tests need a real OpenShell 0.1.x gateway (with bind mounts enabled for
+the workspace tests) and Docker, so CI cannot run them. They are kept for dev
+hosts on branch `test/openshell-live`, one commit on top of this branch: the
+`openshell_integration` Go tests in `internal/openshell/`,
+`internal/openshell/image/`, `internal/openshell/workspace/`,
+`internal/openshell/sandboxcli/` and `internal/gateway/`, the end-to-end
+suite in `test/e2e/openshell/` (mock model servers, harness scenarios),
+`scripts/test-e2e-openshell.sh` and the manual OpenShell Integration E2E
+workflow. To run them against newer work, rebase that commit onto it. This
+section on that branch lists the commands and the environment variables the
+tests read. The live tests create short-lived, prefixed sandboxes and delete
+them.
 
 ## Hosts that still have the legacy install
 
