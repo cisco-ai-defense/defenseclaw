@@ -2193,6 +2193,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             tabs = self.query_one("#tabs", Tabs)
         except NoMatches:
             return
+        self._sync_header_title()
         visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
         # Under ~170 columns fifteen full names don't fit: shorten the
         # inactive tabs (key letters always stay) instead of scrolling.
@@ -2217,13 +2218,38 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             tab.label = text
             self._tab_label_cache[name] = text
 
+    def _header_title(self) -> str:
+        """The header brand, shortened on narrow terminals so every tab fits."""
+
+        width = int(getattr(self.size, "width", 0) or 0)
+        if width <= 0 or width >= 120:
+            return f"DefenseClaw {__version__}"
+        if width >= 96:
+            return "DefenseClaw"
+        # At 80 columns the brand would push tabs off screen; Overview still
+        # shows the wordmark.
+        return ""
+
+    def _sync_header_title(self) -> None:
+        title = self._header_title()
+        if getattr(self, "_header_title_cache", None) == title:
+            return
+        try:
+            widget = self.query_one("#title", Static)
+        except NoMatches:
+            return
+        widget.update(title)
+        widget.display = bool(title)
+        self._header_title_cache = title
+
     def _tab_strip_width(self) -> int:
         """Cells the tab strip gets: the header minus title and buttons."""
 
         width = int(getattr(self.size, "width", 0) or 0)
         if width <= 0:
             return 0
-        title = len(f"DefenseClaw {__version__}") + 1
+        title_text = self._header_title()
+        title = len(title_text) + 1 if title_text else 0
         # Header padding (2) plus the ":" and "?" buttons (5 wide + 1 margin).
         return max(0, width - 2 - title - 12)
 

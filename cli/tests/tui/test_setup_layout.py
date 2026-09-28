@@ -26,7 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from defenseclaw.tui.panels import setup_catalog  # noqa: E402
-from defenseclaw.tui.widgets.tab_fit import fit_tab_labels, strip_width  # noqa: E402
+from defenseclaw.tui.widgets.tab_fit import LABEL_PRIORITY, fit_tab_labels, strip_width  # noqa: E402
 from fixtures import screen_text, snapshot_app  # noqa: E402
 
 FIFTEEN_PANELS = (
@@ -142,14 +142,20 @@ def test_fifteen_tabs_fit_at_120_columns(width: int) -> None:
     assert "(12)" in labels["alerts"]
 
 
-def test_tabs_use_full_then_short_labels_as_width_allows() -> None:
+def test_tabs_name_the_most_important_panels_first() -> None:
     full = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 400)
     wide = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 180 - 33)
 
     assert full["policies"] == "P Policies"
     assert wide["overview"] == "1 Overview"
-    assert wide["sandboxes"] != "7 Sandboxes" and wide["sandboxes"].startswith("7 ")
     assert strip_width(tuple(wide.values())) <= 180 - 33
+    # A named tab is never less important than a letter-only one.
+    named = [name for name in LABEL_PRIORITY if name in wide and wide[name] != wide[name][:1]]
+    letter_only = [name for name in LABEL_PRIORITY if name in wide and name not in named]
+    assert named and letter_only
+    assert max(LABEL_PRIORITY.index(n) for n in named if n != "overview") < min(
+        LABEL_PRIORITY.index(n) for n in letter_only
+    )
     # Unknown width (before the first layout) keeps the full labels.
     assert fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 0) == full
 
