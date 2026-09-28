@@ -51,7 +51,7 @@ sandbox) and `deleted` (after it is gone).
 | `RecordSandboxHealth` | `sandbox-health` | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Always (`durable_health_transition`) |
 | `RecordSandboxFinding` | `sandbox-finding` | `log.finding.observed` | `security.finding` | No |
 
-`RecordSandboxPolicy` records name the changed host or egress pattern in `defenseclaw.admin.target_ref`: a wildcard such as `*.example.com` is recorded as `suffix:example.com`, and a leading `::` as `0::` (`::/0` becomes `0::/0`).
+`RecordSandboxPolicy` records name the changed host or egress pattern in `defenseclaw.admin.target_ref`: a wildcard such as `*.example.com` is recorded as `suffix:example.com`, a leading `::` as `0::` (`::/0` becomes `0::/0`), and a name whose first label starts with `_` as `host:` plus the name (`_x.example` becomes `host:_x.example`), because a reference must start with a letter or digit.
 
 A mandatory record is delivered whatever a route's collection settings say.
 
@@ -243,10 +243,13 @@ record:
 - An egress or approval host has its port split off (the port is used when
   none was given separately). It is lowercased and IDNA-encoded
   (`bücher.example` becomes `xn--bcher-kva.example`), and IP literals lose
-  their brackets and zone. If the host still does not canonicalize, egress
-  records it as `defenseclaw.network.target_ref` `invalid-host` with
-  `server.address` absent, and an approval omits it. An out-of-range port is
-  omitted.
+  their brackets and zone. A name whose first label starts with `_`
+  (`_x.example`) is recorded as `defenseclaw.network.target_ref`
+  `host:_x.example` with `server.address` absent, since neither field may
+  start with `_`; an approval omits it. If the host still does not
+  canonicalize, egress records it as `defenseclaw.network.target_ref`
+  `invalid-host` with `server.address` absent, and an approval omits it. An
+  out-of-range port is omitted.
 - An egress path keeps only its origin-form path; the query and fragment are
   dropped.
 - Workspace paths: invalid UTF-8 is replaced and NUL bytes are dropped.

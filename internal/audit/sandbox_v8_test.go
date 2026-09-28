@@ -1040,6 +1040,9 @@ func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
 		{"exact host", SandboxEgressUnblock, "webhook.site", "webhook.site"},
 		{"wildcard host", SandboxEgressUnblock, "*.pastebin.com", "suffix:pastebin.com"},
 		{"padded wildcard host", SandboxEgressBlock, " *.example.com\t", "suffix:example.com"},
+		{"service label host", SandboxEgressUnblock, "_x.dcmarker.example", "host:_x.dcmarker.example"},
+		{"service label rule", SandboxPolicyRuleAdd, "_dcmarker._tcp.example", "host:_dcmarker._tcp.example"},
+		{"service label wildcard", SandboxEgressBlock, "*._x.dcmarker.example", "suffix:_x.dcmarker.example"},
 		{"IPv6 default route", SandboxEgressUnblock, "::/0", "0::/0"},
 		{"IPv6 loopback", SandboxEgressBlock, "::1", "0::1"},
 		{"IPv6 prefix", SandboxEgressUnblock, "fe80::/10", "fe80::/10"},
@@ -1460,6 +1463,9 @@ func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 		{"policy nested wildcard target", func(r *SandboxRecorder) error {
 			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressUnblock, Target: "*.*.example.com"})
 		}},
+		{"policy underscore target that is not a name", func(r *SandboxRecorder) error {
+			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: "_x/dcmarker"})
+		}},
 		{"policy colon target that is not an address", func(r *SandboxRecorder) error {
 			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: "::not-an-ip"})
 		}},
@@ -1656,6 +1662,8 @@ func TestSandboxHostCanonicalization(t *testing.T) {
 		{"bücher.example:8443", "xn--bcher-kva.example", 8443, true},
 		{"r3---sn-abc.example", "r3---sn-abc.example", 0, true},
 		{"my_service.internal", "my_service.internal", 0, true},
+		{"_X.DCmarker.example", "_x.dcmarker.example", 0, true},
+		{"_x.dcmarker.example.:443", "_x.dcmarker.example", 443, true},
 		{"", "", 0, false},
 		{"exa mple.org", "", 0, false},
 		{"-bad.example", "", 0, false},
@@ -1893,6 +1901,8 @@ func testSandboxEgressHostileHostsAreStillRecorded(t *testing.T, harness *sandbo
 		{name: "bracketed ipv6 authority", host: "[2001:db8::1]:443", target: "2001:db8::1", address: "2001:db8::1", wantPort: 443},
 		{name: "ipv6 zone", host: "fe80::1%eth0", target: "fe80::1", address: "fe80::1", leak: "eth0"},
 		{name: "explicit port out of range", host: "example.org", port: 70000, target: "example.org", address: "example.org"},
+		{name: "service label name", host: "_X.dcmarker.example:8443", target: "host:_x.dcmarker.example", wantPort: 8443},
+		{name: "service label name too long for a reference", host: "_" + strings.Repeat("a", 252), target: sandboxInvalidHost},
 		{name: "userinfo", host: "dcuser:dcsecret@example.org", target: sandboxInvalidHost, leak: "dcsecret"},
 		{name: "path", host: "example.org/dcpathmarker", target: sandboxInvalidHost, leak: "dcpathmarker"},
 		{name: "percent", host: "dc%41marker.example", target: sandboxInvalidHost, leak: "%41marker"},
@@ -1952,6 +1962,7 @@ func testSandboxApprovalHostileHostIsOmitted(t *testing.T, harness *sandboxHarne
 		{name: "userinfo", host: "dcuser:dcsecret@example.org"},
 		{name: "idn authority", host: "Bücher.example:8443", address: "xn--bcher-kva.example", wantPort: 8443},
 		{name: "port out of range", host: "10.0.0.8", port: 70000, address: "10.0.0.8"},
+		{name: "service label name", host: "_x.dcmarker.example:443", wantPort: 443},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)

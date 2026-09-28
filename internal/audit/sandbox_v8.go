@@ -533,6 +533,7 @@ const (
 	maxSandboxFindingTargetBytes = 256
 	maxSandboxAuthorityBytes     = 1024
 	maxSandboxHostBytes          = 253
+	maxSandboxNetworkTargetBytes = 256 // defenseclaw.network.target_ref
 	maxSandboxPolicyTargetBytes  = 1024
 )
 
@@ -540,9 +541,18 @@ const (
 // canonicalized; server.address is then absent.
 const sandboxInvalidHost = "invalid-host"
 
+// sandboxHostRefPrefix starts the reference of a DNS name whose first label
+// starts with "_" (_dmarc.example, _x.example). Egress patterns and the
+// proxy accept such names and resolvers look them up, but a registered
+// identifier must start with a letter or digit, so the name is recorded as
+// "host:_x.example" (as "*.example" becomes "suffix:example") and
+// server.address, which must be the bare name, is omitted.
+const sandboxHostRefPrefix = "host:"
+
 var (
 	sandboxIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
-	sandboxHostPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+	sandboxHostPattern       = regexp.MustCompile(`^[a-z0-9_][a-z0-9._-]*$`)
+	sandboxUnderscoreName    = regexp.MustCompile(`^_[A-Za-z0-9._-]*$`)
 	sandboxDigestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	sandboxPolicyHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
@@ -647,9 +657,9 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		return fmt.Errorf("audit: sandbox egress source %q is not registered", input.Source)
 	}
 	destination := canonicalSandboxDestination(input.Host, input.Port)
-	host, serverAddress, port := destination.host, observability.Present(destination.host), destination.port
+	host, serverAddress, port := destination.ref(), destination.address(), destination.port
 	if !destination.canonical {
-		host, serverAddress = sandboxInvalidHost, observability.Absent[string]()
+		host = sandboxInvalidHost
 	}
 	defaultSeverity := "INFO"
 	if input.Blocked {
@@ -749,10 +759,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 		return fmt.Errorf("audit: sandbox approval kind %q is not registered", input.Kind)
 	}
 	destination := canonicalSandboxDestination(input.Host, input.Port)
-	host, port := observability.Absent[string](), destination.port
-	if destination.canonical {
-		host = observability.Present(destination.host)
-	}
+	host, port := destination.address(), destination.port
 	severity, err := sandboxSeverity(input.Severity, "INFO")
 	if err != nil {
 		return err
@@ -1578,13 +1585,14 @@ func sandboxPolicyRevision(version uint32) observability.Optional[string] {
 }
 
 // sandboxPolicyTarget is the defenseclaw.admin.target_ref of a policy change.
-// The egress decider's host patterns include two forms that cannot start an
+// The egress decider's host patterns include three forms that cannot start an
 // identifier. A leading wildcard (*.example.com) is recorded as
 // suffix:example.com. An IPv6 literal or prefix written with a leading "::"
 // (::/0, ::1) takes an explicit zero group (0::/0, 0::1), which names the
-// same addresses. Any other target that is not a bounded identifier is
-// rejected: this mandatory record must say what the change opened or closed,
-// so the target is never silently dropped.
+// same addresses. A name whose first label starts with "_" (_x.example) is
+// recorded as host:_x.example. Any other target that is not a bounded
+// identifier is rejected: this mandatory record must say what the change
+// opened or closed, so the target is never silently dropped.
 func sandboxPolicyTarget(value string) (observability.Optional[string], error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1594,6 +1602,8 @@ func sandboxPolicyTarget(value string) (observability.Optional[string], error) {
 		value = "suffix:" + suffix
 	} else if strings.HasPrefix(value, "::") && sandboxIPOrPrefix(value) {
 		value = "0" + value
+	} else if sandboxUnderscoreName.MatchString(value) {
+		value = sandboxHostRefPrefix + value
 	}
 	if !sandboxIdentifier(value, maxSandboxPolicyTargetBytes) {
 		return observability.Absent[string](), fmt.Errorf("audit: sandbox policy target is not a bounded reference")
@@ -1646,6 +1656,28 @@ type sandboxDestination struct {
 	port      observability.Optional[int64]
 }
 
+// ref is the destination's defenseclaw.network.target_ref: the host, with
+// sandboxHostRefPrefix when it cannot start an identifier (sandboxInvalidHost
+// when the prefixed name no longer fits).
+func (d sandboxDestination) ref() string {
+	if !strings.HasPrefix(d.host, "_") {
+		return d.host
+	}
+	if ref := sandboxHostRefPrefix + d.host; len(ref) <= maxSandboxNetworkTargetBytes {
+		return ref
+	}
+	return sandboxInvalidHost
+}
+
+// address is the destination's server.address: the host when it is
+// canonical and can start an identifier, else absent.
+func (d sandboxDestination) address() observability.Optional[string] {
+	if !d.canonical || strings.HasPrefix(d.host, "_") {
+		return observability.Absent[string]()
+	}
+	return observability.Present(d.host)
+}
+
 // canonicalSandboxDestination canonicalizes an agent-chosen host and port.
 // The host may be a name, an IP literal, or a host:port authority; an
 // explicit port wins over the authority's, and a port outside 1-65535 is
@@ -1693,7 +1725,8 @@ func canonicalSandboxAuthority(value string) (string, int, bool) {
 // normalizer (which requires a leading alphanumeric). Names lose a trailing
 // root dot, are lowercased, and internationalized ones take their ASCII
 // (punycode) form; a name must then be letters, digits, '.', '-', and '_'
-// only, so a port, path, userinfo, or wildcard never reaches telemetry.
+// only, so a port, path, userinfo, or wildcard never reaches telemetry. A
+// name may start with '_' (see sandboxHostRefPrefix).
 func canonicalSandboxHost(value string) (string, bool) {
 	literal := value
 	if strings.HasPrefix(literal, "[") && strings.HasSuffix(literal, "]") {
