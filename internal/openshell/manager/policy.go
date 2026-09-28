@@ -242,6 +242,9 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 			return m.violationError(ctx, err, rec.Name)
 		}
 	}
+	if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
+		return m.violationError(ctx, v, rec.Name)
+	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && eff.Workspace.Mode != config.OpenShellWorkdirMount {
 		// The mount is part of the sandbox; it cannot become a copy.
 		for i := range violations {
@@ -251,6 +254,50 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 		}
 		return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
 			Message: "the sandbox policy now runs this project in copy mode; delete the sandbox and run it again"}
+	}
+	return nil
+}
+
+// resourceViolation reports a sandbox whose resource limits (fixed in its
+// template when it was created, record.Resources) exceed the organization's
+// current openshell.admin.max_resources: the template cannot change, so the
+// sandbox must not start again under the larger (or no) limit. Records from
+// before the limits were recorded (nil) are not judged.
+func resourceViolation(applied *packs.Resources, max config.OpenShellResourcesConfig) *packs.Violation {
+	if applied == nil {
+		return nil
+	}
+	for _, q := range []struct {
+		key, have, limit string
+		parse            func(string) (int64, error)
+	}{
+		{"resources.cpu", applied.CPU, max.CPU, config.ParseOpenShellCPU},
+		{"resources.memory", applied.Memory, max.Memory, config.ParseOpenShellMemory},
+	} {
+		limit := strings.TrimSpace(q.limit)
+		if limit == "" {
+			continue
+		}
+		ceiling, err := q.parse(limit)
+		if err != nil {
+			continue // the resolver refuses a malformed maximum on its own
+		}
+		have := strings.TrimSpace(q.have)
+		over := have == ""
+		if over {
+			have = "no limit"
+		} else if n, err := q.parse(have); err != nil || n > ceiling {
+			over = true
+		}
+		if !over {
+			continue
+		}
+		what := strings.TrimPrefix(q.key, "resources.")
+		return &packs.Violation{Key: q.key, Source: packs.SourceUser, Attempted: have, Enforced: limit,
+			Constraint: "openshell.admin.max_resources", Fatal: true,
+			Message: "your organization now caps sandbox " + what + " at " + limit + ", and this sandbox was created with " + have +
+				"; delete it and run it again",
+			Detail: "a sandbox's resource limits are fixed when it is created"}
 	}
 	return nil
 }

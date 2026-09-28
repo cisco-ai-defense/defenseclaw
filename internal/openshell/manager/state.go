@@ -146,7 +146,10 @@ type record struct {
 	MCP       *sandboxapi.MCPSummary       `json:"mcp,omitempty"`
 	// RunConfig renders the per-run harness files again on start (nil for
 	// a harness without them, and in records from before it existed).
-	RunConfig  *runConfigRecord       `json:"run_config,omitempty"`
+	RunConfig *runConfigRecord `json:"run_config,omitempty"`
+	// Resources are the limits the sandbox's template got at create (an
+	// empty field is unlimited); nil in records from before they were kept.
+	Resources  *packs.Resources       `json:"resources,omitempty"`
 	Violations []sandboxapi.Violation `json:"violations,omitempty"`
 	Warnings   []string               `json:"warnings,omitempty"`
 

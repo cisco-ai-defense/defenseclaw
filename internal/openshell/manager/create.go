@@ -272,6 +272,8 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		Violations: wireViolations(in.violations), TokenDelivery: config.OpenShellTokenDeliveryProvider,
 	}
 	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
+	resources := eff.Resources
+	rec.Resources = &resources
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
 	}

@@ -457,6 +457,10 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
 	}
+	if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
+		v.Warnings = append(slices.Clip(v.Warnings), res.Message+
+			" (it keeps its current limits until it stops, and cannot start again)")
+	}
 	if b.elsewhere != "" {
 		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on "+b.elsewhere+
 			", not the gateway DefenseClaw is connected to; DefenseClaw keeps it until it connects there again (openshell.gateway), "+
