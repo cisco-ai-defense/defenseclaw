@@ -44,8 +44,9 @@ from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
 from defenseclaw.openshell_validation import (
     MAX_PROJECT_GLOB_BYTES,
     openshell_error,
-    valid_cpu,
+    valid_binary,
     valid_copy_pattern,
+    valid_cpu,
     valid_egress_pattern,
     valid_memory,
     valid_project_glob,
@@ -131,6 +132,13 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.egress.feed, "")
         self.assertIsNone(oc.mcp.import_)
         self.assertEqual(oc.admin, OpenShellAdminConfig())
+
+    def test_explicit_empty_pack_dir_means_no_custom_packs(self):
+        # As in Go (TestOpenShellExplicitEmptyPackDir): only an absent key
+        # takes the default.
+        self.assertEqual(_merge_openshell({"pack_dir": ""}, "/var/dc").pack_dir, "")
+        self.assertEqual(_merge_openshell({"pack_dir": " "}, "/var/dc").pack_dir, "")
+        self.assertEqual(_merge_openshell({}, "/var/dc").pack_dir, os.path.join("/var/dc", "policies", "sandbox"))
 
     def test_full_section(self):
         oc = _merge_openshell(_FULL_SECTION, "/var/dc")
@@ -257,6 +265,24 @@ class TestOpenShellValidation(unittest.TestCase):
                      "..", "C:/work/.env", "c:env", "a\x00b", "a" * (MAX_PROJECT_GLOB_BYTES + 1)):
             self.assertFalse(valid_project_glob(glob), glob)
 
+    def test_binary_paths(self):
+        # The same cases as TestOpenShellValidate; absolute means absolute on this OS.
+        root = os.path.abspath(os.sep)
+        for binary in ("", "openshell", " openshell-0.1 ", "openshell.exe",
+                       os.path.join(root, "opt", "openshell", "bin", "openshell")):
+            self.assertTrue(valid_binary(binary), binary)
+        for binary in ("bin/openshell", "./openshell", "tools\\openshell.exe", "~/bin/openshell"):
+            self.assertFalse(valid_binary(binary), binary)
+        self.assertEqual(openshell_error({"openshell": {"binary": "bin/openshell"}})[0], "openshell.binary")
+
+    def test_pack_dir_paths(self):
+        # The schema checks the spelling (TestDefenseClawConfigV8OpenShellValues).
+        for pack_dir in ("", "~", "~/packs", "/etc/packs", "C:/packs", "D:\\packs", "\\\\server\\share\\packs"):
+            load_validate_v8({"config_version": 8, "openshell": {"pack_dir": pack_dir}})
+        for pack_dir in ("packs", "./.defenseclaw/packs", "~alice/packs", "C:packs", " /etc/packs", "/etc/packs\n"):
+            with self.assertRaises(V8ConfigError, msg=pack_dir):
+                load_validate_v8({"config_version": 8, "openshell": {"pack_dir": pack_dir}})
+
     def test_quantities_mirror_go(self):
         # The same cases as TestParseOpenShellQuantities.
         for value in ("2", "1.5", "0.25", "500m", " 3 "):
@@ -374,6 +400,8 @@ class TestOpenShellSave(unittest.TestCase):
             "host glob with a port": lambda oc: setattr(oc.egress, "block", ["paste.example:443"]),
             "inner wildcard": lambda oc: setattr(oc.egress, "allow", ["a.*.example"]),
             "shorthand IPv4 unblock": lambda oc: setattr(oc.egress, "unblocked", ["127.1"]),
+            "relative binary": lambda oc: setattr(oc, "binary", "bin/openshell"),
+            "relative pack dir": lambda oc: setattr(oc, "pack_dir", "packs"),
             "zero cpu": lambda oc: setattr(oc.resources, "cpu", "0"),
             "equal explicit ports": lambda oc: (setattr(oc, "ingress_port", 19001), setattr(oc, "egress_port", 19001)),
             "derived port collision": lambda oc: (setattr(oc, "enabled", True), setattr(oc, "ingress_port", 18972)),

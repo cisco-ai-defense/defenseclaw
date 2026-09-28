@@ -13,14 +13,17 @@
 Mirrors ``OpenShellConfig.Validate`` and ``Config.ValidateOpenShell`` in
 internal/config/openshell.go for everything the v8 schema cannot express
 (egress pattern grammar, project-relative mask globs, copy-mode path globs,
-positive quantities, listener collisions), so a Python writer never saves a
-section the Go gateway refuses to load. The shared corpus testdata/openshell/config_validation_cases.yaml pins the
-parity; the input is a document that already passed the v8 schema.
+the binary path, positive quantities, listener collisions), so a Python
+writer never saves a section the Go gateway refuses to load. The shared
+corpus testdata/openshell/config_validation_cases.yaml pins the parity; the
+input is a document that already passed the v8 schema.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import ntpath
+import os
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -154,6 +157,25 @@ def valid_copy_pattern(pattern: str) -> bool:
     return anchored and all(_go_glob_well_formed(segment) for segment in p.split("/"))
 
 
+def _host_absolute(path: str) -> bool:
+    """Go's ``filepath.IsAbs`` on this host."""
+    if os.name != "nt":
+        return path.startswith("/")
+    drive, rest = ntpath.splitdrive(path)
+    # A drive that starts with a separator is a UNC or device path.
+    return bool(drive) and (drive[0] in "/\\" or rest[:1] in ("/", "\\"))
+
+
+def valid_binary(binary: str) -> bool:
+    """``validateOpenShellBinary``: empty, a command name on PATH, or an absolute path.
+
+    A relative path with a separator would run from the working directory,
+    the project folder for ``sandbox run``.
+    """
+    b = binary.strip()
+    return not b or _host_absolute(b) or not ("/" in b or "\\" in b)
+
+
 def valid_project_glob(glob: str) -> bool:
     """``ValidateOpenShellProjectGlob``: a project-relative glob that cannot escape the project."""
     g = glob.strip()
@@ -234,6 +256,9 @@ def openshell_error(document: Mapping[str, Any]) -> tuple[str, str] | None:
     admin = _mapping(section.get("admin"))
     workdir = _mapping(section.get("workdir"))
 
+    binary = section.get("binary")
+    if isinstance(binary, str) and not valid_binary(binary):
+        return "openshell.binary", "use a command name on PATH or an absolute path"
     ingress, egress_port = _port(section.get("ingress_port")), _port(section.get("egress_port"))
     if ingress != 0 and ingress == egress_port:
         return "openshell.egress_port", "use different ingress_port and egress_port values"

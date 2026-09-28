@@ -4968,7 +4968,9 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         ingress_port=_openshell_int(raw.get("ingress_port")),
         egress_port=_openshell_int(raw.get("egress_port")),
         pack=_openshell_str(raw.get("pack")),
-        pack_dir=_openshell_str(raw.get("pack_dir")) or pack_dir_default,
+        # Only an absent key takes the default: an explicit empty pack_dir
+        # means no custom packs, as in Go.
+        pack_dir=_openshell_str(raw.get("pack_dir"), pack_dir_default),
         profile=_openshell_str(raw.get("profile")),
         yolo=_openshell_optional_bool(raw.get("yolo")),
         workdir=OpenShellWorkdirConfig(

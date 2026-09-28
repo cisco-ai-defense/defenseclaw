@@ -22,6 +22,7 @@ import (
 	"math"
 	"net/netip"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -115,7 +116,8 @@ type OpenShellConfig struct {
 	// sandbox API. Off by default.
 	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	// Binary is the upstream `openshell` CLI used for terminal attach, file
-	// transfer, port forwarding and gateway registration.
+	// transfer, port forwarding and gateway registration: a command name
+	// looked up on PATH or an absolute path.
 	Binary  string                 `mapstructure:"binary"  yaml:"binary,omitempty"`
 	Gateway OpenShellGatewayConfig `mapstructure:"gateway" yaml:"gateway,omitempty"`
 	// IngressPort is the sandbox hook ingress listener; 0 means api_port+1.
@@ -126,8 +128,11 @@ type OpenShellConfig struct {
 	// strict), a custom pack name under PackDir, or an absolute path to a
 	// pack.yaml or its directory. Empty selects the default pack (open).
 	Pack string `mapstructure:"pack" yaml:"pack,omitempty"`
-	// PackDir holds custom packs as <name>/pack.yaml. Defaults to
-	// <policy_dir>/sandbox.
+	// PackDir holds custom packs as <name>/pack.yaml: an absolute path or one
+	// starting with "~/" (the v8 schema refuses a relative one, which the pack
+	// loader would refuse for every custom pack name). Defaults to
+	// <data_dir>/policies/sandbox; an explicit empty value means no custom
+	// packs.
 	PackDir string `mapstructure:"pack_dir" yaml:"pack_dir,omitempty"`
 	// Profile overrides the pack's network profile (open|balanced|strict).
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
@@ -428,6 +433,11 @@ var (
 		"T": 1000 * 1000 * 1000 * 1000, "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40,
 	}
 )
+
+// openShellHarnessVersionKey is openShellNamePattern without ".": the config
+// loader (viper) reads a dotted image.harness_versions key as a key path, so
+// such a key never loads.
+var openShellHarnessVersionKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // ParseOpenShellCPU parses a CPU quantity ("2", "1.5", "500m") into
 // millicores.
@@ -791,6 +801,7 @@ func (o *OpenShellConfig) Validate() error {
 			errs = append(errs, err)
 		}
 	}
+	check(validateOpenShellBinary(o.Binary))
 	check(validateOpenShellPort("ingress_port", o.IngressPort, true))
 	check(validateOpenShellPort("egress_port", o.EgressPort, true))
 	if o.IngressPort != 0 && o.IngressPort == o.EgressPort {
@@ -824,8 +835,8 @@ func (o *OpenShellConfig) Validate() error {
 	check(validateOpenShellNames("harnesses", o.Harnesses))
 	check(validateOpenShellNames("wrappers", o.Wrappers))
 	for name := range o.Image.HarnessVersions {
-		if !openShellNamePattern.MatchString(name) {
-			check(fmt.Errorf("image.harness_versions: invalid harness name %q", name))
+		if !openShellHarnessVersionKey.MatchString(name) {
+			check(fmt.Errorf("image.harness_versions: invalid harness name %q (use letters, digits, \"_\" and \"-\")", name))
 		}
 	}
 	check(validateOpenShellResources("resources", o.Resources))
@@ -875,6 +886,19 @@ func isOpenShellLockableKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// validateOpenShellBinary accepts the default (empty), a command name looked
+// up on PATH, or an absolute path. A relative path with a separator
+// ("bin/openshell", "./openshell", "~/bin/openshell": nothing expands "~")
+// would run from the working directory: for `sandbox run` and `sandbox
+// connect` that is the project folder, which may be an untrusted repository.
+func validateOpenShellBinary(binary string) error {
+	b := strings.TrimSpace(binary)
+	if b == "" || filepath.IsAbs(b) || !strings.ContainsAny(b, `/\`) {
+		return nil
+	}
+	return fmt.Errorf("binary %q must be a command name on PATH or an absolute path", binary)
 }
 
 func validateOpenShellPort(field string, port int, zeroOK bool) error {

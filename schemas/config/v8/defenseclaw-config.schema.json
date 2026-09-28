@@ -657,8 +657,7 @@
           "$ref": "#/$defs/openShellPackRef"
         },
         "pack_dir": {
-          "type": "string",
-          "maxLength": 4096
+          "$ref": "#/$defs/openShellPackDir"
         },
         "profile": {
           "$ref": "#/$defs/openShellProfileOrInherit"
@@ -806,6 +805,19 @@
         "$ref": "#/$defs/connectorName"
       }
     },
+    "openShellPackDir": {
+      "description": "The custom pack directory: empty (no custom packs), an absolute path (\"/...\", \"C:/...\" or a UNC path), or one under the home directory (\"~\" or \"~/...\"). The pack loader refuses relative paths.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(|~|~/.*|[/\\\\].*|[A-Za-z]:[/\\\\].*)$"
+    },
+    "openShellHarnessVersionKey": {
+      "description": "A harness name keying image.harness_versions. No \".\": the gateway's config loader reads a dotted key as a key path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    },
     "openShellGlobList": {
       "type": "array",
       "maxItems": 1024,
@@ -909,7 +921,7 @@
           "type": "object",
           "maxProperties": 64,
           "propertyNames": {
-            "$ref": "#/$defs/connectorName"
+            "$ref": "#/$defs/openShellHarnessVersionKey"
           },
           "additionalProperties": {
             "type": "string",

@@ -1071,6 +1071,14 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		{"pack digest format", openshell(map[string]any{"admin": map[string]any{"required_pack_digest": "sha256:ABC"}})},
 		{"harness name with space", openshell(map[string]any{"harnesses": []any{"claude code"}})},
 		{"string yolo", openshell(map[string]any{"yolo": "yes"})},
+		{"relative pack dir", openshell(map[string]any{"pack_dir": "packs"})},
+		{"working directory pack dir", openshell(map[string]any{"pack_dir": "./.defenseclaw/packs"})},
+		{"other user's home pack dir", openshell(map[string]any{"pack_dir": "~alice/packs"})},
+		{"drive-relative pack dir", openshell(map[string]any{"pack_dir": "C:packs"})},
+		{"pack dir with trailing newline", openshell(map[string]any{"pack_dir": "/etc/packs\n"})},
+		{"dotted harness version key", openshell(map[string]any{
+			"image": map[string]any{"harness_versions": map[string]any{"claude.code": "1.0.0"}},
+		})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := schema.Validate(tc.doc); err == nil {
@@ -1095,6 +1103,15 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		})},
 		{"millicores and binary memory", openshell(map[string]any{
 			"resources": map[string]any{"cpu": "1500m", "memory": "512Mi"},
+		})},
+		{"empty pack dir", openshell(map[string]any{"pack_dir": ""})},
+		{"home pack dir", openshell(map[string]any{"pack_dir": "~"})},
+		{"home subdirectory pack dir", openshell(map[string]any{"pack_dir": "~/packs"})},
+		{"posix pack dir", openshell(map[string]any{"pack_dir": "/etc/defenseclaw/packs"})},
+		{"drive pack dir", openshell(map[string]any{"pack_dir": `C:\ProgramData\DefenseClaw\packs`})},
+		{"unc pack dir", openshell(map[string]any{"pack_dir": `\\server\share\packs`})},
+		{"harness version keys", openshell(map[string]any{
+			"image": map[string]any{"harness_versions": map[string]any{"codex": "0.146.0", "claude_code-2": "1"}},
 		})},
 		{"ip literals, prefixes and wildcard patterns", openshell(map[string]any{
 			"admin": map[string]any{"egress_block": []any{"203.0.113.7", "198.51.100.0/24", "[2001:db8::1]", "2001:db8::2", "2001:db8::/32", "*.Ngrok.IO", "paste.example."}},

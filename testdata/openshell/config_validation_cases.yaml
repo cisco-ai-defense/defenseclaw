@@ -486,6 +486,76 @@ cases:
       openshell:
         workdir: {unmask: ['  ']}
 
+  - name: binary-command-name
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        binary: openshell
+
+  - name: binary-relative-path
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        binary: bin/openshell
+
+  - name: binary-in-the-working-directory
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        binary: ./openshell
+
+  - name: binary-under-an-unexpanded-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        binary: '~/bin/openshell'
+
+  - name: pack-dir-under-home
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: '~/packs'
+
+  - name: pack-dir-explicitly-empty
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: ''
+
+  - name: pack-dir-relative
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: packs
+
+  - name: pack-dir-under-another-users-home
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        pack_dir: '~alice/packs'
+
+  - name: harness-version-dotted-key
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        image: {harness_versions: {claude.code: 1.0.0}}
+
+  - name: harness-version-keys
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        image: {harness_versions: {codex: 0.146.0, claude_code-2: '1'}}
+
   - name: tri-state-yaml11-no
     valid: false
     source: |

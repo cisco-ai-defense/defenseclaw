@@ -85,16 +85,41 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	}
 }
 
+// An explicit empty pack_dir keeps no custom pack directory in both Go
+// loaders; cli/defenseclaw/config.py reads it the same way.
+func TestOpenShellExplicitEmptyPackDir(t *testing.T) {
+	path := writeOpenShellConfig(t, "openshell:\n  pack_dir: ''\n")
+	for name, load := range map[string]func(string) (*Config, error){
+		"LoadFromFile": LoadFromFile, "LoadRuntimeV8File": LoadRuntimeV8File,
+	} {
+		cfg, err := load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if cfg.OpenShell.PackDir != "" {
+			t.Fatalf("%s: pack_dir = %q, want empty", name, cfg.OpenShell.PackDir)
+		}
+	}
+}
+
+// openShellTestRoot is an absolute root on this OS: "/", or the temp
+// directory's volume ("C:" plus a backslash).
+func openShellTestRoot() string {
+	return filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
+}
+
 func TestOpenShellFullSectionLoads(t *testing.T) {
+	binary := filepath.Join(openShellTestRoot(), "usr", "bin", "openshell")
+	packDir := filepath.Join(openShellTestRoot(), "etc", "defenseclaw", "packs")
 	path := writeOpenShellConfig(t, `gateway:
   api_port: 19000
 openshell:
   enabled: true
-  binary: /usr/bin/openshell
+  binary: '`+binary+`'
   gateway: {name: openshell, workspace: team}
   egress_port: 19500
   pack: balanced
-  pack_dir: /etc/defenseclaw/packs
+  pack_dir: '`+packDir+`'
   profile: strict
   yolo: false
   workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep}
@@ -129,11 +154,11 @@ openshell:
 	tr := true
 	want := OpenShellConfig{
 		Enabled:           true,
-		Binary:            "/usr/bin/openshell",
+		Binary:            binary,
 		Gateway:           OpenShellGatewayConfig{Name: "openshell", Workspace: "team"},
 		EgressPort:        19500,
 		Pack:              "balanced",
-		PackDir:           "/etc/defenseclaw/packs",
+		PackDir:           packDir,
 		Profile:           "strict",
 		Yolo:              &f,
 		Workdir:           OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep"},
@@ -235,6 +260,13 @@ func TestOpenShellValidate(t *testing.T) {
 		{"unblocked glob", func(o *OpenShellConfig) { o.Egress.Unblocked = []string{"ok.example", "a.*.example"} }, "egress.unblocked[1]"},
 		{"harness", func(o *OpenShellConfig) { o.Harnesses = []string{"claude code"} }, "harnesses[0]"},
 		{"image harness", func(o *OpenShellConfig) { o.Image.HarnessVersions = map[string]string{"bad name": "1"} }, "image.harness_versions"},
+		{"dotted image harness", func(o *OpenShellConfig) {
+			o.Image.HarnessVersions = map[string]string{"claude.code": "1"}
+		}, "image.harness_versions"},
+		{"relative binary", func(o *OpenShellConfig) { o.Binary = "bin/openshell" }, "binary"},
+		{"working directory binary", func(o *OpenShellConfig) { o.Binary = "./openshell" }, "binary"},
+		{"backslash binary", func(o *OpenShellConfig) { o.Binary = `tools\openshell.exe` }, "binary"},
+		{"home binary", func(o *OpenShellConfig) { o.Binary = "~/bin/openshell" }, "binary"},
 		{"cpu", func(o *OpenShellConfig) { o.Resources.CPU = "0" }, "resources.cpu"},
 		{"memory", func(o *OpenShellConfig) { o.Resources.Memory = "4GB" }, "resources.memory"},
 		{"admin profile", func(o *OpenShellConfig) { o.Admin.MinProfile = "none" }, "admin.min_profile"},
@@ -272,8 +304,17 @@ func TestOpenShellValidate(t *testing.T) {
 	valid.Resources = OpenShellResourcesConfig{CPU: "1.5", Memory: "512Mi"}
 	valid.Admin.Locked = append([]string(nil), OpenShellLockableKeys...)
 	valid.Admin.RequiredPack, valid.Admin.RequiredPackDigest = "strict", "sha256:"+strings.Repeat("0f", 32)
+	valid.Image.HarnessVersions = map[string]string{"codex": "0.146.0", "claude_code-2": "1"}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid section rejected: %v", err)
+	}
+	for _, binary := range []string{"", "openshell", " openshell-0.1 ", "openshell.exe",
+		filepath.Join(openShellTestRoot(), "opt", "openshell", "bin", "openshell")} {
+		o := DefaultConfig().OpenShell
+		o.Binary = binary
+		if err := o.Validate(); err != nil {
+			t.Errorf("binary %q rejected: %v", binary, err)
+		}
 	}
 	var nilSection *OpenShellConfig
 	if err := nilSection.Validate(); err != nil {
