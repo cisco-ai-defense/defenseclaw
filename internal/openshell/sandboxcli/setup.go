@@ -227,10 +227,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	keepTelemetry := o.UpstreamTelemetry || a.Cfg.OpenShell.UpstreamTelemetry
 	telemetryOff := !keepTelemetry
 	if a.GOOS == "darwin" {
-		// Homebrew's launchd service does not read gateway.env (the doctor
-		// skips the telemetry check there): nothing to ask or change.
+		// Setup changes the telemetry only through the systemd unit, whose
+		// environment files it can check (the doctor skips the telemetry
+		// check here). The Homebrew service's wrapper sources gateway.env
+		// too, so say how to turn it off by hand.
 		if telemetryOff {
-			a.note("OpenShell's anonymous usage telemetry stays on under Homebrew (its service does not read gateway.env)")
+			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
+				openshell.EnvTelemetryEnabled + "=false in " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
+				", which the Homebrew service reads, and restart the gateway (`brew services restart " + openshell.GatewayFormula + "`)")
 		}
 	} else {
 		switch {

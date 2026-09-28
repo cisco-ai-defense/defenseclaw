@@ -1029,7 +1029,10 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	state := map[bool]string{true: "on", false: "off"}[on]
 	switch {
 	case r.GOOS == "darwin":
-		tele.Status, tele.Detail = StatusSkip, "gateway.env is read by the systemd unit only"
+		// The Homebrew service's wrapper sources gateway.env before it
+		// starts the gateway, but launchd cannot be asked which one, so
+		// DefenseClaw leaves the telemetry to the user there.
+		tele.Status, tele.Detail = StatusSkip, "DefenseClaw changes it on Linux only; the Homebrew service reads "+EnvTelemetryEnabled+" from "+st.EnvPath
 	case errors.Is(envErr, ErrGatewayMismatch):
 		tele.Status, tele.Detail = StatusWarn, envErr.Error()
 	case r.WantTelemetry != nil && *r.WantTelemetry != on:

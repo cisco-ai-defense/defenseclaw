@@ -46,7 +46,8 @@ import (
 const (
 	// GatewayTOMLFile is read by openshell-gateway through XDG discovery.
 	GatewayTOMLFile = "gateway.toml"
-	// GatewayEnvFile is the systemd unit's EnvironmentFile.
+	// GatewayEnvFile is the systemd unit's EnvironmentFile; the Homebrew
+	// service's wrapper sources it too.
 	GatewayEnvFile = "gateway.env"
 	// GatewayService is the systemd user unit.
 	GatewayService = "openshell-gateway"
@@ -985,7 +986,9 @@ func splitSystemdWords(s string) []string {
 
 // serviceEnvironment checks that the gateway service reads the files
 // DefenseClaw edits and returns the environment it starts with. Under
-// Homebrew it returns nil: launchd does not read gateway.env.
+// Homebrew it returns nil: the service's wrapper sources a gateway.env
+// (XDG, else the one under the Homebrew prefix), but launchd cannot be
+// asked which.
 func (g *GatewayConfigurator) serviceEnvironment(ctx context.Context) (map[string]string, error) {
 	if g.GOOS == "darwin" {
 		return nil, nil

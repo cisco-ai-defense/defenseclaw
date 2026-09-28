@@ -517,21 +517,27 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	has(t, ta.output(), "openshell.workdir.mode is copy")
 }
 
-// TestSetupOnMacOSLeavesTelemetryAlone: the Homebrew gateway does not read
-// gateway.env, so setup neither asks about OpenShell's telemetry nor edits
-// that file (and restarts the gateway) for a change that does nothing.
+// TestSetupOnMacOSLeavesTelemetryAlone: setup changes OpenShell's
+// telemetry only through the systemd unit, so on macOS it neither asks
+// about it nor edits gateway.env (and restarts the gateway). The note said
+// the Homebrew service does not read gateway.env, but its wrapper sources
+// it (manual test M8): the note says how to turn the telemetry off there.
 func TestSetupOnMacOSLeavesTelemetryAlone(t *testing.T) {
+	const note = "OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
+		"OPENSHELL_TELEMETRY_ENABLED=false in ~/.config/openshell/gateway.env, which the Homebrew service reads, and restart the gateway " +
+		"(`brew services restart nvidia/openshell/openshell`)"
 	for _, upstream := range []bool{false, true} {
 		// On a terminal: the bind mounts question and the restart it needs.
 		ta := setupApp(t, "y\ny\n", "", false)
 		ta.GOOS = "darwin"
+		ta.gateway.state.EnvPath = filepath.Join(ta.home, ".config", "openshell", "gateway.env")
 		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true, UpstreamTelemetry: upstream}))
 		if p := ta.gateway.planned; len(p) != 1 || !p[0].EnableBindMounts || len(p[0].Env) != 0 || len(p[0].UnsetEnv) != 0 {
 			t.Fatalf("upstream %t: gateway plans = %+v", upstream, p)
 		}
-		lacks(t, ta.output(), "Disable OpenShell's anonymous usage telemetry?")
-		if note := strings.Contains(ta.output(), "telemetry stays on under Homebrew"); note == upstream {
-			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, note, ta.output())
+		lacks(t, ta.output(), "Disable OpenShell's anonymous usage telemetry?", "does not read gateway.env")
+		if shown := strings.Contains(ta.output(), note); shown == upstream {
+			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, shown, ta.output())
 		}
 	}
 }

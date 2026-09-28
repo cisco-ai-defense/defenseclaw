@@ -448,7 +448,9 @@ func TestDoctorChecks(t *testing.T) {
 			want: []checkWant{{"gateway-service", fail, "Failed to connect to bus"}}},
 		{name: "macOS skips Linux-only checks", setup: func(f *doctorFixture) { f.onBrew() },
 			want: []checkWant{{"landlock", pass, "ABI 6 in the Linux VM Docker runs in"}, {"linger", skip, ""},
-				{"gateway-service", pass, "nvidia/openshell/openshell"}, {"telemetry", skip, ""}}},
+				{"gateway-service", pass, "nvidia/openshell/openshell"},
+				// The Homebrew service's wrapper sources gateway.env too (M8).
+				{"telemetry", skip, "DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from /"}}},
 		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {
 			f.onBrew()
 			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
