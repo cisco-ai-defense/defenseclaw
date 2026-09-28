@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 const (
@@ -252,6 +254,95 @@ func RemoveOrphanedSandboxData(dataDir, name string) error {
 		errs = append(errs, fmt.Errorf("%s holds files DefenseClaw did not write there; it is left in place", dir))
 	}
 	return errors.Join(errs...)
+}
+
+// RecordedSandbox is a sandbox the daemon keeps a record of under a data
+// dir (RecordedSandboxes).
+type RecordedSandbox struct {
+	Name string
+	// Retained marks a sandbox that is gone, whose record keeps only its
+	// pre-session snapshot.
+	Retained bool
+}
+
+// RecordedSandboxes lists the sandboxes recorded under dataDir, for sandbox
+// teardown while the daemon is not running (RemoveSandboxState).
+// Unreadable records are left out.
+func RecordedSandboxes(dataDir string) []RecordedSandbox {
+	recs, _ := newRecordStore(dataDir).loadAll()
+	out := make([]RecordedSandbox, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, RecordedSandbox{Name: r.Name, Retained: r.Retained})
+	}
+	return out
+}
+
+// RemoveSandboxState is the local half of the daemon's delete (cleanup and
+// deleteRetained) for a sandbox that is gone from the OpenShell gateway
+// while the daemon is not running: sandbox teardown deletes it there
+// directly, and turns openshell.enabled off, so no daemon would reconcile
+// it later. It releases a live mount (the protection pins PlanMount set in
+// the project's .git, and the mask files), deletes the pre-session snapshot
+// and its refs or the copy-mode state, the run files and the ingress
+// binding, then the record and the sandbox directory. The gateway side (the
+// sandbox, its providers) is the caller's, and so is making sure no daemon
+// runs on dataDir. Every step is attempted and the errors are joined; the
+// record stays while one failed, so a retry finds the sandbox again.
+func RemoveSandboxState(ctx context.Context, dataDir, name string) error {
+	if !openshell.ValidSandboxName(name) || name == recordDirName {
+		return fmt.Errorf("invalid sandbox name %q", name)
+	}
+	store := newRecordStore(dataDir)
+	var rec record
+	if p, err := store.path(name); err == nil {
+		data, err := safefile.ReadRegularFileBounded(p, recordMaxBytes)
+		switch {
+		case err == nil:
+			if err := json.Unmarshal(data, &rec); err != nil || rec.Name != name {
+				return fmt.Errorf("sandbox record %s is malformed; it is left in place", name)
+			}
+		case !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("sandbox record %s: %w", name, err)
+		}
+	}
+	var errs []error
+	keep := func(err error) {
+		if err != nil && !errors.Is(err, openshell.ErrInvalidName) && !errors.Is(err, workspace.ErrSnapshotNotFound) &&
+			!errors.Is(err, workspace.ErrCopyNotFound) {
+			errs = append(errs, err)
+		}
+	}
+	keep(workspace.ReleaseMount(dataDir, name))
+	keep(workspace.DeleteSnapshot(ctx, dataDir, name))
+	keep(workspace.DeleteCopy(dataDir, name))
+	dir := filepath.Join(dataDir, "sandboxes", name)
+	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
+	if rec.BindingID != "" {
+		keep(revokeStoredBinding(dataDir, rec.BindingID))
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if err := store.remove(name); err != nil {
+		return err
+	}
+	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%s holds files DefenseClaw did not write there; it is left in place", dir)
+	}
+	return nil
+}
+
+// revokeStoredBinding revokes an ingress binding in dataDir's binding store
+// directly (the daemon is not running); one already gone is no error.
+func revokeStoredBinding(dataDir, id string) error {
+	store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(dataDir), sandboxauth.WithRefreshInterval(0))
+	if err != nil {
+		return fmt.Errorf("open the ingress binding store: %w", err)
+	}
+	if err := store.Revoke(id); err != nil && !errors.Is(err, sandboxauth.ErrNotFound) {
+		return fmt.Errorf("revoke the ingress binding %s: %w", id, err)
+	}
+	return nil
 }
 
 // loadAll reads every record; unreadable files are reported and skipped.

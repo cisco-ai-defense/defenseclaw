@@ -240,3 +240,46 @@ func TestSaveAfterRemoveKeepsTheRecordGone(t *testing.T) {
 		t.Fatalf("the removed record is back: %v", err)
 	}
 }
+
+// TestRemoveSandboxState pins the local half of a delete teardown runs for
+// a sandbox it deleted on the gateway while no daemon runs: the binding,
+// the run files, the record and the directory go; a malformed record stays
+// where it is, with everything it would name.
+func TestRemoveSandboxState(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "offbox"})
+	e.stop()
+	e.m.mu.Lock()
+	bindingID := e.m.boxes[sb.Name].rec.BindingID
+	e.m.mu.Unlock()
+	if _, err := e.store.Get(bindingID); err != nil {
+		t.Fatalf("binding before: %v", err)
+	}
+	if err := RemoveSandboxState(context.Background(), e.dataDir, sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	if got := RecordedSandboxes(e.dataDir); len(got) != 0 {
+		t.Fatalf("records after = %+v", got)
+	}
+	if _, err := e.store.Get(bindingID); err == nil {
+		t.Fatal("the binding survived")
+	}
+	if _, err := os.Stat(filepath.Join(e.dataDir, "sandboxes", sb.Name)); !os.IsNotExist(err) {
+		t.Fatalf("the sandbox directory is still there: %v", err)
+	}
+
+	bad := filepath.Join(e.dataDir, "sandboxes", recordDirName, "badbox.json")
+	if err := os.WriteFile(bad, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveSandboxState(context.Background(), e.dataDir, "badbox"); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("malformed record: %v", err)
+	}
+	if _, err := os.Stat(bad); err != nil {
+		t.Fatalf("the malformed record was removed: %v", err)
+	}
+	if err := RemoveSandboxState(context.Background(), e.dataDir, "../escape"); err == nil {
+		t.Fatal("an invalid name was accepted")
+	}
+}

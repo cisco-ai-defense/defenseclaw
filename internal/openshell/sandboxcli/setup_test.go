@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 // hostReport is a doctor report of a ready Linux host; edit adjusts it.
@@ -556,6 +558,104 @@ func TestTeardownWithoutDaemonOrGateway(t *testing.T) {
 	if !strings.Contains(ta.output(), "nothing to tear down") {
 		t.Fatalf("output:\n%s", ta.output())
 	}
+}
+
+// TestTeardownWithTheDaemonStopped pins that a teardown that deletes a
+// recorded sandbox on the gateway itself (no daemon runs) also removes
+// what the daemon's delete would have: the ingress binding, the run files
+// and the record, and that it drops recorded sandboxes the gateway no
+// longer has (a kept snapshot). A daemon that has sandboxes on but cannot
+// list them keeps its local state.
+func TestTeardownWithTheDaemonStopped(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*testApp, string, *sandboxauth.FileStore) {
+		ta := newTestApp(t, "")
+		writeConfig(t, ta, "")
+		owner, err := image.NewStore(ta.Cfg.DataDir).Owner()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fake := openshelltest.New()
+		client := fake.Client(openshell.ClientOptions{})
+		labels := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: owner}
+		if _, err := client.CreateSandbox(ctx, "dc-claude-live", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
+			t.Fatal(err)
+		}
+		ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+			return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
+		}
+		store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(ta.Cfg.DataDir), sandboxauth.WithRefreshInterval(0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _, err := store.Mint(sandboxauth.Spec{SandboxName: "dc-claude-live", Connector: "claudecode", Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sandboxes := filepath.Join(ta.Cfg.DataDir, "sandboxes")
+		for name, rec := range map[string]string{
+			"dc-claude-live": `{"version":1,"name":"dc-claude-live","harness":"claudecode","binding_id":"` + b.ID + `"}`,
+			"dc-claude-kept": `{"version":1,"name":"dc-claude-kept","harness":"claudecode","retained":true}`,
+		} {
+			if err := os.MkdirAll(filepath.Join(sandboxes, name, "run-config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sandboxes, name, "run-config", "settings.json"), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(sandboxes, "manager"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sandboxes, "manager", name+".json"), []byte(rec), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return ta, b.ID, store
+	}
+	t.Run("stopped", func(t *testing.T) {
+		ta, id, store := setup(t)
+		ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+		if err := ta.Teardown(ctx, TeardownOptions{Yes: true, KeepImages: true}); err != nil {
+			t.Fatalf("Teardown: %v\n%s", err, ta.output())
+		}
+		out := ta.output()
+		for _, want := range []string{"gone sandboxes    dc-claude-kept (kept snapshot)", "deleted sandbox dc-claude-live",
+			"removed what the gone sandbox dc-claude-kept left on this machine"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("teardown output lacks %q:\n%s", want, out)
+			}
+		}
+		if left := manager.RecordedSandboxes(ta.Cfg.DataDir); len(left) != 0 {
+			t.Fatalf("records left: %+v", left)
+		}
+		for _, name := range []string{"dc-claude-live", "dc-claude-kept"} {
+			if _, err := os.Stat(filepath.Join(ta.Cfg.DataDir, "sandboxes", name)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s's directory is still there: %v", name, err)
+			}
+		}
+		fresh, err := sandboxauth.OpenFileStore(store.Path(), sandboxauth.WithRefreshInterval(0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fresh.Get(id); !errors.Is(err, sandboxauth.ErrNotFound) {
+			t.Fatalf("the binding survived the teardown: %v", err)
+		}
+	})
+	t.Run("a daemon with sandboxes on that cannot list them", func(t *testing.T) {
+		ta, id, store := setup(t)
+		ta.daemon.errors = map[string]*sandboxapi.Error{
+			http.MethodGet + " " + sandboxapi.PathSandboxes: {Code: sandboxapi.CodeUpstream, Message: "listing is down"},
+		}
+		if err := ta.Teardown(ctx, TeardownOptions{Yes: true, KeepImages: true}); err != nil {
+			t.Fatalf("Teardown: %v\n%s", err, ta.output())
+		}
+		if left := manager.RecordedSandboxes(ta.Cfg.DataDir); len(left) != 2 {
+			t.Fatalf("records left = %+v; a daemon may still be managing them", left)
+		}
+		if _, err := store.Get(id); err != nil {
+			t.Fatalf("the binding was revoked under a running daemon: %v", err)
+		}
+	})
 }
 
 // noCloseClient keeps the shared fake gateway open when a command closes

@@ -54,7 +54,18 @@ type teardownPlan struct {
 	images     []string
 	// orphans are sandboxes whose data under <data_dir>/sandboxes the
 	// daemon has no record of.
-	orphans  []string
+	orphans []string
+	// offline is set when no daemon manages the data dir (it is stopped,
+	// or sandboxes are off): teardown then removes the local state of the
+	// recorded sandboxes it deletes on the gateway itself, and of those
+	// already gone from it (stale), which no daemon reconciles once
+	// openshell.enabled is off (manager.RemoveSandboxState).
+	offline bool
+	// recorded are the sandboxes the daemon keeps records of, by name.
+	recorded map[string]manager.RecordedSandbox
+	// stale are recorded sandboxes the gateway no longer has: a kept
+	// snapshot, or a delete the daemon never saw.
+	stale    []string
 	gateway  []receiptFile
 	changed  []receiptFile
 	wrappers []wrapper.Installed
@@ -110,7 +121,7 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 
 func (p *teardownPlan) empty() bool {
 	return len(p.sandboxes) == 0 && len(p.providers) == 0 && len(p.profiles) == 0 && len(p.images) == 0 &&
-		len(p.orphans) == 0 && len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0
+		len(p.orphans) == 0 && len(p.stale) == 0 && len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0
 }
 
 // owner is this data dir's sandbox owner label, "" when it never had one
@@ -130,6 +141,10 @@ func (a *App) owner() string {
 func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPlan, error) {
 	p := &teardownPlan{}
 	owner := a.owner()
+	// No daemon manages the data dir when none answers, or when the one
+	// that does has sandboxes off; one that has them on but could not list
+	// them may still be running its manager, so nothing local is touched.
+	p.offline = true
 	if api, err := a.api(); err == nil {
 		if list, err := api.List(ctx); err == nil {
 			p.daemon = true
@@ -141,9 +156,15 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 			}
 			sort.Strings(p.unhanded)
 		}
+		if p.daemon {
+			p.offline = false
+		} else if st, err := api.Status(ctx); err == nil && st.Enabled {
+			p.offline = false
+		}
 	}
 	// The gateway directly: sandboxes and providers the daemon does not
 	// know (it is stopped, or they were orphaned), and the profiles.
+	listed := false
 	c, _, err := a.OpenShell(ctx)
 	if err != nil {
 		p.gwErr = err
@@ -152,6 +173,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		if owner != "" {
 			sel := map[string]string{manager.LabelManaged: "true", manager.LabelOwner: owner}
 			if sbs, err := c.ListSandboxes(ctx, sel); err == nil {
+				listed = true
 				for _, sb := range sbs {
 					if !slices.Contains(p.sandboxes, sb.Name) {
 						p.sandboxes = append(p.sandboxes, sb.Name)
@@ -170,6 +192,17 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		p.profiles = a.unusedProfiles(ctx, c, p.providers, p.ownIngress)
 	}
 	sort.Strings(p.sandboxes)
+	if p.offline {
+		p.recorded = map[string]manager.RecordedSandbox{}
+		for _, r := range manager.RecordedSandboxes(a.dataDir()) {
+			p.recorded[r.Name] = r
+			// Only a gateway that listed its sandboxes tells a gone one
+			// from a live one.
+			if listed && !slices.Contains(p.sandboxes, r.Name) {
+				p.stale = append(p.stale, r.Name)
+			}
+		}
+	}
 	p.orphans = manager.OrphanedSandboxData(a.dataDir())
 	if !o.KeepImages {
 		if tags, err := a.Images.Remove(ctx, true); err == nil {
@@ -256,6 +289,14 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 	list("provider profiles", p.profiles)
 	list("images", p.images)
 	list("leftover data", p.orphans)
+	var stale []string
+	for _, name := range p.stale {
+		if p.recorded[name].Retained {
+			name += " (kept snapshot)"
+		}
+		stale = append(stale, name)
+	}
+	list("gone sandboxes", stale)
 	for _, f := range p.gateway {
 		how := "restore the backup " + f.Backup
 		if f.Backup == "" {
@@ -278,6 +319,18 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 	if o.KeepImages {
 		a.note("images are kept (--keep-images)")
 	}
+}
+
+// removeSandboxState removes what a recorded sandbox left on this machine
+// once it is gone from the gateway (manager.RemoveSandboxState): its mount
+// pins and masks, snapshot, copy, run files, binding and record, and the
+// CLI's own state of it.
+func (a *App) removeSandboxState(ctx context.Context, name string) error {
+	if err := manager.RemoveSandboxState(ctx, a.dataDir(), name); err != nil {
+		return err
+	}
+	a.forgetCLIState(name)
+	return nil
 }
 
 func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOptions) error {
@@ -309,8 +362,22 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 				fail("wait for "+name+" to go", err)
 				continue
 			}
+			// No daemon cleans up after a delete it did not make.
+			if _, ok := p.recorded[name]; ok && p.offline {
+				if err := a.removeSandboxState(ctx, name); err != nil {
+					fail("remove what "+name+" left on this machine", err)
+					continue
+				}
+			}
 		}
 		a.ok("deleted sandbox " + name)
+	}
+	for _, name := range p.stale {
+		if err := a.removeSandboxState(ctx, name); err != nil {
+			fail("remove what "+name+" left on this machine", err)
+			continue
+		}
+		a.ok("removed what the gone sandbox " + name + " left on this machine")
 	}
 	if p.client != nil {
 		// The daemon deletes a sandbox's providers with it; what is left
