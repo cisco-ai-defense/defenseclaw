@@ -47,7 +47,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from defenseclaw.policy_catalog import ScopeLevels, level_value, resolve_levels
+from defenseclaw.policy_catalog import ScopeLevels, level_value, policy_root, resolve_levels
 
 POLICY_VIEWS: tuple[str, ...] = (
     "posture",
@@ -902,7 +902,9 @@ class PoliciesPanelModel:
         # ``guardrail hilt --connector`` needs the per-connector map; a
         # single-connector install changes the global block instead.
         self.multi_connector = isinstance(connectors, Mapping) and bool(connectors)
-        self.policy_dir = str(getattr(config, "policy_dir", "") or "")
+        # policy_dir, else <data_dir>/policies: the folder the CLI composes
+        # protection packs under (policy_catalog.protected_pack_dir).
+        self.policy_dir = policy_root(config)
 
     def apply_policies(self, policies: list[Any] | tuple[Any, ...]) -> None:
         self.policies = tuple(policies)

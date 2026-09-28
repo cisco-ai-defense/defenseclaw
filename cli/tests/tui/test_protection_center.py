@@ -306,6 +306,9 @@ def test_consequence_modals_turn_red_only_when_protection_weakens() -> None:
     # codex's strict pack is composed into protected-codex/strict, so it keeps strict levels.
     assert protection_change_modal(model, codex, kubernetes, True).actions[0].danger is False
     assert composed_pack_path(model, codex).endswith(os.path.join("protected-codex", "strict"))
+    # With no policy_dir the CLI composes under <data_dir>/policies; the preview says the same.
+    model.set_config(SimpleNamespace(policy_dir="", data_dir="/dc"))
+    assert composed_pack_path(model, codex) == os.path.join("/dc", "policies", "guardrail", "protected-codex", "strict")
 
 
 def test_global_changes_name_the_connectors_that_keep_their_own_setting() -> None:

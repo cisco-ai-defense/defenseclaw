@@ -386,7 +386,8 @@ class ConnectorPack:
         return asdict(self)
 
 
-def _policy_root(cfg: Any) -> str:
+def policy_root(cfg: Any) -> str:
+    """The policy folder: ``policy_dir``, else ``<data_dir>/policies`` ("" without either)."""
     root = str(getattr(cfg, "policy_dir", "") or "").strip()
     if root:
         return os.path.expanduser(root)
@@ -401,7 +402,7 @@ def preset_pack_dir(cfg: Any, preset: str) -> str:
     else the bundled copy, else the seeded location (so the caller can report
     the path the gateway will look at).
     """
-    root = _policy_root(cfg)
+    root = policy_root(cfg)
     seeded = os.path.join(root, "guardrail", preset) if root else ""
     if seeded and os.path.isdir(seeded):
         return seeded
@@ -435,7 +436,7 @@ def _same_path(a: str, b: str) -> bool:
 
 def _preset_candidates(cfg: Any, preset: str) -> list[str]:
     out: list[str] = []
-    root = _policy_root(cfg)
+    root = policy_root(cfg)
     if root:
         out.append(os.path.join(root, "guardrail", preset))
     try:
@@ -553,7 +554,7 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
     for preset in RULE_PACK_PRESETS:
         _add(preset, preset_pack_dir(cfg, preset), "preset")
 
-    root = _policy_root(cfg)
+    root = policy_root(cfg)
     guardrail_root = os.path.join(root, "guardrail") if root else ""
     if guardrail_root and os.path.isdir(guardrail_root):
         try:
@@ -848,7 +849,7 @@ def protected_pack_dir(cfg: Any, scope: str, profile: str = "default") -> str:
     gateway takes tool-call block and alert levels from the folder name, so a
     strict pack with opt-in packs layered on must still end in ``strict``.
     """
-    root = _policy_root(cfg)
+    root = policy_root(cfg)
     if not root:
         return ""
     safe = profile if profile in PACK_PROFILES else "default"
@@ -1263,7 +1264,14 @@ def _level_pair(block: Any) -> tuple[str, str]:
 
 
 def scope_levels(cfg: Any, connector: str = "") -> ScopeLevels:
-    """:func:`resolve_levels` for the global scope ("") or one connector of *cfg*."""
+    """:func:`resolve_levels` for the global scope ("") or one active connector of *cfg*.
+
+    An active (manually configured) connector's pack is its
+    ``guardrail.connectors`` override, else the global pack, exactly as the
+    gateway resolves it: the ``application_protection`` overlay pack only
+    applies to connectors that are *not* active (``manualConnectorConfigured``
+    in internal/config/application_protection.go), which no catalog scope is.
+    """
     gc = _guardrail(cfg)
     fallback = global_pack(cfg)
     if not connector:
@@ -1430,6 +1438,7 @@ __all__ = [
     "preset_pack_dir",
     "is_protected_pack_path",
     "pack_profile",
+    "policy_root",
     "protected_pack_dir",
     "protection_pack_dir",
     "protection_packs",
