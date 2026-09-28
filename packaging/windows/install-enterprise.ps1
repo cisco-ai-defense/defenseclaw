@@ -78,11 +78,66 @@ param(
     # enrolled user runtimes before any service activation.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
-    [switch]$Json
+    [switch]$Json,
+
+    # Enterprise profile. SecureClient (default) is the Cisco Secure Client
+    # deployment and behaves exactly as before. Standalone is deployable by
+    # any MDM: vendor-neutral roots under Program Files\Cisco\DefenseClaw and
+    # ProgramData\Cisco\DefenseClaw, no CMID credential broker, PowerShell 7.
+    [ValidateSet('SecureClient', 'Standalone')]
+    [string]$EnterpriseProfile = 'SecureClient',
+    # Standalone-only payload trust (see the module's
+    # Initialize-DefenseClawStandalonePayloadTrust).
+    [ValidateSet('Authenticode', 'HashPinned')]
+    [string]$TrustMode = 'Authenticode',
+    [string]$PayloadManifest,
+    # Comma-separated SHA-256 signer certificate thumbprints. A string, not
+    # an array, because -File invocation passes arrays as one literal token.
+    [string]$AllowedSigners = '',
+    [string]$ProductVersion
 )
 
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($EnterpriseProfile -ceq 'Standalone') {
+    # The standalone lifecycle runs only on the engine, bitness, and
+    # language mode it is certified for. Each refusal names a stable code an
+    # MDM wrapper can report. The Secure Client path is unchanged.
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        throw (
+            'powershell7_required: the standalone enterprise lifecycle requires ' +
+            'PowerShell 7 (pwsh.exe, x64); Windows PowerShell ' +
+            "$($PSVersionTable.PSVersion) is not supported"
+        )
+    }
+    if (-not [Environment]::Is64BitProcess) {
+        throw (
+            'powershell_32bit_host: run the standalone enterprise lifecycle from ' +
+            'a 64-bit process; 32-bit MDM agents must launch it through ' +
+            '%WINDIR%\sysnative'
+        )
+    }
+    $osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    if ($osArchitecture -cne 'X64') {
+        throw "unsupported_architecture: the standalone enterprise lifecycle requires Windows x64 (found $osArchitecture)"
+    }
+    if ($ExecutionContext.SessionState.LanguageMode -ne
+        [Management.Automation.PSLanguageMode]::FullLanguage) {
+        throw (
+            'powershell_constrained_language: the standalone enterprise ' +
+            'lifecycle compiles protected native helpers and requires ' +
+            'FullLanguage mode; allow the DefenseClaw signer in the WDAC or ' +
+            'AppLocker script policy'
+        )
+    }
+}
+elseif ($TrustMode -cne 'Authenticode' -or
+    -not [string]::IsNullOrWhiteSpace($PayloadManifest) -or
+    -not [string]::IsNullOrWhiteSpace($AllowedSigners) -or
+    -not [string]::IsNullOrWhiteSpace($ProductVersion)) {
+    throw 'payload trust modes, allowed signers, and product version recording apply only to -EnterpriseProfile Standalone'
+}
 
 function ConvertTo-DefenseClawTrustedMachineRoot {
     param(
@@ -171,17 +226,31 @@ $trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
 $trustedWindows = [string]$trustedMachineRoots.Windows
 $trustedProgramFiles = [string]$trustedMachineRoots.ProgramFiles
 $trustedProgramData = [string]$trustedMachineRoots.ProgramData
-$InstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
-    [IO.Path]::Combine(
-        $trustedProgramFiles,
-        'Cisco\Cisco Secure Client\DefenseClaw'
+function Get-DefenseClawBootstrapProfileRoots {
+    <#
+        Bootstrap copy of the module's Get-DefenseClawProfileRoots, needed
+        before the module is trusted and imported. The pytest contract keeps
+        the two in lockstep.
+    #>
+    param(
+        [ValidateSet('SecureClient', 'Standalone')]
+        [string]$ForProfile = $EnterpriseProfile
     )
+    $vendor = if ($ForProfile -ceq 'Standalone') { 'Cisco' } else { 'Cisco\Cisco Secure Client' }
+    return @{
+        InstallRoot = [IO.Path]::Combine($trustedProgramFiles, "$vendor\DefenseClaw")
+        StateRoot = [IO.Path]::Combine($trustedProgramData, "$vendor\DefenseClaw")
+        CertificationInstallBase = [IO.Path]::Combine($trustedProgramFiles, "$vendor\DefenseClaw-Cert")
+        CertificationStateBase = [IO.Path]::Combine($trustedProgramData, "$vendor\DefenseClaw-Cert")
+    }
+}
+
+$bootstrapProfileRoots = Get-DefenseClawBootstrapProfileRoots
+$InstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    [string]$bootstrapProfileRoots.InstallRoot
 } else { $InstallRoot }
 $StateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
-    [IO.Path]::Combine(
-        $trustedProgramData,
-        'Cisco\Cisco Secure Client\DefenseClaw'
-    )
+    [string]$bootstrapProfileRoots.StateRoot
 } else { $StateRoot }
 $trustedSystem32 = [IO.Path]::Combine($trustedWindows, 'System32')
 [Environment]::SetEnvironmentVariable('SystemRoot', $trustedWindows, 'Process')
@@ -393,6 +462,14 @@ namespace $nativeNamespace
 
         public static string[] GetActiveSessionSIDs()
         {
+            return GetActiveSessionSIDs(false);
+        }
+
+        // includeEntra admits Microsoft Entra ID user SIDs (S-1-12-1-...)
+        // for the standalone profile; the parameterless Secure Client form
+        // keeps the historical S-1-5-21 filter exactly.
+        public static string[] GetActiveSessionSIDs(bool includeEntra)
+        {
             IntPtr sessions = IntPtr.Zero;
             int count = 0;
             if (!WTSEnumerateSessionsW(
@@ -442,7 +519,10 @@ namespace $nativeNamespace
                         typeof(SecurityIdentifier));
                     if (sid.Value.StartsWith(
                             "S-1-5-21-",
-                            StringComparison.OrdinalIgnoreCase))
+                            StringComparison.OrdinalIgnoreCase) ||
+                        (includeEntra && sid.Value.StartsWith(
+                            "S-1-12-1-",
+                            StringComparison.OrdinalIgnoreCase)))
                         active.Add(sid.Value);
                 }
                 List<string> ordered = new List<string>(active);
@@ -626,17 +706,11 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
     $install = [IO.Path]::GetFullPath($RequestedInstallRoot).TrimEnd('\')
     $state = [IO.Path]::GetFullPath($RequestedStateRoot).TrimEnd('\')
     $expectedInstall = [IO.Path]::Combine(
-        $trustedProgramFiles,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw-Cert',
+        [string]$bootstrapProfileRoots.CertificationInstallBase,
         $runID
     ).TrimEnd('\')
     $expectedState = [IO.Path]::Combine(
-        $trustedProgramData,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw-Cert',
+        [string]$bootstrapProfileRoots.CertificationStateBase,
         $runID
     ).TrimEnd('\')
     if (-not [string]::Equals(
@@ -751,17 +825,11 @@ function Assert-DefenseClawBootstrapLifecycleScope {
             )
         }
         $expectedInstall = [IO.Path]::Combine(
-            $trustedProgramFiles,
-            'Cisco',
-            'Cisco Secure Client',
-            'DefenseClaw-Cert',
+            [string]$bootstrapProfileRoots.CertificationInstallBase,
             $runID
         ).TrimEnd('\')
         $expectedState = [IO.Path]::Combine(
-            $trustedProgramData,
-            'Cisco',
-            'Cisco Secure Client',
-            'DefenseClaw-Cert',
+            [string]$bootstrapProfileRoots.CertificationStateBase,
             $runID
         ).TrimEnd('\')
         if (-not [string]::Equals(
@@ -800,18 +868,8 @@ function Assert-DefenseClawBootstrapLifecycleScope {
             'DefenseClawHookGuardian'
         )
     }
-    $expectedInstall = [IO.Path]::Combine(
-        $trustedProgramFiles,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw'
-    ).TrimEnd('\')
-    $expectedState = [IO.Path]::Combine(
-        $trustedProgramData,
-        'Cisco',
-        'Cisco Secure Client',
-        'DefenseClaw'
-    ).TrimEnd('\')
+    $expectedInstall = ([string]$bootstrapProfileRoots.InstallRoot).TrimEnd('\')
+    $expectedState = ([string]$bootstrapProfileRoots.StateRoot).TrimEnd('\')
     if (-not [string]::Equals(
             $install,
             $expectedInstall,
@@ -1441,7 +1499,12 @@ function New-DefenseClawBootstrapEnvironment {
 function Assert-DefenseClawBootstrapModuleTrust {
     param(
         [Parameter(Mandatory)][string]$Path,
-        [switch]$AllowUnsignedModule
+        [switch]$AllowUnsignedModule,
+        # Standalone HashPinned: the module's exact SHA-256 from the
+        # administrator's payload manifest admits an unsigned module.
+        [string]$PinnedSHA256,
+        # Standalone Authenticode: optional SHA-256 signer thumbprint pins.
+        [string[]]$AllowedSignerSHA256 = @()
     )
     if ([string]::IsNullOrWhiteSpace($Path) -or
         $Path.Contains('"') -or
@@ -1552,13 +1615,95 @@ function Assert-DefenseClawBootstrapModuleTrust {
         $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
             -LiteralPath $full `
             -ErrorAction Stop
-        if ($signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+        $hashAdmitted = $false
+        if (-not [string]::IsNullOrWhiteSpace($PinnedSHA256) -and
+            $signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+            $actual = (Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $full `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hashAdmitted = $actual -ceq $PinnedSHA256.ToLowerInvariant()
+            if (-not $hashAdmitted) {
+                throw "DefenseClaw enterprise installer module SHA-256 does not match the pinned payload manifest: $full"
+            }
+        }
+        if (-not $hashAdmitted -and
+            $signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
             throw "DefenseClaw enterprise installer module Authenticode signature is not valid ($($signature.Status)): $full; use -AllowUnsigned only for protected controlled test staging"
+        }
+        if (-not $hashAdmitted -and @($AllowedSignerSHA256).Count -gt 0) {
+            $sha256 = [Security.Cryptography.SHA256]::Create()
+            try {
+                $thumbprint = ([BitConverter]::ToString(
+                    $sha256.ComputeHash($signature.SignerCertificate.RawData)
+                )).Replace('-', '').ToLowerInvariant()
+            }
+            finally {
+                $sha256.Dispose()
+            }
+            if ($thumbprint -notin @($AllowedSignerSHA256)) {
+                throw "DefenseClaw enterprise installer module signer is not an allowed signer: $full"
+            }
         }
     }
     # Keep the mount-manager authorization adjacent to the import boundary.
     $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
     return $full
+}
+
+function Get-DefenseClawBootstrapRecordedModulePin {
+    <#
+        Standalone only. Returns the module SHA-256 a hash-pinned standalone
+        deployment recorded in its deployment metadata, or '' when there is
+        no such trusted record. The metadata must pass the same local-NTFS,
+        no-reparse, administrator-owned chain as the module itself, and the
+        running installer must be byte-identical to the one the deployment
+        recorded, so the pin admits only the payload already installed.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$MetadataPath,
+        [Parameter(Mandatory)][string]$InstallerPath
+    )
+    try {
+        if (-not [IO.File]::Exists($MetadataPath)) {
+            return ''
+        }
+        $metadataFull = Assert-DefenseClawBootstrapModuleTrust `
+            -Path $MetadataPath `
+            -AllowUnsignedModule
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $metadataFull -Force
+        if ([int64]$item.Length -gt 1048576) {
+            return ''
+        }
+        $metadata = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $metadataFull `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $trust = $metadata.PSObject.Properties['trust_mode']
+        $recordedProfile = $metadata.PSObject.Properties['profile']
+        $hashes = $metadata.PSObject.Properties['hashes']
+        if ($null -eq $trust -or [string]$trust.Value -cne 'hash_pinned' -or
+            $null -eq $recordedProfile -or [string]$recordedProfile.Value -cne 'standalone' -or
+            $null -eq $hashes -or $null -eq $hashes.Value) {
+            return ''
+        }
+        $module = $hashes.Value.PSObject.Properties['module']
+        $installer = $hashes.Value.PSObject.Properties['installer']
+        if ($null -eq $module -or [string]$module.Value -cnotmatch '^[0-9a-f]{64}$' -or
+            $null -eq $installer -or [string]$installer.Value -cnotmatch '^[0-9a-f]{64}$') {
+            return ''
+        }
+        $running = (Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $InstallerPath `
+            -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($running -cne [string]$installer.Value) {
+            return ''
+        }
+        return [string]$module.Value
+    }
+    catch {
+        # An unreadable or untrusted record admits nothing; the Authenticode
+        # requirement then applies unchanged.
+        return ''
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1619,12 +1764,21 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     # scalar selects the gateway's validated embedded rule-pack defaults.
     param(
         [Parameter(Mandatory)][string]$Mode,
-        [Parameter(Mandatory)][string[]]$Connectors
+        [Parameter(Mandatory)][string[]]$Connectors,
+        [ValidateSet('SecureClient', 'Standalone')]
+        [string]$ForProfile = 'SecureClient'
     )
+    $standalone = $ForProfile -ceq 'Standalone'
     $primary = $Connectors[0]
     $sb = [Text.StringBuilder]::new()
     [void]$sb.AppendLine('config_version: 8')
     [void]$sb.AppendLine('deployment_mode: managed_enterprise')
+    if ($standalone) {
+        # The standalone profile's local policy engine decides; AI Defense is
+        # added later only through a protected credential.
+        [void]$sb.AppendLine('enterprise:')
+        [void]$sb.AppendLine('  profile: standalone')
+    }
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('observability:')
     [void]$sb.AppendLine('  defaults:')
@@ -1640,7 +1794,12 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     [void]$sb.AppendLine('  enabled: true')
     [void]$sb.AppendLine('  rule_pack_dir: ""')
     [void]$sb.AppendLine("  mode: $Mode")
-    [void]$sb.AppendLine('  scanner_mode: both')
+    if ($standalone) {
+        [void]$sb.AppendLine('  scanner_mode: local')
+    }
+    else {
+        [void]$sb.AppendLine('  scanner_mode: both')
+    }
     [void]$sb.AppendLine('  detection_strategy: regex_only')
     [void]$sb.AppendLine('  judge:')
     [void]$sb.AppendLine('    enabled: false')
@@ -1665,6 +1824,21 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     return $sb.ToString()
 }
 
+function Test-DefenseClawBootstrapInteractiveUserSID {
+    <#
+        Secure Client admits only on-premises/local account SIDs
+        (S-1-5-21-...), exactly as before. The standalone profile also admits
+        Microsoft Entra ID user SIDs (S-1-12-1-a-b-c-d), which Intune-joined
+        devices use for every cloud user.
+    #>
+    param([Parameter(Mandatory)][string]$SID)
+    if ($SID.StartsWith('S-1-5-21-', [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $EnterpriseProfile -ceq 'Standalone' -and
+        $SID -cmatch '^S-1-12-1-[0-9]+-[0-9]+-[0-9]+-[0-9]+$'
+}
+
 function Select-DefenseClawActiveInteractiveUserProfiles {
     param(
         [AllowEmptyCollection()][object[]]$Profiles = @(),
@@ -1682,10 +1856,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ($candidate.Value.StartsWith(
-                'S-1-5-21-',
-                [StringComparison]::OrdinalIgnoreCase
-            )) {
+        if (Test-DefenseClawBootstrapInteractiveUserSID -SID $candidate.Value) {
             [void]$active.Add($candidate.Value)
         }
     }
@@ -1702,10 +1873,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ($profileSID.Value.StartsWith(
-                'S-1-5-21-',
-                [StringComparison]::OrdinalIgnoreCase
-            ) -and
+        if ((Test-DefenseClawBootstrapInteractiveUserSID -SID $profileSID.Value) -and
             $active.Contains($profileSID.Value)) {
             $selected.Add($profile)
         }
@@ -1726,7 +1894,9 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     if ($RequireActiveSession -and
         -not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
         $native = Initialize-DefenseClawBootstrapNativePath
-        $ActiveSessionSIDs = @($native::GetActiveSessionSIDs())
+        $ActiveSessionSIDs = @($native::GetActiveSessionSIDs(
+            $EnterpriseProfile -ceq 'Standalone'
+        ))
     }
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
@@ -1740,7 +1910,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
     foreach ($sub in Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
         $sid = $sub.PSChildName
-        if (-not $sid.StartsWith('S-1-5-21-')) { continue }
+        if (-not (Test-DefenseClawBootstrapInteractiveUserSID -SID $sid)) { continue }
         $image = $null
         try {
             $image = (Get-ItemProperty -LiteralPath $sub.PSPath `
@@ -1756,7 +1926,17 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
                 [Security.Principal.NTAccount]
             ).Value
         }
-        catch { continue }
+        catch {
+            # An Entra ID account may not translate while the device is
+            # offline; the standalone profile keys enrollment by SID and home,
+            # so it falls back to the profile directory name. Secure Client
+            # keeps skipping untranslatable SIDs exactly as before.
+            if ($EnterpriseProfile -cne 'Standalone' -or
+                -not $sid.StartsWith('S-1-12-1-', [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $account = [IO.Path]::GetFileName(([IO.Path]::GetFullPath($image)).TrimEnd('\'))
+        }
         $userName = $account
         $backslash = $account.IndexOf('\')
         if ($backslash -ge 0) { $userName = $account.Substring($backslash + 1) }
@@ -2860,7 +3040,9 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     if ($DeferInactiveProfiles) {
         if (-not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
             $native = Initialize-DefenseClawBootstrapNativePath
-            $ActiveSessionSIDs = @($native::GetActiveSessionSIDs())
+            $ActiveSessionSIDs = @($native::GetActiveSessionSIDs(
+                $EnterpriseProfile -ceq 'Standalone'
+            ))
         }
         $activeProfiles = @(
             Select-DefenseClawActiveInteractiveUserProfiles `
@@ -3028,7 +3210,8 @@ try {
     if ($modeSupplied) {
         $renderedConnectors = ConvertTo-DefenseClawConnectorList -Connector $Connector
         $renderedConfigBody = Get-DefenseClawRenderedEnterpriseConfig `
-            -Mode $Mode -Connectors $renderedConnectors
+            -Mode $Mode -Connectors $renderedConnectors `
+            -ForProfile $EnterpriseProfile
         $renderedManifestBody = Get-DefenseClawRenderedEnterpriseTargets `
             -Connectors $renderedConnectors `
             -DeferInactiveProfiles:($Action -in @(
@@ -3046,10 +3229,61 @@ try {
         $Config = $renderedConfigPath
         $Manifest = $renderedManifestPath
     }
+    $bootstrapPinnedModuleSHA256 = ''
+    if ($EnterpriseProfile -ceq 'Standalone' -and $TrustMode -ceq 'HashPinned') {
+        if ([string]::IsNullOrWhiteSpace($PayloadManifest)) {
+            throw '-TrustMode HashPinned requires -PayloadManifest'
+        }
+        # The manifest is the trust anchor for the unsigned module, so it must
+        # pass the same local-NTFS, no-reparse, administrator-owned chain.
+        $manifestFull = Assert-DefenseClawBootstrapModuleTrust `
+            -Path $PayloadManifest `
+            -AllowUnsignedModule
+        $manifestDocument = Microsoft.PowerShell.Management\Get-Content `
+            -LiteralPath $manifestFull `
+            -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $moduleEntry = $null
+        if ($null -ne $manifestDocument.PSObject.Properties['files']) {
+            $moduleEntry = $manifestDocument.files.PSObject.Properties['DefenseClawEnterprise.psm1']
+        }
+        if ($null -eq $moduleEntry -or
+            ([string]$moduleEntry.Value) -cnotmatch '^[0-9A-Fa-f]{64}$') {
+            throw 'payload SHA-256 manifest does not pin DefenseClawEnterprise.psm1'
+        }
+        $bootstrapPinnedModuleSHA256 = [string]$moduleEntry.Value
+    }
+    elseif ($EnterpriseProfile -ceq 'Standalone' -and
+        $TrustMode -ceq 'Authenticode' -and
+        [string]::IsNullOrWhiteSpace($PayloadManifest) -and
+        $Action -cne 'Install' -and
+        -not $AllowUnsigned) {
+        # Nothing keeps a payload manifest after a hash-pinned install, so the
+        # installed CLI (Add/Remove Programs, MDM detect and uninstall
+        # scripts) arrives here with no pin. Admit the installed module by the
+        # digest the deployment's protected metadata recorded; the module then
+        # re-admits the rest of its installed payload the same way.
+        $bootstrapPinnedModuleSHA256 = Get-DefenseClawBootstrapRecordedModulePin `
+            -MetadataPath ([IO.Path]::Combine($StateRoot, 'install', 'deployment.json')) `
+            -InstallerPath $PSCommandPath
+    }
+    $bootstrapAllowedSigners = @()
+    if ($EnterpriseProfile -ceq 'Standalone') {
+        foreach ($signer in @(([string]$AllowedSigners).Split(','))) {
+            $value = ([string]$signer).Trim().ToLowerInvariant()
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                if ($value -cnotmatch '^[0-9a-f]{64}$') {
+                    throw "allowed signer must be a SHA-256 certificate thumbprint: $signer"
+                }
+                $bootstrapAllowedSigners += $value
+            }
+        }
+    }
     try {
         $modulePath = Assert-DefenseClawBootstrapModuleTrust `
             -Path $modulePath `
-            -AllowUnsignedModule:$AllowUnsigned
+            -AllowUnsignedModule:$AllowUnsigned `
+            -PinnedSHA256 $bootstrapPinnedModuleSHA256 `
+            -AllowedSignerSHA256 $bootstrapAllowedSigners
     }
     catch {
         throw "DefenseClaw enterprise installer rejected its module before import: $($_.Exception.Message)"
@@ -3099,6 +3333,13 @@ try {
         DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
+        EnterpriseProfile = $EnterpriseProfile
+    }
+    if ($EnterpriseProfile -ceq 'Standalone') {
+        $arguments['TrustMode'] = $TrustMode
+        $arguments['PayloadManifest'] = $PayloadManifest
+        $arguments['AllowedSigners'] = [string[]]$bootstrapAllowedSigners
+        $arguments['ProductVersion'] = $ProductVersion
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {

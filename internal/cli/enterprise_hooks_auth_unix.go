@@ -34,12 +34,18 @@ func setEnterpriseHookAuthorizationOwnership(path string) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
-	serviceUser, err := user.Lookup("defenseclaw")
+	serviceUserName := "defenseclaw"
+	if enterpriseHooksStandaloneUnixActive() {
+		serviceUserName = enterpriseHookStandaloneServiceUser()
+	}
+	serviceUser, err := user.Lookup(serviceUserName)
 	if err != nil {
 		// No service user on this host — the daemon runs as root and
-		// reads the 0640 file via its owner bit. Nothing to align.
+		// reads the 0640 file via its owner bit. Nothing to align. The
+		// standalone gateway never runs as root, so its account must
+		// exist.
 		var unknown user.UnknownUserError
-		if errors.As(err, &unknown) {
+		if errors.As(err, &unknown) && !enterpriseHooksStandaloneUnixActive() {
 			return nil
 		}
 		return err

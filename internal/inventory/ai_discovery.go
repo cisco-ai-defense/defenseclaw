@@ -167,6 +167,11 @@ type AIDiscoveryOptions struct {
 	// scan-trace telemetry (StartScan / detector traces / End) remains owned
 	// by the bound observability runtime and fires on every tick.
 	ManagedEnterprise bool
+	// StandaloneEnterprise marks the standalone managed profile. Its
+	// service-context profile walk uses the shared
+	// winpath.IsInteractiveUserSID predicate, which also admits Microsoft
+	// Entra ID users; the Secure Client profile keeps its historical filter.
+	StandaloneEnterprise bool
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -683,10 +688,11 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		// branch which added cfg.Privacy.DisableRedaction). When the
 		// redaction subtree lands on main, wire it as
 		// `DisableRedaction: cfg.Privacy.DisableRedaction`.
-		DataDir:           cfg.DataDir,
-		HomeDir:           home,
-		HomeDirs:          append([]string{}, ad.HomeDirs...),
-		ManagedEnterprise: managed.IsManagedEnterprise(cfg.DeploymentMode),
+		DataDir:              cfg.DataDir,
+		HomeDir:              home,
+		HomeDirs:             append([]string{}, ad.HomeDirs...),
+		ManagedEnterprise:    managed.IsManagedEnterprise(cfg.DeploymentMode),
+		StandaloneEnterprise: cfg.StandaloneEnterprise(),
 	})
 }
 
@@ -747,7 +753,7 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// developer running a local build does not silently start reading
 	// their coworkers' dotdirs on a shared workstation.
 	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
-		if platformHomes := platformDiscoveryHomeDirs(); len(platformHomes) > 0 {
+		if platformHomes := platformDiscoveryHomeDirs(opts.StandaloneEnterprise); len(platformHomes) > 0 {
 			opts.HomeDirs = platformHomes
 			opts.HomeDir = platformHomes[0]
 		}

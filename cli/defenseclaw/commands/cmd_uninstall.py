@@ -505,6 +505,10 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
+            "skill-scanner.cmd",
+            "mcp-scanner.cmd",
+            # Written by install.ps1: binds defenseclaw-hook.exe to the data dir.
+            "defenseclaw-hook-state.json",
         )
     else:
         install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
@@ -882,6 +886,9 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
+                "skill-scanner.cmd",
+                "mcp-scanner.cmd",
+                "defenseclaw-hook-state.json",
             }
             if plan.platform_name == "win32"
             else {
@@ -1134,6 +1141,46 @@ def _wait_managed_processes(waiters: list[_WindowsProcessWaiter]) -> None:
             raise click.ClickException(f"identity-bound {waiter.label} process did not exit (PID {waiter.pid})")
 
 
+def _managed_host_has_no_own_gateway(plan: UninstallPlan | None) -> bool:
+    """Report whether this Linux or macOS host has a managed deployment and
+    this account's per-user gateway is not running (its gateway.pid names no
+    live process)."""
+    if os.name == "nt":
+        return False
+    from defenseclaw import upgrade_shim
+
+    if not upgrade_shim.managed_deployment():
+        return False
+    data_dir = plan.data_dir if plan is not None and plan.data_dir else config_module.default_data_path()
+    return not _pid_file_names_a_live_process(os.path.join(str(data_dir), "gateway.pid"))
+
+
+def _pid_file_names_a_live_process(path: str) -> bool:
+    """Report whether the gateway PID file at *path* names a live process
+    (the file holds the PID, alone or as the ``pid`` of a JSON record)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read(4096).strip()
+    except OSError:
+        return False
+    pid: object = None
+    try:
+        pid = json.loads(text)
+    except ValueError:
+        return False
+    if isinstance(pid, dict):
+        pid = pid.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # alive, owned by another account
+    return True
+
+
 def _stop_gateway(plan: UninstallPlan | None = None) -> None:
     gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
@@ -1163,6 +1210,12 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             errors="replace",
             timeout=15,
         )
+        if proc.returncode != 0 and _managed_host_has_no_own_gateway(plan):
+            # On a managed host `stop` refuses whenever this account's own
+            # gateway is not running (and it cannot run there), so there is
+            # nothing of this install to stop; the teardown continues.
+            ux.subhead("no per-user sidecar runs for this account on this managed host — nothing to stop")
+            return
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "unknown error").strip()
             raise click.ClickException(f"could not stop sidecar: {detail}")

@@ -49,9 +49,12 @@ type rulePackWireResponse struct {
 }
 
 var rulePackCmd = &cobra.Command{
-	Use:    "rulepack",
-	Short:  "Inspect a guardrail rule pack without starting the gateway",
-	Hidden: true,
+	Use:   "rulepack",
+	Short: "Inspect a guardrail rule pack without starting the gateway",
+	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
+config. Enterprise packages ship no defenseclaw CLI; administrators validate
+a custom pack with this command before pointing guardrail.rule_pack_dir at
+it.`,
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
@@ -61,8 +64,15 @@ var rulePackCmd = &cobra.Command{
 var rulePackValidateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate a guardrail rule pack",
-	Args:  cobra.NoArgs,
-	RunE:  runRulePackValidate,
+	Long: `Validate a rule-pack directory the same way the gateway does when it loads
+one, including every regular and semantic expression, and print a summary or
+the first problem. Without --dir the embedded default pack is validated.
+Exit status 0 means the pack is valid.
+
+Example:
+  defenseclaw-gateway rulepack validate --dir /etc/defenseclaw/policies/guardrail/custom`,
+	Args: cobra.NoArgs,
+	RunE: runRulePackValidate,
 }
 
 var (

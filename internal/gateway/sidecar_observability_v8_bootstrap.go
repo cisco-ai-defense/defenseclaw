@@ -293,7 +293,9 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		Stdout:        os.Stdout, Stderr: os.Stderr,
 		Secrets:  sidecarObservabilityV8SecretResolver{},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
-		Resolver: net.DefaultResolver, Dialer: &net.Dialer{},
+		// Exporters check each destination, then connect through the
+		// standalone enterprise.network proxy when one is set.
+		Resolver: net.DefaultResolver, Dialer: enterpriseEgressDialer{direct: &net.Dialer{}},
 		Warnings: push.WarningObserverFunc(func(warning push.Warning) {
 			s.observeObservabilityV8Warning(warning)
 		}),
@@ -870,6 +872,7 @@ func sidecarObservabilityV8ManagedOptionsFromConfig(
 	}
 	return config.ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    cfg.DeploymentMode,
+		Profile:           cfg.EnterpriseProfile(),
 		Endpoint:          cfg.CiscoAIDefense.Endpoint,
 		SourceContentHash: config.ObservabilityV8SourceContentHash(raw),
 	}

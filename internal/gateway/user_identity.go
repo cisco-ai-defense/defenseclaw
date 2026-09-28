@@ -48,6 +48,27 @@ func SetUserEmailCollectionEnabled(v bool) { userEmailCollectionEnabled.Store(v)
 // emits the uid or SID and the account name alone.
 func UserEmailCollectionEnabled() bool { return userEmailCollectionEnabled.Load() }
 
+// managedServiceHosted records that the running deployment is
+// managed_enterprise, in any profile. A managed gateway runs as a service
+// account (LocalSystem or NT SERVICE\DefenseClawGateway on Windows, a daemon
+// account on macOS, the defenseclaw account on Linux), so its own OS identity
+// and home never describe the person using an agent. ManagedEnterpriseActive
+// is narrower: it is the Secure Client AI Defense-only posture, which a
+// standalone deployment does not run, so it cannot answer this question.
+//
+// Wired from deployment_mode by NewSidecar and applyConfigReloadSnapshot.
+var managedServiceHosted atomic.Bool
+
+// setManagedServiceHosted records whether the gateway runs as a managed
+// service account. Tests may toggle it under t.Cleanup.
+func setManagedServiceHosted(v bool) { managedServiceHosted.Store(v) }
+
+// gatewayRunsAsServiceAccount reports whether the gateway's own OS identity
+// belongs to a service principal rather than to the end user.
+func gatewayRunsAsServiceAccount() bool {
+	return managedServiceHosted.Load() || ManagedEnterpriseActive()
+}
+
 // resolveHookUserIdentity determines which end user a hook event belongs to.
 //
 // Precedence is deliberate. The identity headers come from the hook process,
@@ -166,14 +187,14 @@ func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 // localProcessUser reports the gateway's own OS user, and only when that is
 // meaningful.
 //
-// Under a managed install the gateway runs as a service account — LocalSystem
-// on Windows, a daemon account on macOS — so its own identity is not the end
+// Under a managed install, in either profile, the gateway runs as a service
+// account (see managedServiceHosted), so its own identity is not the end
 // user's, and reporting it would attribute every event on a multi-user
 // endpoint to one service principal. Under an unmanaged install the gateway
 // runs as the person using it, and its identity is the right answer for
 // traffic that carries none of its own.
 func localProcessUser() (string, string) {
-	if ManagedEnterpriseActive() {
+	if gatewayRunsAsServiceAccount() {
 		return "", ""
 	}
 	current, err := osuser.Current()

@@ -63,6 +63,11 @@ func init() {
 }
 
 func runSidecar(cmd *cobra.Command, _ []string) error {
+	// Before any outbound client exists: a standalone gateway routes its
+	// outbound clients through enterprise.network.
+	if err := applyStandaloneEgress(cfg); err != nil {
+		return fmt.Errorf("sidecar: apply enterprise.network: %w", err)
+	}
 	if sidecarToken != "" {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
@@ -124,7 +129,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// backward compatible with today.
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sc.Health().SetDaemonConfigLoaded(true)
-		statePath := guardianstate.PathForDataDir(cfg.DataDir)
+		statePath := guardianstate.PathForPlatform(enterpriseHooksStandaloneUnixActive(), cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
 		sc.Health().SetGuardianStateReader(func() string {
 			return guardianstate.ReadState(statePath)
 		})

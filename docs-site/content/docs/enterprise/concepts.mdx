@@ -1,0 +1,386 @@
+---
+title: Enterprise concepts
+description: A glossary of the terms used in DefenseClaw's enterprise deployment docs, from profiles and the lifecycle to enrollment, machine policy, health fields, and the Windows, Linux, and macOS security terms.
+keywords:
+  - DefenseClaw enterprise glossary
+  - managed_enterprise
+  - standalone profile
+  - hook guardian
+  - target manifest
+  - managed-hooks-only lock
+  - security_complete
+---
+
+This page defines the terms the enterprise pages use. Each entry says which
+OS it applies to when it is not all of them. Other pages link here the first
+time they use a term.
+
+## Deployment and profiles
+
+### managed_enterprise
+
+The `deployment_mode` value for an administrator-owned deployment. DefenseClaw
+runs as operating-system services, and the config, policies, and program files
+belong to the administrator. Every service is started with
+`DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`, so neither a user's
+environment nor a user's config can change it. Any `enterprise` block in a
+config without this mode is rejected.
+
+### Profile
+
+Which decision stack a managed deployment uses: `secure_client` or
+`standalone`. It is set by `enterprise.profile` and pinned in every service by
+`DEFENSECLAW_ENTERPRISE_PROFILE`. The two must agree. The profile cannot change
+without reinstalling. When neither is set, Windows and macOS use
+`secure_client` and Linux uses `standalone`.
+
+### Secure Client profile
+
+The profile that Cisco Secure Client installs as one of its modules, on
+Windows and macOS. Cisco AI Defense makes every decision and the local
+detectors are off. In the config it allows only `enterprise.profile`; every
+other `enterprise.*` setting is rejected. See
+[Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
+
+### Standalone profile
+
+The profile you install with any MDM, a package, or an administrator shell,
+on Windows, Linux, and macOS. The local policy engine decides. Cisco AI Defense
+can add its verdict when you store an API key. This section of the docs
+describes this profile.
+
+## Install and update
+
+### Lifecycle
+
+The actions that set up and maintain a deployment: `install`, `upgrade`,
+`repair`, `ensure`, `reconcile`, `status`, `verify`, and `uninstall`.
+
+| OS | How you run it |
+| --- | --- |
+| Linux, macOS | `defenseclaw-gateway enterprise linux <action>` or `defenseclaw-gateway enterprise macos <action>`, as root |
+| Windows | `defenseclaw.exe enterprise windows <action> --profile standalone` from an elevated prompt, or the Setup program (`/install`, `/ensure`, and so on). The standalone lifecycle runs in PowerShell 7 |
+
+### Ensure
+
+The one action an MDM needs to run. It installs when nothing is installed. When
+the payload, the config, the secrets (Linux and macOS), or any file or service
+differs from what should be there, it applies the change. When everything matches, it changes
+nothing and exits `0`. Windows `ensure` refuses to replace a newer installed
+version with an older one.
+
+### Transaction and rollback
+
+Every action that changes the computer runs as one transaction. It takes a
+lock, saves a snapshot of what it will change, applies the change, starts the
+services in order, and checks them. If any step fails, it restores the
+snapshot. When a changing action fails (exit `1` on Linux and macOS, `1603` on
+Windows), the transaction has been rolled back. A second run while another
+holds the lock exits `75` (Linux, macOS) or `1618` (Windows).
+
+### Payload
+
+The DefenseClaw programs a lifecycle action installs: the gateway, the hook,
+the sensor helper, and, when shipped, the ACP guard. On Linux and macOS you
+point at them with `--payload <directory>` or use the ones the package
+installed (`--from-package`). On Windows the Setup program carries the
+payload inside it.
+
+### Payload manifest
+
+**Windows.** An administrator-owned JSON file that lists the SHA-256 of every
+payload file. It is the trust anchor for [hash-pinned trust](#hash-pinned-trust).
+Each release publishes
+`DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json` next to the
+Setup program. The standalone Setup program writes the manifest it needs from
+its own embedded copy, so you never supply one to it.
+
+### Hash-pinned trust
+
+**Windows.** A payload trust mode (`hash_pinned`). Every payload file must match
+the SHA-256 recorded in the [payload manifest](#payload-manifest) before the
+lifecycle runs it. Use it for unsigned builds. Hash-pinned builds do not
+satisfy application-control rules that require a publisher signature
+([WDAC and AppLocker](#wdac-and-applocker)). The Linux and macOS MDM wrapper
+has a mode of the same name that checks the package or tarball against the
+SHA-256 you pass it.
+
+### Authenticode trust
+
+**Windows.** A payload trust mode (`authenticode`). Every program and script
+must carry a valid Authenticode signature. You can also require specific
+signers by their SHA-256 certificate thumbprints. It is the default of
+`defenseclaw.exe enterprise windows`.
+
+## Services
+
+### Gateway
+
+The service that checks each agent event against policy and answers allow or
+block. It runs as a restricted service account (`NT SERVICE\DefenseClawGateway`
+on Windows, `defenseclaw` on Linux, `_defenseclaw` on macOS), never as root or
+LocalSystem. It listens only on `127.0.0.1:18970`, and on Linux and macOS also
+on a local hook socket. It can read the config and policies but not change
+them.
+
+### Hook
+
+`defenseclaw-hook` (`defenseclaw-hook.exe` on Windows). An administrator-owned
+program that the agent runs, as the user, for each hook event. It checks that
+the listener is the real gateway, sends the event, and returns the gateway's
+decision to the agent. On Linux and macOS, vendor machine policy registers it
+as `<bin>/defenseclaw-hook hook --connector <name> --enterprise-managed`.
+
+### Guardian
+
+The hook guardian service, running as root or LocalSystem. On each pass it
+writes DefenseClaw's hook, or plugin, into each enrolled user's agent config
+and repairs it if the user changed it. It never writes a user's files with its
+own rights: Linux and macOS use a worker process that runs as that user, and
+Windows uses that user's own token, so it writes only while the user is signed
+in. It also keeps the [authorization ledger](#authorization-ledger). It runs a
+pass every minute.
+
+### Enumerator
+
+The hook enumerator service, running as root or LocalSystem. Every five
+minutes it lists the users on the computer, applies the
+[enrollment](#enrollment) settings, and publishes the
+[target manifest](#target-manifest).
+
+### Sensor helper
+
+A small privileged service that answers a fixed set of AI discovery
+questions for the gateway. The gateway cannot choose a path, process, or
+command for it to read, so a compromised gateway cannot use it to read
+arbitrary data.
+
+## Users and state
+
+### Enrollment
+
+Choosing which users DefenseClaw manages. The enumerator lists candidate
+users, applies `enterprise.enrollment`, and adds a user for an agent only after
+it finds a supported install of that agent for that user. On Linux and macOS
+enrollment governs [per-user connectors](#per-user-connector), and
+machine-policy connectors only with `unenrolled_users: deny`. On Windows it
+governs every connector: a user who is not enrolled has their hook calls
+refused. Most enrollment settings exist only on Linux and macOS. See
+[Enrollment](/docs/enterprise/enrollment).
+
+### Target manifest
+
+`targets.yaml`. The list of (user, agent) pairs the guardian manages, with each
+user's home and agent version. The enumerator writes it; administrators do not
+edit it. The exception is `enterprise.enrollment.mode: manifest` on Linux and
+macOS, where the administrator supplies the file.
+
+### Authorization ledger
+
+The guardian's record of which user is enrolled for which agent. Only the
+guardian writes it; the gateway reads it. On Linux and macOS the gateway checks
+the kernel-reported user ID of each hook call against it. Status and readiness
+come from the ledger, not from a file the gateway can write.
+
+### Runtime descriptor
+
+`managed-runtime.json`. A public, non-secret file the lifecycle writes. It
+records the profile, the product version, the gateway account, the API address,
+the hook socket, the machine-policy agents, and whether self-update is off.
+Hooks read it to know which listener to trust. The per-user installer,
+`defenseclaw upgrade`, and the per-user gateway look for it and refuse to run
+on a managed Linux or macOS computer.
+
+## Agents and hooks
+
+### Per-user connector
+
+An agent whose hooks live in each user's own config, because the vendor has no
+administrator-owned hook location DefenseClaw uses. The guardian writes and
+repairs DefenseClaw's entry for every enrolled user. Devin, Antigravity,
+Hermes, and Amp are per-user everywhere; OpenHands, OmniGent and Kiro are
+per-user on Linux and macOS. OpenCode is per-user only while DefenseClaw's
+managed OpenCode plugin is not in force.
+
+### Machine-policy connector
+
+An agent whose hooks DefenseClaw places in the vendor's administrator-owned
+policy files, which apply to every user of the computer. Codex, Claude Code,
+Cursor, GitHub Copilot, and OpenCode through DefenseClaw's managed OpenCode
+plugin. DefenseClaw changes only its own entries. See
+[Machine policy](/docs/enterprise/machine-policy).
+
+### ACP-mediated connector
+
+An agent that DefenseClaw protects by sitting between the editor and the agent
+on the Agent Client Protocol (ACP), not through hooks. Kiro on Windows,
+through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard).
+
+### Managed-hooks-only lock
+
+A vendor setting that makes the agent run only administrator-managed hooks and
+ignore user and project hooks: `allow_managed_hooks_only` for Codex and
+`allowManagedHooksOnly` for Claude Code. On Linux and macOS DefenseClaw sets
+both when `managed_hooks_only` is `enforce`, the default. On Windows it always
+sets the Codex lock and does not set the Claude Code lock; set
+`managed_hooks_only: preserve` for `claudecode` there so the foreign-hook guard
+covers Claude Code instead.
+[Machine policy](/docs/enterprise/machine-policy) has the details.
+
+### Foreign hook
+
+A hook or plugin that DefenseClaw did not install and that is not on the
+allowlist (`allowed_hooks`, a list of SHA-256 digests). A foreign hook that runs
+after DefenseClaw could change a tool call that DefenseClaw already allowed.
+
+### Foreign-hook guard
+
+The protection against [foreign hooks](#foreign-hook). It covers Cursor, GitHub
+Copilot, Devin, OpenCode, and Amp, Hermes on Linux and macOS, and also Codex
+and Claude Code when their `managed_hooks_only` setting is not `enforce`. With the default
+`foreign_hooks: remove`, the guardian removes foreign entries from the user's
+config, and `defenseclaw-hook` blocks tool calls while an unapproved one is in
+the user or project config. The OpenCode and Amp plugins ask
+`defenseclaw-hook` for the same decision when they load and before each tool
+call, and DefenseClaw's Hermes hook asks before each Hermes tool call. A session that started while an unapproved hook was present stays
+blocked until the agent restarts, for at most 7 days. See
+[Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
+
+### Peer verification
+
+The hook's check that it is talking to the real gateway before it sends
+anything. On Windows it compares the connected process with the gateway
+process the [SCM](#scm) reports; DefenseClaw's Amp and per-user OpenCode
+plugins instead require the listener to prove, with an HMAC over a fresh
+nonce, that it can derive the user's credential. On Linux and macOS hooks and
+plugins use only the hook socket and check, through the kernel
+([SO_PEERCRED and LOCAL_PEERCRED](#so_peercred-and-local_peercred)), that it
+belongs to root or the gateway account.
+
+### Reconcile
+
+One guardian pass: compare each enrolled user's agent config with what it should
+be, and repair DefenseClaw's entries. It happens every minute. `reconcile` runs
+one now.
+
+## Health and inspection
+
+### coverage_complete
+
+A field of the lifecycle result. On Linux and macOS it is `true` when the
+gateway, the guardian, and the enumerator are ready. On Windows it is `true`
+when the deployment is installed, the guardian is ready, and no transaction is
+pending. It does not check that any user is enrolled.
+
+### security_complete
+
+A stricter field of the lifecycle result. On Linux and macOS it adds the
+sensor helper and requires no errors. On Windows it requires a healthy
+deployment with at least one of Codex, Claude Code, or Cursor turned on. With
+Claude Code on, it also requires a current administrator attestation that
+Claude Code runs DefenseClaw's managed hooks. On every OS an installed agent
+that runs without DefenseClaw hooks (`agent_unprotected`,
+`hook_contract_unverified`) makes it `false`. See
+[Health fields](/docs/enterprise/operations#health-fields).
+
+### Observe and action modes
+
+`guardrail.mode`. In `observe` mode policy verdicts never block: DefenseClaw
+records every decision, including what it would have blocked. In `action` mode
+it enforces. The deployment's own checks apply in both modes: a tool call is
+still refused while an unapproved foreign hook is present (with
+`foreign_hooks: remove`), or when the user is not enrolled where enrollment is
+enforced. You can also set the mode per agent under `guardrail.connectors`.
+
+### Cisco AI Defense
+
+Cisco's cloud inspection service. In the Secure Client profile it makes every
+decision, authenticated with [CMID](#cmid). In the standalone profile it is
+optional: set `enterprise.inspection.ai_defense.enabled: true` and
+`enterprise.inspection.ai_defense.credential: <name>` (for example
+`ai-defense-api-key`), then store the API key as a protected credential under
+that name. See [Cisco AI Defense key](/docs/enterprise/ai-defense-key).
+
+### CMID
+
+Secure Client's cloud machine identity. In the Secure Client profile the
+gateway uses it to authenticate to Cisco AI Defense; on Windows the
+`DefenseClawCMIDBroker` service brokers it. The standalone profile does not
+use it.
+
+### AVC
+
+The Cisco Secure Client packaging and signing pipeline. It signs and ships the
+Secure Client profile's Windows Setup. The standalone profile does not use it.
+
+## Platform terms
+
+### SID and service SID
+
+**Windows.** A SID is the security identifier of a user or group. The
+enumerator finds users by SID; the standalone profile accepts local and domain
+user SIDs (`S-1-5-21-…`) and Microsoft Entra ID user SIDs (`S-1-12-1-…`). A
+service SID is the identity Windows gives one service, such as
+`NT SERVICE\DefenseClawGateway`. Access lists grant it only what the gateway
+needs.
+
+### DACL
+
+**Windows.** The access list on a file, folder, registry key, or service that
+says who may read, write, or control it. The lifecycle sets exact DACLs on
+DefenseClaw's state and services.
+
+### SCM
+
+**Windows.** The Service Control Manager. It runs DefenseClaw's services and
+restarts them after a failure. Standard users get query-only access to them.
+
+### NSS and SSSD
+
+**Linux.** NSS is the system's user and group lookup (what `getent` uses). It
+covers local accounts and directory accounts. SSSD is a common way to connect
+Linux to LDAP or Active Directory through NSS. The enumerator lists users
+through NSS. `UID_MAX` in `/etc/login.defs` (60000 when it is not set) caps
+only local accounts in `/etc/passwd`: a local account above it is skipped
+unless it is listed in `include_users`. Directory accounts often have user
+IDs that high, and they have no upper bound unless you set
+`enterprise.enrollment.uid_max`.
+
+### SO_PEERCRED and LOCAL_PEERCRED
+
+**Linux and macOS.** Kernel features that tell one end of a local socket the
+user ID of the process at the other end. `SO_PEERCRED` is the Linux form and
+`LOCAL_PEERCRED` the macOS form. The hook uses them to check the gateway, and
+the gateway uses them to learn which user is calling.
+
+### PPPC and TCC
+
+**macOS.** TCC (Transparency, Consent, and Control) is the macOS privacy
+protection for sensitive folders and data. A PPPC profile is an MDM
+configuration profile that grants an app that access in advance. See
+[macOS](/docs/enterprise/macos).
+
+### WDAC and AppLocker
+
+**Windows.** Application-control policies that decide which programs and
+scripts may run. A rule that requires a publisher signature accepts only
+signed DefenseClaw builds. [Hash-pinned](#hash-pinned-trust) builds do not
+satisfy it.
+
+## Zones
+
+### Trust zones
+
+The threat model puts every component in one zone. An arrow between zones is
+a boundary that DefenseClaw protects.
+
+| Zone | What it holds | How it is treated |
+| --- | --- | --- |
+| Z0 | The platform and the administrator: the OS service manager, root, administrators, the MDM agent, the lifecycle | Trusted by assumption |
+| Z1 | DefenseClaw's privileged services: guardian, enumerator, sensor helper | Trusted. A compromise here equals an administrator compromise |
+| Z2 | The gateway, under its restricted service account | Restricted: it cannot change its own policy or the ledger |
+| Z3 | Administrator-owned state: program files, config, policies, secrets, target manifest, ledger, vendor machine policy | Protected: written only by administrators and DefenseClaw's privileged services |
+| Z4 | The user session: the user, the AI agent, the hook as it runs, the user's own files | Untrusted |
+| Z5 | External services the gateway calls, such as Cisco AI Defense when an administrator stores an API key | External. The gateway reaches them outbound over TLS |
+
+See [Threat model](/docs/enterprise/threat-model#trust-zones).

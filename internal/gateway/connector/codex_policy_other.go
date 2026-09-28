@@ -11,12 +11,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func codexSystemRequirementsPath() (string, error) {
+	if runtime.GOOS == "darwin" {
+		// /etc is a root-owned symlink to /private/etc on macOS; the
+		// trusted-path checks refuse symlinked ancestors, so read the same
+		// file through its canonical path.
+		return "/private/etc/codex/requirements.toml", nil
+	}
 	return "/etc/codex/requirements.toml", nil
 }
 

@@ -1,6 +1,6 @@
 ---
 title: Devin (Devin CLI and Devin Desktop)
-description: Native Devin lifecycle hooks for Devin CLI and Devin Desktop's Devin Local agent on Windows, macOS, and Linux, with a source-reviewed 3000.4.25 contract.
+description: Native Devin lifecycle hooks for Devin CLI and Devin Desktop's Devin Local agent on Windows, macOS, and Linux, pinned to Devin CLI 3000.4.25 and, on Linux, 3000.11.3.
 keywords:
   - DefenseClaw Devin connector
   - Devin CLI hooks
@@ -28,13 +28,16 @@ wrote for the old app. See
 | Surface | Protected | Why |
 | --- | --- | --- |
 | Devin CLI | **Yes** | DefenseClaw registers the `devin-hooks-v1` contract in the Devin CLI hook config. |
-| Devin Desktop, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file, and hooks with Devin CLI, so the same hook registration applies. DefenseClaw has not yet recorded a live Devin Desktop validation run. |
-| Devin Desktop, legacy **Cascade** agent | **No** | Cascade uses a separate hook contract that this connector does not register. New Devin Desktop conversations never start on Cascade, but existing Cascade conversations still run unprotected. |
+| Devin Desktop 3.9.19 or later, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file, and hooks with Devin CLI, so the same hook registration applies. DefenseClaw has not yet recorded a live Devin Desktop validation run. |
+| Devin Desktop, legacy **Cascade** agent | **No** | Cascade uses a separate hook contract that this connector does not register. On Devin Desktop 3.9.19 or later new conversations never start on Cascade, but existing Cascade conversations still run unprotected. Builds from 3.0.12 up to (not including) 3.9.19 still start conversations on Cascade; keep Devin Desktop at 3.9.19 or later (enterprise threat model [R28](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ENTERPRISE-THREAT-MODEL.md#residual-risks)). |
 | Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
 The supported hook contract is pinned to Devin CLI `3000.4.25` on Windows,
-macOS, and Linux. This is source-reviewed compatibility evidence. Authentic
-official-client validation metadata remains empty and `live=false`.
+macOS, and Linux, from source review. On Linux it is also pinned to
+`3000.11.3`, which delivers the `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `Stop` and `SessionEnd` events under these names
+and honors exit-code-2 blocks on `UserPromptSubmit` and `PreToolUse`
+(`PermissionRequest` and `PostCompaction` are not verified).
 
 ## Platform support
 
@@ -99,6 +102,13 @@ and Devin Desktop's Devin Local agent read the same files:
 Existing foreign hook groups and JSONC content are preserved. Devin also loads
 hooks from `.claude/` settings for compatibility; DefenseClaw does not claim or
 modify those locations.
+
+In a standalone enterprise deployment on Linux and macOS, each hook runs the
+administrator-owned hook binary with
+`defenseclaw-hook hook --connector devin --enterprise-managed`, which runs
+the foreign-hook guard and always fails closed: the Devin fail mode is `closed` whatever `hook_fail_mode` says, and
+status and the hook-contract lock report it that way. See
+[Machine policy](/docs/enterprise/machine-policy).
 
 ## Lifecycle and enforcement
 

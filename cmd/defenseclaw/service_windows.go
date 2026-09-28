@@ -22,7 +22,11 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
 const (
@@ -85,7 +89,10 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 		defer closeLog()
 	}
 
-	handler := &defenseClawWindowsService{execute: execute}
+	handler := &defenseClawWindowsService{
+		execute:       execute,
+		sessionEvents: windowsServiceSessionEvents(os.Args[1:], os.Getenv(managed.EnterpriseProfileEnv)),
+	}
 	if err := runSCMService(name, handler); err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: run Windows service %s: %v\n", name, err)
 		return true, 1
@@ -116,6 +123,44 @@ func redirectWindowsServiceOutput() (func(), error) {
 
 type defenseClawWindowsService struct {
 	execute windowsServiceExecutor
+	// sessionEvents subscribes to SCM session-change notifications and
+	// forwards sign-ins to internal/winsession.
+	sessionEvents bool
+}
+
+// windowsServiceSessionEvents reports whether this service host subscribes
+// to session changes: only the standalone profile's hook guardian
+// ("enterprise hooks watch") and hook enumerator ("enterprise windows
+// enumerate"), so a user who signs in is enrolled without waiting for the
+// next periodic tick. Every other service, and every Secure Client service,
+// accepts exactly the controls it always did.
+func windowsServiceSessionEvents(args []string, profilePin string) bool {
+	if !managed.IsStandaloneProfile(managed.NormalizeEnterpriseProfile(profilePin)) {
+		return false
+	}
+	for index := 0; index+2 < len(args); index++ {
+		if args[index] != "enterprise" {
+			continue
+		}
+		switch {
+		case args[index+1] == "hooks" && args[index+2] == "watch":
+			return true
+		case args[index+1] == "windows" && args[index+2] == "enumerate":
+			return true
+		}
+	}
+	return false
+}
+
+// windowsSessionSignIn reports the session-change events that can make a
+// user's exact active session token available.
+func windowsSessionSignIn(eventType uint32) bool {
+	switch eventType {
+	case windows.WTS_CONSOLE_CONNECT, windows.WTS_REMOTE_CONNECT, windows.WTS_SESSION_LOGON, windows.WTS_SESSION_UNLOCK:
+		return true
+	default:
+		return false
+	}
 }
 
 func (service *defenseClawWindowsService) Execute(
@@ -123,7 +168,10 @@ func (service *defenseClawWindowsService) Execute(
 	requests <-chan svc.ChangeRequest,
 	changes chan<- svc.Status,
 ) (bool, uint32) {
-	const accepted = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPreShutdown
+	accepted := svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPreShutdown
+	if service.sessionEvents {
+		accepted |= svc.AcceptSessionChange
+	}
 
 	changes <- svc.Status{State: svc.StartPending, CheckPoint: 1, WaitHint: 30_000}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,6 +230,10 @@ func (service *defenseClawWindowsService) Execute(
 			switch request.Cmd {
 			case svc.Interrogate:
 				changes <- current
+			case svc.SessionChange:
+				if service.sessionEvents && windowsSessionSignIn(request.EventType) {
+					winsession.NotifyLogon()
+				}
 			case svc.Stop, svc.Shutdown, svc.PreShutdown:
 				stopRequested = true
 				stopOnce.Do(func() {

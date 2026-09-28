@@ -1274,6 +1274,26 @@ func rejectWindowsClaudeRegistryPolicyWriteACEs(label string, dacl *windows.ACL)
 	return nil
 }
 
+// WithWindowsClaudeManagedPolicyTransaction runs fn, given the
+// managed-settings.d directory, under the Claude Code managed policy
+// transaction lock the lifecycle and the per-target installer hold. The
+// standalone profile writes its version floor drop-in, a separate file in
+// that directory, this way so it never races them; fn must not touch
+// 90-defenseclaw.json or its ownership sidecar. Secure Client processes are
+// refused: that profile has no version floor.
+func WithWindowsClaudeManagedPolicyTransaction(fn func(policyDir string) error) error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return errors.New("enterprise hooks: the Claude Code version floor applies only to the standalone profile")
+	}
+	return windowsClaudeManagedPolicyTransaction(func() error {
+		path, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return err
+		}
+		return fn(filepath.Dir(path))
+	})
+}
+
 func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 	policyPath, err := windowsClaudeManagedPolicyPath()
 	if err != nil {

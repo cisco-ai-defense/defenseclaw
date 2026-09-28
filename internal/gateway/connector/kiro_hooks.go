@@ -141,7 +141,7 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 	}
 	migrateKiroV2StopAlias(hooks, hookScript)
 	for event, raw := range hooks {
-		remaining := removeOwnedFlatHooks(raw, hookScript)
+		remaining := removeKiroOwnedV2Hooks(raw, hookScript)
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {
@@ -277,7 +277,7 @@ func migrateKiroV2StopAlias(hooks map[string]interface{}, hookScript string) {
 		return
 	}
 	delete(hooks, kiroV2StopAlias)
-	remaining := removeOwnedFlatHooks(raw, hookScript)
+	remaining := removeKiroOwnedV2Hooks(raw, hookScript)
 	if len(remaining) == 0 {
 		return
 	}
@@ -289,12 +289,57 @@ func reconcileKiroV2Hooks(raw interface{}, hookScript string, entry map[string]i
 	list, _ := raw.([]interface{})
 	kept := make([]interface{}, 0, len(list)+1)
 	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) {
+		if kiroV2EntryOwned(item, hookScript) {
 			continue
 		}
 		kept = append(kept, item)
 	}
 	return append(kept, entry)
+}
+
+// kiroV2EntryOwned reports whether a CLI 2.x agent hook entry is
+// DefenseClaw's: its command is hookScript or, on Windows, a Kiro command an
+// earlier build wrote (kiroOwnedHookCommands). The match stays exact, so a
+// user's own entry is never claimed.
+func kiroV2EntryOwned(item interface{}, hookScript string) bool {
+	for _, owned := range kiroOwnedHookCommands(hookScript) {
+		if managedHookCommandEntry(item, owned) {
+			return true
+		}
+	}
+	return false
+}
+
+// removeKiroOwnedV2Hooks drops DefenseClaw's entries (kiroV2EntryOwned) from
+// one event's hook list.
+func removeKiroOwnedV2Hooks(raw interface{}, hookScript string) []interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]interface{}, 0, len(list))
+	for _, item := range list {
+		if kiroV2EntryOwned(item, hookScript) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// kiroV2AgentReferencesAnyHook reports whether an agent file still holds any
+// DefenseClaw Kiro entry, including a form an earlier build wrote; teardown
+// verification uses it.
+func kiroV2AgentReferencesAnyHook(path, hookScript string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("parse kiro agent %s: %w", path, err)
+	}
+	return containsHookScript(cfg, kiroOwnedHookCommands(hookScript)...), nil
 }
 
 func kiroBuiltInAgentName(name string) bool {
@@ -306,13 +351,21 @@ func kiroBuiltInAgentName(name string) bool {
 	}
 }
 
-func patchKiroDefaultAgentSetting(path string) error {
+// patchKiroDefaultAgentSetting makes the defenseclaw agent the one bare
+// `kiro-cli` runs. A per-user install keeps a custom default the user chose
+// (Setup adds DefenseClaw's hooks to that agent instead); force, for a
+// managed install, replaces it, because a managed install never edits the
+// user's agents. Teardown restores the file when it is unchanged.
+func patchKiroDefaultAgentSetting(path string, force bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
 	}
 	current, _ := cfg[kiroDefaultAgentSettingKey].(string)
-	if strings.TrimSpace(current) != "" && !kiroBuiltInAgentName(current) {
+	if !force && strings.TrimSpace(current) != "" && !kiroBuiltInAgentName(current) {
+		return nil
+	}
+	if strings.TrimSpace(current) == kiroManagedAgentName {
 		return nil
 	}
 	cfg[kiroDefaultAgentSettingKey] = kiroManagedAgentName
@@ -367,5 +420,14 @@ func kiroCommandOwned(command, hookScript string) bool {
 	if hookScript != "" && (command == hookScript || strings.Contains(command, hookScript)) {
 		return true
 	}
-	return strings.Contains(command, kiroHookScriptName) || strings.Contains(command, "hook --connector kiro")
+	if strings.Contains(command, kiroHookScriptName) || strings.Contains(command, "hook --connector kiro") {
+		return true
+	}
+	// The Windows encoded bridge carries its arguments base64-encoded.
+	for _, owned := range kiroOwnedHookCommands(hookScript) {
+		if command == owned {
+			return true
+		}
+	}
+	return false
 }

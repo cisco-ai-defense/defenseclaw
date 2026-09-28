@@ -254,6 +254,42 @@ the Amp image already holds:
   any server call and fails closed; hooks reaching DefenseClaw and blocking
   still need a run with a key.
 
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) the guardian writes the
+managed plugin into each enrolled user's Amp plugins directory
+(`~/.config/amp/plugins/defenseclaw.ts`, or
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on Windows) and repairs
+it when the user changes it. Amp has no machine-wide plugin location, so the
+plugin lives in a folder the user owns, and Amp coverage is advisory against
+a user who sets out to avoid it:
+
+- **Another config directory.** Amp loads plugins from the `amp/plugins`
+  folder under `XDG_CONFIG_HOME` (by default `~/.config`). A session started
+  with `XDG_CONFIG_HOME` or `HOME` pointing at another folder does not load
+  DefenseClaw's plugin (`amp plugins list` shows only Amp's own), so its tool
+  calls are not inspected or logged, the guardian never repairs that
+  session, and status and verify keep reporting the user's Amp ready.
+  `DEFENSECLAW_*` environment overrides do not turn the plugin off.
+- **Plugin order.** Amp does not define the order in which plugins run (see
+  the trust boundary above).
+
+A plugin that loaded stays closed when its DefenseClaw check fails: a
+killed or stopped check blocks the call.
+
+What reduces it:
+
+- Where you need enforcement, prefer agents that DefenseClaw governs
+  through machine policy (Claude Code, Codex, Cursor, GitHub Copilot and
+  OpenCode).
+- Use application control (fapolicyd on Linux, Santa or similar on macOS,
+  WDAC or AppLocker on Windows) so users can start Amp only the way you
+  allow, for example only from an administrator-owned launcher that resets
+  `XDG_CONFIG_HOME` and `HOME`.
+
+See R1 and R3 in the
+[enterprise threat model](/docs/enterprise/threat-model#residual-risks).
+
 ## Disable
 
 ```bash

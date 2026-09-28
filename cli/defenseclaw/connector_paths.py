@@ -372,35 +372,94 @@ def is_known(connector: str | None) -> bool:
     return normalize(connector) in KNOWN_CONNECTORS
 
 
+# How much of a plugin.yaml is read, in bytes (the gateway's
+# maxPluginManifestBytes).
+_PLUGIN_MANIFEST_MAX_BYTES = 64 * 1024
+
+
+def _read_plugin_manifest(manifest: str) -> dict | None:
+    """Parse one plugin.yaml the way the gateway does, or return ``None``.
+
+    The bytes go straight to the YAML parser, which reads a UTF-8 or UTF-16
+    (BOM) manifest; any read, decode or parse error means "no manifest",
+    as in the gateway's ``readPluginManifestName``.
+    """
+    try:
+        with open(manifest, "rb") as fh:
+            doc = yaml.safe_load(fh.read(_PLUGIN_MANIFEST_MAX_BYTES))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def scan_plugin_connectors(plugin_dir: str) -> tuple[set[str], bool]:
+    """Return ``(declared names, whether any manifest is loadable)``.
+
+    A manifest is loadable when it sets ``entry`` and ``sha256`` and its
+    ``entry`` is a regular file in the plugin's directory, on an OS where the
+    gateway loads Go plugins (not Windows). Raises :class:`OSError` when
+    *plugin_dir* exists but cannot be listed.
+    """
+    names: set[str] = set()
+    loadable = False
+    if not (plugin_dir or "").strip():
+        return names, loadable
+    try:
+        entries = list(os.scandir(plugin_dir))
+    except FileNotFoundError:
+        return names, loadable
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        names.add(entry.name.strip().lower())
+        doc = _read_plugin_manifest(os.path.join(entry.path, "plugin.yaml"))
+        if doc is None:
+            continue
+        if isinstance(doc.get("name"), str):
+            names.add(doc["name"].strip().lower())
+        if all(isinstance(doc.get(key), str) and doc[key].strip() for key in ("entry", "sha256")):
+            loadable = loadable or _plugin_entry_loadable(entry.path, doc["entry"].strip())
+    return names, loadable
+
+
+def _plugin_entry_loadable(directory: str, entry: str) -> bool:
+    """Report whether the gateway could open plugin *entry* of *directory*:
+    Go plugins never load on Windows, and the loader opens
+    ``<directory>/<entry>`` only when it is a regular file."""
+    if sys.platform == "win32":
+        return False
+    try:
+        info = os.lstat(os.path.join(directory, entry))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
+
+
 def declared_plugin_connectors(plugin_dir: str) -> set[str]:
     """Return the connector names the plugin directories under *plugin_dir* declare.
 
     Each subdirectory declares its own name and, when its ``plugin.yaml`` has
     one, that ``name`` (both lowercased), mirroring the gateway's
-    ``pluginDirDeclares``. A missing *plugin_dir* declares nothing. Any other
-    read error raises :class:`OSError`: callers must then treat every name as
-    one a plugin might provide.
+    ``pluginDirDeclares``. A manifest that cannot be read, decoded (for
+    example one that is not UTF-8) or parsed declares only its directory
+    name, as in the gateway. A missing *plugin_dir* declares nothing. Only a
+    *plugin_dir* that exists but cannot be listed raises :class:`OSError`:
+    callers must then treat every name as one a plugin might provide.
     """
-    names: set[str] = set()
-    if not (plugin_dir or "").strip():
-        return names
-    try:
-        entries = list(os.scandir(plugin_dir))
-    except FileNotFoundError:
-        return names
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        names.add(entry.name.strip().lower())
-        manifest = os.path.join(entry.path, "plugin.yaml")
-        try:
-            with open(manifest, encoding="utf-8") as fh:
-                doc = yaml.safe_load(fh.read(64 * 1024))
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(doc, dict) and isinstance(doc.get("name"), str):
-            names.add(doc["name"].strip().lower())
-    return names
+    return scan_plugin_connectors(plugin_dir)[0]
+
+
+def plugin_dir_may_provide_any_connector(plugin_dir: str) -> bool:
+    """Report whether a plugin under *plugin_dir* could register any name.
+
+    The gateway registers a plugin connector under the name its code reports
+    (``Name()``), which need not match the plugin's directory or manifest
+    name. So while *plugin_dir* holds a manifest the gateway would try to
+    load (``entry`` and ``sha256`` set and the entry file present, not on
+    Windows), no connector name can be ruled out offline. Raises
+    :class:`OSError` like :func:`declared_plugin_connectors`.
+    """
+    return scan_plugin_connectors(plugin_dir)[1]
 
 
 # ---------------------------------------------------------------------------

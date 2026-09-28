@@ -7,6 +7,7 @@
 package connector
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +25,43 @@ var openCodeWindowsExecutablePathResolver = func() string {
 		return OpenCodeExecutablePathOverride
 	}
 	return currentUserOpenCodeWindowsExecutablePath()
+}
+
+// openCodeWindowsNPMExecutablePathResolver names the native image npm's
+// opencode.cmd launches from the opencode-ai package for the user whose
+// paths are being resolved.
+var openCodeWindowsNPMExecutablePathResolver = currentUserOpenCodeWindowsNPMExecutablePath
+
+// OpenCodeWindowsPackageIdentityVerified reports whether an OpenCode image
+// comes from a recognized package: the SST WinGet package directory, or the
+// npm opencode-ai package whose package.json names it.
+func OpenCodeWindowsPackageIdentityVerified(executable string) bool {
+	clean := filepath.Clean(strings.TrimSpace(executable))
+	if !strings.EqualFold(filepath.Base(clean), "opencode.exe") {
+		return false
+	}
+	if strings.EqualFold(filepath.Base(filepath.Dir(clean)), openCodeWindowsPackageDirectory) {
+		return true
+	}
+	bin := filepath.Dir(clean)
+	pkg := filepath.Dir(bin)
+	if !strings.EqualFold(filepath.Base(bin), "bin") || !strings.EqualFold(filepath.Base(pkg), "opencode-ai") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(pkg)), "node_modules") {
+		return false
+	}
+	manifest := filepath.Join(pkg, "package.json")
+	info, err := os.Lstat(manifest)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 256<<10 {
+		return false
+	}
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		return false
+	}
+	var parsed struct {
+		Name string `json:"name"`
+	}
+	return json.Unmarshal(data, &parsed) == nil && parsed.Name == "opencode-ai"
 }
 
 type openCodeExecutableAuthority = protectedSetupExecutableAuthority
@@ -97,14 +135,22 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		filepath.Clean(selected) != selected || !strings.EqualFold(filepath.Base(selected), "opencode.exe") {
 		return errors.New("selected executable is not an absolute normalized opencode.exe path")
 	}
-	expected := openCodeWindowsExecutablePathResolver()
-	if expected == "" || strings.TrimSpace(expected) != expected ||
-		strings.ContainsAny(expected, "\x00\r\n") || !filepath.IsAbs(expected) ||
-		filepath.Clean(expected) != expected {
-		return errors.New("current-token SST WinGet executable path is unavailable")
+	matched := false
+	for _, expected := range []string{openCodeWindowsExecutablePathResolver(), openCodeWindowsNPMExecutablePathResolver()} {
+		if expected == "" || strings.TrimSpace(expected) != expected ||
+			strings.ContainsAny(expected, "\x00\r\n") || !filepath.IsAbs(expected) ||
+			filepath.Clean(expected) != expected {
+			continue
+		}
+		if sameCodexExecutablePath(selected, expected) {
+			matched = true
+		}
 	}
-	if !sameCodexExecutablePath(selected, expected) || !sameCodexExecutablePath(selected, authority.path) {
-		return errors.New("selected executable is not the protected current-token SST WinGet executable")
+	if !matched || !sameCodexExecutablePath(selected, authority.path) {
+		return errors.New("selected executable is not the protected SST WinGet or npm opencode-ai executable for this user")
+	}
+	if !OpenCodeWindowsPackageIdentityVerified(selected) {
+		return errors.New("selected executable package identity is not verified")
 	}
 
 	before, err := os.Lstat(selected)
@@ -139,7 +185,28 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 	return nil
 }
 
+func currentUserOpenCodeWindowsNPMExecutablePath() string {
+	var roaming string
+	if home := activeUserHomeOverride(); home != "" {
+		roaming = filepath.Join(home, "AppData", "Roaming")
+	} else {
+		value, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_RoamingAppData)
+		if err != nil {
+			return ""
+		}
+		roaming = value
+	}
+	if strings.TrimSpace(roaming) == "" || strings.ContainsAny(roaming, "\x00\r\n") || !filepath.IsAbs(roaming) {
+		return ""
+	}
+	return filepath.Join(filepath.Clean(roaming), "npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
+}
+
 func currentUserOpenCodeWindowsExecutablePath() string {
+	if home := activeUserHomeOverride(); home != "" {
+		return filepath.Join(filepath.Clean(home), "AppData", "Local", "Microsoft", "WinGet", "Packages",
+			openCodeWindowsPackageDirectory, "opencode.exe")
+	}
 	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil || strings.TrimSpace(localAppData) == "" ||
 		strings.ContainsAny(localAppData, "\x00\r\n") || !filepath.IsAbs(localAppData) {

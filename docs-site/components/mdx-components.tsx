@@ -7,7 +7,7 @@ import { Card as FumadocsCard, Cards as FumadocsCards } from 'fumadocs-ui/compon
 import { Banner } from 'fumadocs-ui/components/banner';
 import { TypeTable } from 'fumadocs-ui/components/type-table';
 import type { MDXComponents } from 'mdx/types';
-import { Flow, Node, Edge, Sequence, Message } from '@/components/diagram';
+import { Flow, Node, Edge, Zone, Sequence, Message } from '@/components/diagram';
 import { CapabilityMatrix, HookEventsList, SandboxHarnessTable } from '@/components/capability-matrix';
 import { CommandGenerator } from '@/components/command-generator';
 import PolicyCreator from '@/components/policy-creator';
@@ -72,6 +72,7 @@ export const mdxComponents: MDXComponents = {
   Flow,
   Node,
   Edge,
+  Zone,
   Sequence,
   Message,
   CapabilityMatrix,

@@ -1,0 +1,183 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
+
+// The standalone Unix uninstall removes DefenseClaw's own per-user hook
+// registrations before the binaries they name disappear. Each user's
+// teardown runs in the per-user worker with that user's credentials; the
+// connectors edit only DefenseClaw-owned entries, so the user's own hooks
+// and settings stay.
+
+var enterpriseHooksRemoveAllManifest string
+
+var enterpriseHooksRemoveAllCmd = &cobra.Command{
+	Use:    "remove-all",
+	Short:  "Internal: remove DefenseClaw's per-user hooks for every manifest target",
+	Hidden: true,
+	Args:   cobra.NoArgs,
+	RunE:   runEnterpriseHooksRemoveAll,
+}
+
+func init() {
+	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
+		"YAML manifest of per-user hook targets")
+	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRemoveAllCmd)
+}
+
+// enterpriseHooksRemoveAllReport is the command's result.
+type enterpriseHooksRemoveAllReport struct {
+	OK      bool     `json:"ok"`
+	Removed int      `json:"removed"`
+	Pending []string `json:"pending,omitempty"`
+	Failed  []string `json:"failed,omitempty"`
+}
+
+func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
+	report, err := removeAllEnterpriseHookTargets(cmd)
+	if enterpriseHookJSON {
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+	} else if err == nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
+	}
+	if err != nil {
+		return err
+	}
+	if !report.OK {
+		return errors.New("enterprise hooks remove-all: some per-user registrations were not removed")
+	}
+	return nil
+}
+
+func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAllReport, error) {
+	report := enterpriseHooksRemoveAllReport{}
+	if !enterpriseHooksStandaloneUnixActive() {
+		return report, errors.New("enterprise hooks remove-all runs only for the standalone Unix profile")
+	}
+	if os.Geteuid() != 0 {
+		return report, errors.New("enterprise hooks remove-all must run as root")
+	}
+	manifestPath := strings.TrimSpace(enterpriseHooksRemoveAllManifest)
+	if err := enterpriseHookManifestFileTrustCheck(manifestPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			report.OK = true
+			return report, nil
+		}
+		return report, fmt.Errorf("manifest trust check failed: %w", err)
+	}
+	manifest, _, err := enterprisehooks.LoadManifestWithSHA256(manifestPath)
+	if err != nil {
+		return report, err
+	}
+	jobs, pending, failed := enterpriseHookRemoveJobs(manifest)
+	report.Pending, report.Failed = pending, failed
+	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
+		answered := map[int]enterpriseHookWorkerTargetResult{}
+		for _, result := range run.Response.Targets {
+			answered[result.Index] = result
+		}
+		for _, target := range run.Job.Request.Targets {
+			label := run.Job.Account.User + "/" + target.Options.ConnectorName
+			result, ok := answered[target.Index]
+			switch {
+			case !ok && run.Err != nil:
+				report.Failed = append(report.Failed, label+": "+boundedString(run.Err.Error(), 256))
+			case !ok:
+				report.Failed = append(report.Failed, label+": the worker did not answer")
+			case result.Pending:
+				report.Pending = append(report.Pending, label)
+			case !result.OK:
+				report.Failed = append(report.Failed, label+": "+boundedString(result.Error, 256))
+			default:
+				report.Removed++
+			}
+		}
+	}
+	sort.Strings(report.Pending)
+	sort.Strings(report.Failed)
+	report.OK = len(report.Failed) == 0
+	return report, nil
+}
+
+// enterpriseHookRemoveJobs groups the manifest targets into one worker job
+// per account. Rows without a usable uid or with an unavailable home are
+// reported instead of guessed at.
+func enterpriseHookRemoveJobs(manifest enterprisehooks.Manifest) (map[int]*enterpriseHookWorkerJob, []string, []string) {
+	jobs := map[int]*enterpriseHookWorkerJob{}
+	var pending, failed []string
+	index := 0
+	for _, target := range manifest.Targets {
+		user := strings.TrimSpace(target.User)
+		home := filepath.Clean(strings.TrimSpace(target.UserHome))
+		name := strings.ToLower(strings.TrimSpace(target.Connector))
+		label := user + "/" + name
+		if target.UID == nil || target.GID == nil || *target.UID <= 0 || !filepath.IsAbs(home) || name == "" {
+			failed = append(failed, label+": the manifest row has no usable uid, gid or home")
+			continue
+		}
+		uid, gid := *target.UID, *target.GID
+		switch enterpriseHookCheckHome(home, uid).State {
+		case enterprisehooks.HomeAvailable:
+		case enterprisehooks.HomePending:
+			pending = append(pending, label)
+			continue
+		default:
+			failed = append(failed, label+": the home is not trusted")
+			continue
+		}
+		job := jobs[uid]
+		if job == nil {
+			job = &enterpriseHookWorkerJob{
+				Account: enterpriseHookWorkerAccount{UID: uid, GID: gid, User: user, Home: home},
+				Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
+			}
+			jobs[uid] = job
+		}
+		if job.Account.Home != home || job.Account.GID != gid {
+			failed = append(failed, label+": the uid has rows with different homes")
+			continue
+		}
+		dataDir := strings.TrimSpace(target.DataDir)
+		if dataDir == "" {
+			dataDir = filepath.Join(home, ".defenseclaw")
+		}
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+			Index: index,
+			Mode:  enterpriseHookWorkerModeRemove,
+			Options: enterpriseHookWorkerOptions{
+				ConnectorName: name,
+				UserHome:      home,
+				OwnerUID:      uid,
+				OwnerGID:      gid,
+				DataDir:       dataDir,
+				AgentVersion:  strings.TrimSpace(target.AgentVersion),
+			},
+		})
+		index++
+	}
+	return jobs, pending, failed
+}

@@ -484,7 +484,7 @@ All four `/api/v1/inspect/*` endpoints serialize the same
   "raw_action": "block",
   "severity":   "CRITICAL | HIGH | MEDIUM | LOW | INFO | NONE",
   "confidence": 0.93,
-  "reason":     "matched: CMD-RM-RF:Recursive force delete from critical root path",
+  "reason":     "DefenseClaw policy blocked this action (rule CMD-RM-RF: Recursive force delete from critical root path). Do not retry it in another form.",
   "findings":   ["CMD-RM-RF:Recursive force delete from critical root path"],
   "detailed_findings": [
     {
@@ -504,6 +504,13 @@ All four `/api/v1/inspect/*` endpoints serialize the same
 
 Notable behaviours:
 
+- **`reason` is the text the agent shows.** For a block or confirmation by
+  a policy rule it says that DefenseClaw policy decided and names the rule
+  by ID; a title is kept only for DefenseClaw's built-in rules, and rule-pack
+  titles and scanner text stay in the audit record, which keeps the full
+  source reason. A block also tells the agent not to retry the action in
+  another form. In the standalone enterprise profile the text names the
+  organization's policy and tells the user to contact the administrator.
 - **`action` is the *effective* verdict, not the raw policy decision.**
   `applyMode()` downgrades `block`, `confirm`, and `alert` to `allow` outside
   action mode and preserves the original in `raw_action`. It sets

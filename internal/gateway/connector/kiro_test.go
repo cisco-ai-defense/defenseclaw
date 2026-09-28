@@ -5,11 +5,15 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestKiroSetupWritesV3AndDefaultAgentHooks(t *testing.T) {
@@ -258,14 +262,21 @@ func TestKiroV3CommandIsMarkedAndV2CommandIsBare(t *testing.T) {
 	c := NewKiroConnector()
 	bare := c.hookCommand(opts)
 	marked := c.hookCommandForV3Surface(opts)
-	if !strings.HasPrefix(marked, bare) {
-		t.Fatalf("marked command %q must extend bare command %q", marked, bare)
-	}
-	if !strings.HasSuffix(marked, "--hook-surface "+KiroHookSurfaceV3) {
-		t.Fatalf("marked command %q is missing the v3 marker", marked)
-	}
-	if strings.Contains(bare, "--hook-surface") {
-		t.Fatalf("bare command %q must stay unmarked for the 2.x agent config", bare)
+	if runtime.GOOS == "windows" {
+		// Both are the encoded PowerShell bridge; the marker is inside it.
+		if !strings.Contains(decodeKiroWindowsBridge(t, marked), "'--hook-surface','v3'") || strings.Contains(decodeKiroWindowsBridge(t, bare), "--hook-surface") {
+			t.Fatalf("windows commands: marked %q bare %q", marked, bare)
+		}
+	} else {
+		if !strings.HasPrefix(marked, bare) {
+			t.Fatalf("marked command %q must extend bare command %q", marked, bare)
+		}
+		if !strings.HasSuffix(marked, "--hook-surface "+KiroHookSurfaceV3) {
+			t.Fatalf("marked command %q is missing the v3 marker", marked)
+		}
+		if strings.Contains(bare, "--hook-surface") {
+			t.Fatalf("bare command %q must stay unmarked for the 2.x agent config", bare)
+		}
 	}
 	// Ownership must survive the extra argument so teardown still reclaims
 	// the v3 entry when matching on the bare command.
@@ -548,5 +559,59 @@ func TestContainsHookScriptWalksEventKeyedHookMaps(t *testing.T) {
 	}
 	if containsHookScript(cfg, "/data/hooks/other-hook.sh") {
 		t.Error("an unrelated script must not match")
+	}
+}
+
+// decodeKiroWindowsBridge returns the PowerShell script inside an encoded
+// system PowerShell bridge command.
+func decodeKiroWindowsBridge(t *testing.T, command string) string {
+	t.Helper()
+	const flag = " -EncodedCommand "
+	index := strings.LastIndex(command, flag)
+	if index < 0 || !strings.HasPrefix(command, windowsSystemPowerShellExe()+" ") {
+		t.Fatalf("%q is not the encoded system PowerShell bridge", command)
+	}
+	raw, err := base64.StdEncoding.DecodeString(command[index+len(flag):])
+	if err != nil || len(raw)%2 != 0 {
+		t.Fatalf("decode %q: %v", command, err)
+	}
+	wide := make([]uint16, len(raw)/2)
+	for i := range wide {
+		wide[i] = binary.LittleEndian.Uint16(raw[i*2:])
+	}
+	return string(utf16.Decode(wide))
+}
+
+// Kiro honors only exit 2 as a block. The Windows commands used to be
+// `& '<launcher>' hook --connector kiro ...`: cmd.exe rejects the call
+// operator (exit 1) and PowerShell does not wait for the GUI-subsystem
+// release launcher (exit 0), so Kiro went ahead after a block. Both Kiro
+// commands are now the encoded system PowerShell bridge, which starts the
+// launcher without a window, waits for it and exits with its status.
+func TestKiroWindowsCommandsUseTheAwaitedPowerShellBridge(t *testing.T) {
+	launcher := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	t.Cleanup(PinNativeHookExecutableForTest(launcher))
+	for surface, want := range map[string]string{
+		"":                "-ArgumentList @('hook','--connector','kiro') -NoNewWindow -Wait -PassThru",
+		KiroHookSurfaceV3: "-ArgumentList @('hook','--connector','kiro','--hook-surface','v3') -NoNewWindow -Wait -PassThru",
+	} {
+		command := hookInvocationCommandFor("windows", "kiro", "")
+		if surface != "" {
+			command = kiroHookInvocationCommandFor("windows", "", surface)
+		}
+		if strings.HasPrefix(command, "&") {
+			t.Fatalf("surface %q: the call-operator form loses exit 2: %q", surface, command)
+		}
+		script := decodeKiroWindowsBridge(t, command)
+		if !strings.Contains(script, "Start-Process -FilePath '"+launcher+"' "+want) || !strings.HasSuffix(script, "exit $hookProcess.ExitCode") {
+			t.Fatalf("surface %q: script %q", surface, script)
+		}
+		if runtime.GOOS == "windows" && !kiroCommandOwned(command, hookInvocationCommandFor("windows", "kiro", "")) {
+			t.Fatalf("surface %q: DefenseClaw does not recognize its own command", surface)
+		}
+	}
+	// Other connectors keep their commands.
+	if got := hookInvocationCommandFor("windows", "claudecode", ""); !strings.HasPrefix(got, "& '") {
+		t.Fatalf("claudecode command changed: %q", got)
 	}
 }

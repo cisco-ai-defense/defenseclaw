@@ -209,6 +209,8 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
         "DEFENSE" + "CLAW_DISABLE_REDACTION",
         "DEFENSECLAW_DUMP_RAW_SECRETS",
+        # The managed profile pin comes only from the service definition.
+        "DEFENSECLAW_ENTERPRISE_PROFILE",
         "DEFENSECLAW_FAIL_MODE",
         "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
         "DEFENSECLAW_GATEWAY_BIN",

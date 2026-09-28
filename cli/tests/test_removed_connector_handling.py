@@ -253,7 +253,7 @@ class RemovedConnectorUninstallTests(unittest.TestCase):
 
 
 class UnshippedConnectorMigrationTests(unittest.TestCase):
-    """The 0.8.11 upgrade step drops names this release does not ship."""
+    """The `defenseclaw migrate` step drops names this release does not ship."""
 
     def _run(self, body: str, plugin_dirs: tuple[str, ...] = ()) -> tuple[str, list[str]]:
         import tempfile
@@ -321,6 +321,32 @@ class UnshippedConnectorMigrationTests(unittest.TestCase):
         text, changes = self._run(body, plugin_dirs=(RETIRED_EXAMPLE,))
         self.assertEqual(text, body)
         self.assertEqual(changes, [])
+
+    def test_migrate_runs_the_step_while_an_unshipped_name_remains(self):
+        import tempfile
+        from unittest.mock import patch
+
+        import yaml
+
+        from defenseclaw import migrations
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    f"config_version: 8\nguardrail:\n  connector: {RETIRED_EXAMPLE}\n"
+                    f"  connectors:\n    codex: {{}}\n    {RETIRED_EXAMPLE}: {{}}\n"
+                )
+            steps = migrations._pending_migration_steps(8, None, tmpdir, path, 8)
+            self.assertEqual([fn for _name, fn in steps], [migrations._migrate_connector_roster])
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}),
+                patch.object(migrations, "_refresh_local_observability_bundle", lambda *_args: None),
+            ):
+                self.assertTrue(migrations.migrate(tmpdir).changed)
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(yaml.safe_load(fh)["guardrail"], {"connector": "codex", "connectors": {"codex": {}}})
+            self.assertEqual(migrations._pending_migration_steps(8, None, tmpdir, path, 8), [])
 
     def test_shipped_aliases_and_unaffected_config_are_untouched(self):
         body = "guardrail:\n  connector: claude-code\n  connectors:\n    codex: {}\n    claude-code: {}\n"

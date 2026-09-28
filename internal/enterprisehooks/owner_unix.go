@@ -65,13 +65,9 @@ func resolveOwner(home string, uid, gid int) (int, int, error) {
 	if err := validateHomeOwner(home, uid); err != nil {
 		return 0, 0, err
 	}
-	account, err := user.LookupId(strconv.Itoa(uid))
+	accountGID, err := lookupTargetPrimaryGID(uid)
 	if err != nil {
-		return 0, 0, fmt.Errorf("enterprise hooks: resolve target uid %d: %w", uid, err)
-	}
-	accountGID, err := strconv.Atoi(account.Gid)
-	if err != nil || accountGID < 0 {
-		return 0, 0, fmt.Errorf("enterprise hooks: target uid %d has an invalid primary gid", uid)
+		return 0, 0, err
 	}
 	if gid != accountGID {
 		return 0, 0, fmt.Errorf(
@@ -80,6 +76,32 @@ func resolveOwner(home string, uid, gid int) (int, int, error) {
 		)
 	}
 	return uid, gid, nil
+}
+
+// lookupTargetPrimaryGID returns uid's primary gid. os/user answers first,
+// exactly as before; only the standalone profile falls back to NSS or
+// Directory Services for accounts os/user cannot see (CGO_ENABLED=0 Linux
+// builds read only /etc/passwd).
+func lookupTargetPrimaryGID(uid int) (int, error) {
+	account, err := user.LookupId(strconv.Itoa(uid))
+	if err == nil {
+		accountGID, convErr := strconv.Atoi(account.Gid)
+		if convErr != nil || accountGID < 0 {
+			return 0, fmt.Errorf("enterprise hooks: target uid %d has an invalid primary gid", uid)
+		}
+		return accountGID, nil
+	}
+	if !StandaloneUnix() {
+		return 0, fmt.Errorf("enterprise hooks: resolve target uid %d: %w", uid, err)
+	}
+	accountGID, nssErr := standaloneLookupPrimaryGID(uid)
+	if nssErr != nil {
+		return 0, fmt.Errorf("enterprise hooks: resolve target uid %d through the directory: %w", uid, nssErr)
+	}
+	if accountGID < 0 {
+		return 0, fmt.Errorf("enterprise hooks: target uid %d has an invalid primary gid", uid)
+	}
+	return accountGID, nil
 }
 
 func validateHomeOwner(home string, uid int) error {

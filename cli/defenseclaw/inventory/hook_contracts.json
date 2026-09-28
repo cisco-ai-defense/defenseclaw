@@ -28,7 +28,7 @@
         "block_events is resolved per request from the hook config that invoked the hook, not from the release. Setup marks the .kiro/hooks command with `--hook-surface v3`; that surface blocks on PreToolUse and UserPromptSubmit (kiro.dev/docs/hooks/actions). The CLI 2.x agent-hook config stays unmarked and blocks on PreToolUse only -- 2.x shows a non-zero exit on any other trigger as a warning (kiro.dev/docs/cli/2x-reference). Version probing cannot decide this: v3 is the `--v3` flag on the 2.x binary, so `kiro-cli --version` reports 2.x for both surfaces. An unmarked request resolves to the 2.x set.",
         "The ACP guard is an optional second enforcement path and is versioned independently from Kiro native hooks.",
         "Kiro IDE and Kiro CLI share .kiro/hooks; DefenseClaw exposes one Kiro connector for either install.",
-        "Native hooks are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root (kiro.dev/docs/hooks documents no user-level location), so <workspace>/.kiro/hooks/defenseclaw.json is what enforces. The ~/.kiro/hooks/defenseclaw.json copy is written and tracked for teardown but Kiro never reads it, so a global-only install enforces nothing and doctor fails it. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
+        "Kiro IDE 1.0.182 and later and kiro-cli --v3 merge the global ~/.kiro/hooks/*.json with the project .kiro/hooks/*.json (kiro.dev/docs/hooks, all scopes merged), so the global ~/.kiro/hooks/defenseclaw.json enforces; doctor passes it and notes that Kiro IDE builds before 1.0.182 read only the project copy under claw.workspace_dir. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
         "Hook stdout must remain empty because Kiro adds stdout to agent context."
       ]
     },
@@ -1326,7 +1326,8 @@
           "contract_id": "devin-hooks-v1",
           "agent_version": {
             "exact": [
-              "3000.4.25"
+              "3000.4.25",
+              "3000.11.3"
             ]
           },
           "default_for_unversioned": true,
@@ -1424,11 +1425,27 @@
             "scope": "user,workspace"
           },
           "notes": [
-            "The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
+            "The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
             "Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
             "Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
             "Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded."
-          ]
+          ],
+          "platform_overrides": {
+            "darwin": {
+              "agent_version": {
+                "exact": [
+                  "3000.4.25"
+                ]
+              }
+            },
+            "windows": {
+              "agent_version": {
+                "exact": [
+                  "3000.4.25"
+                ]
+              }
+            }
+          }
         }
       ]
     },

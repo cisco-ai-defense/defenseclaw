@@ -1,0 +1,305 @@
+---
+title: Intune on Windows
+description: Deploy the standalone DefenseClaw enterprise profile to Windows x64 with a Microsoft Intune Win32 app, keep it healthy with Remediations, deliver the AI Defense key, change the config and remove it.
+keywords:
+  - DefenseClaw Intune Windows
+  - Win32 app
+  - intunewin
+  - Intune detection rule
+  - Intune Remediations
+  - PowerShell 7 dependency
+---
+
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+
+This recipe creates three things in Intune: a Win32 app that installs
+PowerShell 7, a Win32 app that installs DefenseClaw and depends on it, and an
+optional Remediations package that keeps DefenseClaw healthy. It follows the
+[MDM contract](/docs/enterprise/mdm); read that first for the exit codes,
+detection and logs.
+
+The Intune Management Extension is a 32-bit process, and install commands that
+call `powershell.exe`, detection scripts and Remediations run in Windows
+PowerShell 5.1. So every Intune-facing script in the kit
+(`packaging/mdm/intune/windows`) is 5.1-compatible and does only two things: it
+reads the enterprise marker through the 64-bit registry view, and it starts the
+native x64 Setup or the installed `defenseclaw.exe`. The lifecycle itself runs
+in the trusted PowerShell 7, never inside the Intune host.
+
+## Before you start
+
+- **Devices**: Windows x64 enrolled in Intune. The lifecycle refuses ARM64 and
+  32-bit Windows. Intune cannot enroll Windows Server, so test on Windows 10 or
+  11 clients.
+- **Release**: download `DefenseClawSetup-Enterprise-Standalone-x64.exe`,
+  verify `checksums.txt` with cosign, and read the Setup's SHA-256 pin, as in
+  [What you deliver](/docs/enterprise/mdm#what-you-deliver).
+- **Config**: write `config.yaml` as described in
+  [Configuration](/docs/enterprise/configuration#settings-reference). Keep the
+  AI Defense key out of it.
+- **Workstation**: PowerShell 7.4 or later and Microsoft's
+  `IntuneWinAppUtil.exe` (the Win32 Content Prep Tool).
+- **Remediations** (optional) need Windows Enterprise E3 or E5, Education A3
+  or A5, or Windows VDA per-user licenses.
+
+## 1. Add PowerShell 7 as a Win32 app
+
+The standalone lifecycle runs only in PowerShell 7, installed from Microsoft's
+x64 MSI. That MSI registers the engine under
+`HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions` and installs it in
+`C:\Program Files\PowerShell\7`, which is where the lifecycle looks. Preview
+builds are refused. Wrap the MSI with `IntuneWinAppUtil.exe` and add it in
+**Apps** > **All Apps** > **Create** > **Windows app (Win32)**:
+
+| Setting | Value |
+| --- | --- |
+| Content | `PowerShell-7.x.y-win-x64.msi` from Microsoft, hash-checked |
+| Install command | `msiexec /i PowerShell-7.x.y-win-x64.msi /qn ADD_PATH=1 USE_MU=1 ENABLE_MU=1` |
+| Uninstall command | `msiexec /x {product-code} /qn` |
+| Install behavior | **System** |
+| Detection rule | **File**. Path `C:\Program Files\PowerShell\7`, file `pwsh.exe`, detection method **String (version)**, operator **Greater than or equal to**, value `7.4.0`, *Associated with a 32-bit app on 64-bit clients*: **No** |
+
+## 2. Build the Win32 app content
+
+On the administrator workstation, in PowerShell 7, run the kit's packaging
+script:
+
+```powershell
+./New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<SHA-256 of the Setup from checksums.txt>' `
+  -ConfigPath .\config.yaml `
+  -OutputDirectory .\intune-defenseclaw-1.4.0 `
+  -IntuneWinAppUtil C:\Tools\IntuneWinAppUtil.exe `
+  -ProductVersion 1.4.0
+```
+
+| Parameter | Meaning |
+| --- | --- |
+| `-SetupPath` | The Setup. Required. |
+| `-Sha256` | The Setup's pin. Required with hash-pinned trust; the script refuses a Setup that does not match. |
+| `-TrustMode` | `HashPinned` (default) or `Authenticode`. |
+| `-AllowedSigners` | With `Authenticode`: SHA-256 thumbprints of the signer certificates you accept, comma-separated or repeated. |
+| `-ConfigPath` | The config. The script refuses one with an `api_key:` line. Always pass it: without a config the first install fails with `1639`. |
+| `-OutputDirectory` | Where to write. Required. Its `content` folder must not exist yet. |
+| `-IntuneWinAppUtil` | Path to `IntuneWinAppUtil.exe`. When set, the script also builds the `.intunewin`. |
+| `-ProductVersion` | The release version. The script prints it in the detection rule and records it. |
+
+The script:
+
+1. verifies the Setup against `-Sha256` and, for Authenticode, its signer;
+2. writes `content\` with the Setup, `config.yaml`,
+   `Install-DefenseClawIntune.ps1` and `intune-package.json`, which holds the
+   SHA-256 pins of the Setup and the config (`setup_sha256`, `config_sha256`),
+   the trust mode and the allowed signers;
+3. wraps `content\` into `Install-DefenseClawIntune.intunewin`;
+4. prints the values to enter in the admin center.
+
+## 3. Create the Win32 app
+
+Upload the `.intunewin` in **Apps** > **All Apps** > **Create** >
+**Windows app (Win32)**:
+
+| Step | Setting | Value |
+| --- | --- | --- |
+| Program | Installer type | **Command line** |
+| Program | Install command | `%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` |
+| Program | Uninstall command | `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` |
+| Program | Installation time required | 60 minutes (the default) |
+| Program | Allow available uninstall | **No** |
+| Program | Install behavior | **System** |
+| Program | Device restart behavior | **Determine behavior based on return codes** |
+| Program | Return codes | Keep the defaults: `0` Success, `1707` Success, `3010` Soft reboot, `1641` Hard reboot, `1618` Retry. The lifecycle's `1603` and `1639` then report as Failed. |
+| Requirements | Operating system architecture | **x64** only |
+| Requirements | Minimum operating system | The oldest Windows release your fleet runs. DefenseClaw does not check the Windows version; it needs x64 and PowerShell 7. |
+| Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `1.4.0`, *Associated with a 32-bit app on 64-bit clients*: **No** |
+| Dependencies | App | The PowerShell 7 app, **Automatically install**: **Yes** |
+| Supersedence | Previous DefenseClaw app | **Uninstall previous version**: **No** |
+| Assignments | Required | Device groups |
+
+Why these values:
+
+- **The launcher.** Setup refuses relative and environment-expanded paths, and
+  the Intune content folder is not known in advance.
+  `Install-DefenseClawIntune.ps1` re-checks the pins in `intune-package.json`,
+  builds the absolute `CONFIG=` path, runs
+  `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure JSON=1 CONFIG=...`
+  (adding `ALLOWEDSIGNERS=` for Authenticode), prints the result document and
+  exits with Setup's code. A tampered or incomplete package fails with
+  `mdm_hash_mismatch` or `mdm_package_incomplete` (`1603`).
+- **`Sysnative`** starts the 64-bit Windows PowerShell from the 32-bit Intune
+  host, as Microsoft recommends for 64-bit installs. The launcher itself only
+  checks the pins and starts the native x64 Setup.
+- **The uninstall command** names the Setup without a path, because Intune does
+  not expand environment variables in uninstall commands.
+- **Version comparison, greater than or equal to.** A newer installed version
+  still counts as installed, so an older app never tries to replace it.
+- **No uninstall on supersedence.** `/ensure` upgrades in place and keeps the
+  config, key and state.
+
+If you prefer a script, `packaging/mdm/windows/detect.ps1` works as a custom
+detection script. Intune runs detection scripts without arguments, so set the
+default of `$MinimumVersion` in your copy's `param()` block to the app's
+version. The script reads the 64-bit registry view, so the **Run script as
+32-bit process on 64-bit clients** setting does not matter.
+
+## 4. Keep it healthy with Remediations
+
+A Remediations package re-checks the deployment on a schedule and repairs it
+from the installed payload. Create it in **Devices** > **Manage devices** >
+**Scripts and remediations** > **Create script package**:
+
+| Setting | Value |
+| --- | --- |
+| Detection script file | `Remediate-Detect.ps1` |
+| Remediation script file | `Remediate-Fix.ps1` |
+| Run this script using the logged-on credentials | **No** (runs as SYSTEM) |
+| Enforce script signature check | **No**, or **Yes** after you sign both scripts with a certificate in the devices' Trusted Publishers store. With **Yes**, the scripts run under the device's PowerShell execution policy (Windows clients default to `Restricted`, so set `AllSigned` or `RemoteSigned`) and must be saved as UTF-8 without a byte-order mark. |
+| Run script in 64-bit PowerShell | **No** (the default). The scripts work in either. |
+| Schedule | **Daily**, or **Hourly** every 4 to 8 hours |
+
+- `Remediate-Detect.ps1` runs the installed CLI's
+  `enterprise windows verify --profile standalone --json`. It exits `0` on a
+  healthy host, and also on a host without the deployment, because installing
+  is the Win32 app's job. Otherwise it exits `1`, which starts the remediation.
+- `Remediate-Fix.ps1` runs `enterprise windows ensure --profile standalone --json`,
+  which verifies and repairs from the installed payload, or does nothing. It
+  exits with the lifecycle's code.
+
+Both print one short line, because Intune keeps 2,048 characters of output.
+The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`.
+Remediations cannot install, upgrade or change the config: the installed CLI
+has no payload to install from. The Win32 app does those.
+
+On a computer installed from the unsigned Setup, the Remediations script's
+`ensure` keeps the marker's `hash_pinned` trust mode, so `detect.ps1`,
+`uninstall.ps1` and later Remediations runs keep accepting the unsigned CLI.
+
+## 5. Deliver the Cisco AI Defense key
+
+Microsoft states that scripts are not the place for secrets, so keep the key
+out of the Win32 app, `config.yaml` and every Intune script. First make sure
+the config turns the feature on and names the credential; see
+[Cisco AI Defense key](/docs/enterprise/ai-defense-key). Then, after the Win32
+app has installed DefenseClaw, store the key from an elevated PowerShell 7
+session on the device, for example through your remote-support tool:
+
+```powershell
+$cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+$key = Read-Host -AsSecureString -Prompt 'Cisco AI Defense API key'
+ConvertFrom-SecureString -SecureString $key -AsPlainText | & $cli enterprise secret set --name ai-defense-api-key --from-stdin
+& $cli enterprise secret status
+```
+
+The key goes from the prompt to the CLI's standard input. It never touches the
+disk, a command line or a script.
+
+To automate it, have your secrets-management agent write the key to a file
+that only SYSTEM and Administrators can change, on a local NTFS drive, then
+run as SYSTEM or an elevated administrator:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-file C:\ProgramData\YourAgent\ai-defense.key
+```
+
+Then delete the file. The command:
+
+- runs only elevated, and only when a standalone deployment is installed
+  (otherwise it exits `1603`);
+- refuses a file that a non-administrator can change, and a name or value that
+  is not valid (exit `1639`);
+- writes `C:\ProgramData\Cisco\DefenseClaw\secrets\ai-defense-api-key`, which
+  SYSTEM and Administrators control and only the gateway service can also
+  read, then restarts the gateway service.
+
+`enterprise secret status` shows whether the key is present, when it changed,
+and a digest prefix, never the value. The same wrapper options,
+`-SecretName` with `-SecretPath` or `-SecretFromStdin`, work with
+`Invoke-DefenseClawEnterprise.ps1` in tools that run PowerShell 7.
+
+## 6. Change the config, upgrade and roll back
+
+**Upgrade.** Build a package from the new Setup with
+`New-DefenseClawIntunePackage.ps1`, create it as a new Win32 app, set its
+detection rule to the new version, and make it supersede the previous app with
+**Uninstall previous version**: **No**. Devices below the new version run the
+launcher, and `/ensure` upgrades them in place.
+
+**Change the config.** Setup applies a new config when it runs `/ensure` with a
+config that differs from the installed one. The registry rule detects by
+version only, so Intune does not re-run an app for a config-only change. To
+roll out a new config:
+
+1. Build a package from the same Setup and the new `config.yaml`.
+2. Create it as a new Win32 app that supersedes the previous one with
+   **Uninstall previous version**: **No**.
+3. Use this custom detection script instead of the registry rule. Replace the
+   two values at the top with the minimum version and the `config_sha256`
+   value from the new package's `intune-package.json`:
+
+```powershell
+$minimum = [version]'1.4.0'
+$configSha256 = 'replace-with-config_sha256-from-intune-package.json'
+$base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$key = $base.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $key) { exit 1 }
+$version = [string]$key.GetValue('ProductVersion')
+$stateRoot = [string]$key.GetValue('StateRoot')
+$key.Dispose()
+$base.Dispose()
+$core = ($version -split '[-+]')[0]
+if (-not $core -or [version]$core -lt $minimum) { exit 1 }
+$config = Join-Path $stateRoot 'etc\config.yaml'
+if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { exit 1 }
+$actual = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $configSha256.ToLowerInvariant()) { exit 1 }
+Write-Output "DefenseClaw Enterprise $version"
+exit 0
+```
+
+Devices with the old config are "not detected", so Intune runs the new
+package's launcher, and `ensure` re-applies the deployment with the new config.
+Remediations and the installed CLI cannot apply a config change: the installed
+CLI's `ensure --config` exits `1639`. Do not edit the installed file by hand;
+changes made outside Setup are not validated.
+
+**Roll back.** `/ensure` refuses a Setup older than the installed version
+(`downgrade_refused`, `1603`), so superseding with an older app does nothing.
+Follow [Roll back](/docs/enterprise/lifecycle#roll-back).
+
+## 7. Remove DefenseClaw
+
+Assign the Win32 app as **Uninstall** to the device group. Intune runs the
+uninstall command, `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall
+JSON=1`, which stops and deletes the services, removes DefenseClaw's hooks and
+machine-policy entries (administrator entries stay), and removes the
+Add/Remove Programs entry and the marker. Add `PURGE=1` to the uninstall
+command to also remove the config, the key and the state.
+
+`packaging/mdm/windows/uninstall.ps1 [-Purge]` does the same from any
+PowerShell, as a platform script for example. Both are idempotent.
+
+## 8. Troubleshoot
+
+| Where | What |
+| --- | --- |
+| `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\AppWorkload.log` | Intune's view of the Win32 app: download, install command, exit code, detection |
+| `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\HealthScripts.log` | Remediations runs |
+| `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result, one JSON line per run |
+| `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` | The generic wrapper's steps, when you use it |
+| Application event log, source "DefenseClaw Enterprise" | Installed, upgraded, repaired, failed, busy and refused events |
+
+To see the current state on a device, run from an elevated PowerShell:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
+```
+
+| Symptom | Likely cause |
+| --- | --- |
+| Install fails with `1639` | No config in the package, or its `enterprise.profile` is not `standalone`. |
+| Install fails with `1603` and a config error | The config does not parse or validate. Read `errors[].code` and `errors[].message` in the lifecycle log. |
+| Install fails with `1603` and `powershell7_required` | The PowerShell 7 dependency did not install, or is a preview build. |
+| Install fails with `1603` and `mdm_hash_mismatch` | The package content changed after `New-DefenseClawIntunePackage.ps1` pinned it. Rebuild it. |
+| Intune reports `1618` and retries | Another lifecycle run held the lock. Intune retries three times, five minutes apart. |
+| The app installs again every day | The detection rule does not match what Setup installed: check the key path, the 64-bit setting and the version. |

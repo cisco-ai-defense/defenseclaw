@@ -101,6 +101,10 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	if env.Result == "" {
 		env.Result = "ok"
 	}
+	if env.UserID == "" && env.UserName == "" {
+		caller := auditCallerIdentity(ctx)
+		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
+	}
 	auditAction := string(audit.ActionConnectorHook)
 	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
 		auditAction = env.AuditActionOverride

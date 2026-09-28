@@ -104,13 +104,15 @@ availability does not alter those evidence fields.
 
 | Event | When it fires | DefenseClaw role | Action verdict → behavior |
 | --- | --- | --- | --- |
-| `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) executes | Inspect tool args; intercept risky commands | `block` → gateway returns `{decision: "deny", reason}`; the bridge `throw`s `new Error(reason)`, aborting the tool |
+| `tool.execute.before` | Right before a tool (`bash`, `read`, `edit`, …) executes | Inspect tool args; intercept risky commands | `block` → gateway returns `{decision: "deny", reason}`; the bridge shows the block as an error notice in the TUI and `throw`s an `Error`, aborting the tool. The error is the reason itself when it already comes from DefenseClaw (for example "DefenseClaw policy blocked this action (rule …)"); otherwise it says DefenseClaw blocked the tool call under policy and that it did not run, followed by the reason |
 | `tool.execute.after` | Immediately after a tool returns | Capture the official `title`, `output`, and `metadata` result fields for exact-call outcome attribution. **Cannot block or undo the tool** — it already ran. | Awaited observe-only delivery; transport and fail-mode results are advisory and ignored |
 
 OpenCode 1.18.10-v1.18.31 expose `permission.ask`, `chat.params`, `chat.headers`,
 and experimental chat message/system transformation hooks. DefenseClaw
 intentionally does not implement or claim those ask/context surfaces in this
-focused bridge; `confirm` therefore has no native resumable approval path.
+focused bridge; `confirm` therefore has no native resumable approval path:
+the call runs, and the bridge shows a warning notice in the OpenCode TUI that
+names the severity and reason.
 Findings on `tool.execute.after` are telemetry only. OpenCode's generic
 lifecycle `event` dispatch is also non-awaited, so DefenseClaw does not claim
 blocking or reliable delivery for lifecycle events.
@@ -137,8 +139,8 @@ DefenseClaw writes a single managed plugin file. Its `tool.execute.before` resol
 ```js
 "tool.execute.before": async (input, output) => {
   const verdict = await defenseclawPost("tool.execute.before", input.tool, output.args, cwd);
-  if (verdict?.reason) throw new Error(verdict.reason); // policy block
-  if (verdict?.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE) throw new Error("unobservable later mutation");
+  if (verdict?.reason) throw defenseclawBlock(client, verdict.reason); // error notice + Error naming DefenseClaw
+  if (verdict?.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE) throw defenseclawBlock(client, "unobservable later mutation");
 }
 ```
 

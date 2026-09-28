@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 
@@ -692,4 +693,282 @@ func TestEnumerateWindowsHonoursCancelledContext(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled ctx: err = %v, want context.Canceled", err)
 	}
+}
+
+func staticEnrollmentLookup(account, domain string, err error) (windowsEnrollmentAccountLookup, *int) {
+	calls := 0
+	return func(string) (string, string, error) {
+		calls++
+		return account, domain, err
+	}, &calls
+}
+
+func TestWindowsProfileEnrollmentDecision(t *testing.T) {
+	profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\alice.CONTOSO`}
+	lookup, calls := staticEnrollmentLookup("alice", "CONTOSO", nil)
+	for _, tc := range []struct {
+		name            string
+		exclude, exempt []string
+		want            windowsEnrollmentDecision
+	}{
+		{name: "no filters", want: windowsEnrollmentEnrolled},
+		{name: "exclude by directory name", exclude: []string{"ALICE.CONTOSO"}, want: windowsEnrollmentExcluded},
+		{name: "exclude by SID", exclude: []string{"s-1-5-21-1-2-3-1012"}, want: windowsEnrollmentExcluded},
+		{name: "exclude by account", exclude: []string{"alice"}, want: windowsEnrollmentExcluded},
+		{name: "exclude by domain account", exclude: []string{`contoso\ALICE`}, want: windowsEnrollmentExcluded},
+		{name: "exclude someone else", exclude: []string{"bob", "S-1-5-21-1-2-3-1013"}, want: windowsEnrollmentEnrolled},
+		{name: "exempt by account", exempt: []string{"alice"}, want: windowsEnrollmentExempt},
+		{name: "exclusion wins over exemption", exclude: []string{`CONTOSO\alice`}, exempt: []string{"alice.CONTOSO"}, want: windowsEnrollmentExcluded},
+	} {
+		got, _ := windowsProfileEnrollmentDecision(profile, tc.exclude, tc.exempt, lookup)
+		if got != tc.want {
+			t.Errorf("%s: decision = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	before := *calls
+	windowsProfileEnrollmentDecision(profile, []string{"S-1-5-21-9-9-9-1001", "alice.CONTOSO"}, nil, lookup)
+	windowsProfileEnrollmentDecision(profile, nil, nil, lookup)
+	if *calls != before {
+		t.Fatal("SID, directory-name and empty filters must be decided without an account lookup")
+	}
+}
+
+func TestWindowsEnrollmentAccountLookupIsBounded(t *testing.T) {
+	previous, previousTimeout, previousBudget := windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget
+	t.Cleanup(func() {
+		windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previous, previousTimeout, previousBudget
+	})
+	release := make(chan struct{})
+	defer close(release)
+	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) {
+		<-release
+		return "alice", "CONTOSO", nil
+	}
+	windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = 20*time.Millisecond, 50*time.Millisecond
+	lookup := newWindowsEnrollmentAccountLookup()
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		if _, _, err := lookup("S-1-5-21-1-2-3-1012"); err == nil {
+			t.Fatal("a hung lookup must fail")
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("ten hung lookups took %s; the cycle budget must bound them", elapsed)
+	}
+
+	// The lookup budget counts only time spent waiting on lookups. Probing the
+	// profiles before a lookup (package manifests, executables) must not use it
+	// up, or a slow host would leave later profiles undecided with a healthy
+	// domain controller.
+	t.Run("only lookup time counts", func(t *testing.T) {
+		previous, previousTimeout, previousBudget := windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget
+		t.Cleanup(func() {
+			windowsEnrollmentLookupAccountSID, windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = previous, previousTimeout, previousBudget
+		})
+		windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "alice", "CONTOSO", nil }
+		windowsEnrollmentLookupTimeout, windowsEnrollmentLookupBudget = 20*time.Millisecond, 40*time.Millisecond
+		lookup := newWindowsEnrollmentAccountLookup()
+		for i := 0; i < 3; i++ {
+			// Profile probing between lookups, longer than the whole budget.
+			time.Sleep(60 * time.Millisecond)
+			account, domain, err := lookup("S-1-5-21-1-2-3-1012")
+			if err != nil || account != "alice" || domain != "CONTOSO" {
+				t.Fatalf("lookup %d after probing = %q, %q, %v; want the account name", i, account, domain, err)
+			}
+		}
+	})
+}
+
+// An exempt user gets no new per-user connector rows, but a row already
+// enrolled stays: dropping it would revoke the SID while its hook registration
+// stays in the user's own agent config and fails closed as unregistered.
+func TestEnumerateWindowsStandaloneExemptUserKeepsEnrolledPerUserRows(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	const (
+		carolSID = "S-1-5-21-1004336348-1177238915-682003330-1003"
+		daveSID  = "S-1-5-21-1004336348-1177238915-682003330-1004"
+	)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	homes := map[string]string{}
+	for _, sid := range []string{carolSID, daveSID} {
+		home := codexProfile(t, "0.150.0")
+		devin := filepath.Join(home, "AppData", "Local", "devin", "cli", "_versions", "3000.4.25", "bin")
+		if err := os.MkdirAll(devin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(devin, "devin.exe"), []byte("MZ"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		homes[sid] = home
+	}
+	injectWindowsProfileList(t, homes)
+	enabled := true
+	existing := Manifest{Version: 1, Targets: []ManifestTarget{{
+		SID: carolSID, Connector: "devin", UserHome: homes[carolSID],
+		DataDir: filepath.Join(homes[carolSID], ".defenseclaw"), AgentVersion: "3000.4.25", Enabled: &enabled,
+	}}}
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	raw, err := marshalTargetsManifest(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := standaloneEnumeratorConfig("codex")
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"devin": {Enabled: &enabled}}
+	manifest, err := EnumerateWindows(context.Background(), cfg, EnumerateOptions{
+		ExistingManifestPath: path,
+		ExemptUsers:          []string{carolSID, daveSID},
+	})
+	if err != nil {
+		t.Fatalf("EnumerateWindows: %v", err)
+	}
+	rows := map[string][]string{}
+	for _, target := range manifest.Targets {
+		rows[target.SID] = append(rows[target.SID], target.Connector)
+	}
+	if got := strings.Join(rows[carolSID], ","); got != "codex,devin" {
+		t.Fatalf("the exempt user with an enrolled Devin row has rows %s, want codex,devin", got)
+	}
+	if got := strings.Join(rows[daveSID], ","); got != "codex" {
+		t.Fatalf("the exempt user without a Devin row has rows %s, want only codex", got)
+	}
+}
+
+func TestEnumerateWindowsStandaloneEnrollmentSemantics(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	const (
+		aliceSID = "S-1-5-21-1004336348-1177238915-682003330-1001"
+		bobSID   = "S-1-5-21-1004336348-1177238915-682003330-1002"
+		carolSID = "S-1-5-21-1004336348-1177238915-682003330-1003"
+	)
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	homes := map[string]string{}
+	for _, sid := range []string{aliceSID, bobSID, carolSID} {
+		home := codexProfile(t, "0.150.0")
+		writeWindowsAgentPackageJSON(t, filepath.Join(home, "AppData", "Roaming", "npm", "node_modules", "@github", "copilot"), "1.0.88")
+		devin := filepath.Join(home, "AppData", "Local", "devin", "cli", "_versions", "3000.4.25", "bin")
+		if err := os.MkdirAll(devin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(devin, "devin.exe"), []byte("MZ"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		homes[sid] = home
+	}
+	injectWindowsProfileList(t, homes)
+	names := map[string]string{aliceSID: "alice", bobSID: "bob", carolSID: "carol"}
+	previousLookup := windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsEnrollmentLookupAccountSID = previousLookup })
+	windowsEnrollmentLookupAccountSID = func(sid string) (string, string, error) {
+		return names[strings.ToUpper(sid)], "CONTOSO", nil
+	}
+	cfg := standaloneEnumeratorConfig("codex")
+	enabled := true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"copilot": {Enabled: &enabled}, "devin": {Enabled: &enabled},
+	}
+	manifest, err := EnumerateWindows(context.Background(), cfg, EnumerateOptions{
+		IncludeUsers: []string{`CONTOSO\alice`},
+		ExcludeUsers: []string{"bob"},
+		ExemptUsers:  []string{"carol"},
+	})
+	if err != nil {
+		t.Fatalf("EnumerateWindows: %v", err)
+	}
+	rows := map[string][]string{}
+	for _, target := range manifest.Targets {
+		rows[target.SID] = append(rows[target.SID], target.Connector)
+	}
+	if got := strings.Join(rows[aliceSID], ","); got != "codex,copilot,devin" {
+		t.Fatalf("the included user rows = %s, want codex,copilot,devin", got)
+	}
+	if len(rows[bobSID]) != 0 {
+		t.Fatalf("the excluded user has rows %v", rows[bobSID])
+	}
+	if got := strings.Join(rows[carolSID], ","); got != "codex,copilot" {
+		t.Fatalf("the exempt user rows = %s, want only the machine-policy connectors codex,copilot", got)
+	}
+}
+
+// include_users is additive, as documented and as on Linux and macOS: a
+// non-empty list never unenrolls anyone else.
+func TestEnumerateWindowsStandaloneIncludeUsersIsAdditive(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	const otherSID = "S-1-5-21-1004336348-1177238915-682003330-1002"
+	injectWindowsProfileList(t, map[string]string{
+		testLocalUserSID: codexProfile(t, "0.150.0"),
+		otherSID:         codexProfile(t, "0.150.0"),
+	})
+	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
+		IncludeUsers: []string{"alice"},
+	})
+	if err != nil {
+		t.Fatalf("EnumerateWindows: %v", err)
+	}
+	if len(manifest.Targets) != 2 {
+		t.Fatalf("targets = %+v, want both profiles enrolled", manifest.Targets)
+	}
+}
+
+// A lookup failure keeps a profile's published rows and adds none, so a
+// domain controller outage revokes nobody.
+func TestEnumerateWindowsStandaloneKeepsRowsWhenTheAccountNameIsUnavailable(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	const newSID = "S-1-5-21-1004336348-1177238915-682003330-1002"
+	injectWindowsProfileList(t, map[string]string{
+		testLocalUserSID: codexProfile(t, "0.150.0"),
+		newSID:           codexProfile(t, "0.150.0"),
+	})
+	previousLookup := windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsEnrollmentLookupAccountSID = previousLookup })
+	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) {
+		return "", "", windows.RPC_S_SERVER_UNAVAILABLE
+	}
+	enabled := true
+	existing := Manifest{Version: 1, Targets: []ManifestTarget{{
+		SID: testLocalUserSID, Connector: "codex", UserHome: `C:\Users\alice`,
+		DataDir: `C:\Users\alice\.defenseclaw`, AgentVersion: "0.140.0", Enabled: &enabled,
+	}}}
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	raw, err := marshalTargetsManifest(existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
+		ExistingManifestPath: path,
+		ExcludeUsers:         []string{`CONTOSO\bob`},
+		Logger:               func(subject, reason string) { logged = append(logged, subject+": "+reason) },
+	})
+	if err != nil {
+		t.Fatalf("EnumerateWindows: %v", err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != testLocalUserSID || manifest.Targets[0].AgentVersion != "0.140.0" {
+		t.Fatalf("targets = %+v, want only the known row, unchanged", manifest.Targets)
+	}
+	if !strings.Contains(strings.Join(logged, "\n"), "account name lookup failed") {
+		t.Fatalf("the lookup failure must be logged; log:\n%s", strings.Join(logged, "\n"))
+	}
+
+	// A directory outage must never turn a name-form entry into a non-match.
+	t.Run("the decision stays undecided", func(t *testing.T) {
+		profile := windowsUserProfile{SID: "S-1-5-21-1-2-3-1012", Home: `C:\Users\bob`}
+		failing, _ := staticEnrollmentLookup("", "", windows.ERROR_NONE_MAPPED)
+		got, reason := windowsProfileEnrollmentDecision(profile, []string{`CONTOSO\alice`}, nil, failing)
+		if got != windowsEnrollmentUndecided || !strings.Contains(reason, "keeping the existing rows unchanged") {
+			t.Fatalf("decision = %d (%s), want undecided while the account name is unavailable", got, reason)
+		}
+		if got, _ := windowsProfileEnrollmentDecision(profile, []string{"bob"}, nil, failing); got != windowsEnrollmentExcluded {
+			t.Fatalf("a directory-name exclusion must still apply during a lookup failure, got %d", got)
+		}
+	})
 }

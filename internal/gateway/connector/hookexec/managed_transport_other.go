@@ -39,11 +39,11 @@ import (
 // before any request bytes leave the process). See spec 006 code-
 // review Tier 1 finding T1.1 (Agent E "wrapper/proxy correctness").
 //
-// Linux is inside the //go:build !windows tag but is not a
-// supported managed_enterprise deployment target; the parity plan
-// covers macOS and Windows only. Linux takes this path if a caller
-// ever sets opts.ManagedEnterprise=true and reaches this function,
-// but the deployment model itself does not exist yet.
+// The standalone managed profile on Linux and macOS does not use this
+// client: hooks bound to the root-owned runtime descriptor select
+// managedStandaloneHTTPClient (managed_standalone_transport.go), which
+// verifies the listener's uid before sending a byte. This function remains
+// the unchanged path for the Secure Client macOS deployment.
 func managedEnterpriseHTTPClient(
 	timeout time.Duration,
 	_ string,

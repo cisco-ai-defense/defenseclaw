@@ -44,16 +44,95 @@ marker, so one host can run both surfaces with the correct veto on each.
 </Callout>
 
 <Callout type="warn">
-Kiro hooks are **workspace-scoped**. Kiro discovers hooks only from
-`.kiro/hooks/*.json` relative to the project root and documents no user-level
-location, so the enforcing file is `<workspace>/.kiro/hooks/defenseclaw.json`.
-Setup also writes `~/.kiro/hooks/defenseclaw.json` so teardown can reclaim it,
-but Kiro never reads that copy: a global-only install blocks nothing, even
-though the connector reports healthy and the gateway keeps recording findings.
-Set `claw.workspace_dir` to the project root before running setup, and confirm
-with `defenseclaw doctor` — the `Connector scope [kiro]` check fails when no
-project-local hook file exists.
+Which Kiro builds read the global hook file. Kiro documents a global scope,
+`~/.kiro/hooks/`, that it merges with the project's `.kiro/hooks/` ("Hooks:
+All scopes merged"), for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`.
+Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so for them
+the enforcing file is the workspace copy. For those builds, set
+`claw.workspace_dir` to the project root before running setup. `defenseclaw
+doctor`'s `Connector scope [kiro]` check passes when the global
+`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks, and its detail
+says that Kiro IDE builds before 1.0.182 also need `claw.workspace_dir`,
+because doctor cannot tell which Kiro build you run. It fails
+(`kiro_hooks_not_workspace_scoped`) only when neither the global
+registration nor a workspace copy is present; run `defenseclaw setup kiro`
+to fix that.
 </Callout>
+
+## Native Windows
+
+On Windows, Kiro runs DefenseClaw's native hook binary instead of
+`kiro-hook.sh`. Both hook configs hold the same kind of command: the system
+Windows PowerShell with `-EncodedCommand`, whose script starts
+`defenseclaw-hook.exe hook --connector kiro --hook-surface v3` (the
+`.kiro/hooks` config) or `defenseclaw-hook.exe hook --connector kiro` (the CLI
+2.x agent) with `Start-Process -NoNewWindow -Wait -PassThru` and exits with the
+hook's status. The binary forwards the surface to the gateway. It answers like
+the bash hook: no stdout, and exit 2 with the reason on stderr for a block.
+
+Kiro proceeds past any exit status other than 0 and 2, so a block has to reach
+Kiro as exit 2:
+
+| How Kiro starts the command | Exit status Kiro sees for a block |
+| --- | --- |
+| `cmd.exe /c` (what Node's `shell: true` and `cmd /C` do), or directly | 2 |
+| `powershell -Command` or `pwsh -Command` | 1: PowerShell reports any native exit status other than 0 as 1, and no command that also works in `cmd.exe` can change that |
+
+Kiro does not document which shell runs hook commands on Windows; confirm it
+on your Kiro build before relying on Windows hook enforcement.
+
+A hook that fails closed (an administrator-managed hook, or fail mode `closed`
+from the hook sidecar, `--fail-mode` or `DEFENSECLAW_FAIL_MODE`) also exits 2
+when it fails inside DefenseClaw: a usage error, an invalid flag value, or an
+unreachable gateway. With fail mode `open` those failures exit 1 and Kiro goes
+ahead with a warning, like every other fail-open failure.
+
+Before this release the binary rejected `--hook-surface`, so every Kiro IDE and
+`kiro-cli --v3` event went through with a warning, and the unmarked CLI 2.x
+hook blocked every tool call instead. The command was also
+`& '<defenseclaw-hook.exe>' ...`, which `cmd.exe` rejects and which PowerShell
+does not wait for, so a block never reached Kiro. `defenseclaw setup kiro`
+replaces those entries.
+
+## Enterprise (standalone profile)
+
+On Linux and macOS the [enterprise guardian](/docs/enterprise/concepts#per-user-connector)
+enrolls Kiro per user. For each enrolled user it writes and repairs:
+
+- `~/.kiro/hooks/defenseclaw.json`, the global hook file that Kiro IDE and
+  `kiro-cli --v3` merge into every workspace;
+- the CLI 2.x agent `~/.kiro/agents/defenseclaw.json` and its
+  `chat.defaultAgent` entry in `~/.kiro/settings/cli.json`, for bare
+  `kiro-cli`.
+
+It never edits the user's own agents. When a user has set another
+`chat.defaultAgent`, the guardian makes `defenseclaw` the default instead
+(uninstall puts the user's setting back). An agent the user picks explicitly
+(`--agent`, `/agent swap`) runs without DefenseClaw's hooks. A per-user
+`defenseclaw setup kiro` still adds the hooks to the user's own default agent.
+
+On macOS the guardian also finds `kiro-cli` inside `Kiro CLI.app`, in
+`~/Applications` or `/Applications`, before the app's shell setup links it
+into a bin directory.
+
+It never writes a workspace copy, even when `claw.workspace_dir` is set. That
+directory is machine-wide, so every enrolled user would share the copy, and
+the global file already covers it. Teardown still removes a workspace copy
+that an earlier release wrote.
+
+The standalone profile certifies kiro-cli 2.24.1 and later. That is the first
+build checked with `--v3` and `--agent-engine v3`. In action mode the guardian
+refuses to enroll a new user whose kiro-cli is older and reports the reason. A
+user an earlier release already enrolled below 2.24.1 keeps being repaired at
+that version; a kiro-cli change to another version below 2.24.1 is refused as
+hook contract drift until kiro-cli reaches 2.24.1. The guardian follows a
+kiro-cli self-update at or above 2.24.1 and re-renders the user's hooks. It
+does not follow a downgrade below that version.
+
+On Windows the guardian does not enroll Kiro. `kiro-cli.exe` records its
+version nowhere DefenseClaw can read without running it, and Windows
+discovery runs nothing. Protect Kiro there with
+`defenseclaw-gateway enterprise acp` and the [ACP guard](/docs/acp-guard).
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro

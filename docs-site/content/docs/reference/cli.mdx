@@ -218,7 +218,7 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw alerts [--connector X]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` therefore returns the earliest N matching rows, not the newest N. Omit `--limit` and pipe to `tail` for the most recent rows. `--include-activity` also dumps `activity_events`. |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--include-activity` also dumps `activity_events`, within the same window. |
 | `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail the optional v8 JSONL destination when configured at that path. Mandatory local history is SQLite; JSONL is not an implicit mirror. |
 
@@ -307,16 +307,9 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw upgrade [--version X] [--yes] [--recover-corrupt-audit]` | Drive an upgrade under a compatible installed controller. It verifies artifacts before stopping services, backs up managed state, installs the CLI and gateway, runs release-owned migrations, refreshes owned local-observability assets, restarts services, and performs version-bound health checks. The immutable `0.8.4` built-in command cannot parse the truthful `0.8.5` manifest because that manifest has an empty Windows bridge matrix; a `0.8.3`-or-older built-in command also cannot learn the two-process bridge handoff retroactively. To cross into `0.8.5`, use the authenticated target-release POSIX resolver in latest mode without a version override. That resolver, and built-in controllers from `0.8.5` onward for later compatible manifests, can authenticate a temporary pinned Cosign when no system Cosign exists. On macOS/Linux, `--recover-corrupt-audit` delegates to the authenticated resolver, which requires an explicit post-stop SQLite corruption result before preserving the exact database/WAL set in private same-filesystem custody and activating a fresh store. Native Windows rejects that option before mutation. `--allow-unverified` cannot bypass provenance. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
-| `defenseclaw migrations status [--json-output]` | Show the durable migration cursor and any drift between applied and release-required migrations. |
-| `defenseclaw migrations unmark VERSION` | Mark one migration for retry on the next upgrade. Use only as a targeted recovery action. |
-| `defenseclaw migrations reset` | Remove the migration cursor so the next upgrade bootstraps it again. This does not roll back configuration files. |
-
-A source listed for its platform in the published-baseline matrix can upgrade to
-latest through the authenticated current release-owned resolver, which selects
-and health-checks `0.8.4` before starting a fresh bridge controller. Sources
-outside that matrix fail closed with the exact supported path. Never force a
-hard-cut version or rerun a fresh installer over an old installation.
+| `defenseclaw upgrade [--version X] [--yes]` | Download the latest (or the given) release's installer, check it against that release's `checksums.txt`, and run it. The installer keeps your configuration and data, migrates them, restarts the gateway, and restores the previous install if anything fails. See [Upgrade DefenseClaw](/docs/get-started/upgrade). |
+| `defenseclaw rollback [--yes]` | Swap the live install with the one the last upgrade replaced. Run it again to roll forward. |
+| `defenseclaw migrate [--check] [--from-version X] [--json]` | Bring configuration and data to this version's schema. The installer runs it on every upgrade; `--check` changes nothing. Exits `2` for a configuration written by a newer release. |
 
 ## Uninstall / disable
 
@@ -351,6 +344,189 @@ is on [Sandbox CLI](/docs/reference/sandbox-cli); see also
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
 | `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. |
+
+## Enterprise
+
+Commands for administrator-owned [enterprise deployments](/docs/enterprise).
+They are on the Go binary. Run them as root on Linux and macOS, and from an
+elevated prompt on Windows.
+
+| OS | Binary |
+| --- | --- |
+| Linux | `/opt/defenseclaw/bin/defenseclaw-gateway` |
+| macOS | `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` |
+| Windows | `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe` (the same Go binary under another name) |
+
+### Standalone lifecycle on Linux and macOS
+
+`defenseclaw-gateway enterprise linux|macos <action>` manages the standalone
+deployment. Run `linux` on Linux and `macos` on macOS; the other one exits `2`.
+Every mutating action is a transaction that rolls back on failure. See
+[Upgrade, repair and remove](/docs/enterprise/lifecycle).
+
+| Action | Use it for |
+| --- | --- |
+| `install` | Install the deployment. Refuses when one is already installed |
+| `upgrade` | Upgrade an installed deployment from a new payload or package |
+| `repair` | Re-apply the installed deployment's files, modes, and services |
+| `ensure` | Install, upgrade, or repair as needed. Does nothing when nothing changed |
+| `reconcile` | Run one immediate hook guardian reconcile |
+| `status` | Report the deployment state. Read-only |
+| `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
+| `uninstall` | Stop and remove the deployment. `--purge` also removes config and state |
+
+| Flag | Actions | Meaning |
+| --- | --- | --- |
+| `--payload <dir>` | install, upgrade, repair, ensure | Absolute directory that holds the staged binaries. Cannot be combined with `--from-package` |
+| `--from-package` | install, upgrade, repair, ensure | Use the binaries the `defenseclaw-enterprise` package installed |
+| `--config <file>` | install, upgrade, repair, ensure | Absolute path of the administrator config to install |
+| `--no-start` | install, upgrade, repair, ensure | Install without starting the services. Run `repair` or `ensure` to start them |
+| `--product-version <v>` | install, upgrade, repair, ensure | Refuse unless the payload is exactly this version |
+| `--allow-downgrade` | install, upgrade, repair, ensure | Allow a payload older than the installed release (a deliberate rollback). Without it the lifecycle refuses with `downgrade_refused` |
+| `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
+| `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
+| `--lock-wait <duration>` | install, upgrade, repair, reconcile, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
+| `--purge` | uninstall | Also remove config, credentials, state, and logs |
+| `--remove-service-account` | uninstall | With `--purge`, also delete the gateway service account |
+| `--json` | all | Print the lifecycle result as JSON |
+
+Exit codes: `0` success or no-op, `1` failure (already rolled back), `2`
+invalid arguments, `75` another lifecycle run holds the lock.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --config /root/defenseclaw-config.yaml --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --purge --json
+```
+
+### Lifecycle on Windows
+
+`defenseclaw.exe enterprise windows <action>` manages the Windows deployment
+for both profiles. Run it from an elevated prompt. The standalone profile runs
+its transaction on PowerShell 7, which must be installed.
+
+| Action | Profiles | Use it for |
+| --- | --- | --- |
+| `install`, `upgrade`, `repair` | Secure Client, standalone | Install, upgrade, or re-apply the deployment |
+| `ensure` | Standalone only | Install, upgrade, or repair as needed. Refuses to downgrade (`downgrade_refused`) |
+| `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
+| `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
+| `uninstall` | Secure Client, standalone | Remove the services. Keeps state unless `--purge` |
+
+| Flag | Meaning |
+| --- | --- |
+| `--profile secure_client\|standalone` | The profile. Default: the supplied config's `enterprise.profile`, then the installed profile, then `secure_client` |
+| `--config <file>`, `--manifest <file>` | Administrator config and guardian target manifest (`targets.yaml`) |
+| `--trust-mode authenticode\|hash_pinned` | Standalone payload trust. Default at the CLI: `authenticode` |
+| `--payload-manifest <file>` | Standalone `hash_pinned` trust anchor: an administrator-owned JSON file of payload SHA-256 digests |
+| `--allowed-signer <sha256>` | Standalone: the SHA-256 thumbprint of an accepted Authenticode signer certificate. Repeatable |
+| `--product-version <v>` | Standalone: the version recorded for the deployment. Default: this CLI's version |
+| `--gateway-binary`, `--hook-binary`, `--acp-binary`, `--sensor-helper-binary`, `--cli-binary` | Source binaries for install, upgrade, repair, and ensure |
+| `--broker-binary` | Secure Client only: the source credential broker |
+| `--installer <file>` | An explicit `install-enterprise.ps1` |
+| `--no-start` | Install, upgrade, repair, ensure: stage the services disabled and stopped |
+| `--purge` | Uninstall: also remove managed state |
+| `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
+| `--json` | Print the result as JSON |
+
+Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
+arguments, and `3010` (reserved). Secure Client: `0` and `1603`.
+
+```powershell
+$DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+& $DefenseClaw enterprise windows status --profile standalone --json
+& $DefenseClaw enterprise windows verify --profile standalone --json
+```
+
+### Standalone Setup on Windows
+
+`DefenseClawSetup-Enterprise-Standalone-x64.exe` wraps the standalone
+lifecycle for MDMs. Its release asset
+`DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json` lists the
+payload digests. `DefenseClawSetup-Enterprise-x64.exe` is the Secure Client
+Setup. See [Install with an MDM](/docs/enterprise/mdm).
+
+| Argument | Meaning |
+| --- | --- |
+| `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`, `/verify`, `/uninstall`, `/ensure` | The action |
+| `CONFIG=<file>` | Absolute path of the config. A first `/ensure` needs it and exits `1639` without it |
+| `MANIFEST=<file>` | Absolute path of a guardian target manifest. `/install` needs both `CONFIG=` and `MANIFEST=`; `/ensure` prepares a manifest from the config |
+| `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accepted Authenticode signer thumbprints, comma-separated |
+| `JSON=1`, `NOSTART=1`, `PURGE=1` | Print JSON, stage without starting, remove state on uninstall |
+| `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. Default 1800 |
+| `/quiet`, `/norestart` | Accepted and ignored |
+
+Property names are case-insensitive, and dashes in them are ignored. Paths
+must be absolute: Setup refuses relative paths and paths that contain `%`.
+The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. A token that is not elevated, or a `CONFIG=` or `MANIFEST=` file a non-administrator can change, exits `1603`. The Secure Client Setup returns only `0` and `1603`.
+
+### Machine policy (`enterprise policy`)
+
+These commands inspect DefenseClaw's entries in vendor machine policy. They
+never write machine policy; the lifecycle does. See
+[Machine policy](/docs/enterprise/machine-policy).
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw-gateway enterprise policy show` | Show each connector's route, lock, and coverage. `--connector X` limits it to one connector, `--user NAME` also checks that user's agent config, and `--project DIR` (with `--user`) also scans a project directory for foreign hooks |
+| `defenseclaw-gateway enterprise policy export --connector X` | Print DefenseClaw's entries for your own policy tool. `--format`: `codex` takes `toml` or `plist`; `claudecode` takes `json`, `claude-hklm-json`, `reg`, `plist`, `intune-settings-catalog`, or `version-floor` (the [version floor](/docs/enterprise/machine-policy#claude-code-version-floor) drop-in); `cursor`, `copilot`, and `opencode` take `json`. The default is the connector's native file |
+| `defenseclaw-gateway enterprise policy verify` | Verify coverage. Exits `1` when it is incomplete. Takes the same `--connector` and `--user` flags. `--live` also runs the real client as the user; it needs `--user`, one `--connector` (`codex` or `claudecode`), and `--agent-binary` with an absolute path. `--audit-db` (the gateway audit database searched for the Claude Code check's tool call; default: the configured `audit_db`) and `--timeout` (default `90s`) tune the live check |
+
+All three take `--json`. On this release, set `DEFENSECLAW_CONFIG` to the
+managed config path when you run them. Otherwise they read the calling user's
+`~/.defenseclaw/config.yaml` and refuse.
+
+```bash
+sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
+```
+
+### Protected credentials (`enterprise secret`)
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw-gateway enterprise secret set --name N` | Store a credential. Pass exactly one of `--from-stdin` or `--from-file F`. The value is never printed |
+| `defenseclaw-gateway enterprise secret status` | List stored credentials with a digest prefix and modification time, never the value |
+| `defenseclaw-gateway enterprise secret remove --name N` | Remove a credential |
+
+Names use lowercase letters, digits, and dashes. Every action takes `--json`.
+
+| | Linux and macOS | Windows |
+| --- | --- | --- |
+| After `set` or `remove` | Runs `ensure`. `set` refuses before writing when the service account does not exist (nothing installed) | Restarts the gateway |
+| Requirements | root for `set` and `remove` | An elevated prompt. `set` and `remove` also need an installed standalone deployment |
+| Exit codes | `0`, `1`, `2`, and `75` when the `ensure` it runs finds the lock held | `0`, `1603`, `1639` (invalid input) |
+
+Install first, then store the key. See [AI Defense key](/docs/enterprise/ai-defense-key).
+
+### Per-user hooks (`enterprise hooks`)
+
+The guardian and the enumerator services run these commands. Administrators
+normally need only the lifecycle `status` and `verify`, which include the
+guardian's health.
+
+| Command | Who runs it | Use it for |
+| --- | --- | --- |
+| `defenseclaw-gateway enterprise hooks status` | Administrator | Read-only: the last guardian reconcile and the authorization ledger |
+| `defenseclaw-gateway enterprise hooks verify` | Administrator | Read-only: verify every enabled target in the manifest without repairing it |
+| `defenseclaw-gateway enterprise hooks watch` | Guardian service | Watch the manifest's targets and repair them, with a periodic reconcile (`--interval`, default `1m`) |
+| `defenseclaw-gateway enterprise hooks reconcile` | Guardian and lifecycle | Install or repair every enabled target once |
+| `defenseclaw-gateway enterprise hooks install`, `uninstall` | Root or a guardian on Linux and macOS; only the guardian on Windows | Install, repair, or remove one user's hook registration |
+| `defenseclaw-gateway enterprise hooks enumerate` | Enumerator service (Linux, macOS) | Publish the target manifest. The Windows enumerator service runs `defenseclaw-gateway.exe enterprise windows enumerate` |
+| `defenseclaw-gateway enterprise hooks scrub` | Uninstall scripts, or an administrator | Remove DefenseClaw's entries from one user's agent hook file (`--connector`, `--file`) |
+
+`remove-all` and `apply-target` are hidden internal commands that the
+lifecycle and the guardian use. The hooks commands read the managed config
+and the ledger directory from the service environment
+(`DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`). To run `status`
+or `verify` yourself, use the same values as the guardian's unit or plist,
+and pass `--manifest` on macOS (`/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml`).
+
+### ACP credentials (`enterprise acp`)
+
+`defenseclaw-gateway enterprise acp enroll|verify|revoke` manages the
+protected ACP credential for one user, client, agent, and profile. See
+[ACP guard](/docs/acp-guard).
 
 ## Discoverability
 

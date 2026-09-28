@@ -16,6 +16,14 @@ be running, and validation does not make a network request.
 defenseclaw guardrail validate-pack /path/to/rule-pack
 ```
 
+<Callout type="info" title="Enterprise deployments">
+Enterprise packages ship no `defenseclaw` CLI, so the `defenseclaw` commands
+on this page are not available on a managed host. There, validate with
+`defenseclaw-gateway rulepack validate --dir <pack>` and apply the pack
+through the managed config, as
+[Custom rule packs](/docs/enterprise/configuration#custom-rule-packs) shows.
+</Callout>
+
 A valid pack exits `0` and prints component counts plus a content digest. A
 pack that the helper successfully checks and finds invalid exits `1` with a
 bounded diagnostic that identifies the component path, error code, and reason.

@@ -29,7 +29,9 @@ struct DefenseClawApp: App {
 
     init() {
         CLIProcessGroupLauncher.execIfRequested()
-        _appState = State(initialValue: AppState())
+        let state = AppState()
+        _appState = State(initialValue: state)
+        AppDelegate.startApplication = { [weak state] in state?.start() }
     }
 
     var body: some Scene {
@@ -198,10 +200,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     static let sandboxReviewCategory = SandboxNotificationCategories.review
     static let sandboxUnblockAction = SandboxNotificationCategories.unblockAction
     static let sandboxOpenAction = SandboxNotificationCategories.openAction
+    static var startApplication: (() -> Void)?
     private var miniaturizeObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyActivationPolicy()
+        // Restored minimized/hidden windows may not call onAppear until opened.
+        // Gateway startup belongs to the application lifecycle, independently.
+        Self.startApplication?()
         DCToolbarQuickHelpMonitor.shared.start()
         registerSandboxNotificationCategories()
 

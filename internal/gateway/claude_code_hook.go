@@ -415,6 +415,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
@@ -629,7 +630,7 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 		ToolResponse:  req.ToolResponse,
 		MCPServerName: req.MCPServerName,
 		Payload:       req.Payload,
-	}
+	}.withTrustedActiveHome(ctx)
 	strictScope := codexToolResultContentScope(provenanceReq)
 	if mode == "action" || strictScope == ruleContentScopeSource {
 		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(

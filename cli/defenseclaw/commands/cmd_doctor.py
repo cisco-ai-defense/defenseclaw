@@ -1517,7 +1517,7 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
         reason = health.reason_code
         if reason == "audit-db-schema-incomplete":
             detail = "required schema is incomplete"
-            remediation = "defenseclaw migrations apply"
+            remediation = "defenseclaw-gateway restart"
         elif reason == "audit-db-corrupt":
             detail = "SQLite quick_check reported corruption"
             remediation = "restore the audit database from a trusted backup"
@@ -4052,6 +4052,44 @@ _HOOK_HEALTH_LABELS = {
     "omnigent": "OmniGent policy",
     "kiro": "Kiro hooks",
 }
+
+
+def _check_kiro_global_scope(r: _DoctorResult) -> None:
+    """Report the Kiro hook scope of an install without claw.workspace_dir.
+
+    Kiro merges hooks from every scope, and its global scope is
+    ``~/.kiro/hooks/`` (kiro.dev/docs/configuration: "Hooks: All scopes
+    merged"). Kiro IDE 1.0.182 and later and ``kiro-cli --v3`` read the global
+    ``~/.kiro/hooks/defenseclaw.json`` that setup writes, and bare
+    ``kiro-cli`` runs the defenseclaw agent. Kiro IDE builds before 1.0.182
+    read only the project's ``.kiro/hooks``; doctor cannot tell which build
+    is installed, so the pass names that limit. Without the global
+    registration nothing runs DefenseClaw's hooks.
+    """
+    global_hooks = os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")
+    if _file_references_marker(global_hooks, _HOOK_HEALTH_FALLBACK["kiro"][1]):
+        _emit(
+            "pass",
+            "Connector scope",
+            f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
+            "load it. Kiro IDE builds before 1.0.182 read only the project's "
+            ".kiro/hooks: set claw.workspace_dir for them",
+            r=r,
+        )
+        return
+    _emit(
+        "fail",
+        "Connector scope",
+        f"no DefenseClaw hooks in {global_hooks} and claw.workspace_dir is unset, "
+        "so Kiro runs none of DefenseClaw's hooks",
+        r=r,
+        reason_code="kiro_hooks_not_workspace_scoped",
+        remediation=(
+            "Run `defenseclaw setup kiro`, which writes ~/.kiro/hooks/defenseclaw.json "
+            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); for older Kiro IDE builds also "
+            "set claw.workspace_dir to the project root"
+        ),
+    )
 
 
 def _file_references_marker(path: str, markers: tuple[str, ...]) -> bool:
@@ -8047,7 +8085,7 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
         AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
     }:
         remediation = (
-            "run `defenseclaw migrations apply` after a trusted backup review"
+            "run `defenseclaw-gateway restart` (it applies audit database migrations) after a trusted backup review"
             if health.reason_code == "audit-db-schema-incomplete"
             else "restore the audit database from a trusted backup"
         )
@@ -9580,24 +9618,7 @@ def _check_connector_inventory(
     if workspace:
         _emit("pass", "Connector scope", f"workspace ({workspace})", r=r)
     elif connector == "kiro":
-        # Kiro discovers hooks ONLY from .kiro/hooks/*.json relative to the
-        # project root (kiro.dev/docs/hooks: "Location: .kiro/hooks/ in your
-        # project root"). There is no documented ~/.kiro/hooks. A global-only
-        # install therefore enforces nothing, and reporting it as a pass is
-        # how an operator ends up believing an unguarded Kiro is guarded.
-        _emit(
-            "fail",
-            "Connector scope",
-            "global user config only; Kiro loads hooks from the project root, "
-            "so the installed hooks never run",
-            r=r,
-            reason_code="kiro_hooks_not_workspace_scoped",
-            remediation=(
-                "Set claw.workspace_dir to the project root and re-run "
-                "`defenseclaw setup kiro`, which writes "
-                "<workspace>/.kiro/hooks/defenseclaw.json"
-            ),
-        )
+        _check_kiro_global_scope(r)
     else:
         _emit("pass", "Connector scope", "global user config", r=r)
 

@@ -166,6 +166,9 @@
     "managed": {
       "$ref": "#/$defs/managedIPC"
     },
+    "enterprise": {
+      "$ref": "#/$defs/enterprise"
+    },
     "routing": {
       "$ref": "#/$defs/routing"
     }
@@ -4079,6 +4082,295 @@
           },
           "profile": {
             "$ref": "#/$defs/stableName"
+          }
+        }
+      }
+    },
+    "enterpriseConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "verify_only",
+            "off"
+          ]
+        },
+        "managed_hooks_only": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "preserve"
+          ]
+        },
+        "foreign_hooks": {
+          "type": "string",
+          "enum": [
+            "remove",
+            "report",
+            "allow"
+          ]
+        },
+        "higher_precedence_sources": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "warn"
+          ]
+        },
+        "allowed_hooks": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(sha256:)?[0-9A-Fa-f]{64}$"
+          }
+        }
+      }
+    },
+    "enterpriseClaudeCodeConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprise.machine_policy.connectors.claudecode: the connector policy keys plus version_floor, which only Claude Code has.",
+      "properties": {
+        "ownership": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/ownership"
+        },
+        "managed_hooks_only": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/managed_hooks_only"
+        },
+        "foreign_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/foreign_hooks"
+        },
+        "higher_precedence_sources": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/higher_precedence_sources"
+        },
+        "allowed_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/allowed_hooks"
+        },
+        "version_floor": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "report",
+            "off"
+          ]
+        }
+      }
+    },
+    "enterprise": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "managed_enterprise profile selection and standalone-profile settings. Only valid with deployment_mode managed_enterprise; settings other than profile apply only to the standalone profile.",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "secure_client",
+            "standalone"
+          ]
+        },
+        "inspection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ai_defense": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "credential": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+                }
+              }
+            }
+          }
+        },
+        "enrollment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "manifest"
+              ]
+            },
+            "include_users": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "exclude_users": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "include_groups": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "exclude_groups": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "exempt_users": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "unenrolled_users": {
+              "type": "string",
+              "enum": [
+                "inspect",
+                "deny"
+              ]
+            },
+            "root": {
+              "type": "string",
+              "enum": [
+                "inspect",
+                "deny",
+                "exempt"
+              ]
+            },
+            "uid_min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967294
+            },
+            "uid_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967294
+            },
+            "home_roots": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
+            },
+            "agent_prefixes": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
+            }
+          }
+        },
+        "machine_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/enterpriseConnectorPolicy"
+            },
+            "connectors": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+              },
+              "properties": {
+                "claudecode": {
+                  "$ref": "#/$defs/enterpriseClaudeCodeConnectorPolicy"
+                }
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/enterpriseConnectorPolicy"
+              }
+            }
+          }
+        },
+        "trust": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "",
+                "authenticode",
+                "hash_pinned"
+              ]
+            },
+            "allowed_signers": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{64}$"
+              }
+            }
+          }
+        },
+        "coexistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_user_install": {
+              "type": "string",
+              "enum": [
+                "migrate",
+                "block",
+                "ignore"
+              ]
+            },
+            "disable_self_update": {
+              "type": "boolean"
+            }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "https_proxy": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "no_proxy": {
+              "$ref": "#/$defs/boundedString"
+            }
           }
         }
       }

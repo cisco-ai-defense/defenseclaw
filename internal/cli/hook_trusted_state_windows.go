@@ -36,7 +36,43 @@ var (
 	nativeHookRuntimeReader          = hookruntime.ReadTrustedForExecutable
 	nativeDelegatedHookRuntimeReader = hookruntime.ReadTrustedDelegatedForExecutable
 	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsManagedHookRuntime
+	standaloneEnterpriseHookCheck    = standaloneEnterpriseHookExecutable
 )
+
+// standaloneEnterpriseHookExecutable reports whether executable is the
+// administrator-owned hook binary of a standalone enterprise deployment:
+// <standalone install root>\bin\defenseclaw-hook.exe under the protected
+// Program Files registration, or a run-scoped certification root. Only
+// administrators can place a file there.
+func standaloneEnterpriseHookExecutable(executable string) bool {
+	executable = strings.TrimSpace(executable)
+	if executable == "" || !filepath.IsAbs(executable) {
+		return false
+	}
+	executable = filepath.Clean(executable)
+	if !strings.EqualFold(filepath.Base(executable), nativeHookLauncherName) {
+		return false
+	}
+	bin := filepath.Dir(executable)
+	if !strings.EqualFold(filepath.Base(bin), "bin") {
+		return false
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return false
+	}
+	return winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) == nil
+}
+
+// implicitEnterpriseManagedHook reports whether this hook process must use
+// the administrator-managed runtime even without --enterprise-managed. The
+// standalone profile registers its administrator-owned binary in per-user
+// agent configuration that the user can edit; dropping the flag there must
+// never select the unmanaged runtime, whose fail mode and gateway a user
+// can influence.
+func implicitEnterpriseManagedHook() bool {
+	return standaloneEnterpriseHookCheck(nativeHookExecutable())
+}
 
 var nativeHookRuntimeSnapshot struct {
 	sync.Mutex
@@ -108,7 +144,8 @@ func NativeHookRuntimeNoop() bool {
 	nativeHookRuntimeSnapshot.recognized = recognized
 	nativeHookRuntimeSnapshot.err = err
 	nativeHookRuntimeSnapshot.Unlock()
-	if hookArgsContainEnterpriseManaged(os.Args[1:]) {
+	if hookArgsContainEnterpriseManaged(os.Args[1:]) ||
+		(len(os.Args) > 1 && os.Args[1] == "hook" && implicitEnterpriseManagedHook()) {
 		connectorName, connectorErr := hookConnectorFromArgs(os.Args[1:])
 		if connectorErr != nil {
 			nativeEnterpriseHookRuntimeSnapshot.Lock()
@@ -141,6 +178,12 @@ func NativeHookRuntimeNoop() bool {
 // disable a hook.
 func NativeConnectorHookNoop(args []string) bool {
 	if len(args) != 3 || args[0] != "hook" || args[1] != "--connector" || args[2] != "hermes" {
+		return false
+	}
+	if implicitEnterpriseManagedHook() {
+		// The tombstone lives in target-writable per-user state. A managed
+		// hook never lets the user disable it; after revocation the SID is
+		// unregistered and its hook fails closed instead.
 		return false
 	}
 	home, trusted := trustedNativeHookHome()
@@ -204,7 +247,8 @@ func hookConnectorFromArgs(args []string) (string, error) {
 		}
 	}
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "cursor" {
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "cursor" &&
+		!windowsStandalonePerUserHookConnector(connectorName) {
 		return connectorName, fmt.Errorf(
 			"enterprise managed hook connector %q is not supported",
 			connectorName,
@@ -561,5 +605,17 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 			return true
 		}
 		cursor = parent
+	}
+}
+
+// windowsStandalonePerUserHookConnector reports whether name is a standalone
+// per-user connector whose runtime is this hook binary. OpenCode's managed
+// plugin (machine policy route) runs it for every event.
+func windowsStandalonePerUserHookConnector(name string) bool {
+	switch name {
+	case "copilot", "antigravity", "devin", "hermes", "opencode":
+		return true
+	default:
+		return false
 	}
 }

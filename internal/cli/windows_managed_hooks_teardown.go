@@ -7,6 +7,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -80,6 +81,10 @@ type windowsManagedHooksTeardownResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// windowsManagedHooksTeardownReport is the helper's JSON contract with the
+// lifecycle. The user_registrations_* fields are set only by a standalone
+// finalize: DefenseClaw registrations removed from users' agent
+// configurations, and the users it could not reach.
 type windowsManagedHooksTeardownReport struct {
 	SchemaVersion                int                                 `json:"schema_version"`
 	Action                       string                              `json:"action"`
@@ -98,8 +103,34 @@ type windowsManagedHooksTeardownReport struct {
 	RollbackCompleted            bool                                `json:"rollback_completed"`
 	FinalizationCompleted        bool                                `json:"finalization_completed"`
 	CollectedGenerationCount     int                                 `json:"collected_generation_count"`
+	UserRegistrationsRemoved     int                                 `json:"user_registrations_removed"`
+	UserRegistrationsPending     []string                            `json:"user_registrations_pending,omitempty"`
+	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
+}
+
+// windowsManagedHooksStandaloneUserRegistrationRemover is replaceable in
+// tests.
+var windowsManagedHooksStandaloneUserRegistrationRemover = removeWindowsManagedHooksStandalonePerUserRegistrations
+
+// completeWindowsManagedHooksTeardownUserCleanup runs after a successful
+// standalone finalize: the uninstall has committed, so DefenseClaw's own
+// registrations are removed from users' agent configurations and the
+// outcome is reported. It never fails finalize. Secure Client finalize is
+// unchanged.
+func completeWindowsManagedHooksTeardownUserCleanup(
+	report *windowsManagedHooksTeardownReport,
+	runtimeDir string,
+	manifest enterprisehooks.Manifest,
+) {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return
+	}
+	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
+	report.UserRegistrationsRemoved = len(cleanup.Removed)
+	report.UserRegistrationsPending = cleanup.Pending
+	report.UserRegistrationsFailed = cleanup.Failed
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {
@@ -418,6 +449,9 @@ func runWindowsManagedHooksTeardown(
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
 		}
+		if err == nil {
+			completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
+		}
 	}
 	if err != nil {
 		return fail(err)
@@ -567,6 +601,9 @@ func prepareWindowsManagedHooksTeardown(
 			removeReport.SurvivingOwnedPathReferences,
 		)
 	}
+	if err := removeWindowsManagedHooksStandalonePerUserWiring(identity); err != nil {
+		return restoreOnFailure(err, 0)
+	}
 	if err := removeWindowsManagedHooksRuntimeSelectors(
 		identity.Targets,
 		identity.HookBinary,
@@ -638,6 +675,9 @@ func rollbackWindowsManagedHooksTeardown(
 				journal.HookBinary,
 				journal.SelectorTargets,
 			); err != nil {
+				return err
+			}
+			if err := restoreWindowsManagedHooksStandalonePerUserEnrollments(journal); err != nil {
 				return err
 			}
 			current, err := captureWindowsManagedHooksTeardownMachineState(
@@ -1073,6 +1113,12 @@ func finalizeWindowsManagedHooksTeardown(
 		}
 		collected += removed
 	}
+	// Standalone: the per-user connector directories and the hook runtime
+	// root hold only lock files by now (verification proved enrollments,
+	// selectors and the summary gone), so an uninstall leaves none behind.
+	if _, err := enterprisehooks.RemoveWindowsStandaloneHookRuntimeDirectories(); err != nil {
+		return collected, fmt.Errorf("finalize standalone hook runtime directories: %w", err)
+	}
 	journal.Phase = "finalized"
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
 		return collected, err
@@ -1098,6 +1144,11 @@ func windowsManagedHooksTeardownSelectorExpected(
 	activationState string,
 ) bool {
 	if activationState != windowsManagedHooksActivated {
+		return false
+	}
+	if hookBinary, perUser := enterprisehooks.IsWindowsStandalonePerUserConnector(target.Connector); perUser && !hookBinary {
+		// Plugin connectors never execute the hook binary and never publish a
+		// runtime selector.
 		return false
 	}
 	for _, pending := range pendingTargets {
@@ -1162,6 +1213,9 @@ func verifyWindowsManagedHooksTeardownClean(
 			"Codex machine requirements are not clean after managed-hook teardown",
 		)
 	}
+	if err := verifyWindowsManagedHooksStandalonePerUserClean(targets); err != nil {
+		return 0, err
+	}
 	for _, target := range targets {
 		snapshot, err := enterprisehooks.CaptureWindowsManagedRuntimeSelectorTarget(
 			windowsManagedHooksRuntimeSelectorOptions(target, opts.HookBinary),
@@ -1210,6 +1264,9 @@ func verifyWindowsManagedHooksTeardownInstalled(
 		currentCursor,
 		cursorActive,
 	); err != nil {
+		return err
+	}
+	if err := validateWindowsManagedHooksStandalonePerUserEnrollment(identity); err != nil {
 		return err
 	}
 	if selectorTargets != nil {
@@ -1444,7 +1501,8 @@ func windowsManagedHooksTeardownTargets(
 			return nil, nil, nil, nil, fmt.Errorf("invalid managed-hook teardown SID %q", target.SID)
 		}
 		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" {
+		if connectorName != "claudecode" && connectorName != "codex" && connectorName != "cursor" &&
+			!windowsManagedHooksStandalonePerUserTarget(connectorName) {
 			return nil, nil, nil, nil, fmt.Errorf(
 				"managed-hook teardown does not support connector %q",
 				target.Connector,

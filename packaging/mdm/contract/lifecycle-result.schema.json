@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json",
+  "title": "DefenseClaw standalone enterprise lifecycle result",
+  "description": "The one JSON document every standalone lifecycle action prints with --json on Linux, macOS and Windows (internal/enterprisestatus.Result). MDM wrappers, detection scripts, status and verify parse only this contract. Schema version 1 is the Secure Client Windows status document, which this does not describe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "ok", "action", "noop", "profile", "platform", "product_version",
+    "installed", "transaction_pending", "services", "readiness", "inspection",
+    "machine_policy", "enrollment", "coverage_complete", "security_complete", "errors", "exit_code"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "ok": { "type": "boolean", "description": "True only when errors is empty." },
+    "action": {
+      "type": "string",
+      "enum": ["install", "upgrade", "repair", "ensure", "reconcile", "status", "verify", "uninstall"]
+    },
+    "noop": { "type": "boolean", "description": "ensure/uninstall found nothing to change." },
+    "noop_reason": { "type": "string" },
+    "profile": { "type": "string", "enum": ["standalone", "secure_client"] },
+    "platform": { "type": "string", "enum": ["linux", "darwin", "windows"] },
+    "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
+    "installed_version": { "type": "string", "description": "Version installed on the host after the action; MDM detection compares this." },
+    "installed": { "type": "boolean" },
+    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first." },
+    "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateway", "guardian", "enumerator", "sensor_helper"],
+      "properties": {
+        "gateway": { "type": "boolean" },
+        "guardian": { "type": "boolean" },
+        "enumerator": { "type": "boolean" },
+        "sensor_helper": { "type": "boolean" }
+      }
+    },
+    "inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local", "ai_defense"],
+      "properties": {
+        "local": { "type": "string", "enum": ["active", "disabled", "unknown", ""] },
+        "ai_defense": { "type": "string", "pattern": "^(|disabled|ok|unknown|unavailable(:[A-Za-z0-9_.-]+)?)$" }
+      }
+    },
+    "machine_policy": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/machinePolicy" }
+    },
+    "enrollment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "pending", "failed", "exempt"],
+      "properties": {
+        "targets": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "exempt": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "coverage_complete": { "type": "boolean" },
+    "security_complete": { "type": "boolean" },
+    "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "log_path": { "type": "string" },
+    "exit_code": { "type": "integer" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "properties": { "errors": { "maxItems": 0 } } },
+      "else": { "properties": { "errors": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "platform": { "const": "windows" } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 1603, 1618, 1639, 3010] } } },
+      "else": { "properties": { "exit_code": { "enum": [0, 1, 2, 75] } } }
+    },
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 3010] } } },
+      "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
+    }
+  ],
+  "$defs": {
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "state", "required"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "gateway, guardian, enumerator, sensor_helper, socket, timer, path, oneshot, ..." },
+        "state": { "type": "string" },
+        "start_mode": { "type": "string" },
+        "pid": { "type": "integer", "minimum": 0 },
+        "restarts": { "type": "integer", "minimum": 0 },
+        "required": { "type": "boolean" }
+      }
+    },
+    "machinePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownership", "owned_entries", "foreign_entries"],
+      "properties": {
+        "ownership": { "type": "string", "enum": ["merge", "verify_only", "off", ""] },
+        "lock": { "type": "string" },
+        "effective_lock": { "type": "string" },
+        "owned_entries": { "type": "integer", "minimum": 0 },
+        "foreign_entries": { "type": "integer", "minimum": 0 },
+        "higher_precedence": { "type": "array", "items": { "type": "string" } },
+        "conflicts": { "type": "array", "items": { "type": "string" } },
+        "live_verified_at": { "type": "string" }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

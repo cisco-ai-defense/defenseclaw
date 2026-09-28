@@ -358,17 +358,20 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if configured == "" {
 		configured = c.Guardrail.EffectiveHookFailModeFor(connector)
 	}
-	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured)
+	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
 }
 
 // effectiveManagedEnterpriseHookFailMode keeps the protected deployment
 // contract and every runtime consumer on the same fail-closed value. Native
 // Codex and Claude hooks are enforcement boundaries in managed enterprise
 // deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation.
-func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string) string {
+// allowed to weaken their delivery/response behavior after installation. In
+// the standalone profile Devin runs the administrator-owned
+// `defenseclaw-hook --enterprise-managed`, which always fails closed, so the
+// config, the hook-contract lock and status report the same value.
+func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string, standalone bool) string {
 	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode") {
+	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode" || (standalone && name == "devin")) {
 		return "closed"
 	}
 	if strings.EqualFold(strings.TrimSpace(configured), "open") {

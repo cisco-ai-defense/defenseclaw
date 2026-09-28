@@ -335,6 +335,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"acp",
 		"notifications",
 		"managed",
+		"enterprise",
 		"routing",
 	}
 	if len(properties) != len(allowedTopLevel) {

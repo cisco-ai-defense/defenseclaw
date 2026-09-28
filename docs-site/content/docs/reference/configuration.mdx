@@ -787,6 +787,58 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 
 `claw.mode` becomes **`multi`** automatically once more than one connector is active. That sentinel is mirrored onto the OTel resource attribute `defenseclaw.claw.mode`, so a fan-out gateway is distinguishable from a single-connector one in dashboards and SIEM. The singular `guardrail.connector` is untouched and still drives single-connector installs — the map is purely additive. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
 
+## Enterprise settings (`enterprise.*`)
+
+A managed deployment (`deployment_mode: managed_enterprise`) reads an
+administrator-owned config: `/etc/defenseclaw/config.yaml` on Linux,
+`/opt/cisco/defenseclaw/etc/config.yaml` on macOS, and
+`C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` on Windows. The
+`enterprise` block tunes it. The config is rejected if the block appears in a
+config whose `deployment_mode` is not `managed_enterprise`. In the
+`secure_client` profile, `profile` is the only key allowed. For explanations
+and examples, see the [enterprise settings reference](/docs/enterprise/configuration#settings-reference).
+
+| Key | Values (default) | OS | Notes |
+| --- | --- | --- | --- |
+| `enterprise.profile` | `secure_client` \| `standalone` (Windows and macOS: `secure_client`; Linux: `standalone`) | all | Linux accepts only `standalone` |
+| `enterprise.inspection.ai_defense.enabled` | bool (`false`) | all | Adds Cisco AI Defense to the local engine |
+| `enterprise.inspection.ai_defense.credential` | credential name | all | Lowercase letters, digits, and dashes; must be valid when AI Defense is enabled. Store the value with `enterprise secret set`. An inline `cisco_ai_defense.api_key` is rejected |
+| `enterprise.enrollment.mode` | `auto` \| `manifest` (`auto`) | all | With `manifest` you publish `targets.yaml` and the enumerator does nothing. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`) |
+| `enterprise.enrollment.include_users` | list | all | Linux and macOS: also enrolls these accounts, bypassing the uid range and the login-shell check. Windows: accepted, but every profile is already a candidate, so it changes nothing |
+| `enterprise.enrollment.exclude_users` | list | all | Never enrolled; wins over every include. Linux and macOS also match a numeric uid |
+| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local, Active Directory and Microsoft Entra ID groups by name or SID, decided from session tokens (cached for signed-out users) and the local account database |
+| `enterprise.enrollment.exempt_users` | list | all | Linux and macOS: inspected but not enrolled. Windows: machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows |
+| `enterprise.enrollment.unenrolled_users` | `inspect` \| `deny` (`inspect`) | Linux, macOS | How machine-policy connectors treat users who are not enrolled. On Windows an unenrolled user always fails closed |
+| `enterprise.enrollment.root` | `inspect` \| `deny` \| `exempt` (`inspect`) | Linux, macOS | root is never enrolled. `deny` refuses root's hook calls. `exempt` currently behaves like `inspect` |
+| `enterprise.enrollment.uid_min` | integer (`0`) | Linux, macOS | `0` reads `UID_MIN` from `/etc/login.defs` on Linux (fallback 1000) and uses 501 on macOS |
+| `enterprise.enrollment.uid_max` | integer (`0`) | Linux, macOS | The highest uid enrolled, for local and directory accounts. `0`: login.defs `UID_MAX` (fallback 60000) bounds only local accounts on Linux; macOS uses 2147483646 |
+| `enterprise.enrollment.home_roots` | list of absolute paths | Linux, macOS | Extra home parents the guardian may write, beyond `/home` and `/var/home` (Linux) or `/Users` (macOS) |
+| `enterprise.enrollment.agent_prefixes` | list of absolute paths | Linux, macOS | Extra administrator install prefixes where the enumerator and guardian look for agent CLIs. Paths under homes and temporary directories are refused |
+| `enterprise.machine_policy.default.*` and `enterprise.machine_policy.connectors.<name>.*` | see the next table | all | Resolution order: the connector's value, then `default`, then the built-in value. This block does not enable a connector; `guardrail.connectors` does |
+| `enterprise.trust.mode`, `enterprise.trust.allowed_signers` | `authenticode` \| `hash_pinned`; SHA-256 thumbprints | Windows | Narrow the standalone lifecycle's payload trust: `authenticode` refuses a hash-pinned run and any run over a hash-pinned deployment (`1639`); `hash_pinned` or unset admits both; `allowed_signers` pins signers like `--allowed-signer`. Linux and macOS accept and validate them but do not use them |
+| `enterprise.coexistence.per_user_install` | `migrate` \| `block` \| `ignore` | — | Reserved: accepted and validated, no effect in this release |
+| `enterprise.coexistence.disable_self_update` | bool (`true`) | Windows | Sets `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` only when the value is absent, which also stops the per-user `install.ps1`. On every managed host the update notice stays off and the per-user installer, upgrade and rollback refuse, whatever this key says |
+| `enterprise.network.https_proxy`, `enterprise.network.no_proxy` | proxy URL; host list | all | The gateway's outbound proxy: AI Defense, LLM providers (which need an `http://` proxy URL), the passthrough, webhooks, the remote model router and telemetry exporters go through it. Linux and macOS also set `HTTPS_PROXY` and `NO_PROXY` (both cases) in the gateway's service environment; the Windows gateway sets them in its own process. A change needs a gateway restart |
+
+| `machine_policy` key | Values | Built-in default |
+| --- | --- | --- |
+| `ownership` | `merge` \| `verify_only` \| `off` | `merge` |
+| `managed_hooks_only` | `enforce` \| `preserve` | `enforce` |
+| `foreign_hooks` | `remove` \| `report` \| `allow` | `remove` |
+| `higher_precedence_sources` | `fail` \| `warn` | `fail` |
+| `allowed_hooks` | list of SHA-256 digests | none; the `default` list and the connector's list are merged |
+| `version_floor` | `enforce` \| `report` \| `off`; only under `connectors.claudecode` | `enforce`; see [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor) |
+
+How each OS applies these keys to each connector is on
+[Machine policy](/docs/enterprise/machine-policy).
+
+The standalone lifecycle on Linux and macOS also requires `config_version: 8`,
+`enterprise.profile: standalone` if you set it, and `data_dir` set to exactly
+`/var/lib/defenseclaw` (Linux) or `/opt/cisco/defenseclaw/runtime` (macOS). If
+you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
+`18970`. Connectors are enabled by `guardrail.connectors`, as in any other
+config; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+
 ## Custom-provider overlay (`~/.defenseclaw/custom-providers.json`)
 
 Custom-provider instances live in a separate JSON overlay so the same instance definition can be shared across roles (agent, judge) and across hosts. The Python merger (`_apply_instance_overlay`) and the Go dispatcher (`buildProviderFromEffective`) both apply the same rule: **the role wins; the overlay fills blanks**.

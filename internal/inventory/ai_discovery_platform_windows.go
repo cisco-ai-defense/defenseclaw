@@ -70,8 +70,10 @@ const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pro
 // users, 5+ sub-authorities), matching the same coarse gate the hook
 // enumerator applies at internal/enterprisehooks/enumerator_windows.go. Stale
 // ProfileList entries whose ProfileImagePath no longer exists are skipped so
-// the scan does not waste ticks on ghost profiles.
-func platformDiscoveryHomeDirs() []string {
+// the scan does not waste ticks on ghost profiles. The standalone profile
+// uses winpath.IsInteractiveUserSID, the predicate the standalone hook
+// enumerator applies, which also admits Microsoft Entra ID users.
+func platformDiscoveryHomeDirs(standalone bool) []string {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, profileListRegistryKey, registry.READ)
 	if err != nil {
 		return nil
@@ -84,7 +86,11 @@ func platformDiscoveryHomeDirs() []string {
 	seen := make(map[string]struct{}, len(names))
 	out := make([]string, 0, len(names))
 	for _, sid := range names {
-		if !isInteractiveUserSID(sid) {
+		if standalone {
+			if !winpath.IsInteractiveUserSID(sid, winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
+				continue
+			}
+		} else if !isInteractiveUserSID(sid) {
 			continue
 		}
 		subKey, err := registry.OpenKey(

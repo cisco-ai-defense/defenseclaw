@@ -692,7 +692,7 @@ var builtinHookContracts = map[string][]HookContract{
 	"devin": {{
 		Connector:               "devin",
 		ContractID:              "devin-hooks-v1",
-		ExactAgentVersions:      []string{"3000.4.25"},
+		ExactAgentVersions:      []string{"3000.4.25", "3000.11.3"},
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"%APPDATA%/devin/config.json", "~/.config/devin/config.json", "<workspace>/.devin/hooks.v1.json"},
@@ -709,7 +709,7 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		ToolCallLifecycle:   devinToolCallLifecycle(),
 		Notes: []string{
-			"The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
+			"The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
 			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
 			"Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
 			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded.",
@@ -998,6 +998,11 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
 		// through its protected connector launch boundary and does not persist
 		// the launch environment.
+		// Windows and macOS stay on the Devin build they were reviewed
+		// against; the extra pin covers Linux only.
+		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {
+			contract.ExactAgentVersions = []string{"3000.4.25"}
+		}
 		if contract.Connector == "openhands" && contract.ContractID == "openhands-hooks-v1" {
 			switch goos {
 			case "darwin":

@@ -161,8 +161,13 @@ func seedOpenCodeSelectionForTestAt(t *testing.T, dataDir string, now time.Time)
 		return
 	}
 
-	root := testenv.PrivateTempDir(t)
-	executable := filepath.Join(root, "opencode.exe")
+	// Admission accepts only the SST WinGet package folder or an npm
+	// opencode-ai install.
+	packageDir := filepath.Join(testenv.PrivateTempDir(t), "SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe")
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		t.Fatalf("create OpenCode selection fixture folder: %v", err)
+	}
+	executable := filepath.Join(packageDir, "opencode.exe")
 	body := []byte("MZ OpenCode 1.18.19 CLI reconcile fixture")
 	if err := os.WriteFile(executable, body, 0o700); err != nil {
 		t.Fatalf("write OpenCode selection fixture: %v", err)

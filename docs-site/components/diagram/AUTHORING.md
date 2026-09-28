@@ -83,6 +83,66 @@ diagram is still bigger than the column; readers see it scaled-to-fit
 inline and can click the expand button for the full-size view. Use this
 when the topology genuinely doesn't compress.
 
+## Zones (trust boundaries)
+
+`<Zone>` groups `<Flow>` nodes into privilege or trust zones for threat
+models: which component runs as which identity, and which edges cross a
+boundary. Use zones only when the boundary is the point of the diagram.
+For plain "these belong together" grouping, rely on node kinds and prose.
+
+```mdx
+<Flow direction="TB" caption="Trust zones for a service-mode install. Every edge that crosses a zone border is an attack surface.">
+  <Zone id="z4" label="Z4 · User session (untrusted)" tone="untrusted">
+    <Node id="agent" kind="agent">{`Agent runtime\nClaude Code · Codex`}</Node>
+    <Node id="hook" kind="connector">Hook CLI</Node>
+  </Zone>
+  <Zone id="z1" label="Z1 · Privileged services (LocalSystem · root)" tone="privileged">
+    <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
+  </Zone>
+  <Zone id="z3" label="Z3 · Admin-owned state" tone="protected" />
+  <Node id="policy" zone="z3" kind="policy">Config + policy</Node>
+  <Edge from="agent" to="hook" label="tool call" />
+  <Edge from="hook" to="gateway" label="named pipe" />
+  <Edge from="gateway" to="policy" label="reads" />
+</Flow>
+```
+
+A node joins a zone by nesting inside it or through `zone="id"`; if both
+are given, nesting wins. Each zone is drawn as a framed region behind
+the edges and nodes, with a badge on its top border that prints the
+tone name and the label. The badge carries the meaning, so the tint
+is never the only signal.
+
+| `tone` | Use for | Border |
+| --- | --- | --- |
+| `trusted` | Platform and admin tooling you rely on | solid |
+| `privileged` | Services running as LocalSystem or root | solid |
+| `restricted` | Reduced-privilege service identities and sandboxes | solid |
+| `protected` | Admin-owned state: config, policy, audit | solid |
+| `untrusted` | The user session and anything a prompt can steer | dashed |
+| `external` | Third-party services and the network | dotted |
+
+- [ ] ≤6 zones, ≤5 nodes per zone.
+- [ ] `direction="TB"`. Zoned flows keep the direction you choose, so a
+      zoned chain is never promoted to a horizontal rail.
+- [ ] ≤3 zones side by side in a rank. Cards in neighbouring zones sit
+      62px apart, against 38px for bare siblings.
+- [ ] Zone labels ≤32 chars, in the form `Zn · Name (identity)`. A zone
+      is at least as wide as its badge, so a label longer than about
+      20 chars widens a one-node zone. The six-zone model in
+      [`scripts/test-diagram-zones.tsx`](../../scripts/test-diagram-zones.tsx)
+      uses labels like these and lands at 862px: the gate warns, but it
+      does not fail.
+- [ ] Label every edge that crosses a boundary with its channel (named
+      pipe, HTTPS, file write). Those crossings are what reviewers look for.
+- [ ] Zones do not nest. A `<Zone>` inside another `<Zone>` is drawn as
+      a sibling, and the build logs a warning.
+
+The build also warns, without failing, about an empty zone (which is not
+drawn), a `zone=` that names no zone, a duplicate zone id, and an unknown
+tone (drawn as `external`). `npm run test:diagram-zones` checks the zone
+geometry.
+
 ## `<Sequence>` checklist
 
 - [ ] ≤5 participants. More than that, the swimlane stops being readable

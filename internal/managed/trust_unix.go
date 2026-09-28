@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -208,29 +209,51 @@ func validateTrustedRuntimeDirElement(path string, label string) error {
 	return nil
 }
 
+// trustLookupUser resolves service account names; tests replace it.
+var trustLookupUser = user.Lookup
+
 func trustedRuntimeOwner(uid uint32) bool {
+	return trustedRuntimeOwnerFor(uid, runtime.GOOS, os.Getenv(UnixServiceAccountEnv))
+}
+
+// trustedRuntimeOwnerFor accepts root (uid 0) or a packaged DefenseClaw
+// service account. The Linux account is "defenseclaw" (installer
+// contract); the standalone macOS deployment runs its gateway as the hidden
+// "_defenseclaw" account, so on darwin both names are trusted, the same
+// rule the hook API token checks apply. The launchd services also carry
+// DEFENSECLAW_UNIX_SERVICE_ACCOUNT, but an administrator's root shell does
+// not, and without the darwin default every admin command that loads the
+// managed config (enterprise policy show/verify) refused the service-owned
+// data_dir. Setting DEFENSECLAW_UNIX_SERVICE_ACCOUNT lets custom packaging
+// point trust at a different username without patching the source; it
+// replaces the defaults. The serviceAccount parameter on
+// ValidateTrustedServiceRuntimeDir is a Windows-format `NT SERVICE\...`
+// value and cannot be reused here.
+func trustedRuntimeOwnerFor(uid uint32, goos, custom string) bool {
 	if uid == 0 {
 		return true
 	}
-	// The unix trust model accepts root (uid 0) or the packaged
-	// defenseclaw service account. The service account username is
-	// "defenseclaw" by convention (installer contract). Setting
-	// DEFENSECLAW_UNIX_SERVICE_ACCOUNT lets custom packaging point trust
-	// at a different username without patching the source — the finder
-	// audit flagged this as previously silently unavailable because the
-	// serviceAccount parameter on ValidateTrustedServiceRuntimeDir is a
-	// Windows-format `NT SERVICE\...` value and cannot be reused here.
-	username := "defenseclaw"
-	if custom := strings.TrimSpace(os.Getenv(UnixServiceAccountEnv)); custom != "" {
-		username = custom
+	for _, name := range trustedServiceAccounts(goos, custom) {
+		serviceUser, err := trustLookupUser(name)
+		if err != nil {
+			continue
+		}
+		serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
+		if err == nil && uid == uint32(serviceUID) {
+			return true
+		}
 	}
-	serviceUser, err := user.Lookup(username)
-	if err != nil {
-		return false
+	return false
+}
+
+// trustedServiceAccounts names the service accounts trustedRuntimeOwnerFor
+// accepts on goos.
+func trustedServiceAccounts(goos, custom string) []string {
+	if custom = strings.TrimSpace(custom); custom != "" {
+		return []string{custom}
 	}
-	serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
-	if err != nil {
-		return false
+	if goos == "darwin" {
+		return []string{StandaloneLinuxServiceUser, StandaloneDarwinServiceUser}
 	}
-	return uid == uint32(serviceUID)
+	return []string{StandaloneLinuxServiceUser}
 }

@@ -200,22 +200,6 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	return d.verifyProcessForAuthenticatedMigration(info)
 }
 
-// ManagedProcessStartedAt returns the wall-clock launch generation recorded
-// for an exact, strongly identified managed process. StartTime is not itself a
-// PID-reuse credential; callers receive it only after the executable and
-// kernel start identity have both been revalidated against the live process.
-func (d *Daemon) ManagedProcessStartedAt(pid int) (time.Time, bool) {
-	info, err := d.readPIDInfo()
-	if err != nil || info.PID != pid || info.DataDir == "" ||
-		info.Executable == "" || info.StartIdentity == "" || info.StartTime <= 0 {
-		return time.Time{}, false
-	}
-	if !d.verifyProcessForControl(info) {
-		return time.Time{}, false
-	}
-	return time.Unix(info.StartTime, 0), true
-}
-
 // verifyProcess verifies every identity signal present in a PID record. It
 // deliberately remains usable for legacy liveness detection: accepting a
 // legacy record here prevents Start from launching a duplicate daemon during

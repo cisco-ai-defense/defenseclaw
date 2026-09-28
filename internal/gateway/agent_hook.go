@@ -284,7 +284,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// on the 2.x binary rather than a new release. Setup marks the
 		// .kiro/hooks command, so the request states which config invoked it.
 		if connectorName == "kiro" {
-			req.HookSurface = strings.TrimSpace(r.Header.Get("X-DefenseClaw-Kiro-Surface"))
+			req.HookSurface = kiroHookSurfaceFromHeaders(r.Header)
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
@@ -2448,6 +2448,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
 	resp := agentHookResponse{
 		Action:            action,

@@ -4151,6 +4151,7 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 		proxyAuthenticationMetricV8Producer,
 		"guardrail-proxy",
 		metricReason,
+		apiAuthenticationFailureFacts{},
 	)
 }
 

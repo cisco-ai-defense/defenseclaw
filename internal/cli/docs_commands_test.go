@@ -56,6 +56,9 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 			if len(fields) < 1 || fields[0] != "defenseclaw-gateway" {
 				t.Fatalf("invalid extracted command %q", documented.command)
 			}
+			if runtime.GOOS == "windows" && strings.HasPrefix(strings.Join(fields[1:], " ")+" ", "enterprise hooks enumerate ") {
+				t.Skip("enterprise hooks enumerate is registered only on Linux and macOS")
+			}
 			if documented.inline {
 				validateDocumentedGatewayPath(t, fields[1:], documented.command)
 				return

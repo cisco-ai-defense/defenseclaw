@@ -63,6 +63,20 @@ type InstallOptions struct {
 	RecoveryHookContractEntryUpdatedAt string
 	WorkspaceDir                       string
 	Registry                           *connector.Registry
+	// ManagedHookSocket and ManagedServiceUID route in-agent plugins and
+	// connector shell hooks through the standalone gateway's peer-authorized
+	// unix hook socket (see connector.SetupOpts). Empty keeps the TCP
+	// transport.
+	ManagedHookSocket string
+	ManagedServiceUID int
+	// HookCredentialIdentity is the uid the standalone Unix guardian bound
+	// APIToken and OTLPPathToken to (see connector.SetupOpts). Empty for
+	// every other install.
+	HookCredentialIdentity string
+	// ForeignHookGuardBinary is the administrator-owned hook binary the
+	// standalone Amp and OpenCode plugins run for the foreign-hook guard
+	// (see connector.SetupOpts). Empty everywhere else.
+	ForeignHookGuardBinary string
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -70,6 +84,12 @@ type InstallOptions struct {
 	// installs must leave this false so broad discovery cannot create new app
 	// profiles from scratch.
 	AllowMissingHookConfigRepair bool
+
+	// MachinePolicyContractID is the hook contract a standalone Windows
+	// deployment renders its single machine-wide Claude policy from (see
+	// WindowsStandaloneClaudeMachinePolicyContract). Empty, and every
+	// Secure Client process, render the row's own contract.
+	MachinePolicyContractID string
 }
 
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
@@ -108,6 +128,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	if errEnterpriseHooksUnsupportedWindows != nil {
 		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
+	}
+	if err := refuseStandaloneRootInProcess("verify"); err != nil {
+		return InstallResult{}, err
 	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
@@ -167,6 +190,22 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		HILTEnabled:       opts.HILTEnabled,
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		// The configured transport and credential binding, compared below
+		// with the ones the installed hooks were rendered for.
+		ManagedHookSocket:      strings.TrimSpace(opts.ManagedHookSocket),
+		ManagedServiceUID:      opts.ManagedServiceUID,
+		HookCredentialIdentity: strings.TrimSpace(opts.HookCredentialIdentity),
+		// Verification requires the guard line the standalone Amp and
+		// OpenCode plugins carry, so a plugin rendered without it (before
+		// the guard existed, or edited) fails and the guardian re-renders it.
+		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
+	}
+	if standalonePerUserRepair(uid) {
+		// Install renders some hooks for the guardrail mode (Cursor's action
+		// command differs from its observe command). Without the mode here
+		// the presence check looked for the other rendering, so every cycle
+		// after a switch to action repaired the row again.
+		setupOpts.GuardrailMode = strings.TrimSpace(opts.GuardrailMode)
 	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
@@ -225,6 +264,36 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if connector.HookContractLockDrifted(lock, current) {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
 			}
+			// Outside the standalone per-user worker (see
+			// verifyStandaloneHookRuntime below), Unix verification reads
+			// only the agent config reference and the lock, not the hook
+			// bytes. Hooks installed before the
+			// standalone hook socket was configured (for example by an
+			// earlier release) would otherwise pass and keep posting to the
+			// TCP port with the shared connector bearer; failing here makes
+			// the guardian's verify-or-repair pass reinstall them.
+			if connector.HookTransportDrifted(lock, setupOpts) {
+				return fmt.Errorf("enterprise hooks: connector %s hooks were installed for a different gateway transport than the configured hook socket", conn.Name())
+			}
+			// The same holds for credentials: hooks rendered with the
+			// connector-scoped credential every user shared, or with another
+			// user's or an older key's credentials, are reinstalled with the
+			// target's own per-user credentials.
+			if connector.HookCredentialDrifted(lock, setupOpts) {
+				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with credentials that are not bound to this user", conn.Name())
+			}
+			// A standalone Hermes hook installed before it ran the
+			// foreign-hook guard (or for another hook binary) is
+			// reinstalled with the guard the configuration selects.
+			if connector.HookForeignGuardDrifted(lock, setupOpts) {
+				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with a different foreign-hook guard than the configuration selects", conn.Name())
+			}
+			// The standalone per-user worker also checks the hook runtime
+			// itself: the recorded scripts and plugin bytes, and the fail
+			// and guardrail modes the hooks were rendered for.
+			if err := verifyStandaloneHookRuntime(conn, setupOpts, opts.GuardrailMode, lock, uid); err != nil {
+				return err
+			}
 			result = InstallResult{
 				Connector:       conn.Name(),
 				UserHome:        home,
@@ -253,6 +322,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if errEnterpriseHooksUnsupportedWindows != nil {
 		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
 	}
+	if err := refuseStandaloneRootInProcess("install"); err != nil {
+		return InstallResult{}, err
+	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
 		return InstallResult{}, err
@@ -272,6 +344,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
 	}
+	// The standalone per-user worker runs as the owner: undo a mode change
+	// the user made to their own DefenseClaw directories before inspecting
+	// them, instead of failing every repair until the user undoes it.
+	restoreOwnedDataDirModes(home, dataDir, uid)
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
 		return InstallResult{}, err
 	}
@@ -299,19 +375,24 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 
 	setupOpts := connector.SetupOpts{
-		DataDir:           dataDir,
-		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
-		APIAddr:           strings.TrimSpace(opts.APIAddr),
-		APIToken:          strings.TrimSpace(opts.APIToken),
-		OTLPPathToken:     strings.TrimSpace(opts.OTLPPathToken),
-		Interactive:       false,
-		ManagedEnterprise: true,
-		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:      strings.TrimSpace(opts.HookFailMode),
-		GuardrailMode:     strings.TrimSpace(opts.GuardrailMode),
-		HILTEnabled:       opts.HILTEnabled,
-		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
-		HookContractID:    strings.TrimSpace(opts.HookContractID),
+		DataDir:                dataDir,
+		ProxyAddr:              strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:                strings.TrimSpace(opts.APIAddr),
+		APIToken:               strings.TrimSpace(opts.APIToken),
+		OTLPPathToken:          strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:            false,
+		ManagedEnterprise:      true,
+		WorkspaceDir:           strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:           strings.TrimSpace(opts.HookFailMode),
+		GuardrailMode:          strings.TrimSpace(opts.GuardrailMode),
+		HILTEnabled:            opts.HILTEnabled,
+		AgentVersion:           strings.TrimSpace(opts.AgentVersion),
+		HookContractID:         strings.TrimSpace(opts.HookContractID),
+		ManagedHookSocket:      strings.TrimSpace(opts.ManagedHookSocket),
+		ManagedServiceUID:      opts.ManagedServiceUID,
+		HookCredentialIdentity: strings.TrimSpace(opts.HookCredentialIdentity),
+		// Only the standalone guardian sets this, for Amp and OpenCode.
+		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {
@@ -333,6 +414,24 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	err = connector.WithUserHomeDir(home, func() error {
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
 		pluginArtifacts := connector.ManagedPluginArtifacts(conn, setupOpts)
+		// A hook config file DefenseClaw owns (Kiro, Copilot) lives in a
+		// folder the agent does not create: make its missing parents as the
+		// user, and let Setup write the file itself.
+		var ownedHookConfigs []string
+		if standalonePerUserRepair(uid) {
+			// Refuse a contract the install cannot meet before creating any
+			// folder, so a refused install leaves the home as it was.
+			if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+				return err
+			}
+			if err := withOwnerCredentials(uid, gid, func() error {
+				var prepareErr error
+				ownedHookConfigs, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid)
+				return prepareErr
+			}); err != nil {
+				return err
+			}
+		}
 		// Endpoint-product bootstrap: on a fresh target where the
 		// user hasn't launched the agent yet, the native hook config
 		// file doesn't exist and validateActivationSurfaces below
@@ -364,7 +463,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			paths,
 			uid,
 			opts.AllowMissingHookConfigRepair,
-			pluginArtifacts,
+			append(append([]string{}, pluginArtifacts...), ownedHookConfigs...),
 		); err != nil {
 			return err
 		}
@@ -400,6 +499,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
 				}
 				return errors.Join(failures...)
+			}
+			// OpenHands on macOS admits only a protected, setup-selected
+			// executable: record the user's own image before setup.
+			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
+				return err
 			}
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
@@ -956,6 +1060,18 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
 	}
+	// The standalone floor of a not-gated connector (Kiro) gates new
+	// enrollments only. A user whose hooks an earlier release installed
+	// below the floor already has a contract lock: keep repairing that
+	// user's hooks at the version they were rendered for (a version change
+	// below the floor is still refused as drift, below), because refusing
+	// the repair would leave the row not OK, the gateway would then refuse
+	// the user's hook calls, and the hook script fails open by default.
+	if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" && previous.Connector == "" {
+		if admitted, reason := standaloneNotGatedVersionAdmitted(resolution); !admitted {
+			return fmt.Errorf("enterprise hooks: connector %s agent version %q is not certified for the standalone profile: %s", conn.Name(), opts.AgentVersion, reason)
+		}
+	}
 	if previous.Connector != "" {
 		current, err := connector.NewHookContractLockEntryForMode(
 			opts,
@@ -967,10 +1083,43 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 			return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 		}
 		if connector.HookContractLockDrifted(previous, current) {
-			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+			if standaloneAcceptsAgentVersionChange(resolution) {
+				return nil
+			}
+			floorNote := ""
+			if standaloneProfileProcess() && standaloneNotGatedAgentFloor(conn.Name()) != "" {
+				if _, reason := standaloneNotGatedVersionAdmitted(resolution); reason != "" {
+					floorNote = "; " + reason
+				}
+			}
+			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID, floorNote)
 		}
 	}
 	return nil
+}
+
+// standaloneAcceptsAgentVersionChange reports whether an install may follow
+// an agent version that changed since its hooks were rendered. The standalone
+// enumerator re-discovers every enrolled user's agent version each cycle, and
+// the standalone guardian re-renders and re-verifies the hooks when the new
+// version resolves to a known, verified hook contract; the install then writes
+// a new contract lock. A version without a verified contract never gets here:
+// validateHookContract refuses it first, and status and verify report it as
+// hook_contract_unverified. A connector whose hook contract is not
+// version-gated (Kiro) has no known contract, so it follows a new version at
+// or above its standalone floor instead; without this every kiro-cli
+// self-update stopped the guardian repairing that user's hooks. The Secure
+// Client profile keeps refusing every change, because its versions come from
+// an administrator-authored manifest.
+func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolution) bool {
+	if !standaloneProfileProcess() {
+		return false
+	}
+	if resolution.Status == connector.HookCompatibilityKnown {
+		return true
+	}
+	admitted, _ := standaloneNotGatedVersionAdmitted(resolution)
+	return admitted
 }
 
 func pathInside(root, path string) bool {

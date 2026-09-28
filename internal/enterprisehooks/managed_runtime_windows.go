@@ -64,6 +64,8 @@ func ResolveWindowsManagedHookRuntime(
 		return resolveWindowsCodexManagedHookRuntime(hookExecutable)
 	case "cursor":
 		return resolveWindowsCursorManagedHookRuntime(hookExecutable)
+	case "copilot", "antigravity", "devin", "hermes", "opencode":
+		return resolveWindowsPerUserManagedHookRuntime(hookExecutable, name)
 	default:
 		return WindowsManagedHookRuntime{}, fmt.Errorf(
 			"enterprise hooks: unsupported Windows managed connector %q",

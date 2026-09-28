@@ -157,6 +157,13 @@ var errWindowsEnterpriseNotLocalSystem = errors.New(
 	"enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service",
 )
 
+// RequireWindowsEnterpriseTargetImpersonationIdentity reports whether this
+// process can act as a target user at all: only LocalSystem can obtain a
+// signed-in user's session token. An elevated administrator cannot.
+func RequireWindowsEnterpriseTargetImpersonationIdentity() error {
+	return windowsEnterpriseMutationIdentityCheck()
+}
+
 func requireWindowsEnterpriseLocalSystem() error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {

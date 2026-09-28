@@ -38,6 +38,22 @@ func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
 	return alignEnterpriseWindowsTokenOwner(dataDir, path, "hook token")
 }
 
+func validateEnterpriseHookUserTokenKeyLocation(dataDir string) error {
+	path, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return err
+	}
+	return validateEnterpriseWindowsTokenLocation(dataDir, path, "per-user credential key")
+}
+
+func alignEnterpriseHookUserTokenKeyOwner(dataDir string) error {
+	path, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return err
+	}
+	return alignEnterpriseWindowsTokenOwner(dataDir, path, "per-user credential key")
+}
+
 func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
 	path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
 	if err != nil {

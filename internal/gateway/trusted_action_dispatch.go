@@ -135,18 +135,32 @@ func dispatchTrustedAction(
 		return findings
 	}
 
+	// A partial action whose only uncertainty is a runtime-expanded redirect
+	// target ("> ~/out.txt", "> $HOME/out.txt") still has a static, provable
+	// argv. Semantic rules run on the complete analysis of a static-target
+	// twin without those redirects, but only a match counts there, and only
+	// for a rule that match cannot depend on the dropped redirect and path
+	// facts (redirectReductionCandidate). A non-match or a skipped rule never
+	// suppresses its legacy fallback, which, like every recovery lane below,
+	// still sees the whole action.
+	semanticFacts := facts
+	redirectReduced := false
 	if !facts.Authoritative() {
-		var fallbackTelemetry trustedActionTelemetry
-		findings, fallbackTelemetry = dispatchTrustedFallback(
-			generation,
-			request,
-			facts,
-			options,
-		)
-		telemetry.merge(fallbackTelemetry)
-		return findings
+		reduced, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts)
+		if !ok {
+			var fallbackTelemetry trustedActionTelemetry
+			findings, fallbackTelemetry = dispatchTrustedFallback(
+				generation,
+				request,
+				facts,
+				options,
+			)
+			telemetry.merge(fallbackTelemetry)
+			return findings
+		}
+		semanticFacts, redirectReduced = reduced, true
 	}
-	fullProjection, projectionCode := semantic.Project(facts)
+	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
 		findings, fallbackTelemetry = dispatchTrustedFallback(
@@ -176,9 +190,12 @@ func dispatchTrustedAction(
 		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 			continue
 		}
-		if !candidate.owner.eligible(facts) {
-			if candidate.owner.suppressFallback != nil &&
-				candidate.owner.suppressFallback(facts) {
+		if redirectReduced && !redirectReductionCandidate(candidate) {
+			continue
+		}
+		if !candidate.owner.eligible(semanticFacts) {
+			if !redirectReduced && candidate.owner.suppressFallback != nil &&
+				candidate.owner.suppressFallback(semanticFacts) {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
 			continue
@@ -195,12 +212,14 @@ func dispatchTrustedAction(
 			continue
 		}
 		if !result.Matched {
-			excludeSemanticOwner(excluded, candidate.owner, false)
+			if !redirectReduced {
+				excludeSemanticOwner(excluded, candidate.owner, false)
+			}
 			continue
 		}
 
 		if !enforcementProjected {
-			enforcementFacts = facts.EnforcementProjection()
+			enforcementFacts = semanticFacts.EnforcementProjection()
 			enforcementProjection, projectionCode = semantic.Project(enforcementFacts)
 			enforcementProjected = true
 		}
@@ -248,7 +267,7 @@ func dispatchTrustedAction(
 			newActionFactsSemanticFindingProof(
 				candidate.rule.ID,
 				actionFactsSemanticProofInput{
-					FactsAuthoritative:  facts.Authoritative(),
+					FactsAuthoritative:  semanticFacts.Authoritative(),
 					EnforcementEligible: enforcementFacts.EnforcementEligible(),
 					ProjectionComplete:  projectionCode == semantic.ProjectionOK,
 					EvaluationComplete:  enforcementCode == semantic.EvalOK,
@@ -344,6 +363,18 @@ func dispatchTrustedAction(
 	)
 	findings = append(semanticFindings, legacyFindings...)
 	return finalizeTrustedActionFindings(generation, request, facts, findings)
+}
+
+// redirectReductionCandidate reports whether a match of candidate on the view
+// from actionfacts.DynamicRedirectTargetReduction may stand for the
+// whole action. The expression must be one that more redirects cannot turn
+// off (semantic.Program.RedirectReductionSafe), and the owner must have no
+// code-owned prerequisite: those are Go checks written for complete facts
+// that may read a command's redirects. Other owners keep their legacy
+// fallback, as for any other partial action.
+func redirectReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.RedirectReductionSafe()
 }
 
 func excludeSemanticOwner(
@@ -4215,6 +4246,8 @@ func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
 func trustedBashExecutionTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "bash", "zsh", "ksh", "shell", "shell_command", "terminal",
+		// Amp runs background commands through async_shell_command.
+		"async_shell_command",
 		"run_command", "run_shell", "run_shell_command", "runshellcommand",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
@@ -5693,6 +5726,56 @@ func alertOnlyRuleFindings(findings []RuleFinding) []RuleFinding {
 		}
 	}
 	return alerts
+}
+
+// trustedActiveHome is the home directory action analysis resolves "~" and
+// $HOME against for this request. A standalone gateway runs as a service
+// account on behalf of many users, so it is the verified caller's home:
+// the kernel-verified hook-socket peer's, or on the TCP API the home of the
+// account a per-user credential is bound to. It is never the service
+// account's own home. When the caller's home cannot be resolved it is
+// unresolvedCallerHome, so home-relative and suffix rules (~/.aws/
+// credentials, ~/.kube/config) still match. Everywhere else the gateway
+// runs as the user and its own home is the caller's.
+func trustedActiveHome(ctx context.Context) string {
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		if peer.Home != "" {
+			return peer.Home
+		}
+		return unresolvedCallerHome
+	}
+	if serviceAccountGatewayFromContext(ctx) {
+		if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+			if home := userScopedIdentityHome(identity); home != "" {
+				return home
+			}
+		}
+		return unresolvedCallerHome
+	}
+	return trustedSameHostHome()
+}
+
+// unresolvedCallerHome stands in for a standalone caller whose home cannot
+// be resolved (a directory lookup that failed, a home of "/", or an
+// unclean home path, or a TCP request with no per-user credential). It is
+// absolute and does not exist, so "~" paths resolve to a path no real file
+// has while keeping the ".aws/credentials"-style suffix the rules match on.
+const unresolvedCallerHome = "/nonexistent-home"
+
+type serviceAccountGatewayContextKey struct{}
+
+// withServiceAccountGateway marks requests served by a standalone gateway,
+// which runs as a service account on behalf of many users.
+func withServiceAccountGateway(ctx context.Context) context.Context {
+	return context.WithValue(ctx, serviceAccountGatewayContextKey{}, true)
+}
+
+func serviceAccountGatewayFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	marked, _ := ctx.Value(serviceAccountGatewayContextKey{}).(bool)
+	return marked
 }
 
 func trustedSameHostHome() string {

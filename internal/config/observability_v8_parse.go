@@ -56,6 +56,11 @@ func ParseCompileObservabilityV8(
 	dataDir := strings.TrimSpace(envelope.DataDir)
 	if dataDir == "" {
 		dataDir = strings.TrimSpace(options.DefaultDataDir)
+		// The runtime loader defaults the same way (standaloneLayoutDataDir),
+		// so the compiled local store paths match the runtime data_dir.
+		if layoutDataDir, ok := standaloneLayoutDataDir(sourceName, document.Document); ok {
+			dataDir = layoutDataDir
+		}
 	}
 	if dataDir == "" {
 		return nil, annotateObservabilityV8SemanticError(document, fmt.Errorf("config: v8 compilation requires a data_dir or explicit DefaultDataDir option"))
@@ -68,6 +73,10 @@ func ParseCompileObservabilityV8(
 	if envelope.Observability != nil {
 		source = *envelope.Observability
 	}
+	// The same retired-connector rename the config loader applies
+	// (migrateLegacyConnectorIDs), so a route selector or connector block
+	// written for the retired ID keeps applying to its replacement.
+	migrateObservabilityV8LegacyConnectors(&source)
 	if source.Local.Path == "" {
 		source.Local.Path = filepath.Join(dataDir, DefaultAuditDBName)
 		source.localPathDefaulted = true

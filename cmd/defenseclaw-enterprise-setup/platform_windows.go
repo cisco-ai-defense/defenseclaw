@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +40,7 @@ const (
 	// stage cleanup runs.
 	enterpriseSetupScratchDirName = "scratch"
 	maximumLifecycleOutput        = 2 << 20
+	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
 )
 
 func executeEnterpriseSetup(
@@ -52,16 +54,27 @@ func executeEnterpriseSetup(
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return 0, errors.New("DefenseClaw enterprise Setup requires an elevated administrator token")
 	}
-	payload, err := loadEmbeddedEnterprisePayload()
+	payload, err := enterpriseSetupPayloadLoader()
 	if err != nil {
 		return 0, err
 	}
-	if payload.Manifest.Unsigned && !opts.AllowUnsigned {
+	standalone := payload.Standalone()
+	if payload.Manifest.Unsigned && !opts.AllowUnsigned && !standalone {
 		return 0, errors.New("this enterprise Setup is unsigned and can run only with --allow-unsigned in exact disposable certification scope")
 	}
 	if !payload.Manifest.Unsigned && opts.AllowUnsigned {
-		return 0, errors.New("--allow-unsigned is forbidden for a signed enterprise Setup payload")
+		err := errors.New("--allow-unsigned is forbidden for a signed enterprise Setup payload")
+		if standalone {
+			return 0, enterpriseSetupInvalidArguments{err}
+		}
+		return 0, err
 	}
+	if !standalone && (opts.Action == "ensure" || strings.TrimSpace(opts.AllowedSigners) != "") {
+		return 0, errors.New("ensure and --allowed-signers are available only in the standalone enterprise Setup")
+	}
+	opts.Standalone = standalone
+	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
+	opts.ProductVersion = payload.Manifest.Version
 	for _, input := range []struct {
 		label string
 		value *string
@@ -74,7 +87,7 @@ func executeEnterpriseSetup(
 		}
 		canonical, err := validateEnterpriseSetupInput(*input.value, input.label)
 		if err != nil {
-			return 0, err
+			return 0, standaloneEnterpriseSetupInputError(standalone, err)
 		}
 		*input.value = canonical
 	}
@@ -126,6 +139,17 @@ func executeEnterpriseSetup(
 		if runErr != nil && !opts.JSON {
 			destination = stderr
 		}
+		if opts.Standalone && opts.JSON {
+			// The lifecycle child's stderr is merged into this capture. An MDM
+			// parses stdout, so only the lifecycle's JSON result goes there.
+			document, diagnostics := splitStandaloneLifecycleJSON(output)
+			if len(diagnostics) != 0 {
+				if _, err := stderr.Write(diagnostics); err != nil {
+					return 0, fmt.Errorf("publish enterprise lifecycle diagnostics: %w", err)
+				}
+			}
+			output = document
+		}
 		if _, err := destination.Write(output); err != nil {
 			return 0, fmt.Errorf("publish enterprise lifecycle output: %w", err)
 		}
@@ -140,16 +164,42 @@ func executeEnterpriseSetup(
 	if !errors.As(runErr, &exitErr) {
 		return 0, fmt.Errorf("launch enterprise lifecycle: %w", runErr)
 	}
+	if opts.Standalone {
+		// The standalone lifecycle reports MSI-compatible codes so an MDM
+		// retries a busy host (1618) and does not retry bad arguments
+		// (1639). Anything else is the fatal-install code.
+		switch code := exitErr.ExitCode(); code {
+		case enterpriseBusyExitCode, enterpriseInvalidArgsExitCode:
+			return code, nil
+		}
+	}
 	// The public enterprise lifecycle promises only 0 and 1603. Collapse any
 	// unexpected child status to the same fatal-install code so AVC never
 	// mistakes a partial transaction for reboot-required success.
 	return enterpriseFailureExitCode, nil
 }
 
+// enterpriseSetupPathError is a CONFIG=/MANIFEST= value that is not an
+// existing absolute local path: a command-line error, not a security
+// refusal. Its text is unchanged.
+type enterpriseSetupPathError struct{ error }
+
+func (err enterpriseSetupPathError) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupInputError reports a malformed or missing input
+// path as invalid arguments (1639) for the standalone Setup only.
+func standaloneEnterpriseSetupInputError(standalone bool, err error) error {
+	var path enterpriseSetupPathError
+	if standalone && errors.As(err, &path) {
+		return enterpriseSetupInvalidArguments{err}
+	}
+	return err
+}
+
 func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") ||
 		strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
-		return "", fmt.Errorf("%s path is empty, relative, padded, or environment-expanded", label)
+		return "", enterpriseSetupPathError{fmt.Errorf("%s path is empty, relative, padded, or environment-expanded", label)}
 	}
 	full, err := filepath.Abs(value)
 	if err != nil {
@@ -159,9 +209,12 @@ func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if len(volume) != 2 || volume[1] != ':' || strings.HasPrefix(full, `\\`) ||
 		strings.HasPrefix(full, `//`) || strings.HasPrefix(full, `\\?\`) ||
 		strings.HasPrefix(full, `\\.\`) {
-		return "", fmt.Errorf("%s must use an absolute local Win32 drive path", label)
+		return "", enterpriseSetupPathError{fmt.Errorf("%s must use an absolute local Win32 drive path", label)}
 	}
 	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", enterpriseSetupPathError{fmt.Errorf("inspect %s: %w", label, err)}
+	}
 	if err != nil {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}
@@ -193,7 +246,11 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
 	}
 	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
-	for _, name := range requiredPayloadFiles {
+	required := payload.Required
+	if len(required) == 0 {
+		required = requiredPayloadFiles
+	}
+	for _, name := range required {
 		expected, ok := payload.Files[name]
 		if !ok {
 			return "", nil, errors.Join(fmt.Errorf("validated enterprise payload is missing manifest entry %s", name), cleanup())
@@ -236,7 +293,39 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 			return "", nil, errors.Join(fmt.Errorf("staged enterprise payload digest mismatch: %s", name), cleanup())
 		}
 	}
+	if payload.Standalone() && payload.Manifest.Unsigned {
+		if err := writeStandalonePayloadTrust(stageRoot, payload, required); err != nil {
+			return "", nil, errors.Join(err, cleanup())
+		}
+	}
 	return stageRoot, cleanup, nil
+}
+
+// writeStandalonePayloadTrust stages the hash_pinned trust anchor for an
+// unsigned standalone payload: the digests this Setup verified against its
+// own embedded manifest, in the lifecycle's
+// {"schema_version":1,"files":{...}} form.
+func writeStandalonePayloadTrust(stageRoot string, payload enterprisePayload, required []string) error {
+	files := make(map[string]string, len(required))
+	for _, name := range required {
+		files[name] = strings.ToLower(payload.Files[name].SHA256)
+	}
+	body, err := json.Marshal(map[string]any{"schema_version": 1, "files": files})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(stageRoot, standalonePayloadTrustName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create the standalone payload trust manifest: %w", err)
+	}
+	_, writeErr := file.Write(append(body, '\n'))
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("write the standalone payload trust manifest: %w", err)
+	}
+	return managed.ValidateTrustedFilePath(path, "standalone payload trust manifest")
 }
 
 func createEnterpriseSetupStage(programData string) (string, error) {
@@ -301,16 +390,17 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	if err != nil {
 		return err
 	}
-	allowed := make(map[string]bool, len(requiredPayloadFiles))
+	allowed := make(map[string]bool, len(requiredPayloadFiles)+1)
 	for _, name := range requiredPayloadFiles {
 		allowed[name] = true
 	}
+	allowed[standalonePayloadTrustName] = true
 	for _, entry := range entries {
 		if !allowed[entry.Name()] || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("refusing enterprise Setup cleanup with unexpected staged object: %s", entry.Name())
 		}
 	}
-	for _, name := range requiredPayloadFiles {
+	for _, name := range append(append([]string{}, requiredPayloadFiles...), standalonePayloadTrustName) {
 		path := filepath.Join(cleanStage, name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -321,14 +411,16 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 
 func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions) []string {
 	arguments := []string{"enterprise", "windows", opts.Action, "--installer", filepath.Join(stageRoot, "install-enterprise.ps1")}
-	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
+	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair" || opts.Action == "ensure"
 	appendValue := func(flag, value string) {
 		if strings.TrimSpace(value) != "" {
 			arguments = append(arguments, flag, value)
 		}
 	}
 	if mutation {
-		appendValue("--broker-binary", filepath.Join(stageRoot, "defenseclaw-cmid-broker.exe"))
+		if !opts.Standalone {
+			appendValue("--broker-binary", filepath.Join(stageRoot, "defenseclaw-cmid-broker.exe"))
+		}
 		appendValue("--gateway-binary", filepath.Join(stageRoot, "defenseclaw-gateway.exe"))
 		appendValue("--acp-binary", filepath.Join(stageRoot, "defenseclaw-acp.exe"))
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
@@ -375,6 +467,18 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	// spec-003:PRRT_kwDORuAK-s6alkr4.
 	if opts.DeferredConfig && opts.Action == "install" {
 		arguments = append(arguments, "--deferred-config")
+	}
+	if opts.Standalone {
+		arguments = append(arguments, "--profile", "standalone")
+		appendValue("--product-version", opts.ProductVersion)
+		if opts.StandaloneUnsigned {
+			arguments = append(arguments,
+				"--trust-mode", "hash_pinned",
+				"--payload-manifest", filepath.Join(stageRoot, standalonePayloadTrustName))
+		}
+		for _, signer := range strings.Split(opts.AllowedSigners, ",") {
+			appendValue("--allowed-signer", strings.ToLower(strings.TrimSpace(signer)))
+		}
 	}
 	return arguments
 }

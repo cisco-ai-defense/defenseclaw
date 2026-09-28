@@ -45,22 +45,49 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr       string
-	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
-	TokenFileJS   string // absolute token path, escaped for a JavaScript double-quoted string
-	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
-	Managed       bool
-	TokenFile     string
-	ScopedToken   bool
-	ConnectorName string
-	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	APIAddr     string
+	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
+	TokenFileJS string // absolute token path, escaped for a JavaScript double-quoted string
+	// HookSocketJS is the standalone gateway's unix hook socket, escaped for a
+	// JavaScript double-quoted string; empty keeps the TCP transport.
+	HookSocketJS string
+	// InstallMarkerJS is the managed deployment's install marker, escaped for
+	// a JavaScript double-quoted string; empty when unused.
+	InstallMarkerJS string
+	// ServiceUID is the standalone gateway's service uid trusted as the
+	// hook socket owner (with root); 0 when unused.
+	ServiceUID int
+	// ForeignHookGuardJS is the administrator-owned hook binary an in-agent
+	// plugin runs for the standalone foreign-hook guard, escaped for a
+	// JavaScript double-quoted string; empty skips the check.
+	ForeignHookGuardJS string
+	// ListenerProofJS is "1" when an in-agent plugin on loopback TCP must
+	// make the listener prove it is the gateway before sending its per-user
+	// credential (UserScopedListenerProof); empty skips the proof.
+	ListenerProofJS string
+	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
+	Managed         bool
+	TokenFile       string
+	ScopedToken     bool
+	ConnectorName   string
+	HookBinaryPS    string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS   int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int
 	// Copilot has the same 30-second command-hook envelope and needs an
 	// explicit byte-stream adapter for the GUI-subsystem launcher on Windows.
 	CopilotHookTimeoutMS int
+	// HookSocketTransportSH is the standalone unix-socket transport block a
+	// connector shell hook runs before it builds its bearer header (see
+	// shellHookSocketTransport). Empty keeps the TCP transport, and the
+	// rendered hook is then byte-identical to one without the block.
+	HookSocketTransportSH string
+	// ForeignHookGuardSH is the standalone foreign-hook guard block the
+	// Hermes shell hook runs before its gateway request (see
+	// shellHookForeignGuard). Empty for every other hook and install, whose
+	// renders are then byte-identical to one without it.
+	ForeignHookGuardSH string
 
 	// Sandbox selects the OpenShell in-image variant (sandbox_hooks.go):
 	// APIAddr is the baked hook ingress, FailMode is baked rather than
@@ -484,6 +511,15 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 }
 
 func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
+	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "", "")
+}
+
+// writeHookScriptsCommonWithTransport is writeHookScriptsCommonWithOptions
+// plus the connector scripts' standalone socket transport block (empty for
+// TCP) and foreign-hook guard block (empty unless the connector's standalone
+// shell hook runs the guard). The shared inspect-* scripts keep TCP: no
+// per-user enterprise hook registration invokes them.
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -514,6 +550,10 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
 		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
+		// Rendered only when a managed standalone install names a hook
+		// socket; see WriteHookScriptsForConnectorObjectWithOpts.
+		HookSocketTransportSH: socketTransport,
+		ForeignHookGuardSH:    foreignGuard,
 	}
 	// The inspect-* family has one physical copy per data directory.  Its
 	// bytes must therefore depend only on install-wide inputs; connector mode,
@@ -630,6 +670,19 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 	)
 }
 
+// managedNativeHookRuntimeConnector reports whether a connector's hook is
+// administrator machine policy that runs the hook binary with a
+// runtime-only per-user footprint: Codex, Claude Code, Cursor, Copilot, and
+// OpenCode through its managed plugin on the standalone profile.
+func managedNativeHookRuntimeConnector(name string) bool {
+	switch name {
+	case "codex", "claudecode", "cursor", "copilot", "opencode":
+		return true
+	default:
+		return false
+	}
+}
+
 // ReconcileManagedNativeHookRuntime writes only DefenseClaw's connector-scoped
 // native runtime. It deliberately does not invoke the connector Setup method,
 // so Windows machine-policy connectors never read or modify the agent's
@@ -642,7 +695,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -669,7 +722,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -1330,7 +1383,21 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 		// proxy connector's master token as connector-scoped.
 		scopedToken = !IsProxyConnector(c.Name())
 	}
-	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
+	// A managed standalone install on a unix host sends connector shell hooks
+	// through the gateway's peer-authorized unix hook socket, as it already
+	// does for in-agent plugins. Every other install (per-user, Secure
+	// Client, Windows) has no socket here and keeps the TCP transport.
+	socketTransport := ""
+	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
+		socketTransport = shellHookSocketTransport(socket, serviceUID)
+	}
+	// The standalone Hermes hook also runs the foreign-hook guard first
+	// (shellHookForeignGuardBinary); no other hook or install does.
+	foreignGuard := ""
+	if binary := shellHookForeignGuardBinary(opts, c.Name()); binary != "" {
+		foreignGuard = shellHookForeignGuard(binary)
+	}
+	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken, socketTransport, foreignGuard)
 }
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render

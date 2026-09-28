@@ -123,7 +123,7 @@ def _is_under_allowed_root(path: str) -> bool:
     """Safe containment check — we compare realpath()-resolved parents
     so symlink indirection cannot escape the allowed roots. Uses
     ``os.path.commonpath`` to avoid substring false-positives
-    (``/home/vineeth/.defenseclaw`` vs ``/home/vineeth/.defenseclawEVIL``).
+    (``/home/alice/.defenseclaw`` vs ``/home/alice/.defenseclawEVIL``).
     """
     # Resolve the realpath of the dirname (the target may not exist yet).
     target_dir = os.path.dirname(os.path.abspath(path)) or "/"

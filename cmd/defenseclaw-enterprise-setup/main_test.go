@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -227,11 +228,124 @@ func TestLoadEnterprisePayloadRejectsLegacyFilesMap(t *testing.T) {
 	}
 }
 
+func TestLoadEnterprisePayloadAcceptsStandaloneFlavors(t *testing.T) {
+	for _, unsigned := range []bool{false, true} {
+		payloadFS, manifest := newEnterprisePayloadFixtureForFlavor(t, unsigned, true)
+		payload, err := loadEnterprisePayload(payloadFS)
+		if err != nil {
+			t.Fatalf("unsigned=%t: %v", unsigned, err)
+		}
+		if !payload.Standalone() || len(payload.Required) != len(standalonePayloadFiles) {
+			t.Fatalf("payload %+v, manifest %+v", payload, manifest)
+		}
+		if _, broker := payload.Files["defenseclaw-cmid-broker.exe"]; broker {
+			t.Fatal("the standalone payload must not carry the CMID broker")
+		}
+	}
+	// A standalone manifest may not smuggle the broker back in.
+	payloadFS, manifest := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	contents := []byte("broker")
+	digest := sha256.Sum256(contents)
+	payloadFS["payload/defenseclaw-cmid-broker.exe"] = &fstest.MapFile{Data: contents, Mode: 0o444}
+	manifest.Files = append(manifest.Files, enterprisePayloadManifestFile{Name: "defenseclaw-cmid-broker.exe", SHA256: hex.EncodeToString(digest[:]), Size: int64(len(contents))})
+	writeEnterprisePayloadManifest(t, payloadFS, manifest)
+	if _, err := loadEnterprisePayload(payloadFS); err == nil {
+		t.Fatal("standalone payload with a broker was accepted")
+	}
+	// A Secure Client inventory labeled standalone is rejected.
+	payloadFS, manifest = newEnterprisePayloadFixture(t, false)
+	manifest.DistributionFlavor = standaloneFlavor
+	writeEnterprisePayloadManifest(t, payloadFS, manifest)
+	if _, err := loadEnterprisePayload(payloadFS); err == nil {
+		t.Fatal("Secure Client inventory accepted as standalone")
+	}
+}
+
+func TestParseEnterpriseSetupEnsureAndSigners(t *testing.T) {
+	signer := "allowedsigners=" + strings.Repeat("AB", 32)
+	opts, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", "config=C:\\c.yaml", signer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Action != "ensure" || opts.Config != `C:\c.yaml` || opts.AllowedSigners != strings.Repeat("AB", 32) {
+		t.Fatalf("opts %+v", opts)
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", "--allowed-signers=nope"}); err == nil {
+		t.Fatal("invalid signer accepted")
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/status", "--no-start"}); err == nil ||
+		err.Error() != "--no-start is valid only with install, upgrade, repair, or ensure" {
+		t.Fatalf("standalone --no-start refusal = %v", err)
+	}
+}
+
+// The Secure Client Setup keeps its own action set and flags: ensure and
+// --allowed-signers are argument errors there, worded as before the
+// standalone flavor existed.
+func TestSecureClientSetupRejectsStandaloneArguments(t *testing.T) {
+	for arguments, want := range map[string]string{
+		"/ensure":         `unexpected positional argument "/ensure"`,
+		"--action=ensure": "--action must be install, upgrade, repair, reconcile, status, verify, or uninstall",
+		"--allowed-signers=" + strings.Repeat("ab", 32): "flag provided but not defined: -allowed-signers",
+	} {
+		_, _, err := parseEnterpriseSetupOptions([]string{arguments})
+		if err == nil || err.Error() != want {
+			t.Errorf("parseEnterpriseSetupOptions(%q) error = %v, want %q", arguments, err, want)
+		}
+	}
+	_, _, err := parseEnterpriseSetupOptions([]string{"/install", "--config=a", "--manifest=b", "ALLOWEDSIGNERS=" + strings.Repeat("ab", 32)})
+	if err == nil || !strings.HasPrefix(err.Error(), "unexpected positional argument") {
+		t.Fatalf("Secure Client ALLOWEDSIGNERS= must stay an unknown argument: %v", err)
+	}
+}
+
+func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	for _, standalone := range []bool{false, true} {
+		enterpriseSetupStandaloneFlavor = func() bool { return standalone }
+		var stdout, stderr, want bytes.Buffer
+		if code := runEnterpriseSetup([]string{"/?"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+			t.Fatalf("standalone=%v: help exit=%d stderr=%q", standalone, code, stderr.String())
+		}
+		writeEnterpriseSetupUsageForFlavor(&want, standalone)
+		if stdout.String() != want.String() {
+			t.Fatalf("standalone=%v: usage = %q, want %q", standalone, stdout.String(), want.String())
+		}
+		if got := strings.Contains(stdout.String(), "ensure"); got != standalone {
+			t.Fatalf("standalone=%v: usage lists ensure = %v", standalone, got)
+		}
+	}
+	var secureClient bytes.Buffer
+	writeEnterpriseSetupUsage(&secureClient)
+	if want := enterpriseSetupArtifactName + " --action <install|reconcile|repair|status|uninstall|upgrade|verify> [options]\n" +
+		"Install requires --config <config.yaml> and --manifest <targets.yaml>.\n" +
+		"Production paths and service names are fixed by the enterprise lifecycle.\n"; secureClient.String() != want {
+		t.Fatalf("Secure Client usage = %q", secureClient.String())
+	}
+}
+
+func TestEmbeddedSetupFlavorDefaultsToSecureClient(t *testing.T) {
+	// The source tree embeds only the placeholder, which is not a
+	// standalone manifest.
+	if embeddedEnterpriseSetupStandalone() {
+		t.Fatal("a Setup without a standalone manifest must parse as the Secure Client Setup")
+	}
+}
+
 func newEnterprisePayloadFixture(t *testing.T, unsigned bool) (fstest.MapFS, enterprisePayloadManifest) {
+	return newEnterprisePayloadFixtureForFlavor(t, unsigned, false)
+}
+
+func newEnterprisePayloadFixtureForFlavor(t *testing.T, unsigned, standalone bool) (fstest.MapFS, enterprisePayloadManifest) {
 	t.Helper()
-	payloadFS := make(fstest.MapFS, len(requiredPayloadFiles)+1)
-	entries := make([]enterprisePayloadManifestFile, 0, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
+	files := requiredPayloadFiles
+	if standalone {
+		files = standalonePayloadFiles
+	}
+	payloadFS := make(fstest.MapFS, len(files)+1)
+	entries := make([]enterprisePayloadManifestFile, 0, len(files))
+	for _, name := range files {
 		contents := []byte("test payload for " + name)
 		digest := sha256.Sum256(contents)
 		entries = append(entries, enterprisePayloadManifestFile{
@@ -244,6 +358,12 @@ func newEnterprisePayloadFixture(t *testing.T, unsigned bool) (fstest.MapFS, ent
 	flavor := managedEnterpriseFlavor
 	if unsigned {
 		flavor = managedEnterpriseUnsignedFlavor
+	}
+	if standalone {
+		flavor = standaloneFlavor
+		if unsigned {
+			flavor = standaloneUnsignedFlavor
+		}
 	}
 	manifest := enterprisePayloadManifest{
 		SchemaVersion:      1,
@@ -274,5 +394,62 @@ func TestRunEnterpriseSetupHelpDoesNotInvokePlatform(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), enterpriseSetupArtifactName) || stderr.Len() != 0 {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestSplitStandaloneLifecycleJSONKeepsOnlyTheResultOnStdout(t *testing.T) {
+	output := []byte("WARNING: sonic/ast only supports go1.17~1.26\r\n{\"schema_version\":2,\"ok\":true}\r\n")
+	document, diagnostics := splitStandaloneLifecycleJSON(output)
+	if string(document) != "{\"schema_version\":2,\"ok\":true}\n" {
+		t.Fatalf("document = %q", document)
+	}
+	if string(diagnostics) != "WARNING: sonic/ast only supports go1.17~1.26\n" {
+		t.Fatalf("diagnostics = %q", diagnostics)
+	}
+	plain := []byte("not json at all\n")
+	document, diagnostics = splitStandaloneLifecycleJSON(plain)
+	if string(document) != string(plain) || diagnostics != nil {
+		t.Fatalf("plain output = %q / %q, want it unchanged", document, diagnostics)
+	}
+}
+
+// A command line that does not parse can never succeed on retry. The
+// standalone Setup reports it as 1639 so an MDM stops retrying; the Secure
+// Client Setup keeps its 0-or-1603 contract.
+func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	for _, tc := range []struct {
+		name       string
+		standalone bool
+		missing    bool
+		want       int
+	}{
+		{name: "standalone", standalone: true, want: 1639},
+		{name: "secure client", want: 1603},
+		{name: "no embedded payload", missing: true, want: 1603},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.missing {
+				enterpriseSetupPayloadLoader = func() (enterprisePayload, error) {
+					return enterprisePayload{}, errors.New("enterprise payload missing")
+				}
+			} else {
+				payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, tc.standalone)
+				enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+			}
+			for _, arguments := range [][]string{
+				{"/ensure", "/bogus"},
+				{"/ensure", "ALLOWEDSIGNERS=nothex"},
+				{"/ensure", "PURGE=1"},
+				{"/status", "NOSTART=1"},
+				{"/install", "JSON=maybe"},
+			} {
+				var stdout, stderr bytes.Buffer
+				if got := runEnterpriseSetup(arguments, &stdout, &stderr); got != tc.want {
+					t.Fatalf("%q exit %d, want %d (stderr %q)", arguments, got, tc.want, stderr.String())
+				}
+			}
+		})
 	}
 }

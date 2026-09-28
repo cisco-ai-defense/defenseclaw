@@ -27,6 +27,8 @@ type parseOutput struct {
 	artifacts        []ArtifactFact
 	nextID           int64
 	curlCapabilities []CurlCapability
+	// redirectTargets is set only by a top-level POSIX parse.
+	redirectTargets redirectTargetCapture
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {

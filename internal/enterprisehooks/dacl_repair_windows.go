@@ -51,11 +51,27 @@ func repairWindowsTargetOwnedPathDACL(
 	return windowsEnterpriseGuardianDACLRepair(home, path, target, directory)
 }
 
+// windowsGuardianACLBuilder returns the DACL a no-follow repair applies to the
+// final path element.
+type windowsGuardianACLBuilder func(target *windows.SID, directory bool) (*windows.ACL, error)
+
 func runWindowsEnterpriseGuardianDACLRepair(
 	home string,
 	path string,
 	target *windows.SID,
 	directory bool,
+) error {
+	return runWindowsEnterpriseGuardianDACLRepairWithACL(home, path, target, directory, windowsUserPathProtectionACL)
+}
+
+// runWindowsEnterpriseGuardianDACLRepairWithACL is the LocalSystem no-follow
+// repair with an explicit final DACL (for example the managed plugin DACL).
+func runWindowsEnterpriseGuardianDACLRepairWithACL(
+	home string,
+	path string,
+	target *windows.SID,
+	directory bool,
+	build windowsGuardianACLBuilder,
 ) error {
 	result := make(chan error, 1)
 	go func() {
@@ -98,7 +114,7 @@ func runWindowsEnterpriseGuardianDACLRepair(
 		}
 		repairErr := privilegeErr
 		if repairErr == nil {
-			repairErr = repairWindowsTargetOwnedPathDACLNoFollow(home, path, target, directory)
+			repairErr = repairWindowsTargetOwnedPathDACLNoFollowWithACL(home, path, target, directory, build)
 		}
 		token.Close()
 
@@ -153,6 +169,19 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 	target *windows.SID,
 	directory bool,
 ) error {
+	return repairWindowsTargetOwnedPathDACLNoFollowWithACL(home, path, target, directory, windowsUserPathProtectionACL)
+}
+
+func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
+	home string,
+	path string,
+	target *windows.SID,
+	directory bool,
+	build windowsGuardianACLBuilder,
+) error {
+	if build == nil {
+		return fmt.Errorf("enterprise hooks: DACL repair has no target DACL")
+	}
 	homeAbs, err := filepath.Abs(home)
 	if err != nil {
 		return err
@@ -223,7 +252,7 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 		handle = child
 	}
 
-	acl, err := windowsUserPathProtectionACL(target, directory)
+	acl, err := build(target, directory)
 	if err != nil {
 		return err
 	}

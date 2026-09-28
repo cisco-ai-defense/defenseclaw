@@ -1,0 +1,53 @@
+# One immediate guardian reconcile, for administrators and the lifecycle.
+# It takes the same lock as the running guardian, so the two never write the
+# authorization ledger at the same time. Not started by a timer: the
+# guardian service already reconciles every minute.
+
+[Unit]
+Description=DefenseClaw hook guardian one-shot reconcile
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+After=defenseclaw-gateway.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
+Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
+Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks reconcile --manifest /etc/defenseclaw/hook-guardian/targets.yaml --json
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
+ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
+# CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
+# drops CAP_SETUID from a User= service that filters system calls unless it
+# is in the ambient set, and the per-user workers need both. The kernel
+# clears the ambient set when a worker switches to the user's uid.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_SETGID CAP_SETUID
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+# No MemoryDenyWriteExecute: the per-user workers run agent CLIs, and JIT
+# runtimes such as Node (V8) die under it.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM

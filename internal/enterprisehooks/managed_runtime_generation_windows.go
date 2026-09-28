@@ -1357,9 +1357,15 @@ func canonicalWindowsManagedRuntimeConnector(raw string) (string, error) {
 	switch raw {
 	case "claudecode", "codex", "cursor":
 		return raw, nil
-	default:
-		return "", fmt.Errorf("unsupported managed connector %q", raw)
 	}
+	// Standalone per-user connectors. Hook-binary connectors publish their
+	// selector beside the per-user machine enrollment, their primary
+	// registration; plugin connectors never publish one, so teardown can
+	// still prove its absence.
+	if _, ok := windowsStandalonePerUserConnector(raw); ok {
+		return raw, nil
+	}
+	return "", fmt.Errorf("unsupported managed connector %q", raw)
 }
 
 func validateWindowsManagedRuntimeGenerationPath(path, requiredLeaf string) error {
@@ -1483,7 +1489,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue
@@ -1697,6 +1703,11 @@ func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, err
 			return "", err
 		}
 		directory = filepath.Dir(requirementsPath)
+	case "copilot", "antigravity", "devin", "hermes", "opencode", "amp":
+		directory, err = windowsPerUserManagedRuntimeDir(name)
+		if err != nil {
+			return "", err
+		}
 	default:
 		return "", fmt.Errorf("enterprise hooks: unsupported managed runtime selector connector %q", name)
 	}

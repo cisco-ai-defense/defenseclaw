@@ -65,6 +65,12 @@ type WindowsCodexMachineRequirementsOptions struct {
 	ClaudeTargetEnabled           bool
 	CodexTargetEnabled            bool
 	CursorTargetEnabled           bool
+	// HookContractID binds every managed group's command to its Codex event
+	// and this hook contract. The hook refuses a Codex invocation that does
+	// not carry both, so an unbound command never reaches the gateway. Only
+	// the standalone profile sets it (WindowsCodexStandaloneHookContract);
+	// the Secure Client profile keeps its certified command byte for byte.
+	HookContractID string
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -233,20 +239,56 @@ type codexMachineRequirementsLayout struct {
 	handler       func(codexHookGroup) map[string]interface{}
 }
 
+// windowsCodexBoundManagedHookCommand is the standalone command of one
+// managed group. It names the group's event and the hook contract, which
+// the hook requires, and starts the GUI-subsystem launcher through
+// Start-Process -Wait: the PowerShell call operator does not wait for a
+// GUI-subsystem process, so its exit code (2 blocks) and stdout never
+// reached Codex and every decision was lost.
+func windowsCodexBoundManagedHookCommand(hookBinary, event, contractID string) string {
+	arguments := []string{"hook", "--connector", "codex", "--enterprise-managed", "--event", event, "--hook-contract", contractID}
+	quoted := make([]string, 0, len(arguments))
+	for _, argument := range arguments {
+		quoted = append(quoted, powershellQuoteLiteral(argument))
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @(" + strings.Join(quoted, ",") + ") -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// windowsCodexManagedHookCommandFor is the managed command opts publishes
+// for event.
+func windowsCodexManagedHookCommandFor(opts WindowsCodexMachineRequirementsOptions, event string) string {
+	if contract := strings.TrimSpace(opts.HookContractID); contract != "" {
+		return windowsCodexBoundManagedHookCommand(opts.HookBinary, event, contract)
+	}
+	return windowsCodexManagedHookCommand(opts.HookBinary)
+}
+
+// windowsCodexMachineHandler is the one DefenseClaw handler a Windows managed
+// group carries for command.
+func windowsCodexMachineHandler(command string, timeout int) map[string]interface{} {
+	return map[string]interface{}{
+		"type":            "command",
+		"command":         command,
+		"command_windows": command,
+		"timeout":         timeout,
+	}
+}
+
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
-	command := windowsCodexManagedHookCommand(opts.HookBinary)
 	return codexMachineRequirementsLayout{
 		managedDirKey: "windows_managed_dir",
 		managedDir:    opts.ManagedDir,
 		samePath:      sameWindowsCodexMachinePath,
 		groups:        codexHookGroups,
 		handler: func(group codexHookGroup) map[string]interface{} {
-			return map[string]interface{}{
-				"type":            "command",
-				"command":         command,
-				"command_windows": command,
-				"timeout":         group.timeout,
-			}
+			return windowsCodexMachineHandler(windowsCodexManagedHookCommandFor(opts, group.eventType), group.timeout)
 		},
 	}
 }
@@ -491,9 +533,25 @@ func windowsCodexMachineGroupMatches(
 		matcher   string
 		timeout   int
 	},
-	hookBinary string,
+	opts WindowsCodexMachineRequirementsOptions,
 ) bool {
-	layout := windowsCodexMachineLayout(WindowsCodexMachineRequirementsOptions{HookBinary: hookBinary})
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommandFor(opts, expected.eventType))
+}
+
+func windowsCodexMachineGroupHasCommand(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	command string,
+) bool {
+	layout := codexMachineRequirementsLayout{
+		handler: func(group codexHookGroup) map[string]interface{} {
+			return windowsCodexMachineHandler(command, group.timeout)
+		},
+	}
 	return layout.groupMatches(raw, codexHookGroup(expected))
 }
 
@@ -519,7 +577,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	for _, expected := range codexHookGroups {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 				return true, nil
 			}
 		}
@@ -549,13 +607,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupMatches(candidate, expected, opts) {
 					currentCount++
 				}
 			}
@@ -566,7 +624,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			filtered := make([]interface{}, 0, len(groups)-removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts) {
 					removeCount--
 					continue
 				}

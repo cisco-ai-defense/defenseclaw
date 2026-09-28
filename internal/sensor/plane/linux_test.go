@@ -25,7 +25,12 @@ package plane
 
 import (
 	"encoding/binary"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // TestLinuxParsesProcNetStatSafely pins the field-offset hazard: a process can
@@ -116,7 +121,7 @@ func TestLinuxCredentialRootsCoverTheAgentSurfaces(t *testing.T) {
 	for _, want := range wantSuffixes {
 		found := false
 		for _, root := range roots {
-			if len(root) >= len(want) && root[len(root)-len(want):] == want {
+			if len(root.path) >= len(want) && root.path[len(root.path)-len(want):] == want {
 				found = true
 				break
 			}
@@ -127,6 +132,86 @@ func TestLinuxCredentialRootsCoverTheAgentSurfaces(t *testing.T) {
 	}
 	if len(credentialRoots(nil)) == 0 {
 		t.Error("with no home dirs, the system roots should still be watched")
+	}
+	for _, root := range roots {
+		underHome := strings.HasPrefix(root.path, "/home/dev/")
+		if underHome != (root.home == "/home/dev") {
+			t.Errorf("root %s must be tied to its home only when it lives there, got home %q", root.path, root.home)
+		}
+	}
+}
+
+// TestLinuxHomeCredentialRootsDoNotFollowLinksOutOfTheHome pins that the
+// root helper never marks a location a home's owner redirected elsewhere:
+// marking /etc through ~/.kube would flood the shared event buffer with every
+// process's opens.
+func TestLinuxHomeCredentialRootsDoNotFollowLinksOutOfTheHome(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	outside := t.TempDir()
+	mkdir := func(path string) {
+		t.Helper()
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symlink := func(target, link string) {
+		t.Helper()
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkdir(filepath.Join(home, ".aws"))
+	mkdir(filepath.Join(home, "dotfiles", "ssh"))
+	symlink(filepath.Join(home, "dotfiles", "ssh"), filepath.Join(home, ".ssh"))
+	symlink("dotfiles/ssh", filepath.Join(home, ".cursor"))
+	symlink(outside, filepath.Join(home, ".kube"))
+	symlink("/etc", filepath.Join(home, ".docker"))
+	symlink(home, filepath.Join(home, ".codex"))
+	mkdir(filepath.Join(outside, "gcloud"))
+	symlink(outside, filepath.Join(home, ".config"))
+	if err := os.WriteFile(filepath.Join(home, ".claude"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		root string
+		want string // the directory the descriptor must name; "" = refused
+	}{
+		{root: ".aws", want: filepath.Join(home, ".aws")},
+		{root: ".ssh", want: filepath.Join(home, "dotfiles", "ssh")},
+		{root: ".cursor", want: filepath.Join(home, "dotfiles", "ssh")},
+		{root: ".kube"},
+		{root: ".docker"},
+		{root: ".codex"},
+		{root: ".config/gcloud"},
+		{root: ".claude"},
+		{root: ".openclaw"},
+	} {
+		fd, err := openHomeCredentialRoot(home, filepath.Join(home, test.root))
+		if test.want == "" {
+			if err == nil {
+				_ = unix.Close(fd)
+				t.Errorf("%s: opened a credential root outside the home or not a directory", test.root)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", test.root, err)
+			continue
+		}
+		var got, want unix.Stat_t
+		statErr := unix.Fstat(fd, &got)
+		_ = unix.Close(fd)
+		if statErr != nil {
+			t.Fatal(statErr)
+		}
+		if err := unix.Stat(test.want, &want); err != nil {
+			t.Fatal(err)
+		}
+		if got.Ino != want.Ino || got.Dev != want.Dev {
+			t.Errorf("%s: descriptor does not name %s", test.root, test.want)
+		}
 	}
 }
 

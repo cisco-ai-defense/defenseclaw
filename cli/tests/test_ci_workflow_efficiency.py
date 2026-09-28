@@ -39,7 +39,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "--dist=worksteal" in exhaustive
     assert "name: Python Lint" in workflow
     assert "name: Python Lint & Test" in workflow
-    assert "needs: [release-validation-plan, python-test, python-lint]" in workflow
+    assert "needs: [python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 4' in workflow
@@ -142,20 +142,12 @@ def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:
 def test_release_dispatch_version_is_stamped_without_a_version_only_pr() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
 
-    assert workflow.count('scripts/stamp-version.sh "$RELEASE_TAG"') >= 2
-    assert "Require reviewed source release identity" not in workflow
-    assert "GitHub source snapshot uses development version" in workflow
-    first_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"')
-    build_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', first_stamp + 1)
-    identity_check = workflow.index(
-        "python3 scripts/source_release_identity.py check", build_stamp
-    )
-    extension_build = workflow.index("run: make extensions", build_stamp)
+    assert workflow.count('scripts/stamp-version.sh "$VERSION"') >= 2
+    first_stamp = workflow.index('scripts/stamp-version.sh "$VERSION"')
+    identity_check = workflow.index("python3 scripts/source_release_identity.py check", first_stamp)
+    extension_build = workflow.index("make extensions", identity_check)
     gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
-    assert build_stamp < identity_check < extension_build < gateway_build
+    assert first_stamp < identity_check < extension_build < gateway_build
 
-    macos_build = (ROOT / "scripts/build-macos-app-release.sh").read_text(
-        encoding="utf-8"
-    )
+    macos_build = (ROOT / "scripts/build-macos-app-release.sh").read_text(encoding="utf-8")
     assert 'MARKETING_VERSION="${VERSION}"' in macos_build
-    assert '-X main.version=${VERSION}' in macos_build

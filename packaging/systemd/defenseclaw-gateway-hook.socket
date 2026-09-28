@@ -1,0 +1,25 @@
+# Local hook socket for the DefenseClaw gateway.
+#
+# /run/defenseclaw-hook is created by PID 1 (root, 0755), so a standard user
+# cannot create an impostor socket there. Every local user may connect; the
+# gateway authorizes each connection by the kernel-reported peer uid, and
+# the hook refuses to send anything unless the socket belongs to root or
+# the gateway account.
+
+[Unit]
+Description=DefenseClaw gateway hook socket
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+
+[Socket]
+ListenStream=/run/defenseclaw-hook/hook.sock
+FileDescriptorName=hook
+Service=defenseclaw-gateway.service
+SocketUser=defenseclaw
+SocketGroup=defenseclaw
+SocketMode=0666
+DirectoryMode=0755
+RemoveOnStop=yes
+Backlog=256
+
+[Install]
+WantedBy=sockets.target

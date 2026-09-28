@@ -39,10 +39,14 @@ func Analyze(input Input) (facts Facts) {
 		}
 	}()
 
-	return analyze(input)
+	return analyze(input, "", nil)
 }
 
-func analyze(input Input) Facts {
+// analyze computes the facts of input. twinCommand, when set, replaces the
+// raw command text before it is parsed, and capture, when set, receives the
+// runtime-expanded redirect targets of that parse
+// (analyzeWithRedirectTargets).
+func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
 	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
@@ -183,6 +187,9 @@ func analyze(input Input) Facts {
 		startID = base.nextID
 	}
 	if command != "" && len(argv) == 0 {
+		if twinCommand != "" {
+			command = twinCommand
+		}
 		dialect, ambiguous := chooseRawCommandDialect(
 			input.Tool,
 			dialectHint,
@@ -200,6 +207,11 @@ func analyze(input Input) Facts {
 			return parsed
 		}
 		parsed := parse(command)
+		if capture != nil {
+			// The redirect targets of the command as sent: the reduction
+			// only runs on its partial analysis, never on the rewrite below.
+			*capture = parsed.redirectTargets
+		}
 		if parsed.status == StatusPartial && dialect == DialectPOSIX {
 			// A trusted ActiveHome makes a lone command's "~/" operands
 			// exact; the rewrite is kept only when nothing else is dynamic.

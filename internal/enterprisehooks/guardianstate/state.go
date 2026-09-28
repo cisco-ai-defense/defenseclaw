@@ -82,6 +82,18 @@ func PathForDataDir(dataDir string) string {
 	return filepath.Join(dataDir, StateDirName, FileName)
 }
 
+// PathForPlatform is the single state-file path both the guardian (writer)
+// and the gateway (reader) use. The standalone Unix guardian writes it
+// inside its root-owned authorization directory, which the unprivileged
+// gateway can read but not write; every other deployment keeps the
+// PathForDataDir location.
+func PathForPlatform(standaloneUnix bool, dataDir, authDir string) string {
+	if standaloneUnix {
+		return filepath.Join(authDir, FileName)
+	}
+	return PathForDataDir(dataDir)
+}
+
 // ReadState reads the state file at the given path. Returns
 // StateUnknown when the file does not exist, cannot be opened,
 // exceeds a safety byte limit, or holds a body that is not a known

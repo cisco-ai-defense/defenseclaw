@@ -103,6 +103,16 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
 		return nil
 	}
+	// The bare root command (it has no parent) is the per-user gateway
+	// daemon. On a managed host it must refuse before any side effect:
+	// before PID registration, before a per-user .env can set the
+	// deployment pin, and before the config load and audit store open that
+	// would create ~/.defenseclaw/audit.db.
+	if cmd != nil && !cmd.HasParent() {
+		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+			return err
+		}
+	}
 	// Enterprise hook commands also use this initializer so they receive the
 	// same authenticated v8 runtime context as the root sidecar command.
 	// A Windows daemon may explicitly break away from the TUI's Job Object.
@@ -179,6 +189,9 @@ Run without arguments to start the sidecar daemon.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if versionJSON {
 			return writeMachineVersion(cmd.OutOrStdout())
+		}
+		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+			return err
 		}
 		return runSidecar(cmd, args)
 	},
@@ -461,6 +474,9 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"CURL_CA_BUNDLE",
 		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
 		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
+		// The profile pin comes only from the service definition; a
+		// writable .env must not move a service onto another profile.
+		managed.EnterpriseProfileEnv,
 		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
 		"DEFENSE" + "CLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
 		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",

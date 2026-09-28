@@ -130,6 +130,9 @@ def _render_bridge_publication(
     data_dir: Path,
     *,
     connector: str,
+    foreign_guard: str = "",
+    install_marker: str = "",
+    listener_proof: str = "",
 ) -> bytes:
     template_name = {
         "amp": "amp-plugin.ts",
@@ -146,6 +149,11 @@ def _render_bridge_publication(
         template.replace("{{.APIAddr}}", "127.0.0.1:18970")
         .replace("{{.TokenFileJS}}", token_path_js)
         .replace("{{.FailMode}}", "closed")
+        .replace("{{.HookSocketJS}}", "")
+        .replace("{{.ServiceUID}}", "0")
+        .replace("{{.ForeignHookGuardJS}}", json.dumps(foreign_guard)[1:-1])
+        .replace("{{.InstallMarkerJS}}", json.dumps(install_marker)[1:-1])
+        .replace("{{.ListenerProofJS}}", listener_proof)
     )
     assert "{{." not in rendered
     return rendered.encode()
@@ -449,23 +457,142 @@ def test_registered_connector_bridge_requires_exact_published_bytes(
 
 
 @pytest.mark.parametrize(
-    ("connector", "template_name"),
+    ("connector", "relative_path"),
     [
-        ("amp", "amp-plugin.ts"),
-        ("opencode", "opencode-plugin.js"),
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_bridge_naming_a_user_writable_guard_binary_is_not_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """The standalone bridge runs its foreign-hook guard binary on every tool
+    call, so a copy naming a binary another account can replace is scanned
+    like any third-party plugin."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    guard = tmp_path / "defenseclaw-hook"
+    guard.write_text("#!/bin/sh\n", encoding="utf-8")
+    repository_root = Path(__file__).resolve().parents[2]
+    published = _render_bridge_publication(
+        repository_root,
+        data_dir,
+        connector=connector,
+        foreign_guard=str(guard),
+    )
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+
+    assert first_party_self_reason(target) is None
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_bridge_rendered_with_an_install_marker_stays_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """The Windows standalone guardian renders the bridge with its install
+    marker directory; that bridge is still the published connector bridge,
+    while a marker that is not an absolute path is not."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    for marker, expected in (
+        (str(tmp_path / "DefenseClaw-HookRuntime"), "installed DefenseClaw connector bridge"),
+        ("DefenseClaw-HookRuntime", None),
+    ):
+        published = _render_bridge_publication(
+            repository_root,
+            data_dir,
+            connector=connector,
+            install_marker=marker,
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) == expected, marker
+
+
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_bridge_rendered_with_the_listener_proof_stays_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
+) -> None:
+    """The Windows standalone guardian renders the bridge with the listener
+    proof on ("1"); that bridge is still the published connector bridge,
+    while any other value of the switch is not."""
+
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    target = home / relative_path
+    repository_root = Path(__file__).resolve().parents[2]
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    for proof, expected in (
+        ("1", "installed DefenseClaw connector bridge"),
+        ("", "installed DefenseClaw connector bridge"),
+        ("0", None),
+        ("11", None),
+    ):
+        published = _render_bridge_publication(
+            repository_root,
+            data_dir,
+            connector=connector,
+            install_marker=str(tmp_path / "DefenseClaw-HookRuntime"),
+            listener_proof=proof,
+        )
+        _write_bridge_publication(data_dir, target, connector=connector, payload=published)
+        assert first_party_self_reason(target) == expected, proof
+
+
+@pytest.mark.parametrize(
+    ("connector", "template_names"),
+    [
+        ("amp", ("amp-plugin.ts", "amp-plugin-secure-client.ts")),
+        ("opencode", ("opencode-plugin.js", "opencode-plugin-secure-client.js")),
     ],
 )
 def test_bridge_template_fingerprints_match_gateway_sources(
     connector: str,
-    template_name: str,
+    template_names: tuple[str, str],
 ) -> None:
+    # The current template and the pinned copy the Secure Client profile
+    # renders are both DefenseClaw's own bridge.
     repository_root = Path(__file__).resolve().parents[2]
-    payload = (_bridge_host_templates(repository_root) / template_name).read_bytes()
+    # The current template is fingerprinted by its host bytes (its OpenShell
+    # sandbox branches resolved to the host ones); the pinned copy has none.
+    current, pinned = template_names
+    hooks = repository_root / "internal" / "gateway" / "connector" / "hooks"
+    digests = {
+        hashlib.sha256((_bridge_host_templates(repository_root) / current).read_bytes()).hexdigest(),
+        hashlib.sha256((hooks / pinned).read_bytes()).hexdigest(),
+    }
 
-    assert (
-        hashlib.sha256(payload).hexdigest()
-        == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
-    )
+    assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
 
 
 def test_tampered_plugin_at_expected_install_path_is_not_exempt(

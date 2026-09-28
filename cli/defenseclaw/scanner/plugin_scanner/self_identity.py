@@ -64,9 +64,22 @@ _BRIDGE_PUBLICATION_SCHEMA = {
         "digest_filename": "opencode-plugin.js",
     },
 }
+# SHA-256 of each bridge template in internal/gateway/connector/hooks: the
+# current one and the copy the Secure Client profile renders
+# (*-secure-client.*), which its release pins.
 _BRIDGE_TEMPLATE_DIGESTS = {
-    "amp": "b33193cbc307ac96de1ea1225e45de6eda9abd3043b848051c8fbab58a57924c",
-    "opencode": "92812c1b93005892875db052f751244fe020ea6b7506ecf43e1e778071902e5d",
+    "amp": frozenset(
+        {
+            "e95c2fb223e0b84b3515f425ea7f0b0b89293076a70da5030e6ab1a7bcf66d2c",  # amp-plugin.ts
+            "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
+        }
+    ),
+    "opencode": frozenset(
+        {
+            "c323da2003f29f22987ef64bc95c3c0aa93004d5cce5ead9a0f33896cc3f7c59",  # opencode-plugin.js
+            "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
+        }
+    ),
 }
 _BRIDGE_DYNAMIC_LINES = {
     "amp": (
@@ -88,6 +101,36 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"\n',
             "mode",
         ),
+        (
+            b'const DC_HOOK_SOCKET: string = "',
+            b'"\n',
+            b'const DC_HOOK_SOCKET: string = "{{.HookSocketJS}}"\n',
+            "socket",
+        ),
+        (
+            b'const DC_SERVICE_UID = Number("',
+            b'")\n',
+            b'const DC_SERVICE_UID = Number("{{.ServiceUID}}")\n',
+            "uid",
+        ),
+        (
+            b'const DC_FOREIGN_GUARD: string = "',
+            b'"\n',
+            b'const DC_FOREIGN_GUARD: string = "{{.ForeignHookGuardJS}}"\n',
+            "guard",
+        ),
+        (
+            b'const DC_INSTALL_MARKER: string = "',
+            b'"\n',
+            b'const DC_INSTALL_MARKER: string = "{{.InstallMarkerJS}}"\n',
+            "marker",
+        ),
+        (
+            b'const DC_LISTENER_PROOF: string = "',
+            b'"\n',
+            b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
+            "proof",
+        ),
     ),
     "opencode": (
         (
@@ -107,6 +150,36 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"; // "open" or "closed"\n',
             b'const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"\n',
             "mode",
+        ),
+        (
+            b'const DC_HOOK_SOCKET = "',
+            b'";\n',
+            b'const DC_HOOK_SOCKET = "{{.HookSocketJS}}";\n',
+            "socket",
+        ),
+        (
+            b'const DC_SERVICE_UID = Number("',
+            b'");\n',
+            b'const DC_SERVICE_UID = Number("{{.ServiceUID}}");\n',
+            "uid",
+        ),
+        (
+            b'const DC_FOREIGN_GUARD = "',
+            b'";\n',
+            b'const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";\n',
+            "guard",
+        ),
+        (
+            b'const DC_INSTALL_MARKER = "',
+            b'";\n',
+            b'const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";\n',
+            "marker",
+        ),
+        (
+            b'const DC_LISTENER_PROOF = "',
+            b'";\n',
+            b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
+            "proof",
         ),
     ),
 }
@@ -312,6 +385,41 @@ def _valid_bridge_api_address(value: bytes) -> bool:
     return all(char.isalnum() or char in ".:-[]%" for char in host)
 
 
+def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
+    """Accept an unset standalone value or an absolute, plain path.
+
+    The foreign-hook guard binary is executed by the plugin on every tool
+    call, so a bridge naming one is first-party only when that binary is an
+    administrator-owned file no other account can replace. The hook socket
+    and the Windows standalone install marker (the directory whose absence
+    tells the plugin the deployment was uninstalled) only need to be
+    absolute paths.
+    """
+
+    if value == b"":
+        return True
+    try:
+        path = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
+        return False
+    if kind != "guard":
+        return True
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles", "")
+        return bool(program_files) and os.path.normcase(path).startswith(
+            os.path.normcase(program_files.rstrip("\\/") + os.sep)
+        )
+    return info.st_uid == 0 and not info.st_mode & 0o022
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -323,6 +431,13 @@ def _valid_bridge_dynamic_value(
         return _valid_bridge_api_address(value)
     if kind == "mode":
         return value in {b"open", b"closed"}
+    if kind == "uid":
+        return value.isdigit() and len(value) <= 10
+    if kind == "proof":
+        # The Windows standalone listener proof is on ("1") or off ("").
+        return value in {b"", b"1"}
+    if kind in {"socket", "guard", "marker"}:
+        return _valid_bridge_managed_path(kind, value)
     if kind != "token":
         return False
     try:
@@ -346,8 +461,8 @@ def _matches_immutable_bridge_template(
     """Verify all non-rendered bridge bytes against a packaged fingerprint."""
 
     specifications = _BRIDGE_DYNAMIC_LINES.get(connector)
-    expected_digest = _BRIDGE_TEMPLATE_DIGESTS.get(connector)
-    if specifications is None or expected_digest is None:
+    expected_digests = _BRIDGE_TEMPLATE_DIGESTS.get(connector)
+    if specifications is None or expected_digests is None:
         return False
     lines = payload.splitlines(keepends=True)
     for prefix, suffix, canonical, kind in specifications:
@@ -368,7 +483,7 @@ def _matches_immutable_bridge_template(
         ):
             return False
         lines[index] = canonical
-    return hashlib.sha256(b"".join(lines)).hexdigest() == expected_digest
+    return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
 
 
 def _matches_registered_bridge_publication(path: str, payload: bytes) -> bool:

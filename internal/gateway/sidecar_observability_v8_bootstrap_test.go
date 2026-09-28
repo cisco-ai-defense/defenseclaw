@@ -304,6 +304,9 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 }
 
 func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	// This component fixture runs as the test user, not as a pinned Windows
 	// virtual service account. Keep the process identity honest while the
@@ -1097,6 +1100,9 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 }
 
 func TestSidecarRawReloadResolvesManagedModeAndDefaultEndpoint(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
 		t.Context(), fixture.configPath, fixture.raw,

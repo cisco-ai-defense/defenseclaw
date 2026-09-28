@@ -135,7 +135,15 @@ func PromoteSessionIfAuthenticated(ctx context.Context) context.Context {
 	if sid == "" {
 		return ctx
 	}
+	prior := AgentIdentityFromContext(ctx)
 	id := pending.registry.Resolve(ctx, sid, pending.inboundAgent)
+	// Promotion mints the session's agent instance; it does not change who
+	// the caller is. Keep the user identity established before
+	// authentication (the hook socket's kernel-verified uid, or a per-user
+	// credential's bound identity). Dropping it would let a caller clear a
+	// verified identity by adding a session header, after which the
+	// agent-controlled payload fields would be attributed instead.
+	id.UserID, id.UserIDKind, id.UserName = prior.UserID, prior.UserIDKind, prior.UserName
 	ctx = ContextWithAgentIdentity(ctx, id)
 	// Refresh the audit envelope so the seven-field correlation
 	// stamped by CorrelationMiddleware picks up the newly minted

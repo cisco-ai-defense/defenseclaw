@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -55,6 +56,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
+	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -65,6 +67,13 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// foreignHookSessionLocks serializes foreign-hook session exchanges per
+	// caller identity: each identity has its own session store, so callers
+	// never wait on each other's exchanges.
+	foreignHookSessionLocks keyedMutex
+	// hookCallerLimits bounds each verified caller identity's requests on a
+	// standalone gateway (hook socket and per-user credentials).
+	hookCallerLimits hookCallerLimiter
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -176,6 +185,11 @@ type APIServer struct {
 
 	hookAPITokenMu sync.RWMutex
 	hookAPITokens  map[string]string
+
+	// userScopedCredentials authenticates the standalone profile's per-user
+	// connector credentials on the TCP API (user_scoped_credentials.go).
+	userScopedCredentialsOnce sync.Once
+	userScopedCredentials     *userScopedCredentialStore
 
 	// hookRegistrationRepair is the narrow authenticated bridge from a fresh
 	// connector SessionStart to the Sidecar-owned hook guard. The Sidecar owns
@@ -572,6 +586,14 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 }
 
 func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
+	if name, ok := strings.CutPrefix(path, enterprisepolicy.ForeignHookSessionPathPrefix); ok && name != "" && !strings.Contains(name, "/") {
+		if a.connectorRegistry != nil {
+			_, found := a.connectorRegistry.Get(name)
+			return name, found
+		}
+		_, found := sharedDefaultRegistry().Get(name)
+		return name, found
+	}
 	if path == "/api/v1/codex/notify" {
 		return "codex", true
 	}
@@ -870,6 +892,7 @@ func isAddrInUse(err error) bool {
 
 func (a *APIServer) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/status", a.handleStatus)
 	mux.HandleFunc("/api/v1/admin/shutdown", a.handleShutdown)
@@ -1001,11 +1024,17 @@ func (a *APIServer) Run(ctx context.Context) error {
 	handler = requestIDMiddleware(handler)
 	handler = inboundTraceContextMiddleware(handler)
 
+	baseCtx := ctx
+	if managedHookSocketEnabled(a.scannerCfg) {
+		// Off the verified hook socket a standalone gateway has no trusted
+		// caller identity, so "~" must not resolve to its service account.
+		baseCtx = withServiceAccountGateway(ctx)
+	}
 	srv := &http.Server{
 		Addr:    a.addr,
 		Handler: handler,
 		BaseContext: func(_ net.Listener) context.Context {
-			return ctx
+			return baseCtx
 		},
 	}
 
@@ -1018,32 +1047,123 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// API never comes up, and every connector hook posting to this port fails.
 	// Retrying for a few seconds lets the OS reclaim the port so the restarted
 	// gateway binds the same address the agent's hooks call.
-	ln, lnErr := listenWithRetry(ctx, a.addr, 30*time.Second)
-	if lnErr != nil {
+	//
+	// Under systemd socket activation the listener is inherited instead: PID 1
+	// holds 127.0.0.1:<port> across gateway restarts, so there is no window in
+	// which a local user could bind it (acquireAPIListener).
+	//
+	// The standalone managed profile additionally serves the agent-facing
+	// routes on a unix socket where each caller is identified by its
+	// kernel-verified uid (see managed_hook_peer.go). A failure here leaves
+	// the TCP API up; hooks that require the socket fail closed on their own.
+	// The socket is bound and served before the TCP listener and does not
+	// depend on it: without socket activation (macOS) a local user can hold
+	// the TCP port while the gateway restarts, and that must not take the
+	// socket — whose directory no standard user can write — down with it
+	// for every user on the host. newManagedHookSocketServer returns no
+	// server outside the standalone profile, so there the TCP bind below
+	// behaves exactly as before.
+	hookSrv, hookLn, hookErr := a.newManagedHookSocketServer(ctx, func(h http.Handler) http.Handler {
+		h = a.metricsMiddleware(h)
+		h = CorrelationMiddleware(reg)(h)
+		h = requestIDMiddleware(h)
+		return inboundTraceContextMiddleware(h)
+	})
+	apiDetails := map[string]interface{}{"addr": a.addr}
+	if hookErr != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket unavailable: %v\n", hookErr)
+		apiDetails["hook_socket_error"] = hookErr.Error()
+	}
+
+	errCh := make(chan error, 2)
+	if hookSrv != nil {
+		apiDetails["hook_socket"] = hookLn.Addr().String()
+		go func() {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket listening on %s\n", hookLn.Addr())
+			if err := hookSrv.Serve(hookLn); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("hook socket: %w", err)
+			}
+		}()
+	}
+
+	serveTCP := func(ln net.Listener) {
+		go func() {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	}
+	// tcpBound delivers a listener the standalone bind retry below won; it
+	// stays nil (never ready) when the first bind succeeded.
+	var tcpBound chan net.Listener
+	retryCtx, stopRetry := context.WithCancel(ctx)
+	defer stopRetry()
+	ln, lnErr := a.acquireAPIListener(ctx)
+	switch {
+	case lnErr == nil:
+		serveTCP(ln)
+		a.health.SetAPI(StateRunning, "", apiDetails)
+	case hookSrv != nil && isAddrInUse(lnErr) && ctx.Err() == nil:
+		// Another process holds the TCP port. Keep serving the hook socket,
+		// report the API as failed, and take the port when it is released
+		// instead of exiting into a restart loop that also drops the socket.
+		fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
+		retryDetails := make(map[string]interface{}, len(apiDetails)+1)
+		for key, value := range apiDetails {
+			retryDetails[key] = value
+		}
+		retryDetails["tcp_bind_retrying"] = true
+		a.health.SetAPI(StateError, lnErr.Error(), retryDetails)
+		tcpBound = make(chan net.Listener)
+		go a.retryAPIListenerBind(retryCtx, tcpBound)
+	default:
 		a.health.SetAPI(StateError, lnErr.Error(), nil)
+		if hookSrv != nil {
+			_ = hookSrv.Close()
+			_ = hookLn.Close()
+		}
 		return fmt.Errorf("api: listen %s: %w", a.addr, lnErr)
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-		close(errCh)
-	}()
+	// Readiness and watchdog for Type=notify units; both are no-ops outside
+	// systemd (NOTIFY_SOCKET / WATCHDOG_USEC unset).
+	if _, err := systemd.Notify(systemd.StateReady); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] systemd readiness notification failed: %v\n", err)
+	}
+	watchdogCtx, stopWatchdog := context.WithCancel(ctx)
+	defer stopWatchdog()
+	go systemd.RunWatchdog(watchdogCtx, nil)
 
-	a.health.SetAPI(StateRunning, "", map[string]interface{}{"addr": a.addr})
-
-	select {
-	case err := <-errCh:
-		a.health.SetAPI(StateError, err.Error(), nil)
-		return fmt.Errorf("api: listen %s: %w", a.addr, err)
-	case <-ctx.Done():
-		a.health.SetAPI(StateStopped, "", nil)
+	shutdown := func() error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return srv.Shutdown(shutdownCtx)
+		var hookShutdownErr error
+		if hookSrv != nil {
+			hookShutdownErr = hookSrv.Shutdown(shutdownCtx)
+		}
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		return hookShutdownErr
+	}
+
+	for {
+		select {
+		case ln := <-tcpBound:
+			tcpBound = nil
+			fmt.Fprintf(os.Stderr, "[sidecar-api] %s was released; the API is bound again\n", a.addr)
+			serveTCP(ln)
+			a.health.SetAPI(StateRunning, "", apiDetails)
+		case err := <-errCh:
+			a.health.SetAPI(StateError, err.Error(), nil)
+			_ = shutdown()
+			return fmt.Errorf("api: listen %s: %w", a.addr, err)
+		case <-ctx.Done():
+			a.health.SetAPI(StateStopped, "", nil)
+			_, _ = systemd.Notify(systemd.StateStopping)
+			return shutdown()
+		}
 	}
 }
 
@@ -1141,6 +1261,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
 			"configured_clients": len(cfg.ACP.Clients), "configured_agents": len(cfg.ACP.Agents),
 			"scoped_token_ready": a.acpScopedTokenReady(),
+		}
+		if cfg.StandaloneEnterprise() {
+			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)
@@ -3264,11 +3387,21 @@ func authenticatedInspectConnector(ctx context.Context) string {
 // tokenAuth wraps a handler with Bearer token authentication. Management
 // clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
 // X-DC-Auth header; all are compared against the same gateway token.
-// GET /health is exempt to allow unauthenticated health checks.
+// GET /health is exempt to allow unauthenticated health checks. In the
+// standalone profile the listener proof route answers before authentication
+// and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == connector.UserScopedListenerProofPath && a.userScopedCredentialsRequired() {
+			// A standalone in-agent plugin on loopback TCP makes the
+			// listener prove it is the gateway before it sends its per-user
+			// credential (user_scoped_listener_proof.go). Every other
+			// profile keeps the ordinary authentication below.
+			a.serveUserScopedListenerProof(w, r)
 			return
 		}
 		route := r.Pattern
@@ -3339,12 +3472,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// does; a leaked connector configuration must never grant management API
 		// authority. Exporters that cannot set an authorization header use the
 		// path form below.
+		// The standalone profile accepts connector credentials only when they
+		// are bound to one user (user_scoped_credentials.go): a request that
+		// presents one is attributed to that user, and a connector-wide
+		// credential, which every user of the connector used to hold, no
+		// longer authenticates.
+		userScoped := a.userScopedCredentialsRequired()
 		if isUnscopedOTLPEndpointPath(r.URL.Path) && connector.IsLoopback(r) {
 			source := normalizeConnectorTelemetrySource(r.Header.Get(otelSourceHeader))
 			if scope, validSource := connector.OTLPPathTokenScopeForConnector(source); validSource {
+				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedOTLPCredential, string(scope), token); ok {
+					r.Header.Set(otelSourceHeader, string(scope))
+					a.serveUserScoped(w, r, route, identity, next, nil)
+					return
+				}
 				scoped := a.lookupOTLPPathToken(string(scope))
 				if scoped != "" {
-					if token != "" && constantTimeStringMatch(token, scoped) {
+					if !userScoped && token != "" && constantTimeStringMatch(token, scoped) {
 						// Preserve only the canonical source name used to select the
 						// credential so attribution cannot drift through an alias.
 						r.Header.Set(otelSourceHeader, string(scope))
@@ -3359,6 +3503,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 		}
 		if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+			if token == "" {
+				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedOTLPCredential, source, pathToken); ok {
+					a.serveUserScoped(w, r, route, identity, next, nil)
+					return
+				}
+			}
 			scoped := a.lookupOTLPPathToken(source)
 			if scoped != "" {
 				if token != "" {
@@ -3366,7 +3516,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 					return
 				}
-				if constantTimeStringMatch(pathToken, scoped) {
+				if !userScoped && constantTimeStringMatch(pathToken, scoped) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -3386,7 +3536,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
-			if a.hookAPITokenMatches(hookScope, token) {
+			if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+				a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
+					return withAuthenticatedHookConnector(ctx, hookScope)
+				})
+				return
+			}
+			if !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedHookConnector(
 					PromoteSessionIfAuthenticated(r.Context()),
 					hookScope,
@@ -3411,7 +3567,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			if a.connectorRegistry != nil {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
-			if registered && a.hookAPITokenMatches(hookScope, token) {
+			if registered {
+				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+					a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
+						return withAuthenticatedInspectConnector(ctx, hookScope)
+					})
+					return
+				}
+			}
+			if registered && !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedInspectConnector(
 					PromoteSessionIfAuthenticated(r.Context()),
 					hookScope,
@@ -3474,7 +3638,13 @@ func constantTimeStringMatch(a, b string) bool {
 	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
-func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ string, _ gatewaylog.ErrorCode, metricReason string) {
+func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, route string, code gatewaylog.ErrorCode, metricReason string) {
+	a.emitHTTPAuthFailureForConnector(ctx, r, route, code, metricReason, "")
+}
+
+// emitHTTPAuthFailureForConnector is emitHTTPAuthFailure for a refusal that
+// knows the connector route the caller asked for.
+func (a *APIServer) emitHTTPAuthFailureForConnector(ctx context.Context, r *http.Request, route string, _ gatewaylog.ErrorCode, metricReason, connectorName string) {
 	// Ordinary sidecar authentication failures use the canonical compliance
 	// event plus its generated platform-health metric. OTLP receivers own the
 	// more specific telemetry.authentication.failed event, including the inbound
@@ -3485,7 +3655,7 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, _ 
 		// Target runtime startup guarantees the v8 graph. Missing capability,
 		// collection disablement, or persistence failure cannot revive a legacy
 		// gateway event or Provider metric.
-		a.emitAPIAuthenticationFailureV8(ctx, metricReason)
+		a.emitAPIAuthenticationFailureV8(ctx, metricReason, apiAuthenticationFailureFactsFor(ctx, route, connectorName))
 		return
 	}
 	if r != nil {

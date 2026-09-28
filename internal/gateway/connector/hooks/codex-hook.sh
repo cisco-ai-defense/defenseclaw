@@ -283,7 +283,7 @@ fi
 # descriptors instead; argv contains only the descriptor paths. The
 # descriptor-backed --config form works on curl releases older than 7.55.0,
 # unlike --header @file.
-AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 AUTH_HEADER_FD_OPEN=0
 if [ -n "${API_TOKEN}" ]; then
   # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
@@ -317,7 +317,7 @@ RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
+  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
   --max-time "$HOOK_MAX_TIME" \
   --data-binary "@/dev/fd/9" 2>/dev/null) || CURL_STATUS=$?
 exec 9<&-

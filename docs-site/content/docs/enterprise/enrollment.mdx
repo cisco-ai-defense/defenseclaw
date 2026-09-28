@@ -1,0 +1,432 @@
+---
+title: Enrollment
+description: How the standalone profile finds users on Windows, Linux and macOS, which enrollment settings each OS honors, how directory accounts, new users and deleted users are handled, and how to publish the target list yourself.
+keywords:
+  - DefenseClaw enrollment
+  - hook enumerator
+  - LDAP SSSD Active Directory Entra ID users
+  - UID_MAX login.defs
+  - target manifest
+---
+
+Enrollment decides which users DefenseClaw protects. Two services do the
+work:
+
+- The **enumerator** finds eligible users and their agents every five
+  minutes and writes the protected target manifest.
+- The **guardian** reads that manifest, writes DefenseClaw's hook
+  registration into each enrolled user's agent config, and repairs it every
+  minute.
+
+<Flow
+  direction="TB"
+  caption="Both services are administrator-owned system services. The enumerator writes only the target manifest. On Linux and macOS the guardian changes a user's files through a worker that runs as that user."
+>
+  <Node id="dir" kind="generic">{`Accounts, profiles\nand sessions`}</Node>
+  <Node id="enum" kind="generic">{`Enumerator\nevery 5 minutes`}</Node>
+  <Node id="man" kind="policy">{`Target manifest\nadmin-owned`}</Node>
+  <Node id="grd" kind="generic">{`Guardian\nevery minute`}</Node>
+  <Node id="cfg" kind="agent">{`User's agent config\nDefenseClaw hook`}</Node>
+  <Edge from="dir" to="enum" label="lists users" />
+  <Edge from="enum" to="man" label="writes rows" />
+  <Edge from="man" to="grd" label="reads" />
+  <Edge from="grd" to="cfg" label="writes and repairs" />
+</Flow>
+
+Machine-policy agents (Codex, Claude Code, Cursor, Copilot, and OpenCode
+through its managed plugin) run DefenseClaw's hooks for every user on the
+machine; see
+[Machine policy](/docs/enterprise/machine-policy). On Linux and macOS,
+enrollment therefore matters most for per-user agents and for how the
+gateway treats users it has not enrolled. On Windows every user must be
+enrolled. See [Concepts](/docs/enterprise/concepts) for the terms.
+
+## How users are found
+
+| OS | Accounts | Where the enumerator looks |
+| --- | --- | --- |
+| Windows | Local, Active Directory and Microsoft Entra ID accounts that have a profile on the machine | The profile list in `HKLM`, limited to interactive user SIDs whose profile folder is a real directory (no junctions or links) |
+| Linux | Local, LDAP, SSSD, Active Directory, NIS and other NSS accounts | NSS through a root-owned `getent`, logged-in sessions, the owners of directories under the home roots, and `include_users` |
+| macOS | Local and mobile accounts, and directory accounts that appear through the sources on the right | Local accounts (`dscl . -list /Users`), the console user, the owners of directories under `/Users`, and `include_users`. Directory accounts are not listed; they are looked up through Open Directory. |
+
+## Where agents are found
+
+A row is added for a user and an agent only when the enumerator finds
+that agent installed for the user and can read its version. On Linux and
+macOS the version is read by a worker that runs as the user. When the home
+is not available yet, the enumerator can use the version of a machine-wide
+install from root-owned package metadata, and adds the row as deferred.
+
+Besides each agent's usual per-user install location, discovery searches
+the layouts of the common Node version managers and package managers:
+
+| OS | Also searched |
+| --- | --- |
+| Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes`. The extended search runs only in the worker that runs as the user, never as root. |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. A Codex install from the Microsoft Store (MSIX) is not found. |
+
+An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
+`XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
+or a binary copied into an arbitrary directory) is not found, so it is
+neither enrolled nor reported. On Linux and macOS, install shared agents
+under an `agent_prefixes` path. Use application control where users must
+not run agents from arbitrary locations.
+
+Outside the user's home, discovery runs or reads an agent file only when
+every folder on its resolved path, every link it follows and the file itself
+are owned by root or by that user and no other account can write them;
+otherwise the agent is reported as installed but not run. On macOS an
+element of the `admin` group that others cannot write also counts when
+root, the user or an administrator owns it, so `/Applications` and a Homebrew
+prefix an administrator installed are searched. On Linux a group-writable
+shared prefix (for example Linuxbrew) is not; install shared agents under a
+root-owned `agent_prefixes` path instead.
+
+For machine-policy agents, a missed install is usually still inspected,
+because the vendor policy applies to every copy on the computer. Older
+Claude Code releases are the exception on Linux and macOS: a release that
+does not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77),
+installed under a home with `npm install --prefix`,
+ignores DefenseClaw's hooks and version floor, runs without DefenseClaw, and
+is not reported. So does a Copilot CLI below its 1.0.18 floor (for example
+1.0.15, run with `--no-auto-update`), which does not load
+`/etc/github-copilot/policy.d`. See
+[Vendor limits](/docs/enterprise/machine-policy#vendor-limits); tracked in
+[#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
+
+A per-user agent that a user runs without installing it is not found
+either. OpenHands before 1.12.0 does not load DefenseClaw's hooks, and a
+user can start one straight from the uv cache
+(`uvx --from openhands==1.11.0 openhands`), whose tool calls then run with
+no DefenseClaw decision and no audit record. Status and verify check only the enrolled OpenHands
+and its default hook file, so they keep reporting the user ready. Only
+application control that allows approved agent versions closes it; see
+[Residual risks](/docs/enterprise/threat-model#residual-risks).
+
+## Agents that cannot be enrolled
+
+When the enumerator finds an agent installed for an eligible user but cannot
+enroll it, it records the agent in an administrator-only file beside the
+target manifest (`unprotected-agents.json`), and `status` and `verify` report
+it with `security_complete: false`. `status` warns; `verify` fails.
+
+| Code | Meaning |
+| --- | --- |
+| `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract |
+| `agent_unprotected` | The agent's version could not be read, it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
+
+A per-user agent in this state runs without DefenseClaw hooks. A
+machine-policy agent refuses the unenrolled user on Windows, and on Linux
+and macOS with `unenrolled_users: deny`.
+
+On Linux and macOS a user who has never been enrolled and whose home is
+untrusted (group- or other-writable, a symlink, owned by another account, or
+covered by a user mount) gets no rows. The enumerator still lists the agents
+installed for them, as that user and without running anything in that home
+(package metadata and the presence of the agent CLIs), and reports each one.
+Remove group and other write from the home to enroll the user. An enrolled
+user who loosens their home keeps their rows, and their worker removes group
+and other write again before the next repair.
+
+## Agent upgrades
+
+The enumerator reads each enrolled user's agent version again every cycle
+(on Windows, while the user is signed in, so the guardian can repair their
+hooks at once). When the version changes to one with a verified hook
+contract, the guardian re-renders and re-verifies that user's hooks for it.
+A version without a verified contract is not followed: the row keeps its
+last verified version, so the guardian keeps repairing the hooks rendered
+for it, and `status` and `verify` report `hook_contract_unverified` until
+the user returns to a verified version or DefenseClaw adds the contract.
+
+A user controls the version their own install reports, so they can move
+their own rows between verified contracts, but never to a version without
+one. On Windows the one machine-wide Claude Code policy is rendered from the
+oldest contract among the enrolled Claude Code rows, so an enrolled user's
+change to an older Claude Code contract is not followed either: the row
+stays at its version, the change is reported as `agent_unprotected`, and no
+other user's policy changes. A user enrolled for the first time with an
+older Claude Code still sets the oldest contract.
+
+## What each OS honors
+
+| Setting | Linux and macOS | Windows |
+| --- | --- | --- |
+| `mode` | `auto` or `manifest` | `auto` or `manifest` |
+| `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
+| `exclude_users` | Never enrolled. Wins over every other setting. | Never enrolled. Wins over every other setting. |
+| `include_groups`, `exclude_groups` | Group filters | Group filters for local, Active Directory and Microsoft Entra ID groups; see [Windows](#windows) |
+| `exempt_users` | Not enrolled; their calls are allowed, inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
+| `unenrolled_users` | `inspect` or `deny` for machine-policy agents | Not applied: a user who is not enrolled fails closed |
+| `root` | `inspect`, `deny` or `exempt` | Not applied |
+| `uid_min`, `uid_max` | The interactive uid range | Not applied |
+| `home_roots`, `agent_prefixes` | Extra home parents; extra administrator install prefixes | Not applied, but still validated: an entry that is not an absolute `/` path makes the config invalid |
+
+Every key lives under `enterprise.enrollment`. Defaults and value rules are
+in the [settings reference](/docs/enterprise/configuration#settings-reference).
+A config you share between Linux, macOS and Windows computers is read the
+same way on each; the rows above say which keys each OS acts on.
+
+## Linux and macOS
+
+### Filters
+
+The enumerator applies these checks to each account, in this order:
+
+1. `exclude_users`, then `exempt_users`: the account is skipped. Both match
+   an account name or its numeric uid (for example `"1234401103"`), the
+   spelling the gateway uses for directory accounts it cannot name.
+2. uid 0, uid 65534 and the `nobody` account are never enrolled.
+3. The uid must be in the interactive range (below). On Linux, systemd's
+   dynamic service uids (61184 to 65519) are never enrolled. Accounts in
+   `include_users` skip this check.
+4. Accounts whose login shell is `nologin` or `false` are skipped. Accounts
+   in `include_users` skip this check too.
+5. Group filters: `exclude_groups` wins; when `include_groups` is not
+   empty, only members pass. Accounts in `include_users` are filtered here
+   too.
+6. The home directory must be under a home root, owned by the user, not a
+   link, and not writable by group or others. No parent directory may be
+   writable by everyone.
+
+`enterprise policy show --user <name>` prints an `enrollment:` line when
+`exclude_users`, `exempt_users` or uid 0 keeps that account out of
+enrollment.
+
+```yaml title="config.yaml (Linux example)"
+enterprise:
+  enrollment:
+    mode: auto
+    include_users: [alice]          # enroll even if discovery misses her
+    exclude_users: [build]          # never enroll
+    include_groups: [developers]    # only members of this group
+    exclude_groups: [contractors]   # exclude wins over include
+    exempt_users: [svc-release]     # not enrolled; calls inspected and logged
+    unenrolled_users: inspect       # inspect | deny
+    root: inspect                   # inspect | deny | exempt
+    uid_max: 0                      # 0: login.defs UID_MAX bounds local accounts only
+    home_roots: [/srv/home]         # extra home parents
+    agent_prefixes: [/opt/tools]    # extra administrator install prefixes
+```
+
+Leave `uid_min` unset (or `0`) unless you need a different lower bound.
+A fixed value applies on every host that reads the config, and macOS
+accounts start at uid 501.
+
+### The interactive uid range
+
+| OS | Lowest uid | Highest uid |
+| --- | --- | --- |
+| Linux | `uid_min` if set, else `UID_MIN` from `/etc/login.defs`, else 1000 | `uid_max` if set. Otherwise `UID_MAX` from `/etc/login.defs` (else 60000), for local accounts in `/etc/passwd` only. |
+| macOS | `uid_min` if set, else 501 | `uid_max` if set, else 2147483646 |
+
+Directory accounts (SSSD and Active Directory ID mapping, FreeIPA ranges)
+and systemd-homed users usually have uids far above `UID_MAX`. With the
+default `uid_max: 0` they have no upper bound, so they are enrolled. Set
+`uid_max` to cap local and directory accounts alike.
+
+### Home roots and install prefixes
+
+The home-root defaults are `/home` and `/var/home` on Linux and `/Users` on
+macOS. `home_roots` adds more. On Linux the lifecycle also adds exactly these
+paths to the guardian unit's writable paths. Each entry must be an absolute
+path. `/`, `/tmp`, `/var/tmp`, `/dev/shm`, `/etc`, `/usr`, `/bin`, `/sbin`,
+`/lib`, `/opt`, `/proc`, `/sys`, `/run` and `/var` are refused.
+
+`agent_prefixes` adds administrator install prefixes, for example an npm
+`--prefix` such as `/opt/tools`, to the places the enumerator and the
+guardian look for agent CLIs. Paths under homes (`/home`, `/Users`, `/root`,
+`/var/root`) and temporary directories are refused.
+
+### Unavailable homes
+
+A home that is not there yet or cannot be read right now is **deferred**,
+not failed. Examples: a home not yet created at first login, a locked
+ecryptfs home, an automount or NFS share that is not mounted. The row
+stays, and the next cycle tries again. The worker reads homes with the
+user's own credentials, so NFS `root_squash` homes work once they are
+mounted.
+
+### Users without an enrollment
+
+The gateway checks the kernel-reported uid of every hook call on the Unix
+hook socket:
+
+| Caller | Machine-policy agent | Per-user agent |
+| --- | --- | --- |
+| Enrolled user | Allowed and inspected | Allowed and inspected |
+| User without an enrollment, `unenrolled_users: inspect` (default) | Allowed and inspected | Refused: `enterprise_managed_uid_unregistered` |
+| User without an enrollment, `unenrolled_users: deny` | Refused unless the user is enrolled for some agent | Refused |
+| `exempt_users` entry | Allowed, inspected, and logged as `enterprise_exempt_user` | Same |
+| uid 0, `root: inspect` or `exempt` (default `inspect`) | Allowed and inspected | Allowed and inspected |
+| uid 0, `root: deny` | Refused: `enterprise_managed_root_denied` | Refused |
+
+With `unenrolled_users: deny`, the enumerator also creates enrollment rows
+for machine-policy agents, so enrolled users keep working. OpenCode counts
+as a machine-policy agent here only while its managed plugin is in force;
+see [Machine policy](/docs/enterprise/machine-policy#managed-opencode-plugin).
+
+### Publish the target list yourself
+
+With `mode: manifest` the enumerator stays idle and you maintain the
+target manifest: `/etc/defenseclaw/hook-guardian/targets.yaml` (Linux) or
+`/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml` (macOS). With
+`mode: auto` the enumerator rewrites that file every cycle, so do not edit
+it by hand.
+
+```yaml title="targets.yaml"
+version: 1
+targets:
+  - user: alice
+    connector: codex
+    agent_version: "codex-cli 0.142.0"
+```
+
+Write it as root. The guardian applies it on its next cycle, or at once
+with `defenseclaw-gateway enterprise linux reconcile` or
+`defenseclaw-gateway enterprise macos reconcile` (run as root).
+
+## Windows
+
+- **Profiles.** Only accounts with a profile on the machine can be
+  enrolled, so a user is enrolled after their first sign-in. Local, Active
+  Directory (`S-1-5-21-…`) and Microsoft Entra ID (`S-1-12-1-…`) accounts
+  are eligible.
+- **`include_users`, `exclude_users` and `exempt_users`.** Each entry
+  matches the account name, `DOMAIN\user`, the SID, or the profile folder
+  name, ignoring case. `exclude_users` wins. When the account name cannot be
+  looked up (for example during a domain controller outage), the profile
+  keeps its existing rows and gets no new ones; a failed lookup never
+  revokes a user.
+- **Unenrolled users fail closed.** Once DefenseClaw's machine policy is in
+  place, a hook call from a SID that is not enrolled is refused with
+  `enterprise_managed_sid_unregistered`, for machine-policy agents too.
+- **Signed-in session.** The guardian writes into a user's agent config
+  only while that user has an active (connected) session. For a signed-out
+  or disconnected user the row stays pending and the guardian retries.
+- **`mode: manifest`.** The enumerator stays idle, and you publish
+  `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` yourself.
+  Pass it to the first install with `--manifest` (Setup: `MANIFEST=`), or the
+  install stops with `invalid_arguments`.
+
+### Group filters on Windows
+
+`include_groups` and `exclude_groups` cover local groups, Active Directory
+groups and Microsoft Entra ID groups. Name a group by SID (`S-1-5-32-544`,
+`S-1-12-1-...`) or by name (`Administrators`, `CONTOSO\Developers`). List
+Entra ID groups by SID, because the device cannot resolve their names.
+`exclude_groups` wins; when `include_groups` is not empty, only members are
+enrolled. Membership comes from:
+
+- the signed-in user's session token, which lists every group they belong
+  to. The enumerator caches it, so a signed-out user is decided from the
+  membership seen at their last sign-in, and a change made while they are
+  signed out applies when they next sign in;
+- for local groups, the local account database, which lists direct members
+  at any time, so local accounts are always decided.
+
+A directory user whose membership is not known this way (they have not
+signed in since DefenseClaw was installed) is **pending**: their existing
+rows are kept, no new rows are added, and nothing is revoked until they next
+sign in. Well-known groups other than Everyone (Authenticated Users,
+INTERACTIVE and the like) are added to a token at sign-in and listed by no
+account database, so for them a signed-out user without a cached token is
+pending too.
+
+A group name that does not resolve and never resolved before (a
+misspelling, a group of another platform such as `wheel` in a config shared
+with Linux, or a directory group on a laptop that has been off the corporate
+network since installation) cannot be evaluated. In `exclude_groups` it
+excludes no one, as on Linux and macOS. In `include_groups` it leaves every
+user that no other entry admits pending, so it never revokes anyone. The
+enumerator logs the entry every cycle, and a signed-in user left pending has
+their installed agents reported as `agent_unprotected`. Name groups by SID to
+avoid lookups.
+
+## New, changed and removed users
+
+- **New user.** Enrolled on the next enumerator cycle, within five
+  minutes, once the agent is installed for them. The guardian then
+  writes their registration within its one-minute cycle. Machine-policy
+  agents run DefenseClaw's hooks from the first call: on Linux and macOS
+  the user is inspected (`unenrolled_users: inspect`), and on Windows the
+  call is refused until the user is enrolled. Per-user agents are covered
+  once the guardian has written the registration.
+- **Changed user (Linux and macOS).** A user name that now resolves to a
+  different uid or home path, or a home recreated with a different inode, is
+  a new identity and is enrolled from scratch. A reused uid does not inherit
+  a deleted user's rows. This includes an account that leaves the local
+  account database and returns under the same name with a new uid, for
+  example one moved to a directory: its rows are replaced in that cycle. If
+  it keeps its uid, it counts as deleted locally and is enrolled again as a
+  directory account in the cycle after its rows are removed.
+- **Excluded user.** Removed on the next cycle.
+- **Deleted user (Linux and macOS).** Only a definitive "no such user"
+  answer counts. For an account last seen in the local account database
+  (`/etc/passwd`, or the macOS local directory node), that is the account
+  no longer being listed there, even while a cached lookup still resolves
+  it. For a directory account, another directory account must resolve in
+  the same cycle. On a host that looks up accounts in no directory (Linux
+  `nsswitch.conf` lists only local sources; the macOS search policy lists
+  only `/Local/Default`), every "no such user" answer is definitive. A
+  directory outage, a timeout or an unreachable server never removes
+  anyone.
+
+  The enumerator counts one miss per cycle and removes the user's rows at
+  the third consecutive definitive miss. At the five-minute cycle that is
+  10 to 15 minutes after the account is deleted, or sooner when the
+  enumerator restarts, because it runs a cycle when it starts. Until then
+  the guardian reports the user's targets as pending (the home is gone) or
+  as `target account "<name>" does not exist`. `status` and `verify` show
+  the second as the warning `guardian_target_account_removed` and do not
+  fail on it, and `security_complete` stays true, but `reconcile` fails
+  until the targets are removed. To remove them at once, run
+  `enterprise linux repair` or `enterprise macos repair` as root. Repair
+  removes the targets of accounts that no longer exist and lists them in its
+  result (`deleted_account_targets_removed`). An account that a directory
+  outage could explain keeps its targets (`deleted_account_targets_kept`),
+  and when the local account database cannot be read during the repair, no
+  targets are removed. An account that an earlier release recorded as a
+  directory account is removed only on a host with no directory configured;
+  on a host bound to a directory, add it to `enrollment.exclude_users` to
+  remove its rows on the next cycle.
+
+  On macOS, check that the account record is gone:
+  `dscl . -read /Users/<name>` must report `eDSRecordNotFound`. When
+  `sysadminctl -deleteUser` or `dscl . -delete` reports a permission error,
+  the home folder can be removed while the record stays. The account then
+  still exists, so its targets stay pending (`user home ... is not available`)
+  and nothing is revoked.
+- **Disabled row (Windows).** An existing disabled row stays disabled
+  across cycles.
+- **Agent removed from the config.** Its per-user rows are removed on the
+  next cycle.
+
+### Cleanup when a user is removed on Windows
+
+When a user's per-user row is revoked (the user is excluded or deleted, or
+the agent is removed from the config), the guardian removes DefenseClaw's
+own hook registration or plugin from that user's agent configuration,
+running as the user. This covers Devin, Hermes and Antigravity hooks, the
+OpenCode and Amp plugins, and a DefenseClaw Copilot user hook file. The
+user's own hooks and settings stay.
+
+A signed-out user has no session to act under, so the cleanup is recorded
+in an administrator-owned list and runs at their next sign-in. That
+includes a user whose profile folder is absent while they are signed out (a
+roaming profile whose local copy is deleted, or an FSLogix container); the
+record is dropped without a cleanup only when the account is gone too. A
+user who is enrolled again before then keeps the record until the guardian
+has reinstalled and protects them, so a second revocation before that still
+cleans them. Uninstall does the same for signed-in users; see
+[Remove](/docs/enterprise/windows#remove).
+
+## Supported agent versions
+
+The enumerator records the version it finds, and the guardian installs
+the hook contract for that version. Check the versions DefenseClaw
+supports on each agent's page, for example [Codex](/docs/connectors/codex)
+or [Claude Code](/docs/connectors/claudecode), and in the
+[compatibility table](/docs/connectors/compatibility).
+`defenseclaw-gateway enterprise hooks status` shows each row, including
+rows that are deferred or pending and rows that failed to install.

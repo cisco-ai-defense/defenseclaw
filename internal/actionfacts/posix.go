@@ -48,6 +48,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	}
 
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
+	parsedSource := source
 	file, err := parser.Parse(strings.NewReader(source), "")
 	if err != nil {
 		normalized, valid := normalizePOSIXNullAggregateRedirects(source)
@@ -55,6 +56,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 			out.markInvalid(IssueInvalidSyntax)
 			return out
 		}
+		parsedSource = normalized
 		parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
 		file, err = parser.Parse(strings.NewReader(normalized), "")
 		if err != nil {
@@ -120,6 +122,11 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
 	if len(out.commands) == 0 && out.status == StatusComplete {
 		out.markUnsupported(IssueUnsupportedConstruct)
+	}
+	if wrapperDepth == 0 {
+		out.redirectTargets.source = parsedSource
+	} else {
+		out.redirectTargets = redirectTargetCapture{}
 	}
 	return out
 }
@@ -726,6 +733,7 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 		if target.Expands {
 			command.ArgvComplete = false
 			out.markPartial(IssueDynamicWord)
+			out.redirectTargets.record(redirection.Word)
 		}
 	}
 }

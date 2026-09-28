@@ -420,7 +420,7 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 // its MCP configuration to that principal would put a row in the inventory
 // claiming a service account uses an agent.
 func daemonHomeForInventoryAttribution() string {
-	if ManagedEnterpriseActive() {
+	if gatewayRunsAsServiceAccount() {
 		return ""
 	}
 	home, err := os.UserHomeDir()

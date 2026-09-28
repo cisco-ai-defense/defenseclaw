@@ -89,6 +89,16 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 			}
 		})
 	}
+
+	past := requireV8YAMLError(t, []byte("config_version: 7\n"), V8YAMLErrorVersionUpgrade)
+	if !strings.Contains(past.Error(), "run `defenseclaw migrate`") {
+		t.Fatalf("older config error = %q, want migrate guidance", past.Error())
+	}
+	future := requireV8YAMLError(t, []byte("config_version: 9\n"), V8YAMLErrorVersionUnsupported)
+	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 9)") ||
+		!strings.Contains(future.Error(), "restore ~/.defenseclaw/previous") {
+		t.Fatalf("newer config error = %q, want newer-release guidance", future.Error())
+	}
 }
 
 func TestParseV8YAMLInvalidUTF8AndByteLimit(t *testing.T) {

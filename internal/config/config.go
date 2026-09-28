@@ -232,6 +232,17 @@ const CurrentConfigVersion = 7
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
 	ConfigFilePath string `mapstructure:"-" yaml:"-"`
+	// declaredEnterpriseProfile is enterprise.profile as the config source
+	// declared it, before the service pin or the per-OS default filled it
+	// in. Set only by the loader; not serialized.
+	declaredEnterpriseProfile string
+	// rulePackDirDeclared records that the config source sets
+	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
+	// never rewrites an explicit value. Set only by the loader.
+	rulePackDirDeclared bool
+	// legacyConnectorRouteSelectors names the observability route selectors
+	// that list a retired connector ID, for the migration notice.
+	legacyConnectorRouteSelectors []string
 	// LegacyConnectorNotices records connector IDs this load moved to their
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
@@ -318,7 +329,10 @@ type Config struct {
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
 	// returns true — see managed.go.
 	Managed ManagedIPCConfig `mapstructure:"managed" yaml:"managed,omitempty"`
-	Routing RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+	// Enterprise selects the managed_enterprise profile (Secure Client or
+	// standalone) and tunes the standalone profile. See enterprise.go.
+	Enterprise EnterpriseConfig `mapstructure:"enterprise" yaml:"enterprise,omitempty"`
+	Routing    RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1165,7 +1179,7 @@ func (c OTelConfig) ValidateNamedDestinations() error {
 // capability as a canonical destination; the legacy decoder uses the same
 // predicate only to avoid rejecting a managed source before migration.
 func (c *Config) HasManagedAIDLogSink() bool {
-	return c != nil && managed.IsManagedEnterprise(c.DeploymentMode) &&
+	return c != nil && c.SecureClientIntegration() &&
 		strings.TrimSpace(c.CiscoAIDefense.Endpoint) != ""
 }
 
@@ -2570,6 +2584,7 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 	}
 	return ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    candidate.DeploymentMode,
+		Profile:           candidate.EnterpriseProfile(),
 		Endpoint:          candidate.CiscoAIDefense.Endpoint,
 		SourceContentHash: ObservabilityV8SourceContentHash(raw),
 	}, nil
@@ -2612,6 +2627,16 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("policy_dir") {
 		candidate.PolicyDir = filepath.Join(dataDir, "policies")
+		if candidate.StandaloneEnterprise() {
+			if layout, ok := standaloneUnixLayoutForConfig(candidate.ConfigFilePath); ok {
+				// The gateway service can write data_dir, and the gateway
+				// loads its Rego policies from policy_dir. On the Linux and
+				// macOS layout an omitted policy_dir is the root-owned
+				// vendor policy folder, as in the lifecycle's built-in
+				// config, never a folder inside data_dir.
+				candidate.PolicyDir = layout.VendorPolicyDir
+			}
+		}
 	}
 	if !has("scanners", "codeguard") {
 		candidate.Scanners.CodeGuard = filepath.Join(dataDir, "codeguard-rules")
@@ -2627,6 +2652,9 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("guardrail", "rule_pack_dir") {
 		candidate.Guardrail.RulePackDir = filepath.Join(dataDir, "policies", "guardrail", "default")
+		if candidate.StandaloneEnterprise() {
+			standaloneRulePackDefault(candidate, dataDir)
+		}
 	}
 	if !has("openshell", "pack_dir") {
 		candidate.OpenShell.PackDir = filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
@@ -2675,6 +2703,12 @@ func loadConfigSource(
 	if configuredPath := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); configuredPath != "" &&
 		filepath.Clean(configuredPath) == configFile {
 		dataDir = DefaultDataPath()
+	}
+	// A managed standalone config at the Linux or macOS layout path that
+	// leaves data_dir unset uses the layout's data directory, the one the
+	// services and the lifecycle require, instead of the config's folder.
+	if layoutDataDir, ok := standaloneLayoutDataDirForSource(configFile, sourceBytes, sourceProvided); ok {
+		dataDir = layoutDataDir
 	}
 	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
@@ -2779,6 +2813,8 @@ func loadConfigSource(
 		}
 	}
 	cfg.ConfigFilePath = configFile
+	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
@@ -2789,13 +2825,16 @@ func loadConfigSource(
 		cfg.OTel.Resource.Attributes = otelAttrs
 	}
 
+	// migrateConfig stamps pre-v7 compatibility sources as v7, so the runtime
+	// gate reports the version the file actually declares.
+	sourceConfigVersion := cfg.ConfigVersion
 	migrateConfig(&cfg)
 	if !runtimeV8 {
 		normalizeRelativeGatewayDeviceKeyFile(&cfg)
 	}
 	if runtimeV8 {
-		if cfg.ConfigVersion != ObservabilityV8ConfigVersion {
-			return nil, fmt.Errorf("config: schema v8 is required; run defenseclaw upgrade first")
+		if err := checkRuntimeConfigVersion(sourceConfigVersion); err != nil {
+			return nil, err
 		}
 		clearLegacyObservabilityRuntimeConfig(&cfg)
 	} else {
@@ -2812,6 +2851,12 @@ func loadConfigSource(
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+	if err := resolveEnterpriseConfig(&cfg, runtime.GOOS, os.Getenv(managed.EnterpriseProfileEnv)); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "enterprise_config_invalid")
 		}
 		return nil, err
 	}
@@ -2837,6 +2882,12 @@ func loadConfigSource(
 		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+			}
+			return nil, err
+		}
+		if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
 			}
 			return nil, err
 		}
@@ -3363,6 +3414,21 @@ func yamlKindName(k yaml.Kind) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", k)
 	}
+}
+
+// checkRuntimeConfigVersion admits config_version 8 through
+// MaxSupportedConfigVersion. Older sources are rewritten by the CLI migration;
+// newer ones belong to a newer DefenseClaw and are never guessed at.
+func checkRuntimeConfigVersion(version int) error {
+	switch {
+	case version < ObservabilityV8ConfigVersion:
+		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
+			version, ObservabilityV8ConfigVersion)
+	case version > MaxSupportedConfigVersion:
+		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); "+
+			"upgrade DefenseClaw or restore ~/.defenseclaw/previous", version)
+	}
+	return nil
 }
 
 // migrateConfig applies forward migrations when config_version is behind

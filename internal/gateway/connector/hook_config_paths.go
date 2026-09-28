@@ -252,7 +252,7 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if err != nil {
 		return false, fmt.Errorf("validate opencode managed plugin receipt: %w", err)
 	}
-	if err := safefile.ValidatePrivateFile(boundPath); err != nil {
+	if err := validateOpenCodeManagedPluginProtection(boundPath, opts); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -265,22 +265,61 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if info == nil || !managedFileBackupMatchesSnapshot(&backup, data, true) {
 		return false, nil
 	}
-	for _, marker := range [][]byte{
+	markers := [][]byte{
 		[]byte("// defenseclaw-managed-plugin v7"),
 		[]byte(`"/api/v1/opencode/hook"`),
 		[]byte(`"tool.execute.before": async`),
-		[]byte(`if (verdict && verdict.reason) throw new Error(verdict.reason);`),
+		openCodePluginBlockThrow(opts, "verdict.reason", "verdict && verdict.reason"),
 		[]byte(`verdict.mode === "action" && !DC_ARGUMENTS_AUTHORITATIVE`),
 		[]byte(`hook_event_name: "defenseclaw.plugin.loaded"`),
 		[]byte(`"tool.execute.after": async`),
 		[]byte(`input && input.args`),
 		[]byte(`payload.tool_result = toolResult`),
-	} {
+	}
+	if guard := managedPluginForeignHookGuardMarker(opts, "const DC_FOREIGN_GUARD = ", ";\n"); guard != nil {
+		markers = append(markers, guard, openCodePluginBlockThrow(opts, "blocked", "blocked"))
+	}
+	// A plugin rendered before the listener proof existed would still send
+	// its credential to whoever holds the TCP port; it is repaired.
+	if managedPluginListenerProof(opts) {
+		markers = append(markers,
+			[]byte("const DC_LISTENER_PROOF = \"1\";\n"),
+			[]byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);"),
+		)
+	}
+	for _, marker := range markers {
 		if !bytes.Contains(data, marker) {
 			return false, nil
 		}
 	}
 	return true, nil
+}
+
+// openCodePluginBlockThrow is the rendered statement that fails a blocked
+// tool call: the plain block error, also shown as an error notice
+// (defenseclawBlock), in per-user and standalone renders, and the reason
+// alone in the Secure Client render. A plugin rendered before the block
+// notice existed is repaired.
+func openCodePluginBlockThrow(opts SetupOpts, reason, condition string) []byte {
+	if pluginSecureClientProfile(opts) {
+		return []byte("if (" + condition + ") throw new Error(" + reason + ");")
+	}
+	return []byte("if (" + condition + ") throw defenseclawBlock(client, " + reason + ");")
+}
+
+// validateOpenCodeManagedPluginProtection checks the plugin's custody. A
+// setup for the current user requires the safefile owner-private shape for
+// that user. A Windows enterprise guardian verifying a per-user target
+// (ManagedTargetSID) runs as LocalSystem or an administrator without that
+// user's token, so the current-user shape cannot apply; the guardian pins the
+// exact managed plugin DACL itself, and here the plugin needs the same custody
+// Amp's plugin does: an owner trusted for the target account and no untrusted
+// write authority on the file or its directory.
+func validateOpenCodeManagedPluginProtection(path string, opts SetupOpts) error {
+	if strings.TrimSpace(opts.ManagedTargetSID) != "" {
+		return validatePluginArtifactDestinationFor(path, opts.ManagedTargetSID)
+	}
+	return safefile.ValidatePrivateFile(path)
 }
 
 // configFileReferencesHook reports whether the file at path contains any of

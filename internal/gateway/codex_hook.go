@@ -101,6 +101,26 @@ type codexHookRequest struct {
 	// nil for host traffic. Path-reading helpers go through it instead of the
 	// host filesystem (see sandbox_hook_scope.go).
 	sandboxView *sandboxauth.FSView
+
+	// activeHome is the trusted home for "~" resolution, set by the handler
+	// from the request context (never decoded from the body).
+	activeHome         string
+	activeHomeResolved bool
+}
+
+// withTrustedActiveHome records the request's trusted home so helpers that
+// only see the request resolve "~" against the verified caller.
+func (r codexHookRequest) withTrustedActiveHome(ctx context.Context) codexHookRequest {
+	r.activeHome = trustedActiveHome(ctx)
+	r.activeHomeResolved = true
+	return r
+}
+
+func (r codexHookRequest) resolvedActiveHome() string {
+	if r.activeHomeResolved {
+		return r.activeHome
+	}
+	return trustedSameHostHome()
 }
 
 type codexHookResponse struct {
@@ -462,6 +482,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	additional := codexAdditionalContext(rawAction, severity, safeReason, mode, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,
@@ -840,6 +861,7 @@ func (a *APIServer) inspectCodexToolResult(
 	req codexHookRequest,
 	mode string,
 ) *ToolInspectVerdict {
+	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
@@ -1467,7 +1489,7 @@ func codexToolResultContentScope(req codexHookRequest) ruleContentScope {
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	if len(facts.Network) != 0 {
 		return ruleContentScopeUntrusted
@@ -1511,7 +1533,7 @@ func codexObserveWorkspaceSourceProofForRequest(req codexHookRequest) codexObser
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	if len(facts.Network) != 0 {
 		return codexObserveSourceUntrusted
@@ -1798,7 +1820,7 @@ func codexObserveGitDiffPathspecsForRequest(
 		Tool:       toolName,
 		Args:       codexToolArgs(req),
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: req.resolvedActiveHome(),
 	})
 	commandText := codexExactMapString(req.ToolInput, "command", "cmd", "script")
 	if len(facts.Network) != 0 || facts.Parse.Dialect != actionfacts.DialectPOSIX ||
@@ -2014,7 +2036,7 @@ func codexStaticPowerShellReaderFacts(
 		Tool:        "powershell",
 		Command:     command,
 		CWD:         cwd,
-		ActiveHome:  firstNonEmpty(activeHome, trustedSameHostHome()),
+		ActiveHome:  firstNonEmpty(activeHome, facts.ActiveHome),
 		DialectHint: actionfacts.DialectPowerShell,
 	}), true
 }

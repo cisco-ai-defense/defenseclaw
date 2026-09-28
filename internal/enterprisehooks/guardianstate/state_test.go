@@ -100,3 +100,14 @@ func TestPathForStateRoot(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestPathForPlatform(t *testing.T) {
+	dataDir := filepath.Join("var", "lib", "defenseclaw")
+	authDir := filepath.Join("var", "lib", "defenseclaw-hook-guardian")
+	if got, want := PathForPlatform(false, dataDir, authDir), PathForDataDir(dataDir); got != want {
+		t.Fatalf("non-standalone path = %q, want %q", got, want)
+	}
+	if got, want := PathForPlatform(true, dataDir, authDir), filepath.Join(authDir, FileName); got != want {
+		t.Fatalf("standalone Unix path = %q, want %q", got, want)
+	}
+}

@@ -101,6 +101,23 @@ managed, Team, ProgramData, cloud-dashboard, and MDM surfaces are outside this
 connector contract.
 </Callout>
 
+<Callout type="info" title="Standalone enterprise profile: other hooks in config.yaml">
+Hermes runs every hook registered for an event, in order, and a
+`pre_tool_call` hook can rewrite the tool input, so a hook added after
+DefenseClaw's could change a command DefenseClaw already checked. Hermes has
+no way to lock or order hooks. On Linux and macOS hosts with the standalone
+enterprise profile, DefenseClaw's Hermes hook runs the
+[foreign-hook guard](/docs/enterprise/foreign-hook-guard) before each tool
+call: while `config.yaml`, or the managed-scope `config.yaml` in the folder
+`HERMES_MANAGED_DIR` names, has a hook entry that is not DefenseClaw's and
+that your organization has not approved, tool calls are blocked with a
+message that names the file and the digest to approve, and the guardian
+removes the entry (with a backup). A Hermes process that started with the
+entry keeps running it, so it stays blocked until Hermes restarts. The
+`output_spill` and `outbound` settings under `hooks` are not hooks; the
+guard leaves them alone.
+</Callout>
+
 #### What `setup hermes` actually does
 
 The table highlights convenience options rather than the complete alias
@@ -247,8 +264,11 @@ context at `pre_llm_call`, and continue its bounded verification loop at
 `pre_verify`. DefenseClaw registers all 23 Hermes v0.19 shell-hook-valid events,
 but transform, API, gateway, approval, Kanban, and ordinary lifecycle events
 remain attributed audit unless the official shell response parser documents a
-compatible effect. Hermes does not enforce exit status, timeout, nonzero,
-malformed, auth, or network failures and has no DefenseClaw ask surface.
+compatible effect. Hermes blocks a `pre_tool_call` only on a valid block
+answer and, from Hermes 0.21, on exit code 2. Other exit codes, a timeout,
+malformed output and auth or network failures let the call run in the
+releases DefenseClaw supports (DefenseClaw's entries do not set Hermes'
+`fail_closed`), and Hermes has no DefenseClaw ask surface.
 Confirm verdicts are audit/alert-only, with no synthesized hook output.
 Registration is not claimed live until Hermes reload evidence exists; Doctor
 reports the staged state as unhealthy/pending reload.
@@ -354,6 +374,44 @@ only in the image; nothing on your host changes.
   `.env`, model-provider plugin or profile `secrets` section. The curated
   provider profiles have not carried a real model inside a sandbox; see the
   harness's verification note for what was run.
+
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) the guardian writes the
+DefenseClaw hooks into each enrolled user's default Hermes `config.yaml` and
+repairs them when the user changes them. The enterprise profile writes no
+machine-wide Hermes configuration, so the hooks live in a file the user
+owns, and Hermes coverage is advisory against a user who sets out to avoid
+it:
+
+- **Safe mode and another Hermes home.** `hermes --safe-mode` skips the
+  user's `config.yaml`, and `HERMES_HOME` pointing at a copy of it without
+  the `hooks` block does the same. No DefenseClaw hook runs, nothing is
+  logged, the guardian never repairs that session, and status and verify
+  keep reporting the user's Hermes ready. `--ignore-user-config` on its own
+  keeps the hooks.
+- **A killed hook lets the call run.** `hermes-hook.sh` runs as the user.
+  Hermes blocks a tool call only on a block answer (and, from Hermes 0.21,
+  exit code 2), so when the user kills their own hook process the call runs
+  with no DefenseClaw decision; Hermes' later `post_tool_call` hook can
+  still record it after it ran. In the Hermes releases DefenseClaw supports,
+  a hook timeout also lets the call run. Some builds block the call when a
+  stalled hook times out, but Hermes does not document that.
+
+What reduces it:
+
+- Where you need enforcement, prefer agents that DefenseClaw governs
+  through machine policy (Claude Code, Codex, Cursor, GitHub Copilot and
+  OpenCode).
+- Use application control (fapolicyd on Linux, Santa or similar on macOS,
+  WDAC or AppLocker on Windows) so users can start Hermes only the way you
+  allow, for example only from an administrator-owned launcher that resets
+  `HERMES_HOME` and `HERMES_MANAGED_DIR` and refuses `--safe-mode` and
+  `--ignore-user-config`.
+- Use EDR process protection so users cannot stop or kill the hook process.
+
+See R1, R5 and R18 in the
+[enterprise threat model](/docs/enterprise/threat-model#residual-risks).
 
 ## Disable
 

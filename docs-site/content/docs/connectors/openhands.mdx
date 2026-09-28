@@ -74,7 +74,7 @@ configuration.
 DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The supported POSIX contract starts at `OpenHands CLI 1.12.0`, the first version that loads user-global `~/.openhands/hooks.json`. It is source-reviewed against `OpenHands CLI 1.16.0` with no maximum version currently declared.
 
 <Callout type="warning">
-Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. A repository-local `.openhands/hooks.json` can still override or layer with that behavior depending on OpenHands' own config loading. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly.
+Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. OpenHands 1.16.0 loads a repository-local `.openhands/hooks.json` instead of the global file, not next to it: in a project that has its own file, none of DefenseClaw's global hooks run, so tool calls there are not inspected or logged. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly. In an enterprise deployment the guardian writes only the global file, and the foreign-hook guard does not cover OpenHands; see the [enterprise residual risks](/docs/enterprise/threat-model#residual-risks).
 </Callout>
 
 ## Hook schema
@@ -216,6 +216,58 @@ exist only in the image; nothing on your host changes.
   file is a directory. The curated provider profiles have not carried a real
   model inside a sandbox; see the harness's verification note for what was
   run.
+
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) on Linux and macOS the
+guardian writes DefenseClaw's hooks into each enrolled user's
+`~/.openhands/hooks.json` and repairs them when the user changes them.
+OpenHands has no machine-wide hook location, so the hooks live in a file the
+user owns, and OpenHands coverage is advisory against a user who sets out to
+avoid it:
+
+- **Project hook files replace DefenseClaw's hooks.** OpenHands looks for
+  `.openhands/hooks.json` in the working directory first, then for
+  `~/.openhands/hooks.json`, and uses only the first file it finds. In a
+  project that has its own file, even one with a single unrelated hook,
+  none of DefenseClaw's hooks run (OpenHands reports `Loaded: ... 1 hook`
+  instead of 6), and no DefenseClaw message is shown. A repository a
+  developer clones can carry the file. The guardian does not restore or
+  remove project files, the foreign-hook guard does not cover OpenHands,
+  and status and verify do not report it.
+- **Older OpenHands releases.** OpenHands before 1.12.0 does not load
+  `~/.openhands/hooks.json`. A user can start one without installing it, for
+  example with `uvx --from openhands==1.11.0 openhands`, and its tool calls
+  then run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it
+  is not reported.
+- **Another home.** OpenHands reads the hook file under `HOME`, so a session
+  started with `HOME` pointing elsewhere loads no DefenseClaw hooks. The guardian never repairs that
+  session, and status and verify keep reporting the user's OpenHands ready.
+  `OPENHANDS_PERSISTENCE_DIR` and `DEFENSECLAW_*` environment overrides do
+  not remove the hooks.
+- **A killed or stalled hook lets the call run.** `openhands-hook.sh` runs
+  as the user. OpenHands treats a killed hook (`Exit Code: -9`) and can
+  treat a hook that stalls until its 60-second timeout as non-blocking,
+  so the call runs with no DefenseClaw decision; OpenHands' own
+  confirmation prompt, which the user answers, is the only check left.
+
+What reduces it:
+
+- Where you need enforcement, prefer agents that DefenseClaw governs
+  through machine policy (Claude Code, Codex, Cursor, GitHub Copilot and
+  OpenCode).
+- Keep `.openhands/hooks.json` out of the repositories developers use, for
+  example with a repository rule or a server-side push check, and search
+  existing checkouts for it.
+- Use application control (fapolicyd on Linux, Santa or similar on macOS)
+  to allow only OpenHands 1.12.0 or later from approved locations,
+  including copies a package runner such as `uvx` starts from its cache, and
+  to control how users start it (for example only from an
+  administrator-owned launcher that resets `HOME`).
+- Use EDR process protection so users cannot stop or kill the hook process.
+
+See R1, R15, R18 and R30 in the
+[enterprise threat model](/docs/enterprise/threat-model#residual-risks).
 
 ## Disable
 

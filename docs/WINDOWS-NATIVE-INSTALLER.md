@@ -7,6 +7,14 @@
 > security boundaries, and troubleshooting. The guide is authoritative for
 > user-facing support classifications.
 
+> **DefenseClaw 1.0 and later:** `scripts/install.ps1` installs, upgrades and
+> rolls back DefenseClaw on Windows directly, and `defenseclaw upgrade` runs
+> it. Releases no longer publish `DefenseClawSetup-x64.exe`,
+> `upgrade-manifest.json`, release provenance or `defenseclaw_<version>_*`
+> archives. The Setup package described below is still built by
+> `windows-native.yml` for managed deployments; the release-pipeline and
+> upgrade details that follow describe 0.8.x.
+
 ## Existing release inputs
 
 The installer composes the established release outputs instead of creating a

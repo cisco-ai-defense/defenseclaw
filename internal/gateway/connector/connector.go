@@ -93,6 +93,52 @@ type SetupOpts struct {
 	// disable-sentinel overrides and derive their data directory from the
 	// verified script location instead.
 	ManagedEnterprise bool
+	// ManagedHookSocket is the standalone gateway's peer-authorized unix
+	// hook socket (from the root-owned runtime descriptor). When set on a
+	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks
+	// send hook traffic to it instead of the TCP API, and only after
+	// checking that the socket and its directory belong to root or
+	// ManagedServiceUID; the gateway then identifies the caller by
+	// kernel-verified uid, so no bearer token leaves the hook. Empty keeps
+	// the TCP transport (per-user installs and the Secure Client profile).
+	ManagedHookSocket string
+	// ManagedServiceUID is the standalone gateway's service uid, trusted
+	// alongside root as the hook socket owner. Ignored unless
+	// ManagedHookSocket is set.
+	ManagedServiceUID int
+	// HookCredentialIdentity is the OS identity (uid) the standalone
+	// guardian bound APIToken and OTLPPathToken to. The hook contract lock
+	// records it with a digest of those credentials (never the credentials
+	// themselves) so verification can tell hooks rendered with the
+	// connector-scoped credential, another user's or an older key's
+	// credentials apart and have them repaired. Empty for every other
+	// install, whose locks are unchanged.
+	HookCredentialIdentity string
+	// ForeignHookGuardBinary is the administrator-owned hook binary a
+	// standalone managed in-agent plugin (Amp, OpenCode) runs before each
+	// tool call to evaluate the enterprise foreign-hook guard: those
+	// plugins call the gateway directly and never run `defenseclaw hook`.
+	// Empty (per-user installs, Secure Client) keeps the plugin unchanged.
+	ForeignHookGuardBinary string
+	// ManagedInstallMarker is an administrator-owned directory that exists
+	// exactly while the managed deployment rendering an in-agent plugin
+	// (OpenCode, Amp) is installed; the Windows standalone guardian passes
+	// its hook runtime directory, which uninstall removes last. Uninstall
+	// cannot remove the plugin from a signed-out user's own profile, so when
+	// the gateway is unreachable or the credential is gone and this marker no
+	// longer exists, the plugin treats the deployment as uninstalled and
+	// stops failing closed. Ignored unless ManagedEnterprise is set and the
+	// path is absolute; empty keeps the fail mode unconditional.
+	ManagedInstallMarker string
+	// ManagedListenerProof makes a managed in-agent plugin (OpenCode, Amp)
+	// that keeps the loopback TCP transport ask the listener to prove it can
+	// derive the plugin's per-user hook credential before the plugin sends
+	// that credential or any hook payload (UserScopedListenerProof): a local
+	// user who holds the port while the gateway restarts then receives
+	// nothing to replay and cannot answer with a verdict. The Windows
+	// standalone guardian sets it; per-user installs, the Secure Client
+	// profile and the unix hook socket leave it false.
+	ManagedListenerProof bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,
@@ -181,6 +227,14 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+
+	// ManagedTargetSID is set only by the Windows enterprise guardian when it
+	// sets up or verifies one per-user target: the target account's SID.
+	// Custody checks then trust that account the way they trust the current
+	// user under its own token (the guardian verifies signed-out users
+	// without one), and setup never launches the user's agent executable
+	// from the guardian process. Empty everywhere else.
+	ManagedTargetSID string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

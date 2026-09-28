@@ -282,6 +282,26 @@ type HookRegistrationPosture struct {
 	HookExecutable        string `json:"hook_executable,omitempty"`
 	CodexEnforcement      bool   `json:"codex_enforcement,omitempty"`
 	ClaudeCodeEnforcement bool   `json:"claudecode_enforcement,omitempty"`
+	// HookSocket and HookSocketServiceUID record the standalone unix hook
+	// socket transport the hooks were rendered with (see
+	// managedPluginHookSocket). Both are empty for the TCP transport, so
+	// locks written by per-user, Secure Client and Windows installs are
+	// unchanged. HookTransportDrifted compares them with the configured
+	// transport.
+	HookSocket           string `json:"hook_socket,omitempty"`
+	HookSocketServiceUID int    `json:"hook_socket_service_uid,omitempty"`
+	// HookCredentialBinding records which per-user credentials the hooks
+	// were rendered with: the bound identity and a truncated digest of the
+	// credentials (see hookCredentialBinding). Empty for every install that
+	// does not bind credentials to a user. HookCredentialDrifted compares
+	// it with the configured credentials.
+	HookCredentialBinding string `json:"hook_credential_binding,omitempty"`
+	// ForeignHookGuard records the administrator-owned hook binary the
+	// standalone Hermes shell hook was rendered to run for the foreign-hook
+	// guard (see shellHookForeignGuardBinary). Empty for every other hook
+	// and install. HookForeignGuardDrifted compares it with the configured
+	// guard.
+	ForeignHookGuard string `json:"foreign_hook_guard,omitempty"`
 }
 
 // LoadActiveConnector reads the previously active connector name from
@@ -1123,6 +1143,7 @@ func newHookContractLockEntry(
 	}
 	resolution := resolveHookContractForOptions(name, opts)
 	contract := resolution.Contract
+	hookSocket, hookSocketServiceUID := managedPluginHookSocket(opts)
 	entry := HookContractLockEntry{
 		Connector:              normalizeConnectorName(name),
 		RawAgentVersion:        resolution.RawVersion,
@@ -1145,6 +1166,10 @@ func newHookContractLockEntry(
 			HookExecutable:        opts.HookExecutable,
 			CodexEnforcement:      opts.CodexEnforcement,
 			ClaudeCodeEnforcement: opts.ClaudeCodeEnforcement,
+			HookSocket:            hookSocket,
+			HookSocketServiceUID:  hookSocketServiceUID,
+			HookCredentialBinding: hookCredentialBinding(opts),
+			ForeignHookGuard:      shellHookForeignGuardBinary(opts, name),
 		},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1419,6 +1444,59 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	return HookContractCompatibilityDrifted(previous, current)
 }
 
+// HookTransportDrifted reports whether the hooks recorded by lock were
+// rendered for a different gateway transport than opts now selects: TCP
+// against the standalone unix hook socket, another socket path, or another
+// trusted service uid. A lock written before the transport was recorded
+// counts as TCP, so hooks installed before an upgrade that added the socket
+// fail verification and the guardian reinstalls them.
+//
+// Unix verification does not compare hook bytes, so without this check a
+// target protected before the socket was configured would keep posting to
+// the TCP port with the shared connector bearer. Like script digests, this
+// is a repair signal and is deliberately not part of HookContractLockDrifted.
+func HookTransportDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
+	wantSocket, wantUID := managedPluginHookSocket(opts)
+	haveSocket, haveUID := "", 0
+	if posture := lock.RegistrationPosture; posture != nil {
+		haveSocket, haveUID = posture.HookSocket, posture.HookSocketServiceUID
+	}
+	if haveSocket == "" {
+		haveUID = 0
+	}
+	return haveSocket != wantSocket || haveUID != wantUID
+}
+
+// hookCredentialBinding is the non-secret record of the per-user
+// credentials opts renders: the bound identity and the first 16 bytes of a
+// SHA-256 over the credentials. The lock sits in the user's own data
+// directory next to credentials the user already holds, so the digest
+// discloses nothing new; it only lets verification notice that the
+// credentials changed. Empty when opts binds no identity.
+func hookCredentialBinding(opts SetupOpts) string {
+	identity := strings.TrimSpace(opts.HookCredentialIdentity)
+	if identity == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte("defenseclaw.hook-credential-binding.v1\x00" + identity + "\x00" +
+		strings.TrimSpace(opts.APIToken) + "\x00" + strings.TrimSpace(opts.OTLPPathToken)))
+	return identity + ":" + hex.EncodeToString(digest[:16])
+}
+
+// HookCredentialDrifted reports whether the hooks recorded by lock were
+// rendered with other credentials than opts selects: the connector-scoped
+// credential shared by every user (a lock without a binding), another
+// user's, or credentials derived from an older key. Like
+// HookTransportDrifted it is a repair signal for Unix verification, which
+// does not compare hook or agent configuration bytes.
+func HookCredentialDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
+	have := ""
+	if posture := lock.RegistrationPosture; posture != nil {
+		have = posture.HookCredentialBinding
+	}
+	return have != hookCredentialBinding(opts)
+}
+
 func cursorHookContractUnchanged(previous, current HookContractLockEntry) bool {
 	if normalizeConnectorName(previous.Connector) != "cursor" || normalizeConnectorName(current.Connector) != "cursor" {
 		return false
@@ -1462,6 +1540,37 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	// changed script bytes are the thing setup/guardian repair is supposed to
 	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
+}
+
+// HookContractChangedByDefenseClawRelease reports whether the only
+// compatibility drift is a ContractID that a different DefenseClaw release
+// resolved for the same agent version. A lock with no writer version predates
+// DefenseClawVersion and counts as a different release. Admission refreshes
+// such a lock instead of refusing it; any agent version change still drifts.
+func HookContractChangedByDefenseClawRelease(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || previous.ContractID == "" ||
+		current.ContractID == "" || previous.ContractID == current.ContractID {
+		return false
+	}
+	if previous.DefenseClawVersion != "" && previous.DefenseClawVersion == current.DefenseClawVersion {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
+}
+
+// AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
+// recorded when a DefenseClaw release last admitted the connector. A refusal
+// for an unchanged agent comes from the running release's own contract table,
+// not from the agent.
+func AgentUnchangedSinceLock(previous HookContractLockEntry, rawAgentVersion string) bool {
+	if strings.TrimSpace(previous.Connector) == "" {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	current := HookContractLockEntry{Connector: previous.Connector, RawAgentVersion: rawAgentVersion}
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current)
 }
 
 // stableRawAgentVersionForContract removes only upstream presentation text

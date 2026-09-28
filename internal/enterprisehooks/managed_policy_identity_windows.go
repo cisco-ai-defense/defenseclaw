@@ -9,9 +9,11 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // VerifyWindowsClaudeManagedPolicyIdentity is a read-only proof that the
@@ -70,10 +72,41 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 			return errors.New("enterprise hooks: Claude machine policy belongs to another protected gateway deployment")
 		}
 		if err := provider.VerifyManagedHookPolicy(policy.data, setup); err != nil {
-			return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
+			if !windowsStandaloneProfilePinned() {
+				return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
+			}
+			// The policy was rendered for the enrolled Claude version's hook
+			// contract (for example with DirectoryAdded from 2.1.219), which
+			// this version-less setup cannot know. It is still this
+			// deployment's policy if it is byte-for-byte the rendering of
+			// one registered contract for the same executable and gateway.
+			if !claudeManagedPolicyMatchesKnownContract(provider, policy.data, setup) {
+				return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
+			}
 		}
 		return nil
 	})
+}
+
+func claudeManagedPolicyMatchesKnownContract(
+	provider *connector.ClaudeCodeConnector,
+	policy []byte,
+	setup connector.SetupOpts,
+) bool {
+	for _, contract := range connector.KnownHookContracts("claudecode") {
+		pinned := setup
+		pinned.HookContractID = contract.ContractID
+		if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsStandaloneProfilePinned reports whether this service runs under the
+// standalone enterprise profile pin.
+func windowsStandaloneProfilePinned() bool {
+	return managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
 }
 
 // VerifyWindowsCursorManagedPolicyIdentity is the equivalent read-only proof

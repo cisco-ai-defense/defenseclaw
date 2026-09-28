@@ -197,6 +197,10 @@ type Sidecar struct {
 	inspectionMu        sync.RWMutex
 	inspectionAvailable bool
 	inspectionDetail    string
+	// inspectionEpoch advances on every setInspectionAvailability, so an
+	// observer bound to a replaced inspector stops publishing (see
+	// inspectionAvailabilityObserver).
+	inspectionEpoch uint64
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -497,7 +501,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// redaction behavior for an already-running embedder or a later retry. Cisco
 	// AI Defense failure diagnostics remain sink-redacted in every posture; this
 	// flag must never authorize raw upstream response bytes in gateway logs.
-	setManagedEnterpriseRedactionPosture(managed.IsManagedEnterprise(cfg.DeploymentMode))
+	setManagedEnterpriseRedactionPosture(cfg.ManagedAIDOnly())
+	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
+	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
 	return sidecar, nil
 }
@@ -999,7 +1005,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// and watches its parent dir for late arrivals (AVC packaging can
 	// drop the file AFTER DefenseClaw is installed). OSS installs skip
 	// this call and get the pre-overlay behavior verbatim.
-	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+	if s.currentConfig().SecureClientIntegration() {
 		envConfigPath, err := config.ResolveDefaultEnvConfigPath()
 		if err != nil {
 			return fmt.Errorf("resolve managed env_config path: %w", err)
@@ -1034,17 +1040,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			)
 		}()
 	}
-
-	// The updater cannot instantiate the target release's logger. It leaves a
-	// private, terminal receipt after health verification; this worker waits for
-	// API/config/telemetry readiness and admits that receipt through the one
-	// canonical mandatory compliance pipeline. Pending receipts are never
-	// interpreted as success.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		s.runUpgradeReceiptConsumer(runCtx)
-	}()
 
 	// Process and mandatory-SQLite capacity metrics are generated lazily under
 	// the active v8 graph. If every corresponding family is disabled, neither
@@ -1299,7 +1294,7 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 	}
 	err := runGuardrailFn(ctx)
 	if err != nil && ctx.Err() == nil {
-		s.health.SetGuardrail(StateError, err.Error(), nil)
+		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 	}
 	return err
 }
@@ -1788,6 +1783,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// mutating process-global state. The actual toggles are applied only after
 	// the candidate runtime graph has passed its canaries and committed.
 	nextManagedEnterprise := managed.IsManagedEnterprise(next.DeploymentMode)
+	// Only the Secure Client profile runs the AID-only posture; a
+	// standalone deployment keeps the local engine and ordinary redaction.
+	nextManagedAIDOnly := next.ManagedAIDOnly()
 	// The v8 runtime graph is the first mutation and the commit boundary. Its
 	// reload builds and canary-validates the complete candidate off-path, then
 	// atomically publishes it. Everything below is deliberately infallible, so
@@ -1811,7 +1809,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// process-wide privacy kill switch to mutate on reload. Keep only the
 	// managed-enterprise local-agent carve-out and cloud-controlled
 	// per-inspection redaction gate in sync with the committed deployment mode.
-	setManagedEnterpriseRedactionPosture(nextManagedEnterprise)
+	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
+	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
+	setManagedServiceHosted(nextManagedEnterprise)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
 
 	appliedCfg := current
@@ -1944,7 +1944,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			// keeping stale state that points at the old endpoint.
 			api.SetCiscoInspector(nil)
 		}
-		if nextManagedEnterprise {
+		if nextManagedAIDOnly {
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 			}
@@ -2028,7 +2028,17 @@ func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	return !reflect.DeepEqual(oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense)
+	if !reflect.DeepEqual(oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense) {
+		return true
+	}
+	// A standalone deployment's AI Defense client also depends on the
+	// enterprise block: whether it is enabled, which protected credential
+	// holds its key, and the egress proxy it dials through.
+	if !oldCfg.StandaloneEnterprise() && !newCfg.StandaloneEnterprise() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.Enterprise.Inspection, newCfg.Enterprise.Inspection) ||
+		!reflect.DeepEqual(oldCfg.Enterprise.Network, newCfg.Enterprise.Network)
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {
@@ -2288,7 +2298,10 @@ func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorNam
 // entirely rather than silently falling back to API-key auth.
 func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 	cfg := s.currentConfig()
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if cfg.StandaloneEnterprise() {
+		return s.newStandaloneInspector(ctx, cfg)
+	}
+	if cfg.ManagedAIDOnly() {
 		// Re-check cloudreg.Registered() on every hot-reload (T5.3).
 		// Factory registration is set once at init() time and does not
 		// change during runtime, but a config reload that switches
@@ -2580,12 +2593,35 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 func (s *Sidecar) setInspectionAvailability(err error) {
 	s.inspectionMu.Lock()
 	defer s.inspectionMu.Unlock()
+	s.inspectionEpoch++
+	s.recordInspectionAvailabilityLocked(err)
+}
+
+func (s *Sidecar) recordInspectionAvailabilityLocked(err error) {
 	s.inspectionAvailable = err == nil
 	if err != nil {
 		s.inspectionDetail = err.Error()
 		return
 	}
 	s.inspectionDetail = ""
+}
+
+// inspectionAvailabilityObserver returns a callback for an inspector's
+// per-request outcomes. It publishes them until the next
+// setInspectionAvailability, which every inspector rebuild makes, so a late
+// reply from a replaced client cannot overwrite its successor's state.
+func (s *Sidecar) inspectionAvailabilityObserver() func(error) {
+	s.inspectionMu.RLock()
+	epoch := s.inspectionEpoch
+	s.inspectionMu.RUnlock()
+	return func(err error) {
+		s.inspectionMu.Lock()
+		defer s.inspectionMu.Unlock()
+		if s.inspectionEpoch != epoch {
+			return
+		}
+		s.recordInspectionAvailabilityLocked(err)
+	}
 }
 
 // inspectionAvailability reports the last managed-inspection outcome.
@@ -2595,6 +2631,30 @@ func (s *Sidecar) inspectionAvailability() (bool, string) {
 	s.inspectionMu.RLock()
 	defer s.inspectionMu.RUnlock()
 	return s.inspectionAvailable, s.inspectionDetail
+}
+
+// addStandaloneAIDefenseHealth publishes the optional Cisco AI Defense
+// client of a standalone deployment on a guardrail health detail. The local
+// engine keeps deciding when that client cannot be built (missing, untrusted
+// or empty credential, rejected egress proxy) or when its requests fail
+// (rejected key, unreachable endpoint or proxy), so inspection_available
+// stays true there; these keys are what show the administrator that the
+// cloud augmentation they enabled is not running. Other profiles are
+// untouched.
+func (s *Sidecar) addStandaloneAIDefenseHealth(detail map[string]interface{}) {
+	cfg := s.currentConfig()
+	if detail == nil || !cfg.StandaloneEnterprise() || !cfg.Enterprise.Inspection.AIDefense.Enabled {
+		return
+	}
+	available, reason := s.inspectionAvailability()
+	detail["ai_defense_available"] = available
+	if available {
+		return
+	}
+	if reason == "" {
+		reason = "client not initialized"
+	}
+	detail["ai_defense_error"] = "ai_defense: " + reason
 }
 
 func (s *Sidecar) apiSnapshot() *APIServer {
@@ -2692,10 +2752,15 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		// per-connector roster is the status command's "Agents" section, so
 		// we deliberately do NOT re-enumerate connector names here.
 		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
+		if s.currentConfig().StandaloneEnterprise() {
+			details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
+			details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
+			connName = "managed standalone"
+		}
 		s.health.SetGateway(StateDisabled, "", details)
 		fmt.Fprintf(os.Stderr,
-			"[sidecar] gateway client disabled: connector=%q + loopback gateway.host=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
-			connName, s.currentConfig().Gateway.Host)
+			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
+			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode)
 		<-ctx.Done()
 		s.health.SetGateway(StateStopped, "", nil)
 		return nil
@@ -3466,17 +3531,29 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: connector lifecycle for %s is owned by the enterprise hook guardian; gateway will not write user hook files\n", conn.Name())
 	}
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
-	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason)
-	}
-	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason)
+	refuseAdmission := func(err error) error {
+		return &hookContractAdmissionRefusal{connectors: []string{conn.Name()}, err: err}
 	}
 	// Compatibility checks intentionally use the filtered read below, so a
 	// fresh protected Windows Codex repair receipt can supersede the old lock.
 	// Rollback authority is captured separately from the raw lock bytes before
 	// Setup mutates registration posture.
 	previousLock := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name())
+	// An earlier release admitted this exact agent, so an unknown/unversioned
+	// verdict comes from this release's contract table. Report it as a plain
+	// failure so an upgrade rolls back instead of keeping the agent unguarded.
+	refuseUnverified := func(err error) error {
+		if connector.AgentUnchangedSinceLock(previousLock, agentVersion) {
+			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
+		}
+		return refuseAdmission(err)
+	}
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+	}
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
+	}
 	singleRollback := multiConnectorSetupTransaction{}
 	if !guardianManagedLifecycle {
 		if previous := previousLock; previous.Connector != "" {
@@ -3485,7 +3562,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			// an explicit setup/restart from refreshing an existing connector.
 			// Only an upstream agent-version/contract change requires the action-mode override.
 			if connector.HookContractCompatibilityDrifted(previous, current) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-				return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+				if err := hookContractDriftAdmission(conn.Name(), previous, current); err != nil {
+					return refuseAdmission(err)
+				}
 			}
 		}
 	}
@@ -3648,7 +3727,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// variant, and flip the merge dispatch to mergeVerdictsManaged.
 		// Fail-closed: if the managed cloud auth provider can't
 		// initialize, remote inspection stays disabled entirely.
-		if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
+		if s.currentConfig().ManagedAIDOnly() {
 			proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 			// AID-only posture: every local detector (guardrail regex,
 			// CodeGuard/ClawShield) and explicit local policy (static
@@ -3727,6 +3806,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if guardianManagedLifecycle {
 			publishHealth := func() {
 				covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, []string{conn.Name()})
+				if s.currentConfig().StandaloneEnterprise() {
+					covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
+				}
 				state := StateStarting
 				verifiedEnforcement := false
 				hint := "awaiting a trusted enterprise hook guardian authorization record"
@@ -3735,7 +3817,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					verifiedEnforcement = enforcementEnabled
 					hint = "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path"
 				}
-				s.health.SetGuardrail(state, status, map[string]interface{}{
+				detail := map[string]interface{}{
 					"summary":             summary,
 					"connector":           conn.Name(),
 					"mode":                "observability",
@@ -3746,7 +3828,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					"hint":                hint,
 					"lifecycle_manager":   "enterprise_hook_guardian",
 					"guardian_verified":   covered,
-				})
+				}
+				s.addStandaloneAIDefenseHealth(detail)
+				s.health.SetGuardrail(state, status, detail)
 			}
 			publishHealth()
 			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
@@ -4126,7 +4210,13 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// rather than idling on a gateway that protects nothing.
 	if len(succeeded) == 0 {
 		err := fmt.Errorf("multi-connector boot: all %d configured connectors failed setup", len(conns))
-		s.health.SetGuardrail(StateError, err.Error(), nil)
+		if refused := setupTransaction.admissionRefused; len(refused) == len(conns) && !setupTransaction.releaseRefused {
+			err = &hookContractAdmissionRefusal{connectors: refused, err: fmt.Errorf(
+				"%w: multi-connector boot: all %d configured connectors were refused: %s (rerun discovery/setup to refresh the lock; see the gateway log for each connector)",
+				ErrHookContractAdmission, len(conns), strings.Join(refused, ", "),
+			)}
+		}
+		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 		return err
 	}
 
@@ -4200,21 +4290,24 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		return nil
 	}
 
-	// Managed mode disables the local detectors, so remote inspection is
-	// all that stands between a tool call and its upstream. A build with
-	// no credential factory can never reach it.
-	if !cloudreg.Registered() {
-		err := fmt.Errorf(
-			"managed_enterprise requires managed-cloud support: %w",
-			cloudreg.ErrNoProviderRegistered,
-		)
-		s.health.SetGuardrail(StateError, err.Error(), nil)
-		return err
-	}
-	// A registered factory that fails now may only be waiting on the
-	// local agent, so probe once and report rather than refuse.
-	if _, err := s.ensureCMIDProvider(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: inspection unavailable at boot: %v\n", err)
+	// The Secure Client profile disables the local detectors, so remote
+	// inspection is all that stands between a tool call and its upstream,
+	// and a build with no credential factory can never reach it. The
+	// standalone profile decides locally and needs no cloud provider.
+	if s.currentConfig().ManagedAIDOnly() {
+		if !cloudreg.Registered() {
+			err := fmt.Errorf(
+				"managed_enterprise requires managed-cloud support: %w",
+				cloudreg.ErrNoProviderRegistered,
+			)
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		// A registered factory that fails now may only be waiting on the
+		// local agent, so probe once and report rather than refuse.
+		if _, err := s.ensureCMIDProvider(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: inspection unavailable at boot: %v\n", err)
+		}
 	}
 
 	type managedConnectorRegistration struct {
@@ -4284,6 +4377,9 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	}
 	publishHealth := func() {
 		covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, succeeded)
+		if s.currentConfig().StandaloneEnterprise() {
+			covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
+		}
 		state := StateStarting
 		enforcementEnabled := false
 		hint := "awaiting a trusted enterprise hook guardian authorization record"
@@ -4293,6 +4389,12 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
 		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
+		if s.currentConfig().StandaloneEnterprise() {
+			// The local policy engine always inspects; AI Defense only
+			// augments it, so its outage degrades rather than disables.
+			// addStandaloneAIDefenseHealth publishes the AI Defense state.
+			inspectionAvailable = true
+		}
 		detail := map[string]interface{}{
 			"summary":              summary,
 			"connectors":           succeeded,
@@ -4309,6 +4411,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			// say plainly that nothing is inspecting behind it.
 			detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
 		}
+		s.addStandaloneAIDefenseHealth(detail)
 		s.health.SetGuardrail(state, status, detail)
 	}
 	publishHealth()
@@ -4345,11 +4448,29 @@ type managedGuardianAuthorizationTarget struct {
 	OK        bool                           `json:"ok"`
 	Error     string                         `json:"error,omitempty"`
 	Result    *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// UID and HomeInode are written only by the standalone Unix guardian.
+	UID       int    `json:"uid,omitempty"`
+	HomeInode uint64 `json:"home_inode,omitempty"`
 }
 
 const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
 
 func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (bool, string) {
+	return managedGuardianAuthorizationCoverage(dataDir, connectorNames, false)
+}
+
+// managedGuardianStandaloneCoverage is the standalone view of the same
+// record: a user whose home or agent config the guardian cannot repair
+// must not flip the whole host (and every other user) to "starting". The
+// record must still be trusted, fresh and self-consistent; per-target
+// failures and pending targets are reported, not fatal, and a connector
+// nobody uses is not a gap. The hook socket already authorizes each user
+// against their own protected targets.
+func managedGuardianStandaloneCoverage(dataDir string) (bool, string) {
+	return managedGuardianAuthorizationCoverage(dataDir, nil, true)
+}
+
+func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []string, isolateTargets bool) (bool, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
 		return false, err.Error()
@@ -4427,6 +4548,32 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
 		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
 	}
+	if isolateTargets {
+		// A target whose current repair failed keeps its last successful
+		// row (so a user cannot unenroll by breaking their own home), so
+		// protected targets lie between the successes and the successes
+		// plus failures; anything else still fails closed.
+		if authorization.TargetCount < 0 || authorization.SuccessCount < 0 ||
+			authorization.FailureCount < 0 || authorization.PendingCount < 0 ||
+			authorization.SuccessCount+authorization.FailureCount+authorization.PendingCount != authorization.TargetCount ||
+			len(authorization.ProtectedTargets) < authorization.SuccessCount ||
+			len(authorization.ProtectedTargets) > authorization.SuccessCount+authorization.FailureCount {
+			return false, "hook guardian authorization is inconsistent"
+		}
+		if reason := managedGuardianProtectedTargetsError(authorization.ProtectedTargets); reason != "" {
+			return false, reason
+		}
+		if authorization.FailureCount > 0 || authorization.PendingCount > 0 {
+			return true, fmt.Sprintf(
+				"%d of %d guardian targets need attention (%d failed, %d pending); every other user stays protected",
+				authorization.FailureCount+authorization.PendingCount,
+				authorization.TargetCount,
+				authorization.FailureCount,
+				authorization.PendingCount,
+			)
+		}
+		return true, ""
+	}
 	if !authorization.OK ||
 		authorization.TargetCount < 0 ||
 		authorization.SuccessCount < 0 ||
@@ -4444,25 +4591,12 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 			authorization.FailureCount,
 		)
 	}
+	if reason := managedGuardianProtectedTargetsError(authorization.ProtectedTargets); reason != "" {
+		return false, reason
+	}
 	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
-	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))
 	for _, target := range authorization.ProtectedTargets {
-		if !target.OK || strings.TrimSpace(target.Error) != "" {
-			return false, "hook guardian authorization contains an unsuccessful protected target"
-		}
-		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
-		if connectorName == "" && target.Result != nil {
-			connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
-		}
-		key := managedGuardianTargetKey(target, connectorName)
-		if connectorName == "" || key == "" {
-			return false, "hook guardian authorization contains an incomplete protected target"
-		}
-		if _, duplicate := targets[key]; duplicate {
-			return false, fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
-		}
-		targets[key] = struct{}{}
-		covered[connectorName] = struct{}{}
+		covered[managedGuardianTargetConnector(target)] = struct{}{}
 	}
 	for _, name := range connectorNames {
 		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
@@ -4470,6 +4604,35 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		}
 	}
 	return true, ""
+}
+
+// managedGuardianProtectedTargetsError validates every protected target:
+// successful, complete and unique.
+func managedGuardianProtectedTargetsError(protected []managedGuardianAuthorizationTarget) string {
+	targets := make(map[string]struct{}, len(protected))
+	for _, target := range protected {
+		if !target.OK || strings.TrimSpace(target.Error) != "" {
+			return "hook guardian authorization contains an unsuccessful protected target"
+		}
+		connectorName := managedGuardianTargetConnector(target)
+		key := managedGuardianTargetKey(target, connectorName)
+		if connectorName == "" || key == "" {
+			return "hook guardian authorization contains an incomplete protected target"
+		}
+		if _, duplicate := targets[key]; duplicate {
+			return fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
+		}
+		targets[key] = struct{}{}
+	}
+	return ""
+}
+
+func managedGuardianTargetConnector(target managedGuardianAuthorizationTarget) string {
+	connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
+	if connectorName == "" && target.Result != nil {
+		connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
+	}
+	return connectorName
 }
 
 func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {
@@ -4615,6 +4778,12 @@ type multiConnectorSetupTransaction struct {
 	removed       []multiConnectorSetupRollbackPoint
 	activeState   *connector.ActiveConnectorStateSnapshot
 	hookLockState *connector.HookContractLockSnapshot
+	// admissionRefused lists connectors skipped cleanly at the hook-contract
+	// admission gate, before Setup touched them.
+	admissionRefused []string
+	// releaseRefused is set when a refusal came from this release's contract
+	// table for an agent an earlier release admitted.
+	releaseRefused bool
 }
 
 func captureSingleConnectorRollbackAuthority(
@@ -4774,6 +4943,8 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction = seed[0]
 		transaction.succeeded = nil
 		transaction.applied = nil
+		transaction.admissionRefused = nil
+		transaction.releaseRefused = false
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
@@ -4836,6 +5007,10 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					continue
 				}
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				transaction.admissionRefused = append(transaction.admissionRefused, registration.conn.Name())
+				if errors.Is(err, errReleaseContractRefusal) {
+					transaction.releaseRefused = true
+				}
 				continue
 			}
 			// Isolate: roll back this connector's partial state, log, leave
@@ -5020,6 +5195,8 @@ func priorConnectorSetupOpts(applied multiConnectorSetupRollbackPoint) (connecto
 	prior.HookExecutable = posture.HookExecutable
 	prior.CodexEnforcement = posture.CodexEnforcement
 	prior.ClaudeCodeEnforcement = posture.ClaudeCodeEnforcement
+	prior.ManagedHookSocket = posture.HookSocket
+	prior.ManagedServiceUID = posture.HookSocketServiceUID
 	return prior, nil
 }
 
@@ -5242,10 +5419,19 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
 	strictUnknownVersion := strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode")
+	previousLock := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name())
+	// See runGuardrail: an unchanged agent refused by this release's contract
+	// table is a release problem, not upstream drift.
+	markUnverified := func(err error) error {
+		if connector.AgentUnchangedSinceLock(previousLock, opts.AgentVersion) {
+			return fmt.Errorf("%w: %w", errReleaseContractRefusal, err)
+		}
+		return err
+	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason)
+		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		!actionMode && !strictUnknownVersion &&
@@ -5255,9 +5441,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason)
+		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
-	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
+	if previous := previousLock; previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
 		// Setup refreshes generated hook artifacts for every configured
 		// connector on boot. A stale generated digest is therefore a repair
@@ -5266,7 +5452,9 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		if connector.HookContractCompatibilityDrifted(previous, current) &&
 			actionMode &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-			return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+			if err := hookContractDriftAdmission(conn.Name(), previous, current); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -5424,11 +5612,27 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
+	fleetMode := strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode))
+	// A managed standalone deployment is hook-only. Its connectors come
+	// from guardrail.connectors, so configuredConnectorName falls back to
+	// claw.mode (default "openclaw") and the heuristic below would dial.
+	// The fleet client authenticates with the gateway's own API token,
+	// and on a managed host any local account can bind a loopback port
+	// such as the default 127.0.0.1:18789, so that dial would hand the
+	// token to whoever listens there. Dial only when the administrator
+	// enabled the fleet explicitly and pointed it at another machine.
+	if cfg.StandaloneEnterprise() {
+		switch fleetMode {
+		case "enabled", "on", "true":
+			return !gatewayHostIsThisMachine(cfg.Gateway.Host)
+		}
+		return false
+	}
 	// Explicit operator override wins over the heuristic. We
 	// intentionally fall THROUGH for any unrecognized value (incl.
 	// typos) instead of returning a default, so a config typo can't
 	// silently flip fleet integration on or off in production.
-	switch strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode)) {
+	switch fleetMode {
 	case "enabled", "on", "true":
 		return true
 	case "disabled", "off", "false":
@@ -5484,6 +5688,22 @@ func isLoopbackGatewayHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// gatewayHostIsThisMachine reports whether dialing host reaches a listener
+// on this machine: a loopback host, or an unspecified (bind-all) address
+// such as 0.0.0.0 or ::, which a dial also sends to the local host. The
+// managed standalone profile refuses both for the fleet dial.
+func gatewayHostIsThisMachine(host string) bool {
+	if isLoopbackGatewayHost(host) {
+		return true
+	}
+	h := strings.TrimSpace(strings.ToLower(host))
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		h = h[1 : len(h)-1]
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsUnspecified()
 }
 
 // verifyHookScriptsOnDisk checks that every hook script the connector
@@ -6165,6 +6385,55 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 // installed hook surface for this error — the existing registration is still
 // the last verified contract.
 var ErrHookContractAdmission = errors.New("hook contract admission failed")
+
+// GuardrailHookContractAdmissionRefused is the guardrail health detail that
+// lists the connectors refused by the hook-contract admission gate when that
+// refusal alone stopped the guardrail. The rest of the gateway keeps running.
+const GuardrailHookContractAdmissionRefused = "hook_contract_admission_refused"
+
+// errReleaseContractRefusal marks an admission refusal that this release's
+// hook-contract table caused for an agent a previous release admitted. It is
+// never reported as upstream drift (exit 3): an upgrade must roll back.
+var errReleaseContractRefusal = errors.New("refused by this release's hook-contract table for an agent that an earlier release admitted")
+
+// hookContractAdmissionRefusal names the connectors behind a guardrail that
+// stopped at the admission gate, so health can report them without parsing
+// error text. It matches ErrHookContractAdmission.
+type hookContractAdmissionRefusal struct {
+	connectors []string
+	err        error
+}
+
+func (e *hookContractAdmissionRefusal) Error() string { return e.err.Error() }
+
+func (e *hookContractAdmissionRefusal) Unwrap() error { return e.err }
+
+func guardrailFailureDetails(err error) map[string]interface{} {
+	var refusal *hookContractAdmissionRefusal
+	if !errors.As(err, &refusal) || len(refusal.connectors) == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		GuardrailHookContractAdmissionRefused: append([]string(nil), refusal.connectors...),
+	}
+}
+
+// hookContractDriftAdmission refuses upstream agent drift. A contract change
+// that only a different DefenseClaw release introduced for the same agent
+// version is expected after an upgrade or rollback: it is logged and admitted,
+// and the Setup that follows refreshes the lock.
+func hookContractDriftAdmission(name string, previous, current connector.HookContractLockEntry) error {
+	if connector.HookContractChangedByDefenseClawRelease(previous, current) {
+		writer := "an earlier DefenseClaw release"
+		if previous.DefenseClawVersion != "" {
+			writer = "DefenseClaw " + previous.DefenseClawVersion
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook contract %s (written by %s) is now %s in DefenseClaw %s; agent version %q is unchanged, refreshing the lock\n",
+			name, previous.ContractID, writer, current.ContractID, current.DefenseClawVersion, current.RawAgentVersion)
+		return nil
+	}
+	return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, name, previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+}
 
 func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connector.Connector) error {
 	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)

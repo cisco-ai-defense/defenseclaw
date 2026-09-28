@@ -1,0 +1,3 @@
+# The unprivileged account the DefenseClaw gateway runs as. An existing
+# account with this name is reused as is.
+u defenseclaw - "DefenseClaw gateway" /var/lib/defenseclaw /usr/sbin/nologin

@@ -249,9 +249,9 @@ already exists. Enrollment, rotation, and revocation hold a persistent OS file
 lock across the complete record/index transaction, so independent gateway,
 guardian, and administrator processes cannot interleave credential state.
 
-The managed Windows payload and macOS managed runtime include
-`defenseclaw-acp` as a separately hashed and protected executable. On Linux,
-install it beside `defenseclaw-gateway` under `/opt/defenseclaw/bin`.
+The managed Windows payload, the macOS managed runtime and the Linux deb, rpm
+and payload archive include `defenseclaw-acp` as a separately hashed and
+protected executable (`/opt/defenseclaw/bin/defenseclaw-acp` on Linux).
 
 | UX and custody | Normal user mode | Managed enterprise mode |
 | --- | --- | --- |

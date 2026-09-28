@@ -13,6 +13,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func appFloatPtr(v float64) *float64 { return &v }
@@ -226,5 +228,29 @@ func TestApplicationProtectionEffectiveEnabled(t *testing.T) {
 	}
 	if !cfg.EffectiveEnabled("cursor") {
 		t.Error("EffectiveEnabled(cursor) = false, want true")
+	}
+}
+
+// Standalone Devin runs the administrator-owned hook with
+// --enterprise-managed, which fails closed: an administrator's
+// hook_fail_mode open for Devin must not leave the config, the lock and
+// status saying "open" while the hook fails closed. Other profiles keep the
+// configured value.
+func TestStandaloneDevinHookFailModeIsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, mode, profile, want string
+	}{
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone, "closed"},
+		{"secure client", managed.DeploymentModeManagedEnterprise, managed.ProfileSecureClient, "open"},
+		{"per-user", "", "", "open"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{DeploymentMode: test.mode}
+			cfg.Enterprise.Profile = test.profile
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"devin": {HookFailMode: "open"}}
+			if got := cfg.EffectiveHookFailModeForConnector("devin"); got != test.want {
+				t.Fatalf("devin hook fail mode = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
