@@ -53,11 +53,18 @@ LABEL_PRIORITY: tuple[str, ...] = (
 )
 
 
+_SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
 def _label(key: str, name: str, unread: int) -> str:
-    """``"2 Alerts (3)"``, or ``"2(3)"`` when ``name`` is empty."""
+    """``"2 Alerts (3)"``, or ``"2³"`` when ``name`` is empty.
+
+    A letter-only tab shows its unread count as superscript digits, so the
+    badge costs one cell per digit instead of ``"(3)"``'s three.
+    """
 
     if not name:
-        return f"{key}({unread})" if unread else key
+        return f"{key}{str(unread).translate(_SUPERSCRIPT)}" if unread else key
     return f"{key} {name} ({unread})" if unread else f"{key} {name}"
 
 

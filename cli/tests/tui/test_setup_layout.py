@@ -165,3 +165,15 @@ def test_status_line_has_no_debug_text(hermetic) -> None:
 
     assert "backend=" not in app._status_text()  # noqa: SLF001
     assert "hints=" not in app._status_text()  # noqa: SLF001
+
+
+def test_every_tab_fits_at_80_columns_with_unread_badges() -> None:
+    # 80 columns, no title: 80 - 2 (padding) - 12 (the : and ? buttons).
+    unread = {"alerts": 2, "logs": 2, "audit": 1, "activity": 1, "ai": 2}
+    for active in ("overview", "policies", "setup"):
+        labels = fit_tab_labels(FIFTEEN_PANELS, active, unread, 66)
+        assert strip_width(tuple(labels.values())) <= 66, active
+        for name, key, _label in FIFTEEN_PANELS:
+            assert labels[name].startswith(key)
+    # Letter-only tabs keep their badge, as superscript digits.
+    assert fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)["logs"] == "8²"
