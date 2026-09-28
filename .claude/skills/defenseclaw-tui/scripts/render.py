@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -145,6 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     home = Path(tempfile.mkdtemp(prefix="dc-tui-render-"))
+    try:
+        return _main(args, home)
+    finally:
+        # Every run gets a fresh scratch home; don't leave them behind.
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def _main(args: argparse.Namespace, home: Path) -> int:
     os.environ.setdefault("DEFENSECLAW_HOME", str(home))
     _stub_host_probes()
 

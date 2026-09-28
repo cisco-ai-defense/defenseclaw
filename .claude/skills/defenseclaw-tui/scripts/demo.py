@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -87,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Setup panel config: a full default config (default) or an empty one",
     )
     parser.add_argument(
+        "--keep-home",
+        action="store_true",
+        help="keep the scratch home after exit (to inspect what --real-exec wrote)",
+    )
+    parser.add_argument(
         "--real-exec",
         action="store_true",
         help="run confirmed commands for real (inside the scratch home) instead of echoing them",
@@ -102,8 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         _install_fake_executor(app)
     if args.panel:
         app.call_after_refresh(app.action_switch_panel, args.panel)
-    app.run()
-    print(f"scratch home: {root}")
+    try:
+        app.run()
+    finally:
+        if args.keep_home:
+            print(f"scratch home kept: {root}")
+        else:
+            shutil.rmtree(root, ignore_errors=True)
     return 0
 
 

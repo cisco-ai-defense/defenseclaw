@@ -128,8 +128,9 @@ doctor, and a temp `DEFENSECLAW_HOME`).
   `--expect TEXT`, `--svg PATH`, `--list-panels`.
 - `scripts/demo.py`: runs the same app interactively. HOME, DEFENSECLAW_HOME,
   CLAUDE_CONFIG_DIR and CODEX_HOME point into a scratch dir. Confirmed commands
-  only echo their argv unless you pass `--real-exec`. Options: `--panel`,
-  `--first-run`, `--setup-config`.
+  only echo their argv unless you pass `--real-exec`. The scratch home is deleted
+  on exit unless you pass `--keep-home`. Options: `--panel`, `--first-run`,
+  `--setup-config`, `--real-exec`, `--keep-home`.
 - `scripts/gap_audit.py`: Click tree against palette rows, TUI argv literals and
   `--json`. Options: `--missing-only`, `--groups`, `--prefix`.
 - `scripts/touchpoints.py PANEL [--stem S]`: which per-panel if-chains mention

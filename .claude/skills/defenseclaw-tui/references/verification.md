@@ -36,7 +36,8 @@ This is the same hermetic app, running for real. HOME, DEFENSECLAW_HOME,
 CLAUDE_CONFIG_DIR and CODEX_HOME point into a fresh `mktemp` dir. Confirmed
 commands only print `demo: would run: <argv>` (and `<stdin: N chars>` for
 secrets) and exit 0, so follow-ups and refreshes still fire. `--real-exec`
-runs the real CLI inside the scratch home.
+runs the real CLI inside the scratch home; add `--keep-home` to inspect what it
+wrote (the home is deleted on exit otherwise, as `render.py` does every run).
 
 ```bash
 S=.claude/skills/defenseclaw-tui/scripts
