@@ -86,6 +86,11 @@ func TestSetupNonInteractive(t *testing.T) {
 		t.Fatal(err)
 	}
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml, Backup: toml + ".defenseclaw.bak"}}, Restarted: true}
+	// No sandbox runs on the gateway, so setup may restart it.
+	idle := openshelltest.New().Client(openshell.ClientOptions{})
+	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+		return noCloseClient{idle}, &openshell.Registration{Name: "openshell"}, nil
+	}
 	err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, Yes: true, Wrappers: true})
 	if err != nil {
 		t.Fatalf("Setup: %v\n%s", err, ta.output())
@@ -114,6 +119,71 @@ func TestSetupNonInteractive(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("setup output lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestSetupLeavesTheGatewayRunningSandboxes pins that setup never restarts
+// the shared OpenShell gateway under running sandboxes (of any owner) on
+// its own: without a terminal (or with --yes) it leaves the change for
+// `doctor --fix`, a terminal asks with no as the default, and
+// --restart-gateway restarts it.
+func TestSetupLeavesTheGatewayRunningSandboxes(t *testing.T) {
+	ctx := context.Background()
+	fake := openshelltest.New()
+	client := fake.Client(openshell.ClientOptions{})
+	for _, name := range []string{"dc-claude-theirs", "dc-codex-mine"} {
+		if _, err := client.CreateSandbox(ctx, name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{
+			Labels: map[string]string{manager.LabelManaged: "true", manager.LabelOwner: "someone-" + name}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := fake.SetPhase(openshell.DefaultWorkspace, name, openshell.PhaseReady); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := func(t *testing.T, input string, tty bool, o SetupOptions) *testApp {
+		t.Helper()
+		ta := newTestApp(t, input)
+		ta.IO.TTY = tty
+		writeConfig(t, ta, "")
+		ta.HostDoctor = hostReport(nil)
+		ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+			return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
+		}
+		o.SkipImages, o.NoWrappers = true, true
+		if err := ta.Setup(ctx, o); err != nil {
+			t.Fatalf("Setup: %v\n%s", err, ta.output())
+		}
+		return ta
+	}
+	for _, tc := range []struct {
+		name    string
+		input   string
+		tty     bool
+		o       SetupOptions
+		applied int
+	}{
+		{"non-interactive", "", false, SetupOptions{NonInteractive: true}, 0},
+		{"yes", "", true, SetupOptions{Yes: true}, 0},
+		{"a terminal answers no by default", "\n\n\n", true, SetupOptions{}, 0},
+		{"a terminal answers yes", "\n\ny\n", true, SetupOptions{}, 1},
+		{"--restart-gateway", "", false, SetupOptions{NonInteractive: true, RestartGateway: true}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setup(t, tc.input, tc.tty, tc.o)
+			if len(ta.gateway.planned) != 1 || ta.gateway.applied != tc.applied {
+				t.Fatalf("gateway plans = %+v, applied %d, want %d\n%s", ta.gateway.planned, ta.gateway.applied, tc.applied, ta.output())
+			}
+			out := ta.output()
+			if tc.o.RestartGateway {
+				return
+			}
+			if !strings.Contains(out, "drops the connections of every sandbox on it, and 2 sandboxes run on it (dc-claude-theirs, dc-codex-mine)") {
+				t.Fatalf("output does not name the running sandboxes:\n%s", out)
+			}
+			if tc.applied == 0 && !strings.Contains(out, "skipped: the OpenShell gateway change above (it restarts the gateway; apply it with `defenseclaw sandbox doctor --fix`") {
+				t.Fatalf("output does not say how to apply the change later:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -218,8 +288,8 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 // that file (and restarts the gateway) for a change that does nothing.
 func TestSetupOnMacOSLeavesTelemetryAlone(t *testing.T) {
 	for _, upstream := range []bool{false, true} {
-		// On a terminal: the only question is the bind mounts one.
-		ta := newTestApp(t, "y\n")
+		// On a terminal: the bind mounts question and the restart it needs.
+		ta := newTestApp(t, "y\ny\n")
 		ta.GOOS = "darwin"
 		writeConfig(t, ta, "")
 		ta.HostDoctor = hostReport(nil)

@@ -146,6 +146,13 @@ What setup does, in order:
    host mounts; agents cannot reach the gateway, and DefenseClaw mounts only
    the folder you launch from. Say no, or pass `--no-mounts`, and every run
    works on a copy instead.
+
+   The gateway is shared, so a restart drops the connections of every
+   sandbox on it, whoever runs it. When sandboxes are running, setup lists
+   them and asks before it restarts the gateway (the default answer is no).
+   With `--yes` or `--non-interactive` it doesn't restart the gateway; it
+   leaves the change for `defenseclaw sandbox doctor --fix` or
+   `defenseclaw sandbox setup --restart-gateway`.
 4. **Turns OpenShell's anonymous usage telemetry off** on Linux, unless you
    keep it (`--upstream-telemetry`). Setup does this in the gateway's
    `gateway.env`, which only the Linux systemd service reads. On macOS the
@@ -170,6 +177,7 @@ What setup does, in order:
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
 | `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. On macOS it stays on either way. |
 | `--skip-images` | Don't build images now; the first run builds its image. |
+| `--restart-gateway` | Restart the OpenShell gateway to apply its configuration even while sandboxes run on it. |
 | `--non-interactive` | Never prompt: take the defaults and skip steps that need consent. |
 | `--yes`, `-y` | Answer every question with its default. |
 

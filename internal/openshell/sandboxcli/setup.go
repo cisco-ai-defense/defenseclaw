@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -71,6 +72,9 @@ type SetupOptions struct {
 	Harnesses         []string
 	UpstreamTelemetry bool
 	SkipImages        bool
+	// RestartGateway lets setup restart the OpenShell gateway to apply its
+	// configuration while sandboxes run on it (see consentGatewayRestart).
+	RestartGateway bool
 }
 
 // Setup is the one-time `sandbox setup` flow: host checks, the consented
@@ -178,6 +182,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			changes.UnsetEnv = []string{openshell.EnvTelemetryEnabled}
 		}
 	}
+	// Steps left out say so at the end, with the command that does them.
+	var skipped []string
 	if changes.EnableBindMounts || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
 		plan, err := a.Gateway.Plan(ctx, changes)
 		if err != nil {
@@ -187,14 +193,23 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			for _, l := range strings.Split(strings.TrimRight(plan.String(), "\n"), "\n") {
 				a.note(l)
 			}
-			res, err := a.Gateway.Apply(ctx, plan)
-			if rerr := a.recordGatewayApply(res); rerr != nil {
-				a.warn("could not record the gateway change for teardown: " + rerr.Error())
-			}
+			restart, err := a.consentGatewayRestart(ctx, o, assume)
 			if err != nil {
-				return fmt.Errorf("change the gateway configuration: %w", err)
+				return err
 			}
-			a.ok("gateway configured and restarted")
+			if restart {
+				res, err := a.Gateway.Apply(ctx, plan)
+				if rerr := a.recordGatewayApply(res); rerr != nil {
+					a.warn("could not record the gateway change for teardown: " + rerr.Error())
+				}
+				if err != nil {
+					return fmt.Errorf("change the gateway configuration: %w", err)
+				}
+				a.ok("gateway configured and restarted")
+			} else {
+				skipped = append(skipped, "the OpenShell gateway change above (it restarts the gateway; apply it with `"+
+					CommandName+" doctor --fix` or `"+CommandName+" setup --restart-gateway`)")
+			}
 		}
 	}
 	if copyOnly {
@@ -253,8 +268,6 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return err
 		}
 	}
-	// Steps left out say so at the end, with the command that does them.
-	var skipped []string
 	cmd := "claude"
 	if len(specs) > 0 {
 		cmd = specs[0].Command
@@ -290,6 +303,58 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	a.println()
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
+}
+
+// consentGatewayRestart decides whether setup restarts the OpenShell
+// gateway to apply its configuration. The gateway is shared: a restart
+// drops the connections of every sandbox on it, of every owner and data
+// dir. With none running it restarts; otherwise the user is asked (no by
+// default), and --yes, --non-interactive or no terminal restart only with
+// --restart-gateway. A gateway whose sandboxes cannot be listed counts as
+// running some.
+func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume bool) (bool, error) {
+	if o.RestartGateway {
+		return true, nil
+	}
+	running, known := a.runningSandboxes(ctx)
+	if known && len(running) == 0 {
+		return true, nil
+	}
+	what := "the sandboxes on it could not be listed, so some may be running"
+	if known {
+		shown := running
+		if len(shown) > 5 {
+			shown = append(slices.Clip(shown[:5]), fmt.Sprintf("%d more", len(running)-5))
+		}
+		what = plural(int64(len(running)), "sandbox runs", "sandboxes run") + " on it (" + strings.Join(shown, ", ") + ")"
+	}
+	a.warn("applying this restarts the OpenShell gateway, which drops the connections of every sandbox on it, and " + what)
+	return a.ask("Restart the OpenShell gateway now?", false, assume)
+}
+
+// runningSandboxes names the sandboxes on the OpenShell gateway that a
+// restart would disrupt, of every owner. known is false when the gateway
+// could not list them.
+func (a *App) runningSandboxes(ctx context.Context) (names []string, known bool) {
+	c, _, err := a.OpenShell(ctx)
+	if err != nil {
+		return nil, false
+	}
+	defer c.Close()
+	list, err := c.ListSandboxes(ctx, nil)
+	if err != nil {
+		return nil, false
+	}
+	for _, sb := range list {
+		if sb == nil {
+			continue
+		}
+		if sb.Status.Phase == openshell.PhaseReady || sb.Status.Phase == openshell.PhaseProvisioning {
+			names = append(names, sb.Name)
+		}
+	}
+	sort.Strings(names)
+	return names, true
 }
 
 func failed(rep *openshell.DoctorReport, id string) bool {

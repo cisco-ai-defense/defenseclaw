@@ -148,6 +148,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("upstream-telemetry", "bool", "keep OpenShell's anonymous usage telemetry on"),
             _Flag("skip-images", "bool", "do not build the harness images now (the first run builds them)"),
+            _Flag(
+                "restart-gateway",
+                "bool",
+                "restart the OpenShell gateway to apply its configuration even while sandboxes run on it",
+            ),
         ),
         example="defenseclaw sandbox setup\ndefenseclaw sandbox setup --non-interactive --harness claudecode",
     ),

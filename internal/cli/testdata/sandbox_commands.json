@@ -660,6 +660,11 @@
         "default": "false"
       },
       {
+        "name": "restart-gateway",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "skip-images",
         "type": "bool",
         "default": "false"

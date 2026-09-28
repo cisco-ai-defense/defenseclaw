@@ -155,6 +155,7 @@ keep it, records the harnesses, offers shell wrappers and builds the harness ima
 	f.StringSliceVar(&o.Harnesses, "harness", nil, "harness to set up (repeatable; default: openshell.harnesses, else claude and codex)")
 	f.BoolVar(&o.UpstreamTelemetry, "upstream-telemetry", false, "keep OpenShell's anonymous usage telemetry on")
 	f.BoolVar(&o.SkipImages, "skip-images", false, "do not build the harness images now (the first run builds them)")
+	f.BoolVar(&o.RestartGateway, "restart-gateway", false, "restart the OpenShell gateway to apply its configuration even while sandboxes run on it")
 	return cmd
 }
 
