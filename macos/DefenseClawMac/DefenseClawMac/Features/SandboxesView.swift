@@ -296,9 +296,12 @@ struct SandboxAskRow: View {
             HStack(spacing: 6) {
                 Image(systemName: ask.risky ? "exclamationmark.shield.fill" : "questionmark.circle")
                     .foregroundStyle(ask.risky ? Cisco.orange : Cisco.blue)
-                Text("\(ask.sandbox) wants \(ask.kindLabel): \(ask.destination)")
+                // Every endpoint Approve opens, not only the first: one ask
+                // can cover several ports of one host.
+                Text("\(ask.sandbox) wants \(ask.kindLabel): \(ask.opens)")
                     .font(.caption.weight(.medium))
-                    .lineLimit(compact ? 1 : 2)
+                    .lineLimit(compact ? 2 : 3)
+                    .help(ask.opens)
             }
             if !compact, !(ask.reason.isEmpty && ask.binary.isEmpty) {
                 Text([ask.binary, ask.reason].filter { !$0.isEmpty }.joined(separator: " · "))
@@ -306,7 +309,10 @@ struct SandboxAskRow: View {
                     .foregroundStyle(.secondary)
             }
             HStack {
-                Button("Approve") { Task { await appState.decideSandboxAsk(ask, approve: true) } }
+                Button(ask.endpoints.count > 1 ? "Approve all \(ask.endpoints.count)" : "Approve") {
+                    Task { await appState.decideSandboxAsk(ask, approve: true) }
+                }
+                .help("Opens \(ask.opens) for \(ask.sandbox)")
                 if !compact { Button("Always…", action: always) }
                 Button("Reject") { Task { await appState.decideSandboxAsk(ask, approve: false) } }
             }

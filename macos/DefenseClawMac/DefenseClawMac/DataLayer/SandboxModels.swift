@@ -124,6 +124,9 @@ struct SandboxAsk: Identifiable, Sendable, Hashable {
     var host = ""
     var port = 0
     var binary = ""
+    /// Every host:port approving opens: one ask can cover several ports of
+    /// one host (triage.withPorts), while host and port name only the first.
+    var endpoints: [String] = []
     var risky = false
     var reason = ""
     var rationale = ""
@@ -131,6 +134,8 @@ struct SandboxAsk: Identifiable, Sendable, Hashable {
     var createdAt: Date?
 
     var destination: String { host.isEmpty ? "—" : SandboxFormat.hostPort(host, port) }
+    /// What Approve opens: every endpoint when there are several.
+    var opens: String { endpoints.count > 1 ? endpoints.joined(separator: ", ") : destination }
     var kindLabel: String {
         switch kind {
         case "host_port": "a port on this machine"
@@ -542,6 +547,11 @@ enum SandboxDecoding {
                 host: str(d["host"]),
                 port: int(d["port"]),
                 binary: str(d["binary"]),
+                endpoints: list(d["endpoints"]).compactMap { item in
+                    let endpoint = dict(item)
+                    let host = str(endpoint["host"])
+                    return host.isEmpty ? nil : SandboxFormat.hostPort(host, int(endpoint["port"]))
+                },
                 risky: (d["risky"] as? Bool) ?? false,
                 reason: str(d["reason"]),
                 rationale: str(d["rationale"]),

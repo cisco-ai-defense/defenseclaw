@@ -37,6 +37,7 @@ struct SandboxModelTests {
         failedHookCallsAreAnAlert()
         unblockedDestinationsAreNoLongerOffered()
         askTextIsTheDaemonsSentence()
+        anAskShowsEveryPortItOpens()
         notificationUnblockNeedsAnUnlockedMac()
         noAsksTextHoldsForEveryPackAndMatchesTheTUI()
         if failureCount > 0 {
@@ -358,6 +359,21 @@ struct SandboxModelTests {
                "ask body: \(notes.first?.body ?? "nil")")
         expect(notes.last?.body == "It wants to reach 10.0.0.5:22. Review it in DefenseClaw.",
                "bare ask body: \(notes.last?.body ?? "nil")")
+    }
+
+    private static func anAskShowsEveryPortItOpens() {
+        let asks = SandboxDecoding.approvals(from: ["approvals": [
+            ["id": "a1", "sandbox": "myapp", "kind": "host_port", "status": "pending", "risky": true,
+             "host": "host.openshell.internal", "port": 5432,
+             "endpoints": [["host": "host.openshell.internal", "port": 5432],
+                           ["host": "host.openshell.internal", "port": 6379]]],
+            ["id": "a2", "sandbox": "myapp", "status": "pending", "host": "api.example.com", "port": 443,
+             "endpoints": [["host": "api.example.com", "port": 443]]],
+        ]])
+        expect(asks[0].endpoints == ["host.openshell.internal:5432", "host.openshell.internal:6379"], "endpoints decode")
+        expect(asks[0].opens == "host.openshell.internal:5432, host.openshell.internal:6379",
+               "Approve names every port it opens: \(asks[0].opens)")
+        expect(asks[1].opens == "api.example.com", "one endpoint reads as the destination")
     }
 
     private static func notificationUnblockNeedsAnUnlockedMac() {
