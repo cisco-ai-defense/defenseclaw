@@ -1257,7 +1257,7 @@
       "consumers": [
         {
           "location": "test/e2e/openshell/hookonly_e2e_test.go",
-          "description": "Live hook-only harness sandbox test (openshell_integration build tag)"
+          "description": "Live hook-only harness sandbox test (openshell_integration build tag, on branch test/openshell-live)"
         }
       ],
       "since": "0.9.0"
@@ -3866,6 +3866,25 @@
         {
           "location": "internal/openshell/harness/harness.go",
           "description": "Spec.Env passes it to the sandbox for attribution"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_RENDER_DIR",
+      "category": "test_fixture",
+      "purpose": "Names a directory TestSandboxArtifactsGolden writes each harness's rendered sandbox overlay under (<dir>/<connector>/<in-image path>), so a manifest drift can be reviewed by diffing the trees two revisions render.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/sandbox_artifacts_test.go",
+          "description": "Writes the rendered sandbox artifacts for review"
         }
       ],
       "since": "0.9.0"
