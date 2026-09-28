@@ -12,7 +12,9 @@ import sqlite3
 import subprocess
 import textwrap
 import time
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -224,6 +226,27 @@ async def _communicate_captured(
     _close_async_process_transport(process)
     await asyncio.sleep(0)
     return process.returncode or 0, stdout, stderr
+
+
+# On Windows every Textual timer waits out each sleep on a thread of the
+# loop's default executor (a high-resolution waitable timer). The TUI keeps
+# over a dozen timers running (the pollers, the metric progress bars, the
+# strip tick, the screen refresh), more than the stock min(32, CPUs + 4)
+# workers of a 4-8 CPU machine, so the screen refresh and the panel render
+# threads queued behind 30-60 s poll sleeps and a tab took seconds to paint.
+_WINDOWS_EXECUTOR_WORKERS = 64
+_WIDENED_LOOPS: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
+
+
+def _widen_windows_default_executor(loop: asyncio.AbstractEventLoop, *, platform: str | None = None) -> None:
+    """Give Textual's per-timer sleeper threads room on Windows."""
+
+    if (os.name if platform is None else platform) != "nt" or loop in _WIDENED_LOOPS:
+        return
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=_WINDOWS_EXECUTOR_WORKERS, thread_name_prefix="defenseclaw-tui")
+    )
+    _WIDENED_LOOPS.add(loop)
 
 
 TOKENS = DEFAULT_TOKENS
@@ -1903,6 +1926,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # frame under a new active-panel value.
                 self._render_chrome_if_generation(panel, self._panel_render_generation)
         return super().export_screenshot(title=title, simplify=simplify)
+
+    def on_load(self) -> None:
+        # Load runs before compose and mount start any timer.
+        _widen_windows_default_executor(asyncio.get_running_loop())
 
     def on_mount(self) -> None:
         self._app_shutting_down = False
