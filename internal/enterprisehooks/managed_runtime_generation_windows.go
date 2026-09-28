@@ -307,19 +307,21 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 	}
 
 	for attempt := 0; attempt < windowsManagedRuntimeSelectorReadAttempts; attempt++ {
-		selector, first, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, false)
+		selector, first, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return result, err
 		}
 		if !exists {
-			return result, errors.New(
-				"enterprise hooks: managed runtime generation selector is absent",
+			return result, fmt.Errorf(
+				"enterprise hooks: managed runtime generation selector is absent: %w",
+				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
 		entry, ok := windowsManagedRuntimeSelectorTargetForSID(selector, opts.TargetSID)
 		if !ok {
-			return result, errors.New(
-				"enterprise hooks: registered SID is absent from the managed runtime generation selector",
+			return result, fmt.Errorf(
+				"enterprise hooks: registered SID is absent from the managed runtime generation selector: %w",
+				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
 		if err := validateWindowsManagedRuntimeSelectorTargetAgainstResolve(entry, opts); err != nil {
