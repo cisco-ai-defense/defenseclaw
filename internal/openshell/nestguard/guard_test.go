@@ -638,6 +638,26 @@ func TestRepositoryInUnlistableFolder(t *testing.T) {
 	}
 }
 
+// TestManyUnwatchableFoldersFallBackToPolling: events mode rechecks every
+// folder it could not watch on each interval; past maxUnwatched that is a
+// sweep, so the guard polls instead.
+func TestManyUnwatchableFoldersFallBackToPolling(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("inotify only")
+	}
+	skipRoot(t)
+	root := realTemp(t)
+	for i := 0; i <= maxUnwatched; i++ {
+		mkdirMode(t, filepath.Join(root, "d"+strconv.Itoa(i)), 0)
+	}
+	var c collector
+	g, err := New(Options{Root: root, OnDetect: c.add, Mode: ModeEvents, PollInterval: 50 * time.Millisecond, Gitlinks: noLinks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGuard(t, g, ModePoll)
+}
+
 func TestWatchLimitFallsBackToPolling(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("inotify only")

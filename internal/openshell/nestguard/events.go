@@ -104,6 +104,11 @@ func (g *Guard) runEvents(ctx context.Context) error {
 					return err
 				}
 				if errors.Is(err, fs.ErrPermission) {
+					if len(unwatched) >= maxUnwatched {
+						// Rechecking that many on every interval is a
+						// sweep: poll instead.
+						return errWatchLimit
+					}
 					unwatched[p] = true
 					g.probe(p)
 				}
@@ -251,6 +256,10 @@ func (g *Guard) runEvents(ctx context.Context) error {
 }
 
 var errWatchLimit = errors.New("nestguard: file-watch limit reached")
+
+// maxUnwatched bounds the folders events mode rechecks on every interval
+// because they could not be watched; past it the guard polls.
+const maxUnwatched = 1024
 
 // GitGitlinks lists the gitlinks (mode 160000) of the index of the git
 // repository at root, through gitsafe so no repository configuration can

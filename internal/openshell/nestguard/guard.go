@@ -519,7 +519,7 @@ func scan(root, rel string, maxEntries int, skip func(string) bool) ([]string, b
 	truncated := false
 	err = filepath.WalkDir(start, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			if p == start {
+			if p == start && (p == root || !errors.Is(walkErr, fs.ErrPermission)) {
 				return walkErr
 			}
 			if d != nil && d.IsDir() {
