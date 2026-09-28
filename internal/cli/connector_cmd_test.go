@@ -48,6 +48,7 @@ func TestMain(m *testing.M) {
 		serveCodexPolicyFixture()
 		os.Exit(0)
 	}
+	isolatePerUserGatewayGateFromHost()
 	os.Exit(m.Run())
 }
 
