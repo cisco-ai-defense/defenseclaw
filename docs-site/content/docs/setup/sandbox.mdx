@@ -127,8 +127,9 @@ to check the machine without changing anything.
 In the DefenseClaw macOS app, open **Setup** and choose **Sandbox**. The
 wizard asks the same questions as the TUI and runs the same
 `defenseclaw sandbox setup --non-interactive` command, except that it never
-installs OpenShell: the installer needs `sudo`, so if OpenShell is missing,
-run `defenseclaw sandbox setup --install-openshell` in a terminal first.
+installs OpenShell: if OpenShell is missing, run
+`defenseclaw sandbox setup --install-openshell` in a terminal first (on a Mac
+it installs NVIDIA's `nvidia/openshell` Homebrew formula).
 It has no telemetry question: setup cannot turn OpenShell's telemetry off on
 a Mac (see step 4 below).
 

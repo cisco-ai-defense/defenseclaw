@@ -4761,7 +4761,13 @@ def sandbox_wizard_fields(
                 visible_when=is_setup,
             )
         )
-    installer = "NVIDIA's pinned, sha256-verified installer (uses sudo; the terminal asks for your password)"
+    macos = (host_os() if os_name is None else os_name).strip().lower() == "darwin"
+    # On macOS the installer installs a Homebrew formula, without sudo.
+    installer = "NVIDIA's pinned, sha256-verified installer " + (
+        "(it installs the nvidia/openshell Homebrew formula; no sudo)"
+        if macos
+        else "(uses sudo; the terminal asks for your password)"
+    )
     if machine is None:
         machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
         install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
@@ -4806,7 +4812,7 @@ def sandbox_wizard_fields(
             visible_when=is_setup,
         ),
     ]
-    if (host_os() if os_name is None else os_name).strip().lower() != "darwin":
+    if not macos:
         fields.append(
             WizardFormField(
                 "Disable OpenShell Telemetry",

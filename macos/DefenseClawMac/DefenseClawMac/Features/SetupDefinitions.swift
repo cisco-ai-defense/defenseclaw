@@ -777,15 +777,16 @@ enum TUIWizards {
     )
 
     /// OpenShell sandbox setup (TUI Setup slot 13). The argv mirrors the TUI's
-    /// `_build_sandbox_args` byte for byte. The OpenShell installer needs sudo
-    /// and so a terminal; the app never passes --install-openshell. Like the
-    /// TUI on macOS it has no telemetry question: the Homebrew gateway does
-    /// not read gateway.env, so setup cannot turn OpenShell's telemetry off.
+    /// `_build_sandbox_args` byte for byte. The OpenShell install runs in a
+    /// terminal (on a Mac it installs NVIDIA's Homebrew formula); the app
+    /// never passes --install-openshell. Like the TUI on macOS it has no
+    /// telemetry question: the Homebrew gateway does not read gateway.env,
+    /// so setup cannot turn OpenShell's telemetry off.
     private static let sandbox = WizardDefinition(
         id: "sandbox", title: "Sandbox", icon: "cube.transparent",
         blurb: "Run Claude Code and Codex in NVIDIA OpenShell sandboxes that see only your project folder. "
             + "Needs Docker. If OpenShell is missing, run `defenseclaw sandbox setup --install-openshell` "
-            + "in a terminal (it uses sudo).",
+            + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula).",
         baseArgs: ["sandbox", "setup"],
         commandBuilder: sandboxCommands,
         validation: sandboxValidation,

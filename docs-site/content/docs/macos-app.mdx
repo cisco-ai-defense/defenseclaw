@@ -134,8 +134,9 @@ machine), **Claude Code** and **Codex** (at least one; defaults follow
 does not read `gateway.env`, so setup cannot turn OpenShell's anonymous usage
 telemetry off on a Mac (see [sandbox setup](/docs/setup/sandbox)).
 
-The app never installs OpenShell: NVIDIA's installer needs `sudo` and so a
-terminal. When OpenShell is missing, run this in Terminal first:
+The app never installs OpenShell. When OpenShell is missing, run this in
+Terminal first; it installs NVIDIA's `nvidia/openshell` Homebrew formula and
+starts its gateway with `brew services`:
 
 ```bash
 defenseclaw sandbox setup --install-openshell

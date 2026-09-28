@@ -323,6 +323,18 @@ def test_an_installed_openshell_needs_no_install() -> None:
     assert install.value == "no" and install.hint == "OpenShell 0.1.1 is installed; nothing to install."
 
 
+@pytest.mark.parametrize(
+    ("os_name", "says", "never"),
+    [("linux", "uses sudo", "Homebrew"), ("darwin", "nvidia/openshell Homebrew formula", "uses sudo")],
+)
+def test_the_install_hint_says_how_openshell_is_installed(os_name: str, says: str, never: str) -> None:
+    # On macOS NVIDIA's installer installs a Homebrew formula, without sudo.
+    for machine in (None, sandbox_machine_check(NO_OPENSHELL)):
+        fields = sandbox_wizard_fields({}, machine=machine, os_name=os_name)
+        hint = next(field for field in fields if field.label == "Install OpenShell").hint
+        assert says in hint and never not in hint, hint
+
+
 def test_a_stopped_gateway_or_a_failed_doctor() -> None:
     service = {"id": "gateway-service", "status": "fail", "detail": "inactive"}
     stopped = {**READY, "checks": [*READY["checks"][:3], service]}
