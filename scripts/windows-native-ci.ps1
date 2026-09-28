@@ -1612,6 +1612,7 @@ function Stage-PackageData(
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
     }
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\guardrail\tool-chains.json') -Destination (Join-Path $data 'policies\guardrail') -Force
+    Copy-Tree (Join-Path $WorkspaceRoot 'policies\guardrail-use-cases') (Join-Path $data 'policies\guardrail-use-cases')
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
     $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
     $targetRegistry = Join-Path $data 'envvars\registry.json'
