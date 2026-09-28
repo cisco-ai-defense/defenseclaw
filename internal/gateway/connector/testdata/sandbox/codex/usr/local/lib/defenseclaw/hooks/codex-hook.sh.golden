@@ -170,7 +170,12 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
   defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
-  defenseclaw_emit_unreachable_stderr "codex tool" "$1"
+  # Codex shows this line under the blocked step: a prompt hook blocks the
+  # prompt, every other hook a tool call.
+  case "$PAYLOAD_EVENT" in
+    UserPromptSubmit) defenseclaw_emit_unreachable_stderr "codex prompt" "$1" ;;
+    *) defenseclaw_emit_unreachable_stderr "codex tool" "$1" ;;
+  esac
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi

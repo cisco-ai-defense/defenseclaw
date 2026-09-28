@@ -153,7 +153,12 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 
 fail_unreachable() {
   defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
-  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"
+{{if .Sandbox}}  # Claude shows this line under the blocked step: a prompt hook blocks the
+  # prompt, every other hook a tool call.
+  case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+    UserPromptSubmit|UserPromptExpansion) defenseclaw_emit_unreachable_stderr "claude-code prompt" "$1" ;;
+    *) defenseclaw_emit_unreachable_stderr "claude-code tool" "$1" ;;
+  esac{{else}}  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"{{end}}
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi

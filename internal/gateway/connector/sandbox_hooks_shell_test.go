@@ -350,6 +350,33 @@ func TestSandboxClaudeHookFailsClosedWithoutEnvOverrides(t *testing.T) {
 	})
 }
 
+// TestSandboxHookFailClosedNamesThePrompt pins the wording the harness shows
+// when the ingress is down: a prompt hook blocks the prompt, a tool hook the
+// tool call.
+func TestSandboxHookFailClosedNamesThePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		provider SandboxArtifactProvider
+		version  string
+		hook     string
+		args     []string
+		payload  string
+		want     string
+	}{
+		{&ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil,
+			`{"hook_event_name":"UserPromptSubmit","session_id":"s1","prompt":"hi"}`, "blocking claude-code prompt (fail mode closed)"},
+		{&ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, "blocking claude-code tool (fail mode closed)"},
+		{&CodexConnector{}, "0.146.0", "codex-hook.sh", []string{"--event", "UserPromptSubmit", "--hook-contract", "codex-hooks-v4"},
+			`{"hook_event_name":"UserPromptSubmit","session_id":"s1","turn_id":"t1","prompt":"hi"}`, "blocking codex prompt (fail mode closed)"},
+	} {
+		h := newSandboxHookHarness(t, tc.provider, tc.version)
+		env := map[string]string{SandboxTokenEnv: "openshell:resolve:env:v1_DEFENSECLAW_SANDBOX_TOKEN"}
+		run := h.run(t, SandboxHookDir+"/"+tc.hook, tc.args, tc.payload, env, []string{"exit:7", "exit:7"})
+		if run.exitCode != 2 || !strings.Contains(run.stderr, tc.want) {
+			t.Fatalf("%s: exit %d stderr %q, want exit 2 and %q", tc.hook, run.exitCode, run.stderr, tc.want)
+		}
+	}
+}
+
 // TestSandboxHooksFailClosedOnEveryBadReply pins that no reply the workload
 // can provoke turns into an allow: a garbage DEFENSECLAW_SANDBOX_TOKEN earns a
 // 401, a request flood a 429, an unversioned placeholder a relay 500, and a
