@@ -57,7 +57,7 @@ the rest show only their key.
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |
-| `P` | Policies | Named policies, guardrail rule packs and sandbox packs; activate a policy or switch a rule pack ([below](#policies-panel)) |
+| `P` | Policies | The protection center: posture per connector, opt-in packs, chains, rule families, policies, rule packs and sandbox packs ([below](#policies-panel-protection-center)) |
 | `0` | Setup | Setup tasks grouped by goal, and the config editor ([below](#setup-panel)) |
 
 The Overview panel's **AI Agents** metric intentionally excludes `local_model`
@@ -81,59 +81,78 @@ credential checks also feed the bounded missing-credential notice without
 exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
 for the on-disk format.
 
-## Policies panel
+## Policies panel (protection center)
 
-Press `P` (or `p` on Overview) to open **Policies**. DefenseClaw has three
-independent policy layers, and the panel shows each one in its own view; press
-`1`, `2` or `3` to switch.
+Press `P` (or `p` on Overview) to open **Policies**. The header sums up your
+protection, for example `● default policy · default pack · 1 of 5 opt-in packs
+· 26 chains (4 can block)`. Pick a view from the list on the left (or press
+`1`-`7`); the pane on the right (below the table on narrower terminals, and on
+`i` at 80x24) explains the highlighted row and what you can do with it.
 
 | View | What it shows |
 | --- | --- |
-| Policies | Every named policy (built-in and your own) with the active one marked, and what it blocks: the lowest severity the guardrail blocks and alerts on, and the lowest severity that blocks an install. Wider terminals add the firewall default and the description. |
-| Rule packs | The guardrail rule pack each active connector uses, and whether it comes from the global setting or a per-connector override. |
+| Posture | One row for the global setting and one per active connector: mode (observe logs, action enforces), the levels tool calls are blocked and alerted at, human approval, rule pack and opt-in packs. The detail pane says in plain words what that scope does and shows the CRITICAL / HIGH / MEDIUM / LOW → action table. |
+| Opt-in packs | The high-assurance deterministic packs: privacy, cloud production, database destruction, infrastructure destruction and Kubernetes production (and the staged SSH authorized-keys contract, which can't be turned on yet), with what each covers and whether it is on for the selected scope. |
+| Chains | The 26 built-in bounded tool-call chains (for example SQL `xp_cmdshell` enable → invoke, Kubernetes manifest write → apply → pod exec, download → execute), grouped by SQL, Kubernetes, cloud, host, credentials, data egress, network and security controls. `✓` marks the chains that can block; `◐` marks alert-only ones. Read-only. |
+| Rule families | The rule families in the scope's pack (command, sensitive path, secret, trust exploit, C2, enterprise data, cognitive file) with how many rules each has and what it catches. |
+| Policies | Every named policy with the active one marked; `Enter` picks one to activate. |
+| Rule packs | The rule pack of each scope; `Enter` switches it for all connectors or one. |
 | Sandbox packs | The OpenShell sandbox packs (read-only; not shown on Windows). |
 
-| Key | Action |
-| --- | --- |
-| `Enter` | Policies: pick a policy to activate. Rule packs: switch the pack for all connectors or for one |
-| `i` | Details of the highlighted row |
-| `r` | Refresh |
+On **Posture**, change the highlighted scope with one key:
 
-**Activating a policy.** The picker previews what changes from the active
-policy: block, alert and install levels, the firewall default, human approval,
-and whether the policy replaces your webhooks or changes your Cisco AI Defense
-settings. A confirm step follows. It turns red and asks twice when the change
-weakens protection. The TUI then runs `defenseclaw policy activate NAME`, which
-also reloads the running gateway; if the gateway is stopped, it loads the
-policy when it starts.
+| Key | Change | Runs |
+| --- | --- | --- |
+| `m` | Observe ↔ action | `defenseclaw guardrail mode observe\|action [--connector NAME]` |
+| `b` | Block tool calls at CRITICAL, HIGH+ or MEDIUM+ (or back to the pack's level) | `defenseclaw guardrail block-at LEVEL [--connector NAME]` |
+| `a` | Alert at CRITICAL, HIGH+, MEDIUM+ or LOW+ (or the pack's level) | `defenseclaw guardrail alert-at LEVEL [--connector NAME]` |
+| `h` | Human approval off, or for CRITICAL, HIGH+, MEDIUM+ or LOW+ | `defenseclaw guardrail hilt on\|off …` |
+| `p` | Rule pack | `defenseclaw guardrail use-pack PACK [--connector NAME]` |
 
-**Switching a rule pack.** Pick the scope (all connectors, or one), then the
-pack: `default`, `strict`, `permissive`, a pack found under
-`~/.defenseclaw/policies/guardrail/`, or a folder you type. The pack is checked
-with `defenseclaw guardrail validate-pack --json` first, and an invalid pack is
-refused. A global switch lists the per-connector overrides it clears. The TUI
-then runs `defenseclaw guardrail use-pack PACK [--connector NAME]`.
+On **Opt-in packs**, `s` changes the scope and `Space` (or `Enter`) turns the
+highlighted pack on or off with `defenseclaw guardrail protection
+enable|disable NAME [--connector NAME]`. Turning a pack on tells DefenseClaw
+that the scope works against that kind of protected resource (for example a
+production database), so the confirm step says so; the pack is merged into a
+pack of its own under `~/.defenseclaw/policies/guardrail/protected-<scope>/`,
+checked with the rule-pack validator, and only then switched to. A global
+change lists connectors that keep their own pack.
 
+Every change shows what it does first. The confirm step turns red and asks
+twice when protection gets weaker (for example action → observe, a higher block
+level, approval off, or an opt-in pack off). Mode, level, pack and opt-in
+changes for one connector restart a running gateway so they take effect; a
+global mode or level change applies live, and a stopped gateway is never
+started.
+
+In the **Policies** view, `b` and `a` edit the highlighted named policy's own
+block and alert thresholds, which apply to LLM traffic through the guardrail
+proxy (`defenseclaw policy edit guardrail …`, which reloads the gateway).
 Overview's **Policy posture** reads, for example, `strict · block MEDIUM+ ·
 alert LOW+`, and the status line shows `policy <name> · <mode>`.
 
 ## Setup panel
 
-Press `0` for **Setup**. Tasks are grouped by goal: **Get protected**,
-**Guardrail & scanning**, **Alerts & telemetry** and **Gateway & advanced**.
-The line above the list sums up readiness (for example `6 ok · 2 need
-attention`); press `i` for the checks, their fix commands, and what the
-highlighted task runs. The hint line and `?` list only the keys of the view
-you are in.
+Press `0` for **Setup**. The list on the left groups the tasks by goal: **Get
+protected**, **Guardrail & scanning**, **Alerts & telemetry** and **Gateway &
+advanced**, with a count and a `!` when something needs attention; on narrow
+terminals it becomes a one-line switcher (`←`/`→`). Each task shows its real
+state, such as `✓ on · observe`, `! not set` or `○ not set up`, and the pane
+beside it says what the task does, what is set now, what needs attention (with
+the fix) and what it runs. The line above sums up readiness (for example `7 ok
+· 3 need attention`); press `i` for every check and its fix command. The hint
+line and `?` list only the keys of the view you are in.
 
-In a task form, `Enter` on a text field (or just start typing) opens a text box:
-`Enter` saves the value, `Esc` cancels, and `Ctrl+T` shows a hidden secret.
-`←`/`→` or `Space` change a choice, and `Ctrl+R` runs the task. Secrets you
-enter for **API keys & secrets** reach `defenseclaw keys set --value-stdin` on
-standard input, never on the command line. Follow-up commands run only after
+In a task form, `Enter` on a text field (or just start typing, or paste) opens
+a text box: `Enter` saves the value, `Esc` cancels, and `Ctrl+T` shows a hidden
+secret. `←`/`→` or `Space` change a choice, and `Ctrl+R` runs the task. Secrets
+you enter for **API keys & secrets** reach `defenseclaw keys set --value-stdin`
+on standard input, never on the command line. Follow-up commands run only after
 the previous one succeeds.
 
-Press `c` for the **config editor**:
+Press `c` for the **config editor**. On wide terminals its sections are listed
+on the left, grouped (Core, Protection, …), with the highlighted field's value
+and help beside the table:
 
 | Key | Action |
 | --- | --- |
