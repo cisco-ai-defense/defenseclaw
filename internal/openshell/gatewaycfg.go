@@ -650,6 +650,12 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 	}
 	if restart {
 		if err := g.Restart(ctx); err != nil {
+			// The service manager refused both restarts (brew services
+			// without the formula, for one): the gateway may never have
+			// stopped. Only one that does not answer is down.
+			if errors.Is(cause, errRestartCommand) && errors.Is(err, errRestartCommand) && g.answers(ctx) {
+				return fmt.Errorf("%w; the gateway could not be restarted, so it still runs on its old configuration (the previous files were restored)", cause)
+			}
 			return fmt.Errorf("%w; the previous configuration was restored but the gateway did not come back: %v", cause, err)
 		}
 	} else {
@@ -793,6 +799,17 @@ func (g *GatewayConfigurator) restartCommand() serviceCommand {
 	return serviceCommand{"systemctl", []string{"--user", "restart", GatewayService}}
 }
 
+// errRestartCommand marks a restart the service manager refused, which
+// may have left the gateway running as it was.
+var errRestartCommand = errors.New("openshell: restart the gateway")
+
+// answers reports whether the gateway is healthy within a short wait.
+func (g *GatewayConfigurator) answers(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return g.VerifyGateway(ctx) == nil
+}
+
 // Restart restarts the gateway service and waits until it is healthy.
 func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	if err := g.defaults(); err != nil {
@@ -800,7 +817,7 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	}
 	c := g.restartCommand()
 	if out, err := g.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
-		return fmt.Errorf("openshell: restart the gateway: %v: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
 	}
 	if err := g.VerifyGateway(ctx); err != nil {
 		return fmt.Errorf("openshell: the restarted gateway is not healthy: %w", err)

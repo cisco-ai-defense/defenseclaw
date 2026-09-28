@@ -339,6 +339,33 @@ func TestGatewayConfigRollback(t *testing.T) {
 			t.Fatalf("restored=%v restarts=%d", f.read(t, "gateway.toml") == operatorTOML, n)
 		}
 	})
+	// doctor --fix on a Mac without the Homebrew formula: `brew services
+	// restart` refused, the gateway was never stopped, and the error said
+	// it "did not come back" (manual test M10).
+	t.Run("restart refused, gateway still up", func(t *testing.T) {
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.write(t, "gateway.toml", operatorTOML)
+		refused := 0
+		f.runner.OnFunc("brew services restart nvidia/openshell/openshell", func(context.Context, openshell.Command) ([]byte, error) {
+			refused++
+			return []byte("Error: Formula `openshell` is not installed."), errors.New("brew: exit status 1")
+		})
+		_, err := f.apply(f.plan(t, bindMounts))
+		want := "openshell: restart the gateway: brew: exit status 1: Error: Formula `openshell` is not installed.; " +
+			"the gateway could not be restarted, so it still runs on its old configuration (the previous files were restored)"
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v\nwant %s", err, want)
+		}
+		if f.read(t, "gateway.toml") != operatorTOML || refused != 2 || f.verified != 1 {
+			t.Fatalf("restored=%v, restarts refused %d, health checks %d", f.read(t, "gateway.toml") == operatorTOML, refused, f.verified)
+		}
+		// Down after all: it did not come back.
+		f.verify = errors.New("connection refused")
+		if _, err := f.apply(f.plan(t, bindMounts)); err == nil || !strings.Contains(err.Error(), "did not come back") {
+			t.Fatalf("err = %v", err)
+		}
+	})
 	t.Run("explicit rollback", func(t *testing.T) {
 		f := newGatewayFixture(t)
 		f.write(t, "gateway.toml", operatorTOML)
@@ -557,9 +584,12 @@ func TestGatewayConfigRecordsPendingRestart(t *testing.T) {
 	f := newGatewayFixture(t)
 	f.write(t, "gateway.toml", operatorTOML)
 	f.runner.On("systemctl --user restart openshell-gateway", "Job failed", errors.New("exit status 1"))
+	// systemd stopped the gateway and could not start it again.
+	f.verify = errors.New("connection refused")
 	if _, err := f.apply(f.plan(t, bindMounts)); err == nil || !strings.Contains(err.Error(), "did not come back") {
 		t.Fatalf("Apply = %v", err)
 	}
+	f.verify = nil
 	if st, err := f.cfg.Read(); err != nil || st.RestartPendingSince.IsZero() {
 		t.Fatalf("no pending restart recorded: %+v, %v", st, err)
 	}
