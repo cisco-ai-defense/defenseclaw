@@ -118,4 +118,9 @@ func TestWindowsStandaloneStatusNamesGatewayStartFailureAndDeletedAccount(t *tes
 	if deleted != 1 {
 		t.Fatalf("warnings = %+v, want one deleted-account warning", status.Warnings)
 	}
+	// An unresolvable SID outside this computer's accounts (a domain account
+	// whose directory may be unreachable) is never reported deleted.
+	if previousDeleted("S-1-5-21-1-2-3-1001") {
+		t.Fatal("a non-local SID whose lookup failed was reported deleted")
+	}
 }

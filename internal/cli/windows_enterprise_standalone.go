@@ -656,14 +656,17 @@ type windowsEnterpriseManifestAccount struct {
 
 // windowsEnterpriseManifestAccounts reads the installed manifest's accounts;
 // windowsEnterpriseAccountCreatedDataDir reports an account-created data
-// folder, and windowsEnterpriseAccountDeleted an account SID that no longer
-// names an account. Tests replace them.
+// folder, and windowsEnterpriseAccountDeleted a local account SID that no
+// longer names an account. Tests replace them.
 var (
 	windowsEnterpriseManifestAccounts      = readWindowsEnterpriseManifestAccounts
 	windowsEnterpriseAccountCreatedDataDir = enterprisehooks.WindowsAccountCreatedDataDir
 	windowsEnterpriseAccountDeleted        = func(sid string) bool {
+		// A domain or Entra account's lookup also fails while its directory
+		// is unreachable; never tell the administrator to remove that
+		// profile.
 		parsed, err := windows.StringToSid(sid)
-		if err != nil {
+		if err != nil || !enterprisehooks.WindowsLocalAccountSID(parsed.String()) {
 			return false
 		}
 		_, _, _, err = parsed.LookupAccount("")
