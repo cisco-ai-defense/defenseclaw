@@ -125,6 +125,135 @@ func TestQuiescingRecoveryLeavesPerUserRuntimeStoppedBesideEnterprise(t *testing
 	}
 }
 
+// An uninstall found a per-user install journal in the published phase, left
+// by an install interrupted before an enterprise deployment was installed.
+// Recovery activates and commits the install, then converges it. Convergence
+// must leave the per-user runtime stopped with auto-start off instead of
+// running the refused gateway start, so the journal completes and the
+// uninstall continues on its first attempt. Without the deployment, or with
+// no runtime wanted, convergence is unchanged and prints no notice.
+func TestPublishedRecoveryLeavesPerUserRuntimeStoppedBesideEnterprise(t *testing.T) {
+	refusal := errors.New("enterprise deployment present")
+	for _, test := range []struct {
+		name       string
+		refusal    error
+		wanted     serviceState
+		wantCalls  string
+		wantNotice bool
+	}{
+		{
+			name:       "beside enterprise",
+			refusal:    refusal,
+			wanted:     serviceState{Gateway: true, Watchdog: true},
+			wantCalls:  "activate,journal:committed,autostart:false,stop,verify-stopped,journal:converged,journal:complete",
+			wantNotice: true,
+		},
+		{
+			name:       "watchdog only beside enterprise",
+			refusal:    refusal,
+			wanted:     serviceState{Watchdog: true},
+			wantCalls:  "activate,journal:committed,autostart:false,stop,verify-stopped,journal:converged,journal:complete",
+			wantNotice: true,
+		},
+		{
+			name:      "without enterprise",
+			wanted:    serviceState{Gateway: true, Watchdog: true},
+			wantCalls: "activate,journal:committed,autostart:true,start,verify-running,journal:converged,journal:complete",
+		},
+		{
+			name:      "no runtime wanted beside enterprise",
+			refusal:   refusal,
+			wantCalls: "activate,journal:committed,autostart:false,start,verify-running,journal:converged,journal:complete",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			notices := stubRuntimeRestoreRefusal(t, test.refusal)
+			var calls []string
+			ops := installRuntimeConvergenceOps{
+				disableStableHook: func(string) error {
+					t.Fatal("ready convergence disabled the stable hook")
+					return nil
+				},
+				configureAutoStart: func(_ string, enabled bool) (gatewayAutoStartSnapshot, bool, error) {
+					calls = append(calls, fmt.Sprintf("autostart:%v", enabled))
+					return gatewayAutoStartSnapshot{}, true, nil
+				},
+				startServices: func(_ string, _ string, wanted serviceState) (serviceState, error) {
+					calls = append(calls, "start")
+					if test.refusal != nil && (wanted.Gateway || wanted.Watchdog) {
+						return serviceState{}, fmt.Errorf("start gateway: exit status 1: %w", test.refusal)
+					}
+					return wanted, nil
+				},
+				verifyServices: func(string, string, serviceState) error {
+					calls = append(calls, "verify-running")
+					return nil
+				},
+				stopServices: func(string, string) (serviceState, error) {
+					calls = append(calls, "stop")
+					return serviceState{}, nil
+				},
+				verifyStopped: func(string, string) error {
+					calls = append(calls, "verify-stopped")
+					return nil
+				},
+			}
+			phase := setupPhasePublished
+			err := recoverSetupJournalPhase(setupJournal{
+				SchemaVersion: setupJournalSchemaVersion,
+				Phase:         setupPhasePublished,
+				Transaction:   setupTransaction{Action: "install"},
+			}, setupRecoveryOps{
+				Activate: func(setupTransaction) error {
+					calls = append(calls, "activate")
+					return nil
+				},
+				Rollback: func(setupTransaction) error {
+					t.Fatal("published recovery rolled back after a successful activation")
+					return nil
+				},
+				Converge: func(setupTransaction) error {
+					return convergeInstallRuntime(
+						testCurrentTransactionID,
+						false,
+						`C:\DefenseClaw\bin\defenseclaw-gateway.exe`,
+						`C:\Users\test\.defenseclaw`,
+						test.wanted,
+						ops,
+					)
+				},
+				Cleanup: func(setupTransaction) error { return nil },
+				Transition: func(_ setupTransaction, from, to string) error {
+					if phase != from {
+						return fmt.Errorf("journal phase = %q, want %q", phase, from)
+					}
+					calls = append(calls, "journal:"+to)
+					phase = to
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("recovery = %v, want the journal to complete", err)
+			}
+			if phase != setupPhaseComplete {
+				t.Fatalf("journal phase = %q, want complete", phase)
+			}
+			if got := strings.Join(calls, ","); got != test.wantCalls {
+				t.Fatalf("recovery calls = %q, want %q", got, test.wantCalls)
+			}
+			got := notices.String()
+			if test.wantNotice {
+				if !strings.Contains(got, "left the per-user gateway stopped") ||
+					!strings.Contains(got, refusal.Error()) {
+					t.Fatalf("notice = %q, want the skipped start and its reason", got)
+				}
+			} else if got != "" {
+				t.Fatalf("notice = %q, want none", got)
+			}
+		})
+	}
+}
+
 // Without an enterprise deployment the rollback still restores the prior
 // per-user runtime and prints no notice.
 func TestRollbackRestoresPerUserRuntimeWithoutEnterpriseDeployment(t *testing.T) {

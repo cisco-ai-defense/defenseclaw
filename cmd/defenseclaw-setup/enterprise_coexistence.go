@@ -19,12 +19,12 @@ var refuseSetupBesideEnterprise = func() error {
 	return winenterprise.RefusePerUser("be installed, upgraded, or repaired")
 }
 
-// refuseRuntimeRestoreBesideEnterprise stops a setup rollback or recovery
-// from restarting the per-user gateway and watchdog beside an enterprise
-// deployment. A restored gateway from this release refuses to start there,
-// and one from an earlier release would take the port the managed hooks use.
-// Rollback leaves them stopped instead of failing on the refusal, so the
-// journal still closes and uninstall stays available.
+// refuseRuntimeRestoreBesideEnterprise stops a setup rollback, recovery, or
+// committed convergence from restarting the per-user gateway and watchdog
+// beside an enterprise deployment. A restored gateway from this release
+// refuses to start there, and one from an earlier release would take the port
+// the managed hooks use. Setup leaves them stopped instead of failing on the
+// refusal, so the journal still closes and uninstall stays available.
 var refuseRuntimeRestoreBesideEnterprise = func() error {
 	return winenterprise.RefusePerUser("restart its gateway")
 }

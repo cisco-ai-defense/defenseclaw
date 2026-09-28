@@ -3306,6 +3306,17 @@ func convergeInstallRuntime(
 		}
 		return errors.Join(hookErr, quiesceOwnedInstallRuntime(gatewayPath, dataRoot, ops))
 	}
+	// An enterprise deployment installed since the operation began owns the
+	// hook port now. This is reached when an uninstall recovers an install
+	// journal left in the published phase, and when the deployment arrives
+	// during an install. Leave the per-user runtime stopped with auto-start
+	// off; its gateway start would be refused and hold the journal open.
+	if wanted.Gateway || wanted.Watchdog {
+		if refusal := refuseRuntimeRestoreBesideEnterprise(); refusal != nil {
+			reportRuntimeRestoreSkipped(refusal)
+			return quiesceOwnedInstallRuntime(gatewayPath, dataRoot, ops)
+		}
+	}
 	if _, _, err := ops.configureAutoStart(gatewayPath, wanted.Gateway); err != nil {
 		return err
 	}
