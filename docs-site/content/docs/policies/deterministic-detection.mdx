@@ -325,13 +325,22 @@ must not be selected as `policy_dir` until that binding exists. Dynamic paths,
 malformed keys, missing policy, failed writes, and unresolved homes already
 fail closed to abstention in its ActionFacts helper.
 
-“Selectable” means the pack can be layered into a custom pack in Policy Creator
-or copied into an operator-owned policy directory. It does not add another
-value to `defenseclaw setup guardrail --rule-pack`, which accepts only
-`default`, `permissive`, and `strict`. Validate the exported pack, review the
-declared trust boundary, then set `guardrail.rule_pack_dir`; assigning a
-production-protection pack asserts that the selected connector context is
-actually protected. See [Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs).
+“Selectable” means the pack can be turned on for the global rule pack or one
+connector with `defenseclaw guardrail protection enable NAME [--connector X]`,
+layered into a custom pack in Policy Creator, or copied into an
+operator-owned policy directory. `guardrail protection enable` composes
+`~/.defenseclaw/policies/guardrail/protected-<scope>/` from the scope's
+current pack plus every pack that is on (the same merge Policy Creator uses),
+validates it with the gateway's validator, and switches the scope to it;
+`guardrail protection disable NAME` takes it out again and `guardrail
+protection list` shows which scope has which pack on. The staged SSH contract
+is refused. None of this adds another value to `defenseclaw setup guardrail
+--rule-pack`, which accepts only `default`, `permissive`, and `strict`. For a
+Policy Creator export, validate the pack, review the declared trust boundary,
+then switch to it with `defenseclaw guardrail use-pack`. Either way, assigning
+a production-protection pack asserts that the selected connector context is
+actually protected. See [Opt-in protection packs](/docs/reference/cli#opt-in-protection-packs)
+and [Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs).
 
 ## Other deterministic detection lanes
 

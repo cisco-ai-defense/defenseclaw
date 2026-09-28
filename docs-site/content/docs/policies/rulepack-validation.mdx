@@ -111,9 +111,10 @@ never treats directory presence as proof that the pack is valid.
 Validation is a preflight; it does not change the running gateway. Switch to
 the validated pack with `defenseclaw guardrail use-pack`, which validates the
 pack again and then writes the global or one connector's `rule_pack_dir`. An
-invalid pack changes nothing. The gateway notices the new `rule_pack_dir` in
-`config.yaml` and reloads the rules through the same strict validator; startup
-and restart use that validator too.
+invalid pack changes nothing. A running gateway loads a new `rule_pack_dir`
+only when it starts, so `use-pack` restarts a running gateway (pass
+`--no-restart` to skip; a stopped gateway is never started), and startup
+validates the pack with the same strict validator.
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org
@@ -133,7 +134,8 @@ DefenseClaw does not watch rule-pack files for live changes. Editing a file in
 the active directory does not update an already running gateway, and
 `defenseclaw-gateway policy reload` reloads OPA policy rather than guardrail
 rule packs. Validate the finished directory, then switch to it with `use-pack`
-(a new directory) or restart the gateway (edits in place).
+(which restarts a running gateway) or restart the gateway yourself after
+editing the active pack in place.
 
 ## Safe editing loop
 
