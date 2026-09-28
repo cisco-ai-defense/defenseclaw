@@ -204,3 +204,10 @@ def test_textual_command_parser_accepts_go_gateway_registry_commands() -> None:
     assert _argv(parsed) == ["defenseclaw-gateway", "status"]
     assert parsed.category == "daemon"
     assert parsed.needs_preview is False
+
+
+def test_dry_run_of_a_destructive_verb_gets_a_normal_preview() -> None:
+    infer_command_risk = _command_line_module().infer_command_risk
+
+    assert infer_command_risk("other", ("uninstall", "--dry-run")) == "setup"
+    assert infer_command_risk("other", ("uninstall",)) == "destructive"

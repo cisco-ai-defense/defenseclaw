@@ -158,7 +158,9 @@ def infer_command_risk(category: str, args: tuple[str, ...]) -> str:
     if not lowered:
         return "read-only"
     if _has_any_arg(lowered, "uninstall", "reset", "remove", "delete", "quarantine", "wipe"):
-        return "destructive"
+        # A dry run only reports what would be removed: preview it like a
+        # setup command instead of the red double-confirm.
+        return "setup" if "--dry-run" in lowered else "destructive"
     if _has_any_arg(lowered, "restart", "rotate-token"):
         return "restart"
     if _has_any_arg(
