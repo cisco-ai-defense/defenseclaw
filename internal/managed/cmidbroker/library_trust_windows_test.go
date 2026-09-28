@@ -6,11 +6,19 @@
 package cmidbroker
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -102,7 +110,7 @@ func TestOpenTrustedLibraryReportsTheVerifiedSigner(t *testing.T) {
 		t.Fatalf("openTrustedLibrary: %v", err)
 	}
 	defer lease.Close()
-	if observed != lease.Signer() || observed.SimpleName == "" || observed.SimpleName == CMIDLibraryPublisher {
+	if observed != lease.Signer() || observed.CommonName == "" || observed.CommonName == CMIDLibraryPublisher {
 		t.Fatalf("signer = %#v, lease signer = %#v", observed, lease.Signer())
 	}
 	if digest, err := hex.DecodeString(observed.CertificateSHA256); err != nil || len(digest) != 32 {
@@ -193,5 +201,106 @@ func TestOpenTrustedLibraryAppliesPathTrustBeforeOpenAndWhileHeld(t *testing.T) 
 
 	if _, err := OpenTrustedLibrary(library, nil); err == nil {
 		t.Fatal("OpenTrustedLibrary accepted a nil path-trust policy")
+	}
+}
+
+func certificateContextForSubject(t *testing.T, subject pkix.Name) (*windows.CertContext, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      subject,
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}
+	encoded, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context, err := windows.CertCreateCertificateContext(
+		windows.X509_ASN_ENCODING|windows.PKCS_7_ASN_ENCODING,
+		&encoded[0],
+		uint32(len(encoded)),
+	)
+	if err != nil {
+		t.Fatalf("CertCreateCertificateContext: %v", err)
+	}
+	t.Cleanup(func() { _ = windows.CertFreeCertificateContext(context) })
+	return context, encoded
+}
+
+func simpleDisplayName(context *windows.CertContext) string {
+	name := make([]uint16, 256)
+	written := windows.CertGetNameString(
+		context, windows.CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nil, &name[0], uint32(len(name)),
+	)
+	if written <= 1 {
+		return ""
+	}
+	return windows.UTF16ToString(name[:written])
+}
+
+// A certificate without a CN is displayed by its OU or O, so a signer whose
+// OU is "Cisco Systems, Inc." has that simple display name. The pin must read
+// the CN attribute and refuse the certificate.
+func TestLibrarySignerIgnoresTheDisplayNameFallback(t *testing.T) {
+	for name, test := range map[string]struct {
+		subject pkix.Name
+		accept  bool
+	}{
+		"Cisco common name": {
+			subject: pkix.Name{
+				CommonName:   CMIDLibraryPublisher,
+				Organization: []string{CMIDLibraryPublisher},
+				Country:      []string{"US"},
+			},
+			accept: true,
+		},
+		"Cisco organizational unit without a common name": {
+			subject: pkix.Name{
+				OrganizationalUnit: []string{CMIDLibraryPublisher},
+				Organization:       []string{"Example"},
+				Country:            []string{"US"},
+			},
+		},
+		"Cisco organization without a common name": {
+			subject: pkix.Name{
+				Organization: []string{CMIDLibraryPublisher},
+				Country:      []string{"US"},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			context, encoded := certificateContextForSubject(t, test.subject)
+			if !test.accept {
+				if display := simpleDisplayName(context); display != CMIDLibraryPublisher {
+					t.Fatalf("fixture premise: simple display name = %q, want the Windows fallback to %q",
+						display, CMIDLibraryPublisher)
+				}
+			}
+			signer, err := librarySignerFromContext(context)
+			if err != nil {
+				t.Fatalf("librarySignerFromContext: %v", err)
+			}
+			digest := sha256.Sum256(encoded)
+			if signer.CertificateSHA256 != hex.EncodeToString(digest[:]) {
+				t.Fatalf("signer SHA-256 = %s, want the DER certificate digest", signer.CertificateSHA256)
+			}
+			err = CheckLibrarySigner(signer)
+			if test.accept {
+				if err != nil || signer.CommonName != CMIDLibraryPublisher {
+					t.Fatalf("signer %#v rejected: %v", signer, err)
+				}
+				return
+			}
+			if signer.CommonName != "" || !errors.Is(err, ErrLibrarySigner) {
+				t.Fatalf("signer %#v accepted or misread: %v", signer, err)
+			}
+		})
 	}
 }

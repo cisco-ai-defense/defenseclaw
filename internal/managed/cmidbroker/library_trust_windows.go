@@ -68,9 +68,9 @@ func (lease *LibraryLease) Close() error {
 // immediately before it is loaded. It applies validatePath (the deployment's
 // path trust), opens the file without write or delete sharing, re-applies
 // validatePath while the handle is held, verifies the Authenticode signature
-// of the open file with WinVerifyTrust, and requires the signer to be
-// CMIDLibraryPublisher. The caller holds the returned lease until the library
-// has been loaded.
+// of the open file with WinVerifyTrust, and requires the one common name in
+// the signer certificate's subject to be CMIDLibraryPublisher. The caller
+// holds the returned lease until the library has been loaded.
 func OpenTrustedLibrary(path string, validatePath func(string) error) (*LibraryLease, error) {
 	return openTrustedLibrary(path, validatePath, CheckLibrarySigner)
 }
@@ -210,8 +210,13 @@ func verifiedLibrarySigner(state windows.Handle) (LibrarySigner, error) {
 	if uintptr(providerCert.size) < unsafe.Sizeof(cryptProviderCert{}) || providerCert.cert == nil {
 		return LibrarySigner{}, errors.New("WinVerifyTrust returned a malformed signer certificate")
 	}
-	context := providerCert.cert
-	if context.EncodedCert == nil || context.Length == 0 ||
+	return librarySignerFromContext(providerCert.cert)
+}
+
+// librarySignerFromContext identifies a signer certificate by the common name
+// in its encoded subject and by the SHA-256 of its DER encoding.
+func librarySignerFromContext(context *windows.CertContext) (LibrarySigner, error) {
+	if context == nil || context.EncodedCert == nil || context.Length == 0 ||
 		context.Length > maxLibrarySignerCertificateBytes {
 		return LibrarySigner{}, errors.New("WinVerifyTrust returned an invalid signer certificate encoding")
 	}
@@ -219,27 +224,20 @@ func verifiedLibrarySigner(state windows.Handle) (LibrarySigner, error) {
 	copy(encoded, unsafe.Slice(context.EncodedCert, context.Length))
 	digest := sha256.Sum256(encoded)
 	return LibrarySigner{
-		SimpleName:        certificateSimpleName(context),
+		CommonName:        subjectCommonName(certificateSubject(context)),
 		CertificateSHA256: hex.EncodeToString(digest[:]),
 	}, nil
 }
 
-func certificateSimpleName(context *windows.CertContext) string {
-	size := windows.CertGetNameString(context, windows.CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nil, nil, 0)
-	if size <= 1 {
-		return ""
+// certificateSubject copies the DER-encoded subject name of the certificate,
+// or returns nil when Windows reports none or one outside the certificate.
+func certificateSubject(context *windows.CertContext) []byte {
+	info := context.CertInfo
+	if info == nil || info.Subject.Data == nil || info.Subject.Size == 0 ||
+		info.Subject.Size > context.Length {
+		return nil
 	}
-	name := make([]uint16, size)
-	written := windows.CertGetNameString(
-		context,
-		windows.CERT_NAME_SIMPLE_DISPLAY_TYPE,
-		0,
-		nil,
-		&name[0],
-		size,
-	)
-	if written <= 1 || written > size {
-		return ""
-	}
-	return windows.UTF16ToString(name[:written])
+	subject := make([]byte, info.Subject.Size)
+	copy(subject, unsafe.Slice(info.Subject.Data, info.Subject.Size))
+	return subject
 }

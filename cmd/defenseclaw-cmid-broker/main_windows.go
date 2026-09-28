@@ -174,18 +174,26 @@ func runBroker(ctx context.Context, options brokerOptions, ready chan<- struct{}
 		logger.Print("stage=provider-registration success=false")
 		return errors.New("managed CMID provider is not registered")
 	}
-	provider, err := cloudreg.New(cloudreg.Config{LibPath: options.cmidLibraryPath})
-	if err != nil || provider == nil {
+	// Keep the signer-verified library leased through construction and its
+	// first native refresh, when the DLL is loaded into this process.
+	provider, signer, err := constructVerifiedCMIDProvider(
+		ctx,
+		options.cmidLibraryPath,
+		func(candidate string) (trustedCMIDLibrary, error) {
+			return cmidbroker.OpenTrustedLibrary(candidate, func(value string) error {
+				return validateBrokerPath(value, "CMID library", false)
+			})
+		},
+		func(candidate string) (cmidbroker.Provider, error) {
+			return cloudreg.New(cloudreg.Config{LibPath: candidate})
+		},
+	)
+	if err != nil {
+		logger.Printf("stage=provider-library-trust success=false error=%q", err.Error())
 		logger.Print("stage=provider-construction success=false")
 		return errors.New("managed CMID provider construction failed")
 	}
-	refreshCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	err = provider.Refresh(refreshCtx)
-	cancel()
-	if err != nil {
-		logger.Print("stage=provider-refresh success=false category=cmid_refresh_failed")
-		return errors.New("managed CMID provider readiness failed")
-	}
+	logger.Printf("stage=provider-library-trust success=true signer=%q signer_sha256=%s", signer.CommonName, signer.CertificateSHA256)
 
 	server, err := cmidbroker.NewServer(serverConfig, provider, key[:], func(event cmidbroker.Event) {
 		logger.Printf(

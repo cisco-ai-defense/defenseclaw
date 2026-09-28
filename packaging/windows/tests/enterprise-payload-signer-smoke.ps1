@@ -18,6 +18,9 @@ $ErrorActionPreference = 'Stop'
 
 $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1'))
 $installerPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\install-enterprise.ps1'))
+$assemblyHelperPath = [IO.Path]::GetFullPath(
+    (Join-Path $PSScriptRoot '..\..\scripts\lib\assert-cisco-signature.ps1')
+)
 
 function New-SmokeSignerCertificate {
     param([Parameter(Mandatory)][string]$Subject)
@@ -86,6 +89,28 @@ $cisco = New-SmokeSignerCertificate -Subject 'CN="Cisco Systems, Inc.", O="Cisco
 $ciscoNearMiss = New-SmokeSignerCertificate -Subject 'CN=Cisco Systems Inc., O="Cisco Systems, Inc.", C=US'
 $ciscoCase = New-SmokeSignerCertificate -Subject 'CN="cisco systems, inc.", C=US'
 $customer = New-SmokeSignerCertificate -Subject 'CN=Contoso Code Signing, O=Contoso, C=US'
+# Without a CN, Windows' simple display name falls back to the OU, then the O,
+# so these certificates display as 'Cisco Systems, Inc.' but have no publisher
+# common name. Two CNs are ambiguous and are refused as well.
+$ciscoUnitOnly = New-SmokeSignerCertificate -Subject 'OU="Cisco Systems, Inc.", O=Example, C=US'
+$ciscoOrganizationOnly = New-SmokeSignerCertificate -Subject 'O="Cisco Systems, Inc.", C=US'
+$ciscoTwoNames = New-SmokeSignerCertificate -Subject 'CN="Cisco Systems, Inc.", CN=Example, C=US'
+$ciscoQuoted = New-SmokeSignerCertificate -Subject 'O="Example, CN=Cisco Systems, Inc.", C=US'
+foreach ($premise in @($ciscoUnitOnly, $ciscoOrganizationOnly)) {
+    $display = $premise.GetNameInfo(
+        [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+        $false
+    )
+    if ($display -cne 'Cisco Systems, Inc.') {
+        throw "fixture premise: '$($premise.Subject)' displays as '$display', not the publisher"
+    }
+}
+$noCommonName = @(
+    @('OU-only publisher', $ciscoUnitOnly),
+    @('O-only publisher', $ciscoOrganizationOnly),
+    @('two common names', $ciscoTwoNames),
+    @('common name inside another value', $ciscoQuoted)
+)
 $customerSha256 = Get-SmokeCertificateSha256 -Certificate $customer
 $otherSha256 = 'ab' * 32
 
@@ -106,6 +131,7 @@ if ($parseErrors.Count -ne 0) {
 }
 foreach ($name in @(
     'ConvertTo-DefenseClawBootstrapTrustedSignerSet',
+    'Get-DefenseClawBootstrapCertificateCommonName',
     'Assert-DefenseClawBootstrapModuleSigner'
 )) {
     $definition = $installerAst.Find(
@@ -121,6 +147,29 @@ foreach ($name in @(
     }
     . ([scriptblock]::Create($definition.Extent.Text))
 }
+
+# Setup assembly's helper requires PowerShell 7 as a file, but its CN reader
+# is the same code, so load just that function on both engines.
+$assemblyAst = [Management.Automation.Language.Parser]::ParseFile(
+    $assemblyHelperPath,
+    [ref]$tokens,
+    [ref]$parseErrors
+)
+if ($parseErrors.Count -ne 0) {
+    throw "assembly helper parser errors: $($parseErrors.Message -join '; ')"
+}
+$assemblyReader = $assemblyAst.Find(
+    {
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-CiscoSignatureCommonName'
+    },
+    $false
+)
+if ($null -eq $assemblyReader) {
+    throw 'assembly helper does not define Get-CiscoSignatureCommonName'
+}
+. ([scriptblock]::Create($assemblyReader.Extent.Text))
 
 $bootstrapSet = ConvertTo-DefenseClawBootstrapTrustedSignerSet -Value @(
     "$($customerSha256.ToUpperInvariant()), $customerSha256",
@@ -155,6 +204,15 @@ Assert-SmokeThrows -Name 'bootstrap near-miss publisher' -Expected 'not the Defe
         -Path 'C:\fixture\DefenseClawEnterprise.psm1' `
         -AdditionalTrustedSignerSha256 @()
 }
+foreach ($case in $noCommonName) {
+    $candidate = $case[1]
+    Assert-SmokeThrows -Name "bootstrap $($case[0])" -Expected 'not the DefenseClaw publisher' -Script {
+        Assert-DefenseClawBootstrapModuleSigner `
+            -SignerCertificate $candidate `
+            -Path 'C:\fixture\DefenseClawEnterprise.psm1' `
+            -AdditionalTrustedSignerSha256 @()
+    }
+}
 Assert-SmokeThrows -Name 'bootstrap missing signer' -Expected 'no signer certificate' -Script {
     Assert-DefenseClawBootstrapModuleSigner `
         -SignerCertificate $null `
@@ -176,7 +234,7 @@ if ($null -eq $module) {
 }
 
 $moduleResult = & $module {
-    param($Cisco, $CiscoNearMiss, $CiscoCase, $Customer, $CustomerSha256, $OtherSha256)
+    param($Cisco, $CiscoNearMiss, $CiscoCase, $Customer, $CustomerSha256, $OtherSha256, $NoCommonName)
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
 
@@ -234,7 +292,7 @@ $moduleResult = & $module {
         @('near-miss publisher', $CiscoNearMiss),
         @('case-folded publisher', $CiscoCase),
         @('foreign publisher', $Customer)
-    )) {
+    ) + $NoCommonName) {
         $candidate = $case[1]
         Assert-ModuleThrows -Name "module $($case[0])" -Expected 'not the DefenseClaw publisher' -Script {
             Assert-DefenseClawPayloadSigner `
@@ -339,14 +397,49 @@ $moduleResult = & $module {
             -AdditionalTrustedSignerSha256 @($CustomerSha256)
     }
 
+    $commonNames = @{}
+    foreach ($certificate in @($Cisco, $CiscoNearMiss, $CiscoCase, $Customer) + @(
+            $NoCommonName | ForEach-Object { $_[1] }
+        )) {
+        $commonNames[$certificate.Thumbprint] = Get-DefenseClawCertificateCommonName `
+            -Certificate $certificate
+    }
+
     return [pscustomobject]@{
+        common_names = $commonNames
         foreign_signer_available = $null -ne $foreignSigned
         foreign_signer_rejected = $foreignSignerRejected
         foreign_descriptor_recheck_pinned = $foreignDescriptorRecheckPinned
     }
-} $cisco $ciscoNearMiss $ciscoCase $customer $customerSha256 $otherSha256
+} $cisco $ciscoNearMiss $ciscoCase $customer $customerSha256 $otherSha256 $noCommonName
 
-foreach ($certificate in @($cisco, $ciscoNearMiss, $ciscoCase, $customer)) {
+# The module, the installer bootstrap, and Setup assembly read the same CN.
+$expectedCommonNames = @(
+    @($cisco, 'Cisco Systems, Inc.'),
+    @($ciscoNearMiss, 'Cisco Systems Inc.'),
+    @($ciscoCase, 'cisco systems, inc.'),
+    @($customer, 'Contoso Code Signing')
+) + @($noCommonName | ForEach-Object { , @($_[1], $null) })
+foreach ($expected in $expectedCommonNames) {
+    $certificate = $expected[0]
+    $readers = [ordered]@{
+        module = $moduleResult.common_names[$certificate.Thumbprint]
+        bootstrap = Get-DefenseClawBootstrapCertificateCommonName -Certificate $certificate
+        assembly = Get-CiscoSignatureCommonName -Certificate $certificate
+    }
+    foreach ($reader in $readers.GetEnumerator()) {
+        if ($reader.Value -cne $expected[1]) {
+            throw (
+                "$($reader.Key) common name of '$($certificate.Subject)' is " +
+                "'$($reader.Value)', want '$($expected[1])'"
+            )
+        }
+    }
+}
+
+foreach ($certificate in @($cisco, $ciscoNearMiss, $ciscoCase, $customer) + @(
+        $noCommonName | ForEach-Object { $_[1] }
+    )) {
     $certificate.Dispose()
 }
 
@@ -356,6 +449,7 @@ foreach ($certificate in @($cisco, $ciscoNearMiss, $ciscoCase, $customer)) {
     engine = $PSVersionTable.PSVersion.ToString()
     bootstrap_signer_pinned = $true
     module_signer_pinned = $true
+    signer_common_name_required = $true
     signer_fingerprint_validated = $true
     lifecycle_parameter_validated = $true
     foreign_signer_available = [bool]$moduleResult.foreign_signer_available
