@@ -1038,14 +1038,21 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
-	body, err := readWindowsEnterpriseBoundedFile(layout.ManifestPath, 16<<20)
+	return readWindowsEnterpriseStandaloneEnrollmentAt(layout.ManifestPath, layout.DataDir)
+}
+
+// readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets
+// and exempt rows, and as pending the targets the guardian's last reconcile
+// (in runtimeDir) left waiting for their account's session. Every Windows
+// per-user row is written deferred, so that flag does not say which.
+func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string) (enterprisestatus.Enrollment, error) {
+	body, err := readWindowsEnterpriseBoundedFile(manifestPath, 16<<20)
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
 	var manifest struct {
 		Targets []struct {
-			Enabled  bool `yaml:"enabled"`
-			Deferred bool `yaml:"deferred"`
+			Enabled bool `yaml:"enabled"`
 		} `yaml:"targets"`
 	}
 	if err := yaml.Unmarshal(body, &manifest); err != nil {
@@ -1053,12 +1060,12 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	}
 	enrollment := enterprisestatus.Enrollment{Targets: len(manifest.Targets)}
 	for _, target := range manifest.Targets {
-		if target.Deferred {
-			enrollment.Pending++
-		}
 		if !target.Enabled {
 			enrollment.Exempt++
 		}
+	}
+	if state, exists, err := loadEnterpriseHookGuardianState(runtimeDir); err == nil && exists {
+		enrollment.Pending = state.PendingCount
 	}
 	return enrollment, nil
 }

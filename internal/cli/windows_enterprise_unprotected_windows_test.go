@@ -8,8 +8,10 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -157,5 +159,37 @@ func TestWindowsStandaloneStatusNamesGatewayStartFailureAndDeletedAccount(t *tes
 	}
 	if !named {
 		t.Fatalf("verify errors = %+v, want the service named with the repair that restores it", verify.Errors)
+	}
+}
+
+// Every Windows per-user row is written deferred; status counts as pending
+// only the targets the guardian's last reconcile left waiting for a session.
+func TestWindowsStandaloneEnrollmentCountsOnlyPendingTargets(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	cfg = nil
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "targets.yaml")
+	if err := os.WriteFile(manifest, []byte("version: 1\ntargets:\n"+
+		"  - {sid: S-1-5-21-1-2-3-1001, connector: codex, enabled: true, deferred: true}\n"+
+		"  - {sid: S-1-5-21-1-2-3-1002, connector: codex, enabled: true, deferred: true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(enterpriseHookGuardianState{
+		Version: 1, OK: true, TargetCount: 2, SuccessCount: 1, PendingCount: 1,
+		Results: []enterpriseHookReconcileRow{
+			{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", OK: true},
+			{SID: "S-1-5-21-1-2-3-1002", Connector: "codex", Pending: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hookGuardianStateFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := readWindowsEnterpriseStandaloneEnrollmentAt(manifest, dir)
+	if err != nil || enrollment.Targets != 2 || enrollment.Pending != 1 {
+		t.Fatalf("enrollment = %+v, %v; want 2 targets, 1 pending", enrollment, err)
 	}
 }
