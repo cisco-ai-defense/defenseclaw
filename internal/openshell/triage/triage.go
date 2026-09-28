@@ -842,8 +842,8 @@ func lookupTransient(err error) bool {
 // RecheckResolved holds the destination names of a proposal (typically a
 // rule approved earlier, whose names may resolve elsewhere by now) to the
 // proxy's dial-time address rules, applied to what they resolve to now, as
-// Classify does. It returns why a name fails, most severe first, or ""
-// when every name passes or does not resolve now:
+// Classify does. It returns the most severe reason a name fails for, or
+// "" when every name passes or does not resolve now:
 //
 //   - ReasonResolvesToHost: this machine or what only it reaches, which a
 //     direct rule must never lead to, whoever approved it;
