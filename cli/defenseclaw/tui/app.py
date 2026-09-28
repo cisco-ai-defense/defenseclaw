@@ -2023,8 +2023,40 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self._roster_catalog_refresh_pending = False
                 self._schedule_slow_refresh()
 
+    def on_paste(self, event: events.Paste) -> None:
+        """A paste on a Setup text row opens the text box with the pasted text.
+
+        Without this, pasting an API key into a wizard form or the config
+        editor did nothing: the Setup rows only take keys, and the paste
+        never reached a text field.
+        """
+
+        if len(self.screen_stack) > 1 or self.active_panel != "setup" or not event.text:
+            return
+        text = event.text.replace("\r\n", "\n").split("\n", 1)[0]
+        model = self.setup_model
+        if model.form_active and not model.goal_active and model.form_fields:
+            index = _clamp_int(getattr(model, "form_cursor", 0), 0, len(model.form_fields) - 1)
+            field = model.form_fields[index]
+            if _is_setup_form_text_field(field):
+                self._open_setup_field_editor("form", field.value + text)
+                event.stop()
+            return
+        if model.mode == "config" and not model.form_active:
+            field = self._current_setup_field()
+            if field is not None and _is_setup_config_text_field(field):
+                self._open_setup_field_editor("config", field.value + text)
+                event.stop()
+
     def on_key(self, event: events.Key) -> None:
         if len(self.screen_stack) > 1:
+            # Keys typed in the same burst as the one that opened a Setup text
+            # box were routed to the screen underneath first; hand the
+            # printable ones to the text box instead of dropping them.
+            top = self.screen
+            if isinstance(top, FieldEditorScreen) and event.is_printable and event.character:
+                top.type_text(event.character)
+                event.stop()
             return
 
         command = self.query_one("#command-input", Input)

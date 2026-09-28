@@ -27,6 +27,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
@@ -132,6 +133,21 @@ class FieldEditorScreen(ModalScreen[str | None]):
         field_input = self.query_one("#field-editor-input", Input)
         field_input.focus()
         field_input.cursor_position = len(field_input.value)
+
+    def type_text(self, text: str) -> None:
+        """Type ``text`` that reached the app before this editor had focus.
+
+        Keys typed in one burst (fast typing, or a terminal without bracketed
+        paste) are all routed to the screen underneath before the key that
+        opened this editor is handled; the app hands them over here.
+        """
+
+        try:
+            field_input = self.query_one("#field-editor-input", Input)
+        except NoMatches:
+            self._value += text
+            return
+        field_input.insert_text_at_cursor(text)
 
     @on(Input.Submitted, "#field-editor-input")
     def _on_submitted(self, event: Input.Submitted) -> None:

@@ -78,3 +78,50 @@ async def test_typing_into_a_wizard_text_field_keeps_the_exact_value(tmp_path) -
 
         assert app.setup_model.form_active is True
         assert wizard_field_value(app.setup_model.form_fields, "Env Name", raw=True) == TYPED
+
+
+async def _open_credentials_env_name(pilot: Any, app: Any) -> None:
+    await pilot.press("0")
+    await pilot.pause()
+    app.setup_model.active_wizard = SetupWizard.CREDENTIALS
+    await pilot.press("enter")
+    await pilot.pause()
+    goal = next(i for i, g in enumerate(app.setup_model.goals) if "Set" in g.label)
+    app.setup_model.goal_cursor = goal
+    await pilot.press("enter")
+    await pilot.pause()
+    app.setup_model.form_cursor = next(
+        i for i, f in enumerate(app.setup_model.form_fields) if f.label == "Env Name"
+    )
+    await pilot.pause()
+
+
+async def test_keys_typed_in_one_burst_all_reach_the_text_box(tmp_path) -> None:
+    # A terminal delivers fast typing (and non-bracketed pastes) as one burst:
+    # every key is routed before the first one opens the text box.
+    from textual import events
+    from textual.widgets import Input
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _open_credentials_env_name(pilot, app)
+        for character in "OPENAI_API_KEY":
+            app.post_message(events.Key(character, character))
+        await pilot.pause()
+        await pilot.pause()
+        assert isinstance(app.screen, FieldEditorScreen)
+        assert app.screen.query_one("#field-editor-input", Input).value == "OPENAI_API_KEY"
+
+
+async def test_paste_on_a_text_row_opens_the_text_box_with_the_pasted_text(tmp_path) -> None:
+    from textual import events
+    from textual.widgets import Input
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _open_credentials_env_name(pilot, app)
+        app.post_message(events.Paste("DEFENSECLAW_LLM_KEY\nsecond line"))
+        await pilot.pause()
+        await pilot.pause()
+        assert isinstance(app.screen, FieldEditorScreen)
+        assert app.screen.query_one("#field-editor-input", Input).value == "DEFENSECLAW_LLM_KEY"
