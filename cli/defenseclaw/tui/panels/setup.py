@@ -615,6 +615,8 @@ class SetupPanelModel:
         external: bool = False,
     ) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
+        active_field = self.current_field()
+        active_key = active_field.key if active_field is not None else ""
         preserve_config_draft = external and self.mode == "config" and self.has_changes()
         preserve_wizard_draft = external and self.form_active
         self.config = cfg
@@ -628,7 +630,9 @@ class SetupPanelModel:
                         self.active_section = index
                         break
             self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
-            self.active_line = self.first_editable_line()
+            # Keep the cursor on the field just saved rather than jumping to
+            # the top of the section.
+            self.active_line = self._line_for_key(active_key)
             self.config_scroll = 0
         self.disk_change_pending = preserve_config_draft or preserve_wizard_draft
         # Readiness rows depend on cfg.gateway / cfg.guardrail / cfg.audit /
@@ -1106,6 +1110,14 @@ class SetupPanelModel:
                 )
                 for section in self.sections
             )
+
+    def _line_for_key(self, key: str) -> int:
+        section = self.current_section()
+        if key and section is not None:
+            for index, field in enumerate(section.fields):
+                if field.kind != "header" and field.key == key:
+                    return index
+        return self.first_editable_line()
 
     def first_editable_line(self) -> int:
         if not self.sections:

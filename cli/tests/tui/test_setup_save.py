@@ -186,3 +186,14 @@ def test_guardrail_rule_pack_preset_is_shown_as_is() -> None:
     cfg = {"guardrail": {"enabled": True, "rule_pack_dir": "/packs/strict"}}
     fields = guardrail_wizard_fields(cfg)
     assert wizard_field_value(fields, "Rule Pack") == "strict"
+
+
+def test_reloading_the_config_keeps_the_cursor_on_the_same_field() -> None:
+    cfg = default_config()
+    model = SetupPanelModel(cfg)
+    _focus(model, "guardrail.block_message")
+
+    model.set_config(cfg)
+
+    field = model.current_field()
+    assert field is not None and field.key == "guardrail.block_message"
