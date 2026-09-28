@@ -70,6 +70,28 @@ func TestSessionInARunningSandboxSaysTheReviewIsLive(t *testing.T) {
 	}
 }
 
+// Keeping the changes of a session in a sandbox that keeps running does not
+// make them the next session's base: what the sandbox changes after the
+// review was not reviewed, and undo must still revert it.
+func TestKeepingChangesInARunningSandboxKeepsTheUndoPoint(t *testing.T) {
+	ta := newTestApp(t, "y\n")
+	sb := sampleSandbox("m1-b")
+	sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: time.Now().Add(-time.Hour)}
+	ta.daemon.add(sb)
+	runAnswers(ta, "state=none\n", "")
+	if err := ta.Connect(context.Background(), ConnectOptions{Name: "m1-b"}); err != nil {
+		t.Fatalf("Connect: %v\n%s", err, ta.output())
+	}
+	out := ta.output()
+	if !strings.Contains(out, "Keep changes?") || !strings.Contains(out, "the undo point stays, since m1-b keeps running") {
+		t.Fatalf("output:\n%s", out)
+	}
+	dir, _ := ta.cliStateDir("m1-b")
+	if _, err := os.Stat(filepath.Join(dir, "accepted.json")); err == nil {
+		t.Fatal("changes a running sandbox can still add to were accepted as the next session's base")
+	}
+}
+
 // A review that fails says nothing about what changed: the keep/undo
 // question still comes, keeping does not make the changes the next
 // session's base, and --rm keeps the undo snapshot.

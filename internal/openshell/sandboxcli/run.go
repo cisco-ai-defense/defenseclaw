@@ -851,11 +851,15 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 // hint says so.
 func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode bool) (bool, error) {
 	run := a.runLaunchOf(sb)
-	question := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resume it?", sb.Name, sb.Phase, sb.WorkdirMode)
+	held := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder", sb.Name, sb.Phase, sb.WorkdirMode)
+	if n := a.attachedSessions(sb.Name); n > 0 {
+		// Both sessions share it: neither's end stops it under the other.
+		held += fmt.Sprintf(", and %s attached to it", plural(int64(n), "session is", "sessions are"))
+	}
+	question := held + ". Resume it?"
 	ignored := resumeIgnores(o, sb, run)
 	if len(ignored) > 0 {
-		question = fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resuming it keeps its own settings and ignores %s. Resume it anyway?",
-			sb.Name, sb.Phase, sb.WorkdirMode, strings.Join(ignored, ", "))
+		question = held + ". Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". Resume it anyway?"
 	}
 	resume, err := a.ask(question, len(ignored) == 0, false)
 	if err != nil || !resume {

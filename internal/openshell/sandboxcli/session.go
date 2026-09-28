@@ -55,6 +55,10 @@ type session struct {
 	// liveRun is set at the end of a session in a sandbox whose detached
 	// run is still going: nothing may stop the sandbox under it.
 	liveRun bool
+	// others counts, at the end of the session, the other sessions whose
+	// harness or shell still runs in the sandbox (attachedSessions):
+	// nothing may stop the sandbox, or undo the folder, under them.
+	others int
 	// headless marks a one-prompt session (the resume hint says how to
 	// run the next prompt).
 	headless bool
@@ -136,6 +140,9 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
+	// While the harness runs, other sessions' ends leave the sandbox alone.
+	release := s.app.holdSession(s.sb.Name)
+	defer release()
 	stop := s.beginSession(ctx)
 	defer stop()
 	if headless || !s.app.IO.TTY {
@@ -552,6 +559,9 @@ func (s *session) end(ctx context.Context) error {
 			s.liveRun = true
 		}
 	}
+	// Another session's harness or shell still running in the sandbox keeps
+	// it running (this session's lease went with its harness).
+	s.others = a.attachedSessions(s.sb.Name)
 	if after.WorkdirMode == config.OpenShellWorkdirCopy {
 		return s.endCopy(ctx, after, elsewhere != "")
 	}
@@ -563,6 +573,8 @@ func (s *session) end(ctx context.Context) error {
 	case after.Phase != "ready":
 		// Stopped from elsewhere: nothing runs in it any more.
 		stopped = true
+	case s.others > 0:
+		a.note(s.sb.Name + " keeps running: " + s.othersText() + ", so what changes after this review is not in it")
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
 			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
@@ -603,10 +615,14 @@ func (s *session) end(ctx context.Context) error {
 	}
 	s.printNested(after)
 	s.printAsks(after)
-	if s.liveRun && changed {
-		// Undo stops the sandbox, which would end the run.
-		a.note("the detached run in " + s.sb.Name + " is still going; review or undo once it ends: `" + CommandName + " review " + s.sb.Name +
-			"`, `" + CommandName + " undo " + s.sb.Name + "`")
+	if (s.liveRun || s.others > 0) && changed {
+		// Undo stops the sandbox, which would end the run or the other
+		// sessions (and revert their work too).
+		what := "the detached run in " + s.sb.Name + " is still going; review or undo once it ends"
+		if !s.liveRun {
+			what = s.othersText() + "; review or undo once they end"
+		}
+		a.note(what + ": `" + CommandName + " review " + s.sb.Name + "`, `" + CommandName + " undo " + s.sb.Name + "`")
 		return s.finish(ctx, false)
 	}
 	decision, accepted := s.onExit(changed)
@@ -643,11 +659,17 @@ func (s *session) end(ctx context.Context) error {
 		a.warn("interrupted: nothing was decided, so the changes stay in the folder and the undo point is kept (`" + CommandName + " undo " +
 			s.sb.Name + "` still reverts them; `" + CommandName + " review " + s.sb.Name + "` shows them)")
 	case !changed:
-	case accepted && reviewed:
+	case accepted && reviewed && stopped:
 		// The next session starts from here: its undo point replaces this
 		// one. Changes nobody could review never become the base.
 		a.acceptUndoPoint(after)
 		a.ok("kept: the changes stay in the folder, and the next session takes a new undo point")
+	case accepted && reviewed:
+		// The sandbox keeps running: what it changes after this review was
+		// not reviewed, so it must not become the base either.
+		a.ok("kept: the changes stay in the folder")
+		a.note("the undo point stays, since " + s.sb.Name + " keeps running: `" + CommandName + " undo " + s.sb.Name +
+			"` still reverts this session's changes with whatever it changes next")
 	case accepted:
 		a.ok("kept: the changes stay in the folder, and the undo point stays, since they could not be reviewed")
 	case after.Snapshot != nil:
@@ -717,14 +739,23 @@ func (s *session) onExit(changed bool) (string, bool) {
 	return ans, false
 }
 
+// othersText is "1 other session is attached to it".
+func (s *session) othersText() string {
+	return plural(int64(s.others), "other session is", "other sessions are") + " attached to it"
+}
+
 // finish stops (or with --rm deletes) the sandbox after a session. A
-// sandbox the session did not start, or whose detached run is still going,
-// keeps running.
+// sandbox the session did not start, whose detached run is still going, or
+// that other sessions are attached to keeps running.
 func (s *session) finish(ctx context.Context, stopped bool) error {
 	a := s.app
 	name := s.sb.Name
-	if s.rm && s.liveRun {
+	switch {
+	case s.rm && s.liveRun:
 		a.warn(name + " is not deleted (--rm): its detached run is still going; delete it once the run ends: `" + CommandName + " delete " + name + "`")
+		s.rm = false
+	case s.rm && s.others > 0:
+		a.warn(name + " is not deleted (--rm): " + s.othersText() + "; delete it once they end: `" + CommandName + " delete " + name + "`")
 		s.rm = false
 	}
 	if s.rm {
@@ -745,6 +776,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		case s.liveRun:
 			a.note("Sandbox " + name + " keeps running: its detached run is still going → follow: " + CommandName + " logs " + name + " -f   stop: " +
 				CommandName + " stop " + name)
+			return nil
+		case s.others > 0:
+			a.note("Sandbox " + name + " keeps running: " + s.othersText() + " → stop it once they end: " + CommandName + " stop " + name)
 			return nil
 		case !s.started:
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)

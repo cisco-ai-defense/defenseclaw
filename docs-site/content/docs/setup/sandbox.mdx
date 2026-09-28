@@ -563,10 +563,13 @@ The sandbox is then stopped, not deleted, so you can resume it later.
 every run. With no changes, nothing is asked.
 
 Keeping the changes (Enter, `y`, `--yes`, or `on_exit: keep`) makes them
-the base of the next session: its start takes a fresh snapshot. A session
-whose changes nobody kept (a detached run, or one without a terminal to ask
-on) leaves its undo point in place, so the next start keeps it and `undo`
-still reverts every session since.
+the base of the next session: its start takes a fresh snapshot. That needs
+the sandbox stopped before the review: in one that keeps running (it was
+running when you connected) the undo point stays, since what it changes
+after the review was not reviewed. A session
+whose changes nobody kept (a detached run, or one without a terminal
+to ask on) leaves its undo point in place, so the next start keeps
+it and `undo` still reverts every session since.
 
 ### What the review flags
 
@@ -973,7 +976,7 @@ myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 blocked  ~
 
 | Command | What it does |
 | --- | --- |
-| `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead, and `--prompt TEXT` runs one prompt headless, without a terminal. A session stops only a sandbox it started, and leaves a sandbox whose detached run is still going running. |
+| `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead, and `--prompt TEXT` runs one prompt headless, without a terminal. A session stops only a sandbox it started, and leaves a sandbox whose detached run is still going, or that another session is attached to, running. |
 | `defenseclaw sandbox exec <name> -- <command>` | Run one command in a running sandbox, through its egress proxy. |
 | `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not) and keeps the run's log. |
 | `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder and you did not keep them at the end of that session, in which case the old snapshot is kept so `undo` still reverts them; it says which. `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
