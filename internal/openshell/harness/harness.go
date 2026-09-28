@@ -69,12 +69,29 @@ const LauncherSystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 // resolve missing modules from NODE_PATH before any of their own code runs.
 var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE", "NODE_OPTIONS", "NODE_PATH"}
 
-// launcherPreamble is the environment set-up every launcher runs first:
-// system directories lead PATH, Node's compile cache is off, and the egress
-// proxy is exported (egressEnvScript, which the sandbox's login shells and
-// `sandbox exec` commands run too; see shellenv.go). It also defines
-// dc_launch, which launcherExec starts the harness with
-// (launcherJobControl).
+// launcherLoaderScrub drops the dynamic loader's variables (every LD_*, as
+// glibc and musl read LD_PRELOAD, LD_AUDIT and LD_LIBRARY_PATH among them)
+// and GCONV_PATH, which names the iconv modules glibc loads, before the
+// launcher starts any program. An agent could export them from a shell
+// start-up file like the variables above, and the loader would load a
+// workload-written shared object into /usr/bin/env, the launcher's own
+// helpers, the supervisor and the harness, and from the harness into every
+// hook. The launcher's bash has already been loaded when its first line
+// runs, so unsetting them here keeps them from every program after it.
+const launcherLoaderScrub = `# The dynamic loader would load workload-written code into every program
+# started with these.
+for dc_var in ${!LD_@} GCONV_PATH; do
+  unset -v "$dc_var"
+done
+unset dc_var
+`
+
+// launcherPreamble is the environment set-up every launcher runs first: the
+// loader variables are dropped (launcherLoaderScrub), system directories
+// lead PATH, Node's compile cache is off, and the egress proxy is exported
+// (egressEnvScript, which the sandbox's login shells and `sandbox exec`
+// commands run too; see shellenv.go). It also defines dc_launch, which
+// launcherExec starts the harness with (launcherJobControl).
 //
 // Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
 // own module.enableCompileCache) says, which for the Cursor Agent wrapper is
@@ -82,7 +99,7 @@ var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "
 // V8 code it finds there in place of the root-owned sources (measured on
 // Cursor's Node 24.5.0: a second start reads the cache and V8 accepts it).
 // NODE_DISABLE_COMPILE_CACHE=1 switches the cache off, reads included.
-const launcherPreamble = `PATH=` + LauncherSystemPATH + `${PATH:+:$PATH}
+const launcherPreamble = launcherLoaderScrub + `PATH=` + LauncherSystemPATH + `${PATH:+:$PATH}
 export PATH
 # Node would run V8 code cached in the workload-writable HOME in place of the
 # root-owned harness sources.

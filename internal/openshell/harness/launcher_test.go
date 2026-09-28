@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -235,6 +236,40 @@ func TestClaudeCodeLauncherQuietsTheNativeInstallCheck(t *testing.T) {
 		if artifacts.Env[name] != "1" {
 			t.Errorf("the Claude Code sandbox env does not set %s=1: %v", name, artifacts.Env)
 		}
+	}
+}
+
+// TestLaunchersDropLoaderEnv starts every launcher with the dynamic loader
+// variables an agent could export from ~/.bashrc, naming an inert marker
+// object that does not exist (glibc's loader then warns in each program it
+// starts with the variable and loads nothing). The harness must receive none
+// of them, and on Linux no program the launcher starts may warn about the
+// marker: only the launcher's own bash, loaded before its first line runs,
+// sees it.
+func TestLaunchersDropLoaderEnv(t *testing.T) {
+	for _, name := range Names() {
+		spec, _ := Get(name)
+		t.Run(name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "dc-inert-loader-marker.so")
+			code, got, out := launcherEnv(t, spec, []string{
+				"LD_PRELOAD=" + marker, "LD_AUDIT=" + marker, "LD_LIBRARY_PATH=" + filepath.Dir(marker),
+				"LD_BIND_NOW=1", "GCONV_PATH=" + filepath.Dir(marker),
+			})
+			if code != 0 || !strings.Contains(got, "\nPATH=") {
+				t.Fatalf("the stub never ran: exit %d\n%s", code, out)
+			}
+			for _, v := range []string{"LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH", "LD_BIND_NOW", "GCONV_PATH"} {
+				if strings.Contains(got, "\n"+v+"=") {
+					t.Errorf("%s reached the harness:\n%s", v, got)
+				}
+			}
+			if runtime.GOOS == "linux" {
+				// One warning per variable, from the launcher's bash.
+				if n := strings.Count(out, marker); n > 2 {
+					t.Errorf("%d loader warnings name the marker; programs the launcher started saw it:\n%s", n, out)
+				}
+			}
+		})
 	}
 }
 

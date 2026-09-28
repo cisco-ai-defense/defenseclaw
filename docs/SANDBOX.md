@@ -1546,7 +1546,11 @@ the switches that would run the harness without its hooks, puts the system
 directories first on `PATH`, switches Node's compile cache off, exports the
 egress proxy settings (see [paths out of the workload](#paths-out-of-the-workload)),
 and drops `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `CDPATH`, `GLOBIGNORE`,
-`NODE_OPTIONS` and `NODE_PATH` from the harness environment. The Python
+`NODE_OPTIONS` and `NODE_PATH` from the harness environment. It drops the
+dynamic loader's variables (every `LD_*`, `LD_PRELOAD`, `LD_AUDIT` and
+`LD_LIBRARY_PATH` among them) and `GCONV_PATH` before it starts any
+program, so a shared object named in a start-up file is never loaded into
+its helpers, the harness or the hooks the harness runs. The Python
 harnesses' launchers (Hermes, OpenHands, OmniGent) also drop every `PYTHON*`
 variable: their uv entry points run the interpreter without `-I`, so a
 `PYTHONPATH` exported from a start-up file would import a planted
