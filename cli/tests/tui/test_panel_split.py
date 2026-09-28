@@ -126,6 +126,22 @@ def test_narrow_switcher_keeps_the_active_item_and_points_at_the_rest() -> None:
     assert switcher.key_at(plain.index("Guardrail")) == "two"
 
 
+def test_narrow_switcher_shows_as_many_items_as_fit() -> None:
+    items = tuple(NavItem(i.key, i.label, i.badge, active=i.key == "three") for i in ITEMS) + (
+        NavItem("five", "Config editor"),
+    )
+    labels = ["Get protected", "Guardrail & scanning", "Alerts & telemetry", "Gateway & advanced", "Config editor"]
+
+    # 84 columns hold every item but the first: the window grows both ways.
+    plain = Text.from_markup(panel_split.nav_switcher(items, 84).markup).plain
+    assert plain.startswith("‹") and not plain.endswith("›")
+    assert [label in plain for label in labels] == [False, True, True, True, True]
+    # A little narrower and one item drops off each end, never the neighbours.
+    plain = Text.from_markup(panel_split.nav_switcher(items, 70).markup).plain
+    assert plain.startswith("‹") and plain.endswith("›")
+    assert [label in plain for label in labels] == [False, True, True, True, False]
+
+
 def test_switcher_escapes_labels() -> None:
     items = (NavItem("x", "[bold]odd[/]", active=True), NavItem("y", "plain [1]"))
     plain = Text.from_markup(panel_split.nav_switcher(items, 80).markup).plain

@@ -284,14 +284,15 @@ def nav_switcher(items: Sequence[NavItem], width: int) -> NavSwitcher:
     if _window_width(labels, 0, len(labels)) <= width:
         start, end = 0, len(labels)
     else:
+        # Grow the window one item at a time, alternating right and left.
         grew = True
         while grew:
             grew = False
-            for candidate in ((start, end + 1), (start - 1, end)):
-                lo, hi = candidate
-                if lo < 0 or hi > len(labels) or _window_width(labels, lo, hi) > width:
-                    continue
-                start, end = lo, hi
+            if end < len(labels) and _window_width(labels, start, end + 1) <= width:
+                end += 1
+                grew = True
+            if start > 0 and _window_width(labels, start - 1, end) <= width:
+                start -= 1
                 grew = True
     if _window_width(labels, start, end) > width:
         labels[active] = _clip(labels[active], max(4, width - 4))
