@@ -85,16 +85,21 @@ OpenShell install plan
 Run this plan? [y/N] y
   ✓ OpenShell 0.1.1 installed, gateway running
 Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder) [Y/n]
-Disable OpenShell's anonymous usage telemetry? [Y/n]
+Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
   OpenShell gateway configuration changes
     edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)
   …
   ✓ gateway configured and restarted
-  Harnesses: [x] Claude Code [x] Codex [ ] Amp [ ] Antigravity [ ] GitHub Copilot CLI [ ] Cursor Agent [ ] Devin CLI [ ] Hermes Agent [ ] Kiro CLI [ ] OmniGent [ ] OpenCode [ ] OpenHands    Credentials: ANTHROPIC_API_KEY ✓  ~/.codex/auth.json ✓
+  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
+    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓
+    Codex (codex)         model credential ~/.codex/auth.json ✓
+  Other harnesses: agy, amp (not verified yet), copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
   ✓ openshell.enabled is on in ~/.defenseclaw/config.yaml
 Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N]
+Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]
   Building the Claude Code image (the first build downloads about 3 GB)…
   ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-…-u1000, hooks verified (built in 6m10s)
+Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n]
   Building the Codex image (the first build downloads about 3 GB)…
   ✓ Codex 0.146.0: defenseclaw/sandbox:codex-…-u1000, hooks verified (built in 2m41s)
   ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972)
@@ -155,23 +160,38 @@ What setup does, in order:
    `defenseclaw sandbox setup --restart-gateway`.
 4. **Turns OpenShell's anonymous usage telemetry off** on Linux, unless you
    keep it (`--upstream-telemetry`). Setup does this in the gateway's
-   `gateway.env`, which only the Linux systemd service reads. On macOS the
+   `gateway.env`, which only the Linux systemd service reads, so like step 3
+   it restarts the gateway. The question says so before you answer, with the
+   number of sandboxes running on the gateway, and the restart under running
+   sandboxes is asked about separately as above. Your answer is recorded in
+   `openshell.upstream_telemetry`: once you keep the telemetry, later runs of
+   setup don't ask again (set it to `false` to be asked). On macOS the
    Homebrew gateway runs under launchd, which ignores that file, so setup
    cannot turn the telemetry off there: it does not ask, leaves `gateway.env`
    alone and says the telemetry stays on, and the doctor shows its telemetry
    check as skipped (`gateway.env is read by the systemd unit only`).
-5. **Records the harnesses** in `openshell.harnesses` and shows which model
-   credential each one would use, then turns `openshell.enabled` on.
+5. **Records the harnesses** in `openshell.harnesses`, then turns
+   `openshell.enabled` on. The `Harnesses` lines are information, not a
+   checklist: one line for each harness this run sets up, with the model
+   credential it would share, or what to do when none is found (set the
+   named variable, or log in inside the sandbox on the first run). The other
+   harnesses follow by the names `--harness` and `run` take; set one up with
+   `defenseclaw sandbox setup --harness NAME`.
 6. **Offers the shell wrappers** that make typing `claude` or `codex` start
-   a sandbox (see [the shell wrapper](#make-claude-run-sandboxed)).
+   a sandbox (see [the shell wrapper](#make-claude-run-sandboxed)). Kiro CLI
+   gets none: you start it as `kiro-cli`, which runs `kiro-cli-chat` itself,
+   past any wrapper, so run it with `defenseclaw sandbox run kiro`.
 7. **Builds each harness image** and checks that its hooks fire and block in
-   it. The first build takes a few minutes.
+   it. The first build takes a few minutes and downloads about 3 GB. On a
+   terminal, setup asks before building the image of a harness you didn't
+   name with `--harness` (the defaults, or `openshell.harnesses`); say no and
+   the first run builds it. `--yes` and `--non-interactive` build them all.
 8. **Waits for the DefenseClaw daemon** to turn sandboxes on, and reports
    its hook ingress and egress proxy addresses.
 
 | Flag | Effect |
 | --- | --- |
-| `--harness NAME` | A harness to set up; repeat it for more. The list replaces `openshell.harnesses`, so name every harness you want. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
+| `--harness NAME` | A harness to set up; repeat it for more. It is added to `openshell.harnesses`, which keeps the harnesses set up before. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
 | `--install-openshell` | Install OpenShell without asking. |
 | `--no-mounts` | Leave bind mounts off; every run works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
@@ -188,30 +208,28 @@ already configured and up-to-date images are left as they are.
 
 ## Which harnesses can run
 
-Start a harness with `defenseclaw sandbox run <command>`, using the command
-from the table. DefenseClaw uses a harness image only after proving that
+Start a harness with `defenseclaw sandbox run <name>`, using the name from
+the table. DefenseClaw uses a harness image only after proving that
 its hooks fire and block in it, so the unverified harnesses below cannot
 run yet. The TUI and macOS wizards offer Claude Code and Codex. To add
-others, run setup with every harness you want, for example:
+another, run setup with it (repeat `--harness` for more), for example:
 
 ```bash
-defenseclaw sandbox setup --harness claude --harness codex --harness copilot
+defenseclaw sandbox setup --harness copilot
 ```
 
-`--harness` replaces the `openshell.harnesses` list rather than adding to it,
-and that list decides which images the doctor checks and `image build`
-builds by default, and which harnesses the wizards turn on. So
-`setup --harness copilot` alone drops Claude Code and Codex from it, and a
-later run of the TUI or macOS wizard sets it back to the harnesses you pick
-there.
+`--harness` adds to the `openshell.harnesses` list, so the harnesses set up
+before stay in it. That list decides which images the doctor checks and
+`image build` builds by default, and which harnesses the wizards turn on. To
+drop a harness from it, edit `openshell.harnesses` in `config.yaml`.
 
-| Harness | Command | Hook tier | Status |
+| Harness | Name | Hook tier | Status |
 | --- | --- | --- | --- |
 | Claude Code | `claude` | managed | Verified |
 | Codex | `codex` | managed | Verified |
 | GitHub Copilot CLI | `copilot` | managed | Verified through Copilot's bring-your-own-provider mode. Copilot's own models through a GitHub token are unverified. |
 | OpenCode | `opencode` | user | Verified |
-| Kiro CLI | `kiro-cli-chat` | user | Verified in Kiro's scripted mode. A real model through `KIRO_API_KEY` or a login is unverified. |
+| Kiro CLI | `kiro` | user | Verified in Kiro's scripted mode. A real model through `KIRO_API_KEY` or a login is unverified. |
 | Hermes Agent | `hermes` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
 | OpenHands | `openhands` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
 | OmniGent | `omnigent` | managed | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
@@ -272,6 +290,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
 | `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
+| `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `MCP` | Your MCP servers that came along. |
 | `Hooks` | Shown for user-tier harnesses: the agent could edit its own hook settings, and hook silence is detected. |
 | `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
@@ -368,6 +387,16 @@ address to `openshell.egress.allow` in `config.yaml`.
 A blocked request gets an HTTP 403 with a JSON body written for the agent:
 it says what was blocked, how you can unblock it, and not to try another
 way, so the agent can adapt or tell you.
+
+The proxy address the sandbox gets (`HTTPS_PROXY` and `HTTP_PROXY`) holds a
+user name and password of its own, so a verbose tool such as `curl -v`
+prints a `Proxy-Authorization: Basic …` header, and the agent may warn you
+that a credential leaked. It is not one of your secrets, and seeing it is
+harmless: DefenseClaw makes one for each sandbox, it works only on
+DefenseClaw's egress proxy, which listens only on this machine's loopback
+address, and it lets the sandbox reach only what its own policy already
+allows. The proxy uses it to tell sandboxes apart, and it stops working
+when the sandbox is deleted.
 
 <Callout type="warn" title="Open web is a deliberate trade-off">
 The `open` profile lets an agent that has been tricked by a prompt injection
@@ -953,10 +982,41 @@ defenseclaw sandbox teardown --dry-run
 defenseclaw sandbox teardown
 ```
 
-Teardown deletes this install's sandboxes and the OpenShell providers it
-created, and its images (`--keep-images` keeps them). It restores the
-OpenShell gateway configuration setup changed, unless someone changed it
-since, removes the shell wrappers, and turns `openshell.enabled` off.
+The dry run prints every step, with `none` for a step with nothing to do,
+and ends with `dry run: nothing was changed`:
+
+```text
+Sandbox teardown
+  sandboxes         myapp-7f3a
+  providers         myapp-7f3a-ingress
+  provider profiles defenseclaw-ingress-18971 (this install's hook ingress)
+                    defenseclaw-anthropic, 5 --credential profiles (dc-cred-…) (shared by every DefenseClaw install on this gateway and unused now; an install that needs one imports it again)
+  images            defenseclaw/sandbox:claudecode-…-u1000, defenseclaw/sandbox:codex-…-u1000
+  gateway config    ~/.config/openshell/gateway.toml: restore the backup ~/.config/openshell/gateway.toml.defenseclaw-…
+                    then restart the OpenShell gateway, which drops the connections of every sandbox on it
+  shell wrappers    claude, codex in ~/.bashrc
+  config            turn openshell.enabled off in ~/.defenseclaw/config.yaml
+
+  dry run: nothing was changed
+```
+
+Teardown takes these steps, in order:
+
+1. **sandboxes**: deletes this install's sandboxes.
+2. **providers**: deletes the OpenShell providers it created that are left.
+3. **provider profiles**: deletes the unused DefenseClaw provider profiles,
+   each labeled with whose it is (see below).
+4. **images**: removes the harness images this install built
+   (`--keep-images` keeps them).
+5. **leftover data** and **gone sandboxes**, when there are any: removes what
+   sandboxes left on this machine (see below).
+6. **gateway config**: restores the OpenShell gateway configuration setup
+   changed, from the backup setup kept, and restarts the gateway. A file
+   someone changed since is left alone with a warning. `nothing to restore`
+   means setup never changed it.
+7. **shell wrappers**: removes them from every shell's rc file.
+8. **config**: turns `openshell.enabled` off in `config.yaml`.
+
 OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
 and stops if teardown fails.
 
@@ -976,7 +1036,9 @@ profile (`defenseclaw-…`) that no remaining provider uses, including ones
 another DefenseClaw install imported. Another DefenseClaw daemon on the same
 gateway imports them again when it needs them, and another install's
 ingress profile is never removed. On a shared gateway, run `--dry-run`
-first and check the `provider profiles` line.
+first and check the `provider profiles` lines: `(this install's hook
+ingress)` marks this install's own, and `(shared by every DefenseClaw
+install on this gateway …)` the ones any install may have imported.
 
 ## Troubleshooting
 
@@ -1038,7 +1100,7 @@ section, and skips them while `openshell.enabled` is off.
 | An image build fails | The error from `setup` or `image build` names the build log, `~/.defenseclaw/logs/sandbox-image-<harness>.log`. `defenseclaw sandbox image build <harness> --verbose` streams the build instead. |
 | A tool cannot reach a site | Look for the block in `defenseclaw sandbox activity`, then unblock it. Git over SSH and databases don't go through the web proxy: use HTTPS remotes, or `--host-port` for a service on your machine. |
 | Project folder mounts show as disabled | Run `defenseclaw sandbox doctor --fix`, or setup again. On macOS, share your home folder in Docker Desktop and turn host networking on. |
-| Low disk space | `docker system prune`, then `defenseclaw sandbox image prune` removes superseded harness images. |
+| Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. |
 
 Exit statuses: 3 means the platform or deployment is unsupported (Windows,
 WSL2, `managed_enterprise`, or running as root), 69 means no hook of the
