@@ -273,11 +273,12 @@ func (o Options) getenv(key string) string {
 // plugin that holds further plugins. Each .cursor-plugin folder adds the hook
 // configs its plugin.json and marketplace.json declare, and every
 // hooks/hooks.json in the tree is scanned. The walk never follows links or
-// reparse points, skips version-control and package folders that are not
-// plugins themselves, and lists at most foreignHookPluginMaxDirs folders; it
-// has no depth limit, because the folder bound already limits its cost and
-// a deep folder can hold hooks like any other. Anything it cannot verify is
-// reported as a problem so the guard denies.
+// reparse points (one that could hold hooks is reported, see
+// foreignHookLinkMayHoldHooks), skips version-control and package folders
+// that are not plugins themselves, and lists at most foreignHookPluginMaxDirs
+// folders; it has no depth limit, because the folder bound already limits
+// its cost and a deep folder can hold hooks like any other. Anything it
+// cannot verify is reported as a problem so the guard denies.
 func scanCursorPluginTree(
 	tree string,
 	addSource func(foreignHookSource),
@@ -321,7 +322,9 @@ func scanCursorPluginTree(
 			mode := entry.Type()
 			switch {
 			case foreignHookLinkMode(mode):
-				folderProblem(path, "the entry is a link or reparse point")
+				if foreignHookLinkMayHoldHooks(current, name, path) {
+					folderProblem(path, "the entry is a link or reparse point")
+				}
 			case mode.IsDir() && foreignHookNameIs(name, ".cursor-plugin"):
 				// Plugin and marketplace manifests, read above.
 			case mode.IsDir() && (foreignHookNameIs(name, ".git") || foreignHookNameIs(name, "node_modules")) &&
@@ -605,6 +608,25 @@ func foreignHookNameIs(name, want string) bool {
 // point, which the guard never follows.
 func foreignHookLinkMode(mode fs.FileMode) bool {
 	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
+}
+
+// foreignHookLinkMayHoldHooks reports whether a link or reparse point found in
+// the plugin tree at dir/name (path) could lead Cursor to hooks the walk does
+// not read: one named like a hooks folder, a hooks/hooks.json file or a
+// .cursor-plugin folder, one that resolves to a folder (which may be or hold
+// a plugin), and one whose target cannot be resolved. Resolving reads only
+// the target's type; the walk still never lists or reads through a link. A
+// link to a file under any other name, such as CLAUDE.md linked to AGENTS.md,
+// holds no hooks. Windows can open a path through a file symbolic link that
+// points at a folder, so the target type is resolved on every platform rather
+// than taken from the link itself.
+func foreignHookLinkMayHoldHooks(dir, name, path string) bool {
+	if foreignHookNameIs(name, "hooks") || foreignHookNameIs(name, ".cursor-plugin") ||
+		(foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(dir), "hooks")) {
+		return true
+	}
+	target, err := os.Stat(path)
+	return err != nil || target.IsDir()
 }
 
 // cursorPayloadWorkspaceRoots returns the distinct absolute workspace roots

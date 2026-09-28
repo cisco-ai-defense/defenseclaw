@@ -752,6 +752,99 @@ func TestCursorForeignHookGuardWalksDeepPluginFolders(t *testing.T) {
 	}
 }
 
+func symlinkForTest(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation needs privileges on Windows: %v", err)
+		}
+		t.Fatal(err)
+	}
+}
+
+// A link inside a plugin that resolves to a file under a name Cursor never
+// loads hooks from (CLAUDE.md linked to AGENTS.md, a script alias) holds no
+// hooks and does not deny. A link that resolves to a folder, cannot be
+// resolved, or stands in for a hooks folder, a hooks/hooks.json file or a
+// .cursor-plugin folder still cannot be verified.
+func TestCursorForeignHookGuardIgnoresPluginLinksToFiles(t *testing.T) {
+	fixture := newForeignHookFixture(t)
+	plugin := filepath.Join(fixture.profile, ".cursor", "plugins", "local", "p")
+	writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p"})
+	if err := os.WriteFile(filepath.Join(plugin, "AGENTS.md"), []byte("# Agents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkForTest(t, "AGENTS.md", filepath.Join(plugin, "CLAUDE.md"))
+	symlinkForTest(t, filepath.Join("..", "AGENTS.md"), filepath.Join(plugin, "scripts", "README.md"))
+	if result := fixture.run(t, "preToolUse", nil); result.rt.requests != 1 {
+		t.Fatalf("links to files inside a plugin were denied: %s", result.stdout)
+	}
+
+	for name, prepare := range map[string]func(t *testing.T, plugin string) string{
+		"link to a folder": func(t *testing.T, plugin string) string {
+			target := filepath.Join(filepath.Dir(plugin), "..", "..", "..", "elsewhere")
+			writeForeignHookJSON(t, filepath.Join(target, "hooks", "hooks.json"), rewritingCursorHooks("./rewrite.sh"))
+			link := filepath.Join(plugin, "vendor")
+			symlinkForTest(t, target, link)
+			return link
+		},
+		// Created before its target exists, so on Windows this is a file
+		// symbolic link; Windows still opens paths through it.
+		"file link that now points at a folder": func(t *testing.T, plugin string) string {
+			target := filepath.Join(filepath.Dir(plugin), "..", "..", "..", "later")
+			link := filepath.Join(plugin, "later")
+			symlinkForTest(t, target, link)
+			writeForeignHookJSON(t, filepath.Join(target, "hooks", "hooks.json"), rewritingCursorHooks("./rewrite.sh"))
+			return link
+		},
+		"link that cannot be resolved": func(t *testing.T, plugin string) string {
+			link := filepath.Join(plugin, "missing")
+			symlinkForTest(t, filepath.Join(plugin, "does-not-exist"), link)
+			return link
+		},
+		"hooks.json link": func(t *testing.T, plugin string) string {
+			target := filepath.Join(plugin, "real-hooks.json")
+			writeForeignHookJSON(t, target, rewritingCursorHooks("./rewrite.sh"))
+			link := filepath.Join(plugin, "hooks", "hooks.json")
+			symlinkForTest(t, target, link)
+			return link
+		},
+		"hooks folder link to a file": func(t *testing.T, plugin string) string {
+			target := filepath.Join(plugin, "notes.txt")
+			if err := os.WriteFile(target, []byte("notes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(plugin, "hooks")
+			symlinkForTest(t, target, link)
+			return link
+		},
+		"plugin metadata link to a file": func(t *testing.T, plugin string) string {
+			target := filepath.Join(plugin, "plugin.json")
+			writeForeignHookJSON(t, target, map[string]interface{}{"name": "p", "hooks": rewritingCursorHooks("./rewrite.sh")})
+			link := filepath.Join(plugin, ".cursor-plugin")
+			symlinkForTest(t, target, link)
+			return link
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newForeignHookFixture(t)
+			plugin := filepath.Join(fixture.profile, ".cursor", "plugins", "local", "p")
+			if err := os.MkdirAll(plugin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			link := prepare(t, plugin)
+			result := fixture.run(t, "preToolUse", nil)
+			assertForeignHookDenied(t, result, link)
+			if !strings.Contains(result.stdout, "cannot be verified") || !strings.Contains(result.stdout, "link or reparse point") {
+				t.Fatalf("unverifiable link message = %s", result.stdout)
+			}
+		})
+	}
+}
+
 // A file loaded from two scopes needs an approval in each: a plugin manifest
 // that points at the user's hooks file registers the handler as a plugin hook
 // too.
