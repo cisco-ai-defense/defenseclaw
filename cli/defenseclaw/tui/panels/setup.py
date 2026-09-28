@@ -410,6 +410,12 @@ class SetupPanelAction:
     refresh_credentials: bool = False
     clear_restart_queue: bool = False
     open_model_picker: bool = False
+    # Open the text editor modal for the focused row: "form" (wizard form
+    # field) or "config" (config editor field). ``field_editor_value`` seeds
+    # it (the current value plus the key that was pressed); None means the
+    # current value.
+    open_field_editor: str = ""
+    field_editor_value: str | None = None
 
 
 @dataclass(frozen=True)
@@ -989,7 +995,7 @@ class SetupPanelModel:
                 return SetupFocusedRowAction("form", "toggle", "Enter/Space", "Toggle this setup option.")
             if field.options:
                 return SetupFocusedRowAction("form", "cycle", "Left/Right", "Cycle through available choices.")
-            return SetupFocusedRowAction("form", "edit", "Type", "Edit this setup value.")
+            return SetupFocusedRowAction("form", "edit", "Enter", "Edit this setup value.")
         if self.mode == "config":
             field = self.current_field()
             section = self.current_section()
@@ -1015,7 +1021,7 @@ class SetupPanelModel:
                 return SetupFocusedRowAction("config", "toggle", "Enter/Space", "Toggle true or false.")
             if field.kind == "choice":
                 return SetupFocusedRowAction("config", "cycle", "Enter/Space", "Cycle through allowed choices.")
-            return SetupFocusedRowAction("config", "edit", "Type", "Edit this config value.")
+            return SetupFocusedRowAction("config", "edit", "Enter", "Edit this config value.")
         info = self.active_wizard_info()
         return SetupFocusedRowAction(
             "wizard",

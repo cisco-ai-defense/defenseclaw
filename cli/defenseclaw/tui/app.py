@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import textwrap
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -108,6 +108,7 @@ from defenseclaw.tui.screens.consequence import (
     ConsequenceModalScreen,
 )
 from defenseclaw.tui.screens.detail import DetailScreen
+from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
 from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
@@ -9941,7 +9942,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             if self.first_run_model.active:
                 action = self.first_run_model.handle_key(_vim_key(key))
                 return self._apply_first_run_action(action)
-            action = self._handle_setup_key(_vim_key(key))
+            action = self._handle_setup_key(_vim_key(key), character=_typed_character(event))
             return self._apply_setup_action(action)
         return False
 
@@ -10194,6 +10195,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.run_worker(self._load_setup_credentials(), exclusive=False, thread=False)
         if action.open_model_picker:
             self.run_worker(self._open_model_picker(), exclusive=False, thread=False)
+        if action.open_field_editor:
+            # Pushed synchronously (not from a worker) so the very next key
+            # already lands in the text box when someone types quickly.
+            self._open_setup_field_editor(action.open_field_editor, action.field_editor_value)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
         if self.setup_model.sandbox_machine_wanted():
@@ -10519,13 +10524,6 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return self._set_setup_config_text(_cycle_value(field.value, field.options, delta))
         return False
 
-    def _append_setup_config_text(self, *, value: str = "", trim: bool = False) -> bool:
-        field = self._current_setup_field()
-        if field is None or not field.interactive or field.kind in {"bool", "choice", "header"}:
-            return False
-        next_value = field.value[:-1] if trim else field.value + value
-        return self._set_setup_config_text(next_value)
-
     def _set_setup_config_text(self, value: str) -> bool:
         if not self.setup_model.sections:
             return False
@@ -10559,11 +10557,14 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return self.setup_model.form_active or self.setup_model.goal_active
         return False
 
-    def _handle_setup_key(self, key: str) -> SetupPanelAction:
+    def _handle_setup_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
+        """Route a Setup key. ``character`` is the raw printable character
+        (case and spaces intact) when the key typed one."""
+
         if self.setup_model.goal_active:
             return self._handle_setup_goal_key(key)
         if self.setup_model.form_active:
-            return self._handle_setup_form_key(key)
+            return self._handle_setup_form_key(key, character=character)
         if key == "S":
             return self.setup_model.review_save_action()
         if key == "G":
@@ -10579,7 +10580,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.setup_model.set_config(self.config)
             return SetupPanelAction(True, hint="Config reverted from current runtime config.")
         if self.setup_model.mode == "config":
-            return self._handle_setup_config_key(key)
+            return self._handle_setup_config_key(key, character=character)
         return self._handle_setup_wizard_key(key)
 
     def _handle_setup_wizard_key(self, key: str) -> SetupPanelAction:
@@ -10642,14 +10643,17 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
         return SetupPanelAction(False)
 
-    def _handle_setup_form_key(self, key: str) -> SetupPanelAction:
+    def _handle_setup_form_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
         fields = self.setup_model.form_fields
         if not fields:
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True)
         cursor = _clamp_int(getattr(self.setup_model, "form_cursor", 0), 0, len(fields) - 1)
         self.setup_model.form_cursor = cursor
-        if key in {"esc", "escape", "q"}:
+        text_row = _is_setup_form_text_field(fields[cursor])
+        # ``q`` on a text row starts typing (a value can begin with q);
+        # elsewhere it closes the form like Esc.
+        if key in {"esc", "escape"} or (key == "q" and not text_row):
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True, hint="Setup wizard form closed.")
         if key in {"tab", "down"}:
@@ -10662,7 +10666,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self._replace_setup_form_value(cursor, "")
             return SetupPanelAction(True)
         if key == "backspace":
-            self._replace_setup_form_value(cursor, fields[cursor].value[:-1])
+            if text_row:
+                return SetupPanelAction(True, open_field_editor="form", field_editor_value=fields[cursor].value[:-1])
             return SetupPanelAction(True)
         if key == "ctrl+t":
             if self.setup_model.toggle_form_reveal():
@@ -10683,14 +10688,16 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             if key == "enter" and getattr(field, "picker", ""):
                 # Searchable model picker instead of submitting the form.
                 return SetupPanelAction(True, open_model_picker=True)
+            if key == "enter" and text_row:
+                return SetupPanelAction(True, open_field_editor="form")
             if key == "enter":
                 return self.setup_model.submit_wizard_form()
-        if len(key) == 1 and field.kind not in {"section", "preset", "whtype", "regid"}:
-            self._replace_setup_form_value(cursor, field.value + key)
-            return SetupPanelAction(True)
+        if text_row and (seed := _typed_seed(key, character)):
+            # A printable key opens the text box with that key applied.
+            return SetupPanelAction(True, open_field_editor="form", field_editor_value=field.value + seed)
         return SetupPanelAction(True)
 
-    def _handle_setup_config_key(self, key: str) -> SetupPanelAction:
+    def _handle_setup_config_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
         if key in {"w", "`"}:
             self.setup_model.mode = "wizards"
             return SetupPanelAction(True, hint="Setup wizards opened.")
@@ -10722,15 +10729,20 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             section = self.setup_model.sections[self.setup_model.active_section]
             self.setup_model.active_line = min(len(section.fields) - 1, self.setup_model.active_line + 1)
             return SetupPanelAction(True)
+        field = self._current_setup_field()
+        text_row = _is_setup_config_text_field(field)
         if key in {"enter", "space"}:
-            field = self._current_setup_field()
             if field is not None and not field.interactive:
                 # A read-only row says why (an admin lock names the policy).
                 return SetupPanelAction(True, hint=field.hint or "This field is read-only.")
+            if text_row and field is not None:
+                seed = field.value + " " if key == "space" else None
+                return SetupPanelAction(True, open_field_editor="config", field_editor_value=seed)
             self._cycle_setup_config_field(1)
             return SetupPanelAction(True)
         if key == "backspace":
-            self._append_setup_config_text(trim=True)
+            if text_row and field is not None:
+                return SetupPanelAction(True, open_field_editor="config", field_editor_value=field.value[:-1])
             return SetupPanelAction(True)
         if key == "ctrl+u":
             self._set_setup_config_text("")
@@ -10740,12 +10752,15 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         if key == "r":
             self.setup_model.set_config(self.config)
             return SetupPanelAction(True, hint="Config edits reverted.")
-        if len(key) == 1:
-            changed = self._append_setup_config_text(value=key)
-            if changed:
-                return SetupPanelAction(True)
-            field = self._current_setup_field()
-            reason = field.hint if field is not None and not field.interactive else ""
+        seed = _typed_seed(key, character)
+        if seed:
+            # Letters the editor uses as commands (j k s r w ...) were
+            # handled above; any other printable key opens the text box.
+            if text_row and field is not None:
+                return SetupPanelAction(True, open_field_editor="config", field_editor_value=field.value + seed)
+            if field is not None and field.interactive:
+                return SetupPanelAction(True, hint="Press Enter or Space to change this value.")
+            reason = field.hint if field is not None else ""
             return SetupPanelAction(True, hint=reason or "This field is read-only.")
         return SetupPanelAction(False)
 
@@ -10789,6 +10804,76 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         self._render_chrome()
         if action.hint:
             self._set_status(action.hint)
+
+    def _open_setup_field_editor(self, target: str, seed: str | None = None) -> None:
+        """Edit the focused wizard-form or config-editor row in a text box."""
+
+        if target == "form":
+            fields = self.setup_model.form_fields
+            if not self.setup_model.form_active or not fields:
+                return
+            index = _clamp_int(getattr(self.setup_model, "form_cursor", 0), 0, len(fields) - 1)
+            form_field = fields[index]
+
+            def apply_form_value(result: str | None) -> None:
+                if result is None:
+                    self._set_status("Edit cancelled.")
+                    return
+                # The form may have closed or been rebuilt while the box was open.
+                current = self.setup_model.form_fields
+                if (
+                    not self.setup_model.form_active
+                    or index >= len(current)
+                    or current[index].label != form_field.label
+                ):
+                    self._set_status("The form changed while editing; nothing was applied.")
+                    return
+                self._replace_setup_form_value(index, result)
+                self._render_chrome()
+
+            self.push_screen(
+                FieldEditorScreen(
+                    form_field.label,
+                    value=form_field.value if seed is None else seed,
+                    hint=form_field.hint,
+                    password=form_field.kind == "password",
+                    validator=_setup_form_validator(form_field),
+                ),
+                apply_form_value,
+            )
+            return
+        config_field = self._current_setup_field()
+        if not _is_setup_config_text_field(config_field):
+            return
+        section_index = self.setup_model.active_section
+        line = self.setup_model.active_line
+
+        def apply_config_value(result: str | None) -> None:
+            if result is None:
+                self._set_status("Edit cancelled.")
+                return
+            current = self._current_setup_field()
+            if (
+                self.setup_model.active_section != section_index
+                or self.setup_model.active_line != line
+                or current is None
+                or current.key != config_field.key
+            ):
+                self._set_status("The config editor changed while editing; nothing was applied.")
+                return
+            self._set_setup_config_text(result)
+            self._render_chrome()
+
+        self.push_screen(
+            FieldEditorScreen(
+                config_field.label,
+                value=config_field.value if seed is None else seed,
+                hint=config_field.hint or config_field.key,
+                password=config_field.kind == "password",
+                validator=_setup_config_validator(config_field),
+            ),
+            apply_config_value,
+        )
 
     async def _open_model_picker(self) -> None:
         fields = self.setup_model.form_fields
@@ -13603,6 +13688,66 @@ def _catalog_panel_invalidated_by_command(args: tuple[str, ...]) -> str | None:
 
 def _vim_key(key: str) -> str:
     return "esc" if key == "escape" else key
+
+
+def _typed_character(event: events.Key) -> str | None:
+    """The printable character a key typed, with its case, or None."""
+
+    character = event.character
+    if character and len(character) == 1 and character.isprintable():
+        return character
+    return None
+
+
+def _typed_seed(key: str, character: str | None) -> str:
+    """Text a Setup key should add to a field: the raw character, else ""."""
+
+    if character is not None:
+        return character
+    if key == "space":
+        return " "
+    return key if len(key) == 1 and key.isprintable() else ""
+
+
+_SETUP_FORM_NON_TEXT_KINDS = frozenset({"bool", "section", "preset", "whtype", "regid"})
+
+
+def _is_setup_form_text_field(field: Any) -> bool:
+    return field is not None and field.kind not in _SETUP_FORM_NON_TEXT_KINDS and not field.options
+
+
+def _is_setup_config_text_field(field: Any) -> bool:
+    return (
+        field is not None
+        and field.interactive
+        and field.kind not in {"bool", "choice", "header"}
+        and not field.options
+    )
+
+
+def _setup_form_validator(field: Any) -> Callable[[str], str | None] | None:
+    if field.kind != "int":
+        return None
+
+    def validate(value: str) -> str | None:
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            int(text)
+        except ValueError:
+            return "Enter a whole number."
+        return None
+
+    return validate
+
+
+def _setup_config_validator(field: Any) -> Callable[[str], str | None]:
+    def validate(value: str) -> str | None:
+        result = validate_config_field(field.with_value(value))
+        return result.message if result.severity == "error" else None
+
+    return validate
 
 
 def _truncate_display(value: str, width: int) -> str:
