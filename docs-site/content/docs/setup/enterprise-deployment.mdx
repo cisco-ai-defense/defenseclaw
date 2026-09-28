@@ -1355,6 +1355,24 @@ as a conflict, and install and verify fail until the file is changed or the
 opt-out is set. A managed file that sets `disableAllHooks: true` is always
 reported.
 
+Cursor has no managed-hooks-only setting. On managed Windows endpoints,
+DefenseClaw scans user, workspace, and plugin hooks before each `preToolUse`
+or `workspaceOpen` invocation and denies unapproved handlers. The scan covers
+Cursor and imported Claude-format files, plugin manifests, marketplace entries,
+and nested plugin folders. It denies if a hook source cannot be checked, if
+there are more than 32 workspace roots or 4096 plugin directories, or if a
+plugin folder link cannot be resolved. Hook files are reread for every
+invocation. The denial names the source and approval digest; the user message
+also shows the handler command, while the agent message omits it.
+
+An administrator can add a digest to
+`connector_hooks.cursor.approved_foreign_hooks`. The digest covers the handler
+registration, event, scope, and matcher. It does not cover the contents of a
+script that the command runs. Approve only absolute commands whose executable
+and script cannot be modified by standard users. Existing per-user DefenseClaw
+hook entries require the cleanup tracked in #917 and #918 before enabling this
+guard on an enrolled profile.
+
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
 interactive users on that endpoint; those users are not silently treated as
