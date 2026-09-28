@@ -85,7 +85,8 @@ def test_global_block_at_sets_only_guardrail_block_at(app) -> None:
     assert (gc.block_at, gc.alert_at, gc.connectors) == ("HIGH", "", {})
     assert (gc.enabled, gc.mode, gc.port, gc.rule_pack_dir) == (True, "action", 4321, "/packs/default")
     app.cfg.save.assert_called_once()
-    assert app.logger.log_action.call_args.args[0] == "guardrail-block-at"
+    assert app.logger.log_action.call_args.args[0] == "config-update"  # the registered audit action
+    assert app.logger.log_action.call_args.args[2].startswith("guardrail-block-at ")
 
 
 def test_global_and_connector_changes_restart_a_running_gateway(app, restarts) -> None:

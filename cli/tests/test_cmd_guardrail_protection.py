@@ -141,7 +141,8 @@ def test_enable_globally_composes_validates_then_switches(env) -> None:
     assert gc.rule_pack_dir == str(final)
     assert (gc.enabled, gc.mode, gc.port, gc.connectors) == (True, "action", 4321, {})
     app.cfg.save.assert_called_once()
-    assert app.logger.log_action.call_args.args[0] == "guardrail-protection"
+    assert app.logger.log_action.call_args.args[0] == "config-update"  # the registered audit action
+    assert app.logger.log_action.call_args.args[2].startswith("guardrail-protection ")
 
 
 def test_second_pack_recomposes_from_the_recorded_base(env) -> None:

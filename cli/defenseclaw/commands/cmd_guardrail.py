@@ -2531,14 +2531,21 @@ def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: 
     return "restarted" if restarted else "restart_failed"
 
 
-def _log_guardrail_change(app: AppContext, action: str, details: str) -> None:
-    """Audit a saved change; a stopped or refusing gateway only skips the event."""
+def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None:
+    """Audit a saved change; a stopped or refusing gateway only skips the event.
+
+    The gateway admits only registered audit actions (internal/audit/actions.go)
+    and answers anything else with HTTP 400, so these changes are recorded as
+    the registered ``config-update`` action with the operation named in the
+    details (for example ``guardrail-mode scope=codex mode=action``).
+    """
+    from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
     if not app.logger:
         return
     try:
-        app.logger.log_action(action, "config", details)
+        app.logger.log_action(ACTION_CONFIG_UPDATE, "config", f"{operation} {details}".strip())
     except CanonicalObservabilityUnavailableError:
         click.echo(
             "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
