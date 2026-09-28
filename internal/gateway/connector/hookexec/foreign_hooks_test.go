@@ -1095,7 +1095,7 @@ func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
 	}
 }
 
-func TestForeignHookParseCacheIsKeyedByContent(t *testing.T) {
+func TestCursorForeignHookGuardRereadsChangedHookFiles(t *testing.T) {
 	fixture := newForeignHookFixture(t)
 	path := filepath.Join(fixture.workspace, ".cursor", "hooks.json")
 	writeForeignHookJSON(t, path, map[string]interface{}{"hooks": map[string]interface{}{}})
@@ -1103,7 +1103,7 @@ func TestForeignHookParseCacheIsKeyedByContent(t *testing.T) {
 		t.Fatalf("clean file blocked: %s", result.stdout)
 	}
 	// Rewriting the same path must be re-read and re-parsed, never served
-	// from a cached "clean" verdict.
+	// from an earlier "clean" result.
 	writeForeignHookJSON(t, path, rewritingCursorHooks("rewrite"))
 	fixture.rt = ok(`{"action":"allow"}`)
 	assertForeignHookDenied(t, fixture.run(t, "preToolUse", nil), path)

@@ -32,7 +32,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -54,8 +53,6 @@ const (
 	// foreignHookMaxRoots bounds the distinct workspace roots taken from the
 	// payload. A payload that reports more cannot be verified and denies.
 	foreignHookMaxRoots = 32
-	// foreignHookCacheLimit bounds the in-process parse cache.
-	foreignHookCacheLimit = 64
 	// foreignHookPluginMaxDepth and foreignHookPluginMaxDirs bound the walk of
 	// <home>/.cursor/plugins. A tree that exceeds either bound cannot be
 	// verified and denies.
@@ -125,16 +122,6 @@ type foreignHookParseResult struct {
 	handlers []foreignHookParsedHandler
 	problem  string
 }
-
-// foreignHookParseCache memoizes parse results by source format and content
-// sha256 so repeated sources (for example the same file reached through two
-// workspace roots, or a long-lived caller) are parsed once. It never caches a
-// verdict for a path: every call re-reads and re-hashes the current bytes, and
-// the allowlist and ownership checks run on every lookup.
-var foreignHookParseCache = struct {
-	sync.Mutex
-	entries map[string]foreignHookParseResult
-}{entries: map[string]foreignHookParseResult{}}
 
 // cursorForeignHookGuardApplies reports whether this invocation is the managed
 // Cursor preToolUse gate.
@@ -726,22 +713,7 @@ func readForeignHookSource(source foreignHookSource) foreignHookParseResult {
 	if !exists || len(bytes.TrimSpace(data)) == 0 {
 		return foreignHookParseResult{}
 	}
-	sum := sha256.Sum256(data)
-	key := source.format + ":" + hex.EncodeToString(sum[:])
-	foreignHookParseCache.Lock()
-	cached, ok := foreignHookParseCache.entries[key]
-	foreignHookParseCache.Unlock()
-	if ok {
-		return cached
-	}
-	result := parseForeignHookDocument(source.format, data)
-	foreignHookParseCache.Lock()
-	if len(foreignHookParseCache.entries) >= foreignHookCacheLimit {
-		foreignHookParseCache.entries = map[string]foreignHookParseResult{}
-	}
-	foreignHookParseCache.entries[key] = result
-	foreignHookParseCache.Unlock()
-	return result
+	return parseForeignHookDocument(source.format, data)
 }
 
 // readForeignHookFile reads a user-, project- or plugin-owned hook file
