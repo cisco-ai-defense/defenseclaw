@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fixtures import screen_text, snapshot_app  # noqa: E402
+from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
 
 # (panel, keys to press, text from the first table row of the fake data)
 CASES = (
@@ -41,10 +41,10 @@ async def test_first_row_is_on_screen_at_80x24(tmp_path, panel: str, keys: tuple
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.action_switch_panel(panel)
-        await pilot.pause()
+        await settle_panel(app, pilot)
         for key in keys:
             await pilot.press(key)
-            await pilot.pause()
+            await settle_panel(app, pilot)
         assert row_text in screen_text(app)
 
 
@@ -53,9 +53,9 @@ async def test_open_alert_detail_leaves_its_row_visible_at_80x24(tmp_path) -> No
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.action_switch_panel("alerts")
-        await pilot.pause()
+        await settle_panel(app, pilot)
         await pilot.press("enter")
-        await pilot.pause()
+        await settle_panel(app, pilot)
         text = screen_text(app)
         # The table row and the detail pane's own lines are both on screen.
         assert text.count("skill://alpha") >= 2

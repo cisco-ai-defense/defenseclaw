@@ -33,6 +33,11 @@ async def test_success_strip_hides_itself_and_failure_stays(tmp_path, monkeypatc
         app._strip_label = "policy activate strict"  # noqa: SLF001
         app._strip_state = "running"  # noqa: SLF001
         app._strip_finished(exit_code=exit_code, duration=0.1)  # noqa: SLF001
-        await asyncio.sleep(0.2)
+        # Wait on an app timer due after the strip's hide timer, not the wall
+        # clock: Windows Textual timers sleep on executor threads and can fire
+        # late.
+        hide_timer_passed = asyncio.Event()
+        app.set_timer(0.2, hide_timer_passed.set)
+        await asyncio.wait_for(hide_timer_passed.wait(), timeout=10)
         await pilot.pause()
         assert app.query_one("#command-progress").has_class("hidden") is hidden

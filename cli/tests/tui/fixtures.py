@@ -17,6 +17,7 @@ current screen as plain text, which is what a person sees in the terminal.
 
 from __future__ import annotations
 
+import asyncio
 import io
 from types import SimpleNamespace
 
@@ -42,6 +43,7 @@ from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolRow, ToolsPanelModel
 from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from rich.console import Console
+from textual.pilot import Pilot
 
 
 def snapshot_config(tmp_path) -> SimpleNamespace:
@@ -212,6 +214,28 @@ def snapshot_app(tmp_path, *, setup_config: object | None = None) -> DefenseClaw
     app.activity_model.append_output("Checking gateway...")
     app.activity_model.finish_entry(0)
     return app
+
+
+async def settle_panel(app: DefenseClawTUI, pilot: Pilot, *, timeout: float = 10.0) -> None:
+    """Wait until the active panel's deferred render has landed, then repaint.
+
+    A switch paints the tab and a "Loading current data…" body first and
+    renders the rows after that frame (Alerts, Audit and Logs on a worker
+    thread), so one ``pilot.pause()`` can capture the loading frame on a
+    slow runner.
+    """
+
+    panel = app.active_panel
+    deadline = asyncio.get_running_loop().time() + timeout
+    while (
+        panel in app._panel_render_queued  # noqa: SLF001
+        or panel in app._panel_render_running  # noqa: SLF001
+        or panel in app._panel_render_pending  # noqa: SLF001
+    ):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"{panel}: the deferred panel render did not finish in {timeout}s")
+        await pilot.pause(0.01)
+    await pilot.pause()
 
 
 def screen_text(app: DefenseClawTUI) -> str:

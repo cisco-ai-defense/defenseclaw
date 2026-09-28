@@ -20,7 +20,7 @@ from defenseclaw.tui.panels.activity import ActivityPanelModel
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fixtures import screen_text, snapshot_app  # noqa: E402
+from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
 
 
 def test_command_output_with_markup_is_shown_literally() -> None:
@@ -45,7 +45,7 @@ async def test_activity_history_is_visible_at_80x24(tmp_path) -> None:
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
         app.action_switch_panel("activity")
-        await pilot.pause()
+        await settle_panel(app, pilot)
         text = screen_text(app)
         assert "[2] Mutations" in text
         assert "$ doctor" in text
