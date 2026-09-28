@@ -1335,7 +1335,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # validate-pack delegates strict offline validation to the installed
         # gateway helper without starting the runtime. mode flips observe /
         # action without re-running setup, and protection turns the opt-in
-        # protection packs on and off per scope.
+        # protection packs on and off per scope. block-at / alert-at set the
+        # tool-call block and alert levels, globally or per connector.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1347,6 +1348,8 @@ class CommandRegistrationTests(unittest.TestCase):
                 "fail-mode",
                 "hilt",
                 "block-message",
+                "block-at",
+                "alert-at",
                 "judge",
                 "list-packs",
                 "mode",

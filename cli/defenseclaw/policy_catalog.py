@@ -24,7 +24,9 @@ caller.
 Besides named policies and rule packs it describes the opt-in protection
 packs (``policies/guardrail-use-cases/``), the rule families of a pack, the
 fixed bounded tool-call chains (``tool-chains.json``) and the posture of
-every guardrail scope (global + each active connector).
+every guardrail scope (global + each active connector), including the
+tool-call block and alert levels it resolves to (:func:`resolve_levels`, the
+gateway's ``guardrail.block_at`` / ``alert_at`` precedence and clamp).
 """
 
 from __future__ import annotations
@@ -1148,6 +1150,129 @@ def tool_chains(path: str | os.PathLike[str] | None = None) -> list[ToolChain]:
 
 
 # ---------------------------------------------------------------------------
+# Tool-call levels (guardrail.block_at / alert_at)
+# ---------------------------------------------------------------------------
+
+#: Values of ``guardrail.block_at`` / ``alert_at`` (global or per connector),
+#: strongest first. Empty inherits.
+LEVELS = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+
+#: Where a scope's tool-call level comes from, most specific first.
+LEVEL_SOURCES = ("override", "global", "pack")
+
+# (block rank, alert rank) of each rule-pack profile: decision.go
+# ``guardrailProfileThresholds``.
+_PROFILE_RANKS = {"strict": (2, 1), "permissive": (4, 3), "default": (4, 2)}
+
+
+def level_value(value: object) -> str:
+    """A stored ``block_at`` / ``alert_at`` as ``CRITICAL`` … ``LOW``.
+
+    "" for inherit and for anything the gateway would ignore (it only
+    honours the four levels, in any case).
+    """
+    text = str(value or "").strip().upper()
+    return text if text in _SEVERITY_RANK else ""
+
+
+def level_label(rank: int) -> str:
+    """Severity rank → the catalog scale (4 → ``CRITICAL``, 3 → ``HIGH+`` …)."""
+    return _RANK_LABELS.get(rank, "none")
+
+
+def level_name(rank: int) -> str:
+    """Severity rank → the stored level (4 → ``CRITICAL``, 3 → ``HIGH`` …; "" if unknown)."""
+    return next((name for name, value in _SEVERITY_RANK.items() if value == rank), "")
+
+
+@dataclass(frozen=True)
+class ScopeLevels:
+    """The tool-call block and alert levels one scope resolves to."""
+
+    block_rank: int
+    alert_rank: int  # already clamped to block_rank
+    block_source: str  # "override" | "global" | "pack"
+    alert_source: str
+    wanted_alert_rank: int  # before the clamp
+
+    @property
+    def block_at(self) -> str:
+        return level_label(self.block_rank)
+
+    @property
+    def alert_at(self) -> str:
+        return level_label(self.alert_rank)
+
+    @property
+    def alert_clamped(self) -> bool:
+        """The alert level was set above the block level and follows it down."""
+        return self.wanted_alert_rank > self.alert_rank
+
+    @property
+    def source(self) -> str:
+        """The more specific source of the two levels (override > global > pack)."""
+        for source in ("override", "global"):
+            if source in (self.block_source, self.alert_source):
+                return source
+        return "pack"
+
+
+def resolve_levels(
+    pack_path: str,
+    global_levels: tuple[object, object] = ("", ""),
+    connector_levels: tuple[object, object] | None = None,
+) -> ScopeLevels:
+    """Tool-call levels exactly as the gateway resolves them.
+
+    Mirrors ``guardrailLevelThresholds`` in internal/gateway/decision.go:
+    block and alert each take the connector's own value
+    (``connector_levels``, None for the global scope), else the global
+    ``guardrail.block_at`` / ``alert_at`` (``global_levels``), else the level
+    of the scope's rule-pack profile (:func:`pack_profile` of
+    ``pack_path``). The alert rank is then clamped to the block rank:
+    anything that blocks also alerts.
+    """
+    pack_block, pack_alert = _PROFILE_RANKS[pack_profile(pack_path)]
+
+    def pick(index: int, pack_rank: int) -> tuple[int, str]:
+        if connector_levels is not None:
+            own = level_value(connector_levels[index])
+            if own:
+                return _SEVERITY_RANK[own], "override"
+        shared = level_value(global_levels[index])
+        if shared:
+            return _SEVERITY_RANK[shared], "global"
+        return pack_rank, "pack"
+
+    block_rank, block_source = pick(0, pack_block)
+    alert_rank, alert_source = pick(1, pack_alert)
+    return ScopeLevels(
+        block_rank=block_rank,
+        alert_rank=min(alert_rank, block_rank),
+        block_source=block_source,
+        alert_source=alert_source,
+        wanted_alert_rank=alert_rank,
+    )
+
+
+def _level_pair(block: Any) -> tuple[str, str]:
+    """``(block_at, alert_at)`` stored on a guardrail block ("" when unset)."""
+    if block is None:
+        return "", ""
+    return level_value(getattr(block, "block_at", "")), level_value(getattr(block, "alert_at", ""))
+
+
+def scope_levels(cfg: Any, connector: str = "") -> ScopeLevels:
+    """:func:`resolve_levels` for the global scope ("") or one connector of *cfg*."""
+    gc = _guardrail(cfg)
+    fallback = global_pack(cfg)
+    if not connector:
+        return resolve_levels(fallback.path, _level_pair(gc))
+    path = _override_dir(gc, connector) or fallback.path
+    return resolve_levels(path, _level_pair(gc), _level_pair(_connector_block(gc, connector)))
+
+
+# ---------------------------------------------------------------------------
 # Scope posture (global + each active connector)
 # ---------------------------------------------------------------------------
 
@@ -1162,6 +1287,15 @@ class ScopePosture:
     pack_path: str
     pack_source: str  # ConnectorPack.source: "global" | "override" | "default"
     protection: tuple[str, ...]  # opt-in packs layered into the effective pack
+    # Tool-call levels after guardrail.block_at / alert_at (see resolve_levels),
+    # on the catalog scale: "CRITICAL" | "HIGH+" | "MEDIUM+" | "LOW+".
+    block_at: str = ""
+    alert_at: str = ""
+    levels_source: str = "pack"  # "override" | "global" | "pack": the more specific of the two
+    # The values set at this scope itself (the global ones on the global row):
+    # "CRITICAL" | "HIGH" | "MEDIUM" | "LOW", "" = inherits.
+    own_block_at: str = ""
+    own_alert_at: str = ""
 
     def to_json(self) -> dict[str, object]:
         out = asdict(self)
@@ -1205,6 +1339,8 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
         return memo[key]
 
     fallback = global_pack(cfg)
+    global_levels = _level_pair(gc)
+    levels = resolve_levels(fallback.path, global_levels)
     out = [
         ScopePosture(
             scope="global",
@@ -1215,6 +1351,11 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
             pack_path=fallback.path,
             pack_source=fallback.source,
             protection=_protection(fallback.path),
+            block_at=levels.block_at,
+            alert_at=levels.alert_at,
+            levels_source=levels.source,
+            own_block_at=global_levels[0],
+            own_alert_at=global_levels[1],
         )
     ]
     for row in effective_packs(cfg):
@@ -1224,6 +1365,8 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
         mode = effective_mode(row.connector) if callable(effective_mode) else (override_mode or getattr(gc, "mode", ""))
         effective_hilt = getattr(gc, "effective_hilt", None)
         hilt = effective_hilt(row.connector) if callable(effective_hilt) else getattr(gc, "hilt", None)
+        own_levels = _level_pair(block)
+        levels = resolve_levels(row.path, global_levels, own_levels)
         out.append(
             ScopePosture(
                 scope=row.connector,
@@ -1234,6 +1377,11 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
                 pack_path=row.path,
                 pack_source=row.source,
                 protection=_protection(row.path),
+                block_at=levels.block_at,
+                alert_at=levels.alert_at,
+                levels_source=levels.source,
+                own_block_at=own_levels[0],
+                own_alert_at=own_levels[1],
             )
         )
     return out
@@ -1242,6 +1390,8 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
 __all__ = [
     "BUILTIN_POLICY_NAMES",
     "COVERS_MAX_CHARS",
+    "LEVELS",
+    "LEVEL_SOURCES",
     "PACK_PROFILES",
     "PROTECTED_PACK_PREFIX",
     "PROTECTION_MANIFEST",
@@ -1254,6 +1404,7 @@ __all__ = [
     "ProtectionPack",
     "RuleFamily",
     "RulePack",
+    "ScopeLevels",
     "ScopePosture",
     "ToolChain",
     "active_policy_name",
@@ -1264,6 +1415,9 @@ __all__ = [
     "global_pack",
     "hilt_label",
     "is_named_policy",
+    "level_label",
+    "level_name",
+    "level_value",
     "list_named_policies",
     "load_policy_yaml",
     "load_rule_files",
@@ -1281,7 +1435,9 @@ __all__ = [
     "protection_packs",
     "protection_packs_dir",
     "read_protection_manifest",
+    "resolve_levels",
     "rule_families",
+    "scope_levels",
     "scope_postures",
     "summarize_policy",
     "threshold_label",

@@ -28,6 +28,8 @@ This command surfaces the common policy levers directly:
   defenseclaw guardrail enable         # turn on + connector setup
   defenseclaw guardrail disable        # turn off + connector teardown
   defenseclaw guardrail mode           # observe (log only) vs action (enforce)
+  defenseclaw guardrail block-at       # lowest severity a tool call is blocked at
+  defenseclaw guardrail alert-at       # lowest severity a tool call raises an alert at
   defenseclaw guardrail fail-mode      # open vs closed on hook failures
   defenseclaw guardrail hilt           # human-in-the-loop prompting
   defenseclaw guardrail block-message  # message shown when an action is blocked
@@ -305,6 +307,8 @@ def guardrail() -> None:
       status         enabled state + roster (mode/fail/rule-pack/hilt/judge)
       enable/disable flip enforcement on/off
       mode           observe (log only) vs action (enforce)
+      block-at       lowest severity a tool call is blocked at
+      alert-at       lowest severity a tool call raises an alert at
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
@@ -3385,6 +3389,257 @@ def mode_cmd(
         notes=notes,
         message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
     )
+
+
+_LEVEL_CHOICES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "inherit")
+_LEVEL_WORDS = {
+    "block_at": {
+        "noun": "block",
+        "command": "block-at",
+        "does": "blocks tool calls at",
+        "done": "are blocked at",
+    },
+    "alert_at": {
+        "noun": "alert",
+        "command": "alert-at",
+        "does": "alerts on tool calls at",
+        "done": "raise an alert at",
+    },
+}
+_LEVEL_SOURCE_WORDS = {"override": "its own", "global": "the global", "pack": "its rule pack's"}
+
+
+def _set_tool_call_level(
+    app: AppContext, setting: str, level: str, connector: str | None, *, restart: bool, json_out: bool
+) -> None:
+    """``guardrail block-at`` / ``alert-at``: set one scope's tool-call level.
+
+    Writes only ``guardrail.<setting>`` or ``guardrail.connectors.<C>.<setting>``
+    (``inherit`` clears it); precedence and clamp are the gateway's
+    (``policy_catalog.resolve_levels``). A global change reloads live. A
+    per-connector one sits in ``guardrail.connectors``, so it restarts a
+    running gateway; a stopped one is never started.
+    """
+    from defenseclaw import policy_catalog
+
+    words = _LEVEL_WORDS[setting]
+    noun = words["noun"]
+    gc = app.cfg.guardrail
+    value = "" if level.lower() == "inherit" else level.upper()
+    scope = "global"
+    connector_key: str | None = None
+
+    def _own(key: str | None) -> str:
+        block = gc if key is None else gc._connector_override(key)
+        return policy_catalog.level_value(getattr(block, setting, "")) if block is not None else ""
+
+    def _levels() -> policy_catalog.ScopeLevels:
+        return policy_catalog.scope_levels(app.cfg, connector_key or "")
+
+    def _setting(levels: policy_catalog.ScopeLevels) -> tuple[str, str, int]:
+        """``(effective label, source, rank)`` of this command's setting."""
+        if setting == "block_at":
+            return levels.block_at, levels.block_source, levels.block_rank
+        return levels.alert_at, levels.alert_source, levels.alert_rank
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        previous: str,
+        gateway: str | None = None,
+        notes: list[str] | None = None,
+        requested: bool = False,
+    ) -> None:
+        levels = _levels()
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "setting": setting,
+                        # A failure reports the level asked for; nothing was written.
+                        "level": (value if requested else _own(connector_key)) or "inherit",
+                        "previous": previous or "inherit",
+                        "source": _setting(levels)[1],
+                        "effective_block_at": levels.block_at,
+                        "effective_alert_at": levels.alert_at,
+                        "gateway": gateway,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            (ux.ok if ok else ux.err)(message, indent="  ")
+            for note in notes or []:
+                ux.subhead(note, indent="    ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    if connector:
+        connector_key, problem = _resolve_scope_connector(app, connector)
+        scope = normalize_connector(connector_key)
+        if problem:
+            # Not a connector here: it stores nothing, and would follow the global default.
+            connector_key = None
+            _finish(ok=False, exit_code=1, message=problem, previous="", requested=True)
+    subject = f"{_connector_label(scope)} ({scope})" if connector_key else ""
+
+    previous = _own(connector_key)
+    if previous == value:
+        label, source, _rank = _setting(_levels())
+        if connector_key and value:
+            message = f"{subject} already has its own {noun} level, {value}; nothing was changed."
+        elif connector_key:
+            message = (
+                f"{subject} has no {noun} level of its own; it already follows "
+                f"{_LEVEL_SOURCE_WORDS[source]} {noun} level ({label}); nothing was changed."
+            )
+        elif value:
+            message = f"The global {noun} level is already {value}; nothing was changed."
+        else:
+            message = (
+                f"No global {noun} level is set, so each connector uses its own or its rule pack's; "
+                "nothing was changed."
+            )
+        _finish(ok=True, exit_code=0, message=message, previous=previous)
+        return
+
+    try:
+        actives = [str(c) for c in app.cfg.active_connectors()]
+    except Exception:  # noqa: BLE001 — treat an unreadable roster as empty.
+        actives = []
+    # A global value replaces the level of every connector without its own,
+    # whatever its rule pack says: remember them to name the ones it loosens.
+    followers = {} if connector_key else {c: _setting(policy_catalog.scope_levels(app.cfg, c)) for c in actives}
+    global_rank = _setting(_levels())[2]
+
+    _preflight_config_write(app)
+    target = gc if connector_key is None else _connector_block_for_write(gc, connector_key)
+    setattr(target, setting, value)
+    try:
+        app.cfg.save()
+    except (OSError, ValueError) as exc:
+        setattr(target, setting, previous)
+        _finish(ok=False, exit_code=1, message=f"Failed to save config: {exc}", previous=previous, requested=True)
+    _log_guardrail_change(
+        app,
+        f"guardrail-{words['command']}",
+        f"scope={scope} {setting}={value or 'inherit'} previous={previous or 'inherit'}",
+    )
+    outcome = _apply_to_running_gateway(app, needs_restart=connector_key is not None, restart=restart, quiet=json_out)
+
+    levels = _levels()
+    label, source, _rank = _setting(levels)
+    if connector_key and value:
+        message = f"{subject} now {words['does']} {label}."
+    elif connector_key:
+        message = f"{subject} follows {_LEVEL_SOURCE_WORDS[source]} {noun} level again: {label}."
+    elif value:
+        message = (
+            f"The global {noun} level is now {value}: tool calls {words['done']} {label} "
+            "unless a connector has its own."
+        )
+    else:
+        pack = policy_catalog.global_pack(app.cfg).pack
+        message = (
+            f"The global {noun} level is cleared: each connector without its own uses its rule pack's "
+            f"({label} for the {pack} pack)."
+        )
+    notes: list[str] = []
+    if levels.alert_clamped:
+        notes.append(
+            f"Alerts start at {levels.alert_at}, not {policy_catalog.level_label(levels.wanted_alert_rank)}: "
+            "anything that blocks also alerts."
+        )
+    if connector_key and policy_catalog.mode_label(gc.effective_mode(connector_key)) != "action":
+        notes.append(
+            f"{_connector_label(scope)} is in observe mode, so it only logs; the levels apply once it's in action mode."
+        )
+    elif not connector_key and policy_catalog.mode_label(gc.mode) != "action":
+        notes.append(
+            "The global mode is observe, so connectors that follow it only log; "
+            "the levels apply once they're in action mode."
+        )
+    for name, (old_label, _old_source, old_rank) in followers.items():
+        own = _own(name)
+        if own:
+            notes.append(
+                f"{_connector_label(name)} ({name}) keeps its own {noun} level ({own}); change it with: "
+                f"defenseclaw guardrail {words['command']} {value or 'inherit'} --connector {name}"
+            )
+            continue
+        new_label, _new_source, new_rank = _setting(policy_catalog.scope_levels(app.cfg, name))
+        # Only a connector whose own rule pack set a different level than the
+        # global default's is loosened behind the operator's back.
+        if new_rank > old_rank and old_rank != global_rank:
+            notes.append(
+                f"{_connector_label(name)} ({name}) now {words['does']} {new_label} instead of {old_label}; "
+                f"keep it with: defenseclaw guardrail {words['command']} "
+                f"{policy_catalog.level_name(old_rank)} --connector {name}"
+            )
+    _finish(
+        ok=outcome != "restart_failed",
+        exit_code=1 if outcome == "restart_failed" else 0,
+        message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
+        previous=previous,
+        gateway=outcome,
+        notes=notes,
+    )
+
+
+def _level_command(setting: str):
+    words = _LEVEL_WORDS[setting]
+
+    @click.argument("level", metavar="LEVEL", type=click.Choice(_LEVEL_CHOICES, case_sensitive=False))
+    @click.option(
+        "--connector",
+        "connector",
+        default=None,
+        help=f"Set only this connector's {words['noun']} level (writes its per-connector override).",
+    )
+    @_restart_option
+    @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+    @pass_ctx
+    def command(app: AppContext, level: str, connector: str | None, restart: bool, json_out: bool) -> None:
+        _set_tool_call_level(app, setting, level, connector, restart=restart, json_out=json_out)
+
+    return command
+
+
+block_at_cmd = guardrail.command(
+    "block-at",
+    help="""Set the lowest severity at which tool calls are blocked.
+
+    LEVEL is CRITICAL, HIGH, MEDIUM or LOW (any case), or inherit to clear
+    the value. Sets only ``guardrail.block_at``, or with ``--connector X``
+    only ``guardrail.connectors.X.block_at``. A connector's own level wins
+    over the global one, which wins over the rule pack's (strict blocks
+    MEDIUM+, default and permissive CRITICAL). Levels apply to tool calls
+    in action mode; the named policy's thresholds for LLM traffic through
+    the guardrail proxy are separate (``policy edit guardrail``). A global change
+    reaches a running gateway live; a per-connector one restarts it
+    (``--no-restart`` to skip; a stopped gateway is never started).
+    """,
+)(_level_command("block_at"))
+
+alert_at_cmd = guardrail.command(
+    "alert-at",
+    help="""Set the lowest severity at which tool calls raise an alert.
+
+    LEVEL is CRITICAL, HIGH, MEDIUM or LOW (any case), or inherit to clear
+    the value. Sets only ``guardrail.alert_at``, or with ``--connector X``
+    only ``guardrail.connectors.X.alert_at``; precedence, reload and
+    restart work like ``guardrail block-at``. Anything that blocks also
+    alerts, so an alert level above the block level alerts from the block
+    level instead (strict packs alert on LOW+, default MEDIUM+, permissive
+    HIGH+).
+    """,
+)(_level_command("alert_at"))
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The
