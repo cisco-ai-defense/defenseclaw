@@ -694,6 +694,7 @@ func TestGatewayServiceState(t *testing.T) {
 	t.Run("homebrew", func(t *testing.T) {
 		f := newGatewayFixture(t)
 		f.cfg.GOOS = "darwin"
+		f.cfg.BrewFormulaInstalled = func() bool { return true }
 		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"name":"openshell","running":true,"loaded":true,"status":"started","file":"/Users/u/Library/LaunchAgents/homebrew.mxcl.openshell.plist"}]`, nil)
 		f.runner.On("brew services restart nvidia/openshell/openshell", "", nil)
 		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed || st.Manager != "brew" {
@@ -701,6 +702,26 @@ func TestGatewayServiceState(t *testing.T) {
 		}
 		if err := f.cfg.Restart(context.Background()); err != nil || !f.runner.Called("brew services restart nvidia/openshell/openshell") {
 			t.Fatalf("restart: %v", err)
+		}
+	})
+	// Without the formula there is no service to ask brew about, and brew
+	// took about 40 s to say so on a Mac (manual test M4): the Homebrew
+	// prefix answers instead.
+	t.Run("homebrew without the formula", func(t *testing.T) {
+		prefix := t.TempDir()
+		t.Setenv("HOMEBREW_PREFIX", prefix)
+		t.Setenv("PATH", t.TempDir())
+		f := newGatewayFixture(t)
+		f.cfg.GOOS = "darwin"
+		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || st.Installed || st.Manager != "brew" || f.runner.Called("brew") {
+			t.Fatalf("state = %+v, %v; brew asked: %t", st, err, f.runner.Called("brew"))
+		}
+		if err := os.MkdirAll(filepath.Join(prefix, "opt", "openshell"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Installed || !f.runner.Called("brew services info") {
+			t.Fatalf("with the formula: state = %+v, %v", st, err)
 		}
 	})
 }

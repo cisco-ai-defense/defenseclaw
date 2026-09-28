@@ -25,6 +25,8 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -137,6 +139,11 @@ type GatewayConfigurator struct {
 	ProbeClientAuth func(context.Context, *Registration) error
 	RestartWait     time.Duration
 	Now             func() time.Time
+	// BrewFormulaInstalled reports whether Homebrew holds GatewayFormula
+	// (default brewFormulaInstalled). ServiceState asks brew about the
+	// service only then: `brew services info` can take most of a minute,
+	// and a formula that is not installed has no service to report.
+	BrewFormulaInstalled func() bool
 }
 
 func (g *GatewayConfigurator) defaults() error {
@@ -175,6 +182,9 @@ func (g *GatewayConfigurator) defaults() error {
 	}
 	if g.Now == nil {
 		g.Now = time.Now
+	}
+	if g.BrewFormulaInstalled == nil {
+		g.BrewFormulaInstalled = brewFormulaInstalled
 	}
 	return nil
 }
@@ -1067,6 +1077,9 @@ func resolveFilePath(p string) (string, error) {
 
 func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceState, error) {
 	st := &ServiceState{Manager: "brew", Unit: GatewayFormula}
+	if !g.BrewFormulaInstalled() {
+		return st, nil
+	}
 	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Timeout: time.Minute})
 	if err != nil {
 		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
@@ -1085,6 +1098,33 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
 	return st, nil
+}
+
+// brewFormulaInstalled reports whether GatewayFormula has a keg under a
+// Homebrew prefix: HOMEBREW_PREFIX (which `brew shellenv` sets) or the one
+// of the brew on PATH. It reads the file system and runs nothing.
+func brewFormulaInstalled() bool {
+	prefixes := []string{os.Getenv("HOMEBREW_PREFIX")}
+	if brew, err := exec.LookPath("brew"); err == nil {
+		prefixes = append(prefixes, filepath.Dir(filepath.Dir(brew)))
+		// A brew linked from elsewhere (~/bin/brew) names its prefix
+		// through the link.
+		if real, err := filepath.EvalSymlinks(brew); err == nil {
+			prefixes = append(prefixes, filepath.Dir(filepath.Dir(real)))
+		}
+	}
+	name := path.Base(GatewayFormula)
+	for _, p := range prefixes {
+		if !filepath.IsAbs(p) {
+			continue
+		}
+		for _, keg := range []string{filepath.Join(p, "opt", name), filepath.Join(p, "Cellar", name)} {
+			if info, err := os.Stat(keg); err == nil && info.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // readGatewayFile reads a configuration file. A missing file returns nil

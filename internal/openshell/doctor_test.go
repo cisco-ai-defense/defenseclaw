@@ -130,8 +130,9 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			return f.fake.Client(openshell.ClientOptions{}), nil
 		},
 		Gateway: &openshell.GatewayConfigurator{Dir: f.dir, GOOS: "linux", Runner: f.runner,
-			VerifyGateway:   func(context.Context) error { f.verified++; return nil },
-			ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe }},
+			VerifyGateway:        func(context.Context) error { f.verified++; return nil },
+			ProbeClientAuth:      func(context.Context, *openshell.Registration) error { f.probes++; return f.probe },
+			BrewFormulaInstalled: func() bool { return true }},
 		Ports:         []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
 		LandlockABI:   func() (int, error) { return 6, nil },
 		DiskFree:      func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
@@ -434,6 +435,10 @@ func TestDoctorChecks(t *testing.T) {
 			want: []checkWant{{"gateway-service", fail, "Failed to connect to bus"}}},
 		{name: "macOS skips Linux-only checks", setup: func(f *doctorFixture) { f.onBrew() },
 			want: []checkWant{{"landlock", skip, "Docker Desktop"}, {"linger", skip, ""}, {"gateway-service", pass, "nvidia/openshell/openshell"}, {"telemetry", skip, ""}}},
+		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {
+			f.onBrew()
+			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+		}, want: []checkWant{{"gateway-service", fail, "nvidia/openshell/openshell is not installed"}}, fix: &fixWant{command: install}},
 
 		{name: "cli missing", setup: func(f *doctorFixture) { f.found["openshell"] = false }, want: []checkWant{{"openshell-cli", fail, "not on PATH"}}},
 		{name: "cli 0.0.x", setup: cliVersion("openshell 0.0.16\n"), want: []checkWant{{"openshell-cli", fail, "predates 0.0.37"}}},

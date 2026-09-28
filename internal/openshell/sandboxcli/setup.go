@@ -100,9 +100,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	a.println()
 	a.println(a.bold("DefenseClaw sandbox setup"))
 
-	// 1. The machine.
+	// 1. The machine. The line starts before the checks, which can take
+	// a while (Homebrew is slow to answer about its services).
+	a.printf("  Checking this machine…  ")
 	rep := a.runDoctor(ctx)
-	a.printf("  Checking this machine…  %s\n", a.machineLine(rep))
+	a.printf("%s\n", a.machineLine(rep))
 	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)

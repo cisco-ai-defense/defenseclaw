@@ -173,6 +173,23 @@ func TestSetupNonInteractive(t *testing.T) {
 		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
+// TestSetupShowsTheMachineCheckWhileItRuns pins that the machine check's
+// line is on screen while the checks run: on a Mac they took about 40 s
+// with nothing after the title (manual test M4).
+func TestSetupShowsTheMachineCheckWhileItRuns(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	var during string
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		if during == "" {
+			during = ta.output()
+		}
+		return hostReport(nil)(ctx, d)
+	}
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true, NoWrappers: true}))
+	has(t, during, "DefenseClaw sandbox setup\n  Checking this machine…")
+	has(t, ta.output(), "  Checking this machine…  ✓ linux/arm64  ✓ Landlock  ✓ Docker 29.4.0  ✓ OpenShell 0.1.1\n")
+}
+
 // TestSetupLeavesTheGatewayRunningSandboxes pins that setup never restarts
 // the shared OpenShell gateway under running sandboxes (of any owner) on
 // its own: without a terminal (or with --yes) it leaves the change for
