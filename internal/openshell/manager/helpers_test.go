@@ -98,6 +98,11 @@ type fakeWorkspace struct {
 	// onUndo and onDeleteSnapshot run first in Undo and DeleteSnapshot,
 	// with their context (a caller going away mid-step, say).
 	onUndo, onDeleteSnapshot func(ctx context.Context)
+	// scanned is what ScanSecrets finds now (default: masked, what the
+	// mount plan masks); scanErr fails it.
+	scanned  []workspace.MaskedPath
+	scanErr  error
+	lastScan workspace.MountOptions
 }
 
 func newFakeWorkspace() *fakeWorkspace {
@@ -125,6 +130,19 @@ func (f *fakeWorkspace) PlanMount(_ context.Context, opts workspace.MountOptions
 		Labels:    map[string]string{},
 	}
 	return plan, nil
+}
+
+func (f *fakeWorkspace) ScanSecrets(_ context.Context, opts workspace.MountOptions) ([]workspace.MaskedPath, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastScan = opts
+	if f.scanErr != nil {
+		return nil, f.scanErr
+	}
+	if f.scanned != nil {
+		return f.scanned, nil
+	}
+	return f.masked, nil
 }
 
 func (f *fakeWorkspace) ReleaseMount(_, name string) error {

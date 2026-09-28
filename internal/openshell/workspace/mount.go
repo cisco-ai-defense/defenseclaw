@@ -220,24 +220,9 @@ func PlanMount(ctx context.Context, opts MountOptions) (*MountPlan, error) {
 		}
 	}
 
-	scanOpts := secretScanOptions{
-		patterns:     opts.Masks,
-		unmask:       normalizeUnmask(opts.Unmask, src.Path),
-		maskTracked:  opts.MaskTracked,
-		detector:     opts.Detector,
-		contentScan:  !opts.DisableContentScan,
-		maxEntries:   opts.MaxWalkEntries,
-		maxScanFiles: opts.MaxContentScanFiles,
-	}
-	if scanOpts.detector == nil {
-		scanOpts.detector = DefaultSecretDetector()
-	}
-	if src.Git != nil {
-		tracked, err := trackedFiles(ctx, src.Path, src.Git.GitDir)
-		if err != nil {
-			return nil, err
-		}
-		scanOpts.tracked = tracked
+	scanOpts, err := mountScanOptions(ctx, opts, src)
+	if err != nil {
+		return nil, err
 	}
 	scan, err := detectSecrets(src.Path, scanOpts)
 	if err != nil {
@@ -286,6 +271,58 @@ func PlanMount(ctx context.Context, opts MountOptions) (*MountPlan, error) {
 	}
 	ok = true
 	return plan, nil
+}
+
+// ScanSecrets runs PlanMount's secret scan of opts.Project again (context
+// folders aside) and returns what a mount planned now would mask, without
+// creating anything. A mounted sandbox's masks are fixed when it is
+// created; its manager compares them with this before starting it again,
+// so a secret file that appeared since is not shared with it unnoticed.
+func ScanSecrets(ctx context.Context, opts MountOptions) ([]MaskedPath, error) {
+	if !platformSupported() {
+		return nil, ErrUnsupportedPlatform
+	}
+	lay, err := newLayout(opts.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	src, err := ValidateSource(ctx, opts.Project, SourceOptions{Home: opts.Home, DataDir: lay.dataDir, Protected: opts.Protected})
+	if err != nil {
+		return nil, err
+	}
+	scanOpts, err := mountScanOptions(ctx, opts, src)
+	if err != nil {
+		return nil, err
+	}
+	scan, err := detectSecrets(src.Path, scanOpts)
+	if err != nil {
+		return nil, err
+	}
+	return scan.masks, nil
+}
+
+// mountScanOptions are the secret scan options of a live mount of src.
+func mountScanOptions(ctx context.Context, opts MountOptions, src *Source) (secretScanOptions, error) {
+	scanOpts := secretScanOptions{
+		patterns:     opts.Masks,
+		unmask:       normalizeUnmask(opts.Unmask, src.Path),
+		maskTracked:  opts.MaskTracked,
+		detector:     opts.Detector,
+		contentScan:  !opts.DisableContentScan,
+		maxEntries:   opts.MaxWalkEntries,
+		maxScanFiles: opts.MaxContentScanFiles,
+	}
+	if scanOpts.detector == nil {
+		scanOpts.detector = DefaultSecretDetector()
+	}
+	if src.Git != nil {
+		tracked, err := trackedFiles(ctx, src.Path, src.Git.GitDir)
+		if err != nil {
+			return secretScanOptions{}, err
+		}
+		scanOpts.tracked = tracked
+	}
+	return scanOpts, nil
 }
 
 // planGitProtection adds the git pins and read-only binds.

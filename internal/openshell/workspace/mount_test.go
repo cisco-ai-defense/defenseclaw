@@ -563,3 +563,37 @@ func TestPlanMountRefusesAFolderTheScanCannotFinish(t *testing.T) {
 		t.Fatalf("context folder past the limit: %v", err)
 	}
 }
+
+// TestScanSecretsSeesSecretsAddedAfterTheMount pins that ScanSecrets finds
+// what a mount planned now would mask, a secret file added after the mount
+// was planned included, and creates nothing.
+func TestScanSecretsSeesSecretsAddedAfterTheMount(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".env", "X=1\n")
+	plan, err := PlanMount(bg, e.mountOpts("s-rescan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Masked) != 1 || plan.Masked[0].Rel != ".env" {
+		t.Fatalf("masked at plan = %+v", plan.Masked)
+	}
+	writeFile(t, e.project, "deploy/id_rsa", "not a real key\n")
+	writeFile(t, e.project, "kept.env", "Y=2\n")
+	opts := e.mountOpts("s-scan-only")
+	opts.Unmask = []string{"kept.env"}
+	masks, err := ScanSecrets(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rels []string
+	for _, m := range masks {
+		rels = append(rels, m.Rel)
+	}
+	if strings.Join(rels, ",") != ".env,deploy/id_rsa" {
+		t.Fatalf("rescan = %v, want .env and deploy/id_rsa", rels)
+	}
+	if pathExists(filepath.Join(e.data, "sandboxes", "s-scan-only")) {
+		t.Fatal("the scan created state")
+	}
+}

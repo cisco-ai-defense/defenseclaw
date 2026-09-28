@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -366,6 +367,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err != nil {
 		return sandboxapi.Errorf(sandboxapi.CodeInternal, "look up the sandbox binding: %v", err)
 	}
+	if rec.WorkdirMode == config.OpenShellWorkdirMount && rec.Project != "" {
+		if err := m.checkNewSecrets(ctx, rec, eff, binding); err != nil {
+			return err
+		}
+	}
 	// With token_delivery: provider the token is rotated, so a credential
 	// from an earlier session is useless, and the provider carries the new
 	// one into the sandbox. With token_delivery: env the token is a plain
@@ -515,6 +521,45 @@ func tokenDelivery(rec record) string {
 		return config.OpenShellTokenDeliveryProvider
 	}
 	return config.OpenShellTokenDeliveryEnv
+}
+
+// checkNewSecrets refuses to start a mounted sandbox whose project now
+// holds files the secret scan would mask (by name, pattern or content)
+// that its masks leave visible: they are fixed when the sandbox is
+// created, so a secret file added since (a credential the user put in the
+// project between sessions, a mask pattern the policy added) would be
+// shared with the next session unnoticed. A scan that cannot finish fails
+// closed, as it does on create.
+func (m *Manager) checkNewSecrets(ctx context.Context, rec record, eff *packs.Effective, binding sandboxauth.Binding) error {
+	found, err := m.ws.ScanSecrets(ctx, workspace.MountOptions{
+		Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir,
+		Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Protected: eff.PolicySources(),
+	})
+	if err != nil {
+		return workspaceError(err)
+	}
+	have := maskedRels(binding, rec.Workdir)
+	var visible []string
+	for _, mk := range found {
+		if !slices.ContainsFunc(have, func(h string) bool { return mk.Rel == h || strings.HasPrefix(mk.Rel, h+"/") }) {
+			visible = append(visible, sandboxapi.DisplayText(mk.Rel))
+		}
+	}
+	if len(visible) == 0 {
+		return nil
+	}
+	sort.Strings(visible)
+	shown := visible
+	if len(shown) > 5 {
+		shown = append(slices.Clip(shown[:5]), fmt.Sprintf("and %d more", len(visible)-5))
+	}
+	msg := fmt.Sprintf("%d file(s) that look like secrets are in the project now, which sandbox %s does not mask "+
+		"(its masks are fixed when it is created): %s", len(visible), rec.Name, strings.Join(shown, ", "))
+	m.logf("sandbox %s: start refused: %s", rec.Name, msg)
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: rec.Name, Reason: "secrets_unmasked",
+		Message: truncate("✗ not started: "+msg, 512)})
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg,
+		Detail: "move them out of the project, or delete the sandbox and run it again, which masks them (--unmask shares one on purpose)"}
 }
 
 // maskedRels turns the binding's sandbox mask paths back into

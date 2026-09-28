@@ -97,6 +97,8 @@ func (b BuilderImages) Resolve(ctx context.Context, spec image.BuildSpec, build 
 // seam over package workspace so the workspace API can evolve behind it.
 type Workspace interface {
 	PlanMount(ctx context.Context, opts workspace.MountOptions) (*workspace.MountPlan, error)
+	// ScanSecrets is PlanMount's secret scan alone, which creates nothing.
+	ScanSecrets(ctx context.Context, opts workspace.MountOptions) ([]workspace.MaskedPath, error)
 	ReleaseMount(dataDir, name string) error
 	Snapshot(ctx context.Context, opts workspace.SnapshotOptions) (*workspace.SnapshotRecord, error)
 	LoadSnapshot(dataDir, name string) (*workspace.SnapshotRecord, error)
@@ -112,6 +114,10 @@ type DefaultWorkspace struct{}
 
 func (DefaultWorkspace) PlanMount(ctx context.Context, opts workspace.MountOptions) (*workspace.MountPlan, error) {
 	return workspace.PlanMount(ctx, opts)
+}
+
+func (DefaultWorkspace) ScanSecrets(ctx context.Context, opts workspace.MountOptions) ([]workspace.MaskedPath, error) {
+	return workspace.ScanSecrets(ctx, opts)
 }
 
 func (DefaultWorkspace) ReleaseMount(dataDir, name string) error {
