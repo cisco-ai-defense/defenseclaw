@@ -93,6 +93,19 @@ fi
 echo state=interrupted
 `
 
+// runNoLog is the exit status of runTailScript and runFollowScript when the
+// sandbox has no run log.
+const runNoLog = 3
+
+// runTailScript prints the last lines of the latest run's log (exit 3: there
+// is no log). tail's own complaints stay in the sandbox: `sandbox logs` says
+// what went wrong.
+const runTailScript = `d=$1
+n=$2
+[ -e "$d/latest.log" ] || exit 3
+exec tail -n "$n" "$d/latest.log" 2>/dev/null
+`
+
 // runFollowScript follows the latest run's log until the run ends (exit 3:
 // there is no log).
 const runFollowScript = `d=$1

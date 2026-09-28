@@ -576,19 +576,25 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		inv, err = cli.Exec(sb.Name, []string{"sh", "-c", runFollowScript, "sh", RunDir, strconv.Itoa(lines)},
 			openshell.CLIExecOptions{WorkDir: sb.Workdir})
 	} else {
-		inv, err = cli.Exec(sb.Name, []string{"tail", "-n", strconv.Itoa(lines), RunDir + "/latest.log"},
+		inv, err = cli.Exec(sb.Name, []string{"sh", "-c", runTailScript, "sh", RunDir, strconv.Itoa(lines)},
 			openshell.CLIExecOptions{WorkDir: sb.Workdir, Timeout: time.Minute})
 	}
 	if err != nil {
 		return err
 	}
+	// Only the OpenShell CLI's own messages reach stderr: both scripts keep
+	// tail's inside the sandbox and exit runNoLog without a log.
 	code, err := a.Streamer.Stream(ctx, inv, out, a.IO.Err)
 	_ = flush()
 	if err != nil {
 		return err
 	}
-	if code != 0 {
+	switch code {
+	case 0:
+	case runNoLog:
 		return fmt.Errorf("%s has no detached run output (start one with `%s run <harness> --detach --prompt TEXT`)", sb.Name, CommandName)
+	default:
+		return fmt.Errorf("could not read the run log of %s (exit status %d)", sb.Name, code)
 	}
 	run, err := a.detachedRun(ctx, cli, sb)
 	if err != nil {

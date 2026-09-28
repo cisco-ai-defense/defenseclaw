@@ -17,12 +17,14 @@
 package sandboxcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -332,7 +334,7 @@ func TestExecAndLogs(t *testing.T) {
 			cmd = cmd[1:]
 		}
 		switch {
-		case cmd[0] == "tail":
+		case len(cmd) > 2 && cmd[2] == runTailScript:
 			return 0, "log line\n"
 		case len(cmd) > 2 && cmd[2] == runFollowScript:
 			return 0, "log line\nmore\n"
@@ -355,7 +357,7 @@ func TestExecAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmds := ta.stream.commands()
-	if !slices.Contains(cmds, harness.SandboxEnvPath+" ls -la") || slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "tail -n 50 "+RunDir+"/latest.log") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
+	if !slices.Contains(cmds, harness.SandboxEnvPath+" ls -la") || slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "sh -c "+runTailScript+" sh "+RunDir+" 50") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
 		return isRunStatus(sandboxCommand(argv))
 	}) {
 		t.Fatalf("commands = %q", cmds)
@@ -375,6 +377,78 @@ func TestExecAndLogs(t *testing.T) {
 	}
 	if out := ta.output(); !strings.Contains(out, "more") || !strings.Contains(out, "exited with status 0") {
 		t.Fatalf("logs -f output:\n%s", out)
+	}
+}
+
+// TestLogsWithoutARunLog: a sandbox without a run log gets DefenseClaw's
+// answer, and a log that could not be read is not taken for a missing run.
+func TestLogsWithoutARunLog(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		follow bool
+		code   int
+		want   string
+	}{
+		{"no log", false, runNoLog, "box has no detached run output (start one with"},
+		{"no log, following", true, runNoLog, "box has no detached run output (start one with"},
+		{"the exec failed", false, 255, "could not read the run log of box (exit status 255)"},
+		{"the exec failed, following", true, 1, "could not read the run log of box (exit status 1)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.add(sampleSandbox("box"))
+			ta.IO.TTY = false
+			ta.stream.answer = func(argv []string) (int, string) {
+				if cmd := sandboxCommand(argv); len(cmd) > 2 && (cmd[2] == runTailScript || cmd[2] == runFollowScript) {
+					return c.code, ""
+				}
+				return 0, ""
+			}
+			err := ta.Logs(context.Background(), LogsOptions{Name: "box", Follow: c.follow})
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("Logs = %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+// TestRunTailScript runs the script `sandbox logs` runs in the sandbox: no
+// log is exit runNoLog with nothing on stderr (not tail's complaint).
+func TestRunTailScript(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is required")
+	}
+	dir := t.TempDir()
+	latest := filepath.Join(dir, "latest.log")
+	run := func() (int, string, string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		cmd := exec.Command("/bin/sh", "-c", runTailScript, "sh", dir, "2")
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		code := 0
+		var exit *exec.ExitError
+		if err := cmd.Run(); errors.As(err, &exit) {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return code, stdout.String(), stderr.String()
+	}
+	if code, out, errOut := run(); code != runNoLog || out != "" || errOut != "" {
+		t.Fatalf("without a log: exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	// latest.log links to the run's log: a dangling link is no log either.
+	if err := os.Symlink(filepath.Join(dir, "gone.log"), latest); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := run(); code != runNoLog || out != "" || errOut != "" {
+		t.Fatalf("dangling link: exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gone.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := run(); code != 0 || out != "two\nthree\n" || errOut != "" {
+		t.Fatalf("with a log: exit %d, stdout %q, stderr %q", code, out, errOut)
 	}
 }
 
