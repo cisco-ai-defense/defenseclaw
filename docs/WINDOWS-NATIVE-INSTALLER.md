@@ -307,6 +307,16 @@ owned services restart. Downgrades are rejected by both the CLI and setup.
 Machine-scope state and the HKLM policy
 `SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1` disable self-update.
 Those installations must be serviced by the enterprise deployment channel.
+A production Windows managed-enterprise deployment sets this policy itself
+unless the value already exists, and removes it on uninstall only if it still
+carries the deployment's owner marker.
+
+While a managed-enterprise deployment is installed (its `DefenseClawGateway`
+Windows service exists), the per-user product refuses to run beside it. The
+refusal covers `install.ps1`, Setup install, upgrade, and repair, and the
+per-user gateway `start`, `restart`, and foreground run. Both products serve
+hooks on the same local port. Setup uninstall stays available, so an existing
+per-user copy can be removed.
 
 ## Release gate
 
