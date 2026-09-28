@@ -12908,8 +12908,15 @@ function Get-DefenseClawTargetRuntimeExchangeValue {
 function Assert-DefenseClawTargetRuntimePlan {
     param(
         [Parameter(Mandatory)]$Plan,
-        [Parameter(Mandatory)][hashtable]$Layout
+        [Parameter(Mandatory)][hashtable]$Layout,
+        # An Upgrade/Repair validation plan may carry a standalone deferred
+        # account's pending root, which Setup neither stages nor validates.
+        [switch]$AllowPending
     )
+    $allowedBaselines = @('absent', 'canonical')
+    if ($AllowPending) {
+        $allowedBaselines += 'pending'
+    }
     $allowedPlanProperties = @(
         'schema_version',
         'manifest_path',
@@ -12996,7 +13003,7 @@ function Assert-DefenseClawTargetRuntimePlan {
                 $script:AdministratorsSID,
                 $script:TrustedInstallerSID
             ) -or
-            [string]$root.baseline -notin @('absent', 'canonical')) {
+            [string]$root.baseline -notin $allowedBaselines) {
             throw 'target runtime plan contains an invalid SID or baseline'
         }
         $rawHome = [string]$root.user_home
@@ -13072,7 +13079,7 @@ function Assert-DefenseClawTargetRuntimePlan {
             }
         }
         elseif (-not [string]::IsNullOrWhiteSpace($baselineIdentity)) {
-            throw 'target runtime absent baseline unexpectedly has an identity'
+            throw "target runtime $([string]$root.baseline) baseline unexpectedly has an identity"
         }
     }
     return $Plan
@@ -13435,14 +13442,18 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             $transactionDirectory `
             'target-runtime-plan.json') `
         -TransactionDirectory $transactionDirectory
+    $planArguments = @(
+        'enterprise', 'windows', 'target-runtime', 'plan',
+        '--manifest', [string]$Layout.ManifestPath,
+        '--output', $planPath
+    )
+    if ($ValidationOnly) {
+        $planArguments += '--validate-only'
+    }
     $planProbe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
-            'enterprise', 'windows', 'target-runtime', 'plan',
-            '--manifest', [string]$Layout.ManifestPath,
-            '--output', $planPath
-        ) `
+        -Arguments $planArguments `
         -Capture `
         -AllowFailure
     if ([int]$planProbe.exit_code -ne 0) {
@@ -13454,15 +13465,24 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         -Plan (Get-DefenseClawTargetRuntimeExchangeValue `
             -Path $planPath `
             -TransactionDirectory $transactionDirectory) `
-        -Layout $Layout
+        -Layout $Layout `
+        -AllowPending:$ValidationOnly
     if ($ValidationOnly) {
-        if (@($plan.roots |
+        # A standalone deferred account's pending root (absent, or created by
+        # the account before enrollment) is the guardian's to create or adopt
+        # in that account's session; only another absent root is refused.
+        $absentRoots = @($plan.roots |
                 Microsoft.PowerShell.Core\Where-Object {
                     [string]$_.baseline -ceq 'absent'
-                }).Count -gt 0) {
+                })
+        if ($absentRoots.Count -gt 0) {
             throw (
                 'Upgrade/Repair refuses an enabled target with an absent ' +
-                'managed runtime root; add the target through a fresh Install'
+                'managed runtime root (' +
+                (@($absentRoots | Microsoft.PowerShell.Core\ForEach-Object {
+                    [string]$_.data_dir
+                }) -join ', ') +
+                '); add the target through a fresh Install'
             )
         }
         # No user object was mutated, so no rollback ownership is journaled.

@@ -91,6 +91,32 @@ func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDir
 	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err != nil {
 		t.Fatalf("pending proof for an account-created data directory failed: %v", err)
 	}
+	// Repair plans the account's root pending and the lifecycle retire finds
+	// nothing to retire there, instead of failing the whole lifecycle.
+	plan, err := PlanWindowsManagedRuntimeRootsForValidation(
+		Manifest{Version: 1, Targets: []ManifestTarget{target}},
+		`C:\ProgramData\DefenseClaw\etc\targets.yaml`,
+		strings.Repeat("a", 64),
+	)
+	if err != nil || len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselinePending {
+		t.Fatalf("repair plan = %+v, %v; want the account's root pending", plan.Roots, err)
+	}
+	hookExe, _ := windowsEnterpriseHookExecutable()
+	previousAncestor, previousDir, previousFile := windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck
+	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck = previousAncestor, previousDir, previousFile
+	})
+	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(WindowsManagedRuntimeGenerationGCOptions{
+		Connector:      "claudecode",
+		TargetSID:      sid.String(),
+		DataDir:        dataDir,
+		HookExecutable: hookExe,
+	}); err != nil || removed != 0 {
+		t.Fatalf("lifecycle retire = %d, %v; want nothing to retire", removed, err)
+	}
 	var creation windowsTargetOwnedDirectoryCreation
 	if err := runWindowsTestThreadImpersonatedAsSelf(func() error {
 		var err error

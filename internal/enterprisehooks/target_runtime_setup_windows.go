@@ -34,6 +34,14 @@ const (
 	windowsManagedRuntimeStateCanonical    = "canonical"
 	windowsManagedRuntimeStateAbsent       = "absent"
 
+	// windowsManagedRuntimeBaselinePending is a standalone Upgrade/Repair
+	// root whose rows are all deferred and whose data directory is absent or
+	// one the account created itself before enrollment. Setup neither stages
+	// nor validates it: the guardian proves it pending and creates or adopts
+	// it in the account's session, so one account's folder never fails the
+	// whole lifecycle. Only validation plans carry it.
+	windowsManagedRuntimeBaselinePending = "pending"
+
 	windowsManagedRuntimeStagePrefix       = ".defenseclaw.setup-"
 	windowsManagedRuntimeStageRandomBytes  = 16
 	windowsManagedRuntimeMarkerSubAuths    = 8
@@ -162,6 +170,29 @@ func PlanWindowsManagedRuntimeRoots(
 	manifestPath string,
 	manifestSHA256 string,
 ) (WindowsManagedRuntimePlan, error) {
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, false)
+}
+
+// PlanWindowsManagedRuntimeRootsForValidation is the Upgrade/Repair plan. It
+// is PlanWindowsManagedRuntimeRoots, except that in the standalone profile a
+// root whose rows are all deferred and whose data directory is absent or was
+// created by the account itself before enrollment is planned pending, as the
+// guardian's pending proof treats it, instead of failing the lifecycle.
+// Stage, finalize and cleanup refuse a plan with a pending root.
+func PlanWindowsManagedRuntimeRootsForValidation(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+) (WindowsManagedRuntimePlan, error) {
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, true)
+}
+
+func planWindowsManagedRuntimeRoots(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+	validation bool,
+) (WindowsManagedRuntimePlan, error) {
 	var plan WindowsManagedRuntimePlan
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
 		return plan, err
@@ -201,9 +232,12 @@ func PlanWindowsManagedRuntimeRoots(
 		TargetCount:    targetCount,
 		Roots:          make([]WindowsManagedRuntimeRootPlan, 0, len(targets)),
 	}
+	pendingAllowed := validation && windowsEnterpriseStandaloneProcess()
+	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
-			root, inspectErr := planWindowsManagedRuntimeRoot(target)
+			key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
+			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key])
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -214,7 +248,26 @@ func PlanWindowsManagedRuntimeRoots(
 	if err != nil {
 		return WindowsManagedRuntimePlan{}, err
 	}
-	return plan, validateWindowsManagedRuntimePlan(plan, manifest)
+	return plan, validateWindowsManagedRuntimePlanRows(plan, manifest, false, pendingAllowed)
+}
+
+// windowsManagedRuntimeDeferredOnlyRoots returns the root keys of the
+// profiles whose enabled manifest rows are all deferred.
+func windowsManagedRuntimeDeferredOnlyRoots(manifest Manifest) map[string]bool {
+	roots := make(map[string]bool)
+	for _, row := range manifest.Targets {
+		if !row.IsEnabled() {
+			continue
+		}
+		target, err := resolveWindowsManagedRuntimeTarget(row.UserHome, row.SID, row.DataDir)
+		if err != nil {
+			continue
+		}
+		key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
+		deferred, seen := roots[key]
+		roots[key] = row.IsDeferred() && (deferred || !seen)
+	}
+	return roots
 }
 
 // StageWindowsManagedRuntimeRoots creates only random staging leaves. It never
@@ -480,7 +533,23 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 	return windowsManagedRuntimeTarget{home: home, data: dataDir, sid: target}, nil
 }
 
-func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsManagedRuntimeRootPlan, error) {
+// windowsManagedRuntimeAccountCreatedBaseline reports whether the opened
+// data directory is one the account created itself before enrollment
+// (windowsAccountCreatedDataDir), which the guardian adopts at enrollment.
+func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target windowsManagedRuntimeTarget) bool {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	ok, err := windowsAccountCreatedDataDir(target.data, descriptor, target.sid)
+	return err == nil && ok
+}
+
+// planWindowsManagedRuntimeRoot inspects one target root. With pendingAllowed
+// (a standalone validation plan of a profile whose rows are all deferred), an
+// absent data directory, or one the account created itself before enrollment,
+// is planned pending instead of absent or refused.
+func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed bool) (WindowsManagedRuntimeRootPlan, error) {
 	parent, err := openWindowsManagedRuntimeProfile(target)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
@@ -494,19 +563,26 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsM
 	final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
 	if windowsManagedRuntimeRootMissing(err) {
 		root.Baseline = windowsManagedRuntimeBaselineAbsent
+		if pendingAllowed {
+			root.Baseline = windowsManagedRuntimeBaselinePending
+		}
 	} else if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
 		if err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid); err != nil {
-			return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+			if !pendingAllowed || !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+			}
+			root.Baseline = windowsManagedRuntimeBaselinePending
+		} else {
+			identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+			if err != nil {
+				return WindowsManagedRuntimeRootPlan{}, err
+			}
+			root.Baseline = windowsManagedRuntimeBaselineCanonical
+			root.BaselineIdentity = identity
 		}
-		identity, err := windowsManagedRuntimeHandleIdentity(final, true)
-		if err != nil {
-			return WindowsManagedRuntimeRootPlan{}, err
-		}
-		root.Baseline = windowsManagedRuntimeBaselineCanonical
-		root.BaselineIdentity = identity
 	}
 	randomLeaf := make([]byte, windowsManagedRuntimeStageRandomBytes)
 	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, randomLeaf); err != nil {
@@ -1228,14 +1304,16 @@ func renameWindowsManagedRuntimeHandle(handle, parent windows.Handle, finalLeaf 
 }
 
 func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest Manifest) error {
-	return validateWindowsManagedRuntimePlanRows(plan, manifest, false)
+	return validateWindowsManagedRuntimePlanRows(plan, manifest, false, false)
 }
 
 // validateWindowsManagedRuntimePlanRows validates plan against manifest. With
 // allowRowDrift the manifest's enabled row count may differ from the plan's
 // (a republication that changed rows of the same users); the resolved profile
-// roots must still match the plan exactly, in order.
-func validateWindowsManagedRuntimePlanRows(plan WindowsManagedRuntimePlan, manifest Manifest, allowRowDrift bool) error {
+// roots must still match the plan exactly, in order. Only a validation plan
+// (allowPending) may carry a pending root, and only for a profile whose rows
+// are all deferred.
+func validateWindowsManagedRuntimePlanRows(plan WindowsManagedRuntimePlan, manifest Manifest, allowRowDrift, allowPending bool) error {
 	if plan.SchemaVersion != WindowsManagedRuntimePlanSchemaVersion {
 		return fmt.Errorf("enterprise hooks: unsupported managed runtime plan schema %d", plan.SchemaVersion)
 	}
@@ -1263,15 +1341,21 @@ func validateWindowsManagedRuntimePlanRows(plan WindowsManagedRuntimePlan, manif
 	}
 	seenLeaf := make(map[string]bool)
 	seenMarker := make(map[string]bool)
+	var deferredOnly map[string]bool
+	if allowPending {
+		deferredOnly = windowsManagedRuntimeDeferredOnlyRoots(manifest)
+	}
 	for index, target := range targets {
 		root := plan.Roots[index]
 		if !sameWindowsEnterprisePath(root.UserHome, target.home) || !sameWindowsEnterprisePath(root.DataDir, target.data) || !strings.EqualFold(root.SID, target.sid.String()) {
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d does not match manifest", index)
 		}
-		if root.Baseline != windowsManagedRuntimeBaselineAbsent && root.Baseline != windowsManagedRuntimeBaselineCanonical {
+		pending := root.Baseline == windowsManagedRuntimeBaselinePending &&
+			deferredOnly[windowsManagedRuntimeRootKey(target.sid.String(), target.home)]
+		if root.Baseline != windowsManagedRuntimeBaselineAbsent && root.Baseline != windowsManagedRuntimeBaselineCanonical && !pending {
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d has invalid baseline", index)
 		}
-		if (root.Baseline == windowsManagedRuntimeBaselineAbsent) != (root.BaselineIdentity == "") || (root.BaselineIdentity != "" && !validWindowsManagedRuntimeIdentity(root.BaselineIdentity)) {
+		if (root.Baseline == windowsManagedRuntimeBaselineCanonical) != (root.BaselineIdentity != "") || (root.BaselineIdentity != "" && !validWindowsManagedRuntimeIdentity(root.BaselineIdentity)) {
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d has invalid baseline identity", index)
 		}
 		if !validWindowsManagedRuntimeStageLeaf(root.StagingLeaf) || seenLeaf[strings.ToLower(root.StagingLeaf)] {
@@ -1295,7 +1379,7 @@ func validateWindowsManagedRuntimeRequestRows(request WindowsManagedRuntimeReque
 	if request.SchemaVersion != WindowsManagedRuntimeRequestSchemaVersion {
 		return nil, fmt.Errorf("enterprise hooks: unsupported managed runtime request schema %d", request.SchemaVersion)
 	}
-	if err := validateWindowsManagedRuntimePlanRows(request.Plan, manifest, allowRowDrift); err != nil {
+	if err := validateWindowsManagedRuntimePlanRows(request.Plan, manifest, allowRowDrift, false); err != nil {
 		return nil, err
 	}
 	planRoots := make(map[string]WindowsManagedRuntimeRootPlan, len(request.Plan.Roots))
