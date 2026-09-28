@@ -33,9 +33,10 @@ import (
 // false, plus the harness's notice in claude_code_output / codex_output. The
 // tool must run and the harness show the notice; the native hook runner
 // already does that (hookexec TestAlertRemainsAdvisoryUnderClosedFailMode).
-// These tests pin the same for the shell hooks, on the host and in the
-// sandbox, where an alert used to be "invalid or missing action", a
-// fail-closed block that also left a hook-failure record.
+// TestHostHooksTreatAlertAsAdvisory pins the same for the host shell hooks
+// (TestSandboxHooksRenderVerdicts for the sandbox ones), where an alert used
+// to be "invalid or missing action", a fail-closed block that also left a
+// hook-failure record.
 
 const alertNotice = `{"systemMessage":"DefenseClaw observed a HIGH Claude Code hook finding: advisory"}`
 
@@ -43,64 +44,6 @@ const alertNotice = `{"systemMessage":"DefenseClaw observed a HIGH Claude Code h
 // PreToolUse.
 const alertVerdict = `{"action":"alert","raw_action":"alert","would_block":false,"severity":"HIGH",` +
 	`"reason":"advisory","claude_code_output":` + alertNotice + `,"codex_output":` + alertNotice + `}`
-
-func TestSandboxHooksTreatAlertAsAdvisory(t *testing.T) {
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq is required")
-	}
-	codexArgs := []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}
-	for _, tc := range []struct {
-		connector, version, script string
-		args                       []string
-		stdin                      string
-		// notice is the stdout an alert with its notice must produce.
-		notice string
-	}{
-		{"claudecode", "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, alertNotice},
-		{"codex", "0.146.0", "codex-hook.sh", codexArgs, codexPreToolUse, alertNotice},
-		{"copilot", "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, ""},
-		{"cursor", "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, ""},
-		{"kiro", "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, ""},
-		{"devin", "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, ""},
-	} {
-		rt, err := resolveSandboxTarget(tc.connector, SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})
-		if err != nil {
-			t.Fatal(err)
-		}
-		files, err := renderSandboxHookFiles(tc.connector, rt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		h := newSandboxHookHarnessFiles(t, files, SandboxHookPATH)
-		env := map[string]string{SandboxTokenEnv: "tok", "CLAUDE_TOOL_NAME": "Bash"}
-		for name, reply := range map[string]string{
-			"with-notice": alertVerdict,
-			"bare":        `{"action":"alert","would_block":false}`,
-		} {
-			t.Run(tc.script+"/"+name, func(t *testing.T) {
-				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, []string{"200|" + reply})
-				if run.exitCode != 0 {
-					t.Fatalf("exit %d, want 0 (an alert lets the tool run); stdout=%q stderr=%s", run.exitCode, run.stdout, run.stderr)
-				}
-				if len(run.calls) != 1 {
-					t.Fatalf("calls = %d, want 1", len(run.calls))
-				}
-				if strings.Contains(run.stderr, "invalid or missing action") {
-					t.Fatalf("the alert was taken for a bad reply: %s", run.stderr)
-				}
-				if name == "with-notice" && tc.notice != "" && strings.TrimSpace(run.stdout) != tc.notice {
-					t.Fatalf("stdout = %q, want the harness notice %s", run.stdout, tc.notice)
-				}
-				if name == "bare" && (tc.connector == "claudecode" || tc.connector == "codex") && run.stdout != "" {
-					t.Fatalf("stdout = %q, want nothing without a notice", run.stdout)
-				}
-			})
-		}
-	}
-}
 
 // TestHostHooksTreatAlertAsAdvisory runs the host Claude Code and Codex hooks
 // against a stubbed gateway in both fail modes: an alert exits 0 with the

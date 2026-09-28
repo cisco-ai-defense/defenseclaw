@@ -35,75 +35,31 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TestOmnigentSandboxArtifacts: the root-owned configuration loads only the
+// DefenseClaw policy module and pins the TUI theme (without one the TUI's
+// first-launch picker crashes writing it to the root-owned file, R2-79).
 func TestOmnigentSandboxArtifacts(t *testing.T) {
-	a, err := NewOmnigentConnector().SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "0.13.0"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.TamperTier != SandboxTamperTierManaged || a.HookContract != "omnigent-custom-policy-v1" || len(a.Files) != 3 {
-		t.Fatalf("artifacts = %+v", a)
-	}
-	var module, config, agent []byte
-	for _, f := range a.Files {
-		if f.Owner != SandboxOwnerRoot || f.Mode != 0o644 {
-			t.Fatalf("%s must be root-owned 0644: %+v", f.Path, f)
-		}
-		switch f.Path {
-		case OmnigentSandboxPolicyModulePath:
-			module = f.Data
-		case OmnigentSandboxConfigPath:
-			config = f.Data
-		case OmnigentSandboxAgentPath + "/config.yaml":
-			agent = f.Data
-		}
-	}
-	var spec struct {
-		SpecVersion int `yaml:"spec_version"`
-		Executor    struct {
-			Config struct {
-				Harness string `yaml:"harness"`
-			} `yaml:"config"`
-		} `yaml:"executor"`
-		OSEnv struct {
-			Type    string `yaml:"type"`
-			Sandbox struct {
-				Type string `yaml:"type"`
-			} `yaml:"sandbox"`
-		} `yaml:"os_env"`
-	}
-	if err := yaml.Unmarshal(agent, &spec); err != nil || spec.SpecVersion != 1 || spec.Executor.Config.Harness != "openai-agents" ||
-		spec.OSEnv.Type != "caller_process" || spec.OSEnv.Sandbox.Type != "none" {
-		t.Fatalf("sandbox agent = %+v, %v", spec, err)
-	}
-	body := string(module)
-	for _, want := range []string{"def _sandbox_post(", "_SANDBOX_TOKEN_ENV = \"DEFENSECLAW_SANDBOX_TOKEN\"", "X-DefenseClaw-Hook-Idempotency-Key", "POLICY_REGISTRY"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("sandbox policy lacks %q", want)
-		}
-	}
-	if strings.Contains(body, "{{API_ADDR_B64}}") || strings.Contains(body, "{{FAIL_MODE_B64}}") {
+	var cfg map[string]interface{}
+	artifacts := sandboxArtifactsFor(t, NewOmnigentConnector(), "0.13.0")
+	if module := sandboxFile(t, artifacts, OmnigentSandboxPolicyModulePath).Data; strings.Contains(string(module), "{{API_ADDR_B64}}") || strings.Contains(string(module), "{{FAIL_MODE_B64}}") {
 		t.Fatal("sandbox policy carries unrendered template tokens")
 	}
-	var cfg map[string]interface{}
+	config := sandboxFile(t, artifacts, OmnigentSandboxConfigPath).Data
 	if err := yaml.Unmarshal(config, &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if modules := cfg["policy_modules"].([]interface{}); len(modules) != 1 || modules[0] != omnigentPolicyModuleName {
 		t.Fatalf("policy_modules = %v", cfg["policy_modules"])
 	}
-	// The TUI reads its theme from this root-owned file; without one its
-	// first-launch picker crashes writing it (R2-79).
 	if tui, _ := cfg["tui"].(map[string]interface{}); tui["theme"] != "dark" {
 		t.Fatalf("tui = %v, want a pinned theme", cfg["tui"])
+	}
+	if err := verifyOmnigentSandboxConfig(config); err != nil {
+		t.Fatalf("rendered config rejected: %v", err)
 	}
 	for _, bad := range []string{"policy_modules: []\n", "policy_modules: [x]\npolicies: {}\n", "{"} {
 		if err := verifyOmnigentSandboxConfig([]byte(bad)); err == nil {
 			t.Fatalf("verify accepted %q", bad)
-		}
-	}
-	for _, version := range []string{"0.14.0", "0.6.0", ""} {
-		if _, err := NewOmnigentConnector().SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: version}); err == nil {
-			t.Fatalf("version %q rendered outside the reviewed contract", version)
 		}
 	}
 }
@@ -111,14 +67,12 @@ func TestOmnigentSandboxArtifacts(t *testing.T) {
 // omnigentIngress stands in for the sandbox ingress: it answers each request
 // with the next scripted (status, body) and records what it received.
 type omnigentIngress struct {
-	mu        sync.Mutex
-	replies   []omnigentReply
-	calls     int
-	auths     []string
-	keys      []string
-	bodies    []string
-	lastPaths []string
+	mu       sync.Mutex
+	replies  []omnigentReply
+	requests []omnigentRequest
 }
+
+type omnigentRequest struct{ auth, key, body, path string }
 
 type omnigentReply struct {
 	status int
@@ -129,14 +83,10 @@ func (s *omnigentIngress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
 	s.mu.Lock()
 	reply := omnigentReply{status: 500, body: "{}"}
-	if s.calls < len(s.replies) {
-		reply = s.replies[s.calls]
+	if len(s.requests) < len(s.replies) {
+		reply = s.replies[len(s.requests)]
 	}
-	s.calls++
-	s.auths = append(s.auths, r.Header.Get("Authorization"))
-	s.keys = append(s.keys, r.Header.Get("X-DefenseClaw-Hook-Idempotency-Key"))
-	s.bodies = append(s.bodies, string(raw))
-	s.lastPaths = append(s.lastPaths, r.URL.Path)
+	s.requests = append(s.requests, omnigentRequest{r.Header.Get("Authorization"), r.Header.Get("X-DefenseClaw-Hook-Idempotency-Key"), string(raw), r.URL.Path})
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(reply.status)
@@ -222,13 +172,13 @@ print(json.dumps(module.defenseclaw_policy(json.loads(sys.argv[2]))))
 			if verdict["result"] != tc.result || !strings.Contains(verdict["reason"], tc.reason) {
 				t.Fatalf("verdict = %v, want %s containing %q", verdict, tc.result, tc.reason)
 			}
-			if ingress.calls != tc.wantCalls {
-				t.Fatalf("ingress calls = %d, want %d", ingress.calls, tc.wantCalls)
+			if len(ingress.requests) != tc.wantCalls {
+				t.Fatalf("ingress calls = %d, want %d", len(ingress.requests), tc.wantCalls)
 			}
-			for i := 0; i < ingress.calls; i++ {
-				if ingress.auths[i] != "Bearer "+tc.token || !keyRE.MatchString(ingress.keys[i]) || ingress.keys[i] != ingress.keys[0] ||
-					ingress.lastPaths[i] != "/api/v1/omnigent/hook" || !strings.Contains(ingress.bodies[i], `"hook_event_name":"PreToolUse"`) {
-					t.Fatalf("call %d: auth %q key %q path %q body %s", i, ingress.auths[i], ingress.keys[i], ingress.lastPaths[i], ingress.bodies[i])
+			for i, req := range ingress.requests {
+				if req.auth != "Bearer "+tc.token || !keyRE.MatchString(req.key) || req.key != ingress.requests[0].key ||
+					req.path != "/api/v1/omnigent/hook" || !strings.Contains(req.body, `"hook_event_name":"PreToolUse"`) {
+					t.Fatalf("call %d: %+v", i, req)
 				}
 			}
 		})

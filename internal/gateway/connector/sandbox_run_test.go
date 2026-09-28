@@ -19,6 +19,7 @@ package connector
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestClaudeCodeSandboxRunFiles(t *testing.T) {
 			for _, f := range files {
 				paths = append(paths, f.Path)
 			}
-			if strings.Join(sortedStrings(paths), ",") != strings.Join(tc.files, ",") {
+			if slices.Sort(paths); !slices.Equal(paths, tc.files) {
 				t.Fatalf("files = %v, want %v", paths, tc.files)
 			}
 			if err := validateClaudeCodeRunSettingsSchema(got[ClaudeCodeSandboxRunDropInPath]); err != nil {
@@ -411,14 +412,4 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 			}
 		})
 	}
-}
-
-func sortedStrings(in []string) []string {
-	out := append([]string(nil), in...)
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j] < out[j-1]; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
-	return out
 }

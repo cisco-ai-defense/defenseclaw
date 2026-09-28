@@ -92,11 +92,14 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 	const want = `{"CommandLine":"echo hi > /tmp/x"}`
 	project := func(tool string, args json.RawMessage) (json.RawMessage, bool) {
 		out, cwd, ok := AntigravityTrustedShellArgs(tool, args)
-		if ok && cwd != "/work/app" {
-			t.Errorf("cwd = %q, want /work/app", cwd)
+		// A refused projection, and text sent to a running command, name no
+		// directory.
+		want := ""
+		if ok && tool == "run_command" {
+			want = "/work/app"
 		}
-		if !ok && cwd != "" {
-			t.Errorf("refused projection returned cwd %q", cwd)
+		if cwd != want {
+			t.Errorf("%s cwd = %q (ok %t), want %q", tool, cwd, ok, want)
 		}
 		return out, ok
 	}
@@ -120,6 +123,12 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 		{"no-command", "run_command", `{"Cwd":"/work/app","WaitMsBeforeAsync":500}`, false},
 		{"not-an-object", "run_command", `"echo hi"`, false},
 		{"other-tool", "view_file", `{"CommandLine":"echo hi > /tmp/x","Cwd":"/work/app"}`, false},
+		{"input", "send_command_input", `{"CommandId":"c1","Input":"echo hi > /tmp/x","WaitMs":500}`, true},
+		{"labels-and-unknown-fields", "send_command_input", `{"CommandId":"c1","Input":"echo hi > /tmp/x","Terminate":false,"toolSummary":"s","Extra":1}`, true},
+		{"terminate-only", "send_command_input", `{"CommandId":"c1","Terminate":true}`, false},
+		{"empty-input", "send_command_input", `{"CommandId":"c1","Input":"  "}`, false},
+		{"input-not-string", "send_command_input", `{"CommandId":"c1","Input":["echo"]}`, false},
+		{"duplicate-input", "send_command_input", `{"Input":"ls","Input":"echo hi > /tmp/x"}`, false},
 	})
 	// Without Cwd (or with a null one) the command runs in the session's
 	// directory: no cwd comes back.
@@ -129,24 +138,6 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 			t.Fatalf("%s: projection = %s, cwd %q, %t", args, got, cwd, ok)
 		}
 	}
-}
-
-func TestAntigravityCommandInputArgs(t *testing.T) {
-	project := func(tool string, args json.RawMessage) (json.RawMessage, bool) {
-		out, cwd, ok := AntigravityTrustedShellArgs(tool, args)
-		if cwd != "" {
-			t.Errorf("send_command_input returned cwd %q", cwd)
-		}
-		return out, ok
-	}
-	checkTrustedShellArgs(t, project, `{"CommandLine":"echo hi > /tmp/x"}`, []trustedShellArgsCase{
-		{"input", "send_command_input", `{"CommandId":"c1","Input":"echo hi > /tmp/x","WaitMs":500}`, true},
-		{"labels-and-unknown-fields", "send_command_input", `{"CommandId":"c1","Input":"echo hi > /tmp/x","Terminate":false,"toolSummary":"s","Extra":1}`, true},
-		{"terminate-only", "send_command_input", `{"CommandId":"c1","Terminate":true}`, false},
-		{"empty-input", "send_command_input", `{"CommandId":"c1","Input":"  "}`, false},
-		{"input-not-string", "send_command_input", `{"CommandId":"c1","Input":["echo"]}`, false},
-		{"duplicate-input", "send_command_input", `{"Input":"ls","Input":"echo hi > /tmp/x"}`, false},
-	})
 }
 
 func TestHermesTrustedShellArgs(t *testing.T) {

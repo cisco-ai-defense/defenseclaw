@@ -106,23 +106,19 @@ type sandboxHookHarness struct {
 // system directories for jq, sed, od, ...).
 func newSandboxHookHarness(t *testing.T, provider SandboxArtifactProvider, version string) *sandboxHookHarness {
 	t.Helper()
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq is required")
-	}
-	artifacts, err := provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: version})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return newSandboxHookHarnessFiles(t, artifacts.Files, SandboxHookPATH)
+	return newSandboxHookHarnessFiles(t, sandboxArtifactsFor(t, provider, version).Files, SandboxHookPATH)
 }
 
 // newSandboxHookHarnessFiles materializes an explicit sandbox file set whose
 // baked PATH is the curl stub directory followed by systemPATH.
 func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH string) *sandboxHookHarness {
 	t.Helper()
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required")
+	}
 	h := &sandboxHookHarness{root: t.TempDir(), stubDir: t.TempDir()}
 	stubPath := h.stubDir + ":" + systemPATH
 	h.bakedPATH = stubPath
@@ -241,113 +237,256 @@ func (h *sandboxHookHarness) run(t *testing.T, script string, args []string, std
 var sandboxIdempotencyKeyRE = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})$`)
 
 const (
-	claudePreToolUse  = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
-	codexPreToolUse   = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
-	copilotPreToolUse = `{"sessionId":"s1","timestamp":1790483549431,"cwd":"/work/proj","toolName":"bash","toolArgs":{"command":"ls","description":"list"}}`
-	cursorPreToolUse  = `{"hook_event_name":"beforeShellExecution","conversation_id":"c1","command":"ls","cwd":"/work/proj","cursor_version":"2026.07.23-e383d2b"}`
-	kiroPreToolUse    = `{"hook_event_name":"preToolUse","cwd":"/work/proj","session_id":"s1","tool_name":"shell","tool_input":{"command":"ls"}}`
-	devinPreToolUse   = `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"ls"}}`
-	allowResponse     = `200|{"action":"allow"}`
+	claudePreToolUse      = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
+	codexPreToolUse       = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Bash","tool_input":{"command":"ls"}}`
+	copilotPreToolUse     = `{"sessionId":"s1","timestamp":1790483549431,"cwd":"/work/proj","toolName":"bash","toolArgs":{"command":"ls","description":"list"}}`
+	cursorPreToolUse      = `{"hook_event_name":"beforeShellExecution","conversation_id":"c1","command":"ls","cwd":"/work/proj","cursor_version":"2026.07.23-e383d2b"}`
+	kiroPreToolUse        = `{"hook_event_name":"preToolUse","cwd":"/work/proj","session_id":"s1","tool_name":"shell","tool_input":{"command":"ls"}}`
+	devinPreToolUse       = `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"ls"}}`
+	hermesPreToolCall     = `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"ls"},"session_id":"s1","cwd":"/work/p","extra":{}}`
+	openHandsPreToolUse   = `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"ls"},"session_id":"s1","working_dir":"/work/p","metadata":{}}`
+	antigravityPreToolUse = `{"toolName":"run_command","toolInput":{"CommandLine":"ls"}}`
+	allowResponse         = `200|{"action":"allow"}`
 )
 
-var copilotPreToolUseArgs = []string{"--event", "preToolUse"}
+var (
+	codexPreToolUseArgs   = []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}
+	copilotPreToolUseArgs = []string{"--event", "preToolUse"}
+)
 
-func TestSandboxClaudeHookRetriesOnceWithIdempotencyKey(t *testing.T) {
-	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
-	hook := SandboxHookDir + "/claude-code-hook.sh"
-	env := map[string]string{SandboxTokenEnv: "openshell:resolve:env:v1_DEFENSECLAW_SANDBOX_TOKEN"}
+// sandboxHookCase is one sandbox hook script run on a PreToolUse event.
+type sandboxHookCase struct {
+	connector string
+	provider  SandboxArtifactProvider
+	version   string
+	script    string
+	args      []string
+	stdin     string
+	route     string
+	// headers are sent with every request.
+	headers map[string]string
+	// wrapsBody: the hook posts its input inside a JSON envelope.
+	wrapsBody bool
+	// lifecycle hooks accept only allow, alert, block and confirm; the
+	// inspect hooks allow every verdict other than block.
+	lifecycle bool
+	// blocked reports whether a run is a block under the harness's own
+	// contract: Hermes enforces only a stdout block directive (its exit
+	// status is ignored), Antigravity only a synchronous {"decision":"deny"},
+	// Kiro exit 2 with nothing on stdout (it adds stdout to the context),
+	// every other harness exit 2 (see sandboxHookFailObject).
+	blocked func(sandboxHookRun) bool
+}
 
-	for name, first := range map[string]string{"empty-reply": "exit:52", "relay-503": `503|{}`, "timeout": "exit:28"} {
-		t.Run(name, func(t *testing.T) {
-			run := h.run(t, hook, nil, claudePreToolUse, env, []string{first, allowResponse})
-			if run.exitCode != 0 {
-				t.Fatalf("exit %d, stderr=%s", run.exitCode, run.stderr)
-			}
-			if len(run.calls) != 2 {
-				t.Fatalf("calls = %d, want 2", len(run.calls))
-			}
-			key := run.calls[0].headers["x-defenseclaw-hook-idempotency-key"]
-			if !sandboxIdempotencyKeyRE.MatchString(key) {
-				t.Fatalf("idempotency key %q is not a random 128-bit key", key)
-			}
-			for i, call := range run.calls {
-				if call.headers["x-defenseclaw-hook-idempotency-key"] != key {
-					t.Fatalf("call %d changed the idempotency key", i)
-				}
-				if call.url() != "http://host.openshell.internal:18971/api/v1/claude-code/hook" {
-					t.Fatalf("call %d url = %q", i, call.url())
-				}
-				if call.headers["authorization"] != "Bearer "+env[SandboxTokenEnv] {
-					t.Fatalf("call %d authorization = %q", i, call.headers["authorization"])
-				}
-				if call.body != claudePreToolUse {
-					t.Fatalf("call %d body = %q", i, call.body)
-				}
-				if call.argv[0] != "-q" || call.flagValue("--noproxy") != "*" {
-					t.Fatalf("call %d must ignore curlrc and proxies: %v", i, call.argv)
-				}
-			}
-			if run.calls[0].flagValue("--max-time") != strconv.Itoa(sandboxHookMaxTimeSeconds) ||
-				run.calls[1].flagValue("--max-time") != strconv.Itoa(sandboxHookRetryMaxTimeSeconds) {
-				t.Fatalf("attempt budgets = %s/%s", run.calls[0].flagValue("--max-time"), run.calls[1].flagValue("--max-time"))
-			}
-		})
+// lastJSON decodes the last stdout line of a hook run.
+func lastJSON(run sandboxHookRun) map[string]interface{} {
+	lines := strings.Split(strings.TrimSpace(run.stdout), "\n")
+	var out map[string]interface{}
+	_ = json.Unmarshal([]byte(lines[len(lines)-1]), &out)
+	return out
+}
+
+// sandboxHookFailObject reports, for the harnesses that also want one, the
+// event-native object a failure on a known event prints with its exit 2.
+var sandboxHookFailObject = map[string]func(sandboxHookRun) bool{
+	"cursor": func(run sandboxHookRun) bool { return lastJSON(run)["permission"] == "deny" },
+	"devin":  func(run sandboxHookRun) bool { return lastJSON(run)["decision"] == "block" },
+}
+
+func sandboxHookCases() []sandboxHookCase {
+	exit2 := func(run sandboxHookRun) bool { return run.exitCode == 2 }
+	return []sandboxHookCase{
+		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, "/api/v1/claude-code/hook", nil, false, true, exit2},
+		{"codex", &CodexConnector{}, "0.146.0", "codex-hook.sh", codexPreToolUseArgs, codexPreToolUse, "/api/v1/codex/hook",
+			map[string]string{"x-defenseclaw-hook-event": "PreToolUse", "x-defenseclaw-hook-contract": "codex-hooks-v4"}, false, true, exit2},
+		{"copilot", NewCopilotConnector(), "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, "/api/v1/copilot/hook",
+			map[string]string{"x-defenseclaw-copilot-event": "preToolUse"}, false, true, exit2},
+		{"cursor", NewCursorConnector(), "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, "/api/v1/cursor/hook", nil, false, true, exit2},
+		{"kiro", NewKiroConnector(), "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, "/api/v1/kiro/hook",
+			map[string]string{"x-defenseclaw-kiro-surface": ""}, false, true,
+			func(run sandboxHookRun) bool { return run.exitCode == 2 && run.stdout == "" }},
+		{"devin", NewDevinConnector(), "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, "/api/v1/devin/hook", nil, false, true, exit2},
+		{"hermes", NewHermesConnector(), "0.19.0", "hermes-hook.sh", nil, hermesPreToolCall, "/api/v1/hermes/hook", nil, false, true,
+			func(run sandboxHookRun) bool {
+				d := lastJSON(run)
+				return d["action"] == "block" || d["decision"] == "block"
+			}},
+		{"openhands", NewOpenHandsConnector(), "1.16.0", "openhands-hook.sh", nil, openHandsPreToolUse, "/api/v1/openhands/hook", nil, false, true, exit2},
+		{"antigravity", NewAntigravityConnector(), "1.2.12", "antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, "/api/v1/antigravity/hook",
+			map[string]string{"x-defenseclaw-antigravity-event": "PreToolUse"}, false, true,
+			func(run sandboxHookRun) bool { return run.exitCode == 0 && lastJSON(run)["decision"] == "deny" }},
+		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, "/api/v1/inspect/tool",
+			map[string]string{"x-defenseclaw-connector": "claudecode"}, true, false, exit2},
+		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool-response.sh", nil, `{"output":"ok"}`, "/api/v1/inspect/tool-response", nil, true, false, exit2},
+		{"codex", &CodexConnector{}, "0.146.0", "inspect-request.sh", nil, `{"content":"hi"}`, "/api/v1/inspect/request", nil, true, false, exit2},
+		{"codex", &CodexConnector{}, "0.146.0", "inspect-response.sh", nil, `{"content":"hi"}`, "/api/v1/inspect/response", nil, true, false, exit2},
 	}
 }
 
-func TestSandboxClaudeHookFailsClosedWithoutEnvOverrides(t *testing.T) {
-	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
-	hook := SandboxHookDir + "/claude-code-hook.sh"
-	token := "openshell:resolve:env:v2_DEFENSECLAW_SANDBOX_TOKEN"
-	// A planted host token file and every host override must be ignored.
-	if err := os.WriteFile(filepath.Join(h.path(SandboxHookDir), ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"host\"\n"), 0o600); err != nil {
-		t.Fatal(err)
+// TestSandboxHooksRetryOnceWithIdempotencyKey pins the transport every
+// sandbox hook posts with: the baked ingress route, curlrc and proxies
+// ignored, one retry with the same random 128-bit key after a dropped
+// request, a relay 503 or a timeout (the relay occasionally drops a request,
+// possibly after the ingress acted on it) within its own time budget, and the
+// binding token only in curl configuration on a descriptor: every process in
+// the sandbox can read curl's command line, and with token_delivery: env the
+// token is the credential itself (quoted, so one with a quote or a backslash
+// still arrives intact).
+func TestSandboxHooksRetryOnceWithIdempotencyKey(t *testing.T) {
+	const token = `dcsb_env-delivered"token\x`
+	// The inspect hooks bake their connector, whatever the environment says.
+	env := map[string]string{SandboxTokenEnv: token, "CLAUDE_TOOL_NAME": "Bash", "DEFENSECLAW_CONNECTOR": "cursor"}
+	for _, tc := range sandboxHookCases() {
+		h := newSandboxHookHarness(t, tc.provider, tc.version)
+		for name, first := range map[string]string{"empty-reply": "exit:52", "relay-503": `503|{}`, "timeout": "exit:28"} {
+			t.Run(tc.script+"/"+name, func(t *testing.T) {
+				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, []string{first, allowResponse})
+				if run.exitCode != 0 || tc.blocked(run) || len(run.calls) != 2 {
+					t.Fatalf("exit %d calls %d stdout %q; stderr=%s", run.exitCode, len(run.calls), run.stdout, run.stderr)
+				}
+				key := run.calls[0].headers["x-defenseclaw-hook-idempotency-key"]
+				if !sandboxIdempotencyKeyRE.MatchString(key) {
+					t.Fatalf("idempotency key %q is not a random 128-bit key", key)
+				}
+				for i, call := range run.calls {
+					argv := strings.Join(call.argv, "\n")
+					switch {
+					case call.headers["x-defenseclaw-hook-idempotency-key"] != key:
+						t.Fatalf("call %d changed the idempotency key", i)
+					case call.url() != "http://host.openshell.internal:18971"+tc.route:
+						t.Fatalf("call %d url = %q", i, call.url())
+					case !tc.wrapsBody && call.body != tc.stdin:
+						t.Fatalf("call %d body = %q", i, call.body)
+					case call.argv[0] != "-q" || call.flagValue("--noproxy") != "*":
+						t.Fatalf("call %d must ignore curlrc and proxies: %v", i, call.argv)
+					case strings.Contains(argv, "dcsb_env-delivered") || strings.Contains(strings.ToLower(argv), "authorization"):
+						t.Fatalf("call %d put the bearer on curl's command line:\n%s", i, argv)
+					case call.flagValue("--config") != "/dev/fd/7" || call.headers["authorization"] != "Bearer "+token:
+						t.Fatalf("call %d: config %q, authorization %q", i, call.config, call.headers["authorization"])
+					}
+					for name, want := range tc.headers {
+						if call.headers[name] != want {
+							t.Fatalf("call %d %s = %q, want %q", i, name, call.headers[name], want)
+						}
+					}
+				}
+				if run.calls[0].flagValue("--max-time") != strconv.Itoa(sandboxHookMaxTimeSeconds) ||
+					run.calls[1].flagValue("--max-time") != strconv.Itoa(sandboxHookRetryMaxTimeSeconds) {
+					t.Fatalf("attempt budgets = %s/%s", run.calls[0].flagValue("--max-time"), run.calls[1].flagValue("--max-time"))
+				}
+			})
+		}
+	}
+}
+
+// TestSandboxHooksFailClosed pins that no reply the workload can provoke
+// turns into an allow: a garbage DEFENSECLAW_SANDBOX_TOKEN earns a 401, a
+// request flood a 429, an unversioned placeholder a relay 500, and a relay
+// can garble the body. The hook templates are rendered with an "open" fail
+// mode forced into the template data (resolveSandboxTarget refuses it) and
+// run with every host override and host token file in place, so the test also
+// proves the sandbox branches never consult them. A missing token and an
+// oversized payload (the head(1) tier the sandbox hooks use in place of
+// python3, with an inherited cap ignored in both directions) block without a
+// request.
+func TestSandboxHooksFailClosed(t *testing.T) {
+	replies := map[string][]string{
+		"ingress-down":   {"exit:7", "exit:7"},
+		"unauthorized":   {`401|{"error":"bad token"}`},
+		"forbidden":      {`403|{"error":"route not allowed"}`},
+		"not-found":      {`404|{"error":"no route"}`},
+		"too-large":      {`413|{"error":"payload too large"}`},
+		"rate-limited":   {`429|{"error":"slow down"}`},
+		"relay-500":      {`500|placeholder did not resolve`},
+		"relay-502":      {`502|{}`, `502|{}`},
+		"no-status":      {`|`},
+		"garbled-status": {`2x0|{"action":"allow"}`},
+		"not-json":       {`200|<html>proxy</html>`},
+		"empty-2xx":      {`204|`},
+		"no-action":      {`200|{"ok":true}`},
 	}
 	hostOverrides := map[string]string{
-		"DEFENSECLAW_FAIL_MODE":           "open",
-		"DEFENSECLAW_STRICT_AVAILABILITY": "0",
-		"DEFENSECLAW_GATEWAY_TOKEN":       "host-master",
-		"DEFENSECLAW_HOME":                "/nonexistent",
-		"DEFENSECLAW_CONNECTOR":           "cursor",
+		"DEFENSECLAW_FAIL_MODE": "open", "DEFENSECLAW_STRICT_AVAILABILITY": "0", "DEFENSECLAW_GATEWAY_TOKEN": "host-master",
+		"DEFENSECLAW_HOME": "/nonexistent", "DEFENSECLAW_CONNECTOR": "cursor", "CLAUDE_TOOL_NAME": "Bash",
 	}
-	withToken := map[string]string{SandboxTokenEnv: token}
-	for key, value := range hostOverrides {
-		withToken[key] = value
+	with := func(extra map[string]string) map[string]string {
+		env := map[string]string{}
+		for _, m := range []map[string]string{hostOverrides, extra} {
+			for k, v := range m {
+				env[k] = v
+			}
+		}
+		return env
 	}
-
-	t.Run("ingress-down", func(t *testing.T) {
-		run := h.run(t, hook, nil, claudePreToolUse, withToken, []string{"exit:7", "exit:7"})
-		if run.exitCode != 2 {
-			t.Fatalf("exit %d, want 2 (fail closed); stderr=%s", run.exitCode, run.stderr)
+	for _, tc := range sandboxHookCases() {
+		rt, err := resolveSandboxTarget(tc.connector, SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if len(run.calls) != 2 {
-			t.Fatalf("calls = %d, want one attempt plus one retry", len(run.calls))
+		rt.failMode = "open"
+		files, err := renderSandboxHookFiles(tc.connector, rt)
+		if err != nil {
+			t.Fatal(err)
 		}
-	})
-	t.Run("missing-token", func(t *testing.T) {
-		run := h.run(t, hook, nil, claudePreToolUse, hostOverrides, []string{allowResponse})
-		if run.exitCode != 2 || len(run.calls) != 0 {
-			t.Fatalf("exit %d calls %d, want 2 and no request; stderr=%s", run.exitCode, len(run.calls), run.stderr)
+		h := newSandboxHookHarnessFiles(t, files, SandboxHookPATH)
+		for _, name := range []string{".token", ".hook-" + tc.connector + ".token"} {
+			if err := os.WriteFile(filepath.Join(h.path(SandboxHookDir), name), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"host\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if !strings.Contains(run.stderr, "DEFENSECLAW_SANDBOX_TOKEN") {
-			t.Fatalf("stderr does not explain the missing token: %s", run.stderr)
+		markers := t.TempDir()
+		writeMarkerTool(t, h.stubDir, "python3", markers)
+		script := SandboxHookDir + "/" + tc.script
+		cases := map[string][]string{}
+		for name, r := range replies {
+			cases[name] = r
 		}
-	})
-	t.Run("unauthorized-not-retried", func(t *testing.T) {
-		run := h.run(t, hook, nil, claudePreToolUse, withToken, []string{`401|{"error":"bad token"}`, allowResponse})
-		if run.exitCode != 2 || len(run.calls) != 1 {
-			t.Fatalf("exit %d calls %d, want 2 and a single request", run.exitCode, len(run.calls))
+		if tc.lifecycle {
+			cases["unknown-action"] = []string{`200|{"action":"maybe"}`}
 		}
-	})
-	t.Run("token-never-from-host", func(t *testing.T) {
-		run := h.run(t, hook, nil, claudePreToolUse, withToken, []string{allowResponse})
-		if run.exitCode != 0 || len(run.calls) != 1 {
-			t.Fatalf("exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
+		for name, responses := range cases {
+			t.Run(tc.script+"/"+name, func(t *testing.T) {
+				run := h.run(t, script, tc.args, tc.stdin, with(map[string]string{SandboxTokenEnv: "garbage"}), responses)
+				if f := sandboxHookFailObject[tc.connector]; !tc.blocked(run) || tc.lifecycle && f != nil && !f(run) {
+					t.Fatalf("not blocked: exit %d stdout=%q stderr=%s", run.exitCode, run.stdout, run.stderr)
+				}
+				// Only transport failures and relay 502-504s are retried.
+				if len(run.calls) != len(responses) {
+					t.Fatalf("calls = %d, want %d", len(run.calls), len(responses))
+				}
+				for _, call := range run.calls {
+					if call.headers["authorization"] != "Bearer garbage" {
+						t.Fatalf("authorization = %q, want the sandbox token only", call.headers["authorization"])
+					}
+				}
+			})
 		}
-		if got := run.calls[0].headers["authorization"]; got != "Bearer "+token {
-			t.Fatalf("authorization = %q, want the sandbox token only", got)
+		t.Run(tc.script+"/missing-token", func(t *testing.T) {
+			run := h.run(t, script, tc.args, tc.stdin, with(nil), []string{allowResponse})
+			// Cursor still denies the event it read.
+			if !tc.blocked(run) || len(run.calls) != 0 || !strings.Contains(run.stderr, SandboxTokenEnv) || tc.connector == "cursor" && !sandboxHookFailObject["cursor"](run) {
+				t.Fatalf("exit %d calls %d stdout=%q stderr=%q, want a block naming %s and no request", run.exitCode, len(run.calls), run.stdout, run.stderr, SandboxTokenEnv)
+			}
+		})
+		t.Run(tc.script+"/oversized-payload", func(t *testing.T) {
+			big := strings.Replace(tc.stdin, `"ls"`, `"`+strings.Repeat("a", 1<<20)+`"`, 1)
+			big = strings.Replace(big, `"ok"`, `"`+strings.Repeat("a", 1<<20)+`"`, 1)
+			big = strings.Replace(big, `"hi"`, `"`+strings.Repeat("a", 1<<20)+`"`, 1)
+			run := h.run(t, script, tc.args, big, with(map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_HOOK_MAX_BODY": "99999999"}), []string{allowResponse})
+			if !tc.blocked(run) || len(run.calls) != 0 {
+				t.Fatalf("exit %d calls %d stdout=%q, want a block and no request", run.exitCode, len(run.calls), run.stdout)
+			}
+		})
+		t.Run(tc.script+"/allow", func(t *testing.T) {
+			run := h.run(t, script, tc.args, tc.stdin, with(map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_HOOK_MAX_BODY": "4"}), []string{allowResponse})
+			if tc.blocked(run) || run.exitCode != 0 || len(run.calls) != 1 || !tc.wrapsBody && run.calls[0].body != tc.stdin {
+				t.Fatalf("allow: exit %d calls %d stdout=%q stderr=%s", run.exitCode, len(run.calls), run.stdout, run.stderr)
+			}
+		})
+		if ran, _ := os.ReadDir(markers); len(ran) != 0 {
+			t.Fatalf("%s started python3", tc.script)
 		}
-	})
+	}
 }
 
 // TestSandboxHookFailClosedNamesThePrompt pins the wording the harness shows
@@ -369,94 +508,143 @@ func TestSandboxHookFailClosedNamesThePrompt(t *testing.T) {
 			`{"hook_event_name":"UserPromptSubmit","session_id":"s1","turn_id":"t1","prompt":"hi"}`, "blocking codex prompt (fail mode closed)"},
 	} {
 		h := newSandboxHookHarness(t, tc.provider, tc.version)
-		env := map[string]string{SandboxTokenEnv: "openshell:resolve:env:v1_DEFENSECLAW_SANDBOX_TOKEN"}
-		run := h.run(t, SandboxHookDir+"/"+tc.hook, tc.args, tc.payload, env, []string{"exit:7", "exit:7"})
+		run := h.run(t, SandboxHookDir+"/"+tc.hook, tc.args, tc.payload, map[string]string{SandboxTokenEnv: "tok"}, []string{"exit:7", "exit:7"})
 		if run.exitCode != 2 || !strings.Contains(run.stderr, tc.want) {
 			t.Fatalf("%s: exit %d stderr %q, want exit 2 and %q", tc.hook, run.exitCode, run.stderr, tc.want)
 		}
 	}
 }
 
-// TestSandboxHooksFailClosedOnEveryBadReply pins that no reply the workload
-// can provoke turns into an allow: a garbage DEFENSECLAW_SANDBOX_TOKEN earns a
-// 401, a request flood a 429, an unversioned placeholder a relay 500, and a
-// relay can garble the body. The hook templates are rendered with an "open"
-// fail mode forced into the template data (resolveSandboxTarget refuses it),
-// so the test also proves the sandbox branches never consult it.
-func TestSandboxHooksFailClosedOnEveryBadReply(t *testing.T) {
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq is required")
-	}
-	replies := map[string][]string{
-		"unauthorized":   {`401|{"error":"bad token"}`},
-		"forbidden":      {`403|{"error":"route not allowed"}`},
-		"not-found":      {`404|{"error":"no route"}`},
-		"too-large":      {`413|{"error":"payload too large"}`},
-		"rate-limited":   {`429|{"error":"slow down"}`},
-		"relay-500":      {`500|placeholder did not resolve`},
-		"relay-502":      {`502|{}`, `502|{}`},
-		"no-status":      {`|`},
-		"garbled-status": {`2x0|{"action":"allow"}`},
-		"not-json":       {`200|<html>proxy</html>`},
-		"empty-2xx":      {`204|`},
-		"no-action":      {`200|{"ok":true}`},
-	}
-	// Inspect verdicts other than block (allow, alert) allow; the lifecycle
-	// hooks accept only allow, alert, block and confirm
-	// (TestSandboxHooksTreatAlertAsAdvisory).
-	lifecycle := map[string]string{"unknown-action": `200|{"action":"maybe"}`}
-	for _, tc := range []struct {
-		connector string
-		version   string
-		script    string
-		args      []string
-		stdin     string
-		lifecycle bool
-	}{
-		{"claudecode", "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, true},
-		{"codex", "0.146.0", "codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, true},
-		{"copilot", "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, true},
-		{"cursor", "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, true},
-		{"kiro", "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, true},
-		{"devin", "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, true},
-		{"claudecode", "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, false},
-		{"claudecode", "2.1.156", "inspect-tool-response.sh", nil, `{"output":"ok"}`, false},
-		{"codex", "0.146.0", "inspect-request.sh", nil, `{"content":"hi"}`, false},
-		{"codex", "0.146.0", "inspect-response.sh", nil, `{"content":"hi"}`, false},
-	} {
-		rt, err := resolveSandboxTarget(tc.connector, SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})
-		if err != nil {
-			t.Fatal(err)
-		}
-		rt.failMode = "open"
-		files, err := renderSandboxHookFiles(tc.connector, rt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		h := newSandboxHookHarnessFiles(t, files, SandboxHookPATH)
-		cases := map[string][]string{}
-		for name, r := range replies {
-			cases[name] = r
-		}
+// TestSandboxHooksRenderVerdicts pins what each harness gets for a verdict:
+// the gateway's event-native object where it rendered one, the harness's own
+// block signal with the gateway's reason where it did not, and for an
+// advisory finding (action "alert", would_block false) the harness notice
+// with the tool left to run (an alert used to be "invalid or missing
+// action", a fail-closed block).
+func TestSandboxHooksRenderVerdicts(t *testing.T) {
+	claudeDeny := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nope"}}`
+	cursorDeny := `{"permission":"deny","user_message":"nope","agent_message":"nope"}`
+	copilotDeny := `{"permissionDecision":"deny","permissionDecisionReason":"nope"}`
+	devinContext := `{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"note"}}`
+	const any = "*"
+	cases := map[string]sandboxHookCase{}
+	for _, tc := range sandboxHookCases() {
 		if tc.lifecycle {
-			for name, r := range lifecycle {
-				cases[name] = []string{r}
-			}
+			cases[tc.connector] = tc
 		}
-		env := map[string]string{SandboxTokenEnv: "garbage", "CLAUDE_TOOL_NAME": "Bash", "DEFENSECLAW_FAIL_MODE": "open"}
-		for name, responses := range cases {
-			t.Run(tc.script+"/"+name, func(t *testing.T) {
-				run := h.run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin, env, responses)
-				if run.exitCode != 2 {
-					t.Fatalf("exit %d, want 2 (blocked); stdout=%q stderr=%s", run.exitCode, run.stdout, run.stderr)
-				}
-				if len(run.calls) == 0 {
-					t.Fatal("the hook never asked the ingress")
-				}
-			})
+	}
+	for _, v := range []struct {
+		name, connector string
+		stdin           string // the case's PreToolUse payload when empty
+		args            []string
+		reply           string
+		// exit is the exit status (-1: the harness's block signal and
+		// failure object instead);
+		// stdout is the exact trimmed stdout (any: not checked); reason must
+		// appear on stdout or stderr.
+		exit           int
+		stdout, reason string
+	}{
+		{"claude block verdict", "claudecode", "", nil, `{"action":"block","reason":"nope","claude_code_output":` + claudeDeny + `}`, 0, claudeDeny, ""},
+		{"copilot block verdict", "copilot", "", nil, `{"action":"block","reason":"nope","hook_output":` + copilotDeny + `}`, 0, copilotDeny, ""},
+		// Copilot's only hook deny besides the verdict is exit 2.
+		{"copilot bare block", "copilot", "", nil, `{"action":"block","reason":"nope"}`, 2, any, "nope"},
+		{"copilot session start unknown action", "copilot", `{"sessionId":"s1"}`, []string{"--event", "sessionStart"}, `{"action":"maybe"}`, 2, any, ""},
+		{"cursor allow", "cursor", "", nil, `{"action":"allow"}`, 0, `{"permission":"allow"}`, ""},
+		{"cursor block verdict", "cursor", "", nil, `{"action":"block","reason":"nope","hook_output":` + cursorDeny + `}`, 2, cursorDeny, ""},
+		{"cursor bare block", "cursor", "", nil, `{"action":"block","reason":"nope"}`, -1, any, ""},
+		// A prompt gate says continue, an observation event prints {}.
+		{"cursor prompt allow", "cursor", `{"hook_event_name":"beforeSubmitPrompt","prompt":"hi"}`, nil, `{"action":"allow"}`, 0, `{"continue":true}`, ""},
+		{"cursor prompt block", "cursor", `{"hook_event_name":"beforeSubmitPrompt","prompt":"hi"}`, nil, `{"action":"block","reason":"nope"}`, 2, any, `"continue":false`},
+		{"cursor observation", "cursor", `{"hook_event_name":"afterShellExecution","command":"ls"}`, nil, `{"action":"allow"}`, 0, `{}`, ""},
+		// Kiro adds stdout to the agent context: it stays empty.
+		{"kiro allow", "kiro", "", nil, `{"action":"allow"}`, 0, "", ""},
+		{"kiro block verdict", "kiro", "", nil, `{"action":"block","reason":"nope","hook_output":{"decision":"block","reason":"nope"}}`, -1, "", "nope"},
+		{"kiro bare block", "kiro", "", nil, `{"action":"block","reason":"nope"}`, -1, "", "nope"},
+		{"kiro verdict deny", "kiro", "", nil, `{"action":"allow","hook_output":{"decision":"deny","reason":"nope"}}`, -1, "", "nope"},
+		{"devin allow", "devin", "", nil, `{"action":"allow"}`, 0, "", ""},
+		{"devin block verdict", "devin", "", nil, `{"action":"block","reason":"nope","hook_output":{"decision":"block","reason":"nope"}}`, -1, `{"decision":"block","reason":"nope"}`, ""},
+		{"devin bare block", "devin", "", nil, `{"action":"block","reason":"nope"}`, -1, any, "nope"},
+		// Context for an observation event is printed without blocking.
+		{"devin context", "devin", `{"hook_event_name":"PostToolUse","tool_name":"exec"}`, nil, `{"action":"alert","hook_output":` + devinContext + `}`, 0, devinContext, ""},
+		{"hermes block verdict", "hermes", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"block","reason":"rule X"}}`, -1, any, "rule X"},
+		{"hermes bare block", "hermes", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
+		{"openhands block verdict", "openhands", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"deny","reason":"rule X"}}`, -1, any, "rule X"},
+		{"openhands bare block", "openhands", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
+		{"antigravity block verdict", "antigravity", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"deny","reason":"rule X"}}`, -1, any, "rule X"},
+		{"antigravity bare block", "antigravity", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
+		{"claude alert", "claudecode", "", nil, alertVerdict, 0, alertNotice, ""},
+		{"claude bare alert", "claudecode", "", nil, `{"action":"alert","would_block":false}`, 0, "", ""},
+		{"codex alert", "codex", "", nil, alertVerdict, 0, alertNotice, ""},
+		{"codex bare alert", "codex", "", nil, `{"action":"alert","would_block":false}`, 0, "", ""},
+		{"copilot alert", "copilot", "", nil, alertVerdict, 0, any, ""},
+		{"cursor alert", "cursor", "", nil, alertVerdict, 0, any, ""},
+		{"kiro alert", "kiro", "", nil, alertVerdict, 0, any, ""},
+		{"devin alert", "devin", "", nil, alertVerdict, 0, any, ""},
+	} {
+		t.Run(v.name, func(t *testing.T) {
+			tc := cases[v.connector]
+			stdin, args := tc.stdin, tc.args
+			if v.stdin != "" {
+				stdin, args = v.stdin, v.args
+			}
+			run := newSandboxHookHarness(t, tc.provider, tc.version).run(t, SandboxHookDir+"/"+tc.script, args, stdin,
+				map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_FAIL_MODE": "open"}, []string{"200|" + v.reply})
+			if len(run.calls) != 1 || strings.Contains(run.stderr, "invalid or missing action") && v.exit == 0 {
+				t.Fatalf("calls %d stderr %s", len(run.calls), run.stderr)
+			}
+			if f := sandboxHookFailObject[v.connector]; v.exit < 0 && (!tc.blocked(run) || f != nil && !f(run)) || v.exit >= 0 && run.exitCode != v.exit {
+				t.Fatalf("exit %d stdout %q stderr %q, want exit %d (-1: the harness's block)", run.exitCode, run.stdout, run.stderr, v.exit)
+			}
+			if v.stdout != any && strings.TrimSpace(run.stdout) != v.stdout {
+				t.Fatalf("stdout = %q, want %q", run.stdout, v.stdout)
+			}
+			if !strings.Contains(run.stdout+run.stderr, v.reason) {
+				t.Fatalf("stdout %q stderr %q lack %q", run.stdout, run.stderr, v.reason)
+			}
+		})
+	}
+}
+
+// TestSandboxHooksBindTheRegisteredEvent: a hook posts only the event its
+// registration names (argv, never an exported variable), fails closed on any
+// other registration, and a Codex SessionEnd gets its short time budget.
+func TestSandboxHooksBindTheRegisteredEvent(t *testing.T) {
+	env := map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_FAIL_MODE": "open", "HOOK_EVENT": "Stop"}
+	codex := newSandboxHookHarness(t, &CodexConnector{}, "0.146.0")
+	run := codex.run(t, SandboxHookDir+"/codex-hook.sh", []string{"--event", "SessionEnd", "--hook-contract", "codex-hooks-v4"},
+		`{"hook_event_name":"SessionEnd","session_id":"s1"}`, env, []string{allowResponse})
+	if run.exitCode != 0 || len(run.calls) != 1 || run.calls[0].flagValue("--max-time") != strconv.Itoa(sandboxHookSessionEndMaxTimeSeconds) {
+		t.Fatalf("SessionEnd exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
+	}
+	agy := newSandboxHookHarness(t, NewAntigravityConnector(), "1.2.12")
+	run = agy.run(t, SandboxHookDir+"/antigravity-hook.sh", []string{"PostToolUse"}, `{}`, env, []string{allowResponse})
+	if run.exitCode != 0 || len(run.calls) != 1 || run.calls[0].headers["x-defenseclaw-antigravity-event"] != "PostToolUse" {
+		t.Fatalf("exit %d calls %d headers %v", run.exitCode, len(run.calls), run.calls)
+	}
+	copilot := newSandboxHookHarness(t, NewCopilotConnector(), "1.0.88")
+	for _, tc := range []struct {
+		name string
+		h    *sandboxHookHarness
+		hook string
+		args []string
+		// denied reports the harness's block for a PreToolUse whose
+		// registration is broken (nil: only no request is required).
+		denied func(sandboxHookRun) bool
+	}{
+		{"codex mismatched event", codex, "codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, nil},
+		{"copilot no args", copilot, "copilot-hook.sh", nil, nil},
+		{"copilot unknown event", copilot, "copilot-hook.sh", []string{"--event", "futureEvent"}, nil},
+		{"copilot extra args", copilot, "copilot-hook.sh", []string{"--event", "preToolUse", "--x"}, nil},
+		{"antigravity none", agy, "antigravity-hook.sh", nil, nil},
+		{"antigravity unknown", agy, "antigravity-hook.sh", []string{"BeforeTool"}, nil},
+		{"antigravity extra", agy, "antigravity-hook.sh", []string{"PreToolUse", "x"},
+			func(run sandboxHookRun) bool { return lastJSON(run)["decision"] == "deny" }},
+	} {
+		stdin := map[string]string{"codex-hook.sh": codexPreToolUse, "copilot-hook.sh": copilotPreToolUse, "antigravity-hook.sh": antigravityPreToolUse}[tc.hook]
+		run := tc.h.run(t, SandboxHookDir+"/"+tc.hook, tc.args, stdin, env, []string{allowResponse})
+		if len(run.calls) != 0 || tc.denied == nil && tc.hook != "antigravity-hook.sh" && run.exitCode != 2 || tc.denied != nil && !tc.denied(run) {
+			t.Errorf("%s: exit %d calls %d stdout %q, want no request and a block", tc.name, run.exitCode, len(run.calls), run.stdout)
 		}
 	}
 }
@@ -474,24 +662,6 @@ func TestSandboxArtifactsRefuseOpenFailMode(t *testing.T) {
 				t.Fatalf("%s fail mode %q: %v", tc.connector, mode, err)
 			}
 		}
-	}
-}
-
-func TestSandboxClaudeHookRendersBlockVerdict(t *testing.T) {
-	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
-	output := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nope"}}`
-	run := h.run(t, SandboxHookDir+"/claude-code-hook.sh", nil, claudePreToolUse,
-		map[string]string{SandboxTokenEnv: "tok"},
-		[]string{`200|{"action":"block","reason":"nope","claude_code_output":` + output + `}`})
-	if run.exitCode != 0 {
-		t.Fatalf("exit %d; stderr=%s", run.exitCode, run.stderr)
-	}
-	var decoded map[string]interface{}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(run.stdout)), &decoded); err != nil {
-		t.Fatalf("stdout is not the structured verdict: %q", run.stdout)
-	}
-	if decoded["hookSpecificOutput"].(map[string]interface{})["permissionDecision"] != "deny" {
-		t.Fatalf("verdict = %v", decoded)
 	}
 }
 
@@ -539,39 +709,6 @@ var sandboxHookChildEnv = map[string]bool{
 	SandboxTokenEnv: true, "DEFENSECLAW_TRACEPARENT": true, "CLAUDE_TOOL_NAME": true,
 }
 
-// sandboxEnvAttack is the scratch state of one polluted-environment run.
-type sandboxEnvAttack struct {
-	h *sandboxHookHarness
-	// markers collects one file per planted program that ran.
-	markers string
-	// planted holds marker versions of the tools the hooks run.
-	planted string
-	// pyDir holds a sitecustomize.py that leaves a marker.
-	pyDir string
-	// victim stands for a workload directory the hook must never adopt as
-	// its HOME (and so never remove); keep is a file inside it.
-	victim, keep string
-	// tmpdir is an inherited TMPDIR the hook must ignore.
-	tmpdir string
-}
-
-func newSandboxEnvAttack(t *testing.T, h *sandboxHookHarness) *sandboxEnvAttack {
-	t.Helper()
-	a := &sandboxEnvAttack{h: h, markers: t.TempDir(), planted: t.TempDir(), pyDir: t.TempDir(), victim: t.TempDir(), tmpdir: t.TempDir()}
-	for _, tool := range []string{"mktemp", "curl", "jq", "head", "sed", "tr", "od", "id", "uname", "cat", "python3"} {
-		writeMarkerTool(t, a.planted, tool, a.markers)
-	}
-	site := "open(" + strconv.Quote(filepath.Join(a.markers, "sitecustomize")) + ", 'w').close()\n"
-	if err := os.WriteFile(filepath.Join(a.pyDir, "sitecustomize.py"), []byte(site), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a.keep = filepath.Join(a.victim, "keep")
-	if err := os.WriteFile(a.keep, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return a
-}
-
 // TestSandboxHooksScrubInheritedEnvironment runs every sandbox hook with an
 // environment the workload controls (Claude Code applies settings env blocks
 // to hook processes): a PATH entry ahead of the baked one, a PYTHONPATH
@@ -584,90 +721,71 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 		t.Skip("sandbox hooks run only inside the Linux sandbox image (bash 5); macOS /bin/bash 3.2 differs")
 	}
 	const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-	hooks := []struct {
-		name     string
-		provider SandboxArtifactProvider
-		version  string
-		script   string
-		args     []string
-		stdin    string
-		route    string
-		traced   bool
-	}{
-		{"claude-code-hook", &ClaudeCodeConnector{}, "2.1.156", "claude-code-hook.sh", nil, claudePreToolUse, "/api/v1/claude-code/hook", true},
-		{"codex-hook", &CodexConnector{}, "0.146.0", "codex-hook.sh",
-			[]string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, "/api/v1/codex/hook", true},
-		{"copilot-hook", NewCopilotConnector(), "1.0.88", "copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, "/api/v1/copilot/hook", true},
-		{"cursor-hook", NewCursorConnector(), "2026.07.23-e383d2b", "cursor-hook.sh", nil, cursorPreToolUse, "/api/v1/cursor/hook", true},
-		{"kiro-hook", NewKiroConnector(), "2.24.1", "kiro-hook.sh", nil, kiroPreToolUse, "/api/v1/kiro/hook", true},
-		{"devin-hook", NewDevinConnector(), "3000.4.25", "devin-hook.sh", nil, devinPreToolUse, "/api/v1/devin/hook", true},
-		{"inspect-tool", &ClaudeCodeConnector{}, "2.1.156", "inspect-tool.sh", nil, `{"command":"ls"}`, "/api/v1/inspect/tool", false},
-		{"hermes-hook", NewHermesConnector(), "0.19.0", "hermes-hook.sh", nil, hermesPreToolCall, "/api/v1/hermes/hook", true},
-		{"openhands-hook", NewOpenHandsConnector(), "1.16.0", "openhands-hook.sh", nil, openHandsPreToolUse, "/api/v1/openhands/hook", true},
-		{"antigravity-hook", NewAntigravityConnector(), "1.2.12", "antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, "/api/v1/antigravity/hook", true},
-	}
-	vectors := map[string]func(t *testing.T, a *sandboxEnvAttack) map[string]string{
-		"planted-path": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+	// markers collects one file per planted program that ran; planted holds
+	// marker versions of the tools the hooks run; pyDir a sitecustomize.py
+	// that leaves a marker; victim a workload directory the hook must never
+	// adopt as its HOME (and so never remove); tmpdir an inherited TMPDIR.
+	type attack struct{ markers, planted, pyDir, victim, tmpdir string }
+	vectors := map[string]func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string{
+		"planted-path": func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 			return map[string]string{"PATH": a.planted + ":/usr/bin:/bin"}
 		},
-		"pythonpath-sitecustomize": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
-			if _, err := exec.LookPath("python3"); err != nil {
-				t.Skip("python3 is required")
-			}
+		"pythonpath-sitecustomize": func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 			return map[string]string{"PYTHONPATH": a.pyDir, "PYTHONSTARTUP": filepath.Join(a.pyDir, "sitecustomize.py")}
 		},
-		"python3-never-started": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+		"python3-never-started": func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 			// python3 on the baked PATH itself.
-			writeMarkerTool(t, a.h.stubDir, "python3", a.markers)
+			writeMarkerTool(t, h.stubDir, "python3", a.markers)
 			return nil
 		},
-		"bash-knobs": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+		"bash-knobs": func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 			return map[string]string{"FUNCNEST": "1", "TMOUT": "1", "POSIXLY_CORRECT": "1", "EXECIGNORE": "*/jq", "BASH_COMPAT": "31"}
 		},
-		"hook-variables": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+		"hook-variables": func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 			return map[string]string{
-				"HOOK_DIR":                    "/nonexistent",
-				"DEFENSECLAW_BAKED_HOOK_PATH": a.planted,
-				"DEFENSECLAW_HOOK_HOME":       a.victim,
-				"DEFENSECLAW_HOOK_MAX_BODY":   "4",
-				"DEFENSECLAW_FAIL_MODE":       "open",
-				"DC_SANDBOX_INGRESS":          "attacker.invalid:1",
-				"FAIL_MODE":                   "open",
-				"TMPDIR":                      a.tmpdir,
+				"HOOK_DIR": "/nonexistent", "DEFENSECLAW_BAKED_HOOK_PATH": a.planted, "DEFENSECLAW_HOOK_HOME": a.victim,
+				"DEFENSECLAW_HOOK_MAX_BODY": "4", "DEFENSECLAW_FAIL_MODE": "open", "DC_SANDBOX_INGRESS": "attacker.invalid:1",
+				"FAIL_MODE": "open", "TMPDIR": a.tmpdir,
 			}
 		},
-		"interpreter-inputs": func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+		"interpreter-inputs": func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 			return map[string]string{"PERL5LIB": a.pyDir, "RUBYOPT": "-W0", "NODE_OPTIONS": "--no-warnings", "GCONV_PATH": a.pyDir, "DC_TEST_CANARY": "1"}
 		},
 	}
-	vectors["all-at-once"] = func(t *testing.T, a *sandboxEnvAttack) map[string]string {
+	vectors["all-at-once"] = func(t *testing.T, h *sandboxHookHarness, a attack) map[string]string {
 		env := map[string]string{}
 		for name, vector := range vectors {
-			if name == "all-at-once" || name == "pythonpath-sitecustomize" {
-				continue
-			}
-			for key, value := range vector(t, a) {
-				env[key] = value
-			}
-		}
-		env["PYTHONPATH"] = a.pyDir
-		return env
-	}
-
-	for _, hook := range hooks {
-		for name, vector := range vectors {
-			t.Run(hook.name+"/"+name, func(t *testing.T) {
-				h := newSandboxHookHarness(t, hook.provider, hook.version)
-				a := newSandboxEnvAttack(t, h)
-				env := map[string]string{
-					SandboxTokenEnv:           "tok",
-					"DEFENSECLAW_TRACEPARENT": traceparent,
-					"CLAUDE_TOOL_NAME":        "Bash",
-				}
-				for key, value := range vector(t, a) {
+			if name != "all-at-once" {
+				for key, value := range vector(t, h, a) {
 					env[key] = value
 				}
-
+			}
+		}
+		return env
+	}
+	for _, hook := range sandboxHookCases() {
+		if hook.script == "inspect-tool-response.sh" || hook.script == "inspect-request.sh" || hook.script == "inspect-response.sh" {
+			continue
+		}
+		for name, vector := range vectors {
+			t.Run(hook.script+"/"+name, func(t *testing.T) {
+				h := newSandboxHookHarness(t, hook.provider, hook.version)
+				a := attack{markers: t.TempDir(), planted: t.TempDir(), pyDir: t.TempDir(), victim: t.TempDir(), tmpdir: t.TempDir()}
+				for _, tool := range []string{"mktemp", "curl", "jq", "head", "sed", "tr", "od", "id", "uname", "cat", "python3"} {
+					writeMarkerTool(t, a.planted, tool, a.markers)
+				}
+				site := "open(" + strconv.Quote(filepath.Join(a.markers, "sitecustomize")) + ", 'w').close()\n"
+				if err := os.WriteFile(filepath.Join(a.pyDir, "sitecustomize.py"), []byte(site), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				keep := filepath.Join(a.victim, "keep")
+				if err := os.WriteFile(keep, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				env := map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_TRACEPARENT": traceparent, "CLAUDE_TOOL_NAME": "Bash"}
+				for key, value := range vector(t, h, a) {
+					env[key] = value
+				}
 				run := h.run(t, SandboxHookDir+"/"+hook.script, hook.args, hook.stdin, env, []string{allowResponse})
 				if run.exitCode != 0 || len(run.calls) != 1 {
 					t.Fatalf("exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
@@ -677,7 +795,7 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 					t.Fatalf("url = %q, want %q", call.url(), want)
 				}
 				forwarded := call.body
-				if hook.script == "inspect-tool.sh" {
+				if hook.wrapsBody {
 					var body map[string]string
 					if err := json.Unmarshal([]byte(call.body), &body); err != nil {
 						t.Fatalf("inspect body %q: %v", call.body, err)
@@ -687,7 +805,7 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 				if forwarded != hook.stdin {
 					t.Fatalf("forwarded payload = %q, want the hook input %q", forwarded, hook.stdin)
 				}
-				if hook.traced && call.headers["traceparent"] != traceparent {
+				if !hook.wrapsBody && call.headers["traceparent"] != traceparent {
 					t.Fatalf("allowlisted trace context lost: headers %v", call.headers)
 				}
 				if ran, _ := os.ReadDir(a.markers); len(ran) != 0 {
@@ -697,7 +815,7 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 					}
 					t.Fatalf("planted code ran inside the sandbox hook: %v", names)
 				}
-				if _, err := os.Stat(a.keep); err != nil {
+				if _, err := os.Stat(keep); err != nil {
 					t.Fatalf("an inherited DEFENSECLAW_HOOK_HOME was adopted and removed: %v", err)
 				}
 				if call.env["PATH"] != h.bakedPATH {
@@ -716,155 +834,14 @@ func TestSandboxHooksScrubInheritedEnvironment(t *testing.T) {
 	}
 }
 
-// TestSandboxHookPayloadCapWithoutPython checks that the head(1) tier the
-// sandbox hooks use in place of python3 still refuses an oversized payload,
-// and that an inherited cap is ignored in both directions.
-func TestSandboxHookPayloadCapWithoutPython(t *testing.T) {
+// TestSandboxInspectHookSendsTheToolName: the inspect hook reads the tool
+// name the harness exports and wraps the payload with it.
+func TestSandboxInspectHookSendsTheToolName(t *testing.T) {
 	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
-	markers := t.TempDir()
-	writeMarkerTool(t, h.stubDir, "python3", markers)
-	hook := SandboxHookDir + "/claude-code-hook.sh"
-	oversized := `{"hook_event_name":"PreToolUse","tool_input":{"command":"` + strings.Repeat("a", 1<<20) + `"}}`
-	run := h.run(t, hook, nil, oversized, map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_HOOK_MAX_BODY": "99999999"}, []string{allowResponse})
-	if run.exitCode != 2 || len(run.calls) != 0 {
-		t.Fatalf("oversized payload: exit %d calls %d, want 2 and no request; stderr=%s", run.exitCode, len(run.calls), run.stderr)
-	}
-	run = h.run(t, hook, nil, claudePreToolUse, map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_HOOK_MAX_BODY": "4"}, []string{allowResponse})
-	if run.exitCode != 0 || len(run.calls) != 1 || run.calls[0].body != claudePreToolUse {
-		t.Fatalf("normal payload: exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
-	}
-	if ran, _ := os.ReadDir(markers); len(ran) != 0 {
-		t.Fatal("a sandbox hook started python3")
-	}
-}
-
-func TestSandboxCodexHookBindsEventAndContract(t *testing.T) {
-	h := newSandboxHookHarness(t, &CodexConnector{}, "0.146.0")
-	hook := SandboxHookDir + "/codex-hook.sh"
-	env := map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_FAIL_MODE": "open"}
-
-	run := h.run(t, hook, []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, env, []string{"exit:56", allowResponse})
-	if run.exitCode != 0 || len(run.calls) != 2 {
-		t.Fatalf("exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
-	}
-	call := run.calls[1]
-	if call.url() != "http://host.openshell.internal:18971/api/v1/codex/hook" ||
-		call.headers["x-defenseclaw-hook-event"] != "PreToolUse" ||
-		call.headers["x-defenseclaw-hook-contract"] != "codex-hooks-v4" ||
-		call.headers["authorization"] != "Bearer tok" {
-		t.Fatalf("unexpected request: %v", call.argv)
-	}
-
-	sessionEnd := `{"hook_event_name":"SessionEnd","session_id":"s1"}`
-	run = h.run(t, hook, []string{"--event", "SessionEnd", "--hook-contract", "codex-hooks-v4"}, sessionEnd, env, []string{allowResponse})
-	if run.exitCode != 0 || len(run.calls) != 1 {
-		t.Fatalf("SessionEnd exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
-	}
-	if got := run.calls[0].flagValue("--max-time"); got != strconv.Itoa(sandboxHookSessionEndMaxTimeSeconds) {
-		t.Fatalf("SessionEnd --max-time = %s", got)
-	}
-
-	// The registered binding is still enforced and fails closed despite the
-	// open override.
-	run = h.run(t, hook, []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, env, []string{allowResponse})
-	if run.exitCode != 2 || len(run.calls) != 0 {
-		t.Fatalf("mismatched event exit %d calls %d", run.exitCode, len(run.calls))
-	}
-	run = h.run(t, hook, []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, env, []string{"exit:7", "exit:7"})
-	if run.exitCode != 2 {
-		t.Fatalf("ingress down exit %d, want 2", run.exitCode)
-	}
-}
-
-// TestSandboxCopilotHook pins the Copilot sandbox hook: the event travels in
-// its header over the retrying transport, an event-native verdict is printed
-// for Copilot, and every failure, a block without a verdict included, exits 2
-// (Copilot's only hook deny besides the verdict).
-func TestSandboxCopilotHook(t *testing.T) {
-	h := newSandboxHookHarness(t, NewCopilotConnector(), "1.0.88")
-	hook := SandboxHookDir + "/copilot-hook.sh"
-	token := "openshell:resolve:env:v3_DEFENSECLAW_SANDBOX_TOKEN"
-	env := map[string]string{SandboxTokenEnv: token, "DEFENSECLAW_FAIL_MODE": "open", "DEFENSECLAW_GATEWAY_TOKEN": "host"}
-	if err := os.WriteFile(filepath.Join(h.path(SandboxHookDir), ".hook-copilot.token"), []byte("host\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Run("retry-keeps-key-and-event", func(t *testing.T) {
-		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, env, []string{"exit:52", allowResponse})
-		if run.exitCode != 0 || len(run.calls) != 2 || run.stdout != "" {
-			t.Fatalf("exit %d calls %d stdout %q; stderr=%s", run.exitCode, len(run.calls), run.stdout, run.stderr)
-		}
-		key := run.calls[0].headers["x-defenseclaw-hook-idempotency-key"]
-		if !sandboxIdempotencyKeyRE.MatchString(key) {
-			t.Fatalf("idempotency key %q", key)
-		}
-		for i, call := range run.calls {
-			if call.url() != "http://host.openshell.internal:18971/api/v1/copilot/hook" ||
-				call.headers["x-defenseclaw-copilot-event"] != "preToolUse" ||
-				call.headers["x-defenseclaw-hook-idempotency-key"] != key ||
-				call.headers["authorization"] != "Bearer "+token ||
-				call.body != copilotPreToolUse {
-				t.Fatalf("call %d: %v body %q", i, call.argv, call.body)
-			}
-		}
-	})
-	t.Run("verdict-is-printed", func(t *testing.T) {
-		verdict := `{"permissionDecision":"deny","permissionDecisionReason":"nope"}`
-		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, env, []string{`200|{"action":"block","reason":"nope","hook_output":` + verdict + `}`})
-		if run.exitCode != 0 || strings.TrimSpace(run.stdout) != verdict {
-			t.Fatalf("exit %d stdout %q; stderr=%s", run.exitCode, run.stdout, run.stderr)
-		}
-	})
-	t.Run("block-without-verdict-exits-2", func(t *testing.T) {
-		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, env, []string{`200|{"action":"block","reason":"nope"}`})
-		if run.exitCode != 2 || !strings.Contains(run.stderr, "nope") {
-			t.Fatalf("exit %d stderr %q", run.exitCode, run.stderr)
-		}
-	})
-	for name, args := range map[string][]string{
-		"no-args":       nil,
-		"unknown-event": {"--event", "futureEvent"},
-		"extra-args":    {"--event", "preToolUse", "--x"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			run := h.run(t, hook, args, copilotPreToolUse, env, []string{allowResponse})
-			if run.exitCode != 2 || len(run.calls) != 0 {
-				t.Fatalf("exit %d calls %d, want 2 and no request", run.exitCode, len(run.calls))
-			}
-		})
-	}
-	t.Run("missing-token-ignores-host-token", func(t *testing.T) {
-		run := h.run(t, hook, copilotPreToolUseArgs, copilotPreToolUse, map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "host"}, []string{allowResponse})
-		if run.exitCode != 2 || len(run.calls) != 0 || !strings.Contains(run.stderr, SandboxTokenEnv) {
-			t.Fatalf("exit %d calls %d stderr %q", run.exitCode, len(run.calls), run.stderr)
-		}
-	})
-	t.Run("unknown-action-fails-closed", func(t *testing.T) {
-		run := h.run(t, hook, []string{"--event", "sessionStart"}, `{"sessionId":"s1"}`, env, []string{`200|{"action":"maybe"}`})
-		if run.exitCode != 2 {
-			t.Fatalf("exit %d, want 2", run.exitCode)
-		}
-	})
-}
-
-func TestSandboxInspectHookBakesConnector(t *testing.T) {
-	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
-	env := map[string]string{SandboxTokenEnv: "tok", "CLAUDE_TOOL_NAME": "Bash", "DEFENSECLAW_CONNECTOR": "cursor"}
-	run := h.run(t, SandboxHookDir+"/inspect-tool.sh", nil, `{"command":"ls"}`, env, []string{allowResponse})
-	if run.exitCode != 0 || len(run.calls) != 1 {
-		t.Fatalf("exit %d calls %d; stderr=%s", run.exitCode, len(run.calls), run.stderr)
-	}
-	call := run.calls[0]
-	if call.url() != "http://host.openshell.internal:18971/api/v1/inspect/tool" || call.headers["x-defenseclaw-connector"] != "claudecode" {
-		t.Fatalf("unexpected request: %v", call.argv)
-	}
+	run := h.run(t, SandboxHookDir+"/inspect-tool.sh", nil, `{"command":"ls"}`, map[string]string{SandboxTokenEnv: "tok", "CLAUDE_TOOL_NAME": "Bash"}, []string{allowResponse})
 	var body map[string]string
-	if err := json.Unmarshal([]byte(call.body), &body); err != nil || body["tool"] != "Bash" {
-		t.Fatalf("body = %q", call.body)
-	}
-	run = h.run(t, SandboxHookDir+"/inspect-tool.sh", nil, `{}`, map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "host"}, []string{allowResponse})
-	if run.exitCode != 2 || len(run.calls) != 0 {
-		t.Fatalf("inspect without sandbox token exit %d calls %d", run.exitCode, len(run.calls))
+	if run.exitCode != 0 || len(run.calls) != 1 || json.Unmarshal([]byte(run.calls[0].body), &body) != nil || body["tool"] != "Bash" || body["args"] != `{"command":"ls"}` {
+		t.Fatalf("exit %d calls %+v", run.exitCode, run.calls)
 	}
 }
 
@@ -884,14 +861,11 @@ func TestSandboxCodexNotifyBridge(t *testing.T) {
 		run.calls[0].env[SandboxTokenEnv] != "" {
 		t.Fatalf("the bearer reached curl's command line or environment: %v", run.calls[0].argv)
 	}
-	run = h.run(t, notify, []string{payload}, "", nil, []string{`200|{}`})
-	if run.exitCode != 0 || len(run.calls) != 0 {
-		t.Fatalf("notify without token exit %d calls %d", run.exitCode, len(run.calls))
-	}
-	// A token curl configuration could not quote is never sent.
-	run = h.run(t, notify, []string{payload}, "", map[string]string{SandboxTokenEnv: `bad"tok`}, []string{`200|{}`})
-	if run.exitCode != 0 || len(run.calls) != 0 {
-		t.Fatalf("notify with a malformed token exit %d calls %d", run.exitCode, len(run.calls))
+	// No token, or one curl configuration could not quote: nothing is sent.
+	for _, env := range []map[string]string{nil, {SandboxTokenEnv: `bad"tok`}} {
+		if run := h.run(t, notify, []string{payload}, "", env, []string{`200|{}`}); run.exitCode != 0 || len(run.calls) != 0 {
+			t.Fatalf("notify with token %q: exit %d calls %d", env[SandboxTokenEnv], run.exitCode, len(run.calls))
+		}
 	}
 	run = h.run(t, notify, []string{payload}, "", map[string]string{SandboxTokenEnv: "tok"}, []string{"exit:7"})
 	if run.exitCode != 0 || run.stdout != "" || run.stderr != "" {
@@ -899,68 +873,23 @@ func TestSandboxCodexNotifyBridge(t *testing.T) {
 	}
 }
 
-// TestSandboxHooksKeepBearerOffCurlArgv pins that no sandbox hook puts the
-// binding token on curl's command line, which every process in the sandbox
-// can read: with openshell.token_delivery: env it is the credential itself.
-// defenseclaw_sandbox_post moves the hook's Authorization header into curl
-// configuration on a descriptor (quoted, so a token with a quote or a
-// backslash still arrives intact), for the first attempt and the retry.
-func TestSandboxHooksKeepBearerOffCurlArgv(t *testing.T) {
-	const token = `dcsb_env-delivered"token\x`
-	for _, tc := range []struct {
-		name     string
-		provider SandboxArtifactProvider
-		version  string
-		script   string
-		args     []string
-		payload  string
-	}{
-		{"codex", &CodexConnector{}, "0.146.0", SandboxHookDir + "/codex-hook.sh", []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse},
-		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", SandboxHookDir + "/claude-code-hook.sh", nil, claudePreToolUse},
-		{"inspect", &ClaudeCodeConnector{}, "2.1.156", SandboxHookDir + "/inspect-tool.sh", nil, claudePreToolUse},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newSandboxHookHarness(t, tc.provider, tc.version)
-			run := h.run(t, tc.script, tc.args, tc.payload, map[string]string{SandboxTokenEnv: token}, []string{"exit:7", allowResponse})
-			if len(run.calls) == 0 {
-				t.Fatalf("no request: exit %d stderr %q", run.exitCode, run.stderr)
-			}
-			for i, call := range run.calls {
-				argv := strings.Join(call.argv, "\n")
-				if strings.Contains(argv, "dcsb_env-delivered") || strings.Contains(strings.ToLower(argv), "authorization") {
-					t.Fatalf("call %d put the bearer on curl's command line:\n%s", i, argv)
-				}
-				if call.flagValue("--config") != "/dev/fd/7" || call.headers["authorization"] != "Bearer "+token {
-					t.Fatalf("call %d: config %q, authorization %q", i, call.config, call.headers["authorization"])
-				}
-			}
-		})
-	}
-}
-
 func TestSandboxClaudeOtelHeadersHelper(t *testing.T) {
 	h := newSandboxHookHarness(t, &ClaudeCodeConnector{}, "2.1.156")
 	helper := h.path(claudeCodeSandboxOtelHelperPath)
-	for _, tc := range []struct {
-		token    string
-		wantAuth string
-	}{
-		{"openshell:resolve:env:v9_DEFENSECLAW_SANDBOX_TOKEN", "Bearer openshell:resolve:env:v9_DEFENSECLAW_SANDBOX_TOKEN"},
-		{`bad"token`, ""},
-		{"", ""},
+	for token, wantAuth := range map[string]string{
+		"openshell:resolve:env:v9_DEFENSECLAW_SANDBOX_TOKEN": "Bearer openshell:resolve:env:v9_DEFENSECLAW_SANDBOX_TOKEN",
+		`bad"token`: "",
+		"":          "",
 	} {
 		cmd := exec.Command(helper)
-		cmd.Env = []string{"PATH=/usr/bin:/bin", SandboxTokenEnv + "=" + tc.token}
+		cmd.Env = []string{"PATH=/usr/bin:/bin", SandboxTokenEnv + "=" + token}
 		out, err := cmd.Output()
-		if err != nil {
-			t.Fatalf("helper: %v", err)
-		}
 		var headers map[string]string
-		if err := json.Unmarshal(out, &headers); err != nil {
-			t.Fatalf("helper output %q is not JSON: %v", out, err)
+		if err != nil || json.Unmarshal(out, &headers) != nil {
+			t.Fatalf("helper: %v, output %q", err, out)
 		}
-		if headers["Authorization"] != tc.wantAuth || headers["x-defenseclaw-source"] != "claudecode" {
-			t.Fatalf("token %q: headers = %v", tc.token, headers)
+		if headers["Authorization"] != wantAuth || headers["x-defenseclaw-source"] != "claudecode" {
+			t.Fatalf("token %q: headers = %v", token, headers)
 		}
 	}
 }
@@ -998,9 +927,6 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("/bin/bash is required")
 	}
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skip("jq is required")
-	}
 	traceDir, traceLog := t.TempDir(), filepath.Join(t.TempDir(), "trace")
 	for _, dir := range strings.Split(SandboxHookPATH, ":") {
 		entries, _ := os.ReadDir(dir)
@@ -1035,115 +961,50 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 		responses []string
 	}
 	token := map[string]string{SandboxTokenEnv: "tok", "CLAUDE_TOOL_NAME": "Bash", "DEFENSECLAW_TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"}
-	blockOut := `200|{"action":"block","reason":"nope"}`
 	oversized := `{"hook_event_name":"PreToolUse","tool_input":{"command":"` + strings.Repeat("a", 1<<20) + `"}}`
-	inspect := func(script, stdin string) []scenario {
-		return []scenario{
-			{script, nil, stdin, token, []string{allowResponse}},
-			{script, nil, stdin, token, []string{blockOut}},
-			{script, nil, stdin, token, []string{"exit:7", "exit:7"}},
-			{script, nil, stdin, token, []string{`401|{}`}},
+	// Every hook: allow, block, a native verdict, retry, outage, auth
+	// failure, oversized payload and a missing token.
+	paths := func(tc sandboxHookCase, verdict string) []scenario {
+		out := []scenario{}
+		for _, responses := range [][]string{{allowResponse}, {`200|{"action":"block","reason":"nope"}`}, {`200|{"action":"block","reason":"nope","hook_output":` + verdict + `}`},
+			{"exit:52", allowResponse}, {"exit:7", "exit:7"}, {`401|{}`}} {
+			out = append(out, scenario{tc.script, tc.args, tc.stdin, token, responses})
 		}
+		return append(out, scenario{tc.script, tc.args, oversized, token, nil}, scenario{tc.script, tc.args, tc.stdin, nil, nil})
 	}
-	// The hook-only lifecycle hooks: allow, block, retry, outage,
-	// auth failure, oversized payload and a missing token.
-	hookOnlyToolScenarios := func(script string, args []string, stdin string, env map[string]string, blockOut, oversized string) []scenario {
-		return []scenario{
-			{script, args, stdin, env, []string{allowResponse}},
-			{script, args, stdin, env, []string{blockOut}},
-			{script, args, stdin, env, []string{"exit:52", allowResponse}},
-			{script, args, stdin, env, []string{"exit:7", "exit:7"}},
-			{script, args, stdin, env, []string{`401|{}`}},
-			{script, args, oversized, env, nil},
-			{script, args, stdin, nil, nil},
-		}
+	verdicts := map[string]string{
+		"copilot": `{"permissionDecision":"deny"}`, "cursor": `{"permission":"deny"}`, "kiro": `{"decision":"block","reason":"nope"}`,
+		"devin": `{"decision":"block","reason":"nope"}`, "hermes": `{"decision":"block","reason":"nope"}`,
 	}
-	codexArgs := []string{"--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"}
-	for _, tc := range []struct {
-		connector string
-		provider  SandboxArtifactProvider
-		version   string
-		scenarios []scenario
-	}{
-		{"claudecode", &ClaudeCodeConnector{}, "2.1.156", append([]scenario{
-			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{allowResponse}},
-			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{blockOut}},
-			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{"exit:52", allowResponse}},
-			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{"exit:7", "exit:7"}},
-			{"claude-code-hook.sh", nil, claudePreToolUse, token, []string{`401|{}`}},
-			{"claude-code-hook.sh", nil, oversized, token, nil},
-			{"claude-code-hook.sh", nil, claudePreToolUse, nil, nil},
-		}, append(inspect("inspect-tool.sh", `{"command":"ls"}`), inspect("inspect-tool-response.sh", `{"output":"ok"}`)...)...)},
-		{"codex", &CodexConnector{}, "0.146.0", append([]scenario{
-			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{allowResponse}},
-			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{blockOut}},
-			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{"exit:56", allowResponse}},
-			{"codex-hook.sh", codexArgs, codexPreToolUse, token, []string{"exit:7", "exit:7"}},
+	scenarios := map[string][]scenario{
+		// The extra paths: Codex's SessionEnd budget, a mismatched event and
+		// the notify bridge; Copilot's session start; Cursor's allow verdict;
+		// agy's unknown event.
+		"codex": {
 			{"codex-hook.sh", []string{"--event", "SessionEnd", "--hook-contract", "codex-hooks-v4"}, `{"hook_event_name":"SessionEnd"}`, token, []string{allowResponse}},
-			{"codex-hook.sh", codexArgs, oversized, token, nil},
 			{"codex-hook.sh", []string{"--event", "Stop", "--hook-contract", "codex-hooks-v4"}, codexPreToolUse, token, nil},
 			{codexSandboxNotifyScript, []string{`{"type":"agent-turn-complete"}`}, "", token, []string{`200|{}`}},
-		}, append(inspect("inspect-request.sh", `{"content":"hi"}`), inspect("inspect-response.sh", `{"content":"hi"}`)...)...)},
-		{"copilot", NewCopilotConnector(), "1.0.88", []scenario{
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{allowResponse}},
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{blockOut}},
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{`200|{"action":"block","hook_output":{"permissionDecision":"deny"}}`}},
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{"exit:52", allowResponse}},
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{"exit:7", "exit:7"}},
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, token, []string{`401|{}`}},
-			{"copilot-hook.sh", copilotPreToolUseArgs, oversized, token, nil},
-			{"copilot-hook.sh", copilotPreToolUseArgs, copilotPreToolUse, nil, nil},
-			{"copilot-hook.sh", []string{"--event", "sessionStart"}, `{"sessionId":"s1"}`, token, []string{allowResponse}},
-		}},
-		{"cursor", NewCursorConnector(), "2026.07.23-e383d2b", []scenario{
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{allowResponse}},
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{blockOut}},
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`200|{"action":"block","hook_output":{"permission":"deny"}}`}},
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`200|{"action":"allow","hook_output":{"permission":"allow"}}`}},
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{"exit:52", allowResponse}},
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{"exit:7", "exit:7"}},
-			{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`401|{}`}},
-			{"cursor-hook.sh", nil, oversized, token, nil},
-			{"cursor-hook.sh", nil, cursorPreToolUse, nil, nil},
-		}},
-		{"kiro", NewKiroConnector(), "2.24.1", []scenario{
-			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{allowResponse}},
-			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{blockOut}},
-			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{`200|{"action":"block","hook_output":{"decision":"block","reason":"nope"}}`}},
-			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{"exit:52", allowResponse}},
-			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{"exit:7", "exit:7"}},
-			{"kiro-hook.sh", nil, kiroPreToolUse, token, []string{`401|{}`}},
-			{"kiro-hook.sh", nil, oversized, token, nil},
-			{"kiro-hook.sh", nil, kiroPreToolUse, nil, nil},
-		}},
-		{"devin", NewDevinConnector(), "3000.4.25", []scenario{
-			{"devin-hook.sh", nil, devinPreToolUse, token, []string{allowResponse}},
-			{"devin-hook.sh", nil, devinPreToolUse, token, []string{blockOut}},
-			{"devin-hook.sh", nil, devinPreToolUse, token, []string{`200|{"action":"block","hook_output":{"decision":"block","reason":"nope"}}`}},
-			{"devin-hook.sh", nil, devinPreToolUse, token, []string{"exit:52", allowResponse}},
-			{"devin-hook.sh", nil, devinPreToolUse, token, []string{"exit:7", "exit:7"}},
-			{"devin-hook.sh", nil, devinPreToolUse, token, []string{`401|{}`}},
-			{"devin-hook.sh", nil, oversized, token, nil},
-			{"devin-hook.sh", nil, devinPreToolUse, nil, nil},
-		}},
-		{"hermes", NewHermesConnector(), "0.19.0", hookOnlyToolScenarios("hermes-hook.sh", nil, hermesPreToolCall, token, blockOut, oversized)},
-		{"openhands", NewOpenHandsConnector(), "1.16.0", hookOnlyToolScenarios("openhands-hook.sh", nil, openHandsPreToolUse, token, blockOut, oversized)},
-		{"antigravity", NewAntigravityConnector(), "1.2.12", append(
-			hookOnlyToolScenarios("antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, token, blockOut, oversized),
-			scenario{"antigravity-hook.sh", []string{"Unknown"}, antigravityPreToolUse, token, nil})},
-	} {
-		t.Run(tc.connector, func(t *testing.T) {
-			artifacts, err := tc.provider.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version})
-			if err != nil {
-				t.Fatal(err)
-			}
-			h := newSandboxHookHarnessFiles(t, artifacts.Files, traceDir)
+		},
+		"copilot":     {{"copilot-hook.sh", []string{"--event", "sessionStart"}, `{"sessionId":"s1"}`, token, []string{allowResponse}}},
+		"cursor":      {{"cursor-hook.sh", nil, cursorPreToolUse, token, []string{`200|{"action":"allow","hook_output":{"permission":"allow"}}`}}},
+		"antigravity": {{"antigravity-hook.sh", []string{"Unknown"}, antigravityPreToolUse, token, nil}},
+	}
+	for _, tc := range sandboxHookCases() {
+		scenarios[tc.connector] = append(scenarios[tc.connector], paths(tc, verdicts[tc.connector])...)
+	}
+	for _, target := range sandboxGoldenTargets {
+		sc, ok := scenarios[target.connector]
+		if !ok {
+			continue
+		}
+		t.Run(target.connector, func(t *testing.T) {
+			h := newSandboxHookHarnessFiles(t, sandboxArtifactsFor(t, target.provider, target.version).Files, traceDir)
 			_ = os.Remove(traceLog)
-			for _, sc := range tc.scenarios {
-				h.run(t, SandboxHookDir+"/"+sc.script, sc.args, sc.stdin, sc.env, sc.responses)
+			for _, s := range sc {
+				h.run(t, SandboxHookDir+"/"+s.script, s.args, s.stdin, s.env, s.responses)
 			}
-			if helper := h.path(claudeCodeSandboxOtelHelperPath); tc.connector == "claudecode" {
-				cmd := exec.Command(helper)
+			if target.connector == "claudecode" {
+				cmd := exec.Command(h.path(claudeCodeSandboxOtelHelperPath))
 				cmd.Env = []string{"PATH=" + traceDir, SandboxTokenEnv + "=tok"}
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("otel helper: %v %s", err, out)
@@ -1166,9 +1027,9 @@ func TestSandboxHookRuntimeBinariesCoverEveryTool(t *testing.T) {
 			}
 			sort.Strings(missing)
 			sort.Strings(names)
-			t.Logf("%s hooks ran: %s", tc.connector, strings.Join(names, " "))
+			t.Logf("%s hooks ran: %s", target.connector, strings.Join(names, " "))
 			if len(missing) > 0 {
-				t.Fatalf("sandboxHookRuntimeBinaries does not list %s, which the %s hooks run", strings.Join(missing, ", "), tc.connector)
+				t.Fatalf("sandboxHookRuntimeBinaries does not list %s, which the %s hooks run", strings.Join(missing, ", "), target.connector)
 			}
 		})
 	}

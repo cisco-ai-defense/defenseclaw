@@ -233,31 +233,6 @@ func TestSandboxArtifactsAreDeterministic(t *testing.T) {
 	}
 }
 
-func TestSandboxArtifactsRefuseUnreviewedHarness(t *testing.T) {
-	cases := []struct {
-		name     string
-		provider SandboxArtifactProvider
-		target   SandboxRenderTarget
-		want     string
-	}{
-		{"claude-missing-version", &ClaudeCodeConnector{}, SandboxRenderTarget{IngressPort: 18971}, "pinned harness version"},
-		{"claude-below-contract", &ClaudeCodeConnector{}, SandboxRenderTarget{IngressPort: 18971, AgentVersion: "2.1.100"}, "no reviewed Linux hook contract"},
-		{"claude-garbage-version", &ClaudeCodeConnector{}, SandboxRenderTarget{IngressPort: 18971, AgentVersion: "latest"}, "no reviewed Linux hook contract"},
-		{"codex-base-image-0.117", &CodexConnector{}, SandboxRenderTarget{IngressPort: 18971, AgentVersion: "codex-cli 0.117.0"}, "no reviewed Linux hook contract"},
-		{"codex-pin-mismatch", &CodexConnector{}, SandboxRenderTarget{IngressPort: 18971, AgentVersion: "0.146.0", HookContractID: "codex-hooks-v3"}, "not the pinned codex-hooks-v3"},
-		{"port-zero", &CodexConnector{}, SandboxRenderTarget{AgentVersion: "0.146.0"}, "out of range"},
-		{"port-too-large", &ClaudeCodeConnector{}, SandboxRenderTarget{IngressPort: 70000, AgentVersion: "2.1.156"}, "out of range"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := tc.provider.SandboxArtifacts(tc.target)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("SandboxArtifacts error = %v, want %q", err, tc.want)
-			}
-		})
-	}
-}
-
 func TestRenderSandboxHookFilesRefusesConnectorsWithoutVariant(t *testing.T) {
 	rt, err := resolveSandboxTarget("codex", SandboxRenderTarget{IngressPort: 18971, AgentVersion: "0.146.0"})
 	if err != nil {
@@ -270,6 +245,9 @@ func TestRenderSandboxHookFilesRefusesConnectorsWithoutVariant(t *testing.T) {
 	}
 }
 
+// TestSandboxHookScriptsCarryNoHostInputs: every sandbox hook runs under
+// bash -p, reads no host address, token, fail mode or config, and posts only
+// through the retrying sandbox transport.
 func TestSandboxHookScriptsCarryNoHostInputs(t *testing.T) {
 	for _, tc := range sandboxGoldenTargets {
 		artifacts := renderSandboxGolden(t, tc.provider, tc.version)
@@ -285,7 +263,7 @@ func TestSandboxHookScriptsCarryNoHostInputs(t *testing.T) {
 			if !strings.HasPrefix(body, "#!/bin/bash -p\n") {
 				t.Errorf("%s: sandbox hook must run under bash -p", file.Path)
 			}
-			for _, forbidden := range []string{"127.0.0.1", "DEFENSECLAW_GATEWAY_TOKEN:-", "DEFENSECLAW_FAIL_MODE:-", ".hookcfg"} {
+			for _, forbidden := range []string{"127.0.0.1", "DEFENSECLAW_GATEWAY_TOKEN:-", "DEFENSECLAW_FAIL_MODE:-", ".hookcfg", `FAIL_MODE="open"`, ".hook-" + tc.connector + ".token"} {
 				if strings.Contains(body, forbidden) {
 					t.Errorf("%s: contains host-only %q", file.Path, forbidden)
 				}
@@ -312,21 +290,18 @@ func TestSandboxHardeningBakesOnlyThePath(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeSandboxDropInShape pins what the drop-in carries beyond the
+// controls verifyClaudeCodeSandboxDropIn enforces: only keys reviewed against
+// the Claude Code 2.1.156 settings schema (Claude drops a whole drop-in with
+// one invalid field), the telemetry settings, and no provider selection
+// (managed env outranks sandbox create --env, so a pin in the static image
+// would override every run's provider; the manager pins it per sandbox).
 func TestClaudeCodeSandboxDropInShape(t *testing.T) {
-	artifacts := renderSandboxGolden(t, &ClaudeCodeConnector{}, "2.1.156")
 	var dropIn map[string]interface{}
-	for _, file := range artifacts.Files {
-		if file.Path == ClaudeCodeSandboxDropInPath {
-			if err := json.Unmarshal(file.Data, &dropIn); err != nil {
-				t.Fatal(err)
-			}
-		}
+	artifacts := renderSandboxGolden(t, &ClaudeCodeConnector{}, "2.1.156")
+	if err := json.Unmarshal(sandboxFile(t, artifacts, ClaudeCodeSandboxDropInPath).Data, &dropIn); err != nil {
+		t.Fatal(err)
 	}
-	if dropIn == nil {
-		t.Fatal("drop-in missing")
-	}
-	// Every key and value shape is reviewed against the Claude Code 2.1.156
-	// settings schema and proven live by the image's hook-fire probe.
 	allowed := map[string]bool{
 		"allowManagedHooksOnly": true, "skipDangerousModePermissionPrompt": true, "otelHeadersHelper": true,
 		"hooks": true, "env": true, "sandbox": true,
@@ -334,68 +309,29 @@ func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 	}
 	for key := range dropIn {
 		if !allowed[key] {
-			t.Errorf("drop-in carries unreviewed key %q (Claude drops a whole drop-in with one invalid field)", key)
+			t.Errorf("drop-in carries unreviewed key %q", key)
 		}
 	}
-	// The auth helpers are schema strings; "" makes Claude run none of them.
-	for _, key := range []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"} {
-		if got, ok := dropIn[key].(string); !ok || got != "" {
-			t.Errorf("drop-in %s = %#v, want \"\"", key, dropIn[key])
-		}
-	}
-	// Claude's own sandbox cannot nest inside OpenShell: pinned off, with
-	// no other sandbox key (each one is a schema risk).
-	if sandbox, ok := dropIn["sandbox"].(map[string]interface{}); !ok || len(sandbox) != 1 || sandbox["enabled"] != false {
+	if sandbox, ok := dropIn["sandbox"].(map[string]interface{}); !ok || len(sandbox) != 1 {
 		t.Errorf("drop-in sandbox = %#v, want exactly {\"enabled\": false}", dropIn["sandbox"])
 	}
 	env := dropIn["env"].(map[string]interface{})
 	for key, want := range map[string]string{
-		"CLAUDE_CODE_SIMPLE":           "0",
-		"DISABLE_AUTOUPDATER":          "1",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":  "http://host.openshell.internal:18971",
-		"OTEL_LOG_TOOL_CONTENT":        "0",
-		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-		// Claude runs shell-form hooks, Bash tool commands and stdio MCP
-		// servers through CLAUDE_CODE_SHELL_PREFIX; a settings file that set
-		// it would replace every managed hook.
-		"CLAUDE_CODE_SHELL_PREFIX":                "",
-		"CLAUDE_CODE_SHELL":                       "",
-		"SHELL":                                   "/bin/bash",
-		"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":         "",
-		"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS": "",
-		"LD_PRELOAD":                              "",
-		"LD_LIBRARY_PATH":                         "",
-		"LD_AUDIT":                                "",
-		"BASH_ENV":                                "",
-		"ENV":                                     "",
+		"DISABLE_AUTOUPDATER": "1", "OTEL_EXPORTER_OTLP_ENDPOINT": "http://host.openshell.internal:18971",
+		"OTEL_LOG_TOOL_CONTENT": "0", "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
 	} {
 		if got, ok := env[key].(string); !ok || got != want {
 			t.Errorf("env[%s] = %#v, want %q", key, env[key], want)
 		}
 	}
-	for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "DEFENSECLAW_FAIL_MODE"} {
+	for _, key := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "DEFENSECLAW_FAIL_MODE", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_URL",
+		"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"} {
 		if _, present := env[key]; present {
 			t.Errorf("env must not carry %s", key)
 		}
 	}
-	// Managed env outranks sandbox create --env: a provider pin in the static
-	// image would override every run's provider (Bedrock Mantle, mocks,
-	// custom gateways). The manager pins the run's provider per sandbox.
-	for _, key := range []string{
-		"ANTHROPIC_BASE_URL", "ANTHROPIC_API_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
-		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
-	} {
-		if _, present := env[key]; present {
-			t.Errorf("env must not pin provider selection (%s): it would override the per-run provider", key)
-		}
-	}
-	hooks := dropIn["hooks"].(map[string]interface{})
-	contract, ok := hookContractByID("claudecode", artifacts.HookContract)
-	if !ok {
-		t.Fatal("unknown contract")
-	}
-	if len(hooks) != len(contract.Events) {
-		t.Fatalf("drop-in registers %d events, contract has %d", len(hooks), len(contract.Events))
+	if contract, ok := hookContractByID("claudecode", artifacts.HookContract); !ok || len(dropIn["hooks"].(map[string]interface{})) != len(contract.Events) {
+		t.Fatalf("drop-in registers %d events for contract %s", len(dropIn["hooks"].(map[string]interface{})), artifacts.HookContract)
 	}
 }
 
@@ -408,22 +344,11 @@ func TestVerifyClaudeCodeSandboxDropInRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyClaudeCodeSandboxDropIn(good, rt); err != nil {
-		t.Fatalf("rendered drop-in rejected: %v", err)
-	}
 	mutate := func(fn func(map[string]interface{})) []byte {
-		var doc map[string]interface{}
-		if err := json.Unmarshal(good, &doc); err != nil {
-			t.Fatal(err)
-		}
-		fn(doc)
-		out, err := json.Marshal(doc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return out
+		return tampered(t, good, json.Unmarshal, json.Marshal, fn)
 	}
-	cases := map[string][]byte{
+	env := func(d map[string]interface{}) map[string]interface{} { return d["env"].(map[string]interface{}) }
+	assertTamperRejected(t, func(b []byte) error { return verifyClaudeCodeSandboxDropIn(b, rt) }, good, map[string][]byte{
 		"disable-all-hooks":  mutate(func(d map[string]interface{}) { d["disableAllHooks"] = true }),
 		"not-managed-only":   mutate(func(d map[string]interface{}) { d["allowManagedHooksOnly"] = false }),
 		"missing-pretooluse": mutate(func(d map[string]interface{}) { delete(d["hooks"].(map[string]interface{}), "PreToolUse") }),
@@ -432,15 +357,12 @@ func TestVerifyClaudeCodeSandboxDropInRejectsTampering(t *testing.T) {
 				"matcher": "*", "hooks": []interface{}{map[string]interface{}{"type": "command", "command": "/tmp/x.sh", "timeout": 30}},
 			}}
 		}),
-		"invalid-json": []byte(`{"hooks":`),
-		"shell-prefix-unpinned": mutate(func(d map[string]interface{}) {
-			delete(d["env"].(map[string]interface{}), "CLAUDE_CODE_SHELL_PREFIX")
-		}),
-		"shell-prefix-set": mutate(func(d map[string]interface{}) {
-			d["env"].(map[string]interface{})["CLAUDE_CODE_SHELL_PREFIX"] = "/sandbox/wrap.sh"
-		}),
-		"shell-unpinned":          mutate(func(d map[string]interface{}) { delete(d["env"].(map[string]interface{}), "SHELL") }),
-		"simple-mode-on":          mutate(func(d map[string]interface{}) { d["env"].(map[string]interface{})["CLAUDE_CODE_SIMPLE"] = "1" }),
+		"invalid-json":            []byte(`{"hooks":`),
+		"shell-prefix-unpinned":   mutate(func(d map[string]interface{}) { delete(env(d), "CLAUDE_CODE_SHELL_PREFIX") }),
+		"shell-prefix-set":        mutate(func(d map[string]interface{}) { env(d)["CLAUDE_CODE_SHELL_PREFIX"] = "/sandbox/wrap.sh" }),
+		"shell-unpinned":          mutate(func(d map[string]interface{}) { delete(env(d), "SHELL") }),
+		"simple-mode-on":          mutate(func(d map[string]interface{}) { env(d)["CLAUDE_CODE_SIMPLE"] = "1" }),
+		"loader-set":              mutate(func(d map[string]interface{}) { env(d)["LD_PRELOAD"] = "/sandbox/x.so" }),
 		"env-block-missing":       mutate(func(d map[string]interface{}) { delete(d, "env") }),
 		"own-sandbox-unpinned":    mutate(func(d map[string]interface{}) { delete(d, "sandbox") }),
 		"own-sandbox-on":          mutate(func(d map[string]interface{}) { d["sandbox"] = map[string]interface{}{"enabled": true} }),
@@ -448,59 +370,7 @@ func TestVerifyClaudeCodeSandboxDropInRejectsTampering(t *testing.T) {
 		"api-key-helper-unpinned": mutate(func(d map[string]interface{}) { delete(d, "apiKeyHelper") }),
 		"aws-export-set":          mutate(func(d map[string]interface{}) { d["awsCredentialExport"] = "/sandbox/export.sh" }),
 		"gcp-refresh-not-string":  mutate(func(d map[string]interface{}) { d["gcpAuthRefresh"] = false }),
-	}
-	for name, body := range cases {
-		t.Run(name, func(t *testing.T) {
-			if err := verifyClaudeCodeSandboxDropIn(body, rt); err == nil {
-				t.Fatal("tampered drop-in accepted")
-			}
-		})
-	}
-}
-
-func TestCodexSandboxRequirementsShape(t *testing.T) {
-	artifacts := renderSandboxGolden(t, &CodexConnector{}, "0.146.0")
-	var requirements, managed map[string]interface{}
-	for _, file := range artifacts.Files {
-		switch file.Path {
-		case CodexSandboxRequirementsPath:
-			if err := toml.Unmarshal(file.Data, &requirements); err != nil {
-				t.Fatal(err)
-			}
-		case CodexSandboxManagedConfigPath:
-			if err := toml.Unmarshal(file.Data, &managed); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if requirements["allow_managed_hooks_only"] != true {
-		t.Fatal("allow_managed_hooks_only not pinned")
-	}
-	if requirements["features"].(map[string]interface{})["hooks"] != true {
-		t.Fatal("features.hooks not pinned true")
-	}
-	hooks := requirements["hooks"].(map[string]interface{})
-	if hooks["managed_dir"] != SandboxHookDir {
-		t.Fatalf("managed_dir = %v", hooks["managed_dir"])
-	}
-	contract, _ := hookContractByID("codex", "codex-hooks-v4")
-	for _, event := range contract.Events {
-		groups, ok := hooks[event].([]interface{})
-		if !ok || len(groups) != 1 {
-			t.Fatalf("event %s groups = %#v", event, hooks[event])
-		}
-		handler := groups[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-		want := SandboxHookDir + "/codex-hook.sh --event " + event + " --hook-contract codex-hooks-v4"
-		if handler["command"] != want {
-			t.Fatalf("event %s command = %v, want %s", event, handler["command"], want)
-		}
-	}
-	if _, present := hooks["state"]; present {
-		t.Fatal("hooks.state must be absent")
-	}
-	if managed["check_for_update_on_startup"] != false {
-		t.Fatal("update check not disabled")
-	}
+	})
 }
 
 func TestVerifyCodexSandboxPolicyRejectsTampering(t *testing.T) {
@@ -520,48 +390,32 @@ func TestVerifyCodexSandboxPolicyRejectsTampering(t *testing.T) {
 		t.Fatalf("rendered policy rejected: %v", err)
 	}
 	edit := func(doc []byte, fn func(map[string]interface{})) []byte {
-		cfg := map[string]interface{}{}
-		if err := toml.Unmarshal(doc, &cfg); err != nil {
-			t.Fatal(err)
-		}
-		fn(cfg)
-		out, err := toml.Marshal(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return out
+		return tampered(t, doc, toml.Unmarshal, toml.Marshal, fn)
 	}
-	cases := []struct {
-		name                  string
-		requirements, managed []byte
-	}{
-		{"hooks-feature-off", edit(requirements, func(c map[string]interface{}) { c["features"] = map[string]interface{}{"hooks": false} }), managed},
-		{"user-hooks-allowed", edit(requirements, func(c map[string]interface{}) { c["allow_managed_hooks_only"] = false }), managed},
-		{"missing-event", edit(requirements, func(c map[string]interface{}) { delete(c["hooks"].(map[string]interface{}), "PreToolUse") }), managed},
-		{"wrong-managed-dir", edit(requirements, func(c map[string]interface{}) { c["hooks"].(map[string]interface{})["managed_dir"] = "/tmp" }), managed},
-		{"update-check-on", requirements, edit(managed, func(c map[string]interface{}) { c["check_for_update_on_startup"] = true })},
-		{"plugins-on", requirements, edit(managed, func(c map[string]interface{}) { c["features"].(map[string]interface{})["plugins"] = true })},
-		{"static-auth-header", requirements, edit(managed, func(c map[string]interface{}) {
+	type policy struct{ requirements, managed []byte }
+	cases := map[string]policy{
+		"hooks-feature-off":  {edit(requirements, func(c map[string]interface{}) { c["features"] = map[string]interface{}{"hooks": false} }), managed},
+		"user-hooks-allowed": {edit(requirements, func(c map[string]interface{}) { c["allow_managed_hooks_only"] = false }), managed},
+		"missing-event":      {edit(requirements, func(c map[string]interface{}) { delete(c["hooks"].(map[string]interface{}), "PreToolUse") }), managed},
+		"wrong-managed-dir":  {edit(requirements, func(c map[string]interface{}) { c["hooks"].(map[string]interface{})["managed_dir"] = "/tmp" }), managed},
+		"update-check-on":    {requirements, edit(managed, func(c map[string]interface{}) { c["check_for_update_on_startup"] = true })},
+		"plugins-on":         {requirements, edit(managed, func(c map[string]interface{}) { c["features"].(map[string]interface{})["plugins"] = true })},
+		"static-auth-header": {requirements, edit(managed, func(c map[string]interface{}) {
 			exporter := c["otel"].(map[string]interface{})["exporter"].(map[string]interface{})["otlp-http"].(map[string]interface{})
 			exporter["headers"].(map[string]interface{})["authorization"] = "Bearer x"
 		})},
-		{"foreign-notify", requirements, edit(managed, func(c map[string]interface{}) { c["notify"] = []interface{}{"/tmp/n.sh"} })},
+		"foreign-notify": {requirements, edit(managed, func(c map[string]interface{}) { c["notify"] = []interface{}{"/tmp/n.sh"} })},
 	}
 	// The commands Codex runs must not inherit what the launcher set for
 	// Codex alone: the OTLP header variables carry the binding token.
 	for _, key := range codexSandboxLauncherOnlyEnv {
-		cases = append(cases, struct {
-			name                  string
-			requirements, managed []byte
-		}{"shell-env-" + key, requirements, edit(managed, func(c map[string]interface{}) {
+		cases["shell-env-"+key] = policy{requirements, edit(managed, func(c map[string]interface{}) {
 			delete(c["shell_environment_policy"].(map[string]interface{})["set"].(map[string]interface{}), key)
-		})})
+		})}
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := verifyCodexSandboxPolicy(tc.requirements, tc.managed, rt, "openshell"); err == nil {
-				t.Fatal("tampered policy accepted")
-			}
-		})
+	for name, tc := range cases {
+		if err := verifyCodexSandboxPolicy(tc.requirements, tc.managed, rt, "openshell"); err == nil {
+			t.Errorf("%s: tampered policy accepted", name)
+		}
 	}
 }

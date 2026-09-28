@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -51,20 +52,50 @@ func sandboxFile(t *testing.T, artifacts SandboxArtifacts, path string) SandboxF
 	return SandboxFile{}
 }
 
-func TestHookOnlySandboxArtifactsRefuseConnectorsWithoutVariant(t *testing.T) {
-	// A hook-only connector that never registered a sandbox renderer.
-	for _, conn := range []*hookOnlyConnector{{name: "nosandbox"}} {
-		_, err := conn.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "1.0.0"})
-		if err == nil || !strings.Contains(err.Error(), "no OpenShell sandbox variant") {
-			t.Fatalf("%s: err = %v", conn.Name(), err)
-		}
-		if SandboxArtifactsSupported(conn) {
-			t.Fatalf("%s reports a sandbox variant it cannot render", conn.Name())
+// tampered decodes good with unmarshal, applies fn, and encodes the result
+// with marshal.
+func tampered(t *testing.T, good []byte, unmarshal func([]byte, interface{}) error, marshal func(interface{}) ([]byte, error), fn func(map[string]interface{})) []byte {
+	t.Helper()
+	doc := map[string]interface{}{}
+	if err := unmarshal(good, &doc); err != nil {
+		t.Fatal(err)
+	}
+	fn(doc)
+	out, err := marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// assertTamperRejected requires verify to accept the rendered good document
+// and to reject every tampered one.
+func assertTamperRejected(t *testing.T, verify func([]byte) error, good []byte, cases map[string][]byte) {
+	t.Helper()
+	if err := verify(good); err != nil {
+		t.Fatalf("rendered document rejected: %v", err)
+	}
+	for name, body := range cases {
+		if err := verify(body); err == nil {
+			t.Errorf("%s: tampered document accepted", name)
 		}
 	}
-	for _, conn := range []Connector{NewCursorConnector(), NewDevinConnector(), NewCopilotConnector(), NewOpenCodeConnector(), NewKiroConnector(), NewAMPConnector(), &ClaudeCodeConnector{}, &CodexConnector{}} {
-		if !SandboxArtifactsSupported(conn) {
-			t.Fatalf("%s renders sandbox artifacts but reports no variant", conn.Name())
+}
+
+// TestSandboxArtifactsTamperTiers pins each overlay's tamper tier: managed
+// only where root-owned files alone carry the hooks; user where the workload
+// can load code into the process beside them (OpenCode and Amp plugins, the
+// Hermes home) or the harness reads them from HOME (Kiro, Devin, OpenHands,
+// agy).
+func TestSandboxArtifactsTamperTiers(t *testing.T) {
+	managed := map[string]bool{"claudecode": true, "codex": true, "copilot": true, "cursor": true, "omnigent": true}
+	for _, tc := range sandboxGoldenTargets {
+		want := SandboxTamperTierUser
+		if managed[tc.connector] {
+			want = SandboxTamperTierManaged
+		}
+		if got := renderSandboxGolden(t, tc.provider, tc.version).TamperTier; got != want {
+			t.Errorf("%s tamper tier %s, want %s", tc.connector, got, want)
 		}
 	}
 }
@@ -87,94 +118,46 @@ func TestRegisterHookOnlySandboxRendererRefusesDuplicates(t *testing.T) {
 	}
 }
 
-func TestHookOnlySandboxArtifactsRefuseUnreviewedVersions(t *testing.T) {
-	cases := []struct {
+// TestSandboxArtifactsRefuseUnreviewedHarness: only a pinned harness release
+// inside a reviewed Linux hook contract, and a valid ingress port, render.
+func TestSandboxArtifactsRefuseUnreviewedHarness(t *testing.T) {
+	const noContract = "no reviewed Linux hook contract"
+	for _, tc := range []struct {
 		name     string
 		provider SandboxArtifactProvider
-		version  string
-		want     string
+		target   SandboxRenderTarget
+		want     string // a substring of the error; any error when empty
 	}{
+		{"claude-missing-version", &ClaudeCodeConnector{}, SandboxRenderTarget{}, "pinned harness version"},
+		{"claude-below-contract", &ClaudeCodeConnector{}, SandboxRenderTarget{AgentVersion: "2.1.100"}, noContract},
+		{"claude-garbage-version", &ClaudeCodeConnector{}, SandboxRenderTarget{AgentVersion: "latest"}, noContract},
+		{"codex-base-image-0.117", &CodexConnector{}, SandboxRenderTarget{AgentVersion: "codex-cli 0.117.0"}, noContract},
+		{"codex-pin-mismatch", &CodexConnector{}, SandboxRenderTarget{AgentVersion: "0.146.0", HookContractID: "codex-hooks-v3"}, "not the pinned codex-hooks-v3"},
+		{"port-zero", &CodexConnector{}, SandboxRenderTarget{AgentVersion: "0.146.0"}, "out of range"},
+		{"port-too-large", &ClaudeCodeConnector{}, SandboxRenderTarget{IngressPort: 70000, AgentVersion: "2.1.156"}, "out of range"},
 		// The community base image ships OpenCode 1.2.18 and Copilot 1.0.16.
-		{"opencode-base-image", NewOpenCodeConnector(), "1.2.18", "no reviewed Linux hook contract"},
-		{"opencode-above-range", NewOpenCodeConnector(), "1.19.0", "no reviewed Linux hook contract"},
-		{"copilot-base-image", NewCopilotConnector(), "1.0.16", "no reviewed Linux hook contract"},
-		{"amp-below-floor", NewAMPConnector(), "0.0.1785301270-g4f08a3", "no reviewed Linux hook contract"},
-		{"amp-missing-version", NewAMPConnector(), "", "pinned harness version"},
-		{"copilot-fail-open", NewCopilotConnector(), "1.0.88", "fail closed"},
-	}
-	for _, tc := range cases {
+		{"opencode-base-image", NewOpenCodeConnector(), SandboxRenderTarget{AgentVersion: "1.2.18"}, noContract},
+		{"opencode-above-range", NewOpenCodeConnector(), SandboxRenderTarget{AgentVersion: "1.19.0"}, noContract},
+		{"copilot-base-image", NewCopilotConnector(), SandboxRenderTarget{AgentVersion: "1.0.16"}, noContract},
+		{"amp-below-floor", NewAMPConnector(), SandboxRenderTarget{AgentVersion: "0.0.1785301270-g4f08a3"}, noContract},
+		{"amp-missing-version", NewAMPConnector(), SandboxRenderTarget{}, "pinned harness version"},
+		{"cursor-newer-build", NewCursorConnector(), SandboxRenderTarget{AgentVersion: "2026.09.26-dd393fe"}, ""},
+		{"cursor-desktop-version", NewCursorConnector(), SandboxRenderTarget{AgentVersion: "2.3.0"}, ""},
+		{"cursor-desktop-major", NewCursorConnector(), SandboxRenderTarget{AgentVersion: "4.0.0"}, ""},
+		{"devin-newer", NewDevinConnector(), SandboxRenderTarget{AgentVersion: "3000.12.0"}, ""},
+		{"kiro-unpinned", NewKiroConnector(), SandboxRenderTarget{}, ""},
+		{"omnigent-newer", NewOmnigentConnector(), SandboxRenderTarget{AgentVersion: "0.14.0"}, ""},
+		{"omnigent-older", NewOmnigentConnector(), SandboxRenderTarget{AgentVersion: "0.6.0"}, ""},
+		{"omnigent-unpinned", NewOmnigentConnector(), SandboxRenderTarget{}, ""},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			target := SandboxRenderTarget{IngressPort: 18971, AgentVersion: tc.version}
-			if tc.name == "copilot-fail-open" {
-				target.FailMode = "open"
+			if tc.target.IngressPort == 0 && tc.name != "port-zero" {
+				tc.target.IngressPort = 18971
 			}
-			_, err := tc.provider.SandboxArtifacts(target)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := tc.provider.SandboxArtifacts(tc.target); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("SandboxArtifacts error = %v, want %q", err, tc.want)
 			}
 		})
-	}
-}
-
-func TestCopilotSandboxPolicyShape(t *testing.T) {
-	artifacts := sandboxArtifactsFor(t, NewCopilotConnector(), "1.0.88")
-	if artifacts.HookContract != "copilot-hooks-v2" || artifacts.TamperTier != SandboxTamperTierManaged {
-		t.Fatalf("contract %s tier %s", artifacts.HookContract, artifacts.TamperTier)
-	}
-	if artifacts.Env["COPILOT_AUTO_UPDATE"] != "false" {
-		t.Fatalf("env = %v", artifacts.Env)
-	}
-	policy := sandboxFile(t, artifacts, CopilotSandboxPolicyPath)
-	if policy.Owner != SandboxOwnerRoot || policy.Mode != 0o644 {
-		t.Fatalf("policy %v %v", policy.Owner, policy.Mode)
-	}
-	var doc struct {
-		Version int `json:"version"`
-		Hooks   map[string][]struct {
-			Type       string `json:"type"`
-			Bash       string `json:"bash"`
-			TimeoutSec int    `json:"timeoutSec"`
-		} `json:"hooks"`
-	}
-	if err := json.Unmarshal(policy.Data, &doc); err != nil {
-		t.Fatal(err)
-	}
-	if doc.Version != 1 || len(doc.Hooks) != len(copilotCurrentHookEvents) {
-		t.Fatalf("version %d, %d events", doc.Version, len(doc.Hooks))
-	}
-	for _, event := range copilotCurrentHookEvents {
-		entries := doc.Hooks[event]
-		want := "'" + SandboxHookDir + "/copilot-hook.sh' --event '" + event + "'"
-		if len(entries) != 1 || entries[0].Type != "command" || entries[0].Bash != want || entries[0].TimeoutSec != 30 {
-			t.Fatalf("%s entries = %+v, want bash %q", event, entries, want)
-		}
-	}
-	managed := sandboxFile(t, artifacts, CopilotSandboxManagedSettingsPath)
-	var settings map[string]interface{}
-	if err := json.Unmarshal(managed.Data, &settings); err != nil || !reflect.DeepEqual(settings, map[string]interface{}{"allowManagedHooksOnly": true}) {
-		t.Fatalf("managed settings = %s (%v)", managed.Data, err)
-	}
-	preseed := sandboxFile(t, artifacts, SandboxHomeDir+"/.copilot/config.json")
-	if preseed.Owner != SandboxOwnerUser || !bytes.Contains(preseed.Data, []byte(`"/work"`)) {
-		t.Fatalf("preseed = %s", preseed.Data)
-	}
-	hook := sandboxFile(t, artifacts, SandboxHookDir+"/copilot-hook.sh")
-	for _, want := range []string{
-		"#!/bin/bash -p\n",
-		`. "${HOOK_DIR}/_sandbox.sh"`,
-		`FAIL_MODE="closed"`,
-		"defenseclaw_sandbox_require_token copilot copilot-hook",
-		`defenseclaw_sandbox_post "/api/v1/copilot/hook"`,
-		`-H "X-DefenseClaw-Copilot-Event: ${COPILOT_HOOK_EVENT}"`,
-	} {
-		if !bytes.Contains(hook.Data, []byte(want)) {
-			t.Errorf("sandbox copilot hook lacks %q", want)
-		}
-	}
-	for _, forbidden := range []string{"exit 0\n  ;;", "allowing copilot tool", `FAIL_MODE="open"`, ".hook-copilot.token"} {
-		if bytes.Contains(hook.Data, []byte(forbidden)) {
-			t.Errorf("sandbox copilot hook still contains host fail-open %q", forbidden)
-		}
 	}
 }
 
@@ -187,20 +170,11 @@ func TestVerifyCopilotSandboxPolicyRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyCopilotSandboxPolicy(good, rt); err != nil {
-		t.Fatalf("rendered policy rejected: %v", err)
-	}
-	mutate := func(f func(doc map[string]interface{})) []byte {
-		var doc map[string]interface{}
-		if err := json.Unmarshal(good, &doc); err != nil {
-			t.Fatal(err)
-		}
-		f(doc)
-		out, _ := json.Marshal(doc)
-		return out
+	mutate := func(fn func(map[string]interface{})) []byte {
+		return tampered(t, good, json.Unmarshal, json.Marshal, fn)
 	}
 	hooks := func(doc map[string]interface{}) map[string]interface{} { return doc["hooks"].(map[string]interface{}) }
-	for name, body := range map[string][]byte{
+	assertTamperRejected(t, func(b []byte) error { return verifyCopilotSandboxPolicy(b, rt) }, good, map[string][]byte{
 		"missing-event": mutate(func(doc map[string]interface{}) { delete(hooks(doc), "preToolUse") }),
 		"extra-event":   mutate(func(doc map[string]interface{}) { hooks(doc)["futureEvent"] = hooks(doc)["preToolUse"] }),
 		"second-handler": mutate(func(doc map[string]interface{}) {
@@ -215,103 +189,42 @@ func TestVerifyCopilotSandboxPolicyRejectsTampering(t *testing.T) {
 		}),
 		"version-2":   mutate(func(doc map[string]interface{}) { doc["version"] = 2 }),
 		"unknown-key": mutate(func(doc map[string]interface{}) { doc["disableAllHooks"] = true }),
-	} {
-		if err := verifyCopilotSandboxPolicy(body, rt); err == nil {
-			t.Errorf("%s: tampered policy accepted", name)
-		}
-	}
-}
-
-func TestOpenCodeSandboxArtifactsShape(t *testing.T) {
-	artifacts := sandboxArtifactsFor(t, NewOpenCodeConnector(), "1.18.31")
-	// The registration is managed, but plugins and custom tools the user or
-	// a project adds load into the same process, so the tier is user.
-	if artifacts.HookContract != "opencode-hooks-v1" || artifacts.TamperTier != SandboxTamperTierUser {
-		t.Fatalf("contract %s tier %s", artifacts.HookContract, artifacts.TamperTier)
-	}
-	if len(artifacts.Files) != 2 || !reflect.DeepEqual(artifacts.Binaries, []SandboxBinary{{Name: "opencode", Role: SandboxBinaryHarness}}) {
-		t.Fatalf("files %d binaries %v", len(artifacts.Files), artifacts.Binaries)
-	}
-	managed := sandboxFile(t, artifacts, OpenCodeSandboxManagedConfigPath)
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(managed.Data, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(cfg["plugin"], []interface{}{"file://" + OpenCodeSandboxPluginPath}) || cfg["autoupdate"] != false || cfg["share"] != "disabled" {
-		t.Fatalf("managed config = %s", managed.Data)
-	}
-	plugin := sandboxFile(t, artifacts, OpenCodeSandboxPluginPath)
-	if plugin.Owner != SandboxOwnerRoot || plugin.Mode != 0o644 {
-		t.Fatalf("plugin %v %v", plugin.Owner, plugin.Mode)
-	}
-	for _, want := range []string{
-		`const DC_API_ADDR = "host.openshell.internal:18971";`,
-		`const DC_FAIL_MODE = "closed";`,
-		"process.env.DEFENSECLAW_SANDBOX_TOKEN",
-		`"X-DefenseClaw-Hook-Idempotency-Key": key`,
-		"const DC_TIMEOUT_MS = 9000;",
-		"const DC_RETRY_TIMEOUT_MS = 12000;",
-		`"tool.execute.before": async`,
-	} {
-		if !bytes.Contains(plugin.Data, []byte(want)) {
-			t.Errorf("sandbox OpenCode plugin lacks %q", want)
-		}
+	})
+	// Only the managed hooks run.
+	managed := sandboxFile(t, sandboxArtifactsFor(t, NewCopilotConnector(), "1.0.88"), CopilotSandboxManagedSettingsPath)
+	var settings map[string]interface{}
+	if err := json.Unmarshal(managed.Data, &settings); err != nil || !reflect.DeepEqual(settings, map[string]interface{}{"allowManagedHooksOnly": true}) {
+		t.Fatalf("managed settings = %s (%v)", managed.Data, err)
 	}
 }
 
 func TestVerifyOpenCodeSandboxManagedConfigRejectsTampering(t *testing.T) {
-	for name, body := range map[string]string{
-		"no-plugin":      `{"plugin":[],"autoupdate":false,"share":"disabled"}`,
-		"extra-plugin":   `{"plugin":["file://` + OpenCodeSandboxPluginPath + `","file:///tmp/x.js"],"autoupdate":false,"share":"disabled"}`,
-		"autoupdate":     `{"plugin":["file://` + OpenCodeSandboxPluginPath + `"],"share":"disabled"}`,
-		"share-enabled":  `{"plugin":["file://` + OpenCodeSandboxPluginPath + `"],"autoupdate":false,"share":"auto"}`,
-		"not-json":       `plugin = []`,
-		"foreign-plugin": `{"plugin":["file:///sandbox/defenseclaw.js"],"autoupdate":false,"share":"disabled"}`,
-	} {
-		if err := verifyOpenCodeSandboxManagedConfig([]byte(body)); err == nil {
-			t.Errorf("%s: tampered managed config accepted", name)
-		}
-	}
+	plugin := `"plugin":["file://` + OpenCodeSandboxPluginPath + `"]`
+	good := sandboxFile(t, sandboxArtifactsFor(t, NewOpenCodeConnector(), "1.18.31"), OpenCodeSandboxManagedConfigPath).Data
+	assertTamperRejected(t, verifyOpenCodeSandboxManagedConfig, good, map[string][]byte{
+		"no-plugin":      []byte(`{"plugin":[],"autoupdate":false,"share":"disabled"}`),
+		"extra-plugin":   []byte(`{"plugin":["file://` + OpenCodeSandboxPluginPath + `","file:///tmp/x.js"],"autoupdate":false,"share":"disabled"}`),
+		"autoupdate":     []byte(`{` + plugin + `,"share":"disabled"}`),
+		"share-enabled":  []byte(`{` + plugin + `,"autoupdate":false,"share":"auto"}`),
+		"not-json":       []byte(`plugin = []`),
+		"foreign-plugin": []byte(`{"plugin":["file:///sandbox/defenseclaw.js"],"autoupdate":false,"share":"disabled"}`),
+	})
 }
 
-func TestAmpSandboxArtifactsShape(t *testing.T) {
-	artifacts := sandboxArtifactsFor(t, NewAMPConnector(), "0.0.1785334225-g9abe75")
-	if artifacts.HookContract != "amp-plugin-v1" || artifacts.TamperTier != SandboxTamperTierUser {
-		t.Fatalf("contract %s tier %s", artifacts.HookContract, artifacts.TamperTier)
-	}
-	plugin := sandboxFile(t, artifacts, AmpSandboxPluginPath)
-	if plugin.Owner != SandboxOwnerUser || plugin.Mode != 0o600 || len(artifacts.Files) != 1 {
-		t.Fatalf("plugin %v %v, %d files", plugin.Owner, plugin.Mode, len(artifacts.Files))
-	}
-	for _, want := range []string{
-		`const DC_API_ADDR = "host.openshell.internal:18971"`,
-		`const DC_FAIL_MODE: string = "closed"`,
-		"process.env.DEFENSECLAW_SANDBOX_TOKEN",
-		`"X-DefenseClaw-Hook-Idempotency-Key": key`,
-		`amp.on("tool.call"`,
-		`amp.on("tool.result"`,
-	} {
-		if !bytes.Contains(plugin.Data, []byte(want)) {
-			t.Errorf("sandbox Amp plugin lacks %q", want)
-		}
-	}
-	if artifacts.Env["AMP_SKIP_UPDATE_CHECK"] != "1" {
-		t.Fatalf("env = %v", artifacts.Env)
-	}
-}
-
+// TestRenderSandboxPluginRejectsHostInputs: a template that is not a sandbox
+// bridge (the host render path) never passes as one, and the sandbox plugins
+// carry no host-only input and always fail closed.
 func TestRenderSandboxPluginRejectsHostInputs(t *testing.T) {
 	rt, err := resolveSandboxTarget("opencode", SandboxRenderTarget{IngressPort: 18971, AgentVersion: "1.18.31"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A template that is not a sandbox bridge (the host render path) must
-	// never pass as one.
 	for _, asset := range []string{"claude-code-hook.sh", "inspect-tool.sh"} {
 		if _, err := renderSandboxPlugin(asset, rt); err == nil {
 			t.Fatalf("%s rendered as a sandbox plugin", asset)
 		}
 	}
+	closed := regexp.MustCompile(`const DC_FAIL_MODE(: string)? = "closed"`)
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
 		body, err := renderSandboxPlugin(asset, rt)
 		if err != nil {
@@ -321,6 +234,9 @@ func TestRenderSandboxPluginRejectsHostInputs(t *testing.T) {
 			if bytes.Contains(body, []byte(marker)) {
 				t.Fatalf("%s carries host-only %q", asset, marker)
 			}
+		}
+		if !closed.Match(body) || !bytes.Contains(body, []byte("process.env.DEFENSECLAW_SANDBOX_TOKEN")) {
+			t.Fatalf("%s does not fail closed on the binding token", asset)
 		}
 	}
 }
@@ -338,7 +254,7 @@ func TestSandboxPluginsExecutableContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
+	for _, tc := range []struct {
 		kind     string
 		provider SandboxArtifactProvider
 		version  string
@@ -347,8 +263,7 @@ func TestSandboxPluginsExecutableContract(t *testing.T) {
 	}{
 		{"opencode", NewOpenCodeConnector(), "1.18.31", OpenCodeSandboxPluginPath, "opencode-sandbox.mjs"},
 		{"amp", NewAMPConnector(), "0.0.1785334225-g9abe75", AmpSandboxPluginPath, "amp-sandbox.ts"},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			if tc.kind == "amp" {
 				probe := exec.Command(node, "-e", "process.exit(process.features && process.features.typescript ? 0 : 1)")
@@ -356,9 +271,8 @@ func TestSandboxPluginsExecutableContract(t *testing.T) {
 					t.Skip("node without TypeScript stripping cannot load the Amp plugin")
 				}
 			}
-			artifacts := sandboxArtifactsFor(t, tc.provider, tc.version)
 			plugin := filepath.Join(dir, tc.file)
-			if err := os.WriteFile(plugin, sandboxFile(t, artifacts, tc.path).Data, 0o600); err != nil {
+			if err := os.WriteFile(plugin, sandboxFile(t, sandboxArtifactsFor(t, tc.provider, tc.version), tc.path).Data, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
