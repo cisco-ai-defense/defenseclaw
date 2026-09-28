@@ -624,9 +624,11 @@ destination. It is applied at the sandbox's next quiet moment, because every
 OpenShell policy change closes the sandbox's open connections. `--always`
 also saves the hosts to `openshell.egress.unblocked` for future sandboxes.
 It is refused, and nothing is approved, for the typical asks: a port on your
-machine, a private network address, or an ask with allowed IP addresses
-(`allowed_ips`). Those open for one sandbox only, so approve them without
-`--always`. For a port that future sandboxes need, pass `--host-port` to `run`
+machine, a destination on your private network (a private address, an
+intranet name such as `*.corp`, or a name that resolves to a private
+address), or an ask with allowed IP addresses (`allowed_ips`). Those open for
+one sandbox only, so approve them without `--always`; to open a private
+destination for every sandbox, add it to `openshell.egress.allow`. For a port that future sandboxes need, pass `--host-port` to `run`
 or add it to `openshell.mcp.host_ports`.
 
 ```bash

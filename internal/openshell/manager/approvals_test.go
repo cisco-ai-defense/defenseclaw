@@ -393,6 +393,43 @@ func TestHostPortApproveAlwaysRefused(t *testing.T) {
 	}
 }
 
+// TestPrivateNameApproveAlwaysRefused pins that "always" is refused for a
+// destination on the user's network, as named (an intranet name) or as
+// resolved (a name with a private answer): it would be saved to
+// openshell.egress.unblocked, which the proxy's guard never lets open a
+// private network, so every future sandbox would ask again. Approving it for
+// the sandbox still works.
+func TestPrivateNameApproveAlwaysRefused(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	ctx := context.Background()
+	sb := e.create(sandboxapi.CreateRequest{Name: "lanalways"})
+	e.watch.waitStarted(t, sb.Name)
+	e.dns.set("db.lan.example.org", "10.0.0.5")
+	ids := map[string]string{
+		"wiki.corp":          addChunk(e, sb.Name, chunk("allow_wiki_corp_443", "wiki.corp", 443)),
+		"db.lan.example.org": addChunk(e, sb.Name, chunk("allow_db_lan_example_org_443", "db.lan.example.org", 443)),
+	}
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	for _, ask := range waitAsks(t, e, sb.Name, 2) {
+		_, err := e.m.DecideApproval(ctx, ask.ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true})
+		if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || !strings.Contains(err.Error(), "openshell.egress.allow") {
+			t.Fatalf("approve always %s: %v", ask.Host, err)
+		}
+		if _, err := e.m.DecideApproval(ctx, ask.ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+			t.Fatalf("approve %s for the sandbox: %v", ask.Host, err)
+		}
+	}
+	for host, id := range ids {
+		eventually(t, host+" approved", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+	}
+	e.persist.mu.Lock()
+	defer e.persist.mu.Unlock()
+	if len(e.persist.allow) != 0 {
+		t.Fatalf("persisted %v for future sandboxes", e.persist.allow)
+	}
+}
+
 func TestDeleteDropsApprovals(t *testing.T) {
 	e := newEnv(t, nil)
 	e.run()

@@ -911,11 +911,20 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		}
 		// The whole proposal is judged again against the current policy:
 		// approving applies every endpoint, port and allowed IP in it.
-		if cur := triage.Classify(ctx, p, m.triagePolicy(b, eff)); cur.Verdict == triage.Reject {
+		cur := triage.Classify(ctx, p, m.triagePolicy(b, eff))
+		if cur.Verdict == triage.Reject {
 			if cur.Violation != nil {
 				return nil, m.violationErrorFor(ctx, cur.Violation, a.sandbox, audit.SandboxPolicyRuleAdd, host)
 			}
 			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
+		}
+		if d.Always && cur.Verdict == triage.Ask && cur.Reason == triage.ReasonPrivateNetwork {
+			// "Always" saves the host to openshell.egress.unblocked, and
+			// the proxy's guard refuses private networks before any
+			// unblock: every future sandbox would ask again.
+			return nil, &sandboxapi.Error{Code: sandboxapi.CodeInvalid,
+				Message: cur.Host + " is on your private network, which is opened per sandbox, not for future sandboxes",
+				Detail:  "approve it for this sandbox, or add " + cur.Host + " to openshell.egress.allow to open it for every sandbox"}
 		}
 		if err := triage.CheckProposal(eff, p, d.Always); err != nil {
 			return nil, m.violationErrorFor(ctx, err, a.sandbox, audit.SandboxPolicyRuleAdd, host)
@@ -983,7 +992,9 @@ func networkHosts(p triage.Proposal) []string {
 }
 
 // alwaysApprovable refuses "always" for proposals that reach this machine
-// or the user's network: those are opened per sandbox only.
+// or the user's network as named: those are opened per sandbox only.
+// DecideApproval also refuses names the current policy treats as private
+// (intranet names, names that resolve to private addresses).
 func alwaysApprovable(p triage.Proposal) error {
 	for _, ep := range p.Endpoints {
 		host := triage.NormalizeHost(ep.Host)
