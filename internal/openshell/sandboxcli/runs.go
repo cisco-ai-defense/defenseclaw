@@ -41,10 +41,13 @@ import (
 // inside the sandbox (session.detach): its output goes to RunDir/<start>.log,
 // which latest.log links to, its runner's pid to latest.pid, its start (epoch
 // seconds) to latest.started and its exit status to latest.exit once it
-// ends. A run the sandbox stopped under never writes latest.exit: its
-// process is gone, and a stop through DefenseClaw writes "interrupted"
-// there first. When DefenseClaw stops a sandbox it keeps the run's log on
-// this machine (cliStateDir), and `sandbox logs` reads it there.
+// ends. A stop through DefenseClaw writes "interrupted" there first (this
+// CLI before it asks for the stop, the daemon before it lets the harness
+// exit), and the runner keeps that mark rather than the status the stop's
+// SIGTERM gave the harness; a run the sandbox stopped under without one
+// never writes latest.exit, its process being gone. When DefenseClaw stops
+// a sandbox it keeps the run's log on this machine (cliStateDir), and
+// `sandbox logs` reads it there.
 
 // runState is the state of a sandbox's latest detached run.
 type runState string

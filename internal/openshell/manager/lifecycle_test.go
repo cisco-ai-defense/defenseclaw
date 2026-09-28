@@ -766,7 +766,8 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	if len(got) < 2 || got[0] != "exec" || !slices.Contains(got, "stop") {
 		t.Fatalf("calls = %v, want the harness asked to exit before the stop", got)
 	}
-	if calls := e.fake.ExecCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) || calls[0].Timeout <= harnessExitWait {
+	if calls := e.fake.ExecCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
+		!slices.Contains(calls[0].Command, harness.RunDir) || calls[0].Timeout <= harnessExitWait {
 		t.Fatalf("exec calls = %+v", calls)
 	}
 	e.startBox("stopbox", sandboxapi.StartRequest{})
@@ -835,6 +836,43 @@ func TestEndHarnessScript(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "harness")
 	must(t, os.Symlink(writeFile(t, filepath.Join(root, "bin", "harness.sh"), "while :; do sleep 1; done\n"), link))
 	exits(exec.Command("/bin/sh", link))
+}
+
+// A detached run the stop ends read "exited with status 143" after the
+// sandbox started again (the live CLI test): the SIGTERM let its runner
+// record the harness's status. The script marks a run that has not ended
+// interrupted first, and leaves a finished run, and a sandbox without a
+// run, alone.
+func TestEndHarnessScriptMarksTheDetachedRun(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "no-harness")
+	end := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command("/bin/sh", append([]string{"-c", endHarnessScript, "defenseclaw-end-harness", root, "1"}, args...)...).Output()
+		if err != nil || strings.TrimSpace(string(out)) != "none" {
+			t.Fatalf("script = %q, %v", out, err)
+		}
+	}
+	exitOf := func(dir string) string {
+		data, err := os.ReadFile(filepath.Join(dir, "latest.exit"))
+		if os.IsNotExist(err) {
+			return "(none)"
+		}
+		must(t, err)
+		return string(data)
+	}
+	going, finished, none := t.TempDir(), t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(going, "latest.pid"), "4242\n")
+	writeFile(t, filepath.Join(finished, "latest.pid"), "4242\n")
+	writeFile(t, filepath.Join(finished, "latest.exit"), "0\n")
+	end(going)
+	end(finished)
+	end(none)
+	end()
+	for dir, want := range map[string]string{going: "interrupted\n", finished: "0\n", none: "(none)"} {
+		if got := exitOf(dir); got != want {
+			t.Fatalf("%s latest.exit = %q, want %q", filepath.Base(dir), got, want)
+		}
+	}
 }
 
 // A delete releases everything the sandbox held, and the --credential

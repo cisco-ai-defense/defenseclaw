@@ -37,7 +37,7 @@ import (
 )
 
 // RunDir is where detached runs keep their output inside the sandbox.
-const RunDir = "/sandbox/.defenseclaw/runs"
+const RunDir = harness.RunDir
 
 // session is one harness session in a sandbox.
 type session struct {
@@ -447,6 +447,29 @@ func (s *session) harnessName() string {
 	return s.spec.DisplayName
 }
 
+// detachScript starts argv ${2...} in the background, in a session of its
+// own, as the latest detached run in the run directory $1 (see runs.go).
+// Its runner records the harness's exit status in latest.exit unless a
+// stop marked the run interrupted there meanwhile: a stop lets the harness
+// exit (SIGTERM) before the sandbox goes, and that status is not the run's
+// own ending.
+const detachScript = `set -eu
+d=$1
+shift
+mkdir -p "$d"
+log="$d/$(date -u +%Y%m%dT%H%M%SZ).log"
+ln -sfn "$log" "$d/latest.log"
+rm -f "$d/latest.exit"
+date +%s > "$d/latest.started"
+runner='f=$1; shift; rc=0; "$@" || rc=$?; [ -s "$f" ] || printf "%s\n" "$rc" > "$f"'
+if command -v setsid >/dev/null 2>&1; then
+  setsid nohup sh -c "$runner" sh "$d/latest.exit" "$@" >"$log" 2>&1 </dev/null &
+else
+  nohup sh -c "$runner" sh "$d/latest.exit" "$@" >"$log" 2>&1 </dev/null &
+fi
+printf '%s\n' "$!" > "$d/latest.pid"
+`
+
 // detach starts the harness in the background inside the sandbox; its
 // output goes to RunDir/latest.log (see runs.go).
 func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error {
@@ -455,22 +478,8 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 	if err != nil {
 		return err
 	}
-	script := `set -eu
-d=` + RunDir + `
-mkdir -p "$d"
-log="$d/$(date -u +%Y%m%dT%H%M%SZ).log"
-ln -sfn "$log" "$d/latest.log"
-rm -f "$d/latest.exit"
-date +%s > "$d/latest.started"
-runner='rc=0; "$@" || rc=$?; printf "%s\n" "$rc" > ` + RunDir + `/latest.exit'
-if command -v setsid >/dev/null 2>&1; then
-  setsid nohup sh -c "$runner" sh "$@" >"$log" 2>&1 </dev/null &
-else
-  nohup sh -c "$runner" sh "$@" >"$log" 2>&1 </dev/null &
-fi
-printf '%s\n' "$!" > "$d/latest.pid"
-`
-	inv, err := s.cli.Exec(s.sb.Name, append([]string{"sh", "-c", script, "sh"}, argv...), openshell.CLIExecOptions{WorkDir: s.sb.Workdir, Timeout: time.Minute})
+	inv, err := s.cli.Exec(s.sb.Name, append([]string{"sh", "-c", detachScript, "sh", RunDir}, argv...),
+		openshell.CLIExecOptions{WorkDir: s.sb.Workdir, Timeout: time.Minute})
 	if err != nil {
 		return err
 	}

@@ -54,6 +54,12 @@ const (
 	SupervisorInterpreter = "/usr/bin/python3"
 	// WorkRoot is where projects are mounted in mount mode.
 	WorkRoot = "/work"
+	// RunDir is where a detached run (`sandbox run --detach`) keeps its
+	// output, pid, start and exit status. A stop marks the run it ends
+	// with "interrupted" in latest.exit there (the CLI before it asks for
+	// the stop, the daemon before it ends the harness), which the run's
+	// runner keeps.
+	RunDir = "/sandbox/.defenseclaw/runs"
 )
 
 // LauncherSystemPATH leads the PATH every launcher passes to its harness:

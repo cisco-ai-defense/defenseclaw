@@ -236,11 +236,15 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 		t.Fatalf("stream commands = %q", cmds)
 	}
 	last := sandboxCommand(ta.stream.runs[1])
+	tail := last[5:]
 	want := []string{harness.ClaudeCodeLauncherPath, "--dangerously-skip-permissions", "-p", "fix the failing tests", "--output-format", "stream-json", "--verbose"}
-	if !slices.Equal(last[4:], want) {
-		t.Fatalf("detached harness argv = %q, want %q", last[4:], want)
+	if !slices.Equal(tail, want) {
+		t.Fatalf("detached harness argv = %q, want %q", tail, want)
 	}
-	has(t, last[2], "d="+RunDir+"\n", `"$d/latest.log"`, "setsid", `date +%s > "$d/latest.started"`)
+	if last[2] != detachScript || last[4] != RunDir {
+		t.Fatalf("detach command = %q", last[:5])
+	}
+	has(t, last[2], `"$d/latest.log"`, "setsid", `date +%s > "$d/latest.started"`)
 	if len(ta.term.runs) != 0 {
 		t.Fatal("a detached run attached the terminal")
 	}
@@ -251,7 +255,7 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 	ta = newTestApp(t, "")
 	ta.IO.TTY = false
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "codex", Detach: true, Prompt: "x"}))
-	if last := sandboxCommand(ta.stream.runs[len(ta.stream.runs)-1]); slices.Contains(last, "stream-json") || last[4] != harness.CodexLauncherPath {
+	if last := sandboxCommand(ta.stream.runs[len(ta.stream.runs)-1]); slices.Contains(last, "stream-json") || last[4] != RunDir || last[5] != harness.CodexLauncherPath {
 		t.Fatalf("detached codex argv = %q", last)
 	}
 }

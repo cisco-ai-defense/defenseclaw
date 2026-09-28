@@ -34,8 +34,10 @@ import (
 // asks the harness to exit first (SIGTERM to its processes, found by the
 // install root their executable or script lies under) and waits a moment
 // for them to go: a harness that exits runs its end-of-session hook, and its
-// terminal ends like a /exit. The stop goes ahead whatever the sandbox
-// answers.
+// terminal ends like a /exit. A detached run the stop ends this way is
+// marked interrupted first, so `sandbox logs` does not take the status the
+// SIGTERM gave it for the run's own ending. The stop goes ahead whatever
+// the sandbox answers.
 
 // Harness shutdown bounds: how long the in-sandbox script waits for the
 // harness to exit, and how long the exec of it may take in all.
@@ -51,8 +53,14 @@ const (
 // install root; a script harness's interpreter runs a script there), lies
 // under the install root $1. The harness's executable link is often not
 // readable to the exec (a process that is not dumpable), its command line
-// always is. It prints how it ended: "none", "exited" or "running".
-const endHarnessScript = `root=$1; ticks=$2; self=$$; pids=
+// always is. Before any of that, a detached run in the run directory $3
+// (harness.RunDir) that has not ended is marked interrupted, as `sandbox
+// stop` marks it: its runner keeps the mark. It prints how it ended:
+// "none", "exited" or "running".
+const endHarnessScript = `root=$1; ticks=$2; runs=$3; self=$$; pids=
+if [ -n "$runs" ] && [ -e "$runs/latest.pid" ] && [ ! -s "$runs/latest.exit" ]; then
+  { printf 'interrupted\n' > "$runs/latest.exit"; } 2>/dev/null
+fi
 for d in /proc/[0-9]*; do
   p=${d#/proc/}
   [ "$p" = "$self" ] && continue
@@ -92,7 +100,7 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) {
 	defer cancel()
 	ticks := int(harnessExitWait / (100 * time.Millisecond))
 	res, err := gw.Client.Exec(ctx, name, []string{"/bin/sh", "-c", endHarnessScript, "defenseclaw-end-harness", spec.InstallRoot(),
-		strconv.Itoa(ticks)}, openshell.ExecOptions{Timeout: harnessExitWait + 3*time.Second, Attempts: 1, MaxOutputBytes: 256})
+		strconv.Itoa(ticks), harness.RunDir}, openshell.ExecOptions{Timeout: harnessExitWait + 3*time.Second, Attempts: 1, MaxOutputBytes: 256})
 	if err != nil {
 		m.logf("sandbox %s: ask the harness to exit before the stop: %v", name, err)
 		return
