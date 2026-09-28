@@ -175,6 +175,11 @@ rest also reach per-user installs.
   `~/.kiro/settings/cli.json` captured at enrollment, which dropped the keys
   added since. It now removes only DefenseClaw's `chat.defaultAgent` and puts
   back the user's earlier value.
+- **Disabling Hermes keeps `config.yaml` as it was.** Teardown rewrote the
+  file without its comments, and approvals in a file put back from an
+  earlier enrollment stayed in `shell-hooks-allowlist.json`. It now removes
+  only DefenseClaw's hook entries, keeping every other byte, and all of
+  DefenseClaw's approvals.
 
 ### Added
 
