@@ -19,10 +19,10 @@ before every command, without putting your machine at risk: it sees only
 your project folder, and DefenseClaw still checks every tool call and every
 site it contacts.
 
-Sandboxes run on Linux (amd64 and arm64) and, as a preview, on macOS on
-Apple silicon with Docker Desktop. They are not supported on Windows or
-WSL2, in `managed_enterprise` deployments, or when you run DefenseClaw as
-root.
+Sandboxes run on Linux (amd64 and arm64). They cannot run on macOS today:
+OpenShell needs Landlock, and the Linux VM kernel of Docker Desktop has none
+(see [macOS](#macos)). They are not supported on Windows or WSL2, in
+`managed_enterprise` deployments, or when you run DefenseClaw as root.
 
 ## How it works
 
@@ -53,12 +53,30 @@ the folder back the way it was before the session.
 | Requirement | Details |
 | --- | --- |
 | DefenseClaw | Installed and initialized (`defenseclaw init`, see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user. |
-| Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On macOS, Docker Desktop with host networking on and your home folder shared. |
-| Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. On macOS the Docker Desktop VM provides it. |
+| Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On macOS the doctor checks that Docker Desktop has host networking on and your home folder shared, but sandboxes cannot run there yet (see [macOS](#macos)). |
+| Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. Without it OpenShell refuses to start a sandbox. Docker Desktop's VM kernel has no Landlock, so sandboxes cannot run on macOS (see [macOS](#macos)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
 | Linux login | `sudo loginctl enable-linger $USER` is recommended, so the OpenShell gateway keeps running after you log out. |
 
 You don't need OpenShell installed beforehand: setup offers to install it.
+
+### macOS
+
+OpenShell sandboxes cannot run on a Mac today. On a Mac, OpenShell runs each
+sandbox in a container in Docker Desktop's Linux VM. DefenseClaw's sandbox
+policy requires Landlock, so OpenShell refuses to start a sandbox without it
+rather than run it unconfined, and Docker Desktop's VM kernel does not run
+Landlock. Measured on Apple silicon with Docker Desktop (engine 29.1.5) and
+OpenShell 0.1.1, the VM kernel is 6.12.65-linuxkit and its only active
+security modules are `capability,bpf`, so OpenShell's supervisor fails its
+Landlock check and every sandbox ends in an error state.
+
+`defenseclaw sandbox doctor` checks the VM kernel for Landlock and reports
+that it is missing. The macOS parts of DefenseClaw stay in place for when
+this changes: setup installs OpenShell from NVIDIA's `nvidia/openshell`
+Homebrew formula and runs its gateway with `brew services`, and the doctor
+checks Docker Desktop's host networking and file sharing. macOS support is
+tracked in a follow-up issue. Until then, run sandboxes on a Linux machine.
 
 ## One-time setup
 
@@ -131,7 +149,8 @@ installs OpenShell: if OpenShell is missing, run
 `defenseclaw sandbox setup --install-openshell` in a terminal first (on a Mac
 it installs NVIDIA's `nvidia/openshell` Homebrew formula).
 It has no telemetry question: setup cannot turn OpenShell's telemetry off on
-a Mac (see step 4 below).
+a Mac (see step 4 below). No sandbox can start on a Mac yet (see
+[macOS](#macos)); the **doctor** action shows why.
 
 </Tab>
 </Tabs>
@@ -1107,6 +1126,8 @@ section, and skips them while `openshell.enabled` is off.
 | --- | --- |
 | ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on`` | Run setup. |
 | `install OpenShell: Homebrew could not install the nvidia/openshell formula` (macOS) | Read Homebrew's `Error:` line just above it. When NVIDIA's tap has no bottle (prebuilt package) for your macOS release, Homebrew builds the formula and first checks your developer tools: it stops when Xcode or the Command Line Tools are older than the newest release (`Your Xcode (26.2) … is too outdated`). Update them as Homebrew says (Xcode from the App Store, the Command Line Tools from Software Update in System Settings), then run `defenseclaw sandbox setup` again. |
+| On macOS, the doctor's **Landlock** check reports no Landlock, or `sandbox run` ends with ``sandbox "<name>" is in error state`` | Docker Desktop's Linux VM kernel has no Landlock, which OpenShell needs, so no sandbox can start on a Mac today (see [macOS](#macos)). There is nothing to fix on the Mac: run sandboxes on a Linux machine. |
+| On macOS, with OpenShell installed outside Homebrew (for example from NVIDIA's release binaries), the machine check finds it but the doctor's **Gateway service** check fails | DefenseClaw finds that `openshell`, but on macOS it manages only the gateway of NVIDIA's `nvidia/openshell` Homebrew formula, which it starts and restarts with `brew services`. It does not manage a gateway you installed or run another way. To let DefenseClaw manage the gateway, install the formula with `defenseclaw sandbox setup --install-openshell`. |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |

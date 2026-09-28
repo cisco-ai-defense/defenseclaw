@@ -34,6 +34,13 @@ Monitoring, Notifications and Connection tabs.
 
 ## OpenShell sandboxes
 
+<Callout type="warn" title="Sandboxes cannot run on a Mac yet">
+OpenShell needs Landlock, and Docker Desktop's Linux VM kernel has none, so no
+sandbox can start on a Mac today (see [macOS](/docs/setup/sandbox#macos)). The
+Sandbox wizard's `doctor` action shows the check. The views below are in place
+for when this changes; macOS support is tracked in a follow-up issue.
+</Callout>
+
 When sandboxes are on (see the [sandbox guide](/docs/setup/sandbox)), the app
 shows the sandboxes the DefenseClaw daemon runs in four places: the menu bar,
 desktop notifications, an Overview card and the Sandboxes panel. It reads the

@@ -2,7 +2,9 @@
 
 The quickstart for NVIDIA OpenShell 0.1 sandboxes is the
 [published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
-(`docs-site/content/docs/setup/sandbox.mdx`). In short, on Linux or macOS:
+(`docs-site/content/docs/setup/sandbox.mdx`). In short, on Linux (sandboxes
+cannot run on macOS yet; see
+[macOS and Docker Desktop](SANDBOX.md#macos-and-docker-desktop)):
 
 ```bash
 defenseclaw sandbox setup

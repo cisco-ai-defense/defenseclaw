@@ -483,8 +483,10 @@ administrator's `openshell.admin` limits are explained in
 [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy).
 
 <Callout title="Where sandboxes run">
-Sandboxes run on Linux and macOS, with the DefenseClaw gateway and the
-OpenShell gateway both running as your own user. In a `managed_enterprise`
+Sandboxes run on Linux, with the DefenseClaw gateway and the OpenShell
+gateway both running as your own user. They cannot run on macOS yet: Docker
+Desktop's Linux VM kernel has no Landlock (see
+[macOS](/docs/setup/sandbox#macos)). In a `managed_enterprise`
 install the gateway doesn't start the sandbox runtime yet: `/health`
 reports the `sandbox` subsystem as `disabled`, and `sandbox setup` and
 `sandbox run` refuse to start. The `openshell` keys, `openshell.admin`

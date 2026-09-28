@@ -233,13 +233,19 @@ deleted.
 ### NVIDIA OpenShell 0.1 sandboxes
 
 - Adds `defenseclaw sandbox`: run a coding agent in skip-permissions mode
-  inside an NVIDIA OpenShell 0.1.x sandbox (Linux amd64/arm64; macOS on Apple
-  silicon with Docker Desktop as a preview, not tested live; local gateway
+  inside an NVIDIA OpenShell 0.1.x sandbox (Linux amd64/arm64; local gateway
   with the Docker driver; OpenShell `>=0.1.1 <0.2.0`) that sees only the
   project folder. OpenShell supplies the kernel-enforced boundary (network
   namespace, Landlock, seccomp, non-root, credential placeholders); DefenseClaw
   keeps judging every tool call through its hooks, which fail closed in a
   sandbox.
+- macOS cannot run sandboxes yet. OpenShell needs Landlock, and Docker
+  Desktop's Linux VM kernel has none (measured with engine 29.1.5: kernel
+  6.12.65-linuxkit, active security modules `capability,bpf`), so OpenShell
+  refuses to start any sandbox there. `defenseclaw sandbox doctor` checks for
+  it. The macOS paths (the Homebrew install and `brew services`, the Docker
+  Desktop checks, the macOS app's sandbox views) stay in place; macOS support
+  is tracked in a follow-up issue.
 - Harnesses: Claude Code, Codex, OpenCode, GitHub Copilot CLI, Kiro CLI,
   Hermes, OpenHands, Antigravity and OmniGent run end to end. Cursor Agent,
   Amp and Devin CLI images build but are refused until a hook check with a

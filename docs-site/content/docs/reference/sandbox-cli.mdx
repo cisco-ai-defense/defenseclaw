@@ -12,8 +12,8 @@ keywords:
 ---
 
 `defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
-agents in NVIDIA OpenShell 0.1 sandboxes on Linux and macOS. This page lists
-every `sandbox` command and flag; see also [Sandbox](/docs/setup/sandbox).
+agents in NVIDIA OpenShell 0.1 sandboxes on Linux. This page lists every
+`sandbox` command and flag; see also [Sandbox](/docs/setup/sandbox).
 Packs and organization limits are covered in
 [Sandbox policy packs and admin controls](/docs/setup/sandbox-policy), and
 the `openshell:` keys in
@@ -34,7 +34,9 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   status 1. `setup`, `run`, `image build`, and `enable` also stop with status
   3 under WSL2, in a `managed_enterprise` install, and when run as root:
   sandboxes run as your own user. `teardown` also stops with status 3 in a
-  `managed_enterprise` install.
+  `managed_enterprise` install. On macOS the commands run, but no sandbox can
+  start yet: OpenShell needs Landlock, and Docker Desktop's Linux VM kernel
+  has none (see [macOS](/docs/setup/sandbox#macos)).
 - **The daemon does the work.** Commands that create, change, or read
   sandboxes call the DefenseClaw daemon's
   [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API

@@ -81,7 +81,8 @@ connector-specific fallback; there is no TUI approval queue.
 ### "I want to run the agent in an OpenShell sandbox"
 
 `defenseclaw sandbox run <harness>` runs a coding agent in an NVIDIA OpenShell
-sandbox, on Linux or macOS, that sees only your project folder. The
+sandbox, on Linux, that sees only your project folder; sandboxes cannot run
+on macOS yet ([why](/docs/setup/sandbox#macos)). The
 [sandbox guide](/docs/setup/sandbox) covers setup and every `sandbox` command.
 DefenseClaw builds sandbox images for twelve harnesses; every other connector is
 pending in the matrix above.

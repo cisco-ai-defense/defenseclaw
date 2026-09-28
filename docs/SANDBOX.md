@@ -39,6 +39,9 @@ Overview and a Sandboxes panel. Still to come:
   `devin` have harness specs and sandbox artifacts. The `amp`, `cursor` and
   `devin` images stay unverified until a probe runs with a vendor account
   (see [Sandboxed connectors](#sandboxed-connectors)).
+- **macOS.** No sandbox can start on Docker Desktop, whose Linux VM kernel
+  has no Landlock (see [macOS and Docker Desktop](#macos-and-docker-desktop)).
+  The macOS code paths stay; macOS support is tracked in a follow-up issue.
 
 ## Why OpenShell
 
@@ -803,7 +806,9 @@ output is deterministic and golden-tested (`internal/openshell/policy/testdata`)
 because every policy reload closes connections.
 
 - **Landlock** is `hard_requirement`: a kernel without the needed ABI refuses
-  to start the sandbox instead of running it unconfined.
+  to start the sandbox instead of running it unconfined. This is why no
+  sandbox starts on Docker Desktop (see
+  [macOS and Docker Desktop](#macos-and-docker-desktop)).
 - **Read-only:** `/usr`, `/lib`, `/etc`, `/proc`, `/dev/urandom`, `/var/log`,
   `/opt`, the harness install roots and read-only context mounts.
 - **Read-write:** `/tmp`, `/dev/null`, `/dev/ptmx`, `/dev/pts`, `/dev/tty`,
@@ -2098,6 +2103,16 @@ These were not measured, so the design does not rely on a result for them:
 | Ending an exec stream does not stop the command in 0.1.1. | `Exec` wraps commands in `timeout(1)` inside the sandbox and retries only attempts whose stream never opened (plus unanswered attempts of idempotent commands). |
 | `WatchSandbox` OCSF lines arrive at level `OCSF` with structured fields empty. The cursor looks like `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log buffer. | The shorthand text is parsed; an `OUT_OF_RANGE` cursor becomes a gap and a fresh subscription. |
 
+### macOS and Docker Desktop
+
+Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
+29.1.5) and OpenShell 0.1.1 in September 2026.
+
+| Behaviour | Design consequence |
+| --- | --- |
+| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | Landlock stays `hard_requirement`, so no sandbox can start on Docker Desktop: macOS cannot run sandboxes today. The doctor checks the VM kernel for Landlock. The macOS code paths (the Homebrew install, `brew services`, the Docker Desktop host-networking and file-sharing checks) stay in place, and macOS support is tracked in a follow-up issue. |
+| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
+
 ## Supported platforms and versions
 
 - OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
@@ -2112,8 +2127,10 @@ These were not measured, so the design does not rely on a result for them:
   OpenShell config directory that are symbolic links. The CA and client
   certificate may be readable by others, and group-writable files and entries
   only produce a warning.
-- Linux amd64 and arm64. macOS arm64 on Docker Desktop is a preview. Windows,
-  WSL2 and Intel macOS are unsupported.
+- Linux amd64 and arm64. macOS arm64 cannot run sandboxes today: Docker
+  Desktop's Linux VM kernel has no Landlock (see
+  [macOS and Docker Desktop](#macos-and-docker-desktop)), and macOS support is
+  tracked in a follow-up issue. Windows, WSL2 and Intel macOS are unsupported.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
