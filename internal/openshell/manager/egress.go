@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -199,6 +200,13 @@ func egressOffReason(eff *packs.Effective) string {
 	return "the sandbox policy turns web egress off for this sandbox (network mode deny, from " + origin + ")"
 }
 
+// unblocksOff reports the organization's refusal of every unblock
+// (openshell.admin.allow_unblock: false).
+func unblocksOff(err error) bool {
+	var v *packs.Violation
+	return errors.As(err, &v) && v.Constraint == "openshell.admin.allow_unblock"
+}
+
 // effSetting is one resolved setting of eff with its provenance.
 func effSetting(eff *packs.Effective, key string) (packs.Setting, bool) {
 	for _, s := range eff.Explain() {
@@ -317,6 +325,12 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		return nil, err
 	}
 	if err := triage.CheckUnblock(eff, host); err != nil {
+		if unblocksOff(err) && eff.DecideEgress(host, 0).Allowed {
+			// Nothing to lift: the organization's refusal of unblocks
+			// would only send the user to the administrator for nothing.
+			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
+				"%s is not blocked: the sandbox policy lets the sandbox reach it, so there is nothing to unblock", host)
+		}
 		return nil, m.violationErrorFor(ctx, err, req.Sandbox, audit.SandboxEgressUnblock, host)
 	}
 	if req.Always {

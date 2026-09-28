@@ -140,18 +140,18 @@ func (e *Effective) adminViolation(key, attempted, constraint, detail string) *V
 // feed and the mode defaults) can be lifted, and so can a host it allows
 // today (the unblock then only matters once the policy refuses it). The
 // guard, the administrator's lists and the block list are never lifted.
+//
+// What refuses the host for good is checked first, so the refusal says
+// what the user can do: the organization's and the user's own lists (only
+// their owner opens those), this machine, a sandbox without the proxy
+// (whose direct connections ask instead), and only then an organization
+// that turned unblocks off.
 func (e *Effective) allowUnblock(host string) error {
 	host, err := validHost(host)
 	if err != nil {
 		return err
 	}
 	const key = "egress.unblock"
-	if isFalse(e.admin.AllowUnblock) {
-		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
-			"blocked destinations cannot be unblocked; ask your administrator")
-	}
-	// The organization's and the user's own lists explain a refusal best,
-	// whatever else would refuse the host too.
 	if v := e.Egress.adminVerdict(key, host); v != nil {
 		return v
 	}
@@ -174,7 +174,12 @@ func (e *Effective) allowUnblock(host string) error {
 		}
 	}
 	if e.NetworkMode == NetworkDeny {
-		return e.profileViolation(key, host, "the proxy is off, so destinations cannot be unblocked")
+		return e.profileViolation(key, host, "the "+e.Profile+" sandbox has no web proxy, so nothing is unblocked there; "+
+			"its direct connection requests show up as asks you can approve once: defenseclaw sandbox approvals")
+	}
+	if isFalse(e.admin.AllowUnblock) {
+		return e.adminViolation(key, host, "openshell.admin.allow_unblock",
+			"blocked destinations cannot be unblocked; ask your administrator")
 	}
 	return nil
 }
