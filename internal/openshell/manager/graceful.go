@@ -45,17 +45,23 @@ const (
 )
 
 // endHarnessScript sends SIGTERM to the harness processes of the sandbox
-// user (an executable, or one of the first two arguments, under the install
-// root $1) and waits up to $2 tenths of a second for them to exit. It
-// prints how it ended: "none", "exited" or "running".
+// user and waits up to $2 tenths of a second for them to exit. A harness
+// process is one whose executable, or one of whose first three arguments
+// resolved (the launcher runs /usr/local/bin/<command>, a link into the
+// install root; a script harness's interpreter runs a script there), lies
+// under the install root $1. The harness's executable link is often not
+// readable to the exec (a process that is not dumpable), its command line
+// always is. It prints how it ended: "none", "exited" or "running".
 const endHarnessScript = `root=$1; ticks=$2; self=$$; pids=
 for d in /proc/[0-9]*; do
   p=${d#/proc/}
   [ "$p" = "$self" ] && continue
   exe=$(readlink "$d/exe" 2>/dev/null) || exe=
   case "$exe" in "$root"/*) pids="$pids $p"; continue ;; esac
-  for a in $(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | head -n 2); do
-    case "$a" in "$root"/*) pids="$pids $p"; break ;; esac
+  for a in $(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | head -n 3); do
+    case "$a" in /*) ;; *) continue ;; esac
+    r=$(readlink -f "$a" 2>/dev/null) || r=$a
+    case "$r" in "$root"/*) pids="$pids $p"; break ;; esac
   done
 done
 [ -n "$pids" ] || { echo none; exit 0; }

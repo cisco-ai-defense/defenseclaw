@@ -152,4 +152,32 @@ func TestEndHarnessScript(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(out)) != "none" {
 		t.Fatalf("script with no harness = %q, %v", out, err)
 	}
+
+	// A harness the launcher runs through a link outside the install root,
+	// whose executable is an interpreter elsewhere: its command line names
+	// it (live, /usr/local/bin/claude, with an unreadable executable link).
+	script := filepath.Join(root, "bin", "harness.sh")
+	if err := os.WriteFile(script, []byte("while :; do sleep 1; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "harness")
+	if err := os.Symlink(script, link); err != nil {
+		t.Fatal(err)
+	}
+	viaLink := exec.Command("/bin/sh", link)
+	if err := viaLink.Start(); err != nil {
+		t.Fatal(err)
+	}
+	linked := make(chan struct{})
+	go func() { _ = viaLink.Wait(); close(linked) }()
+	t.Cleanup(func() { _ = viaLink.Process.Kill() })
+	out, err = exec.Command("/bin/sh", "-c", endHarnessScript, "defenseclaw-end-harness", root, "50").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "exited" {
+		t.Fatalf("script with a linked harness = %q, %v", out, err)
+	}
+	select {
+	case <-linked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the linked harness did not exit")
+	}
 }
