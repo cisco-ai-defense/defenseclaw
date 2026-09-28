@@ -34,10 +34,11 @@ Overview and a Sandboxes panel. Still to come:
   Claude Code and Codex bring the user's MCP servers along and get per-run
   managed configuration (see
   [per-sandbox managed configuration](#per-sandbox-managed-configuration)).
-- **Harnesses.** `claudecode`, `codex`, `opencode`, `copilot`, `amp`,
-  `cursor`, `kiro` and `devin` have harness specs and sandbox artifacts. The
-  Amp, Cursor Agent and Devin images stay unverified until a probe runs with a
-  vendor account (see [Sandboxed connectors](#sandboxed-connectors)).
+- **Harnesses.** `claudecode`, `codex`, `opencode`, `copilot`, `kiro`,
+  `hermes`, `openhands`, `omnigent`, `antigravity`, `amp`, `cursor` and
+  `devin` have harness specs and sandbox artifacts. The `amp`, `cursor` and
+  `devin` images stay unverified until a probe runs with a vendor account
+  (see [Sandboxed connectors](#sandboxed-connectors)).
 
 ## Why OpenShell
 
@@ -724,6 +725,8 @@ ahead of time):
 | `defenseclaw-amp` | `AMP_API_KEY` | bearer | `ampcode.com:443` |
 | `defenseclaw-cursor` | `CURSOR_API_KEY` | bearer | `api2.cursor.sh:443`, `api3.cursor.sh:443`, `repo42.cursor.sh:443` |
 | `defenseclaw-kiro` | `KIRO_API_KEY` | bearer | `q.us-east-1.amazonaws.com:443`, `runtime.us-east-1.kiro.dev:443`, `management.us-east-1.kiro.dev:443`, `prod.us-east-1.auth.desktop.kiro.dev:443` |
+| `defenseclaw-bedrock-mantle-openai-<region>` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` (Hermes, OpenHands and OmniGent) |
+| `defenseclaw-gemini` | `GEMINI_API_KEY` | `x-goog-api-key` | `generativelanguage.googleapis.com:443` (Antigravity) |
 | `dc-cred-<hash>` | the `--credential` variable | bearer | the host and port it is bound to |
 
 A Claude subscription (Pro or Max) signs in on this machine: `claude
@@ -733,9 +736,10 @@ Without a shared credential the run banner says so, and that a login inside
 the sandbox stores a real token there (see below).
 
 The Copilot GitHub-token, Amp, Cursor and Kiro endpoint sets come from the
-pinned CLIs, not from a live run (no account was available). Devin CLI has no
-provider profile: it authenticates with an interactive login inside the
-sandbox.
+pinned CLIs, not from a live run (no account was available). The Gemini
+profile has not carried a real key either: Antigravity was verified against a
+Gemini API mock only. Devin CLI has no provider profile: it authenticates
+with an interactive login inside the sandbox.
 
 An in-sandbox vendor login (`cursor-launch login`, `kiro-launch login
 --use-device-flow`, `devin-launch auth login --force-manual-token-flow`;
