@@ -2478,10 +2478,11 @@ def _assign_rule_pack(app: AppContext, connector_key: str | None, path: str, *, 
 
 
 def _gateway_running(app: AppContext) -> bool:
-    from defenseclaw.commands import cmd_setup
+    # Same probe as cmd_setup._is_pid_alive, without importing cmd_setup.
+    from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return cmd_setup._is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
     except Exception:  # noqa: BLE001 — an unreadable PID file means "not running".
         return False
 
