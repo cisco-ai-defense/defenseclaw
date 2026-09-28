@@ -108,7 +108,7 @@ var Devin = register(&Spec{
 		{Host: ".config/devin/agents", Sandbox: "/sandbox/.config/devin/agents", Dir: true, Note: "user agents"},
 	},
 	preseedRefresh: []string{
-		"put the DefenseClaw hooks back into ~/.config/devin/config.json from the root-owned template, keeping the other settings (the agent can edit or remove them)",
+		"put the DefenseClaw hooks back into ~/.config/devin/config.json from the root-owned template, keeping the other settings (the agent can edit or remove them), and refuse to start when config.json is not a regular file or the restored file lacks the hooks",
 		"pin HOME and drop XDG_CONFIG_HOME, which move the config Devin reads, and refuse a caller --config",
 		"skip the workspace trust check with --respect-workspace-trust false (a headless --print run fails in an untrusted directory, and a declined trust prompt runs Restricted Mode without hooks), refuse a caller --respect-workspace-trust and drop the respect_workspace_trust and skip_workspace_trust config keys; the project's own .devin hooks then load beside DefenseClaw's without a prompt",
 	},
@@ -146,6 +146,11 @@ export HOME
 cfg="$HOME/.config/devin/config.json"
 template="` + connector.DevinSandboxConfigTemplatePath + `"
 [ -x /usr/bin/jq ] || refuse "jq is missing" "The DefenseClaw hooks cannot be restored without it."
+# mv -f onto a directory (or a link to one) moves the restored config inside
+# it and exits 0, and Devin would start with no config.json and no hooks.
+if [ -e "$cfg" ] && [ ! -f "$cfg" ]; then
+  refuse "$cfg is not a regular file" "Devin reads the DefenseClaw hooks from it; remove it and start Devin again."
+fi
 /bin/mkdir -p "${cfg%/*}" 2>/dev/null || refuse "${cfg%/*} cannot be created" "The DefenseClaw hooks live there."
 tmp="$(/usr/bin/mktemp "$cfg.XXXXXX" 2>/dev/null)" || refuse "$cfg cannot be updated" "The DefenseClaw hooks live there."
 # Keep the user's other settings, less the workspace trust keys, which could
@@ -161,4 +166,12 @@ elif ! /bin/cp "$template" "$tmp" 2>/dev/null; then
 fi
 /bin/chmod 0600 "$tmp" 2>/dev/null
 /bin/mv -f "$tmp" "$cfg" 2>/dev/null || { /bin/rm -f "$tmp"; refuse "the DefenseClaw hooks could not be restored to $cfg" "Devin runs without hooks when they are missing."; }
+# The restore must have landed: a regular file carrying the template's
+# hooks, also when something replaced the config in between.
+if [ -L "$cfg" ] || [ ! -f "$cfg" ] ||
+  ! /usr/bin/jq -e --slurpfile t "$template" '.hooks == $t[0].hooks' "$cfg" >/dev/null 2>&1; then
+  /bin/rm -f "$tmp" 2>/dev/null
+  refuse "the DefenseClaw hooks could not be restored to $cfg" "Devin runs without hooks when they are missing."
+fi
+unset tmp
 ` + launcherExec(`/usr/local/bin/devin --respect-workspace-trust false "$@"`)

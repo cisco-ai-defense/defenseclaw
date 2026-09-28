@@ -344,3 +344,53 @@ func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 		}
 	}
 }
+
+// TestDevinLauncherRefusesANonFileConfig replaces the Devin config.json with
+// a directory, and with a link to one. `mv -f` would move the restored
+// config inside it and exit 0, and Devin would start with no hooks; the
+// launcher must refuse instead, leave the directory alone, and start again
+// once the path is free.
+func TestDevinLauncherRefusesANonFileConfig(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/jq"); err != nil {
+		t.Skip("/usr/bin/jq is required")
+	}
+	for name, plant := range map[string]func(t *testing.T, cfg string) string{
+		"directory": func(t *testing.T, cfg string) string {
+			writeFile(t, filepath.Join(cfg, "kept"), []byte("x\n"))
+			return cfg
+		},
+		"link to a directory": func(t *testing.T, cfg string) string {
+			elsewhere := t.TempDir()
+			writeFile(t, filepath.Join(elsewhere, "kept"), []byte("x\n"))
+			if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, cfg); err != nil {
+				t.Fatal(err)
+			}
+			return elsewhere
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			launcher, home := launcherFixture(t, Devin, "echo started\n")
+			cfg := filepath.Join(home, ".config", "devin", "config.json")
+			dir := plant(t, cfg)
+			code, out := startLauncher(t, launcher, home, home, nil, "-p", "hi")
+			if code != 2 || strings.Contains(out, "started") || !strings.Contains(out, cfg+" is not a regular file") {
+				t.Fatalf("exit %d:\n%s", code, out)
+			}
+			if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+				t.Fatalf("the launcher wrote into the directory: %v", entries)
+			}
+			if err := os.RemoveAll(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if code, out := startLauncher(t, launcher, home, home, nil, "-p", "hi"); code != 0 || !strings.Contains(out, "started") {
+				t.Fatalf("after freeing the path: exit %d\n%s", code, out)
+			}
+			if info, err := os.Lstat(cfg); err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("config after the restore: %v %v", info, err)
+			}
+		})
+	}
+}
