@@ -81,6 +81,7 @@ from defenseclaw.tui.panels.overview import (
     string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
+from defenseclaw.tui.panels.policy import PoliciesPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
@@ -97,6 +98,7 @@ from defenseclaw.tui.panels.setup import (
 )
 from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
+from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
 from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
@@ -306,6 +308,7 @@ PANELS = (
     ("ai", "V", "AI Discovery"),
     ("runtime", "N", "Runtime"),
     ("registries", "R", "Registries"),
+    ("policies", "P", "Policies"),
     ("setup", "0", "Setup"),
 )
 
@@ -396,7 +399,7 @@ class _BodyStatic(Static):
             event.stop()
 
 
-class DefenseClawTUI(SandboxPanelMixin, App[None]):
+class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     """Textual TUI foundation.
 
     This first slice intentionally implements shell, routing, command
@@ -889,6 +892,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         ai_discovery_model: AIDiscoveryPanelModel | None = None,
         runtime_model: RuntimePanelModel | None = None,
         sandbox_model: SandboxesPanelModel | None = None,
+        policy_model: PoliciesPanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -966,6 +970,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         if runtime_model is not None:
             self.overview_model.set_runtime_overview(self.runtime_model.overview())
         self._sandbox_init(sandbox_model)
+        self._policy_init(policy_model)
         self.setup_model = setup_model or SetupPanelModel(config)
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
@@ -1429,6 +1434,17 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                         ("sandboxes-refresh", "Refresh", "Re-read the sandboxes now"),
                     ):
                         yield Button(label, id=button_id, compact=True, tooltip=tip)
+                with Horizontal(id="policies-controls", classes="panel-controls hidden"):
+                    for button_id, label, tip in (
+                        ("policies-view-policies", "Policies", "Named security policies (1)"),
+                        ("policies-view-packs", "Packs", "Guardrail rule pack per connector (2)"),
+                        ("policies-view-sandbox", "Sandbox", "Sandbox policy packs, read-only (3)"),
+                        ("policies-activate", "Activate", "Pick a policy, preview what changes, activate it (Enter)"),
+                        ("policies-change-pack", "Change pack", "Switch the rule pack for all connectors or one (Enter)"),
+                        ("policies-details", "Details", "Show the highlighted row (i)"),
+                        ("policies-refresh", "Refresh", "Re-read policies and packs (r)"),
+                    ):
+                        yield Button(label, id=button_id, compact=True, tooltip=tip)
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
                 # All four panels share ``CatalogListModel`` semantics, so the
                 # bars below all map button-id → key → ``handle_key()`` and
@@ -1835,6 +1851,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         # Sandboxes: REST refresh plus, once sandboxes are on, the live
         # activity stream that raises blocked-destination and ask toasts.
         self._sandbox_mount()
+        # Policies: read the catalog once so Overview's posture and the
+        # status strip name the active policy.
+        self._policy_mount()
         # Native delivery evidence changes while the TUI is open; refresh the
         # same bounded snapshot periodically without coupling it to 3s health.
         self.set_interval(30.0, self._schedule_observability_status_load)
@@ -2250,6 +2269,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         if panel == "sandboxes":
             self._schedule_sandbox_poll()
+        if panel == "policies":
+            model = self.policy_model
+            if not model.loaded:
+                self._schedule_policy_load()
+            if model.view == "sandbox_packs" and not model.sandbox_loaded:
+                self._schedule_policy_load(sandbox=True)
         if (
             panel == "runtime"
             and not self._runtime_model_injected
@@ -3160,6 +3185,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             event.stop()
             self._handle_sandbox_control(button_id)
             return
+        if button_id.startswith("policies-"):
+            event.stop()
+            self._handle_policy_control(button_id)
+            return
         # All four catalog panels share ``CatalogListModel`` and the
         # ``_apply_catalog_action`` dispatcher, so the button-id →
         # handle_key mapping is uniform. Routing each prefix into its
@@ -3527,6 +3556,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         elif self.active_panel == "sandboxes":
             self.sandbox_model.cursor = event.cursor_row
             self._sync_sandbox_controls()
+        elif self.active_panel == "policies":
+            self.policy_model.cursor = event.cursor_row
+            self._update_body_only()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
@@ -3625,6 +3657,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.ai_discovery_model.set_cursor(event.cursor_row)
             if repeated_click:
                 self._apply_ai_discovery_action(self.ai_discovery_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel == "policies":
+            self.policy_model.cursor = event.cursor_row
+            if repeated_click:
+                self._apply_policy_action(self.policy_model.handle_key("enter"))
             else:
                 self._update_body_only()
         elif self.active_panel == "setup":
@@ -4131,6 +4169,15 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 ("j/k or Up/Down", "Navigate registries"),
                 ("r", "Refresh"),
             ],
+            "policies": [
+                ("1 / 2 / 3", "Policies / rule packs / sandbox packs"),
+                ("j/k or Up/Down", "Navigate the selected view"),
+                ("Enter", "Policies: pick and activate a policy (preview, confirm)"),
+                ("Enter", "Rule packs: switch the pack for all connectors or one"),
+                ("i", "Details of the highlighted row"),
+                ("r", "Refresh"),
+                ("p (Overview)", "Opens this panel; Runtime keeps p for its planes"),
+            ],
             "setup": setup_keys.help_rows(self._setup_view(), setup_keys.setup_conditions(self.setup_model)),
         }
         active_keys = panel_sheets.get(
@@ -4273,6 +4320,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 self._table_columns = self.sandbox_model.data_table_columns(compact)
                 self._table_rows = self.sandbox_model.data_table_rows(compact)
             self.body_text = self._sandbox_body_text()
+            return self.body_text
+        if self.active_panel == "policies":
+            width = int(getattr(self.size, "width", 0) or 0)
+            self._table_columns = self.policy_model.data_table_columns(width)
+            self._table_rows = self.policy_model.data_table_rows(width)
+            self.body_text = self._policies_body_text()
             return self.body_text
         if self.active_panel == "setup":
             self._table_columns, self._table_rows = self._setup_table()
@@ -4519,6 +4572,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         ai = self.query_one("#ai-controls", Horizontal)
         runtime = self.query_one("#runtime-controls", Horizontal)
         sandboxes = self.query_one("#sandboxes-controls", Horizontal)
+        policies = self.query_one("#policies-controls", Horizontal)
         # Catalog control bars — Skills/MCPs/Plugins/Tools are independent
         # ``Horizontal`` containers (rather than one shared bar keyed on
         # active_panel) so each panel can advertise the action keys it
@@ -4558,6 +4612,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.active_panel != "sandboxes" or self.help_open or self._sandbox_button_bar_collapsed(),
             "hidden",
         )
+        policies.set_class(self.active_panel != "policies" or self.help_open, "hidden")
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
         # Keep the plugins bar panel-scoped. When a connector cannot
@@ -4596,6 +4651,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self._sync_runtime_controls()
         if self.active_panel == "sandboxes" and not self.help_open:
             self._sync_sandbox_controls()
+        if self.active_panel == "policies" and not self.help_open:
+            self._sync_policy_controls()
         if self.active_panel in self.catalog_models and not self.help_open:
             self._sync_catalog_controls(self.active_panel)
 
@@ -8388,6 +8445,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             ("i", "Inventory"),
             ("g", "Guardrail"),
             ("m", "Mode"),
+            ("p", "Policies"),
             ("l", "Logs"),
             ("N", "Notify"),
             ("u", "Upgrade"),
@@ -9351,6 +9409,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
     def _hint_panel_view(self, active_panel: str) -> str:
         if active_panel == "sandboxes":
             return self.sandbox_model.view
+        if active_panel == "policies":
+            return self.policy_model.view
         if self.active_panel == "setup":
             return self._setup_view()
         return ""
@@ -9803,6 +9863,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
     def _detail_text(self) -> str:
         if self.active_panel == "alerts":
             return self.alerts_model.detail_text()
+        if self.active_panel == "policies":
+            detail = self.policy_model.detail_text()
+            if not detail:
+                return ""
+            title, _, rest = detail.partition("\n")
+            return f"[bold #A78BFA]{rich_escape(title)}[/]\n{rich_escape(rest)}"
         if self.active_panel == "registries" and self.registries_model.detail_open:
             detail = self.registries_model.selected_detail_info()
             if detail is None:
@@ -9890,6 +9956,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return self.ai_discovery_model.cursor
         if self.active_panel == "sandboxes":
             return self.sandbox_model.cursor
+        if self.active_panel == "policies":
+            return self.policy_model.cursor
         if self.active_panel == "setup":
             return self._setup_cursor()
         return 0
@@ -9916,6 +9984,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             if event.character == "U":
                 key = "U"
             return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
+        if self.active_panel == "policies":
+            return self._apply_policy_action(self.policy_model.handle_key(_vim_key(key)))
         if self.active_panel == "alerts":
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
@@ -9958,8 +10028,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 else:
                     self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
-            if key in {"i", "l"}:
-                self.action_switch_panel({"i": "inventory", "l": "logs"}[key])
+            if key in {"i", "l", "p"}:
+                self.action_switch_panel({"i": "inventory", "l": "logs", "p": "policies"}[key])
                 return True
             if key in {"N", "X"}:
                 if key == "N":
@@ -11184,6 +11254,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "doctor":
             self._load_doctor_cache()
+        elif command == "policy" or (
+            command == "guardrail" and len(args) > 1 and args[1] in {"use-pack", "enable", "disable"}
+        ):
+            if command == "guardrail":
+                self._refresh_cached_config()
+            self._schedule_policy_load(sandbox=self.policy_model.sandbox_loaded)
         elif panel := _catalog_panel_invalidated_by_command(args):
             await self._refresh_loaded_catalog_after_mutation(panel)
 
@@ -11385,6 +11461,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         self.overview_model.set_cfg(new_overview_cfg)
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)
+        self.policy_model.set_config(new_cfg)
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
         if (

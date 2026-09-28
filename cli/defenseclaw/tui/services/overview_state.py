@@ -495,7 +495,7 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("i", "Inventory", ("aibom", "scan", "--json")),
     ("g", "Guardrail", ("setup", "guardrail")),
     ("m", "Mode", ("setup", "connector")),
-    ("p", "Policy", ("policy", "list")),
+    # ``p`` switches to the Policies panel (app.py), so it has no command here.
     ("l", "Logs", ("logs",)),
     ("N", "Notify", ("setup", "notifications")),
     ("u", "Upgrade", ("upgrade",)),

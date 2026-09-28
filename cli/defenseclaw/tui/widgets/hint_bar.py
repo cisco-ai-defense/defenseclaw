@@ -84,6 +84,14 @@ class HintEngine:
             from defenseclaw.tui.services.sandbox_state import sandbox_keys_hint
 
             return state.panel_keys or sandbox_keys_hint(state.panel_view or "sandboxes")
+        if panel == "policies":
+            from defenseclaw.platform_support import openshell_sandboxes_supported
+            from defenseclaw.tui.services.policy_state import policies_keys_hint
+
+            return policies_keys_hint(
+                state.panel_view or "policies",
+                sandbox_supported=openshell_sandboxes_supported(),
+            )
         if panel == "setup":
             return self._setup_hint(state, status)
         if panel in {"first-run", "firstrun"}:
