@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
+	"golang.org/x/sys/windows"
 )
 
 // windowsCursorUserHooksBackupName is the copy of a user's
@@ -46,12 +48,53 @@ func cleanupWindowsCursorPerUserHookRegistrations(target windowsGenericManagedTa
 	var cleanup windowsCursorUserHookCleanup
 	err := connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
-			var err error
-			cleanup, err = removeWindowsCursorPerUserHookRegistrations(target.home, target.dataDir)
+			localAppData, userProgramFiles, err := windowsCursorTargetUserFolders()
+			if err != nil {
+				return err
+			}
+			cleanup, err = removeWindowsCursorPerUserHookRegistrations(target.home, connector.CursorPerUserInstall{
+				DataDir:          target.dataDir,
+				LocalAppData:     localAppData,
+				UserProgramFiles: userProgramFiles,
+			})
 			return err
 		})
 	})
 	logWindowsCursorPerUserHookCleanup(target.home, cleanup, err)
+}
+
+// windowsCursorTargetUserFolders resolves the LocalAppData and per-user
+// Programs Known Folders of the user the calling thread impersonates.
+var windowsCursorTargetUserFolders = resolveWindowsImpersonatedUserFolders
+
+// resolveWindowsImpersonatedUserFolders reads the Known Folders from the
+// calling thread's impersonation token. The connector's own Known Folder
+// lookups use the process token, which in the guardian is LocalSystem's, so
+// they do not name the target user's folders. Without an impersonation token
+// it fails instead of using the process user's folders.
+func resolveWindowsImpersonatedUserFolders() (localAppData, userProgramFiles string, err error) {
+	var token windows.Token
+	if err := windows.OpenThreadToken(
+		windows.CurrentThread(),
+		windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE,
+		true,
+		&token,
+	); err != nil {
+		return "", "", fmt.Errorf("open the target user's thread token: %w", err)
+	}
+	defer token.Close()
+	localAppData, err = token.KnownFolderPath(windows.FOLDERID_LocalAppData, windows.KF_FLAG_NO_PACKAGE_REDIRECTION)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve the target user's LocalAppData folder: %w", err)
+	}
+	if strings.TrimSpace(localAppData) == "" {
+		return "", "", errors.New("the target user's LocalAppData folder is empty")
+	}
+	userProgramFiles, err = winfolders.UserProgramFilesForToken(token)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve the target user's Programs folder: %w", err)
+	}
+	return filepath.Clean(localAppData), userProgramFiles, nil
 }
 
 // logWindowsCursorPerUserHookCleanup writes to os.Stderr as it is when the
@@ -93,12 +136,12 @@ func logWindowsCursorPerUserHookCleanup(home string, cleanup windowsCursorUserHo
 }
 
 // removeWindowsCursorPerUserHookRegistrations does the cleanup for home and
-// the per-user DefenseClaw data directory dataDir. The caller acts as the
+// the per-user DefenseClaw installation install. The caller acts as the
 // user who owns home. A missing file, or one without DefenseClaw
 // registrations, is left untouched. A hooks.json that is a link, has other
 // hard links, exceeds the size limit, is not one JSON object, or changes
 // while it is being cleaned is left as it was and reported as an error.
-func removeWindowsCursorPerUserHookRegistrations(home, dataDir string) (windowsCursorUserHookCleanup, error) {
+func removeWindowsCursorPerUserHookRegistrations(home string, install connector.CursorPerUserInstall) (windowsCursorUserHookCleanup, error) {
 	cursorDir := filepath.Join(home, ".cursor")
 	cleanup := windowsCursorUserHookCleanup{
 		path:   filepath.Join(cursorDir, "hooks.json"),
@@ -118,7 +161,7 @@ func removeWindowsCursorPerUserHookRegistrations(home, dataDir string) (windowsC
 	if err != nil || !found {
 		return cleanup, err
 	}
-	updated, removed, err := connector.RemoveCursorPerUserHookRegistrations(original, dataDir)
+	updated, removed, err := connector.RemoveCursorPerUserHookRegistrations(original, install)
 	if err != nil {
 		return cleanup, err
 	}

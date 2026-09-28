@@ -90,7 +90,7 @@ func (f cursorUserHooksFixture) remove(t *testing.T, data []byte) ([]byte, []Cur
 	var removed []CursorUserHookRemoval
 	var removeErr error
 	if err := WithUserHomeDir(f.home, func() error {
-		out, removed, removeErr = RemoveCursorPerUserHookRegistrations(data, f.dataDir)
+		out, removed, removeErr = RemoveCursorPerUserHookRegistrations(data, CursorPerUserInstall{DataDir: f.dataDir})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -314,6 +314,73 @@ func TestRemoveCursorPerUserHookRegistrationsRemovesOlderNativeCommands(t *testi
 	}
 }
 
+// The guardian removes the per-user entries while it impersonates the user,
+// but the connector's Known Folder lookups use the process token, which is
+// LocalSystem's there. The direct native commands under the user's
+// LocalAppData and per-user Programs folders are therefore matched from the
+// folders the caller resolves for the user.
+func TestRemoveCursorPerUserHookRegistrationsRemovesOlderNativeCommandsInTheUsersFolders(t *testing.T) {
+	f := newCursorUserHooksFixture(t)
+	localAppData := filepath.Join(f.home, "AppData", "Local")
+	programs := filepath.Join(localAppData, "Programs")
+	native := func(binary string) string {
+		return `"` + binary + `" hook --connector cursor`
+	}
+	owned := []string{
+		native(filepath.Join(localAppData, "DefenseClaw", "HookRuntime", "defenseclaw-hook.exe")),
+		native(filepath.Join(programs, "DefenseClaw", "bin", "defenseclaw-hook.exe")),
+		native(filepath.Join(programs, "DefenseClaw", "bin", "defenseclaw-gateway.exe")),
+	}
+	foreign := []interface{}{
+		map[string]interface{}{"command": native(filepath.Join(programs, "Other", "bin", "defenseclaw-hook.exe"))},
+		map[string]interface{}{"command": owned[0] + " --enterprise-managed"},
+	}
+	var entries []interface{}
+	for _, command := range owned {
+		entries = append(entries, map[string]interface{}{"type": "command", "command": command})
+	}
+	data, err := json.Marshal(map[string]interface{}{
+		"version": 1,
+		"hooks":   map[string]interface{}{"preToolUse": append(entries, foreign...)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without the user's folders, as when they are resolved from the
+	// process token, these entries are not recognized.
+	if got, removed, err := f.remove(t, data); err != nil || len(removed) != 0 || !bytes.Equal(got, data) {
+		t.Fatalf("without the user's folders: (%q, %#v, %v), want the input unchanged", got, removed, err)
+	}
+
+	var got []byte
+	var removed []CursorUserHookRemoval
+	if err := WithUserHomeDir(f.home, func() error {
+		got, removed, err = RemoveCursorPerUserHookRegistrations(data, CursorPerUserInstall{
+			DataDir:          f.dataDir,
+			LocalAppData:     localAppData,
+			UserProgramFiles: programs,
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var commands []string
+	for _, removal := range removed {
+		commands = append(commands, removal.Command)
+	}
+	if !reflect.DeepEqual(commands, owned) {
+		t.Fatalf("removed %v, want %v", commands, owned)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(got, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if kept := cfg["hooks"].(map[string]interface{})["preToolUse"]; !reflect.DeepEqual(kept, foreign) {
+		t.Fatalf("kept entries = %#v, want %#v", kept, foreign)
+	}
+}
+
 func TestRemoveCursorPerUserHookRegistrationsLeavesFilesWithoutThem(t *testing.T) {
 	f := newCursorUserHooksFixture(t)
 	command := f.setupPerUser(t)
@@ -368,7 +435,7 @@ func TestRemoveCursorPerUserHookRegistrationsRefusesFilesItCannotEditExactly(t *
 			}
 		})
 	}
-	if _, _, err := RemoveCursorPerUserHookRegistrations([]byte(`{}`), " "); err == nil {
+	if _, _, err := RemoveCursorPerUserHookRegistrations([]byte(`{}`), CursorPerUserInstall{DataDir: " "}); err == nil {
 		t.Fatal("an empty data directory was accepted")
 	}
 }

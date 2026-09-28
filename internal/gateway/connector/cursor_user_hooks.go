@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -29,8 +30,8 @@ import (
 // ~/.cursor/hooks.json. The managed preToolUse hook treats them as foreign
 // hooks, because they run an adapter from the user's own data directory, so
 // it denies every tool call until they are removed. The managed installer
-// removes them with the ownership rule per-user teardown uses and leaves the
-// rest of the file as it was.
+// removes the commands per-user teardown run by that user would remove and
+// leaves the rest of the file as it was.
 
 // CursorUserHookRemoval names one registration removed from a user's Cursor
 // hooks.json.
@@ -41,26 +42,68 @@ type CursorUserHookRemoval struct {
 
 var utf8ByteOrderMark = []byte{0xef, 0xbb, 0xbf}
 
+// CursorPerUserInstall names the per-user DefenseClaw installation whose
+// Cursor registrations RemoveCursorPerUserHookRegistrations removes.
+type CursorPerUserInstall struct {
+	// DataDir is the per-user DefenseClaw data directory.
+	DataDir string
+	// LocalAppData and UserProgramFiles are the user's LocalAppData and
+	// per-user Programs Known Folders, which hold the executables of the
+	// older direct native commands. The connector's own Known Folder lookups
+	// use the process token, so a caller acting for another user resolves
+	// these from that user's token. An empty folder adds no commands.
+	LocalAppData     string
+	UserProgramFiles string
+}
+
 // RemoveCursorPerUserHookRegistrations returns data without the Cursor hook
-// registrations that per-user DefenseClaw setup writes for dataDir, the
-// per-user DefenseClaw data directory. It uses the exact-command rule of
-// per-user teardown (cursorOwnedHookCommands): the PowerShell adapter command
-// and the older direct native commands. Only entries of the event arrays in
-// the top-level "hooks" object are removed. Every other byte of data is kept,
-// including the other entries, their order and the text between them, so an
-// event array whose entries were all removed stays as an empty array.
+// registrations that per-user DefenseClaw setup writes for install. It uses
+// the exact-command rule of per-user teardown (cursorOwnedHookCommands): the
+// PowerShell adapter command for install.DataDir and the older direct native
+// commands, together with the older direct native commands for the Known
+// Folders in install, so that it finds what per-user teardown run by that
+// user finds. Only entries of the event arrays in the top-level "hooks"
+// object are removed. Every other byte of data is kept, including the other
+// entries, their order and the text between them, so an event array whose
+// entries were all removed stays as an empty array.
 //
 // With nothing to remove it returns data and no removals. It returns an error
 // when data is not one JSON object, repeats a key in the top-level or "hooks"
-// object, or exceeds the Cursor hooks size limit. The older native commands
+// object, or exceeds the Cursor hooks size limit. Some older native commands
 // name paths in the user's home, so a caller acting for another user runs it
 // inside WithUserHomeDir.
-func RemoveCursorPerUserHookRegistrations(data []byte, dataDir string) ([]byte, []CursorUserHookRemoval, error) {
-	if strings.TrimSpace(dataDir) == "" {
+func RemoveCursorPerUserHookRegistrations(data []byte, install CursorPerUserInstall) ([]byte, []CursorUserHookRemoval, error) {
+	if strings.TrimSpace(install.DataDir) == "" {
 		return nil, nil, errors.New("connector: the per-user DefenseClaw data directory is required")
 	}
-	owned := newCursorHookCommandMatcher(cursorOwnedHookCommands(SetupOpts{DataDir: dataDir}))
+	owned := newCursorHookCommandMatcher(append(
+		cursorOwnedHookCommands(SetupOpts{DataDir: install.DataDir}),
+		cursorNativeHookCommandsInUserFolders(install.LocalAppData, install.UserProgramFiles)...,
+	))
 	return removeCursorHookRegistrations(data, owned)
+}
+
+// cursorNativeHookCommandsInUserFolders returns the older direct native Cursor
+// commands whose executables are in the given Known Folders: the HookRuntime
+// launcher under LocalAppData and the per-user installation's launcher and
+// gateway under UserProgramFiles. For the process user these are the commands
+// legacyCursorNativeHookCommands builds from canonicalNativeWindowsHookBinary,
+// canonicalNativeWindowsInstalledHookBinary and
+// canonicalNativeWindowsInstalledGatewayBinary.
+func cursorNativeHookCommandsInUserFolders(localAppData, userProgramFiles string) []string {
+	var binaries []string
+	if localAppData = strings.TrimSpace(localAppData); localAppData != "" {
+		binaries = append(binaries, filepath.Join(localAppData, "DefenseClaw", "HookRuntime", windowsHookBinaryName))
+	}
+	if userProgramFiles = strings.TrimSpace(userProgramFiles); userProgramFiles != "" {
+		bin := filepath.Join(userProgramFiles, "DefenseClaw", "bin")
+		binaries = append(binaries, filepath.Join(bin, windowsHookBinaryName), filepath.Join(bin, windowsGatewayBinaryName))
+	}
+	commands := make([]string, 0, len(binaries))
+	for _, binary := range binaries {
+		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
+	}
+	return commands
 }
 
 func removeCursorHookRegistrations(data []byte, owned cursorHookCommandMatcher) ([]byte, []CursorUserHookRemoval, error) {

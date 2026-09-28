@@ -9,9 +9,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/winfolders"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -38,6 +42,10 @@ func newWindowsCursorUserHooksFixture(t *testing.T) windowsCursorUserHooksFixtur
 		t.Fatal(err)
 	}
 	return f
+}
+
+func (f windowsCursorUserHooksFixture) install() connector.CursorPerUserInstall {
+	return connector.CursorPerUserInstall{DataDir: f.dataDir}
 }
 
 func (f windowsCursorUserHooksFixture) entry(t *testing.T) string {
@@ -83,7 +91,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsKeepsOtherEntriesAndABackup(
 		"    \"stop\": []\r\n  }\r\n}\r\n"
 	f.write(t, f.hooks, original)
 
-	cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir)
+	cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +107,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsKeepsOtherEntriesAndABackup(
 
 	// The next install or repair finds nothing to remove and leaves both
 	// files as they are.
-	again, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir)
+	again, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install())
 	if err != nil || len(again.removed) != 0 {
 		t.Fatalf("second cleanup = (%#v, %v), want a no-op", again, err)
 	}
@@ -113,7 +121,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsKeepsOtherEntriesAndABackup(
 
 func TestRemoveWindowsCursorPerUserHookRegistrationsLeavesFilesWithoutThemAlone(t *testing.T) {
 	f := newWindowsCursorUserHooksFixture(t)
-	if cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err != nil || len(cleanup.removed) != 0 {
+	if cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err != nil || len(cleanup.removed) != 0 {
 		t.Fatalf("no .cursor folder: (%#v, %v), want a no-op", cleanup, err)
 	}
 	assertWindowsCursorTestFileAbsent(t, filepath.Dir(f.hooks))
@@ -121,7 +129,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsLeavesFilesWithoutThemAlone(
 	if err := os.MkdirAll(filepath.Dir(f.hooks), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err != nil || len(cleanup.removed) != 0 {
+	if cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err != nil || len(cleanup.removed) != 0 {
 		t.Fatalf("no hooks.json: (%#v, %v), want a no-op", cleanup, err)
 	}
 	assertWindowsCursorTestFileAbsent(t, f.hooks)
@@ -129,7 +137,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsLeavesFilesWithoutThemAlone(
 
 	foreign := `{"version":1,"hooks":{"preToolUse":[{"command":"node audit.js"}]}}`
 	f.write(t, f.hooks, foreign)
-	if cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err != nil || len(cleanup.removed) != 0 {
+	if cleanup, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err != nil || len(cleanup.removed) != 0 {
 		t.Fatalf("no DefenseClaw entries: (%#v, %v), want a no-op", cleanup, err)
 	}
 	if got := readWindowsCursorTestFile(t, f.hooks); got != foreign {
@@ -148,7 +156,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsRefusesFilesItShouldNotRewri
 	if err := os.Link(f.hooks, other); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err == nil {
+	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err == nil {
 		t.Fatal("a hard-linked hooks.json was rewritten")
 	}
 	if got := readWindowsCursorTestFile(t, other); got != body {
@@ -162,7 +170,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsRefusesFilesItShouldNotRewri
 	// A file that is not one JSON object.
 	invalid := body + ` // per-user`
 	f.write(t, f.hooks, invalid)
-	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err == nil {
+	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err == nil {
 		t.Fatal("an invalid hooks.json was rewritten")
 	}
 	if got := readWindowsCursorTestFile(t, f.hooks); got != invalid {
@@ -175,7 +183,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsRefusesFilesItShouldNotRewri
 	if err := os.Mkdir(f.backup, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err == nil {
+	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err == nil {
 		t.Fatal("hooks.json was rewritten without a backup")
 	}
 	if got := readWindowsCursorTestFile(t, f.hooks); got != body {
@@ -195,7 +203,7 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsRefusesFilesItShouldNotRewri
 		t.Logf("symbolic link not created (%v); skipping the link case", err)
 		return
 	}
-	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.dataDir); err == nil {
+	if _, err := removeWindowsCursorPerUserHookRegistrations(f.home, f.install()); err == nil {
 		t.Fatal("a linked hooks.json was rewritten")
 	}
 	if got := readWindowsCursorTestFile(t, target); got != body {
@@ -241,7 +249,7 @@ func TestCleanupWindowsCursorPerUserHookRegistrationsRunsAsTheTargetAndLogs(t *t
 	originalImpersonation := windowsEnterpriseTargetImpersonation
 	windowsEnterpriseTargetImpersonation = func(target *windows.SID, home string, fn func() error) error {
 		impersonated = append(impersonated, target.String()+"|"+home)
-		return fn()
+		return runWindowsTestThreadImpersonatedAsSelf(fn)
 	}
 	t.Cleanup(func() {
 		windowsEnterpriseTargetImpersonation = originalImpersonation
@@ -283,5 +291,108 @@ func TestCleanupWindowsCursorPerUserHookRegistrationsRunsAsTheTargetAndLogs(t *t
 	cleanupWindowsCursorPerUserHookRegistrations(target)
 	if line := logged(); line != "" {
 		t.Fatalf("guardian log = %q, want nothing for a file without DefenseClaw entries", line)
+	}
+}
+
+// The guardian's own Known Folder lookups name LocalSystem's folders, so the
+// cleanup resolves the target's folders while it impersonates the target and
+// removes the older direct native commands found there.
+func TestCleanupWindowsCursorPerUserHookRegistrationsUsesTheTargetsFolders(t *testing.T) {
+	f := newWindowsCursorUserHooksFixture(t)
+	sid, err := windows.StringToSid("S-1-5-21-1000000001-1000000002-1000000003-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localAppData := filepath.Join(f.home, "AppData", "Local")
+	programs := filepath.Join(localAppData, "Programs")
+	impersonating := false
+	resolvedWhileImpersonating := 0
+	resolveErr := error(nil)
+	originalImpersonation := windowsEnterpriseTargetImpersonation
+	originalFolders := windowsCursorTargetUserFolders
+	windowsEnterpriseTargetImpersonation = func(_ *windows.SID, _ string, fn func() error) error {
+		impersonating = true
+		defer func() { impersonating = false }()
+		return fn()
+	}
+	windowsCursorTargetUserFolders = func() (string, string, error) {
+		if impersonating {
+			resolvedWhileImpersonating++
+		}
+		return localAppData, programs, resolveErr
+	}
+	t.Cleanup(func() {
+		windowsEnterpriseTargetImpersonation = originalImpersonation
+		windowsCursorTargetUserFolders = originalFolders
+	})
+	logged := redirectWindowsCursorTestStderr(t)
+	target := windowsGenericManagedTarget{home: f.home, dataDir: f.dataDir, sid: sid}
+
+	native := func(binary string) string {
+		return `{"command":"\"` + strings.ReplaceAll(binary, `\`, `\\`) + `\" hook --connector cursor"}`
+	}
+	foreign := native(filepath.Join(programs, "Other", "bin", "defenseclaw-hook.exe"))
+	body := `{"version":1,"hooks":{"preToolUse":[` +
+		native(filepath.Join(localAppData, "DefenseClaw", "HookRuntime", "defenseclaw-hook.exe")) + `,` +
+		native(filepath.Join(programs, "DefenseClaw", "bin", "defenseclaw-hook.exe")) + `,` +
+		native(filepath.Join(programs, "DefenseClaw", "bin", "defenseclaw-gateway.exe")) + `,` +
+		foreign + `]}}`
+
+	// A failed lookup leaves the file as it was and is logged.
+	resolveErr = errors.New("test Known Folder failure")
+	f.write(t, f.hooks, body)
+	cleanupWindowsCursorPerUserHookRegistrations(target)
+	if got := readWindowsCursorTestFile(t, f.hooks); got != body {
+		t.Fatalf("hooks.json = %q, want it unchanged", got)
+	}
+	if line := logged(); !strings.Contains(line, "were not removed: test Known Folder failure") {
+		t.Fatalf("guardian log = %q, want the lookup failure", line)
+	}
+
+	resolveErr = nil
+	cleanupWindowsCursorPerUserHookRegistrations(target)
+	if resolvedWhileImpersonating != 2 {
+		t.Fatalf("folders resolved %d times while impersonating, want 2", resolvedWhileImpersonating)
+	}
+	if got, want := readWindowsCursorTestFile(t, f.hooks), `{"version":1,"hooks":{"preToolUse":[`+foreign+`]}}`; got != want {
+		t.Fatalf("hooks.json after cleanup = %q, want %q", got, want)
+	}
+	if line := logged(); !strings.Contains(line, "removed 3 per-user DefenseClaw hook registration(s)") {
+		t.Fatalf("guardian log = %q, want three removals", line)
+	}
+}
+
+// The lookup reads the impersonation token: with one it names that user's
+// folders, and without one it fails instead of naming the process user's.
+func TestResolveWindowsImpersonatedUserFoldersReadsTheThreadToken(t *testing.T) {
+	wantLocal, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrograms, err := winfolders.UserProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var local, programs string
+	if err := runWindowsTestThreadImpersonatedAsSelf(func() error {
+		var err error
+		local, programs, err = resolveWindowsImpersonatedUserFolders()
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(local, filepath.Clean(wantLocal)) || !strings.EqualFold(programs, wantPrograms) {
+		t.Fatalf("impersonated folders = (%q, %q), want (%q, %q)", local, programs, wantLocal, wantPrograms)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		_, _, err := resolveWindowsImpersonatedUserFolders()
+		result <- err
+	}()
+	if err := <-result; !errors.Is(err, windows.ERROR_NO_TOKEN) {
+		t.Fatalf("lookup without an impersonation token: %v, want ERROR_NO_TOKEN", err)
 	}
 }
