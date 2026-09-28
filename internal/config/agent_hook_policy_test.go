@@ -58,4 +58,13 @@ func TestManagedHookPolicyDefaultsAreSecure(t *testing.T) {
 	if !legacy.ClaudeCodeAllowUnmanagedHooks() {
 		t.Fatal("legacy claude_code block opt-out was not honored")
 	}
+	legacy.ConnectorHooks = map[string]AgentHookConfig{"claudecode": {Enabled: true}}
+	if !legacy.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("claude_code opt-out was hidden by connector_hooks.claudecode")
+	}
+	legacy.ClaudeCode.AllowUnmanagedHooks = false
+	legacy.ConnectorHooks["claudecode"] = AgentHookConfig{AllowUnmanagedHooks: true}
+	if !legacy.ClaudeCodeAllowUnmanagedHooks() {
+		t.Fatal("connector_hooks.claudecode opt-out was not honored")
+	}
 }

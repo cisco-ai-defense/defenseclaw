@@ -26,9 +26,9 @@ func managedClaudeLockFixture(t *testing.T) (*ClaudeCodeConnector, SetupOpts, st
 	})
 	opts := SetupOpts{
 		ManagedEnterprise: true,
-		DataDir: filepath.Join(root, "defenseclaw"),
-		HookExecutable: filepath.Join(root, "defenseclaw-hook.exe"),
-		WorkspaceDir: filepath.Join(root, "workspace"),
+		DataDir:           filepath.Join(root, "defenseclaw"),
+		HookExecutable:    filepath.Join(root, "defenseclaw-hook.exe"),
+		WorkspaceDir:      filepath.Join(root, "workspace"),
 	}
 	return NewClaudeCodeConnector(), opts, managedRoot
 }
