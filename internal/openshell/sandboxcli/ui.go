@@ -27,6 +27,8 @@ import (
 	"text/tabwriter"
 	"time"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 const (
@@ -49,11 +51,76 @@ func (a *App) style(text string, codes ...string) string {
 func (a *App) bold(s string) string { return a.style(s, ansiBold) }
 func (a *App) dim(s string) string  { return a.style(s, ansiDim) }
 
-func (a *App) printf(format string, args ...any) { fmt.Fprintf(a.IO.Out, format, args...) }
-func (a *App) println(args ...any)               { fmt.Fprintln(a.IO.Out, args...) }
+// The helpers below print human-readable text through terminalText: the
+// agent names the files, branches, commands and hosts that reach the
+// review, the summary and the prompts. JSON output (writeJSON) and the
+// harness's own streams do not go through them.
+
+func (a *App) printf(format string, args ...any) {
+	fmt.Fprint(a.IO.Out, terminalText(fmt.Sprintf(format, args...)))
+}
+func (a *App) println(args ...any) { fmt.Fprint(a.IO.Out, terminalText(fmt.Sprintln(args...))) }
 
 // line prints one indented line.
-func (a *App) line(text string) { fmt.Fprintln(a.IO.Out, "  "+text) }
+func (a *App) line(text string) { fmt.Fprintln(a.IO.Out, terminalText("  "+text)) }
+
+// palette are the escape sequences this file prints itself.
+var palette = []string{ansiBold, ansiCyan, ansiGreen, ansiYellow, ansiRed, ansiDim, ansiReset}
+
+// terminalText makes text safe to print on a terminal: newlines, tabs and
+// the palette's color codes pass, and every other control character (an
+// escape sequence that clears the screen, moves the cursor, sets the title
+// or writes the clipboard; a carriage return that overwrites a line), C1
+// control, bidirectional override and invalid byte prints as U+FFFD
+// (sandboxapi.DisplayText).
+func terminalText(s string) string {
+	if plainText(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	start := 0
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '\n', '\t':
+			b.WriteString(sandboxapi.DisplayText(s[start:i]))
+			b.WriteByte(s[i])
+			i++
+			start = i
+			continue
+		case 0x1b:
+			if code := paletteCode(s[i:]); code != "" {
+				b.WriteString(sandboxapi.DisplayText(s[start:i]))
+				b.WriteString(code)
+				i += len(code)
+				start = i
+				continue
+			}
+		}
+		i++
+	}
+	b.WriteString(sandboxapi.DisplayText(s[start:]))
+	return b.String()
+}
+
+func paletteCode(s string) string {
+	for _, code := range palette {
+		if strings.HasPrefix(s, code) {
+			return code
+		}
+	}
+	return ""
+}
+
+// plainText reports text of printable ASCII, newlines and tabs only.
+func plainText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 0x7f || (c < 0x20 && c != '\n' && c != '\t') {
+			return false
+		}
+	}
+	return true
+}
 
 func (a *App) ok(text string)   { a.line(a.style("✓", ansiGreen, ansiBold) + " " + text) }
 func (a *App) warn(text string) { a.line(a.style("⚠", ansiYellow, ansiBold) + " " + text) }
@@ -62,7 +129,7 @@ func (a *App) note(text string) { a.line(a.dim(text)) }
 
 // warnErr prints a warning to stderr (while a harness owns stdout).
 func (a *App) warnErr(text string) {
-	fmt.Fprintln(a.IO.Err, a.style("⚠", ansiYellow, ansiBold)+" "+text)
+	fmt.Fprintln(a.IO.Err, terminalText(a.style("⚠", ansiYellow, ansiBold)+" "+text))
 }
 
 func (a *App) mark(ok bool) string {
@@ -77,7 +144,8 @@ func (a *App) table(header []string, rows [][]string) {
 	w := tabwriter.NewWriter(a.IO.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, strings.Join(header, "\t"))
 	for _, r := range rows {
-		fmt.Fprintln(w, strings.Join(r, "\t"))
+		// A tab or newline in a cell would break the columns.
+		fmt.Fprintln(w, strings.Join(sandboxapi.DisplayTexts(r), "\t"))
 	}
 	_ = w.Flush()
 }
@@ -143,7 +211,7 @@ func (a *App) ask(question string, def bool, assumeDefault bool) (bool, error) {
 		hint = "[Y/n]"
 	}
 	for {
-		fmt.Fprintf(a.IO.Out, "%s %s ", question, a.dim(hint))
+		fmt.Fprint(a.IO.Out, terminalText(question+" "+a.dim(hint)+" "))
 		ans, err := a.readLine()
 		if err != nil {
 			return false, err
@@ -188,7 +256,7 @@ func (a *App) choose(question string, choices []choice, def string) (string, err
 		parts = append(parts, label)
 	}
 	for {
-		fmt.Fprintf(a.IO.Out, "%s %s ", question, strings.Join(parts, "  "))
+		fmt.Fprint(a.IO.Out, terminalText(question+" "+strings.Join(parts, "  ")+" "))
 		ans, err := a.readLine()
 		if err != nil {
 			return "", err

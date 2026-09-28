@@ -69,7 +69,7 @@ func errNoHooks() error {
 // notice prints one line while the harness owns the terminal: on stderr,
 // in column 0, is all that is safe.
 func (s *session) notice(msg string) {
-	fmt.Fprintf(s.app.IO.Err, "\r\n[defenseclaw] %s\r\n", msg)
+	fmt.Fprintf(s.app.IO.Err, "\r\n[defenseclaw] %s\r\n", sandboxapi.DisplayText(msg))
 }
 
 // warnHooksOnce prints the session's first live warning about its hooks:
