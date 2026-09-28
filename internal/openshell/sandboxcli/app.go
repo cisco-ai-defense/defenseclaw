@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -144,6 +146,15 @@ type App struct {
 
 	once   sync.Once
 	reader *bufio.Reader
+	// pending is an answer a prompt Ctrl-C ended was still reading (the
+	// next prompt takes it).
+	pending chan lineRead
+	// interrupts delivers the user's Ctrl-C while a prompt waits (default:
+	// SIGINT); tests replace it.
+	interrupts func() (<-chan os.Signal, func())
+	// pager shows text longer than the terminal one screen at a time and
+	// reports whether it did (default: $PAGER or less on a terminal).
+	pager func(text string) bool
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run
@@ -432,23 +443,41 @@ func apiError(err error) error {
 	return e
 }
 
+// adminLimitMessage opens an organization's clamp: the run goes ahead with
+// the organization's value instead of the one asked for.
+const adminLimitMessage = "limited by your organization's DefenseClaw policy"
+
 // violationMessage renders a refused setting with why and what to do.
-// Admin clamps read "blocked by your organization's DefenseClaw policy:
-// <key> — <why> (<openshell.admin constraint>); <next step>".
+// Admin refusals read "blocked by your organization's DefenseClaw policy:
+// <key> — <why> (<openshell.admin constraint>); <next step>", and clamps
+// the run goes ahead with "limited by your organization's DefenseClaw
+// policy: <key> — <why> (<constraint>); running with <value> instead of
+// <asked>".
 func violationMessage(v *sandboxapi.Violation, message, detail string, admin bool) string {
 	if v != nil && (admin || v.Admin) {
+		clamp := !v.Fatal && v.Enforced != ""
 		msg := sandboxapi.AdminMessage + ": " + v.Key
+		if clamp {
+			msg = adminLimitMessage + ": " + v.Key
+		}
 		if v.Message != "" && !strings.Contains(v.Message, sandboxapi.AdminMessage) {
 			msg += " (" + v.Message + ")"
 		}
 		why := firstNonEmpty(v.Detail, detail)
+		if v.Key == "harness" || v.Key == "harness.allowed" {
+			why = harnessCommands(why)
+		}
 		if why != "" && !strings.Contains(msg, why) {
 			msg += " — " + why
 		}
 		if c := v.Constraint; strings.HasPrefix(c, "openshell.admin.") {
 			msg += " (" + c + ")"
 		}
-		if e := v.Enforced; e != "" && e != "true" && e != "false" && !strings.Contains(why, "the run uses") {
+		switch e := v.Enforced; {
+		case e == "" || strings.Contains(why, "the run uses"):
+		case clamp && v.Attempted != "" && v.Attempted != e && !strings.HasPrefix(v.Attempted, "("):
+			msg += "; running with " + v.Key + " " + e + " instead of " + v.Attempted
+		case e != "true" && e != "false":
 			msg += "; the run uses " + v.Key + " " + e
 		}
 		if next := adminNextStep(v, why); next != "" {
@@ -469,6 +498,24 @@ func violationMessage(v *sandboxapi.Violation, message, detail string, admin boo
 		return message + ": " + detail
 	}
 	return message
+}
+
+// harnessCommands names the harnesses in a policy's text by the command
+// users type (`sandbox run claude`), not their connector names
+// (claudecode).
+func harnessCommands(text string) string {
+	if text == "" {
+		return text
+	}
+	for _, name := range harness.Names() {
+		spec, _ := harness.Get(name)
+		if spec.Command == name {
+			continue
+		}
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
+		text = re.ReplaceAllString(text, spec.Command)
+	}
+	return text
 }
 
 // wireViolation is a policy refusal the CLI found itself, in the daemon's

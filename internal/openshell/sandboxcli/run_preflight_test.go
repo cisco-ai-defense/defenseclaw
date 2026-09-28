@@ -169,8 +169,8 @@ func TestBannerDropsRefusedHostPorts(t *testing.T) {
 func TestRunSaysWhatThePolicyOverrodeFirst(t *testing.T) {
 	overridden := sandboxapi.Violation{Key: "profile", Source: "flag", Attempted: "open", Enforced: "strict", Admin: true,
 		Constraint: "openshell.admin.required_pack", Detail: "your organization requires the strict sandbox pack, whose profile is strict"}
-	want := "blocked by your organization's DefenseClaw policy: profile — your organization requires the strict sandbox pack, whose profile is strict " +
-		"(openshell.admin.required_pack); the run uses profile strict"
+	want := "limited by your organization's DefenseClaw policy: profile — your organization requires the strict sandbox pack, whose profile is strict " +
+		"(openshell.admin.required_pack); running with profile strict instead of open"
 	t.Run("declined", func(t *testing.T) {
 		ta := newTestApp(t, "n\n")
 		ta.daemon.explain.Violations = []sandboxapi.Violation{overridden}
@@ -209,7 +209,7 @@ func TestRunMessagesInOrder(t *testing.T) {
 	ta.daemon.explain.Violations = []sandboxapi.Violation{{Key: "harness", Fatal: true, Admin: true, Constraint: "openshell.admin.allowed_harnesses",
 		Message: "blocked by your organization's DefenseClaw policy: harness", Detail: "your organization allows only claudecode"}}
 	err := ta.Run(context.Background(), RunOptions{Harness: "codex"})
-	if err == nil || err.Error() != "blocked by your organization's DefenseClaw policy: harness — your organization allows only claudecode "+
+	if err == nil || err.Error() != "blocked by your organization's DefenseClaw policy: harness — your organization allows only claude "+
 		"(openshell.admin.allowed_harnesses); ask your administrator if you need it" {
 		t.Fatalf("Run = %v", err)
 	}

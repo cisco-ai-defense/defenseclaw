@@ -25,13 +25,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
 )
 
 // ResolveHarness accepts a connector name (claudecode, claude-code), the
@@ -88,6 +91,86 @@ type llmChoice struct {
 	Note string
 }
 
+// llmCandidate is one model credential a harness can share: the --llm
+// choice, the provider profile, the variable the sandbox reads, where the
+// value comes from on this machine (for the banner), and the value.
+type llmCandidate struct {
+	llm, profile, envName, source string
+	value                         func() string
+}
+
+// llmCandidates are the harness's model credentials in the order --llm
+// auto tries them.
+func (a *App) llmCandidates(spec *harness.Spec) []llmCandidate {
+	fromEnv := func(names ...string) func() string {
+		return func() string {
+			for _, n := range names {
+				if v := strings.TrimSpace(a.Getenv(n)); v != "" {
+					return v
+				}
+			}
+			return ""
+		}
+	}
+	switch spec.Name {
+	case "claudecode":
+		return []llmCandidate{
+			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMClaudeOAuth, profiles.ClaudeOAuthID, "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", fromEnv("CLAUDE_CODE_OAUTH_TOKEN")},
+			{LLMBedrock, profiles.ClaudeBedrockMantleID, "ANTHROPIC_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	case "codex":
+		return []llmCandidate{
+			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY", "CODEX_API_KEY")},
+			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "~/.codex/auth.json", a.codexAuthKey},
+			{LLMBedrock, profiles.CodexBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	case "opencode":
+		return []llmCandidate{
+			{LLMAnthropic, profiles.OpenCodeAnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMOpenAI, profiles.OpenCodeOpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
+			{LLMBedrock, profiles.OpenCodeBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	case "copilot":
+		// Bring-your-own-provider mode: the key goes to Copilot as
+		// COPILOT_PROVIDER_API_KEY. The GitHub-token profile (Copilot's own
+		// models) has no --llm choice; its endpoint set is unverified.
+		return []llmCandidate{
+			{LLMAnthropic, profiles.CopilotAnthropicID, "COPILOT_PROVIDER_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMBedrock, profiles.CopilotBedrockMantleID, "COPILOT_PROVIDER_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	case "hermes", "openhands":
+		return []llmCandidate{
+			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
+			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMBedrock, profiles.BedrockMantleOpenAIID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	case "antigravity":
+		// An API key skips the Google sign-in; without one, sign in inside
+		// the sandbox.
+		return []llmCandidate{
+			{LLMGemini, profiles.GeminiID, "GEMINI_API_KEY", "GEMINI_API_KEY", fromEnv("GEMINI_API_KEY")},
+		}
+	case "omnigent":
+		// The sandbox agent runs on OmniGent's openai-agents harness.
+		return []llmCandidate{
+			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
+			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
+			{LLMBedrock, profiles.BedrockMantleOpenAIID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
+		}
+	}
+	return nil
+}
+
+// modelKeyVariables are variables besides the provider profiles' own that
+// a harness reads its model key from: a --credential binding of one is the
+// run's model credential. Hermes's managed provider reads its key from
+// HERMES_DEFENSECLAW_API_KEY, for the OpenAI-compatible endpoint in
+// HERMES_DEFENSECLAW_BASE_URL.
+var modelKeyVariables = map[string][]string{
+	"hermes": {connector.HermesSandboxProviderKeyEnv},
+}
+
 // detectLLM picks the harness's model credential from the user's
 // environment (and, for Codex, ~/.codex/auth.json). reserved are variable
 // names --credential already binds; they win.
@@ -99,72 +182,16 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 	if region == "" {
 		region = firstNonEmpty(a.Getenv("AWS_REGION"), a.Getenv("AWS_DEFAULT_REGION"))
 	}
-	type candidate struct {
-		llm, profile, envName, source string
-		value                         func() string
-	}
-	fromEnv := func(names ...string) func() string {
-		return func() string {
-			for _, n := range names {
-				if v := strings.TrimSpace(a.Getenv(n)); v != "" {
-					return v
-				}
-			}
-			return ""
-		}
-	}
-	var cands []candidate
-	switch spec.Name {
-	case "claudecode":
-		cands = []candidate{
-			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
-			{LLMClaudeOAuth, profiles.ClaudeOAuthID, "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", fromEnv("CLAUDE_CODE_OAUTH_TOKEN")},
-			{LLMBedrock, profiles.ClaudeBedrockMantleID, "ANTHROPIC_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
-		}
-	case "codex":
-		cands = []candidate{
-			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY", "CODEX_API_KEY")},
-			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "~/.codex/auth.json", a.codexAuthKey},
-			{LLMBedrock, profiles.CodexBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
-		}
-	case "opencode":
-		cands = []candidate{
-			{LLMAnthropic, profiles.OpenCodeAnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
-			{LLMOpenAI, profiles.OpenCodeOpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
-			{LLMBedrock, profiles.OpenCodeBedrockMantleID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
-		}
-	case "copilot":
-		// Bring-your-own-provider mode: the key goes to Copilot as
-		// COPILOT_PROVIDER_API_KEY. The GitHub-token profile (Copilot's own
-		// models) has no --llm choice; its endpoint set is unverified.
-		cands = []candidate{
-			{LLMAnthropic, profiles.CopilotAnthropicID, "COPILOT_PROVIDER_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
-			{LLMBedrock, profiles.CopilotBedrockMantleID, "COPILOT_PROVIDER_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
-		}
-	case "hermes", "openhands":
-		cands = []candidate{
-			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
-			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
-			{LLMBedrock, profiles.BedrockMantleOpenAIID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
-		}
-	case "antigravity":
-		// An API key skips the Google sign-in; without one, sign in inside
-		// the sandbox.
-		cands = []candidate{
-			{LLMGemini, profiles.GeminiID, "GEMINI_API_KEY", "GEMINI_API_KEY", fromEnv("GEMINI_API_KEY")},
-		}
-	case "omnigent":
-		// The sandbox agent runs on OmniGent's openai-agents harness.
-		cands = []candidate{
-			{LLMOpenAI, profiles.OpenAIID, "OPENAI_API_KEY", "OPENAI_API_KEY", fromEnv("OPENAI_API_KEY")},
-			{LLMAnthropic, profiles.AnthropicID, "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", fromEnv("ANTHROPIC_API_KEY")},
-			{LLMBedrock, profiles.BedrockMantleOpenAIID, "BEDROCK_MANTLE_API_KEY", EnvBedrockToken, fromEnv(EnvBedrockToken)},
-		}
-	}
+	cands := a.llmCandidates(spec)
 	// A --credential binding of the model's own variable wins.
 	for _, c := range cands {
 		if reserved[c.envName] && (choice == LLMAuto || choice == LLMNone || c.llm == choice) {
 			return llmChoice{Note: c.envName + " comes from --credential"}, nil
+		}
+	}
+	for _, name := range modelKeyVariables[spec.Name] {
+		if reserved[name] && (choice == LLMAuto || choice == LLMNone) {
+			return llmChoice{Note: name + " comes from --credential"}, nil
 		}
 	}
 	if choice == LLMNone {
@@ -204,21 +231,30 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 		return llmChoice{Credential: cred, Source: c.source, Hosts: cp.Hosts}, nil
 	}
 	if choice != LLMAuto {
-		return llmChoice{}, fmt.Errorf("--llm %s: no credential found (%s)", choice, llmHint(spec.Name, choice))
+		return llmChoice{}, fmt.Errorf("--llm %s: no credential found (%s)", choice, a.llmHint(spec, choice))
 	}
-	return llmChoice{Note: "no model credential found (" + llmHint(spec.Name, choice) + "); " + insideLoginCaveat}, nil
+	return llmChoice{Note: "no model credential found (" + a.llmHint(spec, choice) + "); " + insideLoginCaveat}, nil
 }
 
 // insideLoginCaveat is what a login inside the sandbox costs: unlike a
 // shared credential, which the sandbox sees only as a placeholder, the
 // token it stores is real, and the agent can read it and send it out.
-const insideLoginCaveat = "a login inside the sandbox stores a real token there, which the agent can read"
+const insideLoginCaveat = "a login inside the sandbox stores a real token the agent can read"
 
-// sandboxLLM is the banner's model line for a sandbox that exists: the
-// provider profile it was created with, whose placeholder resolves only at
-// the profile's hosts.
-func sandboxLLM(spec *harness.Spec, sb *sandboxapi.Sandbox) llmChoice {
+// sandboxLLM is the banner's model line for a sandbox that exists: what the
+// run that created it shared (run, its record), else the provider profile
+// it was created with, named by the variable a run shares for it, whose
+// placeholder resolves only at the profile's hosts.
+func (a *App) sandboxLLM(spec *harness.Spec, sb *sandboxapi.Sandbox, run *runLaunch) llmChoice {
 	id := sb.Launch.CredentialProfile
+	if run != nil {
+		switch {
+		case run.ModelSource != "" && id != "":
+			return llmChoice{Credential: &sandboxapi.LLMCredential{Profile: id}, Source: run.ModelSource, Hosts: run.ModelHosts}
+		case run.ModelNote != "" && id == "":
+			return llmChoice{Note: run.ModelNote}
+		}
+	}
 	if id == "" {
 		return llmChoice{}
 	}
@@ -226,17 +262,33 @@ func sandboxLLM(spec *harness.Spec, sb *sandboxapi.Sandbox) llmChoice {
 	if err != nil || len(cp.Hosts) == 0 {
 		return llmChoice{Note: id}
 	}
-	return llmChoice{Credential: &sandboxapi.LLMCredential{Profile: id}, Source: strings.TrimPrefix(id, "defenseclaw-") + " credential", Hosts: cp.Hosts}
+	source := strings.TrimPrefix(id, "defenseclaw-") + " credential"
+	for _, c := range a.llmCandidates(spec) {
+		if c.profile == id {
+			source = c.source
+			break
+		}
+	}
+	return llmChoice{Credential: &sandboxapi.LLMCredential{Profile: id}, Source: source, Hosts: cp.Hosts}
 }
 
-func llmHint(harnessName, choice string) string {
-	switch {
+// llmHint says how to give a run spec's model credential.
+func (a *App) llmHint(spec *harness.Spec, choice string) string {
+	switch harnessName := spec.Name; {
 	case choice == LLMBedrock:
 		return "set " + EnvBedrockToken
 	case harnessName == "claudecode":
 		// A Claude subscription logs in on this machine: setup-token prints
-		// a token the sandbox then sees only as a placeholder.
-		return "set ANTHROPIC_API_KEY, or run `claude setup-token` here and set CLAUDE_CODE_OAUTH_TOKEN to the token it prints"
+		// a token the sandbox then sees only as a placeholder. The command
+		// runs the Claude Code installed here, outside the sandbox wrapper.
+		if _, err := a.LookPath(spec.Command); err != nil {
+			return "set ANTHROPIC_API_KEY, or use /login in the sandbox"
+		}
+		setup := "`claude setup-token`"
+		if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, spec.Name) {
+			setup = "`" + wrapper.EnvBypass + "=1 claude setup-token`"
+		}
+		return "set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from " + setup
 	case harnessName == "codex":
 		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
 	case harnessName == "opencode":
@@ -339,6 +391,25 @@ func ParseEnv(list []string) (map[string]string, error) {
 		out[k] = v
 	}
 	return out, nil
+}
+
+// secretWords are the words of a variable name that say it holds a
+// secret.
+var secretWords = []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY", "CREDENTIAL", "CREDENTIALS"}
+
+// secretLooking reports a variable name that says it holds a secret (an
+// API key, a token, a password): KIRO_API_KEY, GITHUB_TOKEN, DB_PASSWORD.
+func secretLooking(name string) bool {
+	n := strings.ToUpper(name)
+	if strings.HasSuffix(n, "_KEY") {
+		return true
+	}
+	for _, w := range secretWords {
+		if n == w || strings.HasSuffix(n, "_"+w) || strings.HasPrefix(n, w+"_") || strings.Contains(n, "_"+w+"_") {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(values ...string) string {

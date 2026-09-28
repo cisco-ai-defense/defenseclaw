@@ -19,6 +19,8 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -88,22 +90,46 @@ func (a *App) accepted(sb *sandboxapi.Sandbox) bool {
 // fresh snapshot when the user accepted the changes on top of the current
 // one (or o says so), and otherwise leaves the choice to the daemon. It
 // reports whether the undo point from before the start was kept, which
-// the returned sandbox shows: its snapshot is still that one.
-func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox, o StartOptions) (*sandboxapi.Sandbox, bool, error) {
+// the returned sandbox shows: its snapshot is still that one. A session
+// (connect) accepts the changes at its end; `sandbox start` (session
+// false) says how to accept them with --new-snapshot instead.
+func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox, o StartOptions, session bool) (*sandboxapi.Sandbox, bool, error) {
 	req := sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot}
 	if !req.NoSnapshot && !req.NewSnapshot && a.accepted(sb) {
 		req.NewSnapshot = true
 	}
 	started, err := api.Start(ctx, sb.Name, req)
 	if err != nil {
-		return nil, false, apiError(err)
+		return nil, false, a.startError(sb, err)
 	}
+	a.forgetCleanCopy(sb.Name)
 	kept := keptUndoPoint(sb, started)
 	if kept && !o.NoSnapshot {
+		accept := "keeping the changes at the end of this session accepts them"
+		if !session {
+			accept = "to accept them instead, stop it and start it again with --new-snapshot (`" + CommandName + " stop " + sb.Name + "`, then `" +
+				CommandName + " start " + sb.Name + " --new-snapshot`)"
+		}
 		a.note("kept the undo point from " + a.clock(started.Snapshot.CreatedAt) + ": the folder still holds changes made since that were not kept " +
-			"at the end of a session, so `" + CommandName + " undo " + sb.Name + "` still reverts them")
+			"at the end of a session, so `" + CommandName + " undo " + sb.Name + "` still reverts them; " + accept)
 	}
 	return started, kept, nil
+}
+
+// startError explains a refused start: a sandbox the policy no longer
+// lets start as it was created (a live mount the organization now runs on
+// a copy, a harness it no longer allows) can only be deleted and run
+// again.
+func (a *App) startError(sb *sandboxapi.Sandbox, err error) error {
+	msg := apiError(err).Error()
+	var e *sandboxapi.Error
+	if errors.As(err, &e) && e.Violation != nil {
+		switch e.Violation.Key {
+		case "workdir.mode", "harness", "harness.allowed":
+			return fmt.Errorf("%s; delete it (`%s delete %s`) and run it again", msg, CommandName, sb.Name)
+		}
+	}
+	return errors.New(msg)
 }
 
 // keptUndoPoint reports whether a start kept the undo point it found: the

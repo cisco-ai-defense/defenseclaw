@@ -159,7 +159,7 @@ func TestMessagePolish(t *testing.T) {
 		if err := ta.Connect(context.Background(), ConnectOptions{Name: "box"}); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(ta.output(), "Model     anthropic credential → api.anthropic.com only (the sandbox sees a placeholder)") {
+		if !strings.Contains(ta.output(), "Model     ANTHROPIC_API_KEY → api.anthropic.com only (the sandbox sees a placeholder)") {
 			t.Fatalf("connect banner:\n%s", ta.output())
 		}
 	})

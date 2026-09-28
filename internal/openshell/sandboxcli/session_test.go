@@ -64,7 +64,7 @@ func TestSessionInARunningSandboxSaysTheReviewIsLive(t *testing.T) {
 	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/m1-b/stop")); n != 0 {
 		t.Fatalf("stop calls = %d", n)
 	}
-	if !strings.Contains(ta.output(), "m1-b keeps running (it was running when you connected), so what it changes after this review is not in it") {
+	if !strings.Contains(ta.output(), "m1-b is still running (it was running when you connected); changes it makes after this point are not in this review") {
 		t.Fatalf("output:\n%s", ta.output())
 	}
 }
@@ -80,7 +80,7 @@ func TestSessionWhoseReviewFailedKeepsUndo(t *testing.T) {
 	}
 	out := ta.output()
 	for _, want := range []string{"could not review the session's changes", "Keep changes?",
-		"its undo snapshot is kept because the changes were not reviewed", "undo: defenseclaw sandbox undo dc-claude-proj-1a2b"} {
+		"its undo point is kept because the changes were not reviewed", "undo: defenseclaw sandbox undo dc-claude-proj-1a2b"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
@@ -129,7 +129,7 @@ func TestSessionShowsAsks(t *testing.T) {
 		t.Fatalf("live output:\n%s", live)
 	}
 	out := ta.output()
-	for _, want := range []string{"Asks      shown here as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox dc-claude-proj-1a2b",
+	for _, want := range []string{"Asks      announced in this terminal's title as they come; answer them in another terminal: defenseclaw sandbox approvals --sandbox dc-claude-proj-1a2b (or `defenseclaw tui`: 7, then t)",
 		"? 1 ask is still waiting for you → defenseclaw sandbox approvals --sandbox dc-claude-proj-1a2b"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)

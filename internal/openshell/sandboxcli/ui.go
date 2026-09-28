@@ -22,11 +22,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -241,7 +245,13 @@ type choice struct {
 	Label string
 }
 
-// choose asks for one of choices; an empty answer selects def.
+// errInterrupted is a choice the user answered with Ctrl-C; the caller
+// says what that leaves as it is.
+var errInterrupted = errors.New("interrupted")
+
+// choose asks for one of choices; an empty answer selects def. An answer
+// is a letter and Enter, which the prompt says, and Ctrl-C returns
+// errInterrupted instead of ending the process.
 func (a *App) choose(question string, choices []choice, def string) (string, error) {
 	a.defaults()
 	if !a.IO.TTY {
@@ -256,8 +266,8 @@ func (a *App) choose(question string, choices []choice, def string) (string, err
 		parts = append(parts, label)
 	}
 	for {
-		fmt.Fprint(a.IO.Out, terminalText(question+" "+strings.Join(parts, "  ")+" "))
-		ans, err := a.readLine()
+		fmt.Fprint(a.IO.Out, terminalText(question+" "+strings.Join(parts, "  ")+" "+a.dim("(then Enter)")+" "))
+		ans, err := a.readAnswer()
 		if err != nil {
 			return "", err
 		}
@@ -273,7 +283,102 @@ func (a *App) choose(question string, choices []choice, def string) (string, err
 	}
 }
 
+// lineRead is one line a prompt read.
+type lineRead struct {
+	s   string
+	err error
+}
+
+// readAnswer reads a line, or returns errInterrupted when the user presses
+// Ctrl-C first. The line an interrupted read was waiting for goes to the
+// next prompt.
+func (a *App) readAnswer() (string, error) {
+	sig, stop := a.interruptSource()
+	defer stop()
+	ch := a.pending
+	a.pending = nil
+	if ch == nil {
+		ch = make(chan lineRead, 1)
+		go func() {
+			s, err := a.readLineNow()
+			ch <- lineRead{s, err}
+		}()
+	}
+	select {
+	case r := <-ch:
+		return r.s, r.err
+	case <-sig:
+		a.pending = ch
+		fmt.Fprintln(a.IO.Out)
+		return "", errInterrupted
+	}
+}
+
+// interruptSource delivers Ctrl-C while a prompt waits.
+func (a *App) interruptSource() (<-chan os.Signal, func()) {
+	if a.interrupts != nil {
+		return a.interrupts()
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt)
+	return ch, func() { signal.Stop(ch) }
+}
+
+// page prints text, through a pager when the terminal cannot show it at
+// once (a long diff).
+func (a *App) page(text string) {
+	text = strings.TrimRight(text, "\n")
+	pager := a.pager
+	if pager == nil {
+		pager = a.terminalPager
+	}
+	if !pager(text) {
+		a.println(text)
+	}
+}
+
+// terminalPager shows text longer than the terminal with $PAGER (default
+// `less -FRX`), which gets it made safe for the terminal like every line
+// this package prints. It reports false when it did not show it.
+func (a *App) terminalPager(text string) bool {
+	out, ok := a.IO.Out.(*os.File)
+	if !ok || !a.IO.TTY || !term.IsTerminal(int(out.Fd())) {
+		return false
+	}
+	_, rows, err := term.GetSize(int(out.Fd()))
+	if err != nil || strings.Count(text, "\n")+1 < rows-2 {
+		return false
+	}
+	argv := strings.Fields(a.Getenv("PAGER"))
+	if len(argv) == 0 {
+		argv = []string{"less", "-FRX"}
+	}
+	path, err := a.LookPath(argv[0])
+	if err != nil {
+		return false
+	}
+	cmd := exec.Command(path, argv[1:]...)
+	cmd.Stdin = strings.NewReader(terminalText(text) + "\n")
+	cmd.Stdout, cmd.Stderr = out, a.IO.Err
+	// A Ctrl-C in the pager is the pager's; this process waits for it.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
+	return cmd.Run() == nil
+}
+
+// readLine reads one answer (the one an interrupted prompt was waiting
+// for first).
 func (a *App) readLine() (string, error) {
+	if ch := a.pending; ch != nil {
+		a.pending = nil
+		r := <-ch
+		return r.s, r.err
+	}
+	return a.readLineNow()
+}
+
+func (a *App) readLineNow() (string, error) {
 	s, err := a.reader.ReadString('\n')
 	if err != nil && (s == "" || !errors.Is(err, io.EOF)) {
 		if errors.Is(err, io.EOF) {
@@ -297,6 +402,15 @@ func (a *App) tildePath(p string) string {
 		return "~" + p[len(home):]
 	}
 	return p
+}
+
+// tildeText abbreviates the home directory in every path of a message.
+func (a *App) tildeText(s string) string {
+	home, err := a.Home()
+	if err != nil || home == "" || home == string(filepath.Separator) {
+		return s
+	}
+	return strings.ReplaceAll(s, home+string(filepath.Separator), "~"+string(filepath.Separator))
 }
 
 func truncate(s string, n int) string {
@@ -334,6 +448,14 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// withArticle is name after "a" or "an": "an OpenHands", "a Codex".
+func withArticle(name string) string {
+	if name != "" && strings.ContainsRune("AEIOUaeiou", rune(name[0])) {
+		return "an " + name
+	}
+	return "a " + name
 }
 
 func plural(n int64, one, many string) string {

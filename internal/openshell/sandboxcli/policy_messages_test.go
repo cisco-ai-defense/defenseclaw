@@ -48,7 +48,7 @@ func TestAdminRefusalsSayWhy(t *testing.T) {
 		want   string
 	}{
 		{"allowed_harnesses", config.OpenShellAdminConfig{AllowedHarnesses: []string{"claudecode"}}, packs.Action{Kind: packs.ActionHarness, Harness: "codex"},
-			"blocked by your organization's DefenseClaw policy: harness — your organization allows only claudecode (openshell.admin.allowed_harnesses); ask your administrator if you need it"},
+			"blocked by your organization's DefenseClaw policy: harness — your organization allows only claude (openshell.admin.allowed_harnesses); ask your administrator if you need it"},
 		{"allow_unblock", config.OpenShellAdminConfig{AllowUnblock: &off}, packs.Action{Kind: packs.ActionUnblock, Host: "example.org"},
 			"blocked by your organization's DefenseClaw policy: egress.unblock — blocked destinations cannot be unblocked; ask your administrator (openshell.admin.allow_unblock)"},
 		{"egress_block", config.OpenShellAdminConfig{EgressBlock: []string{"*.example.net"}}, packs.Action{Kind: packs.ActionUnblock, Host: "www.example.net"},

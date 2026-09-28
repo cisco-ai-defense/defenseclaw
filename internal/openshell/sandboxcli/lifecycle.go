@@ -86,6 +86,10 @@ func profileText(sb sandboxapi.Sandbox) string {
 
 func hooksText(sb sandboxapi.Sandbox) string {
 	switch {
+	case sb.Hooks.Tampered > 0:
+		// A tool call ran without a DefenseClaw verdict: the most urgent
+		// thing the column can say.
+		return "tamper!"
 	case sb.Hooks.Unreachable:
 		return "unreachable!"
 	case sb.Hooks.Silent:
@@ -128,6 +132,12 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		return writeJSON(a.IO.Out, sb)
 	}
 	a.printSandbox(sb)
+	if sb.Phase == "stopped" {
+		if why := a.startRefusal(ctx, api, sb); why != "" {
+			a.warn(sb.Name + " cannot start under the current policy: " + why + "; delete it (`" + CommandName + " delete " + sb.Name +
+				"`) and run again")
+		}
+	}
 	return nil
 }
 
@@ -162,7 +172,7 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		row("Policy", "pack "+firstNonEmpty(st.Pack, "open")+", profile "+firstNonEmpty(st.Profile, "open"))
 	}
 	if st.Admin.Configured {
-		row("Organization", st.Admin.Authority+" admin policy "+st.Admin.Detail)
+		row("Organization", adminText(st.Admin))
 	}
 	row("Running", fmt.Sprintf("%d of %d", st.Running, st.Sandboxes))
 	if st.PendingApprovals > 0 {
@@ -183,14 +193,18 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		row("Uptime", humanDuration(time.Duration(sb.UptimeSeconds)*time.Second))
 	}
 	row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" ("+sb.WorkdirMode+")")
-	yolo := "on"
-	if !sb.Launch.Yolo {
-		yolo = "off (harness prompts kept)"
+	yolo := "skip-permissions on"
+	switch text, own := ownApprovals[sb.Harness]; {
+	case own:
+		yolo = text
+	case !sb.Launch.Yolo:
+		yolo = "skip-permissions off (harness prompts kept)"
 	}
-	row("Permissions", "skip-permissions "+yolo)
+	row("Permissions", yolo)
 	row("Policy", fmt.Sprintf("profile %s, pack %s %s, network %s, approvals %s", sb.Profile, firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest), networkLabel(sb), sb.Approvals))
 	row("Hooks", fmt.Sprintf("%s tier, contract %s", firstNonEmpty(sb.TamperTier, "unknown"), firstNonEmpty(sb.HookContract, "-")))
-	cov := fmt.Sprintf("%d requests, %d tool calls, %d blocked", sb.Hooks.HookRequests, sb.Hooks.ToolCalls, sb.Hooks.ToolBlocked)
+	cov := plural(sb.Hooks.HookRequests, "request", "requests") + ", " + plural(sb.Hooks.ToolCalls, "tool call", "tool calls") +
+		fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)
 	if sb.Hooks.HookFailed > 0 {
 		cov += fmt.Sprintf(", %d failed (fail closed)", sb.Hooks.HookFailed)
 	}
@@ -207,6 +221,15 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		cov += a.style(" — NOT REACHING DefenseClaw since "+sb.Hooks.UnreachableSince.Local().Format("15:04:05"), ansiRed)
 	}
 	row("Hook traffic", cov)
+	if n := sb.Hooks.Tampered; n > 0 {
+		// A post-tool hook whose tool DefenseClaw denied or never saw: the
+		// hooks were tampered with (hooks.on_tamper decides what follows).
+		tamper := plural(n, "tool call", "tool calls") + " ran without a DefenseClaw verdict"
+		if !sb.Hooks.LastTamperAt.IsZero() {
+			tamper += ", last " + sb.Hooks.LastTamperAt.Local().Format("15:04:05")
+		}
+		row("Tamper", a.style(tamper+" (`"+CommandName+" activity --sandbox "+sb.Name+"` has each)", ansiRed))
+	}
 	if sb.Hooks.LastBlocked != "" {
 		row("Last blocked", truncate(sb.Hooks.LastBlocked, 100))
 	}
@@ -223,7 +246,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		row("Endpoint", ep.Host+" "+ep.Result)
 	}
 	if sb.Snapshot != nil {
-		snap := sb.Snapshot.Kind + " snapshot " + sb.Snapshot.CreatedAt.Local().Format("2006-01-02 15:04")
+		snap := "taken " + sb.Snapshot.CreatedAt.Local().Format("2006-01-02 15:04") + " (" + firstNonEmpty(sb.Snapshot.Kind, "a") + " snapshot)"
 		if !sb.Snapshot.UndoneAt.IsZero() {
 			snap += ", undone " + sb.Snapshot.UndoneAt.Local().Format("15:04")
 		}
@@ -299,15 +322,26 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 		return err
 	}
 	cli := a.cli(gateway)
+	// The run's harness options come first, then the ones given now; its
+	// banner lines come back too.
+	run := a.runLaunchOf(sb)
+	args := o.Args
+	shown := RunOptions{Args: args, Prompt: o.Prompt}
+	if run != nil {
+		if !o.Shell {
+			args = sessionArgs(run.Args, o.Args)
+		}
+		shown = RunOptions{Args: args, Prompt: o.Prompt, Credentials: run.Credentials, GitHubWrite: run.GitHubWrite, HostPorts: run.HostPorts}
+	}
 	started, kept := false, sb.Phase == "ready"
 	if sb.Phase != "ready" {
 		a.note("starting " + sb.Name + "…")
-		if sb, kept, err = a.startSandbox(ctx, api, sb, StartOptions{}); err != nil {
+		if sb, kept, err = a.startSandbox(ctx, api, sb, StartOptions{}, true); err != nil {
 			return err
 		}
 		started = true
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell}
 	if o.Refresh && sb.WorkdirMode == config.OpenShellWorkdirCopy {
 		// The refresh replaces the copy, workdir included (a failed refresh
 		// may have left none): probe outside it, and the refresh's baseline
@@ -321,24 +355,25 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 	} else if err := s.probe(ctx, sb.Workdir); err != nil {
 		return err
 	}
+	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept})
+	var code int
 	if o.Shell {
-		inv, err := cli.Connect(sb.Name)
-		if err != nil {
+		// A shell in the project, reviewed at its end like a harness
+		// session: what it changed is kept or undone the same way.
+		if code, err = s.attachShell(ctx); err != nil {
 			return err
 		}
-		_, err = a.Terminal.Run(ctx, inv)
-		return err
-	}
-	a.banner(sb, bannerInfo{llm: sandboxLLM(spec, sb), o: RunOptions{Args: o.Args, Prompt: o.Prompt}, keptSnapshot: kept})
-	opts := harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo,
-		CredentialProfile: sb.Launch.CredentialProfile, BedrockRegion: sb.Launch.BedrockRegion,
-		Args: filterBypass(spec, sb.Launch.Yolo, o.Args, a)}
-	if o.Prompt != "" {
-		opts.Mode, opts.Prompt = harness.Headless, o.Prompt
-	}
-	code, err := s.attach(ctx, opts, headless)
-	if err != nil {
-		return err
+		code = 0
+	} else {
+		opts := harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo,
+			CredentialProfile: sb.Launch.CredentialProfile, BedrockRegion: sb.Launch.BedrockRegion,
+			Args: a.filterBypass(spec, sb, args)}
+		if o.Prompt != "" {
+			opts.Mode, opts.Prompt = harness.Headless, o.Prompt
+		}
+		if code, err = s.attach(ctx, opts, headless); err != nil {
+			return err
+		}
 	}
 	if err := s.end(ctx); err != nil {
 		return err
@@ -357,7 +392,7 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	a.note("refreshing the project copy in " + s.sb.Name + "…")
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
-		return workspaceFailure("refresh the copy", err, "")
+		return workspaceFailure("refresh the copy", err, a.diskFullHint(err))
 	}
 	files, b := int64(rec.Files), rec.Bytes
 	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: "completed", FileCount: &files, ByteCount: &b})
@@ -508,7 +543,7 @@ func (a *App) Start(ctx context.Context, name string, o StartOptions) error {
 		return nil
 	}
 	kept := false
-	if sb, kept, err = a.startSandbox(ctx, api, sb, o); err != nil {
+	if sb, kept, err = a.startSandbox(ctx, api, sb, o, false); err != nil {
 		return err
 	}
 	a.ok(sb.Name + " is " + sb.Phase + " → attach with `" + CommandName + " connect " + sb.Name + "`")
@@ -534,7 +569,7 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	}
 	var errs []error
 	for _, name := range o.Names {
-		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo snapshot)?"
+		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo point)?"
 		if sb, err := api.Get(ctx, name); err == nil {
 			if lost := a.unhandedWork(ctx, sb); lost != "" {
 				question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
@@ -579,6 +614,11 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 		}
 	}
 	work, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	if ex == nil && (err != nil || work == workspace.CopyWorkUnknown) && a.cleanCopy(sb) {
+		// The session that stopped it found it changed nothing, and it has
+		// not run since.
+		return ""
+	}
 	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
 	switch {
 	case err != nil:

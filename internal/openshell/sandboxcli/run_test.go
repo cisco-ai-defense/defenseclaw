@@ -79,14 +79,14 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	out := ta.output()
 	for _, want := range []string{
 		"Sandbox dc-claude-proj-1a2b · Claude Code · skip-permissions ON · network: open + blocklist",
-		"Project   ~/proj → /work/proj (live)   snapshot taken → `defenseclaw sandbox undo dc-claude-proj-1a2b` restores it",
+		"Project   ~/proj → /work/proj (live)   undo point taken → `defenseclaw sandbox undo dc-claude-proj-1a2b` restores it",
 		"Hidden    .env",
 		"Protected .git/hooks .git/config (read-only)",
 		"Model     ANTHROPIC_API_KEY → api.anthropic.com only",
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
-		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 sites contacted (1 request blocked) · 2 files changed (+10 −3)",
+		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted (1 request blocked) · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b",
 	} {
@@ -249,7 +249,7 @@ func TestRunSummaryWaitsForLateDenials(t *testing.T) {
 	if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
 		t.Fatalf("Run: %v\n%s", err, ta.output())
 	}
-	if out := ta.output(); !strings.Contains(out, "0 sites contacted (2 requests blocked)") {
+	if out := ta.output(); !strings.Contains(out, "0 new sites contacted (2 requests blocked)") {
 		t.Fatalf("the summary missed the late denials:\n%s", out)
 	}
 }
@@ -723,8 +723,8 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 	if want := []string{"stage wt", "upload wt"}; len(ta.copy.steps) < 2 || !slices.Equal(ta.copy.steps[:2], want) {
 		t.Fatalf("copy steps = %v, want %v first", ta.copy.steps, want)
 	}
-	if out := ta.output(); !strings.Contains(out, "cannot be mounted live (the git directory is outside the project (a linked worktree))") ||
-		!strings.Contains(out, "copy mode") {
+	if out := ta.output(); !strings.Contains(out, "⚠ ~/proj can't be mounted live (the git directory is outside the project (a linked worktree)), so it runs on a copy: `defenseclaw sandbox pull wt` brings the changes back") ||
+		strings.Contains(out, "run it with --copy") {
 		t.Fatalf("output does not explain the fallback:\n%s", out)
 	}
 }
@@ -757,7 +757,7 @@ func TestRunRefusesTheNameOfAKeptSnapshot(t *testing.T) {
 	kept.Phase = "deleted"
 	ta.daemon.add(kept)
 	err := ta.Run(context.Background(), RunOptions{Harness: "claude", Copy: true, Name: "keptbox"})
-	if err == nil || !strings.Contains(err.Error(), "holds the kept undo snapshot of a deleted sandbox") ||
+	if err == nil || !strings.Contains(err.Error(), "holds the kept undo point of a deleted sandbox") ||
 		!strings.Contains(err.Error(), "`defenseclaw sandbox delete keptbox` drops it") || strings.Contains(err.Error(), "connect") {
 		t.Fatalf("Run = %v", err)
 	}
@@ -804,9 +804,9 @@ func TestSummaryLineCountsBlockedRequests(t *testing.T) {
 		egress sandboxapi.EgressStats
 		want   string
 	}{
-		{sandboxapi.EgressStats{Destinations: 1, Blocked: 1}, "Session ended · 0 tool calls · 0 sites contacted"},
-		{sandboxapi.EgressStats{Destinations: 2, Blocked: 2}, "Session ended · 0 tool calls · 1 site contacted (1 request blocked)"},
-		{sandboxapi.EgressStats{Destinations: 3, Blocked: 3}, "Session ended · 0 tool calls · 2 sites contacted (2 requests blocked)"},
+		{sandboxapi.EgressStats{Destinations: 1, Blocked: 1}, "Session ended · 0 tool calls · 0 new sites contacted"},
+		{sandboxapi.EgressStats{Destinations: 2, Blocked: 2}, "Session ended · 0 tool calls · 1 new site contacted (1 request blocked)"},
+		{sandboxapi.EgressStats{Destinations: 3, Blocked: 3}, "Session ended · 0 tool calls · 2 new sites contacted (2 requests blocked)"},
 	} {
 		if got := s.summaryLine(&sandboxapi.Sandbox{Egress: tc.egress}, nil); got != tc.want {
 			t.Errorf("summaryLine(%+v) = %q, want %q", tc.egress, got, tc.want)

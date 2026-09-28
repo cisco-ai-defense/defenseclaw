@@ -105,7 +105,13 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	case sandboxapi.ActivityEgressLargeUpload:
 		b.WriteString(a.style("⚠", ansiYellow) + " large upload to " + hostPort(ev) + " (" + humanBytes(ev.BytesUp) + ")")
 	case sandboxapi.ActivityApprovalRequested:
-		b.WriteString(a.style("?", ansiYellow, ansiBold) + " ask " + ev.ApprovalID + ": " + firstNonEmpty(ev.Message, hostPort(ev)))
+		// The destination always shows: nobody should approve one they
+		// cannot see. The daemon's message says why it is an ask.
+		what := firstNonEmpty(askDestination(ev), "a new destination")
+		if why := strings.TrimSpace(ev.Message); why != "" && why != ev.Host {
+			what += " (" + truncate(why, 120) + ")"
+		}
+		b.WriteString(a.style("?", ansiYellow, ansiBold) + " ask " + ev.ApprovalID + ": " + what)
 		if ev.Sandbox != "" && ev.ApprovalID != "" {
 			b.WriteString(a.dim("  → " + CommandName + " approve " + ev.Sandbox + " " + ev.ApprovalID))
 		}

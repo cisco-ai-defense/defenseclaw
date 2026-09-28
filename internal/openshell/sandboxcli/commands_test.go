@@ -981,7 +981,7 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	if err := ta.PolicyExplain(context.Background(), PolicyOptions{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
 	}
-	if out := ta.output(); !strings.Contains(out, "balanced (asked for open)") || !strings.Contains(out, "openshell.admin.min_profile") {
+	if out := ta.output(); !strings.Contains(out, "balanced (instead of open)") || !strings.Contains(out, "openshell.admin.min_profile") {
 		t.Fatalf("explain:\n%s", out)
 	}
 	if strings.Contains(ta.output(), "-o json lists all") {
@@ -1238,10 +1238,10 @@ func TestDetectLLMWithoutACredentialPointsToSetupToken(t *testing.T) {
 	claude, _ := harness.Get("claudecode")
 	for _, choice := range []string{"", "none"} {
 		got, err := ta.detectLLM(claude, choice, "", nil)
-		if err != nil || got.Credential != nil || !strings.Contains(got.Note, "stores a real token there, which the agent can read") {
+		if err != nil || got.Credential != nil || !strings.Contains(got.Note, "stores a real token the agent can read") {
 			t.Fatalf("detectLLM(%q) = %+v, %v", choice, got, err)
 		}
-		if choice == "" && !strings.Contains(got.Note, "run `claude setup-token` here and set CLAUDE_CODE_OAUTH_TOKEN") {
+		if choice == "" && !strings.Contains(got.Note, "CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`") {
 			t.Fatalf("note = %q", got.Note)
 		}
 	}

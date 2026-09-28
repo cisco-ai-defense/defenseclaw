@@ -107,7 +107,7 @@ func TestRunWarnsWhenHooksNeverReachDefenseClaw(t *testing.T) {
 			t.Errorf("live output lacks %q:\n%s", want, live)
 		}
 	}
-	if n := strings.Count(live, "DefenseClaw hooks are not reaching"); n != 1 {
+	if n := strings.Count(live, "\x1b]9;DefenseClaw: ⚠ DefenseClaw hooks are not reaching"); n != 1 {
 		t.Errorf("live warnings = %d, want 1", n)
 	}
 	out := ta.output()
@@ -365,7 +365,7 @@ func TestHookFailuresShown(t *testing.T) {
 	}
 
 	s := &session{app: ta.App, before: &sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}}
-	if got, want := s.summaryLine(&sb, nil), "Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 sites contacted (1 request blocked)"; got != want {
+	if got, want := s.summaryLine(&sb, nil), "Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted (1 request blocked)"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 	s.before = &sb

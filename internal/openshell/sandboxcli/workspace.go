@@ -118,10 +118,10 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 			// Not a clean result: the session changed what undo cannot
 			// put back.
 			a.printUnrestored(preview.Result.Unrestored())
-			a.note("nothing else to undo: the rest of " + o.Name + "'s folder matches its pre-session snapshot")
+			a.note("nothing else to undo: the rest of " + o.Name + "'s folder matches its undo point")
 			return nil
 		}
-		a.ok("nothing to undo: " + o.Name + "'s folder matches its pre-session snapshot")
+		a.ok("nothing to undo: " + o.Name + "'s folder matches its undo point")
 		return nil
 	}
 	a.printUndo(preview.Result, true)
@@ -148,9 +148,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	if o.Preview {
 		return nil
 	}
-	question := "Restore " + a.tildePath(preview.Result.Project) + " to the snapshot?"
+	question := "Restore " + a.tildePath(preview.Result.Project) + " to its undo point?"
 	if running {
-		question = "Stop " + o.Name + " and restore " + a.tildePath(preview.Result.Project) + " to the snapshot?"
+		question = "Stop " + o.Name + " and restore " + a.tildePath(preview.Result.Project) + " to its undo point?"
 	}
 	yes, err := a.confirm(question, o.Yes)
 	if err != nil {
@@ -178,8 +178,9 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	}
 	a.ok("restored: " + undoDone(res, "see above"))
 	if res.Result != nil {
-		if res.Result.PostCommit != "" {
-			a.note("the session's state is kept in commit " + shortOID(res.Result.PostCommit))
+		if c := res.Result.PostCommit; c != "" {
+			a.note("the session's state is kept in commit " + shortOID(c) + ": `git -C " + a.tildePath(firstNonEmpty(res.Result.Project, preview.Result.Project)) +
+				" checkout " + shortOID(c) + " -- .` brings its files back")
 		}
 		for _, w := range res.Result.Warnings {
 			a.warn(w)
@@ -195,7 +196,7 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 // summary, or the snapshot, except the places it could not restore (where
 // says where the output lists them).
 func undoDone(res *sandboxapi.UndoResponse, where string) string {
-	msg := firstNonEmpty(res.Summary, "the folder is back to its pre-session snapshot")
+	msg := firstNonEmpty(res.Summary, "the folder is back at its undo point")
 	if res.Result == nil {
 		return msg
 	}
@@ -347,7 +348,7 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 	}
 	switch {
 	case r.BranchBefore != "" && r.BranchBefore != r.BranchAfter:
-		a.line("  switch back to branch " + r.BranchBefore + " at " + firstNonEmpty(shortCommit(r.HeadBefore), "its snapshot commit"))
+		a.line("  switch back to branch " + r.BranchBefore + " at " + firstNonEmpty(shortCommit(r.HeadBefore), "its undo point's commit"))
 	case r.HeadBefore != r.HeadAfter && r.HeadBefore != "":
 		on := ""
 		if r.BranchBefore != "" {
@@ -648,9 +649,29 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 	a.note("Pulling " + sb.Name + "'s work…")
 	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: review})
 	if err != nil {
-		return nil, workspaceFailure("pull "+sb.Name, err, "")
+		return nil, workspaceFailure("pull "+sb.Name, err, a.diskFullHint(err))
 	}
 	return res, nil
+}
+
+// lowDiskBytes is the free space under which a failed write is taken for
+// a full disk: git names only the file it could not write.
+const lowDiskBytes = 64 << 20
+
+// diskFullHint names a full disk as the cause of a workspace failure (no
+// space left on device), which git's own message does not say.
+func (a *App) diskFullHint(err error) string {
+	dir := a.dataDir()
+	free, known := freeBytes(dir)
+	full := isNoSpace(err) || strings.Contains(strings.ToLower(err.Error()), "no space left on device")
+	if !full && (!known || free >= lowDiskBytes) {
+		return ""
+	}
+	msg := "the disk holding " + a.tildePath(dir) + " is full (no space left on device)"
+	if known {
+		msg = "the disk holding " + a.tildePath(dir) + " is full (no space left on device: " + humanBytes(int64(free)) + " free)"
+	}
+	return msg + "; free some space, then retry"
 }
 
 // applyPull lands a pull and records it with the daemon.
@@ -691,7 +712,7 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		a.warn("could not record the pull with the daemon: " + apiError(rerr).Error())
 	}
 	if err != nil {
-		return nil, workspaceFailure("bring back "+sb.Name+"'s changes", err, applyHint(opts.Mode, err))
+		return nil, workspaceFailure("bring back "+sb.Name+"'s changes", err, firstNonEmpty(applyHint(opts.Mode, err), a.diskFullHint(err)))
 	}
 	switch {
 	case fellBack(applied):

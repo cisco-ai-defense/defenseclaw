@@ -19,9 +19,14 @@ package sandboxcli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"path"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -61,12 +66,35 @@ type session struct {
 	// end-of-session deltas.
 	before *sandboxapi.Sandbox
 
+	// shell marks a `connect --shell` session: no harness, so no hooks to
+	// expect.
+	shell bool
+	// startedAt is when the harness (or shell) was attached; harnessCode
+	// its exit status.
+	startedAt   time.Time
+	harnessCode int
+	// interrupted is set when the user pressed Ctrl-C at the end of the
+	// session's keep/undo question; undoStopped when that session's undo
+	// stopped a sandbox it had found running.
+	interrupted bool
+	undoStopped bool
+
 	// hooksWarned is set once the live warning that the session's hooks do
 	// not reach DefenseClaw went out (hooks.go); noHooks once the session
-	// ended without one of them getting through.
+	// ended without one of them getting through. sawHooks is set when the
+	// session saw one of its hooks reach DefenseClaw (a verdict on the feed,
+	// a read of its counters), which a daemon restart cannot take back.
 	hooksMu     sync.Mutex
 	hooksWarned bool
 	noHooks     bool
+	sawHooks    atomic.Bool
+
+	// notices are what the session announced while the harness owned the
+	// terminal (hooks.go), repeated in the summary.
+	noticeMu   sync.Mutex
+	notices    []sessionNotice
+	noticeKeys map[string]bool
+	titleSet   bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -106,12 +134,7 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
-	if before, err := s.api.Get(ctx, s.sb.Name); err == nil {
-		s.before = before
-	} else {
-		s.before = s.sb
-	}
-	stop := s.watchNotices(ctx)
+	stop := s.beginSession(ctx)
 	defer stop()
 	if headless || !s.app.IO.TTY {
 		inv, err := s.cli.Exec(s.sb.Name, argv, openshell.CLIExecOptions{WorkDir: s.sb.Workdir})
@@ -124,21 +147,64 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 		if interrupted() && ctx.Err() == nil {
 			// The harness was ended; the session ends as usual.
 			s.app.warnErr("interrupted: ending the session")
+			s.harnessCode = exitInterrupted
 			return exitInterrupted, nil
 		}
+		s.harnessCode = code
 		return code, err
 	}
 	inv, err := s.cli.Exec(s.sb.Name, argv, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
 	if err != nil {
 		return -1, err
 	}
+	code, err := s.app.Terminal.Run(ctx, inv)
+	s.harnessCode = code
+	return code, err
+}
+
+// loginShell starts the sandbox user's login shell (bash where the image
+// has it) in the exec's working directory, with the environment the
+// profile gives the connect shell (the egress proxy, the harness shim).
+var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash -l; fi; exec sh -l"}
+
+// attachShell runs a login shell in the project folder with the terminal
+// (`connect --shell`).
+func (s *session) attachShell(ctx context.Context) (int, error) {
+	stop := s.beginSession(ctx)
+	defer stop()
+	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
+	if err != nil {
+		return -1, err
+	}
 	return s.app.Terminal.Run(ctx, inv)
 }
 
-// watchNotices follows the sandbox during the session and prints what must
-// not wait until the end: an ask waiting for the user, a quarantined nested
-// repository, and hooks that do not reach DefenseClaw (the daemon's
-// verdict, or no hook by the end of the hook window).
+// beginSession reads the sandbox as the session starts (for the
+// end-of-session deltas) and follows it until the returned stop.
+func (s *session) beginSession(ctx context.Context) func() {
+	if before, err := s.api.Get(ctx, s.sb.Name); err == nil {
+		s.before = before
+	} else {
+		s.before = s.sb
+	}
+	s.startedAt = s.app.Now()
+	return s.watchNotices(ctx)
+}
+
+// promptFirst are the harnesses whose first hook comes only with the
+// user's first prompt, which may be long after they start: an idle one
+// is not overdue. (The Codex TUI too, but its OTLP export from the start
+// proves the path; see telemetryReached.)
+var promptFirst = map[string]bool{
+	"kiro": true, "hermes": true, "antigravity": true, "openhands": true, "omnigent": true, "copilot": true,
+}
+
+// watchNotices follows the sandbox during the session and announces what
+// must not wait until the end: an ask waiting for the user, a blocked
+// destination, a finding (an alert, hook tamper), a quarantined nested
+// repository, a DefenseClaw daemon that does not answer, and hooks that
+// do not reach DefenseClaw (the daemon's verdict, or no hook by the end of
+// the hook window).
 func (s *session) watchNotices(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var since uint64
@@ -147,43 +213,219 @@ func (s *session) watchNotices(ctx context.Context) func() {
 		return nil
 	})
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
-			if ev.Kind == sandboxapi.ActivityApprovalRequested {
-				s.notice(askNotice(s.sb.Name, ev))
-				return nil
-			}
-			if ev.Kind != sandboxapi.ActivityFinding {
-				return nil
-			}
-			switch ev.Reason {
-			case sandboxapi.ReasonNestedRepo:
-				s.notice(strings.TrimPrefix(ev.Message, "⚠ "))
-			case sandboxapi.ReasonHooksUnreachable:
-				s.warnHooksOnce(ev.Message)
-			}
-			return nil
-		})
+		s.followActivity(ctx, since)
 	}()
-	go func() {
-		defer wg.Done()
-		s.checkHooksAfter(ctx, s.app.hookWindow())
-	}()
-	return func() { cancel(); wg.Wait() }
+	if !s.shell && !promptFirst[s.spec.Name] {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.checkHooksAfter(ctx, s.app.hookWindow())
+		}()
+	}
+	return func() {
+		cancel()
+		wg.Wait()
+		s.restoreTitle()
+	}
 }
 
-// askNotice is the live line for an ask of sandbox name: the harness owns
-// this terminal, so the answer comes from another one.
-func askNotice(name string, ev sandboxapi.ActivityEvent) string {
-	what := firstNonEmpty(ev.Message, hostPort(ev), "a new destination")
+// reconnectDelay paces the activity stream's reconnects (a real timer: an
+// App's Sleep may be instant).
+var reconnectDelay = 2 * time.Second
+
+// followActivity follows the session's activity until ctx ends. When the
+// stream ends early the daemon went away (stopped, restarted, crashed):
+// the session says so while it cannot reach it, and follows again once it
+// answers. A restarted daemon numbers its events from the start, so a
+// reconnect reads them all and skips the ones seen or from before the
+// session.
+func (s *session) followActivity(ctx context.Context, since uint64) {
+	var down time.Time
+	for {
+		_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
+			s.onActivity(ctx, ev)
+			return nil
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		since = 0
+		if _, err := s.api.Status(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if down.IsZero() {
+				down = s.app.Now()
+				s.daemonDown()
+			}
+		} else if !down.IsZero() {
+			s.daemonBack(down)
+			down = time.Time{}
+		}
+		t := time.NewTimer(reconnectDelay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// onActivity handles one event of the session's feed.
+func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
+	if !ev.Time.IsZero() && !s.startedAt.IsZero() && ev.Time.Before(s.startedAt.Add(-time.Minute)) {
+		// From before the session (a reconnect reads the daemon's
+		// buffer from the start).
+		return
+	}
+	if !s.firstSight(ev) {
+		return
+	}
+	switch ev.Kind {
+	case sandboxapi.ActivityApprovalRequested:
+		s.askNotice(ctx, ev)
+	case sandboxapi.ActivityEgressBlocked:
+		s.blockNotice(ev)
+	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityHookFailed:
+		// A hook of the session reached DefenseClaw.
+		s.sawHooks.Store(true)
+	case sandboxapi.ActivityFinding:
+		switch ev.Reason {
+		case sandboxapi.ReasonNestedRepo:
+			// The summary lists the quarantined repositories itself.
+			s.notice("", strings.TrimPrefix(ev.Message, "⚠ "), "")
+		case sandboxapi.ReasonHooksUnreachable:
+			s.warnHooksOnce(ev.Message)
+		case sandboxapi.ReasonHooksRestored:
+			s.sawHooks.Store(true)
+		default:
+			if ev.Reason == reasonHookTamper {
+				// Its post-tool hook reached DefenseClaw.
+				s.sawHooks.Store(true)
+			}
+			s.findingNotice(ev)
+		}
+	}
+}
+
+// askDestination is where an ask would open: its host and port.
+func askDestination(ev sandboxapi.ActivityEvent) string {
+	if ev.Host == "" {
+		return ""
+	}
+	if ev.Port != 0 {
+		return ev.Host + ":" + strconv.Itoa(ev.Port)
+	}
+	return ev.Host
+}
+
+// askText is an ask of sandbox name for the live notice: the destination
+// (and the binary asking, when known), why it is an ask, and where it is
+// answered (the harness owns this terminal).
+func askText(name string, ev sandboxapi.ActivityEvent, binary string) string {
+	what := firstNonEmpty(askDestination(ev), "a new destination")
+	if binary != "" {
+		what += " (" + path.Base(binary) + ")"
+	}
 	id := ""
 	if ev.ApprovalID != "" {
 		id = " " + ev.ApprovalID
 	}
-	return "? ask" + id + ": " + truncate(what, 120) + " is waiting for you → in another terminal: " +
-		CommandName + " approve " + name + id + " (or reject)"
+	msg := "? ask" + id + ": " + what + " is waiting for you"
+	if why := strings.TrimSpace(ev.Message); why != "" && why != ev.Host {
+		msg += " (" + truncate(why, 120) + ")"
+	}
+	return msg + " → in another terminal: " + CommandName + " approve " + name + id + " (or reject), or in `defenseclaw tui`: 7 Sandboxes, then t for Asks"
+}
+
+// askNotice announces an ask, with the binary the daemon's list names.
+func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
+	binary := ""
+	if ev.ApprovalID != "" {
+		if list, err := s.api.Approvals(ctx, s.sb.Name); err == nil {
+			for _, ap := range list {
+				if ap.ID == ev.ApprovalID {
+					binary = ap.Binary
+				}
+			}
+		}
+	}
+	what := firstNonEmpty(askDestination(ev), "a new destination")
+	if binary != "" {
+		what += " (" + path.Base(binary) + ")"
+	}
+	s.notice("ask "+ev.ApprovalID, askText(s.sb.Name, ev, binary), "? asked to reach "+what)
+	s.bell()
+}
+
+// blockNotice announces a destination DefenseClaw blocked, once per host,
+// with the command that lifts the block when one does. What the harness
+// fetches on its own and does without (a startup tip) is not announced.
+func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
+	if ev.Host == "" || ev.Reason == harnessFetchReason {
+		return
+	}
+	text := "✗ DefenseClaw blocked " + hostPort(ev)
+	if why := firstNonEmpty(ev.Category, ev.Reason); why != "" {
+		text += " (" + reasonText(why) + ")"
+	}
+	if ev.Unblockable {
+		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
+	}
+	s.notice("block "+ev.Host, text, text)
+}
+
+// harnessFetchReason is triage's reason for a denied request the harness
+// makes around the egress proxy and does without; reasonHookTamper the
+// daemon's for a tool call that ran without a verdict
+// (audit.SandboxFindingHookTamper).
+const (
+	harnessFetchReason = "harness_background_fetch"
+	reasonHookTamper   = "hook_tamper"
+)
+
+// findingNotice announces a finding of the session: an alert on a tool
+// call, hook tamper, silent hooks, an OpenShell security finding.
+func (s *session) findingNotice(ev sandboxapi.ActivityEvent) {
+	if strings.EqualFold(ev.Severity, "info") {
+		return
+	}
+	msg := strings.TrimSpace(strings.TrimPrefix(firstNonEmpty(ev.Message, ev.Reason), "⚠ "))
+	if msg == "" {
+		return
+	}
+	if ev.Host != "" && !strings.Contains(msg, ev.Host) {
+		msg = ev.Host + ": " + msg
+	}
+	s.notice("finding "+msg, "⚠ "+msg, "⚠ "+msg)
+}
+
+// daemonDown announces that the DefenseClaw daemon does not answer: the
+// sandbox's hooks fail closed meanwhile.
+func (s *session) daemonDown() {
+	s.notice("", "⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: "+s.harnessName()+
+		" can't use its tools until it is back (start it with `defenseclaw-gateway start`)", "")
+}
+
+// daemonBack announces the daemon's return and keeps the outage for the
+// summary.
+func (s *session) daemonBack(since time.Time) {
+	s.notice("", "✓ the DefenseClaw daemon is reachable again", "")
+	s.noticeMu.Lock()
+	s.notices = append(s.notices, sessionNotice{summary: "⚠ the DefenseClaw daemon was not reachable from " + since.Local().Format("15:04:05") +
+		" to " + s.app.Now().Local().Format("15:04:05") + "; the hooks failed closed meanwhile"})
+	s.noticeMu.Unlock()
+}
+
+func (s *session) harnessName() string {
+	if s.shell || s.spec == nil {
+		return "the sandbox"
+	}
+	return s.spec.DisplayName
 }
 
 // detach starts the harness in the background inside the sandbox; its
@@ -253,7 +495,7 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t)
 	if err != nil {
 		report("failed", rec, "upload_failed")
-		return workspaceFailure("upload the project copy", err, "")
+		return workspaceFailure("upload the project copy", err, a.diskFullHint(err))
 	}
 	if _, err := a.Workspace.Baseline(ctx, a.dataDir(), s.sb.Name, t); err != nil {
 		report("failed", up, "baseline_failed")
@@ -281,11 +523,20 @@ func (s *session) end(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	a := s.app
 	after, err := s.settled(ctx)
+	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		a.println()
+		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() + "; there is nothing left to review")
+		return nil
+	}
 	if err != nil {
 		return apiError(err)
 	}
 	a.println()
-	if !s.started {
+	elsewhere := s.endedElsewhere(after)
+	if elsewhere != "" {
+		a.warn(elsewhere)
+	}
+	if !s.started && after.Phase == "ready" {
 		// The sandbox was running before the session: a detached run may
 		// still be going in it.
 		if run, err := a.detachedRun(ctx, s.cli, after); err == nil && run.State == runRunning {
@@ -293,13 +544,16 @@ func (s *session) end(ctx context.Context) error {
 		}
 	}
 	if after.WorkdirMode == config.OpenShellWorkdirCopy {
-		return s.endCopy(ctx, after)
+		return s.endCopy(ctx, after, elsewhere != "")
 	}
 	// What the agent left running keeps writing to the mounted folder: a
 	// sandbox the session owns stops before the review, so the review, the
 	// keep/undo answer and the undo point cover everything it changed.
 	stopped := false
 	switch {
+	case after.Phase != "ready":
+		// Stopped from elsewhere: nothing runs in it any more.
+		stopped = true
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
 			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
@@ -311,7 +565,7 @@ func (s *session) end(ctx context.Context) error {
 			}
 		}
 	case !s.liveRun:
-		a.note(s.sb.Name + " keeps running (it was running when you connected), so what it changes after this review is not in it")
+		a.note(s.sb.Name + " is still running (it was running when you connected); changes it makes after this point are not in this review")
 	}
 	rev, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{})
 	reviewed := err == nil
@@ -319,7 +573,8 @@ func (s *session) end(ctx context.Context) error {
 		a.warn("could not review the session's changes: " + apiError(err).Error())
 	}
 	a.println(s.summaryLine(after, rev))
-	s.printHookReach(after)
+	s.printHookReach(after, elsewhere != "")
+	s.printNotices()
 	// A session whose review failed may have changed anything: the
 	// keep/undo question still comes, and the undo point stays.
 	changed := !reviewed || (rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0 ||
@@ -327,7 +582,7 @@ func (s *session) end(ctx context.Context) error {
 	if !reviewed {
 		s.keepSnapshot = true
 		if after.Snapshot != nil {
-			a.note("undo still restores the folder to its snapshot: `" + CommandName + " undo " + s.sb.Name + "`")
+			a.note("undo still restores the folder to its undo point: `" + CommandName + " undo " + s.sb.Name + "`")
 		}
 	}
 	if rev != nil && rev.Report != nil {
@@ -351,11 +606,13 @@ func (s *session) end(ctx context.Context) error {
 		if err != nil {
 			a.warn("diff: " + apiError(err).Error())
 		} else {
-			a.println(strings.TrimRight(diff.Diff, "\n"))
+			a.page(diff.Diff)
 		}
 		decision, accepted = s.onExit(changed)
 	}
-	if decision == "u" {
+	switch {
+	case decision == "u":
+		wasRunning := after.Phase == "ready"
 		res, err := s.api.Undo(ctx, s.sb.Name, sandboxapi.UndoRequest{Stop: true})
 		if err != nil {
 			return fmt.Errorf("undo: %w", apiError(err))
@@ -367,21 +624,51 @@ func (s *session) end(ctx context.Context) error {
 			}
 			a.printUnrestored(res.Result.Unrestored())
 		}
-		// The folder is back at its snapshot.
+		// The folder is back at its undo point; undo stopped the sandbox.
 		s.keepSnapshot = false
+		s.undoStopped = wasRunning && !s.started
 		return s.finish(ctx, true)
-	}
-	if accepted && reviewed {
-		// The next session starts from here: its snapshot replaces this
-		// undo point. Changes nobody could review never become the base.
+	case decision == "i":
+		// Ctrl-C at the question: nothing was decided.
+		s.interrupted, s.keepSnapshot = true, true
+		a.warn("interrupted: nothing was decided, so the changes stay in the folder and the undo point is kept (`" + CommandName + " undo " +
+			s.sb.Name + "` still reverts them; `" + CommandName + " review " + s.sb.Name + "` shows them)")
+	case !changed:
+	case accepted && reviewed:
+		// The next session starts from here: its undo point replaces this
+		// one. Changes nobody could review never become the base.
 		a.acceptUndoPoint(after)
+		a.ok("kept: the changes stay in the folder, and the next session takes a new undo point")
+	case accepted:
+		a.ok("kept: the changes stay in the folder, and the undo point stays, since they could not be reviewed")
+	case after.Snapshot != nil:
+		a.note("the changes stay in the folder; `" + CommandName + " undo " + s.sb.Name + "` still reverts them")
 	}
 	return s.finish(ctx, stopped)
 }
 
-// onExit returns k (keep), u (undo) or d (diff), and whether keeping was
-// the user's choice (an answer, --yes, or on_exit: keep) rather than the
-// default without a terminal.
+// endedElsewhere says what ended the session from outside it, when
+// something did: the sandbox was undone or stopped (another terminal, the
+// TUI), which ended the harness under the user.
+func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
+	if s.startedAt.IsZero() || s.before == nil || s.before.Phase != "ready" {
+		return ""
+	}
+	name := s.sb.Name
+	if snap := after.Snapshot; snap != nil && !snap.UndoneAt.IsZero() && snap.UndoneAt.After(s.startedAt) &&
+		(s.before.Snapshot == nil || !snap.UndoneAt.Equal(s.before.Snapshot.UndoneAt)) {
+		return name + " was undone from outside this session (`" + CommandName + " undo` or the TUI): the folder is back at its undo point, " +
+			"and that stopped " + s.harnessName()
+	}
+	if after.Phase != "ready" {
+		return name + " was stopped from outside this session (`" + CommandName + " stop` or the TUI), which ended " + s.harnessName()
+	}
+	return ""
+}
+
+// onExit returns k (keep), u (undo), d (diff) or i (the user pressed
+// Ctrl-C), and whether keeping was the user's choice (an answer, --yes,
+// or on_exit: keep) rather than the default without a terminal.
 func (s *session) onExit(changed bool) (string, bool) {
 	a := s.app
 	if !changed {
@@ -404,6 +691,9 @@ func (s *session) onExit(changed bool) (string, bool) {
 		return "k", s.yes
 	}
 	ans, err := a.choose("Keep changes?", []choice{{"y", "keep"}, {"u", "undo everything"}, {"d", "show diff"}}, "y")
+	if errors.Is(err, errInterrupted) {
+		return "i", false
+	}
 	if err != nil {
 		return "k", false
 	}
@@ -429,7 +719,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		}
 		a.forgetCLIState(name)
 		if s.keepSnapshot {
-			a.ok("sandbox " + name + " deleted (--rm); its undo snapshot is kept because the changes were not reviewed → review: " +
+			a.ok("sandbox " + name + " deleted (--rm); its undo point is kept because the changes were not reviewed → review: " +
 				CommandName + " review " + name + "   undo: " + CommandName + " undo " + name + "   drop it: " + CommandName + " delete " + name)
 			return nil
 		}
@@ -444,6 +734,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			return nil
 		case !s.started:
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)
+			s.continueHint()
 			return nil
 		}
 		if _, err := s.api.Stop(ctx, name); err != nil {
@@ -455,8 +746,53 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	if s.headless {
 		next += " --prompt TEXT"
 	}
-	a.note("Sandbox kept (stopped) → " + next + "   delete: " + CommandName + " delete " + name)
+	kept := "Sandbox kept (stopped)"
+	if s.undoStopped {
+		kept = "Sandbox " + name + " is stopped now (undo stops it) and kept"
+	}
+	a.note(kept + " → " + next + "   delete: " + CommandName + " delete " + name)
+	s.continueHint()
 	return nil
+}
+
+// continueArgs are the harness arguments that continue its latest
+// conversation.
+var continueArgs = map[string]string{
+	"claudecode": "--continue",
+	"codex":      "resume --last",
+	"opencode":   "--continue",
+	"copilot":    "--continue",
+}
+
+// ownResumeHint is the resume command a harness prints as it exits. Typed
+// on this machine it runs the harness here, outside the sandbox, unless
+// the shell wrapper sends it into the sandbox.
+var ownResumeHint = map[string]string{
+	"claudecode": "claude --resume",
+	"codex":      "codex resume",
+}
+
+// continueHint names the command that continues this conversation inside
+// the sandbox (a plain connect starts a new one), and what the harness's
+// own resume hint does.
+func (s *session) continueHint() {
+	if s.headless || s.shell || s.spec == nil {
+		return
+	}
+	args, ok := continueArgs[s.spec.Name]
+	if !ok {
+		return
+	}
+	a := s.app
+	line := "continue this conversation: " + CommandName + " connect " + s.sb.Name + " -- " + args
+	if own, ok := ownResumeHint[s.spec.Name]; ok {
+		if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name) {
+			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed resumes it in this sandbox too: the shell wrapper is on)"
+		} else {
+			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed would run it on this machine, outside the sandbox)"
+		}
+	}
+	a.note(line)
 }
 
 // settled reads the sandbox for the session summary once its counts stop
@@ -495,35 +831,44 @@ const (
 	settleInterval = time.Second
 )
 
-// summaryLine is "Session ended · 57 tool calls (1 blocked: …) · 23 sites
-// contacted (1 request blocked) · 8 files changed (+212 −37)". Sites count
-// distinct destinations and blocks count refused requests, so the blocked
-// number is labelled as requests.
+// summaryLine is "Session ended · 57 tool calls (1 blocked: <rule title>
+// (RULE-ID)) · 23 new sites contacted (1 request blocked) · 8 files changed
+// (+212 −37)". Sites count destinations the sandbox had not contacted
+// before the session and blocks count refused requests, so the blocked
+// number is labelled as requests. A daemon restart during the session
+// starts its counters from zero: the session's then count from zero too.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
 		before = &sandboxapi.Sandbox{}
 	}
-	calls := after.Hooks.ToolCalls - before.Hooks.ToolCalls
-	blocked := after.Hooks.ToolBlocked - before.Hooks.ToolBlocked
+	hooksBefore, egressBefore := before.Hooks, before.Egress
+	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
+		hooksBefore = sandboxapi.HookCoverage{}
+	}
+	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked {
+		egressBefore = sandboxapi.EgressStats{}
+	}
+	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
+	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
 	parts := []string{"Session ended"}
 	tools := plural(max(calls, 0), "tool call", "tool calls")
 	if blocked > 0 {
 		tools += fmt.Sprintf(" (%d blocked", blocked)
 		if after.Hooks.LastBlocked != "" {
-			tools += ": " + truncate(after.Hooks.LastBlocked, 48)
+			tools += ": " + blockedReason(after.Hooks.LastBlocked)
 		}
 		tools += ")"
 	}
 	parts = append(parts, tools)
 	// A hook call DefenseClaw answered with an error failed closed: the
 	// harness's action was blocked without a verdict.
-	if failed := after.Hooks.HookFailed - before.Hooks.HookFailed; failed > 0 {
+	if failed := after.Hooks.HookFailed - hooksBefore.HookFailed; failed > 0 {
 		parts = append(parts, plural(failed, "hook call", "hook calls")+" failed (blocked)")
 	}
-	sites := after.Egress.Destinations - before.Egress.Destinations
-	requestsBlocked := after.Egress.Blocked - before.Egress.Blocked
-	siteText := plural(int64(max(sites, 0)), "site contacted", "sites contacted")
+	sites := after.Egress.Destinations - egressBefore.Destinations
+	requestsBlocked := after.Egress.Blocked - egressBefore.Blocked
+	siteText := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
 	if requestsBlocked > 0 {
 		siteText += " (" + plural(int64(requestsBlocked), "request blocked", "requests blocked") + ")"
 	}
@@ -540,6 +885,46 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// blockedReason is a blocked tool call's reason as the summary names it:
+// the deciding rule's title and ID ("E2E sandbox marker command
+// (E2E-SANDBOX-MARKER)"), taken from the reason DefenseClaw gave the
+// harness ("Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox
+// marker command. Try another approach…"), or the reason cut short.
+func blockedReason(reason string) string {
+	r := strings.TrimSpace(reason)
+	for _, verb := range []string{"Blocked by ", "Held for approval by ", "Flagged by "} {
+		rest, ok := strings.CutPrefix(r, verb+"DefenseClaw rule ")
+		if !ok {
+			if strings.HasPrefix(r, verb+"DefenseClaw policy.") {
+				return "DefenseClaw policy"
+			}
+			continue
+		}
+		end := len(rest)
+		for _, sep := range []string{":", " (", ". "} {
+			if i := strings.Index(rest, sep); i >= 0 && i < end {
+				end = i
+			}
+		}
+		id := strings.TrimSuffix(rest[:end], ".")
+		title := ""
+		if strings.HasPrefix(rest[end:], ":") {
+			title = strings.TrimSpace(rest[end+1:])
+			for _, sep := range []string{" (also ", ". "} {
+				if i := strings.Index(title, sep); i >= 0 {
+					title = title[:i]
+				}
+			}
+			title = strings.TrimSuffix(title, ".")
+		}
+		if title == "" {
+			return truncate(id, 60)
+		}
+		return truncate(title, 60) + " (" + id + ")"
+	}
+	return truncate(r, 60)
 }
 
 // headMoved describes what a session did to HEAD: "switched main → fix",
@@ -591,12 +976,23 @@ func (s *session) printAsks(sb *sandboxapi.Sandbox) {
 }
 
 // endCopy pulls a copy-mode sandbox's work and asks where it goes.
-func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error {
+func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedElsewhere bool) error {
 	a := s.app
+	if after.Phase != "ready" {
+		// Stopped from elsewhere: its work stays in it until a pull, which
+		// starts it to read it.
+		a.println(s.summaryLine(after, nil))
+		s.printHookReach(after, endedElsewhere)
+		s.printNotices()
+		a.note("its work stays in the sandbox: `" + CommandName + " pull " + after.Name + "` reads it")
+		s.rm = false
+		return s.finish(ctx, true)
+	}
 	pull, err := a.pull(ctx, s.api, s.cli, after)
 	if err != nil {
 		a.println(s.summaryLine(after, nil))
-		s.printHookReach(after)
+		s.printHookReach(after, endedElsewhere)
+		s.printNotices()
 		a.warn("could not pull the sandbox's changes: " + err.Error())
 		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
 		s.rm = false
@@ -604,7 +1000,8 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	}
 	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
-	s.printHookReach(after)
+	s.printHookReach(after, endedElsewhere)
+	s.printNotices()
 	if rev.RiskLine != "" {
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
@@ -614,6 +1011,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	}
 	if pull.Empty() {
 		a.note("the sandbox changed nothing")
+		a.markCleanCopy(after)
 		return s.finish(ctx, false)
 	}
 	mode := ""
@@ -625,7 +1023,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 		}
 		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"})
 		ans, err := a.choose("Bring the changes back?", choices, "a")
-		if err != nil {
+		switch {
+		case errors.Is(err, errInterrupted):
+			// Ctrl-C: nothing comes back; the changes wait in the sandbox.
+			s.interrupted = true
+			a.warn("interrupted: nothing was brought back")
+		case err != nil:
 			return err
 		}
 		mode = map[string]string{"a": "apply", "b": "branch", "p": "patch"}[ans]

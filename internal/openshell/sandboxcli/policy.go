@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -237,11 +238,15 @@ func adminText(s sandboxapi.AdminStatus) string {
 	if !s.Configured {
 		return "no openshell.admin constraints"
 	}
-	t := s.Authority
-	if s.Detail != "" {
-		t += ": " + s.Detail
+	// The detail names the authority itself ("openshell.admin is
+	// enforced but advisory: …"): once is enough.
+	switch {
+	case s.Detail == "":
+		return s.Authority
+	case s.Authority == "" || strings.Contains(s.Detail, s.Authority):
+		return s.Detail
 	}
-	return t
+	return s.Authority + ": " + s.Detail
 }
 
 // PolicyExplain prints every resolved setting with its provenance.
@@ -277,7 +282,14 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 		}
 		asked := ""
 		if s.Requested != "" {
-			asked = " (asked for " + listFit(s.Requested, min(explainRequestedWidth, valueW/3)) + ")"
+			// A value the user chose and the policy replaced has a
+			// violation; one the user never chose (a pack default, no
+			// limit) was replaced, not asked for.
+			verb := "instead of "
+			if slices.ContainsFunc(ex.Violations, func(v sandboxapi.Violation) bool { return v.Key == s.Key }) {
+				verb = "asked for "
+			}
+			asked = " (" + verb + listFit(strings.Trim(s.Requested, "()"), min(explainRequestedWidth, valueW/3)) + ")"
 		}
 		val := listFit(shown, valueW-utf8.RuneCountInString(asked)) + asked
 		if utf8.RuneCountInString(val) > valueW {

@@ -66,10 +66,115 @@ func errNoHooks() error {
 	return &ExitError{Code: ExitHooksUnreachable, Err: &Silent{Err: errors.New("no DefenseClaw hook of the session reached the daemon")}}
 }
 
-// notice prints one line while the harness owns the terminal: on stderr,
-// in column 0, is all that is safe.
-func (s *session) notice(msg string) {
-	fmt.Fprintf(s.app.IO.Err, "\r\n[defenseclaw] %s\r\n", sandboxapi.DisplayText(msg))
+// sessionNotice is one thing the session announced, as its line in the
+// end-of-session summary.
+type sessionNotice struct {
+	summary string
+}
+
+// notice announces msg while the harness owns the terminal, once per key
+// (an empty key: every time), and keeps summary ("" keeps nothing) for the
+// end-of-session summary. A line written into a harness's TUI would
+// corrupt it (it lands on the input box and stays after the redraw), so an
+// interactive session shows the notice in the terminal's title and as a
+// desktop notification (OSC 9, where the terminal has them), and the
+// summary repeats it; a headless session prints a line on stderr.
+func (s *session) notice(key, msg, summary string) {
+	msg = sandboxapi.DisplayText(msg)
+	tui := s.app.IO.TTY && !s.headless
+	s.noticeMu.Lock()
+	if key != "" {
+		if s.noticeKeys == nil {
+			s.noticeKeys = map[string]bool{}
+		}
+		if s.noticeKeys[key] {
+			s.noticeMu.Unlock()
+			return
+		}
+		s.noticeKeys[key] = true
+	}
+	if summary != "" {
+		s.notices = append(s.notices, sessionNotice{summary: summary})
+	}
+	push := tui && !s.titleSet
+	s.titleSet = s.titleSet || tui
+	s.noticeMu.Unlock()
+	if !tui {
+		fmt.Fprintf(s.app.IO.Err, "\r\n[defenseclaw] %s\r\n", msg)
+		return
+	}
+	var b strings.Builder
+	if push {
+		// Keep the title to restore at the end of the session.
+		b.WriteString("\x1b[22;0t")
+	}
+	b.WriteString("\x1b]2;[defenseclaw] " + truncate(msg, 160) + "\a")
+	b.WriteString("\x1b]9;DefenseClaw: " + msg + "\a")
+	fmt.Fprint(s.app.IO.Err, b.String())
+}
+
+// bell rings the terminal: an ask waits for the user.
+func (s *session) bell() {
+	if s.app.IO.TTY && !s.headless {
+		fmt.Fprint(s.app.IO.Err, "\a")
+	}
+}
+
+// restoreTitle puts back the terminal title the session's notices
+// replaced.
+func (s *session) restoreTitle() {
+	s.noticeMu.Lock()
+	set := s.titleSet
+	s.titleSet = false
+	s.noticeMu.Unlock()
+	if set {
+		fmt.Fprint(s.app.IO.Err, "\x1b[23;0t")
+	}
+}
+
+// firstSight reports whether the session sees ev for the first time: a
+// reconnect of the activity stream reads the daemon's buffer again.
+func (s *session) firstSight(ev sandboxapi.ActivityEvent) bool {
+	key := fmt.Sprintf("event %d %d %s %s %s %s %s", ev.Seq, ev.Time.UnixNano(), ev.Kind, ev.ApprovalID, ev.Host, ev.Reason, ev.Message)
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	if s.noticeKeys == nil {
+		s.noticeKeys = map[string]bool{}
+	}
+	if s.noticeKeys[key] {
+		return false
+	}
+	if len(s.noticeKeys) < maxSeenEvents {
+		s.noticeKeys[key] = true
+	}
+	return true
+}
+
+// maxSeenEvents bounds what firstSight remembers.
+const maxSeenEvents = 4096
+
+// maxSummaryNotices is how many of the session's notices the summary
+// repeats; the feed has them all.
+const maxSummaryNotices = 6
+
+// printNotices repeats, after the summary line, what the session announced
+// while the harness owned the terminal.
+func (s *session) printNotices() {
+	s.noticeMu.Lock()
+	list := append([]sessionNotice(nil), s.notices...)
+	s.noticeMu.Unlock()
+	a := s.app
+	for i, n := range list {
+		if i == maxSummaryNotices {
+			a.note(fmt.Sprintf("… %d more: %s activity --sandbox %s", len(list)-i, CommandName, s.sb.Name))
+			break
+		}
+		style := ansiYellow
+		if strings.HasPrefix(n.summary, "✗") {
+			style = ansiRed
+		}
+		a.line(a.style(n.summary, style))
+	}
 }
 
 // warnHooksOnce prints the session's first live warning about its hooks:
@@ -80,7 +185,7 @@ func (s *session) warnHooksOnce(msg string) {
 	s.hooksWarned = true
 	s.hooksMu.Unlock()
 	if !warned {
-		s.notice(msg)
+		s.notice("", msg, "")
 	}
 }
 
@@ -96,6 +201,8 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 	}
 	sb, err := s.api.Get(ctx, s.sb.Name)
 	if err != nil || s.hooksReached(sb) || s.telemetryReached(sb) {
+		// A daemon that does not answer is announced by the activity
+		// watch.
 		return
 	}
 	s.warnHooksOnce("⚠ " + hooksWarningText(firstNonEmpty(sb.Hooks.UnreachableReason,
@@ -103,13 +210,22 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 }
 
 // hooksReached reports whether at least one hook of the session reached
-// DefenseClaw by the time after was read.
+// DefenseClaw by the time after was read. A daemon restart resets the
+// hook counters (the new daemon counts from zero), so the time of the last
+// hook decides too, and what the session saw on its way.
 func (s *session) hooksReached(after *sandboxapi.Sandbox) bool {
+	if s.sawHooks.Load() {
+		return true
+	}
 	before := s.before
 	if before == nil {
 		before = s.sb
 	}
-	return after.Hooks.HookRequests > before.Hooks.HookRequests
+	reached := after.Hooks.HookRequests > before.Hooks.HookRequests || after.Hooks.LastHookAt.After(before.Hooks.LastHookAt)
+	if reached {
+		s.sawHooks.Store(true)
+	}
+	return reached
 }
 
 // telemetryReached reports whether an authenticated OTLP request of the
@@ -128,24 +244,43 @@ func (s *session) telemetryReached(after *sandboxapi.Sandbox) bool {
 
 // printHookReach ends the summary of a session none of whose hooks reached
 // DefenseClaw with the warning, and marks the session for its exit status.
-func (s *session) printHookReach(after *sandboxapi.Sandbox) {
-	if s.hooksReached(after) {
+// A harness that failed before it fired one (it exited with an error, and
+// the daemon saw nothing wrong with its hooks) is said to have failed; a
+// shell fires none.
+func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool) {
+	if s.shell || s.hooksReached(after) {
+		return
+	}
+	a := s.app
+	if code := s.harnessCode; code != 0 && !after.Hooks.Unreachable {
+		if !endedElsewhere && code != exitInterrupted {
+			a.println(a.style(fmt.Sprintf("✗ %s exited with status %d before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)",
+				s.harnessName(), code), ansiRed, ansiBold))
+		}
+		return
+	}
+	if s.spec != nil && promptFirst[s.spec.Name] && !after.Hooks.Unreachable {
+		// Its first hook comes with the first prompt, and the daemon saw
+		// the harness do no work without one: a session nobody prompted.
+		a.note("no hook of this session reached DefenseClaw: " + s.harnessName() + " sends its first one with your first prompt")
 		return
 	}
 	s.noHooks = true
-	a := s.app
 	reason := firstNonEmpty(after.Hooks.UnreachableReason, "not one hook request of this session reached DefenseClaw")
 	a.println(a.style("✗ "+hooksWarningText(reason), ansiRed, ansiBold))
 }
 
 // exit is the status of a finished session: the harness's own, else
-// ExitHooksUnreachable when its hooks never reached DefenseClaw.
+// ExitHooksUnreachable when its hooks never reached DefenseClaw, or the
+// interrupt that ended its keep/undo question.
 func (s *session) exit(code int) error {
 	switch {
 	case code != 0:
 		return &ExitError{Code: code}
 	case s.noHooks:
 		return errNoHooks()
+	case s.interrupted:
+		return &ExitError{Code: exitInterrupted}
 	}
 	return nil
 }

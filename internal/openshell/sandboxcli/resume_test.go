@@ -305,7 +305,7 @@ func TestResumeKeepsAnUnacceptedUndoPoint(t *testing.T) {
 			t.Errorf("output lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "snapshot taken") {
+	if strings.Contains(out, "undo point taken") {
 		t.Fatalf("the banner claims a fresh snapshot:\n%s", out)
 	}
 	// The user kept the changes: the next start, `start` or `connect`,
@@ -318,7 +318,7 @@ func TestResumeKeepsAnUnacceptedUndoPoint(t *testing.T) {
 	if len(starts) != 2 || !strings.Contains(string(starts[1].Body), `"new_snapshot":true`) {
 		t.Fatalf("start after keeping = %s", starts[len(starts)-1].Body)
 	}
-	if out := ta.output(); strings.Contains(out, "kept the undo point") || !strings.Contains(out, "snapshot taken → `defenseclaw sandbox undo m1-a` restores it") {
+	if out := ta.output(); strings.Contains(out, "kept the undo point") || !strings.Contains(out, "undo point taken → `defenseclaw sandbox undo m1-a` restores it") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
@@ -341,7 +341,7 @@ func TestConnectAfterKeepingAsksForANewSnapshot(t *testing.T) {
 	if len(starts) != 1 || !strings.Contains(string(starts[0].Body), `"new_snapshot":true`) {
 		t.Fatalf("start = %s", starts[0].Body)
 	}
-	if out := ta.output(); strings.Contains(out, "kept the undo point") || !strings.Contains(out, "snapshot taken → `defenseclaw sandbox undo m1-b` restores it") {
+	if out := ta.output(); strings.Contains(out, "kept the undo point") || !strings.Contains(out, "undo point taken → `defenseclaw sandbox undo m1-b` restores it") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
@@ -360,7 +360,7 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 	if len(starts) != 1 || strings.Contains(string(starts[0].Body), "snapshot") {
 		t.Fatalf("start = %s", starts[0].Body)
 	}
-	if out := ta.output(); !strings.Contains(out, "snapshot taken → `defenseclaw sandbox undo box` restores it") {
+	if out := ta.output(); !strings.Contains(out, "undo point taken → `defenseclaw sandbox undo box` restores it") {
 		t.Fatalf("output:\n%s", out)
 	}
 	// Changes nobody kept: the daemon keeps the undo point, and the start
@@ -391,7 +391,7 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 	if len(starts) != 3 || !strings.Contains(string(starts[2].Body), `"new_snapshot":true`) {
 		t.Fatalf("third start = %s", starts[2].Body)
 	}
-	if out := ta.output(); strings.Contains(out, "kept the undo point") || !strings.Contains(out, "snapshot taken") {
+	if out := ta.output(); strings.Contains(out, "kept the undo point") || !strings.Contains(out, "undo point taken") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
@@ -510,12 +510,12 @@ func TestRunResumeNamesTheFlagsItIgnores(t *testing.T) {
 	if n := len(ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)); n != 0 {
 		t.Fatal("resuming anyway created a sandbox")
 	}
-	if out := ta.output(); !strings.Contains(out, "resuming proj-0a1b without --safe, --credential (they apply to a new sandbox: pass --new)") {
+	if out := ta.output(); !strings.Contains(out, "resuming proj-0a1b without --safe, --credential (they apply to a new sandbox: run with --new --copy, or delete proj-0a1b first (`defenseclaw sandbox delete proj-0a1b`))") {
 		t.Fatalf("output:\n%s", out)
 	}
 
 	// Flags the sandbox already matches ask nothing new.
-	if got := resumeIgnores(RunOptions{Pack: "open", Profile: "open", LLM: LLMAuto}, &sandboxapi.Sandbox{Pack: "open", Profile: "open"}); len(got) != 0 {
+	if got := resumeIgnores(RunOptions{Pack: "open", Profile: "open", LLM: LLMAuto}, &sandboxapi.Sandbox{Pack: "open", Profile: "open"}, nil); len(got) != 0 {
 		t.Fatalf("resumeIgnores = %v", got)
 	}
 }

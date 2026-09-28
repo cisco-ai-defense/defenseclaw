@@ -156,12 +156,18 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 			return errors.New(violationMessage(&v, v.Message, v.Detail, v.Admin))
 		}
 	}
+	// The flags replace the configured limits a clamp of which the
+	// preflight reported.
+	for _, c := range resourceClamps(o, ex) {
+		ex.Violations = slices.DeleteFunc(ex.Violations, func(v sandboxapi.Violation) bool { return v.Key == c.Key })
+		ex.Violations = append(ex.Violations, c)
+	}
 	// The organization's refusals come first; then what the run needs from
 	// this terminal.
 	if !o.Detach && !headless && !a.IO.TTY {
 		return fmt.Errorf("`sandbox run` attaches %s to your terminal, and there is none; pass --prompt TEXT (with --detach to run in the background)", spec.DisplayName)
 	}
-	if err := a.checkHostPorts(spec, project, o, st); err != nil {
+	if err := a.checkHostPorts(spec, project, o, st, ex); err != nil {
 		return err
 	}
 	// What the policy changed about the request is said before anything
@@ -171,27 +177,21 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		return err
 	}
 	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy
+	if note := copyPolicyNote(ex, o); note != "" {
+		a.note(note)
+	}
 
 	// Resume this folder's sandbox instead of starting another. The
 	// sandbox keeps the settings it was created with, so flags that only a
-	// new sandbox takes turn the default answer to no.
+	// new sandbox takes (and it does not have already) turn the default
+	// answer to no. A sandbox the policy would not start is not offered.
 	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
-			question := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resume it?", sb.Name, sb.Phase, sb.WorkdirMode)
-			ignored := resumeIgnores(o, sb)
-			if len(ignored) > 0 {
-				question = fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resuming it keeps its own settings and ignores %s. Resume it anyway?",
-					sb.Name, sb.Phase, sb.WorkdirMode, strings.Join(ignored, ", "))
-			}
-			resume, err := a.ask(question, len(ignored) == 0, false)
-			if err != nil {
+			if why := a.startRefusal(ctx, api, sb); why != "" {
+				a.note(fmt.Sprintf("Sandbox %s (%s, %s) holds this folder but cannot start under the current policy (%s); `%s delete %s` removes it.",
+					sb.Name, sb.Phase, sb.WorkdirMode, why, CommandName, sb.Name))
+			} else if resumed, err := a.offerResume(ctx, o, sb, copyMode); resumed || err != nil {
 				return err
-			}
-			if resume {
-				if len(ignored) > 0 {
-					a.warn("resuming " + sb.Name + " without " + strings.Join(ignored, ", ") + " (they apply to a new sandbox: pass --new)")
-				}
-				return a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
 			}
 		}
 	}
@@ -208,7 +208,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	// what to do instead of reading the refusal.
 	if !copyMode && a.IO.TTY && !o.Detach {
 		if holder := a.liveMountHolder(ctx, api, project); holder != nil {
-			proceed, useCopy, err := a.resolveLiveMount(ctx, api, project, holder)
+			proceed, useCopy, err := a.resolveLiveMount(ctx, api, spec, project, holder)
 			if err != nil || !proceed {
 				return err
 			}
@@ -216,6 +216,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		}
 	}
 
+	a.warnSecretEnv(env)
 	env = a.withGitIdentity(ctx, project, env)
 	req, llm, err := a.createRequest(spec, project, o, copyMode, env)
 	if err != nil {
@@ -248,24 +249,20 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	}
 
 	a.println()
-	a.note("Starting a " + spec.DisplayName + " sandbox…" + a.buildNote(spec, o))
+	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o))
 	sb, err := api.Create(ctx, req)
 	if err != nil && !copyMode && sandboxapi.IsCode(err, sandboxapi.CodeNeedsCopy) {
 		// A linked worktree, a git directory outside the folder and the
 		// like cannot be protected in place: the run falls back to copy
 		// mode, saying why.
-		why := sandboxapi.AsError(err).Detail
-		if why == "" {
-			why = sandboxapi.AsError(err).Message
-		}
-		a.warn(a.tildePath(project) + " cannot be mounted live (" + why + "); running it in copy mode: the agent works on a copy, and `" +
-			CommandName + " pull` brings its changes back")
+		refusal := sandboxapi.AsError(err)
 		copyMode, req.Copy = true, true
 		if req.Name == "" {
 			if req.Name, err = a.freeName(ctx, api, project); err != nil {
 				return err
 			}
 		}
+		a.warn(a.needsCopyText(project, refusal, req.Name))
 		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o); err != nil {
 			return err
 		}
@@ -282,6 +279,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		}
 		return apiError(err)
 	}
+	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from
@@ -293,6 +291,8 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		ctx := context.WithoutCancel(ctx)
 		if _, derr := api.Delete(ctx, sb.Name, sandboxapi.DeleteRequest{}); derr != nil {
 			a.warn("could not delete " + sb.Name + ": " + derr.Error())
+		} else {
+			a.forgetCLIState(sb.Name)
 		}
 		return err
 	}
@@ -308,7 +308,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		return fail(err)
 	}
 	opts := harness.LaunchOptions{Mode: harness.Interactive, Yolo: sb.Launch.Yolo, CredentialProfile: sb.Launch.CredentialProfile,
-		BedrockRegion: sb.Launch.BedrockRegion, Args: filterBypass(spec, sb.Launch.Yolo, o.Args, a)}
+		BedrockRegion: sb.Launch.BedrockRegion, Args: a.filterBypass(spec, sb, o.Args)}
 	if o.Prompt != "" {
 		opts.Mode, opts.Prompt = harness.Headless, o.Prompt
 	}
@@ -388,16 +388,21 @@ func printHint(spec *harness.Spec) string {
 	return ""
 }
 
-// filterBypass drops, from a safe run's pass-through arguments, the harness
-// flags that turn its own permission prompts off (harness.Spec.BypassArgs),
-// and says so.
-func filterBypass(spec *harness.Spec, yolo bool, args []string, a *App) []string {
-	if yolo {
+// filterBypass drops, from a safe sandbox's pass-through arguments, the
+// harness flags that turn its own permission prompts off
+// (harness.Spec.BypassArgs), and says so, with the organization's reason
+// when it is the organization's.
+func (a *App) filterBypass(spec *harness.Spec, sb *sandboxapi.Sandbox, args []string) []string {
+	if sb.Launch.Yolo {
 		return args
 	}
 	kept, dropped := spec.BypassArgs(args)
 	if len(dropped) > 0 {
-		a.warn(strings.Join(dropped, " ") + " is ignored: this sandbox keeps " + spec.DisplayName + "'s permission prompts")
+		why := ""
+		if reason := a.promptsKept(sb); reason != "harness prompts kept" {
+			why = " (" + reason + ")"
+		}
+		a.warn(strings.Join(dropped, " ") + " is ignored: this sandbox keeps " + spec.DisplayName + "'s permission prompts" + why)
 	}
 	return kept
 }
@@ -549,7 +554,7 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 	switch {
 	case err == nil && sb.Phase == "deleted":
 		// A deleted sandbox whose snapshot was kept: nothing to resume.
-		return fmt.Errorf("the name %s holds the kept undo snapshot of a deleted sandbox: `%s undo %s` restores the folder to it, "+
+		return fmt.Errorf("the name %s holds the kept undo point of a deleted sandbox: `%s undo %s` restores the folder to it, "+
 			"`%s delete %s` drops it; or choose another --name", name, CommandName, name, CommandName, name)
 	case err == nil:
 		return nameTakenError(name, headless)
@@ -603,14 +608,16 @@ func (a *App) buildNote(spec *harness.Spec, o RunOptions) string {
 	if ok, err := a.Images.Current(spec); err != nil || ok {
 		return ""
 	}
-	return " (building its image first: about 3 GB, a few minutes)"
+	// Sizes and times differ by harness and by what the build cache
+	// already holds.
+	return " (building its image first, which can take a few minutes)"
 }
 
 // checkHostPorts refuses a --host-port DefenseClaw does not open, the way
 // the daemon refuses a --credential for one: DefenseClaw's own listeners
 // and the gateways, and ports the organization or the pack keeps closed.
 // The daemon would only drop them, after the banner promised them.
-func (a *App) checkHostPorts(spec *harness.Spec, project string, o RunOptions, st *sandboxapi.Status) error {
+func (a *App) checkHostPorts(spec *harness.Spec, project string, o RunOptions, st *sandboxapi.Status, ex *sandboxapi.Explain) error {
 	if len(o.HostPorts) == 0 || a.Cfg == nil {
 		return nil
 	}
@@ -630,9 +637,28 @@ func (a *App) checkHostPorts(spec *harness.Spec, project string, o RunOptions, s
 			return fmt.Errorf("--host-port %d: %w", port, err)
 		}
 		w := wireViolation(*v)
+		if required := requiredPack(ex); required != "" && !w.Admin {
+			// The pack is the organization's, not the user's choice.
+			w.Message = strings.Replace(w.Message, "the "+required+" sandbox pack", "the "+required+" sandbox pack your organization requires "+
+				"(openshell.admin.required_pack)", 1)
+		}
 		return fmt.Errorf("--host-port %d: %s", port, violationMessage(&w, w.Message, w.Detail, w.Admin))
 	}
 	return nil
+}
+
+// requiredPack is the pack the organization requires (the run's pack comes
+// from openshell.admin.required_pack), or "".
+func requiredPack(ex *sandboxapi.Explain) string {
+	if ex == nil {
+		return ""
+	}
+	for _, s := range ex.Settings {
+		if s.Key == "pack" && s.Source == string(packs.SourceAdmin) {
+			return firstNonEmpty(s.Value, ex.Pack)
+		}
+	}
+	return ""
 }
 
 // gatewayPort is the OpenShell gateway's port from the daemon's status (0
@@ -670,10 +696,87 @@ func (a *App) preflightViolations(list []sandboxapi.Violation) (map[string]bool,
 			return nil, err
 		}
 		if !yes {
+			a.note("cancelled; no sandbox was created")
 			return nil, &Silent{Err: errors.New("the run was cancelled")}
 		}
 	}
 	return shown, nil
+}
+
+// resourceClamps are the organization's limits on --cpu and --memory as
+// clamps of the flags. The policy preflight does not take them, but its
+// settings carry the organization's limit, and a flag above it is
+// overridden like any other: said before the run and confirmed. The
+// daemon's own clamp at create reads the same, so the banner does not
+// repeat it.
+func resourceClamps(o RunOptions, ex *sandboxapi.Explain) []sandboxapi.Violation {
+	var out []sandboxapi.Violation
+	for _, q := range []struct {
+		key, flag string
+		parse     func(string) (int64, error)
+	}{
+		{"resources.cpu", o.CPU, config.ParseOpenShellCPU},
+		{"resources.memory", o.Memory, config.ParseOpenShellMemory},
+	} {
+		asked := strings.TrimSpace(q.flag)
+		if asked == "" {
+			continue
+		}
+		var limit *sandboxapi.Setting
+		for i := range ex.Settings {
+			if s := &ex.Settings[i]; s.Key == q.key && s.Source == string(packs.SourceAdmin) {
+				limit = s
+			}
+		}
+		if limit == nil {
+			continue
+		}
+		ceiling, err := q.parse(limit.Value)
+		if err != nil {
+			continue
+		}
+		if want, err := q.parse(asked); err != nil || want <= ceiling {
+			continue
+		}
+		out = append(out, sandboxapi.Violation{
+			Key: q.key, Source: string(packs.SourceFlag), Attempted: asked, Enforced: limit.Value, Admin: true,
+			Constraint: firstNonEmpty(limit.Origin, "openshell.admin.max_resources"),
+			Message:    sandboxapi.AdminMessage + ": " + q.key,
+			Detail:     "your organization caps sandbox " + strings.TrimPrefix(q.key, "resources.") + " at " + limit.Value,
+		})
+	}
+	return out
+}
+
+// copyPolicyNote says why a run the user did not ask to copy works on a
+// copy: the organization requires it for this folder, or its required pack
+// works on copies. A clamp of a flag was said already (preflight).
+func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions) string {
+	if o.Copy {
+		return ""
+	}
+	for _, v := range ex.Violations {
+		if v.Key == "workdir.mode" {
+			return ""
+		}
+	}
+	for _, s := range ex.Settings {
+		if s.Key != "workdir.mode" || s.Value != config.OpenShellWorkdirCopy || s.Source != string(packs.SourceAdmin) {
+			continue
+		}
+		why := "your organization's policy runs it on a copy"
+		switch s.Origin {
+		case "openshell.admin.require_copy_for":
+			why = "your organization requires copy mode for this folder"
+		case "openshell.admin.required_pack":
+			why = "the " + firstNonEmpty(ex.Pack, "required") + " pack your organization requires works on copies"
+		case "openshell.admin.allow_mount":
+			why = "your organization does not allow live mounts"
+		}
+		return "copy mode: " + why + " (" + s.Origin + "); the agent works on a copy, and your folder gets its changes only through `" +
+			CommandName + " pull`"
+	}
+	return ""
 }
 
 func violationKey(v sandboxapi.Violation) string {
@@ -704,32 +807,142 @@ func (a *App) liveMountHolder(ctx context.Context, api API, project string) *san
 
 // resolveLiveMount asks what to do about the sandbox holding the folder's
 // live mount: work on a copy (the default), delete that sandbox first
-// (`sandbox delete` confirms and names what goes), or start nothing.
-func (a *App) resolveLiveMount(ctx context.Context, api API, project string, holder *sandboxapi.Sandbox) (proceed, useCopy bool, err error) {
-	a.note(fmt.Sprintf("Sandbox %s (%s, %s) already mounts this folder live; a folder takes one live mount, since each would undo the other's work.",
-		holder.Name, firstNonEmpty(holder.HarnessName, holder.Harness), holder.Phase))
+// (`sandbox delete` confirms and names what goes), or start nothing. It
+// names the holder's folder, phase and the commands that resume or delete
+// it.
+func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec, project string, holder *sandboxapi.Sandbox) (proceed, useCopy bool, err error) {
+	where := "this folder"
+	if holder.Project != project {
+		where = a.tildePath(holder.Project)
+	}
+	a.note(fmt.Sprintf("Sandbox %s (%s, %s) already mounts %s live; a folder takes one live mount, since each would undo the other's work.",
+		holder.Name, firstNonEmpty(holder.HarnessName, holder.Harness), holder.Phase, where))
+	a.note("resume it: " + CommandName + " connect " + holder.Name + "   delete it: " + CommandName + " delete " + holder.Name)
 	key, err := a.choose("Run this one on a copy, delete "+holder.Name+" first, or quit?", []choice{
 		{Key: "c", Label: "copy"}, {Key: "d", Label: "delete " + holder.Name}, {Key: "q", Label: "quit"},
 	}, "c")
-	if err != nil {
+	if err != nil && !errors.Is(err, errInterrupted) {
 		return false, false, err
 	}
-	switch key {
-	case "c":
-		a.note("working on a copy (--copy): `" + CommandName + " pull` brings the changes back")
+	switch {
+	case err == nil && key == "c":
+		a.note("working on a copy (--copy): `" + CommandName + " pull NAME` brings the changes back")
 		return true, true, nil
-	case "d":
+	case err == nil && key == "d":
 		if err := a.Delete(ctx, DeleteOptions{Names: []string{holder.Name}}); err != nil {
 			return false, false, err
 		}
 		if a.liveMountHolder(ctx, api, project) != nil {
-			a.note("nothing started: " + holder.Name + " still mounts this folder")
+			a.note("nothing started: " + holder.Name + " still mounts " + where)
 			return false, false, nil
 		}
 		return true, false, nil
 	default:
-		a.note("nothing started; `" + CommandName + " run --copy` works on a copy, `" + CommandName + " delete " + holder.Name + "` frees the folder")
+		a.note("nothing started; `" + CommandName + " run " + spec.Command + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
+			"` resumes " + holder.Name + ", `" + CommandName + " delete " + holder.Name + "` frees the folder")
 		return false, false, nil
+	}
+}
+
+// offerResume asks whether to resume sb, this folder's sandbox of the
+// harness, and resumes it when the answer is yes. Flags sb does not
+// already have are named and turn the default to no; when the folder's
+// live mount is sb's, a new sandbox needs a copy (or sb deleted), and the
+// hint says so.
+func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sandbox, copyMode bool) (bool, error) {
+	run := a.runLaunchOf(sb)
+	question := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resume it?", sb.Name, sb.Phase, sb.WorkdirMode)
+	ignored := resumeIgnores(o, sb, run)
+	if len(ignored) > 0 {
+		question = fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resuming it keeps its own settings and ignores %s. Resume it anyway?",
+			sb.Name, sb.Phase, sb.WorkdirMode, strings.Join(ignored, ", "))
+	}
+	resume, err := a.ask(question, len(ignored) == 0, false)
+	if err != nil || !resume {
+		return false, err
+	}
+	if len(ignored) > 0 {
+		next := "pass --new"
+		if sb.WorkdirMode == config.OpenShellWorkdirMount && !copyMode {
+			// The folder takes one live mount, and it is sb's.
+			next = "run with --new --copy, or delete " + sb.Name + " first (`" + CommandName + " delete " + sb.Name + "`)"
+		}
+		a.warn("resuming " + sb.Name + " without " + strings.Join(ignored, ", ") + " (they apply to a new sandbox: " + next + ")")
+	}
+	return true, a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
+}
+
+// startRefusal says why the current policy would refuse to start sb (a
+// setting it can no longer have, like a live mount the organization now
+// runs on a copy, or a harness it no longer allows), or "" when a start
+// would go ahead or the daemon cannot tell. The daemon checks the same at
+// the start.
+func (a *App) startRefusal(ctx context.Context, api API, sb *sandboxapi.Sandbox) string {
+	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name})
+	if err != nil {
+		return ""
+	}
+	for _, v := range ex.Violations {
+		if v.Fatal {
+			return violationMessage(&v, v.Message, v.Detail, v.Admin)
+		}
+	}
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy {
+		why := "it mounts the folder live, and the policy now runs it on a copy"
+		for _, s := range ex.Settings {
+			if s.Key == "workdir.mode" && s.Source == string(packs.SourceAdmin) {
+				why = "it mounts the folder live, and your organization now runs it on a copy (" + s.Origin + ")"
+			}
+		}
+		return why
+	}
+	if allowed := splitList(settingValue(ex.Settings, "harness.allowed")); len(allowed) > 0 && !slices.Contains(allowed, sb.Harness) {
+		return "the policy allows only " + harnessCommands(strings.Join(allowed, ", "))
+	}
+	return ""
+}
+
+// needsCopyText is the warning of a run that falls back to copy mode
+// because the folder cannot be mounted live (a linked worktree, a git
+// directory outside it): one sentence with the daemon's reason, without
+// its advice to pass --copy, which the run follows already.
+func (a *App) needsCopyText(project string, e *sandboxapi.Error, name string) string {
+	why := ""
+	if e != nil {
+		why = firstNonEmpty(e.Detail, e.Message)
+	}
+	why = strings.TrimPrefix(why, "workspace: ")
+	if _, after, ok := strings.Cut(why, "cannot be mounted live: "); ok {
+		why = after
+	}
+	for _, advice := range []string{"; run with --copy", "; run it with --copy", "; pass --copy"} {
+		if i := strings.Index(why, advice); i >= 0 {
+			why = why[:i]
+		}
+	}
+	why = strings.TrimSpace(a.tildeText(why))
+	msg := a.tildePath(project) + " can't be mounted live"
+	if why != "" && !strings.Contains(why, "cannot be mounted live") {
+		msg += " (" + why + ")"
+	}
+	return msg + ", so it runs on a copy: `" + CommandName + " pull " + name + "` brings the changes back"
+}
+
+// warnSecretEnv warns about --env variables whose names say they hold a
+// secret: the sandbox gets the value itself, in plain text the agent can
+// read, where --credential gives it a placeholder that works only at one
+// host.
+func (a *App) warnSecretEnv(env map[string]string) {
+	var names []string
+	for k := range env {
+		if secretLooking(k) {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		a.warn("--env " + k + " looks like a secret: the sandbox holds its value in plain text, which the agent can read; " +
+			"`--credential " + k + "=HOST` gives it a placeholder that works only at HOST")
 	}
 }
 
@@ -756,30 +969,33 @@ func (a *App) resumable(ctx context.Context, api API, project, harnessName strin
 // resumeIgnores lists the run flags a resume of sb would not honour: they
 // shape a sandbox when it is created (its policy, mounts, credentials,
 // environment and limits), and sb keeps its own. A flag sb already matches
-// is left out.
-func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox) []string {
+// is left out: its own settings, and what the run that created it (run,
+// when the CLI remembers it) was given.
+func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []string {
 	var out []string
 	add := func(set bool, flag string) {
 		if set {
 			out = append(out, flag)
 		}
 	}
+	had := func(same func(r *runLaunch) bool) bool { return run != nil && same(run) }
 	add(o.Safe && sb.Launch.Yolo, "--safe")
 	add(o.Pack != "" && o.Pack != sb.Pack, "--pack "+o.Pack)
 	add(o.Profile != "" && o.Profile != sb.Profile, "--profile "+o.Profile)
 	add(o.Copy && sb.WorkdirMode != config.OpenShellWorkdirCopy, "--copy")
-	add(len(o.Context) > 0, "--context")
-	add(len(o.Unmask) > 0, "--unmask")
-	add(len(o.HostPorts) > 0, "--host-port")
-	add(len(o.Credentials) > 0, "--credential")
-	add(o.GitHubWrite, "--github-write")
-	add(o.NoMCP, "--no-mcp")
-	add(o.LLM != "" && !strings.EqualFold(o.LLM, LLMAuto), "--llm "+o.LLM)
-	add(o.BedrockRegion != "", "--bedrock-region")
-	add(len(o.Env) > 0, "--env")
-	add(o.CPU != "", "--cpu")
-	add(o.Memory != "", "--memory")
-	add(o.NoSnapshot, "--no-snapshot")
+	add(len(o.Context) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Context, r.Context) }), "--context")
+	add(len(o.Unmask) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Unmask, r.Unmask) }), "--unmask")
+	add(len(o.HostPorts) > 0 && !had(func(r *runLaunch) bool { return samePorts(o.HostPorts, r.HostPorts) }), "--host-port")
+	add(len(o.Credentials) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Credentials, r.Credentials) }), "--credential")
+	add(o.GitHubWrite && !had(func(r *runLaunch) bool { return r.GitHubWrite }), "--github-write")
+	add(o.NoMCP && !had(func(r *runLaunch) bool { return r.NoMCP }), "--no-mcp")
+	add(o.LLM != "" && !strings.EqualFold(o.LLM, LLMAuto) && !had(func(r *runLaunch) bool { return strings.EqualFold(o.LLM, r.LLM) }), "--llm "+o.LLM)
+	add(o.BedrockRegion != "" && o.BedrockRegion != sb.Launch.BedrockRegion &&
+		!had(func(r *runLaunch) bool { return o.BedrockRegion == r.BedrockRegion }), "--bedrock-region")
+	add(len(o.Env) > 0 && !had(func(r *runLaunch) bool { return envDigest(o.Env) == r.EnvDigest }), "--env")
+	add(o.CPU != "" && !had(func(r *runLaunch) bool { return strings.TrimSpace(o.CPU) == r.CPU }), "--cpu")
+	add(o.Memory != "" && !had(func(r *runLaunch) bool { return strings.TrimSpace(o.Memory) == r.Memory }), "--memory")
+	add(o.NoSnapshot && !had(func(r *runLaunch) bool { return r.NoSnapshot }), "--no-snapshot")
 	return out
 }
 
@@ -838,7 +1054,7 @@ func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name s
 	a.note("Copying " + a.tildePath(project) + " (secrets are held back)…")
 	rec, err := a.Workspace.Stage(ctx, opts)
 	if err != nil {
-		return nil, workspaceFailure("stage the project copy", err, "")
+		return nil, workspaceFailure("stage the project copy", err, a.diskFullHint(err))
 	}
 	return rec, nil
 }
@@ -925,10 +1141,7 @@ func joinNonEmpty(sep string, parts ...string) string {
 // banner prints the plan's launch banner.
 func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	name := firstNonEmpty(sb.HarnessName, sb.Harness)
-	perms := "skip-permissions ON"
-	if !sb.Launch.Yolo {
-		perms = "skip-permissions OFF (" + a.promptsKept(sb) + ")"
-	}
+	perms := a.permissionsText(sb)
 	a.println()
 	a.printf("%s %s · %s · %s · network: %s\n", a.bold("Sandbox"), a.bold(sb.Name), name, perms, networkLabel(sb))
 	row := func(label, text string) { a.line(fmt.Sprintf("%-10s%s", label, text)) }
@@ -971,8 +1184,14 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
 	}
 	// Asks (a host port, a private address, a destination the profile
-	// does not list) wait for the user while the harness owns the terminal.
-	row("Asks", "shown here as they come; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name)
+	// does not list) wait for the user while the harness owns the terminal;
+	// its screen is the harness's, so a live session announces them in the
+	// terminal title (session.notice).
+	where := "shown here as they come"
+	if a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
+		where = "announced in this terminal's title as they come"
+	}
+	row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
 	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
 		// Servers left behind and a repository's blocked servers arrive as
 		// warnings below, one line each.
@@ -1011,6 +1230,34 @@ func bannerHostPorts(sb *sandboxapi.Sandbox, o RunOptions) []int {
 	return out
 }
 
+// specOf is sb's harness (Claude Code when DefenseClaw does not know
+// it, for the checks that need one).
+func specOf(sb *sandboxapi.Sandbox) *harness.Spec {
+	if spec, ok := harness.Get(sb.Harness); ok {
+		return spec
+	}
+	spec, _ := harness.Get("claudecode")
+	return spec
+}
+
+// ownApprovals are the harnesses without a skip-permissions switch: their
+// approval pauses come from their own policies, DefenseClaw's among them.
+var ownApprovals = map[string]string{
+	"omnigent": "approvals from OmniGent's policies, DefenseClaw's included",
+}
+
+// permissionsText is the banner's permissions: skip-permissions on or off
+// (and why), or the harness's own policies.
+func (a *App) permissionsText(sb *sandboxapi.Sandbox) string {
+	if text, ok := ownApprovals[sb.Harness]; ok {
+		return text
+	}
+	if !sb.Launch.Yolo {
+		return "skip-permissions OFF (" + a.promptsKept(sb) + ")"
+	}
+	return "skip-permissions ON"
+}
+
 // promptsKept says why a sandbox keeps the harness's permission prompts.
 func (a *App) promptsKept(sb *sandboxapi.Sandbox) string {
 	const orgOff = "your organization disables skip-permissions"
@@ -1034,7 +1281,7 @@ func (a *App) undoPointText(sb *sandboxapi.Sandbox, kept bool) string {
 	if kept {
 		return "undo point from " + a.clock(sb.Snapshot.CreatedAt) + " kept → " + undo + " reverts every session since"
 	}
-	return "snapshot taken → " + undo + " restores it"
+	return "undo point taken → " + undo + " restores it"
 }
 
 // clock is a local time of day, with the date when it is not today.

@@ -19,6 +19,7 @@
 package sandboxcli
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -62,4 +63,19 @@ func signalExitCode(s os.Signal) int {
 // execProcess replaces this process with path.
 func execProcess(path string, argv, env []string) error {
 	return syscall.Exec(path, argv, env)
+}
+
+// freeBytes is the space an unprivileged user may still write on the
+// filesystem holding path.
+func freeBytes(path string) (uint64, bool) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	return uint64(st.Bavail) * uint64(st.Bsize), true //nolint:gosec,unconvert // the field types differ by OS
+}
+
+// isNoSpace reports a write that failed because the disk is full.
+func isNoSpace(err error) bool {
+	return errors.Is(err, syscall.ENOSPC)
 }

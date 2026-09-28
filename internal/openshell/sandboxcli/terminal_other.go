@@ -39,3 +39,7 @@ func signalExitCode(os.Signal) int { return 130 }
 func execProcess(string, []string, []string) error {
 	return errors.New("sandbox: replacing the process is not supported on this platform")
 }
+
+func freeBytes(string) (uint64, bool) { return 0, false }
+
+func isNoSpace(error) bool { return false }
