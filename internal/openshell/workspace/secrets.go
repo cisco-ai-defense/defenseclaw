@@ -118,8 +118,23 @@ type secretScan struct {
 
 // walkFunc receives every entry below the root. rel is slash-separated.
 // .git directories and heavy package caches are reported but never
-// descended into, whatever the callback returns.
+// descended into (unless walkOptions.enterHeavy says otherwise for a heavy
+// one), whatever the callback returns.
 type walkFunc func(rel string, d fs.DirEntry) error
+
+// walkOptions tune walkTree.
+type walkOptions struct {
+	// limit is the entry limit (see walkLimit).
+	limit int
+	// enterHeavy decides whether the walk enters a heavy directory (top
+	// set) or a directory inside one it entered (top unset); nil enters
+	// none. Entries inside an entered directory are reported like any.
+	enterHeavy func(rel string, top bool) bool
+	// unreadable receives each directory below the root the walk could
+	// not list for lack of permission; the walk goes on without its
+	// contents.
+	unreadable func(rel string, d fs.DirEntry)
+}
 
 // walkLimit is the entry limit a walk uses for the configured value n.
 func walkLimit(n int) int {
@@ -133,15 +148,27 @@ func walkLimit(n int) int {
 // the entry limit (walkLimit) stopped the walk early; callers that need
 // the whole folder must refuse a truncated walk.
 func walkProject(root string, limit int, fn walkFunc) (bool, error) {
-	limit = walkLimit(limit)
+	return walkTree(root, walkOptions{limit: limit}, fn)
+}
+
+// walkTree is walkProject with options.
+func walkTree(root string, opts walkOptions, fn walkFunc) (bool, error) {
+	limit := walkLimit(opts.limit)
 	count := 0
 	truncated := false
+	// Directories entered at or below a heavy directory.
+	heavy := map[string]bool{}
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if p == root {
 				return walkErr
 			}
 			if d != nil && d.IsDir() {
+				if opts.unreadable != nil && errors.Is(walkErr, fs.ErrPermission) {
+					if rel, err := filepath.Rel(root, p); err == nil {
+						opts.unreadable(filepath.ToSlash(rel), d)
+					}
+				}
 				return fs.SkipDir
 			}
 			return nil
@@ -158,11 +185,22 @@ func walkProject(root string, limit int, fn walkFunc) (bool, error) {
 		if err != nil {
 			return err
 		}
-		err = fn(filepath.ToSlash(rel), d)
-		if d.IsDir() && (d.Name() == ".git" || isHeavyDir(d.Name())) && err == nil {
+		rel = filepath.ToSlash(rel)
+		if err := fn(rel, d); err != nil || !d.IsDir() {
+			return err
+		}
+		if d.Name() == ".git" {
 			return fs.SkipDir
 		}
-		return err
+		inHeavy := heavy[filepath.Dir(p)]
+		if !inHeavy && !isHeavyDir(d.Name()) {
+			return nil
+		}
+		if opts.enterHeavy == nil || !opts.enterHeavy(rel, !inHeavy) {
+			return fs.SkipDir
+		}
+		heavy[p] = true
+		return nil
 	})
 	return truncated, err
 }
@@ -198,7 +236,16 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 		}
 		res.masks = append(res.masks, m)
 	}
-	truncated, err := walkProject(root, opts.maxEntries, func(rel string, d fs.DirEntry) error {
+	// Heavy directories (package caches, virtualenvs, tool state) are not
+	// walked whole, but what lies directly inside one is checked by name:
+	// tools keep credentials at their top (.terraform/terraform.tfstate
+	// holds the backend configuration, credentials included), whereas
+	// packages' own key and certificate files sit deeper. An operator glob
+	// with a slash leads the walk as deep as it reaches.
+	walk := walkOptions{limit: opts.maxEntries, enterHeavy: func(rel string, top bool) bool {
+		return top || globsReachBelow(opts.patterns, rel)
+	}}
+	truncated, err := walkTree(root, walk, func(rel string, d fs.DirEntry) error {
 		entry, isTracked := opts.tracked[rel]
 		if isOpaqueDir(d) || d.Name() == ".git" {
 			return nil
@@ -237,7 +284,7 @@ func detectSecrets(root string, opts secretScanOptions) (*secretScan, error) {
 			add(MaskedPath{Rel: rel, Reason: "name", Hardlinked: hardlinked})
 			return nil
 		}
-		if !opts.contentScan || opts.detector == nil || info.Size() == 0 || info.Size() > maxContentScanBytes {
+		if !opts.contentScan || opts.detector == nil || info.Size() == 0 || info.Size() > maxContentScanBytes || underHeavyDir(rel) {
 			return nil
 		}
 		var content []byte

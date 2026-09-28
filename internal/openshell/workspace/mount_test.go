@@ -458,6 +458,75 @@ func TestPlanMountPinsAncestorsOfProtectedAndMaskedPaths(t *testing.T) {
 	}
 }
 
+// markerDetector flags content holding an inert marker.
+type markerDetector struct{}
+
+func (markerDetector) DetectSecret(_ string, content []byte) (string, bool) {
+	return "test-marker", strings.Contains(string(content), "inert-content-marker")
+}
+
+// TestPlanMountChecksTheTopOfHeavyDirectories: package caches, virtualenvs
+// and tool state are not walked whole, but a credential file directly
+// inside one is masked by name (Terraform keeps the backend configuration,
+// credentials included, in .terraform/terraform.tfstate). Packages' own key
+// and certificate files deeper down stay visible, contents there are not
+// scanned, and an operator glob with a slash reaches as deep as it names.
+func TestPlanMountChecksTheTopOfHeavyDirectories(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".terraform/terraform.tfstate", "{\"backend\":{\"config\":{\"access_key\":\"inert-marker\"}}}\n")
+	writeFile(t, e.project, ".terraform/providers/registry/aws.key", "provider fixture\n")
+	writeFile(t, e.project, ".cache/.env", "TOKEN=inert-marker\n")
+	writeFile(t, e.project, ".cache/notes.txt", "inert-content-marker\n")
+	writeFile(t, e.project, ".cache/hf/token", "inert-marker\n")
+	writeFile(t, e.project, ".cache/hf/other.txt", "not a secret\n")
+	writeFile(t, e.project, "node_modules/pkg/test/fixture.pem", "package fixture\n")
+	writeFile(t, e.project, "node_modules/pkg/.env", "package file\n")
+	writeFile(t, e.project, ".venv/lib/python3/site-packages/certifi/cacert.pem", "ca bundle\n")
+	writeFile(t, e.project, "src/notes.txt", "inert-content-marker\n")
+
+	opts := e.mountOpts("s1")
+	opts.Masks = []string{".cache/hf/token"}
+	opts.Detector = markerDetector{}
+	plan, err := PlanMount(bg, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan.MaskedRels(), " ")
+	if want := ".cache/.env .cache/hf/token .terraform/terraform.tfstate src/notes.txt"; got != want {
+		t.Fatalf("masked = %q, want %q", got, want)
+	}
+	for _, rel := range []string{".cache", ".cache/hf", ".terraform"} {
+		if m, ok := mountByTarget(plan, "/work/myapp/"+rel); !ok || m.Kind != MountPin {
+			t.Fatalf("%s holds a mask but is not pinned: %+v", rel, m)
+		}
+	}
+}
+
+func TestGlobsReachBelow(t *testing.T) {
+	cases := []struct {
+		pattern, dir string
+		want         bool
+	}{
+		{".cache/hf/token", ".cache", true},
+		{".cache/hf/token", ".cache/hf", true},
+		{".cache/hf/token", ".cache/hf/token", false},
+		{".cache/*/token", ".cache/hf", true},
+		{".cache/**/token", ".cache/a/b/c", true},
+		{"/.CACHE/hf/", ".cache", true},
+		{".cache/hf/token", "node_modules", false},
+		{"sub/.cache/hf/token", ".cache", false},
+		{"**/token", ".cache", false},
+		{"token", ".cache", false},
+		{"*.pem", "node_modules", false},
+	}
+	for _, c := range cases {
+		if got := globsReachBelow([]string{c.pattern}, c.dir); got != c.want {
+			t.Errorf("globsReachBelow(%q, %q) = %v, want %v", c.pattern, c.dir, got, c.want)
+		}
+	}
+}
+
 func TestReleaseMountKeepsPinsTheOperatorChanged(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()

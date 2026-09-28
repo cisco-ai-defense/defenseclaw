@@ -67,6 +67,40 @@ func matchSegments(pat, segs []string) bool {
 	return len(segs) == 0
 }
 
+// globsReachBelow reports whether a pattern with a slash could match a path
+// below the directory dir: its leading segments match dir's, or reach a
+// "**" first. Patterns without a slash (base names) and ones that start
+// with "**" match at any depth and do not lead a walk into directories it
+// skips.
+func globsReachBelow(patterns []string, dir string) bool {
+	dirSegs := strings.Split(strings.ToLower(strings.Trim(dir, "/")), "/")
+	for _, p := range patterns {
+		p = strings.TrimSuffix(strings.ToLower(strings.TrimPrefix(strings.TrimSpace(p), "/")), "/")
+		if !strings.Contains(p, "/") || strings.HasPrefix(p, "**") {
+			continue
+		}
+		if segmentsReachBelow(strings.Split(p, "/"), dirSegs) {
+			return true
+		}
+	}
+	return false
+}
+
+func segmentsReachBelow(pat, dirSegs []string) bool {
+	for i, seg := range dirSegs {
+		if i >= len(pat) {
+			return false
+		}
+		if pat[i] == "**" {
+			return true
+		}
+		if ok, _ := path.Match(pat[i], seg); !ok {
+			return false
+		}
+	}
+	return len(pat) > len(dirSegs)
+}
+
 // matchAny returns the first pattern that matches rel.
 func matchAny(patterns []string, rel string) (string, bool) {
 	for _, p := range patterns {
@@ -122,8 +156,10 @@ func isSecretDirName(name string) bool {
 	return false
 }
 
-// Directories skipped by tree walks: package caches and virtualenvs that are
-// huge, rebuilt from lockfiles, and never where a project keeps secrets.
+// Directories skipped by tree walks: package caches, virtualenvs and tool
+// state that are huge and rebuilt from lockfiles or sources. The secret
+// scan still checks the entries directly inside them by name, where tools
+// keep credentials (see detectSecrets).
 var heavyDirNames = map[string]struct{}{
 	"node_modules": {}, ".venv": {}, "venv": {}, "__pycache__": {}, ".tox": {},
 	".nox": {}, ".mypy_cache": {}, ".pytest_cache": {}, ".ruff_cache": {},
