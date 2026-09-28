@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -44,6 +45,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -1153,6 +1155,8 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/api/v1/ai-usage/confidence/policy", "/api/v1/ai-usage/confidence/policy/validate",
 		"/api/v1/codex/notify", "/v1/connectors", "/v1/config/providers", "/v1/config/providers/reload",
 		"/api/v1/ai-usage/components/x/y/locations", "/otlp/codex/token/v1/logs",
+		// The foreign-hook session records (enterprisepolicy).
+		"/api/v1/foreign-hook-session/x",
 		// The sandbox REST API (registerSandboxRoutes).
 		"/api/v1/sandbox/status", "/api/v1/sandbox/sandboxes", "/api/v1/sandbox/sandboxes/box",
 		"/api/v1/sandbox/sandboxes/box/stop", "/api/v1/sandbox/approvals", "/api/v1/sandbox/approvals/ap_1",
@@ -1180,7 +1184,9 @@ func mainAPIRoutePaths(t *testing.T) []string {
 }
 
 // routesRegisteredInRun parses APIServer.Run and returns every path it
-// passes to mux.Handle/HandleFunc, resolving the package constants it uses.
+// passes to mux.Handle/HandleFunc, resolving the package constants it uses
+// and the concatenations it builds from them. A {wildcard} segment becomes
+// "x", a concrete probe of that route.
 func routesRegisteredInRun(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -1189,10 +1195,44 @@ func routesRegisteredInRun(t *testing.T) []string {
 		t.Fatal(err)
 	}
 	constants := map[string]string{
-		"cliObservabilityV8Path":       cliObservabilityV8Path,
-		"alertAcknowledgementV8Path":   alertAcknowledgementV8Path,
-		"destinationtest.EndpointPath": destinationtest.EndpointPath,
+		"cliObservabilityV8Path":                        cliObservabilityV8Path,
+		"alertAcknowledgementV8Path":                    alertAcknowledgementV8Path,
+		"destinationtest.EndpointPath":                  destinationtest.EndpointPath,
+		"enterprisepolicy.ForeignHookSessionPathPrefix": enterprisepolicy.ForeignHookSessionPathPrefix,
 	}
+	var resolve func(ast.Expr) string
+	resolve = func(expr ast.Expr) string {
+		switch arg := expr.(type) {
+		case *ast.BasicLit:
+			value, err := strconv.Unquote(arg.Value)
+			if err != nil {
+				t.Fatalf("route literal %s: %v", arg.Value, err)
+			}
+			return value
+		case *ast.Ident:
+			value, ok := constants[arg.Name]
+			if !ok {
+				t.Fatalf("Run registers route constant %s; teach the sandbox route matrix about it", arg.Name)
+			}
+			return value
+		case *ast.SelectorExpr:
+			name := fmt.Sprint(arg.X) + "." + arg.Sel.Name
+			value, ok := constants[name]
+			if !ok {
+				t.Fatalf("Run registers route %s; teach the sandbox route matrix about it", name)
+			}
+			return value
+		case *ast.BinaryExpr:
+			if arg.Op != token.ADD {
+				t.Fatalf("Run registers a route through the %s operator; teach the sandbox route matrix about it", arg.Op)
+			}
+			return resolve(arg.X) + resolve(arg.Y)
+		default:
+			t.Fatalf("Run registers a route through %T; teach the sandbox route matrix about it", arg)
+			return ""
+		}
+	}
+	wildcard := regexp.MustCompile(`\{[^/{}]+\}`)
 	var paths []string
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
@@ -1208,29 +1248,7 @@ func routesRegisteredInRun(t *testing.T) []string {
 			if !ok || (sel.Sel.Name != "HandleFunc" && sel.Sel.Name != "Handle") {
 				return true
 			}
-			switch arg := call.Args[0].(type) {
-			case *ast.BasicLit:
-				value, err := strconv.Unquote(arg.Value)
-				if err != nil {
-					t.Fatalf("route literal %s: %v", arg.Value, err)
-				}
-				paths = append(paths, value)
-			case *ast.Ident:
-				value, ok := constants[arg.Name]
-				if !ok {
-					t.Fatalf("Run registers route constant %s; teach the sandbox route matrix about it", arg.Name)
-				}
-				paths = append(paths, value)
-			case *ast.SelectorExpr:
-				name := fmt.Sprint(arg.X) + "." + arg.Sel.Name
-				value, ok := constants[name]
-				if !ok {
-					t.Fatalf("Run registers route %s; teach the sandbox route matrix about it", name)
-				}
-				paths = append(paths, value)
-			default:
-				t.Fatalf("Run registers a route through %T; teach the sandbox route matrix about it", arg)
-			}
+			paths = append(paths, wildcard.ReplaceAllString(resolve(call.Args[0]), "x"))
 			return true
 		})
 	}
