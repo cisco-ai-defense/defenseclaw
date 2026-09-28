@@ -606,6 +606,47 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	}
 }
 
+// The daemon's delete leaves the CLI's own state of a sandbox (the run log
+// kept at a stop, the accepted undo point) under its data directory, which
+// `sandbox delete` removes after it: teardown removes it too.
+func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+		return nil, nil, errors.New("no gateway in this test")
+	}
+	ta.daemon.add(sampleSandbox("dc-claude-live"))
+	// The daemon's record: the data under the sandbox's directory is not an
+	// orphan's.
+	sandboxes := filepath.Join(ta.Cfg.DataDir, "sandboxes")
+	if err := os.MkdirAll(filepath.Join(sandboxes, "manager"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sandboxes, "manager", "dc-claude-live.json"),
+		[]byte(`{"version":1,"name":"dc-claude-live","harness":"claudecode"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := ta.cliStateDir("dc-claude-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.log"), []byte("what the agent printed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ta.Teardown(context.Background(), TeardownOptions{Yes: true, KeepImages: true}); err != nil {
+		t.Fatalf("Teardown: %v\n%s", err, ta.output())
+	}
+	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")); n != 1 {
+		t.Fatalf("daemon deletes = %d", n)
+	}
+	if _, err := os.Stat(filepath.Join(sandboxes, "dc-claude-live")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the sandbox's directory (and its kept run log) is still there: %v", err)
+	}
+}
+
 func TestTeardownWithoutDaemonOrGateway(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")

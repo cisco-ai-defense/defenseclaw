@@ -461,6 +461,9 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 				}
 			}
 		}
+		// What the CLI kept of it (a run log, the accepted undo point), as
+		// `sandbox delete` removes it: the daemon's delete leaves it.
+		a.forgetCLIState(name)
 		a.ok("deleted sandbox " + name)
 	}
 	for _, name := range p.stale {
