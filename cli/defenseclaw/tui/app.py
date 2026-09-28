@@ -1126,6 +1126,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # intentionally not a launch preference.
             self.active_panel = "overview"
         self.help_open = False
+        # Where the panel was scrolled when the help opened (the help shares
+        # the panel's scroller).
+        self._help_return_scroll = 0.0
         self.activity_lines: list[str] = []
         self.body_text = ""
         # E1: per-render map of clickable connector-chip segments,
@@ -2200,6 +2203,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if command.has_class("open") or self.focused is command:
             if self._handle_command_palette_key(event):
                 event.stop()
+            return
+
+        if self.help_open and event.key == "escape":
+            # The help's footer promises that Esc closes it.
+            self._close_help()
+            event.stop()
+            event.prevent_default()
             return
 
         table = self.query_one("#panel-table", DataTable)
@@ -3417,13 +3427,29 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.push_screen(ThemePickerScreen(current_theme=current), _on_dismiss)
 
     def action_toggle_help(self) -> None:
-        self.help_open = not self.help_open
-        self._render_chrome()
         if self.help_open:
-            try:
-                self.query_one("#body-scroll", VerticalScroll).scroll_home(animate=False)
-            except NoMatches:
-                pass
+            self._close_help()
+            return
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            scroller = None
+        self._help_return_scroll = scroller.scroll_y if scroller is not None else 0.0
+        self.help_open = True
+        self._render_chrome()
+        if scroller is not None:
+            scroller.scroll_home(animate=False)
+
+    def _close_help(self) -> None:
+        self.help_open = False
+        self._render_chrome()
+        # Scrolling the help moved the shared scroller; put the panel back
+        # where it was once its content is laid out again.
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return
+        self.call_after_refresh(scroller.scroll_to, y=self._help_return_scroll, animate=False)
 
     @on(Tabs.TabActivated, "#tabs")
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
@@ -3529,8 +3555,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._set_status("Command drawer closed.")
             return
         if self.help_open:
-            self.help_open = False
-            self._render_chrome()
+            self._close_help()
             return
         # `q` doubles as the strip's keyboard dismiss. We intentionally
         # never auto-hide on success per UX decision, so this is the
@@ -4418,11 +4443,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 0 A V N R", "Switch panel (panels that use digits keep them; use Tab or Ctrl+P there)"),
+            ("1-9 0 A V N R P", "Switch panel (Tab / Ctrl+P where digits are taken)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
-            ("?", "Toggle this help overlay (j/k or PgUp/PgDn scroll it)"),
+            ("?", "Toggle this help (j/k or PgUp/PgDn scroll it)"),
             ("Ctrl+\\", "Pick a colour theme"),
             ("Y / Ctrl+S", "Copy / save the last command's output"),
             ("D", "Run doctor in the background"),
@@ -4439,7 +4464,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
                 ("m", "Switch connector mode"),
-                ("i / l", "Jump to Inventory / Logs"),
+                ("i / l / p", "Jump to Inventory / Logs / Policies"),
                 ("N", "Turn notifications on or off"),
                 ("u / X", "Upgrade / uninstall (both preview first)"),
             ],
