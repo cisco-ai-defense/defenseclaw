@@ -1003,7 +1003,7 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     # process listings). ``keys set`` reads it from a hidden stdin prompt;
     # the executor feeds it via the intent's ``secret_stdin``.
     built = build_wizard_args(SetupWizard.CREDENTIALS, set_fields)
-    assert built == ("keys", "set", "OPENAI_API_KEY")
+    assert built == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "--value" not in built
     assert "sk-live" not in built
     assert render_wizard_value(set_fields[2]) == "****live"
@@ -1191,7 +1191,7 @@ def test_setup_panel_credentials_restart_and_config_save_state() -> None:
     assert result.intent is not None
     # F-0801: the secret is carried on ``secret_stdin`` (fed to the child's
     # hidden prompt), never in argv where `ps` could read it.
-    assert result.intent.args == ("keys", "set", "OPENAI_API_KEY")
+    assert result.intent.args == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "sk-secret" not in result.intent.args
     assert "--value" not in result.intent.args
     assert result.intent.secret_stdin == "sk-secret\n"

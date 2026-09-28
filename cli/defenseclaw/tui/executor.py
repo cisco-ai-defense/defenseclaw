@@ -110,7 +110,7 @@ class CommandExecutor:
                 os.write(master_fd, text.encode())
             return
         process = self._process
-        if process is not None and process.stdin is not None:
+        if process is not None and process.stdin is not None and not process.stdin.is_closing():
             process.stdin.write(text.encode())
 
     async def run(
@@ -177,9 +177,14 @@ class CommandExecutor:
             yield CommandEvent("done", exit_code=1, duration=time.monotonic() - started)
             return
         if stdin_input is not None and process.stdin is not None:
-            with contextlib.suppress(OSError):
+            # Write the payload, then close stdin: the child sees EOF after
+            # the secret instead of waiting for more input, and nothing typed
+            # later in Activity can reach a secret-reading prompt.
+            with contextlib.suppress(OSError, ConnectionError):
                 process.stdin.write(stdin_input.encode())
                 await process.stdin.drain()
+            with contextlib.suppress(OSError, ConnectionError):
+                process.stdin.close()
         try:
             assert process.stdout is not None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")

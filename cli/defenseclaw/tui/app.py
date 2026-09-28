@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import textwrap
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -3628,8 +3628,15 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         args: tuple[str, ...],
         *,
         display_name: str | None = None,
-    ) -> None:
+        stdin_input: str | None = None,
+        env_overrides: tuple[tuple[str, str], ...] | Mapping[str, str] | None = None,
+    ) -> int | None:
         """Stream a command through the executor and reflect state in the UI.
+
+        Returns the exit code (130 when cancelled), or ``None`` when the
+        command never ran (another command was in flight, or the executor
+        crashed). ``stdin_input`` (a secret for ``keys set --value-stdin``)
+        and ``env_overrides`` go to the child only; neither is logged.
 
         ``display_name`` is the human-readable label surfaced in the
         command-progress strip (the bordered box above the activity log).
@@ -3649,8 +3656,14 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         )
         pre_started_at = self._last_gateway_started_at
         pre_doctor_mtime = self._doctor_cache_mtime()
+        run_kwargs: dict[str, Any] = {}
+        if stdin_input is not None:
+            run_kwargs["stdin_input"] = stdin_input
+        if env_overrides:
+            run_kwargs["env_overrides"] = dict(env_overrides)
+        result: int | None = None
         try:
-            async for event in self.executor.run(binary, args):
+            async for event in self.executor.run(binary, args, **run_kwargs):
                 if event.kind == "start":
                     self.command_running = True
                     self.command_label = label
@@ -3685,6 +3698,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                     self.command_label = ""
                     self._command_started_at = 0.0
                     exit_code = event.exit_code or 0
+                    result = 130 if event.cancelled and exit_code == 0 else exit_code
                     # Re-probe side-effect signals AFTER the command
                     # finished. We compare to the snapshot taken before
                     # the executor loop, so a "restart" command that
@@ -3788,6 +3802,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
+            return None
+        return result
 
     def _render_chrome(self) -> None:
         # Textual clears ``is_running`` before it starts removing screen
@@ -10817,6 +10833,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             category="enforce",
             risk="mutation",
             needs_preview=True,
+            env_overrides=tuple(result.env),
         )
         await self._confirm_and_run_parsed(parsed)
 
@@ -11638,7 +11655,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         model.set_connector_filter(self._connector_filter())
         self._render_chrome()
 
-    async def _confirm_and_run_intent(self, intent: Any) -> None:
+    async def _confirm_and_run_intent(self, intent: Any) -> int | None:
         # N1: a catalog intent that flags itself ``risk="destructive"`` (today
         # only plugin remove, which deletes files from disk) is confirmed
         # through the C1 consequence danger-modal — red border + an explicit
@@ -11647,11 +11664,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         # commands keep the standard preview path (they reach
         # ``_confirm_and_run_parsed`` directly, not through here).
         if getattr(intent, "risk", "read-only") == "destructive":
-            await self._confirm_and_run_destructive_intent(intent)
-            return
+            return await self._confirm_and_run_destructive_intent(intent)
         if getattr(intent, "terminal", False):
             await self._confirm_and_run_terminal_intent(intent)
-            return
+            return None
         parsed = ParsedCommand(
             binary=intent.binary,
             args=tuple(intent.args),
@@ -11659,15 +11675,33 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             category=intent.category,
             risk=getattr(intent, "risk", "read-only"),
             needs_preview=True,
+            stdin_input=getattr(intent, "secret_stdin", None),
+            env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
         )
-        await self._confirm_and_run_parsed(parsed)
-        # Setup wizards (currently the Registry wizard) can request
-        # follow-up commands that should run only after the primary
-        # command finishes. The follow-ups themselves are queued through
-        # the same confirm-and-run path so the user still sees the
-        # preview screen and live output.
-        for follow_up in getattr(intent, "follow_up", ()) or ():
-            await self._confirm_and_run_intent(follow_up)
+        exit_code = await self._confirm_and_run_parsed(parsed)
+        return await self._run_follow_ups(intent, exit_code)
+
+    async def _run_follow_ups(self, intent: Any, exit_code: int | None) -> int | None:
+        """Run ``intent.follow_up`` one at a time after the first command.
+
+        Setup wizards (Registry, Splunk, notification routing) queue extra
+        commands. Each one goes through the same preview/run path, starts
+        only after the previous command finished, and only if it exited 0.
+        """
+
+        follow_ups = tuple(getattr(intent, "follow_up", ()) or ())
+        for index, follow_up in enumerate(follow_ups):
+            if exit_code != 0:
+                remaining = len(follow_ups) - index
+                reason = "was cancelled" if exit_code is None else f"exited {exit_code}"
+                noun = "command" if remaining == 1 else "commands"
+                self._write_activity(
+                    f"[#FBBF24]Skipped {remaining} follow-up {noun}[/]: "
+                    f"{rich_escape(str(getattr(intent, 'label', 'the previous command')))} {reason}."
+                )
+                return exit_code
+            exit_code = await self._confirm_and_run_intent(follow_up)
+        return exit_code
 
     def _destructive_intent_modal(self, intent: Any) -> ConsequenceModalModel:
         """Build the C1 consequence modal for a destructive catalog intent (N1).
@@ -11698,14 +11732,14 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             border_color=TOKENS.accent_red,
         )
 
-    async def _confirm_and_run_destructive_intent(self, intent: Any) -> None:
+    async def _confirm_and_run_destructive_intent(self, intent: Any) -> int | None:
         chosen = await self.push_screen_wait(
             ConsequenceModalScreen(self._destructive_intent_modal(intent))
         )
         if chosen is None:
             self._write_activity(f"[#FBBF24]Cancelled:[/] {intent.label}")
             self._set_status("Command cancelled.")
-            return
+            return None
         # Confirmed (and danger-re-pressed): jump to Activity where the live
         # output is visible, record the alias in the palette MRU, then run.
         if self.active_panel != "activity":
@@ -11716,20 +11750,28 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.state_store.save()
         except Exception:  # noqa: BLE001 - palette MRU is cosmetic
             pass
-        self.run_worker(
-            self._run_command(intent.binary, tuple(intent.args), display_name=intent.label),
-            exclusive=False,
-            thread=False,
+        exit_code = await self._run_command(
+            intent.binary,
+            tuple(intent.args),
+            display_name=intent.label,
+            stdin_input=getattr(intent, "secret_stdin", None),
+            env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
         )
-        for follow_up in getattr(intent, "follow_up", ()) or ():
-            await self._confirm_and_run_intent(follow_up)
+        return await self._run_follow_ups(intent, exit_code)
 
-    async def _confirm_and_run_parsed(self, parsed: ParsedCommand) -> None:
+    async def _confirm_and_run_parsed(self, parsed: ParsedCommand) -> int | None:
+        """Preview ``parsed``, then run it and wait for it to finish.
+
+        Returns the exit code, or ``None`` when the preview was cancelled or
+        the command never started. Callers already run inside a worker, so
+        awaiting here keeps follow-up commands from racing this one.
+        """
+
         confirmed = await self.push_screen_wait(CommandPreviewScreen(parsed))
         if not confirmed:
             self._write_activity(f"[#FBBF24]Cancelled:[/] {parsed.display_name}")
             self._set_status("Command cancelled.")
-            return
+            return None
         # Any command that needed a preview is non-read-only (setup,
         # mutation, destructive, …) — most of them are interactive
         # wizards. The user just confirmed they want to run it, so jump
@@ -11750,10 +11792,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.state_store.save()
         except Exception:  # noqa: BLE001 - palette MRU is cosmetic
             pass
-        self.run_worker(
-            self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
-            exclusive=False,
-            thread=False,
+        return await self._run_command(
+            parsed.binary,
+            parsed.args,
+            display_name=parsed.display_name,
+            stdin_input=parsed.stdin_input,
+            env_overrides=parsed.env_overrides,
         )
 
     def _schedule_data_refresh(self, *, force: bool = False) -> None:

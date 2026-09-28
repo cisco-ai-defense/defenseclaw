@@ -6607,10 +6607,12 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         args = ["keys", "set"]
         if env_name := wizard_field_value(fields, "Env Name"):
             args.append(env_name)
+        args.append("--value-stdin")
         # The secret value is intentionally NOT placed in argv (it would be
-        # visible in process listings). ``keys set`` reads it from a hidden
-        # stdin prompt instead; the value is carried on the intent's
-        # ``secret_stdin`` and written by the executor. See F-0801.
+        # visible in process listings). ``--value-stdin`` makes ``keys set``
+        # read one line from stdin instead of the terminal; the value is
+        # carried on the intent's ``secret_stdin`` and written (then stdin
+        # closed) by the executor. See F-0801.
         return tuple(args)
     return ("keys", "list", "--json")
 
