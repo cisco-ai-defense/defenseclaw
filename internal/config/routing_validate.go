@@ -127,6 +127,62 @@ func (r *RoutingConfig) Validate() error {
 		}
 	}
 
+	embeddingSignals := make(map[string]struct{}, len(r.Signals.Embeddings))
+	for i, signal := range r.Signals.Embeddings {
+		name := strings.TrimSpace(signal.Name)
+		if name == "" {
+			return fmt.Errorf("signals.embeddings[%d].name must be non-empty", i)
+		}
+		if len(name) > 128 {
+			return fmt.Errorf("signals.embeddings[%d].name must not exceed 128 bytes", i)
+		}
+		if _, exists := embeddingSignals[name]; exists {
+			return fmt.Errorf("signals.embeddings[%d].name %q is duplicated", i, name)
+		}
+		embeddingSignals[name] = struct{}{}
+		if len(signal.Examples) == 0 {
+			return fmt.Errorf("signals.embeddings[%d].examples must contain at least one example", i)
+		}
+	}
+
+	domainSignals := make(map[string]struct{}, len(r.Signals.Domains))
+	for i, signal := range r.Signals.Domains {
+		name := strings.TrimSpace(signal.Name)
+		if name == "" {
+			return fmt.Errorf("signals.domains[%d].name must be non-empty", i)
+		}
+		if len(name) > 128 {
+			return fmt.Errorf("signals.domains[%d].name must not exceed 128 bytes", i)
+		}
+		if _, exists := domainSignals[name]; exists {
+			return fmt.Errorf("signals.domains[%d].name %q is duplicated", i, name)
+		}
+		domainSignals[name] = struct{}{}
+		if len(signal.Categories) == 0 {
+			return fmt.Errorf("signals.domains[%d].categories must contain at least one category", i)
+		}
+	}
+
+	complexitySignals := make(map[string]struct{}, len(r.Signals.Complexity))
+	for i, signal := range r.Signals.Complexity {
+		name := strings.TrimSpace(signal.Name)
+		if name == "" {
+			return fmt.Errorf("signals.complexity[%d].name must be non-empty", i)
+		}
+		if len(name) > 128 {
+			return fmt.Errorf("signals.complexity[%d].name must not exceed 128 bytes", i)
+		}
+		if _, exists := complexitySignals[name]; exists {
+			return fmt.Errorf("signals.complexity[%d].name %q is duplicated", i, name)
+		}
+		complexitySignals[name] = struct{}{}
+		hasThreshold := signal.MinMessageLength > 0 || signal.MaxMessageLength > 0 ||
+			signal.MinToolCount > 0 || signal.MaxToolCount > 0
+		if !hasThreshold && len(signal.Indicators) == 0 {
+			return fmt.Errorf("signals.complexity[%d] must have at least one threshold or indicator", i)
+		}
+	}
+
 	decisionNames := make(map[string]struct{}, len(r.Decisions))
 	for i, decision := range r.Decisions {
 		name := strings.TrimSpace(decision.Name)
@@ -153,12 +209,32 @@ func (r *RoutingConfig) Validate() error {
 		}
 		for j, condition := range decision.Conditions {
 			conditionType := strings.ToLower(strings.TrimSpace(condition.Type))
-			if conditionType != "keyword" {
-				return fmt.Errorf("decisions[%d].conditions[%d].type %q is unsupported (supported: keyword)", i, j, condition.Type)
-			}
 			conditionName := strings.TrimSpace(condition.Name)
-			if _, exists := keywordSignals[conditionName]; !exists {
-				return fmt.Errorf("decisions[%d].conditions[%d] references unknown keyword signal %q", i, j, condition.Name)
+			switch conditionType {
+			case "keyword":
+				if _, exists := keywordSignals[conditionName]; !exists {
+					return fmt.Errorf("decisions[%d].conditions[%d] references unknown keyword signal %q", i, j, condition.Name)
+				}
+			case "embedding":
+				if _, exists := embeddingSignals[conditionName]; !exists {
+					return fmt.Errorf("decisions[%d].conditions[%d] references unknown embedding signal %q", i, j, condition.Name)
+				}
+				if r.Embeddings.MMBertModelPath == "" && r.Embeddings.Qwen3ModelPath == "" {
+					return fmt.Errorf("decisions[%d].conditions[%d] uses embedding signal but no embedding model path is configured", i, j)
+				}
+			case "domain":
+				if _, exists := domainSignals[conditionName]; !exists {
+					return fmt.Errorf("decisions[%d].conditions[%d] references unknown domain signal %q", i, j, condition.Name)
+				}
+			case "complexity":
+				if _, exists := complexitySignals[conditionName]; !exists {
+					return fmt.Errorf("decisions[%d].conditions[%d] references unknown complexity signal %q", i, j, condition.Name)
+				}
+			default:
+				return fmt.Errorf("decisions[%d].conditions[%d].type %q is unsupported (supported: keyword, embedding, domain, complexity)", i, j, condition.Type)
+			}
+			if condition.MinConfidence < 0 || condition.MinConfidence > 1.0 {
+				return fmt.Errorf("decisions[%d].conditions[%d].min_confidence must be between 0.0 and 1.0", i, j)
 			}
 		}
 	}
@@ -219,13 +295,38 @@ func isRoutingLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// routingCGNAT is the Carrier-Grade NAT range (100.64.0.0/10, RFC 6598)
+// used by Tailscale and similar overlay networks. Go's net.IP.IsPrivate
+// does not cover it.
+var routingCGNAT = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("100.64.0.0/10")
+	return n
+}()
+
+func isRoutingNonPublicIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || routingCGNAT.Contains(ip)
+}
+
 func isRoutingLocalHost(host string) bool {
 	switch host {
 	case "localhost", "host.docker.internal", "gateway.docker.internal":
 		return true
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
-	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+	if ip != nil {
+		return isRoutingNonPublicIP(ip)
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, addr := range addrs {
+		resolved := net.ParseIP(addr)
+		if resolved == nil || !isRoutingNonPublicIP(resolved) {
+			return false
+		}
+	}
+	return true
 }
 
 func isRoutingMetadataHost(host string) bool {

@@ -111,7 +111,7 @@ func TestRoutingConfigValidateRejectsInvalidRelationships(t *testing.T) {
 			c.Decisions[0].Conditions = []RoutingCondition{{Type: "keyword", Name: "missing"}}
 		}, want: "unknown keyword signal"},
 		{name: "unsupported condition", edit: func(c *RoutingConfig) {
-			c.Decisions[0].Conditions = []RoutingCondition{{Type: "embedding", Name: "code"}}
+			c.Decisions[0].Conditions = []RoutingCondition{{Type: "magic", Name: "code"}}
 		}, want: "unsupported"},
 		{name: "invalid signal operator", edit: func(c *RoutingConfig) { c.Signals.Keywords[0].Operator = "XOR" }, want: "AND or OR"},
 		{name: "invalid key env", edit: func(c *RoutingConfig) { c.Models[1].APIKeyEnv = "not-valid!" }, want: "environment variable"},
