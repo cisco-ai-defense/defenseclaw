@@ -18,6 +18,67 @@ default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
 
+### NVIDIA OpenShell 0.1 sandboxes
+
+- Adds `defenseclaw sandbox`: run a coding agent in skip-permissions mode
+  inside an NVIDIA OpenShell 0.1.x sandbox (Linux amd64/arm64; macOS on Apple
+  silicon with Docker Desktop as a preview, not tested live; local gateway
+  with the Docker driver; OpenShell `>=0.1.1 <0.2.0`) that sees only the
+  project folder. OpenShell supplies the kernel-enforced boundary (network
+  namespace, Landlock, seccomp, non-root, credential placeholders); DefenseClaw
+  keeps judging every tool call through its hooks, which fail closed in a
+  sandbox.
+- Harnesses: Claude Code, Codex, OpenCode, GitHub Copilot CLI, Kiro CLI,
+  Hermes, OpenHands, Antigravity and OmniGent run end to end. Cursor Agent,
+  Amp and Devin CLI images build but are refused until a hook check with a
+  vendor account passes. Each image pins the harness at DefenseClaw's
+  reviewed hook contract, installs root-owned hooks (managed or user tier, see
+  the capability matrix) and must pass a hook-fire probe before use.
+- Workspace: the project is mounted live by default, with secret files
+  masked, `.git/hooks` and `.git/config` read-only, a pre-session snapshot and
+  `sandbox undo`, an end-of-session review of changes that can run code on the
+  host, and a nested-repository guard. `--copy` works on a copy and brings
+  changes back with `sandbox pull` (apply, branch or patch); worktrees and git
+  directories outside the project fall back to copy mode. One sandbox at a
+  time can mount a folder live.
+- Network: an egress proxy on the daemon (default `api_port+2`) allows the
+  web by default and blocks a curated feed of exfiltration and abuse
+  destinations, private networks, this machine and cloud metadata, with
+  one-command `sandbox unblock`. Asks are rare: host ports, private addresses
+  and (under `balanced`/`strict`) hosts off the allowlist. Hooks arrive on a
+  separate ingress listener (default `api_port+1`) with per-sandbox binding
+  tokens.
+- Policy packs `open` (default), `balanced` and `strict`, custom packs under
+  `openshell.pack_dir`, and enterprise constraints under `openshell.admin`
+  (required pack, minimum profile, yolo, mounts, host ports, unblocks, learn
+  mode, allowed harnesses, egress block/allow-only lists, copy requirements,
+  resources, locked keys). Refusals say "blocked by your organization's
+  DefenseClaw policy" and `sandbox policy explain` shows where each value came
+  from.
+- Commands: `sandbox setup|doctor|run|connect|list|status|exec|logs|activity|
+  stop|start|delete|undo|review|pull|approvals|approve|reject|unblock|policy|
+  pack|image|enable|disable|teardown|legacy-cleanup`; the daemon serves them
+  under `/api/v1/sandbox/*` (master token and CSRF). The TUI gains a
+  Sandboxes panel (key `7`) and a Sandbox setup wizard; the macOS app gains
+  sandbox views.
+- Telemetry: sandbox lifecycle, workspace, egress, approval and hook-tamper
+  events in the v8 families, with a `correlation.sandbox` attribute group on
+  hook verdicts.
+- New configuration under `openshell:` (enabled, ports, pack/profile, yolo,
+  workdir, egress, image, approvals, resources, harnesses, wrappers, mcp,
+  token_delivery, admin) and new environment variables
+  (`DEFENSECLAW_SANDBOX_*`, `DEFENSECLAW_EGRESS_*`, `DEFENSECLAW_NO_SANDBOX`);
+  see the configuration and environment-variable references.
+- Fixes that also apply outside sandboxes:
+  - The Claude Code and Codex hook scripts treated an `alert` verdict (flag
+    without blocking) as an invalid reply, so a fail-closed install blocked
+    the tool call. They now let it run and show the notice.
+  - Shell tool calls that name their own working directory or pass extra
+    control arguments (OpenCode, Hermes, Amp, Cursor, Kiro, Devin, Copilot
+    CLI, Antigravity) were only partly parsed, so a matching CRITICAL command
+    rule was reported but not enforced. Those calls are now judged in the
+    directory they name.
+
 ### Legacy OpenShell standalone sandbox removed
 
 - **Breaking:** removes the legacy standalone sandbox integration for the
@@ -27,11 +88,11 @@ deleted.
   units, launcher scripts under `/usr/local/lib/defenseclaw/`, a `sandbox`
   Linux user, and ownership/ACL changes on `~/.openclaw`. The Go wrappers
   called OpenShell CLI verbs that do not exist, and the generated
-  per-connector sandbox policy was never enforced. Support for NVIDIA
-  OpenShell 0.1 is being rebuilt for a future release.
-- **Breaking:** removed commands: `defenseclaw sandbox init`,
-  `defenseclaw sandbox setup` (including `--disable`, `--sandbox-ip`,
-  `--policy`, and its other flags),
+  per-connector sandbox policy was never enforced. The NVIDIA OpenShell 0.1
+  sandboxes above replace it.
+- **Breaking:** removed commands: `defenseclaw sandbox init`, the old
+  `defenseclaw sandbox setup` flags (`--disable`, `--sandbox-ip`, `--policy`
+  and the others; `sandbox setup` now sets up OpenShell 0.1),
   `defenseclaw-gateway sandbox start|stop|restart|status|exec|shell`, and
   `defenseclaw-gateway sandbox policy diff`.
 - Removed files: `policies/openshell/*`, `policies/rego/sandbox.rego`
@@ -53,8 +114,7 @@ deleted.
   Landlock/seccomp OpenShell policy with shims as a supplement; that policy was
   never enforced.
 - Adds
-  `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]`,
-  now the only `sandbox` subcommand.
+  `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]`.
   Linux only; privileged steps run through `sudo` with binaries resolved only
   from root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. It detects a
   legacy install, prints every step with its exact commands, and asks for
