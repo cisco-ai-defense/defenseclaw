@@ -145,12 +145,15 @@ def test_edited_port_round_trips_through_a_v8_config(tmp_path, monkeypatch) -> N
     model = SetupPanelModel(load(data_dir=data_dir))
     _focus(model, "gateway.port")
     assert model.set_current_field_value("19999")
+    _focus(model, "guardrail.block_at")
+    assert model.set_current_field_value("HIGH")
     assert model.review_save_action().open_diff is True
     model.apply_changes_to_config()
     model.config.save()
 
     with open(os.path.join(data_dir, "config.yaml"), encoding="utf-8") as stream:
-        assert yaml.safe_load(stream)["gateway"]["port"] == 19999
+        saved = yaml.safe_load(stream)
+    assert saved["gateway"]["port"] == 19999 and saved["guardrail"]["block_at"] == "HIGH"
     assert load(data_dir=data_dir).gateway.port == 19999
     assert model.has_changes() is False
 
