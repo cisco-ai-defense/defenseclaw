@@ -892,6 +892,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     #     than that produced a "snap" effect during testing.
     ENABLE_SELECT_AUTO_SCROLL = True
     SELECT_AUTO_SCROLL_LINES = 3
+    # Textual's own command palette claims Ctrl+P with priority, which made
+    # the advertised Ctrl+P panel jumper unreachable (and offered a second,
+    # unrelated theme switcher). DefenseClaw has its own palette (: / Ctrl+K).
+    ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit", priority=True),
