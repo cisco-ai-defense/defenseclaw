@@ -161,7 +161,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		changes.EnableBindMounts = yes
 		copyOnly = !yes
 	}
-	telemetryOff := !o.UpstreamTelemetry
+	// A saved openshell.upstream_telemetry: true is an earlier answer to
+	// keep it, which setup does not ask again.
+	keepTelemetry := o.UpstreamTelemetry || a.Cfg.OpenShell.UpstreamTelemetry
+	telemetryOff := !keepTelemetry
 	if a.GOOS == "darwin" {
 		// Homebrew's launchd service does not read gateway.env (the doctor
 		// skips the telemetry check there): nothing to ask or change.
@@ -169,8 +172,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("OpenShell's anonymous usage telemetry stays on under Homebrew (its service does not read gateway.env)")
 		}
 	} else {
-		if !o.UpstreamTelemetry && state.TelemetryEnabled() {
-			yes, err := a.ask("Disable OpenShell's anonymous usage telemetry?", true, assume)
+		switch {
+		case keepTelemetry && !o.UpstreamTelemetry && state.TelemetryEnabled():
+			a.note("OpenShell's anonymous usage telemetry stays on (openshell.upstream_telemetry is true in " + a.tildePath(a.ConfigPath) + ")")
+		case !keepTelemetry && state.TelemetryEnabled():
+			// Say what a yes costs before it is given: an edit of
+			// gateway.env and a restart of the shared gateway.
+			yes, err := a.ask("Disable OpenShell's anonymous usage telemetry? (edits "+a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env"))+
+				" and restarts the OpenShell gateway"+a.restartImpact(ctx)+")", true, assume)
 			if err != nil {
 				return err
 			}
@@ -216,23 +225,13 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.note("without bind mounts every run works on a copy (`--copy`)")
 	}
 
-	// 4. Harnesses and credentials.
+	// 4. Harnesses and credentials. --harness adds to openshell.harnesses.
 	specs, err := a.harnesses(o.Harnesses)
 	if err != nil {
 		return err
 	}
-	var names, labels []string
-	for _, s := range specs {
-		names = append(names, s.Name)
-		labels = append(labels, "[x] "+s.DisplayName)
-	}
-	for _, h := range harness.Names() {
-		if !slices.Contains(names, h) {
-			spec, _ := harness.Get(h)
-			labels = append(labels, "[ ] "+spec.DisplayName)
-		}
-	}
-	a.printf("  Harnesses: %s    Credentials: %s\n", strings.Join(labels, " "), a.credentialLine(specs))
+	names := mergeHarnesses(a.Cfg.OpenShell.Harnesses, specs)
+	a.printHarnesses(specs, names)
 
 	// 5. The configuration.
 	updates := map[string]any{
@@ -256,36 +255,68 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	a.Cfg.OpenShell.Enabled, a.Cfg.OpenShell.Harnesses, a.Cfg.OpenShell.UpstreamTelemetry = true, names, !telemetryOff
 	a.ok("openshell.enabled is on in " + a.tildePath(a.ConfigPath))
 
-	// 6. Wrappers.
-	wrap := o.Wrappers
-	if !wrap && !o.NoWrappers && !o.NonInteractive {
-		var cmds []string
-		for _, s := range specs {
-			cmds = append(cmds, "`"+s.Command+"`")
+	// 6. Wrappers, for the harness commands people type.
+	var wrappable []*harness.Spec
+	for _, s := range specs {
+		if typed, ok := launchedCommands[s.Command]; ok {
+			a.note(fmt.Sprintf("%s gets no shell wrapper: `%s` starts %s itself, which a wrapper cannot catch; start it with `%s run %s`",
+				s.DisplayName, typed, s.Command, CommandName, HarnessArg(s)))
+			continue
 		}
-		wrap, err = a.ask("Make "+strings.Join(cmds, " and ")+" run sandboxed automatically? (shell wrapper; undo any time)", false, o.Yes)
-		if err != nil {
-			return err
+		wrappable = append(wrappable, s)
+	}
+	if len(wrappable) > 0 {
+		wrap := o.Wrappers
+		if !wrap && !o.NoWrappers && !o.NonInteractive {
+			var cmds []string
+			for _, s := range wrappable {
+				cmds = append(cmds, "`"+s.Command+"`")
+			}
+			wrap, err = a.ask("Make "+strings.Join(cmds, " and ")+" run sandboxed automatically? (shell wrapper; undo any time)", false, o.Yes)
+			if err != nil {
+				return err
+			}
+		}
+		if wrap {
+			for _, s := range wrappable {
+				if err := a.Enable(WrapperOptions{Harness: s.Name}); err != nil {
+					a.warn("wrapper for " + s.Command + ": " + err.Error())
+				}
+			}
+		} else if o.NonInteractive && !o.NoWrappers {
+			skipped = append(skipped, "shell wrappers (not asked with --non-interactive; add one with `"+CommandName+" enable "+HarnessArg(wrappable[0])+"`)")
 		}
 	}
 	cmd := "claude"
 	if len(specs) > 0 {
-		cmd = specs[0].Command
-	}
-	if wrap {
-		for _, s := range specs {
-			if err := a.Enable(WrapperOptions{Harness: s.Name}); err != nil {
-				a.warn("wrapper for " + s.Command + ": " + err.Error())
-			}
-		}
-	} else if o.NonInteractive && !o.NoWrappers {
-		skipped = append(skipped, "shell wrappers (not asked with --non-interactive; add one with `"+CommandName+" enable "+cmd+"`)")
+		cmd = HarnessArg(specs[0])
 	}
 
 	// 7. Images, then the ingress provider profile (imported once here:
 	// every profile import briefly drops running sandboxes' connections).
+	// A harness named with --harness gets its image; on a terminal, setup
+	// asks before it downloads one for a harness it picked itself (the
+	// defaults, openshell.harnesses).
 	if !o.SkipImages {
 		for _, s := range specs {
+			build := assume || len(o.Harnesses) > 0
+			if !build {
+				// A current image is only checked, not built: no need to ask.
+				current, err := a.Images.Current(s)
+				build = err == nil && current
+			}
+			if !build {
+				build, err = a.ask(fmt.Sprintf("Build the %s image now? (the first build downloads about 3 GB; otherwise the first `%s run %s` builds it)",
+					s.DisplayName, CommandName, HarnessArg(s)), true, false)
+				if err != nil {
+					return err
+				}
+			}
+			if !build {
+				skipped = append(skipped, fmt.Sprintf("the %s image (the first `%s run %s` builds it, or `%s image build %s`)",
+					s.DisplayName, CommandName, HarnessArg(s), CommandName, HarnessArg(s)))
+				continue
+			}
 			if err := a.buildImage(ctx, s, false, false); err != nil {
 				return err
 			}
@@ -394,19 +425,106 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 	return strings.Join(parts, "  ")
 }
 
-// credentialLine lists the model credentials a run would share.
-func (a *App) credentialLine(specs []*harness.Spec) string {
-	var parts []string
-	for _, s := range specs {
-		llm, err := a.detectLLM(s, LLMAuto, "", nil)
-		switch {
-		case err != nil || llm.Credential == nil:
-			parts = append(parts, s.Command+": "+a.style("none found", ansiYellow))
-		default:
-			parts = append(parts, llm.Source+" "+a.style("✓", ansiGreen))
+// restartImpact completes "restarts the OpenShell gateway" with what the
+// restart disrupts now: the sandboxes running on the shared gateway, of
+// every owner.
+func (a *App) restartImpact(ctx context.Context) string {
+	running, known := a.runningSandboxes(ctx)
+	switch {
+	case !known:
+		return ", which drops the connections of any sandbox running on it"
+	case len(running) == 0:
+		return "; no sandbox runs on it now"
+	}
+	return ", which drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it"
+}
+
+// launchedCommands are harness commands people do not type: another
+// command they do type starts them (Kiro's kiro-cli starts kiro-cli-chat,
+// the agent the launcher runs). A shell wrapper of such a command never
+// runs, and the harness is named by its connector name instead.
+var launchedCommands = map[string]string{"kiro-cli-chat": "kiro-cli"}
+
+// HarnessArg is how a user names spec on the command line (`sandbox run`,
+// --harness): the command they type for it (claude, codex, agy), or its
+// connector name when that command is one they never type (kiro).
+func HarnessArg(spec *harness.Spec) string {
+	if _, ok := launchedCommands[spec.Command]; ok {
+		return spec.Name
+	}
+	return spec.Command
+}
+
+// mergeHarnesses is openshell.harnesses with specs added: setting up one
+// more harness keeps those set up before. Entries that name a known
+// harness are recorded by its connector name.
+func mergeHarnesses(configured []string, specs []*harness.Spec) []string {
+	var out []string
+	add := func(n string) {
+		if n != "" && !slices.Contains(out, n) {
+			out = append(out, n)
 		}
 	}
-	return strings.Join(parts, "  ")
+	for _, n := range configured {
+		if spec, err := ResolveHarness(n); err == nil {
+			n = spec.Name
+		}
+		add(strings.TrimSpace(n))
+	}
+	for _, s := range specs {
+		add(s.Name)
+	}
+	return out
+}
+
+// printHarnesses shows the harnesses this setup sets up, one line each
+// with the model credential a run would share (or how to get one), then
+// the ones set up before and the others --harness adds.
+func (a *App) printHarnesses(specs []*harness.Spec, configured []string) {
+	a.line("Harnesses (add another with `" + CommandName + " setup --harness NAME`):")
+	width := 0
+	for _, s := range specs {
+		width = max(width, len(s.DisplayName)+len(HarnessArg(s))+3)
+	}
+	for _, s := range specs {
+		a.line(fmt.Sprintf("  %-*s  %s", width, s.DisplayName+" ("+HarnessArg(s)+")", a.credentialText(s)))
+	}
+	var earlier, others []string
+	for _, h := range harness.Names() {
+		spec, _ := harness.Get(h)
+		name := HarnessArg(spec)
+		if spec.Verification().Status == harness.Unverified {
+			name += " (not verified yet)"
+		}
+		switch {
+		case slices.ContainsFunc(specs, func(s *harness.Spec) bool { return s.Name == h }):
+		case slices.Contains(configured, h):
+			earlier = append(earlier, name)
+		default:
+			others = append(others, name)
+		}
+	}
+	sort.Strings(earlier)
+	sort.Strings(others)
+	if len(earlier) > 0 {
+		a.line("Set up before: " + strings.Join(earlier, ", "))
+	}
+	if len(others) > 0 {
+		a.line("Other harnesses: " + strings.Join(others, ", "))
+	}
+}
+
+// credentialText is the model credential a run of s would share, or the
+// next step when there is none.
+func (a *App) credentialText(s *harness.Spec) string {
+	if llm, err := a.detectLLM(s, LLMAuto, "", nil); err == nil && llm.Credential != nil {
+		return "model credential " + llm.Source + " " + a.style("✓", ansiGreen)
+	}
+	next := "you log in inside the sandbox on the first run"
+	if hint := llmHint(s.Name, LLMAuto); hint != llmHint("", LLMAuto) {
+		next = hint + " before the first run, or log in inside the sandbox"
+	}
+	return "model credential " + a.style("none found", ansiYellow) + ": " + next
 }
 
 // importIngressProfile imports the provider profile of this config's hook
