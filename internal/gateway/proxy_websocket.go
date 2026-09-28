@@ -63,32 +63,12 @@ func (p *GuardrailProxy) handleWebSocketPassthrough(w http.ResponseWriter, r *ht
 	}
 	defer clientConn.Close()
 
-	// Read the first frame and classify it. Codex sends the full request
-	// (system instructions + user query + tools) in a single frame.
-	type bufferedFrame struct {
-		msgType int
-		data    []byte
-	}
-	firstMsgType, firstMsg, err := clientConn.ReadMessage()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] websocket: failed to read first frame: %v\n", err)
-		return
-	}
-	buffered := []bufferedFrame{{firstMsgType, firstMsg}}
+	// WebSocket passthrough to the default upstream. The Codex Responses
+	// API WS protocol sends the user query after the session setup frame,
+	// so per-request routing can't classify before connecting upstream.
+	// Model routing for Codex happens on the HTTP fallback path instead.
 	targetOrigin := defaultOrigin
 	targetAuth := clientAuth
-
-	origin, auth, model := p.classifyWebSocketMessage(firstMsg, defaultOrigin, clientAuth, r.URL.Path)
-	if origin != defaultOrigin {
-		targetOrigin = origin
-		targetAuth = auth
-		if model != "" {
-			if patched := patchModelInJSON(firstMsg, model); patched != nil {
-				buffered[0].data = patched
-			}
-		}
-		fmt.Fprintf(os.Stderr, "[guardrail] websocket: routed to %s model=%q\n", targetOrigin, model)
-	}
 
 	// Build upstream URL.
 	upstreamURL, err := url.Parse(strings.TrimRight(targetOrigin, "/") + r.URL.Path)
@@ -118,37 +98,17 @@ func (p *GuardrailProxy) handleWebSocketPassthrough(w http.ResponseWriter, r *ht
 		}
 	}
 
-	// Strip unsupported input items for non-ChatGPT backends.
-	if targetOrigin != defaultOrigin {
-		for i := range buffered {
-			if cleaned := stripUnsupportedInputItems(buffered[i].data); cleaned != nil {
-				buffered[i].data = cleaned
-			}
-		}
-	}
+	fmt.Fprintf(os.Stderr, "[guardrail] websocket: %s → %s\n", r.URL.Path, upstreamURL.String())
 
-	fmt.Fprintf(os.Stderr, "[guardrail] websocket: %s → %s (%d buffered frames)\n",
-		r.URL.Path, upstreamURL.String(), len(buffered))
-
-	// Try WebSocket dial first; fall back to HTTP bridge if upstream
-	// doesn't support WebSocket (e.g. Ollama, vLLM, LM Studio).
+	// Dial the upstream WebSocket.
 	upstreamConn, _, wsErr := websocket.DefaultDialer.Dial(upstreamURL.String(), upstreamHeaders)
 	if wsErr != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] websocket: upstream WS dial failed (%v), falling back to HTTP bridge\n", wsErr)
-		// For HTTP bridge, send the last buffered frame (which has user content).
-		bridgeMsg := buffered[len(buffered)-1].data
-		p.bridgeWebSocketToHTTP(clientConn, bridgeMsg, targetOrigin, r.URL.Path, targetAuth)
+		fmt.Fprintf(os.Stderr, "[guardrail] websocket: upstream dial failed: %v\n", wsErr)
+		clientConn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream connection failed"))
 		return
 	}
 	defer upstreamConn.Close()
-
-	// Forward all buffered frames to upstream.
-	for _, frame := range buffered {
-		if err := upstreamConn.WriteMessage(frame.msgType, frame.data); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] websocket: failed to forward buffered frame: %v\n", err)
-			return
-		}
-	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -220,17 +180,35 @@ func (p *GuardrailProxy) classifyWebSocketMessage(
 		return
 	}
 
+	// Parse input[] items directly — extractResponsesAPIMessages may miss
+	// items whose content is an array of parts (Responses API format).
+	var rawItems []json.RawMessage
 	var messages []ChatMessage
-	if len(partial.Input) > 0 {
-		messages = extractResponsesAPIMessages(partial.Input)
+	if len(partial.Input) > 0 && partial.Input[0] == '[' {
+		_ = json.Unmarshal(partial.Input, &rawItems)
 	}
-
-	// Log roles for debugging.
+	for _, raw := range rawItems {
+		var item struct {
+			Type    string          `json:"type"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(raw, &item) == nil && item.Role != "" {
+			msg := ChatMessage{Role: item.Role, RawContent: item.Content}
+			// Try to populate Content as string.
+			var s string
+			if json.Unmarshal(item.Content, &s) == nil {
+				msg.Content = s
+			}
+			messages = append(messages, msg)
+		}
+	}
 	var roles []string
 	for _, m := range messages {
 		roles = append(roles, m.Role)
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] websocket routing: %d input items, roles=%v\n", len(messages), roles)
+	fmt.Fprintf(os.Stderr, "[guardrail] websocket routing: input_bytes=%d raw_items=%d messages=%d roles=%v\n",
+		len(partial.Input), len(rawItems), len(messages), roles)
 
 	// Only classify on user-role content. Developer messages contain
 	// the Codex system prompt which always matches planning keywords
