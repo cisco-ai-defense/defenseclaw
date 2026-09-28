@@ -18,6 +18,7 @@ Behaviour belongs in the per-panel model/service unit tests.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -77,6 +78,23 @@ async def _settle(pilot, app: DefenseClawTUI) -> None:
     await pilot.pause()
 
 
+async def _wait_for_panel_render(pilot, app: DefenseClawTUI, panel: str) -> None:
+    """Wait for the content render a panel switch defers until after a refresh.
+
+    One pause is not always enough: on Windows the refresh can land after it,
+    leaving the switch's placeholder frame (a blank Activity body) on screen.
+    """
+    deadline = asyncio.get_running_loop().time() + 8.0
+    while (
+        panel in app._panel_render_queued  # noqa: SLF001
+        or panel in app._panel_render_running  # noqa: SLF001
+        or panel in app._panel_render_pending  # noqa: SLF001
+    ):
+        assert asyncio.get_running_loop().time() < deadline, f"{panel}: its content never rendered"
+        await pilot.pause()
+    await pilot.pause()
+
+
 @pytest.mark.parametrize(("name", "key"), _panel_params())
 async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: str) -> None:
     app = fixtures.snapshot_app(tmp_path)
@@ -90,6 +108,7 @@ async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: 
             await pilot.pause()
         assert app.active_panel == name
         assert len(app.screen_stack) == 1
+        await _wait_for_panel_render(pilot, app, name)
 
         fold = app.size.height - FOOTER_ROWS
         table = app.query_one("#panel-table", DataTable)
