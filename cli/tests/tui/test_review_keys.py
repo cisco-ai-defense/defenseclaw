@@ -131,3 +131,22 @@ async def test_a_failed_catalog_load_replaces_the_loading_status(tmp_path, monke
         await app._load_catalog_model("skills")
         assert "Loading" not in app.status_text
         assert "skill list exploded" in app.status_text
+
+
+async def test_agent_commands_reload_ai_discovery_or_runtime(tmp_path) -> None:
+    app = snapshot_app(tmp_path)
+    loads: list[str] = []
+
+    async def ai() -> None:
+        loads.append("ai")
+
+    async def runtime() -> None:
+        loads.append("runtime")
+
+    app._load_ai_discovery_model = ai  # type: ignore[method-assign]
+    app._load_runtime_model = runtime  # type: ignore[method-assign]
+
+    await app._handle_successful_command("defenseclaw", ("agent", "discovery", "scan"))
+    await app._handle_successful_command("defenseclaw", ("agent", "discovery", "runtime", "enable", "--yes"))
+
+    assert loads == ["ai", "runtime"]

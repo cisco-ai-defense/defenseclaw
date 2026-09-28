@@ -5803,7 +5803,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._submit_command_text("defenseclaw agent discovery scan")
             return
         if button_id == "ai-refresh":
-            self._submit_command_text("defenseclaw agent usage --json")
+            # Same as the ``r`` key: reload the panel. Running the command
+            # through the palette printed JSON to Activity and left the
+            # panel stale until the next poll.
+            self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
             return
         if button_id == "ai-model-scope":
             self._apply_ai_discovery_action(
@@ -11481,6 +11484,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if command == "guardrail":
                 self._refresh_cached_config()
             self._schedule_policy_load(sandbox=self.policy_model.sandbox_loaded)
+        elif command == "agent":
+            # Enable/disable/scan (and runtime enable/scan) change what the AI
+            # Discovery and Runtime panels show; reload now instead of leaving
+            # the old state (and the old Enable/Disable buttons) up until the
+            # next 15-30 s poll.
+            if tuple(args[1:3]) == ("discovery", "runtime"):
+                await self._load_runtime_model()
+            else:
+                await self._load_ai_discovery_model()
         elif panel := _catalog_panel_invalidated_by_command(args):
             await self._refresh_loaded_catalog_after_mutation(panel)
 
