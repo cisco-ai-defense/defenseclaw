@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // loadRecord reads one sandbox's record from disk.
@@ -281,5 +283,35 @@ func TestRemoveSandboxState(t *testing.T) {
 	}
 	if err := RemoveSandboxState(context.Background(), e.dataDir, "../escape"); err == nil {
 		t.Fatal("an invalid name was accepted")
+	}
+}
+
+// TestOrphanedSnapshotIsFoundAndRemoved pins that a pre-session snapshot
+// an interrupted create or delete left without a record (and without any
+// sandbox directory) is listed as orphaned data and removed with it.
+func TestOrphanedSnapshotIsFoundAndRemoved(t *testing.T) {
+	dataDir := t.TempDir()
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "README.md"), []byte("hello\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := workspace.Snapshot(ctx, workspace.SnapshotOptions{Project: project, Name: "lostsnap", DataDir: dataDir}); err != nil {
+		t.Fatal(err)
+	}
+	if got := OrphanedSandboxData(dataDir); !slices.Equal(got, []string{"lostsnap"}) {
+		t.Fatalf("orphans = %v, want the snapshot's sandbox", got)
+	}
+	if err := RemoveOrphanedSandboxData(dataDir, "lostsnap"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.LoadSnapshot(dataDir, "lostsnap"); !errors.Is(err, workspace.ErrSnapshotNotFound) {
+		t.Fatalf("the orphaned snapshot is left: %v", err)
+	}
+	if got := OrphanedSandboxData(dataDir); len(got) != 0 {
+		t.Fatalf("orphans after removal = %v", got)
 	}
 }

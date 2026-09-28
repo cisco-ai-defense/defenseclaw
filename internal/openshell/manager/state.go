@@ -218,29 +218,43 @@ func (s recordStore) has(name string) bool {
 
 // OrphanedSandboxData lists the sandboxes that have data under
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
-// files) but no daemon record: an interrupted create or delete, or an
-// older build, left it. RemoveOrphanedSandboxData removes it.
+// files) or a pre-session snapshot under <data_dir>/snapshots/<name> (with
+// its refs in the project) but no daemon record: an interrupted create or
+// delete, or an older build, left it. RemoveOrphanedSandboxData removes it.
 func OrphanedSandboxData(dataDir string) []string {
-	entries, err := os.ReadDir(filepath.Join(dataDir, "sandboxes"))
-	if err != nil {
-		return nil
-	}
 	records := newRecordStore(dataDir)
+	seen := map[string]bool{}
 	var out []string
-	for _, e := range entries {
-		name := e.Name()
-		if !e.IsDir() || name == recordDirName || !openshell.ValidSandboxName(name) || records.has(name) {
+	for _, root := range []string{"sandboxes", orphanSnapshotsDir} {
+		entries, err := os.ReadDir(filepath.Join(dataDir, root))
+		if err != nil {
 			continue
 		}
-		out = append(out, name)
+		for _, e := range entries {
+			name := e.Name()
+			if !e.IsDir() || name == recordDirName || seen[name] || !openshell.ValidSandboxName(name) || records.has(name) {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
 	}
 	sort.Strings(out)
 	return out
 }
 
+// orphanSnapshotsDir is where package workspace keeps the pre-session
+// snapshots, one directory per sandbox name.
+const orphanSnapshotsDir = "snapshots"
+
+// orphanSnapshotTimeout bounds the removal of an orphaned snapshot, which
+// deletes its refs in the project with git.
+const orphanSnapshotTimeout = 2 * time.Minute
+
 // RemoveOrphanedSandboxData releases and removes the data an orphaned
 // sandbox left (see OrphanedSandboxData): its mount pins and mask files,
-// its copy-mode state and its run files, then the directory. A sandbox the
+// its pre-session snapshot and the refs it holds in the project, its
+// copy-mode state and its run files, then the directory. A sandbox the
 // daemon still records is refused, and a directory that holds anything
 // else is left in place.
 func RemoveOrphanedSandboxData(dataDir, name string) error {
@@ -257,6 +271,11 @@ func RemoveOrphanedSandboxData(dataDir, name string) error {
 		}
 	}
 	keep(workspace.ReleaseMount(dataDir, name))
+	ctx, cancel := context.WithTimeout(context.Background(), orphanSnapshotTimeout)
+	defer cancel()
+	if err := workspace.DeleteSnapshot(ctx, dataDir, name); !errors.Is(err, workspace.ErrSnapshotNotFound) {
+		keep(err)
+	}
 	keep(workspace.DeleteCopy(dataDir, name))
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
