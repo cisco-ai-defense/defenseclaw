@@ -1865,17 +1865,17 @@ class TestLegacyStandaloneAPIHost(unittest.TestCase):
     def test_cli_sidecar_clients_honor_an_explicit_api_bind(self):
         # A legacy host that pinned gateway.api_bind: 127.0.0.1 has its
         # gateway there; plugin, skill, and status must not dial 10.200.0.1.
-        from defenseclaw.commands import cmd_plugin, cmd_skill, cmd_upgrade
+        # (`defenseclaw upgrade` runs the release installer and dials no
+        # sidecar.)
+        from defenseclaw.commands import cmd_plugin, cmd_skill
 
         cfg = self._cfg("standalone", "10.200.0.1")
         cfg.gateway.api_bind = "127.0.0.1"
         app = SimpleNamespace(cfg=cfg)
         self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
         self.assertEqual(cmd_skill._api_bind_host(app), "127.0.0.1")
-        self.assertEqual(cmd_upgrade._api_bind_host(cfg), "127.0.0.1")
         cfg.gateway.api_bind = "0.0.0.0"
         self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
-        self.assertEqual(cmd_upgrade._api_bind_host(cfg), "0.0.0.0")
         cfg.gateway.api_bind = ""
         self.assertEqual(cmd_skill._api_bind_host(app), "10.200.0.1")
 
