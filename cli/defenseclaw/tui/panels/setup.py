@@ -1460,6 +1460,19 @@ class SetupPanelModel:
             # (enable, disable, ...) never mark the wizard.
             best = SetupWizard.SANDBOX
         if best is None:
+            # A wizard with several actions runs commands its WIZARD_COMMANDS
+            # prefix doesn't cover (Guardrail actions runs guardrail
+            # block-message / hilt / fail-mode, AI discovery runs disable,
+            # Splunk dashboards runs destroy): finish the running wizard of
+            # the same command family, or its row spins forever.
+            running = [
+                wizard
+                for wizard, status in self.wizard_status.items()
+                if status == "running..." and WIZARD_COMMANDS.get(wizard, ())[:1] == tuple(args[:1])
+            ]
+            if len(running) == 1:
+                best = running[0]
+        if best is None:
             return
         if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
             # Only a check: the wizard's setup status stays what it was.
