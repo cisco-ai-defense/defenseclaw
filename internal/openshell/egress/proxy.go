@@ -527,6 +527,22 @@ func (p *Proxy) Tunnels() []TunnelStats {
 	return out
 }
 
+// BindingActivity reports a binding's open tunnels and in-flight forwarded
+// requests and the bytes they moved so far, both ways: what a caller that is
+// about to close the binding's connections (an OpenShell policy reload) can
+// watch for a quiet moment.
+func (p *Proxy) BindingActivity(bindingID string) (open int, moved int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for t := range p.tunnels {
+		if t.principal.BindingID == bindingID {
+			open++
+			moved += t.flow.up.Load() + t.flow.down.Load()
+		}
+	}
+	return open, moved
+}
+
 // tunnel is one open CONNECT tunnel or forwarded request.
 type tunnel struct {
 	id string

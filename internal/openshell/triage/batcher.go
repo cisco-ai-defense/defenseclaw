@@ -52,6 +52,13 @@ type Quiescer interface {
 	WaitQuiescent(ctx context.Context, bindingID string, idle time.Duration) error
 }
 
+// TunnelActivity reports a sandbox binding's traffic through the DefenseClaw
+// egress proxy: its open tunnels and forwarded requests, and the bytes they
+// moved so far. *egress.Proxy satisfies it.
+type TunnelActivity interface {
+	BindingActivity(bindingID string) (open int, moved int64)
+}
+
 // Item is one approval waiting to be applied.
 type Item struct {
 	Sandbox   string
@@ -107,13 +114,21 @@ type BatcherOptions struct {
 	Apply Applier
 	// Quiesce is consulted before each batch; nil applies at once.
 	Quiesce Quiescer
+	// Tunnels, when set, is consulted before each batch too: the policy
+	// reload closes the sandbox's connections through the egress proxy as
+	// well (a package download, a clone), so a batch also waits until none
+	// of the binding's tunnels moved a byte for Idle, or none is open,
+	// within the same MaxWait. The harness's model streams run over its
+	// provider's direct rule, which DefenseClaw does not see: a reload
+	// during one still interrupts it.
+	Tunnels TunnelActivity
 	// Debounce collects approvals until none arrived for this long
 	// (openshell.approvals.debounce_ms; default 3s).
 	Debounce time.Duration
 	// MaxDelay caps how long debouncing may postpone a batch (default 30s).
 	MaxDelay time.Duration
-	// Idle is the hook-quiet interval required before applying (default
-	// 2s).
+	// Idle is the hook-quiet (and tunnel-quiet) interval required before
+	// applying (default 2s).
 	Idle time.Duration
 	// MaxWait bounds the wait for quiescence; a sandbox busy that long gets
 	// its batch anyway (default 2m).
@@ -351,14 +366,11 @@ func (b *Batcher) Drain(ctx context.Context) error {
 // finished results and the items to retry in a later batch.
 func (b *Batcher) apply(ctx context.Context, sandbox string, items []Item) ([]Result, []Item) {
 	forced := false
-	if q := b.opts.Quiesce; q != nil && items[0].BindingID != "" {
-		wctx, cancel := context.WithTimeout(ctx, b.opts.MaxWait)
-		err := q.WaitQuiescent(wctx, items[0].BindingID, b.opts.Idle)
-		cancel()
+	if items[0].BindingID != "" && (b.opts.Quiesce != nil || b.opts.Tunnels != nil) {
+		forced = b.waitQuiet(ctx, items[0].BindingID)
 		if ctx.Err() != nil {
 			return failAll(items, ctx.Err()), nil
 		}
-		forced = err != nil
 	}
 	a := applyRun{b: b, ctx: ctx, sandbox: sandbox, forced: forced}
 	draft, err := a.draft()
@@ -405,6 +417,56 @@ func (b *Batcher) apply(ctx context.Context, sandbox string, items []Item) ([]Re
 		a.single(draft, it)
 	}
 	return a.results, a.retry
+}
+
+// waitQuiet waits until binding's hooks are quiet (Quiesce) and its egress
+// tunnels idle (Tunnels) at the same time, and reports whether MaxWait (or
+// ctx) ended the wait first.
+func (b *Batcher) waitQuiet(ctx context.Context, binding string) (forced bool) {
+	wctx, cancel := context.WithTimeout(ctx, b.opts.MaxWait)
+	defer cancel()
+	for {
+		if q := b.opts.Quiesce; q != nil {
+			if err := q.WaitQuiescent(wctx, binding, b.opts.Idle); err != nil {
+				return true
+			}
+		}
+		if b.tunnelsIdle(wctx, binding) {
+			// A hook request may have arrived while the tunnels were
+			// watched; InFlight tells without waiting.
+			q, ok := b.opts.Quiesce.(interface {
+				Quiescent(bindingID string, idle time.Duration) bool
+			})
+			if !ok || q.Quiescent(binding, b.opts.Idle) {
+				return false
+			}
+		}
+		if wctx.Err() != nil {
+			return true
+		}
+	}
+}
+
+// tunnelsIdle reports that none of binding's egress tunnels moved a byte
+// for Idle, or none is open.
+func (b *Batcher) tunnelsIdle(ctx context.Context, binding string) bool {
+	t := b.opts.Tunnels
+	if t == nil {
+		return true
+	}
+	open, before := t.BindingActivity(binding)
+	if open == 0 {
+		return true
+	}
+	timer := time.NewTimer(b.opts.Idle)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+	}
+	now, after := t.BindingActivity(binding)
+	return now == 0 || (now == open && after == before)
 }
 
 // applyRun collects one batch's outcomes.

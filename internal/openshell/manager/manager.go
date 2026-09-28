@@ -336,6 +336,7 @@ func New(opts Options) (*Manager, error) {
 	m.batcher = triage.NewBatcher(triage.BatcherOptions{
 		Apply:    batchApplier{m: m},
 		Quiesce:  opts.Quiesce,
+		Tunnels:  proxyTunnels{m: m},
 		Debounce: debounce,
 		OnResult: m.approvalsApplied,
 		Recheck:  m.recheckApproval,
@@ -373,6 +374,22 @@ func (m *Manager) EgressAuthenticator() egress.Authenticator { return m.creds }
 
 // EgressSink receives the proxy's events for telemetry and the feed.
 func (m *Manager) EgressSink() egress.EventSink { return m.sink }
+
+// proxyTunnels reports the attached egress proxy's traffic per binding to
+// the approval batcher (triage.TunnelActivity), so a policy reload waits
+// for the sandbox's proxied transfers; nothing while no proxy that reports
+// it is attached.
+type proxyTunnels struct{ m *Manager }
+
+func (t proxyTunnels) BindingActivity(bindingID string) (int, int64) {
+	t.m.mu.Lock()
+	p := t.m.proxy
+	t.m.mu.Unlock()
+	if a, ok := p.(triage.TunnelActivity); ok {
+		return a.BindingActivity(bindingID)
+	}
+	return 0, 0
+}
 
 // AttachProxy connects the running egress proxy, whose decider the manager
 // rebuilds when the configuration or the set of sandboxes changes.

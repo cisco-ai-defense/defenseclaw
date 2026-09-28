@@ -105,6 +105,12 @@ func TestProxyConnectTLSEndToEnd(t *testing.T) {
 	if n := len(h.proxy.Tunnels()); n != 1 {
 		t.Errorf("Tunnels() = %d open, want 1 while the client keeps the connection", n)
 	}
+	if open, moved := h.proxy.BindingActivity("binding-one"); open != 1 || moved < 5000 {
+		t.Errorf("BindingActivity = %d open, %d bytes moved; want the tunnel and its upload", open, moved)
+	}
+	if open, moved := h.proxy.BindingActivity("binding-two"); open != 0 || moved != 0 {
+		t.Errorf("another binding's activity = %d, %d", open, moved)
+	}
 
 	closeIdle(t, h)
 	closed := h.sink.wait(t, EventClosed, 1)[0]
@@ -117,6 +123,9 @@ func TestProxyConnectTLSEndToEnd(t *testing.T) {
 	}
 	if n := len(h.proxy.Tunnels()); n != 0 {
 		t.Errorf("Tunnels() = %d after close", n)
+	}
+	if open, _ := h.proxy.BindingActivity("binding-one"); open != 0 {
+		t.Errorf("BindingActivity after close = %d open", open)
 	}
 }
 

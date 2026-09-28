@@ -264,6 +264,13 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   has no address is rejected. A lookup that times out or fails temporarily
   (SERVFAIL, an unreachable resolver) rejects nothing: the proposal stays
   pending and the next pass decides it.
+- Approvals are applied in batches at quiet moments, because every policy
+  reload closes the sandbox's open connections: the batcher waits until no
+  hook request is in flight and none of the sandbox's egress proxy tunnels
+  moved a byte for 2 seconds (an idle tunnel left open does not count), at
+  most 2 minutes. The harness's own model stream runs over its provider's
+  direct rule, which DefenseClaw does not see, so a reload during a long
+  answer can still interrupt it.
 - The batcher repeats the whole check, with fresh DNS answers, right before
   it applies an approval. When that check cannot be made (a failing lookup,
   or a sandbox policy that does not resolve), an automatic approval is

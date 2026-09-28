@@ -389,6 +389,83 @@ func TestBatcherForcesAfterMaxWait(t *testing.T) {
 	}
 }
 
+// fakeTunnels is a binding's egress proxy traffic: while busy, every read
+// sees more bytes moved.
+type fakeTunnels struct {
+	mu    sync.Mutex
+	open  int
+	moved int64
+	busy  bool
+	reads int
+}
+
+func (f *fakeTunnels) BindingActivity(bindingID string) (int, int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads++
+	if bindingID != "sb_1" {
+		return 0, 0
+	}
+	if f.busy {
+		f.moved += 1 << 10
+	}
+	return f.open, f.moved
+}
+
+func (f *fakeTunnels) set(open int, busy bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open, f.busy = open, busy
+}
+
+// TestBatcherWaitsForIdleTunnels pins that a batch also waits for the
+// binding's egress tunnels to go quiet, since the policy reload closes them
+// too: a transfer that keeps moving bytes holds the batch, a tunnel left
+// open but idle does not, and a transfer that never ends gets the batch
+// after MaxWait. The hooks must be quiet at the same time.
+func TestBatcherWaitsForIdleTunnels(t *testing.T) {
+	apply := newFakeApplier()
+	col := newCollector()
+	inflight := sandboxauth.NewInFlight(nil)
+	tunnels := &fakeTunnels{}
+	tunnels.set(1, true)
+	b := runBatcher(t, BatcherOptions{Apply: apply, Quiesce: inflight, Tunnels: tunnels, Debounce: 5 * time.Millisecond,
+		Idle: 20 * time.Millisecond, OnResult: col.add})
+	it := item(apply, "box", "a")
+	it.BindingID = "sb_1"
+	b.Enqueue(it)
+	time.Sleep(120 * time.Millisecond)
+	if bulk, _ := apply.calls(); len(bulk) != 0 {
+		t.Fatalf("applied while a tunnel was moving data: %v", bulk)
+	}
+	// The transfer ends; its tunnel stays open, idle.
+	tunnels.set(1, false)
+	results := col.wait(t, 1)
+	if results[0].Forced || results[0].Err != nil || results[0].PolicyVersion == 0 {
+		t.Fatalf("result = %+v", results[0])
+	}
+
+	// A transfer that never ends gets the batch after MaxWait.
+	forcedApply, forcedCol := newFakeApplier(), newCollector()
+	busy := &fakeTunnels{}
+	busy.set(2, true)
+	fb := runBatcher(t, BatcherOptions{Apply: forcedApply, Quiesce: inflight, Tunnels: busy, Debounce: 5 * time.Millisecond,
+		Idle: 10 * time.Millisecond, MaxWait: 60 * time.Millisecond, OnResult: forcedCol.add})
+	fit := item(forcedApply, "box", "b")
+	fit.BindingID = "sb_1"
+	fb.Enqueue(fit)
+	if got := forcedCol.wait(t, 1); !got[0].Forced {
+		t.Fatalf("result = %+v, want forced", got[0])
+	}
+	// Another binding's tunnels never hold a batch.
+	other := item(forcedApply, "box", "c")
+	other.BindingID = "sb_2"
+	fb.Enqueue(other)
+	if got := forcedCol.wait(t, 2); got[1].Forced || got[1].Err != nil {
+		t.Fatalf("result = %+v", got[1])
+	}
+}
+
 // TestBatcherFlaggedChunksGoSingle pins that an approved security-flagged
 // chunk goes through the single call with a token read after the bulk
 // approval landed (which made the first read stale).

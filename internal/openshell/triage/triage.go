@@ -46,10 +46,13 @@
 //     auto, or triage on an open network, or the proxy allows the host
 //     through an unblock or an allow entry.
 //
-// Approvals are applied by a Batcher at hook-quiescent moments: every
-// OpenShell policy reload closes the sandbox's open connections, including
-// a hook request waiting on a verdict. The Batcher's Recheck judges each
-// approval again, with fresh DNS answers, right before it is applied.
+// Approvals are applied by a Batcher at quiet moments: every OpenShell
+// policy reload closes the sandbox's open connections, including a hook
+// request waiting on a verdict and its transfers through the egress proxy,
+// so a batch waits until the hooks are quiet and the proxy tunnels idle
+// (the model's own streams run over direct provider rules DefenseClaw does
+// not see). The Batcher's Recheck judges each approval again, with fresh
+// DNS answers, right before it is applied.
 package triage
 
 import (

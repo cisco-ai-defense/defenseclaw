@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -77,5 +78,36 @@ func TestGlobalProfileImportWaitsForRunningSandboxes(t *testing.T) {
 	}
 	if !notified {
 		t.Fatal("the running sandbox was not told about the import")
+	}
+}
+
+// activityProxy is a proxy that reports per-binding tunnel activity.
+type activityProxy struct {
+	fakeProxy
+}
+
+func (p *activityProxy) BindingActivity(bindingID string) (int, int64) {
+	if bindingID == "sb_busy" {
+		return 2, 4096
+	}
+	return 0, 0
+}
+
+// TestApprovalBatchesWatchProxyTunnels pins that the approval batcher sees
+// the attached egress proxy's per-binding traffic (triage.TunnelActivity),
+// and nothing before a proxy that reports it is attached.
+func TestApprovalBatchesWatchProxyTunnels(t *testing.T) {
+	e := newEnv(t, nil)
+	tunnels := proxyTunnels{m: e.m}
+	if open, moved := tunnels.BindingActivity("sb_busy"); open != 0 || moved != 0 {
+		t.Fatalf("activity without a proxy = %d, %d", open, moved)
+	}
+	e.m.AttachProxy(&fakeProxy{counter: egress.NewCounter(egress.CounterOptions{})})
+	if open, _ := tunnels.BindingActivity("sb_busy"); open != 0 {
+		t.Fatalf("activity from a proxy that reports none = %d", open)
+	}
+	e.m.AttachProxy(&activityProxy{fakeProxy{counter: egress.NewCounter(egress.CounterOptions{})}})
+	if open, moved := tunnels.BindingActivity("sb_busy"); open != 2 || moved != 4096 {
+		t.Fatalf("activity = %d, %d", open, moved)
 	}
 }
