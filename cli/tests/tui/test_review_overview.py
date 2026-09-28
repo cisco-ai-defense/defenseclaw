@@ -65,3 +65,19 @@ def test_scanner_path_probe_is_cached_between_repaints(monkeypatch) -> None:
     assert calls == ["skill-scanner"]
     app_module._on_path("skill-scanner", now=100.0 + app_module._ON_PATH_TTL_SECONDS + 1)
     assert calls == ["skill-scanner", "skill-scanner"]
+
+
+async def test_service_details_read_as_words_at_80_columns(tmp_path) -> None:
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from fixtures import screen_text, snapshot_app
+
+    app = snapshot_app(tmp_path)
+    # Tall enough that the Services card is on screen without scrolling.
+    async with app.run_test(size=(80, 70)) as pilot:
+        await pilot.pause()
+        text = screen_text(app)
+    # The Telemetry detail used to fold four letters a line ("cano", "nica").
+    assert "plan loading" in text

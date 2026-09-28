@@ -8395,8 +8395,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         services_table = Table.grid(padding=(0, 1), expand=True)
         services_table.add_column(no_wrap=True, width=2)
         services_table.add_column(no_wrap=True, width=12)
-        services_table.add_column(no_wrap=True, width=10)
-        services_table.add_column(overflow="fold")
+        # Below 100 columns the card is too narrow for a detail column (it
+        # folded "canonical destination plan loading" four letters a line),
+        # so the detail goes under the state instead.
+        narrow_services = self.size.width < 100
+        if narrow_services:
+            services_table.add_column()
+        else:
+            services_table.add_column(no_wrap=True, width=10)
+            services_table.add_column(overflow="fold")
         services_layout = (
             ("Gateway", "gateway"),
             ("Agent", "agent"),
@@ -8414,6 +8421,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             normalized = (state or "").strip().lower()
             dot = "●" if normalized in {"running", "active", "enabled", "clean", "allowed"} else "○"
             detail = detail_by_key.get(key, "") or ""
+            if narrow_services:
+                state_cell = Text(state or "unknown", style=color)
+                if detail:
+                    state_cell.append("\n" + detail, style=TOKENS.text_secondary)
+                services_table.add_row(
+                    Text(dot, style=color), Text(display_name, style=TOKENS.text_primary), state_cell
+                )
+                continue
             services_table.add_row(
                 Text(dot, style=color),
                 Text(display_name, style=TOKENS.text_primary),
