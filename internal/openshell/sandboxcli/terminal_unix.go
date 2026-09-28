@@ -27,6 +27,13 @@ import (
 // terminalSignals are what the terminal sends the foreground job.
 var terminalSignals = []os.Signal{syscall.SIGINT, syscall.SIGTSTP, syscall.SIGQUIT}
 
+// forwardedSignals end the interactive harness rather than this process:
+// the terminal hung up, or something asked this process to terminate.
+var forwardedSignals = []os.Signal{syscall.SIGHUP, syscall.SIGTERM}
+
+// sessionSignals end a headless harness run rather than this process.
+var sessionSignals = []os.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM}
+
 func signalNumber(exit *exec.ExitError) int {
 	if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		return int(ws.Signal())

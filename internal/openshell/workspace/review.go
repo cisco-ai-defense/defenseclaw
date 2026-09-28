@@ -23,6 +23,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -78,12 +79,19 @@ func (r *ReviewReport) Sensitive() bool {
 			return true
 		}
 	}
+	return len(r.SecretPaths()) > 0
+}
+
+// SecretPaths lists the changed files in which the secret scanner found a
+// critical secret, once each.
+func (r *ReviewReport) SecretPaths() []string {
+	var out []string
 	for _, f := range r.Findings {
-		if f.Scanner == "clawshield-secrets" && f.Severity == string(scanner.SeverityCritical) {
-			return true
+		if f.Scanner == "clawshield-secrets" && f.Severity == string(scanner.SeverityCritical) && !slices.Contains(out, f.Path) {
+			out = append(out, f.Path)
 		}
 	}
-	return false
+	return out
 }
 
 // HostExecLabels lists the labels of medium-or-worse flags, for the

@@ -23,6 +23,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -32,8 +34,11 @@ import (
 // control and interrupt signals the terminal sends to its foreground
 // process group (Ctrl-C, Ctrl-Z, Ctrl-\): the child owns the terminal and
 // decides what they mean, and the end-of-session review still runs after
-// it exits. The signals are caught rather than ignored, so the child starts
-// with the default dispositions.
+// it exits. A hang-up (the terminal window closed) or a termination
+// request is passed on to the child instead of ending this process, so
+// the session still ends with its review and stop (or --rm). The signals
+// are caught rather than ignored, so the child starts with the default
+// dispositions.
 type ForegroundTerminal struct{}
 
 // Run implements Terminal.
@@ -47,18 +52,55 @@ func (ForegroundTerminal) Run(ctx context.Context, inv openshell.Invocation) (in
 	}
 	defer cancel()
 	sig := make(chan os.Signal, 16)
-	signal.Notify(sig, terminalSignals...)
+	signal.Notify(sig, append(append([]os.Signal(nil), terminalSignals...), forwardedSignals...)...)
+	defer signal.Stop(sig)
+	if err := cmd.Start(); err != nil {
+		return exitStatus(err)
+	}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		for range sig {
+		for s := range sig {
+			if slices.Contains(forwardedSignals, s) {
+				_ = cmd.Process.Signal(s)
+			}
 		}
 	}()
-	err = cmd.Run()
+	err = cmd.Wait()
 	signal.Stop(sig)
 	close(sig)
 	<-drained
 	return exitStatus(err)
+}
+
+// exitInterrupted is the exit status of a session a signal ended (a
+// shell's 128 + SIGINT).
+const exitInterrupted = 130
+
+// sessionContext is ctx for a headless harness run, cancelled (which ends
+// the harness) when the user interrupts, the terminal hangs up or this
+// process is asked to terminate: the session then still ends with its
+// review and stop (or --rm) instead of this process dying with the sandbox
+// left running. interrupted reports whether a signal ended it.
+func sessionContext(ctx context.Context) (run context.Context, interrupted func() bool, stop func()) {
+	run, cancel := context.WithCancel(ctx)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, sessionSignals...)
+	var got atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sig:
+			got.Store(true)
+			cancel()
+		case <-done:
+		}
+	}()
+	return run, got.Load, func() {
+		signal.Stop(sig)
+		close(done)
+		cancel()
+	}
 }
 
 // CommandStreamer runs a non-interactive invocation with its output on the

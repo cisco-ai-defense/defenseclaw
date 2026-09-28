@@ -169,14 +169,25 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	}
 	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy
 
-	// Resume this folder's sandbox instead of starting another.
+	// Resume this folder's sandbox instead of starting another. The
+	// sandbox keeps the settings it was created with, so flags that only a
+	// new sandbox takes turn the default answer to no.
 	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
-			resume, err := a.ask(fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resume it?", sb.Name, sb.Phase, sb.WorkdirMode), true, false)
+			question := fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resume it?", sb.Name, sb.Phase, sb.WorkdirMode)
+			ignored := resumeIgnores(o, sb)
+			if len(ignored) > 0 {
+				question = fmt.Sprintf("Sandbox %s (%s, %s) already holds this folder. Resuming it keeps its own settings and ignores %s. Resume it anyway?",
+					sb.Name, sb.Phase, sb.WorkdirMode, strings.Join(ignored, ", "))
+			}
+			resume, err := a.ask(question, len(ignored) == 0, false)
 			if err != nil {
 				return err
 			}
 			if resume {
+				if len(ignored) > 0 {
+					a.warn("resuming " + sb.Name + " without " + strings.Join(ignored, ", ") + " (they apply to a new sandbox: pass --new)")
+				}
 				return a.Connect(ctx, ConnectOptions{Name: sb.Name, Refresh: o.Refresh, Rm: o.Rm, Yes: o.Yes, Prompt: o.Prompt, Args: o.Args})
 			}
 		}
@@ -620,6 +631,36 @@ func (a *App) resumable(ctx context.Context, api API, project, harnessName strin
 	return &cands[0]
 }
 
+// resumeIgnores lists the run flags a resume of sb would not honour: they
+// shape a sandbox when it is created (its policy, mounts, credentials,
+// environment and limits), and sb keeps its own. A flag sb already matches
+// is left out.
+func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox) []string {
+	var out []string
+	add := func(set bool, flag string) {
+		if set {
+			out = append(out, flag)
+		}
+	}
+	add(o.Safe && sb.Launch.Yolo, "--safe")
+	add(o.Pack != "" && o.Pack != sb.Pack, "--pack "+o.Pack)
+	add(o.Profile != "" && o.Profile != sb.Profile, "--profile "+o.Profile)
+	add(o.Copy && sb.WorkdirMode != config.OpenShellWorkdirCopy, "--copy")
+	add(len(o.Context) > 0, "--context")
+	add(len(o.Unmask) > 0, "--unmask")
+	add(len(o.HostPorts) > 0, "--host-port")
+	add(len(o.Credentials) > 0, "--credential")
+	add(o.GitHubWrite, "--github-write")
+	add(o.NoMCP, "--no-mcp")
+	add(o.LLM != "" && !strings.EqualFold(o.LLM, LLMAuto), "--llm "+o.LLM)
+	add(o.BedrockRegion != "", "--bedrock-region")
+	add(len(o.Env) > 0, "--env")
+	add(o.CPU != "", "--cpu")
+	add(o.Memory != "", "--memory")
+	add(o.NoSnapshot, "--no-snapshot")
+	return out
+}
+
 func settingValue(settings []sandboxapi.Setting, key string) string {
 	for _, s := range settings {
 		if s.Key == key {
@@ -807,6 +848,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		}
 		row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
 	}
+	// Asks (a host port, a private address, a destination the profile
+	// does not list) wait for the user while the harness owns the terminal.
+	row("Asks", "shown here as they come; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name)
 	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
 		// Servers left behind and a repository's blocked servers arrive as
 		// warnings below, one line each.

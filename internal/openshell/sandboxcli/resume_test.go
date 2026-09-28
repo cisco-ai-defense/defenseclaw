@@ -468,3 +468,52 @@ func TestRunHeadlessOnATerminalOffersResume(t *testing.T) {
 		t.Fatalf("stream runs = %q", ta.stream.commands())
 	}
 }
+
+// A resumed sandbox keeps the settings it was created with: the offer names
+// the flags a resume would ignore (--safe on a skip-permissions sandbox, a
+// credential) and defaults to starting a new sandbox; resuming anyway says
+// what was left out.
+func TestRunResumeNamesTheFlagsItIgnores(t *testing.T) {
+	existing := func(ta *testApp) {
+		ta.daemon.add(sandboxapi.Sandbox{Name: "proj-0a1b", ID: "sb-proj-0a1b", Harness: "claudecode", HarnessName: "Claude Code", Phase: "stopped",
+			WorkdirMode: "mount", Project: ta.project, Workdir: "/work/proj", Pack: "open", Profile: "open", Yolo: true,
+			Launch: sandboxapi.Launch{Yolo: true}, CreatedAt: time.Now()})
+		ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+	}
+	opts := RunOptions{Harness: "claude", Safe: true, Pack: "open", Credentials: []string{"STRIPE_API_KEY=api.stripe.com"}}
+
+	ta := newTestApp(t, "\n")
+	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	existing(ta)
+	if err := ta.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	out := ta.output()
+	if !strings.Contains(out, "Resuming it keeps its own settings and ignores --safe, --credential. Resume it anyway? [y/N]") {
+		t.Fatalf("offer:\n%s", out)
+	}
+	if req := createRequest(t, ta.daemon); !req.Safe || len(req.Credentials) != 1 {
+		t.Fatalf("the default must start a new sandbox with the flags: %+v", req)
+	}
+	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/proj-0a1b/start")); n != 0 {
+		t.Fatal("the old sandbox was resumed")
+	}
+
+	ta = newTestApp(t, "y\ny\n")
+	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	existing(ta)
+	if err := ta.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	if n := len(ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)); n != 0 {
+		t.Fatal("resuming anyway created a sandbox")
+	}
+	if out := ta.output(); !strings.Contains(out, "resuming proj-0a1b without --safe, --credential (they apply to a new sandbox: pass --new)") {
+		t.Fatalf("output:\n%s", out)
+	}
+
+	// Flags the sandbox already matches ask nothing new.
+	if got := resumeIgnores(RunOptions{Pack: "open", Profile: "open", LLM: LLMAuto}, &sandboxapi.Sandbox{Pack: "open", Profile: "open"}); len(got) != 0 {
+		t.Fatalf("resumeIgnores = %v", got)
+	}
+}

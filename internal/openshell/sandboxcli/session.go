@@ -53,6 +53,9 @@ type session struct {
 	// headless marks a one-prompt session (the resume hint says how to
 	// run the next prompt).
 	headless bool
+	// keepSnapshot keeps the undo snapshot when --rm deletes the sandbox:
+	// the session's changes could not be reviewed.
+	keepSnapshot bool
 
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
@@ -115,7 +118,15 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 		if err != nil {
 			return -1, err
 		}
-		return s.app.Streamer.Stream(ctx, inv, s.app.IO.Out, s.app.IO.Err)
+		runCtx, interrupted, stopSignals := sessionContext(ctx)
+		defer stopSignals()
+		code, err := s.app.Streamer.Stream(runCtx, inv, s.app.IO.Out, s.app.IO.Err)
+		if interrupted() && ctx.Err() == nil {
+			// The harness was ended; the session ends as usual.
+			s.app.warnErr("interrupted: ending the session")
+			return exitInterrupted, nil
+		}
+		return code, err
 	}
 	inv, err := s.cli.Exec(s.sb.Name, argv, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
 	if err != nil {
@@ -125,9 +136,9 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 }
 
 // watchNotices follows the sandbox during the session and prints what must
-// not wait until the end: a quarantined nested repository, and hooks that
-// do not reach DefenseClaw (the daemon's verdict, or no hook by the end of
-// the hook window).
+// not wait until the end: an ask waiting for the user, a quarantined nested
+// repository, and hooks that do not reach DefenseClaw (the daemon's
+// verdict, or no hook by the end of the hook window).
 func (s *session) watchNotices(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var since uint64
@@ -140,6 +151,10 @@ func (s *session) watchNotices(ctx context.Context) func() {
 	go func() {
 		defer wg.Done()
 		_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
+			if ev.Kind == sandboxapi.ActivityApprovalRequested {
+				s.notice(askNotice(s.sb.Name, ev))
+				return nil
+			}
 			if ev.Kind != sandboxapi.ActivityFinding {
 				return nil
 			}
@@ -157,6 +172,18 @@ func (s *session) watchNotices(ctx context.Context) func() {
 		s.checkHooksAfter(ctx, s.app.hookWindow())
 	}()
 	return func() { cancel(); wg.Wait() }
+}
+
+// askNotice is the live line for an ask of sandbox name: the harness owns
+// this terminal, so the answer comes from another one.
+func askNotice(name string, ev sandboxapi.ActivityEvent) string {
+	what := firstNonEmpty(ev.Message, hostPort(ev), "a new destination")
+	id := ""
+	if ev.ApprovalID != "" {
+		id = " " + ev.ApprovalID
+	}
+	return "? ask" + id + ": " + truncate(what, 120) + " is waiting for you → in another terminal: " +
+		CommandName + " approve " + name + id + " (or reject)"
 }
 
 // detach starts the harness in the background inside the sandbox; its
@@ -268,14 +295,41 @@ func (s *session) end(ctx context.Context) error {
 	if after.WorkdirMode == config.OpenShellWorkdirCopy {
 		return s.endCopy(ctx, after)
 	}
+	// What the agent left running keeps writing to the mounted folder: a
+	// sandbox the session owns stops before the review, so the review, the
+	// keep/undo answer and the undo point cover everything it changed.
+	stopped := false
+	switch {
+	case s.started && !s.liveRun:
+		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
+			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
+				"); what still runs in it can change the folder after this review")
+		} else {
+			stopped = true
+			if sb != nil {
+				after = sb
+			}
+		}
+	case !s.liveRun:
+		a.note(s.sb.Name + " keeps running (it was running when you connected), so what it changes after this review is not in it")
+	}
 	rev, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{})
-	if err != nil {
+	reviewed := err == nil
+	if !reviewed {
 		a.warn("could not review the session's changes: " + apiError(err).Error())
 	}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after)
-	changed := rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0 ||
-		rev.Report.HeadBefore != rev.Report.HeadAfter || rev.Report.BranchBefore != rev.Report.BranchAfter)
+	// A session whose review failed may have changed anything: the
+	// keep/undo question still comes, and the undo point stays.
+	changed := !reviewed || (rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0 ||
+		rev.Report.HeadBefore != rev.Report.HeadAfter || rev.Report.BranchBefore != rev.Report.BranchAfter))
+	if !reviewed {
+		s.keepSnapshot = true
+		if after.Snapshot != nil {
+			a.note("undo still restores the folder to its snapshot: `" + CommandName + " undo " + s.sb.Name + "`")
+		}
+	}
 	if rev != nil && rev.Report != nil {
 		if line := riskLine(rev.Report); line != "" {
 			a.println(a.style(line, ansiYellow))
@@ -284,6 +338,7 @@ func (s *session) end(ctx context.Context) error {
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
 	s.printNested(after)
+	s.printAsks(after)
 	if s.liveRun && changed {
 		// Undo stops the sandbox, which would end the run.
 		a.note("the detached run in " + s.sb.Name + " is still going; review or undo once it ends: `" + CommandName + " review " + s.sb.Name +
@@ -312,14 +367,16 @@ func (s *session) end(ctx context.Context) error {
 			}
 			a.printUnrestored(res.Result.Unrestored())
 		}
+		// The folder is back at its snapshot.
+		s.keepSnapshot = false
 		return s.finish(ctx, true)
 	}
-	if accepted {
+	if accepted && reviewed {
 		// The next session starts from here: its snapshot replaces this
-		// undo point.
+		// undo point. Changes nobody could review never become the base.
 		a.acceptUndoPoint(after)
 	}
-	return s.finish(ctx, false)
+	return s.finish(ctx, stopped)
 }
 
 // onExit returns k (keep), u (undo) or d (diff), and whether keeping was
@@ -367,10 +424,15 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		s.rm = false
 	}
 	if s.rm {
-		if _, err := s.api.Delete(ctx, name, sandboxapi.DeleteRequest{}); err != nil {
+		if _, err := s.api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: s.keepSnapshot}); err != nil {
 			return fmt.Errorf("delete %s: %w", name, apiError(err))
 		}
 		a.forgetCLIState(name)
+		if s.keepSnapshot {
+			a.ok("sandbox " + name + " deleted (--rm); its undo snapshot is kept because the changes were not reviewed → review: " +
+				CommandName + " review " + name + "   undo: " + CommandName + " undo " + name + "   drop it: " + CommandName + " delete " + name)
+			return nil
+		}
 		a.ok("sandbox " + name + " deleted (--rm)")
 		return nil
 	}
@@ -482,6 +544,16 @@ func (s *session) printNested(sb *sandboxapi.Sandbox) {
 	}
 }
 
+// printAsks says where the asks the session left waiting are answered.
+func (s *session) printAsks(sb *sandboxapi.Sandbox) {
+	if sb.PendingApprovals <= 0 {
+		return
+	}
+	a := s.app
+	a.println(a.style("? "+plural(int64(sb.PendingApprovals), "ask is", "asks are")+" still waiting for you → "+
+		CommandName+" approvals --sandbox "+sb.Name, ansiYellow))
+}
+
 // endCopy pulls a copy-mode sandbox's work and asks where it goes.
 func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error {
 	a := s.app
@@ -500,6 +572,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	if rev.RiskLine != "" {
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
+	s.printAsks(after)
 	for _, b := range pull.Blocking {
 		a.warn(b)
 	}
@@ -526,7 +599,11 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 		s.rm = false
 		return s.finish(ctx, false)
 	}
-	opts := PullOptions{Name: after.Name, AcceptSensitive: rev.RiskLine == "" || !a.IO.TTY}
+	// The same gate as `pull --apply`: changes that can run code on this
+	// machine, or a critical secret the agent wrote (which no risk line
+	// names), are brought back only when the user says so.
+	sensitive := rev.RiskLine != "" || pull.Review.Sensitive()
+	opts := PullOptions{Name: after.Name, AcceptSensitive: !sensitive}
 	switch mode {
 	case "apply":
 		opts.Apply = true
@@ -535,8 +612,15 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox) error 
 	case "patch":
 		opts.PatchOut = after.Name + ".patch"
 	}
-	if rev.RiskLine != "" && a.IO.TTY {
-		yes, err := a.ask("Some changes can run code on this machine. Bring them back anyway?", false, false)
+	if sensitive {
+		question := "Some changes can run code on this machine. Bring them back anyway?"
+		if secrets := pull.Review.SecretPaths(); len(secrets) > 0 {
+			a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+			if rev.RiskLine == "" {
+				question = "Some changes hold what looks like a secret. Bring them back anyway?"
+			}
+		}
+		yes, err := a.ask(question, false, false)
 		if err != nil {
 			return err
 		}

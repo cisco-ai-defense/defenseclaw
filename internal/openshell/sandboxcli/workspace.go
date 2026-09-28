@@ -582,7 +582,10 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return nothing()
 	}
 	if res.Review.Sensitive() && !o.AcceptSensitive {
-		yes, err := a.ask("Some changes can run code on this machine. Bring them back anyway?", false, false)
+		if secrets := res.Review.SecretPaths(); len(secrets) > 0 {
+			a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+		}
+		yes, err := a.ask("Some changes can run code on this machine or hold a secret. Bring them back anyway?", false, false)
 		if err != nil {
 			if errors.Is(err, ErrNoTerminal) {
 				return errors.New("some changes can run code on this machine; review them and pass --accept-sensitive")

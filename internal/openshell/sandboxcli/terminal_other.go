@@ -26,6 +26,10 @@ import (
 
 var terminalSignals = []os.Signal{os.Interrupt}
 
+var forwardedSignals []os.Signal
+
+var sessionSignals = []os.Signal{os.Interrupt}
+
 func signalNumber(*exec.ExitError) int { return 0 }
 
 func execProcess(string, []string, []string) error {
