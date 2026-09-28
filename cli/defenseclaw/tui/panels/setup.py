@@ -82,6 +82,7 @@ from defenseclaw.tui.services.cli_choices import (
 from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
+from defenseclaw.tui.services.sandbox_state import DEFAULT_SANDBOX_HARNESSES, SANDBOX_HARNESS_SPECS
 from defenseclaw.tui.services.setup_state import (
     OPENSHELL_INHERIT_CHOICE,
     ConfigDiffEntry,
@@ -568,6 +569,8 @@ class SetupPanelModel:
         )
         self.wizard_status: dict[SetupWizard, str] = {}
         self._wizard_run_started: dict[SetupWizard, datetime] = {}
+        # A check-only run (the Sandbox wizard's doctor) puts back the status it found.
+        self._status_before_check: dict[SetupWizard, str] = {}
         self.form_fields: list[WizardFormField] = []
         self.form_cursor = 0
         self.form_active = False
@@ -1422,6 +1425,17 @@ class SetupPanelModel:
             best = SetupWizard.SANDBOX
         if best is None:
             return
+        if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
+            # Only a check: the wizard's setup status stays what it was.
+            before = self._status_before_check.pop(best)
+            if not success:
+                self.wizard_status[best] = "check failed"
+            elif before and before != "running...":
+                self.wizard_status[best] = before
+            else:
+                self.wizard_status[best] = "checked"
+            self._wizard_run_started.pop(best, None)
+            return
         self.wizard_status[best] = "done" if success else "failed"
         self._wizard_run_started.pop(best, None)
 
@@ -1485,15 +1499,20 @@ class SetupPanelModel:
         terminal = self.active_wizard == SetupWizard.SANDBOX and tuple(args[:2]) == ("sandbox", "setup")
         if terminal:
             risk = "setup"
-        # The Sandbox wizard's doctor action only reads this machine.
-        category = "info" if tuple(args[:2]) == ("sandbox", "doctor") else "setup"
+        # The Sandbox wizard's doctor action only reads this machine: its
+        # toast says doctor, and it leaves the wizard's status as it was.
+        doctor = tuple(args[:2]) == ("sandbox", "doctor")
+        category = "info" if doctor else "setup"
+        label = "sandbox doctor" if doctor else "setup " + name
+        if doctor:
+            self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
         return SetupPanelAction(
             True,
             SetupCommandIntent(
-                label="setup " + name,
+                label=label,
                 args=args,
                 binary="defenseclaw",
                 category=category,
@@ -4489,12 +4508,18 @@ def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tupl
 
 # --- Sandbox wizard (slot 13) ---------------------------------------------
 
-# (connector name, wizard label, command) for the harnesses the Go tree runs.
-SANDBOX_WIZARD_HARNESSES: tuple[tuple[str, str, str], ...] = (
-    ("claudecode", "Claude Code", "claude"),
-    ("codex", "Codex", "codex"),
-)
+# (connector name, wizard label, command) for every harness the Go tree runs
+# (harness.Names()); with openshell.harnesses empty, setup's defaults are on.
+SANDBOX_WIZARD_HARNESSES: tuple[tuple[str, str, str], ...] = SANDBOX_HARNESS_SPECS
 
+
+# sandboxcli.consentGatewayRestart: a bind-mount or telemetry change restarts
+# the shared OpenShell gateway, and --non-interactive restarts it only while
+# no sandbox runs on it.
+_GATEWAY_RESTART_NOTE = (
+    "restarts the OpenShell gateway, which drops the connections of every running sandbox; "
+    "while sandboxes run, setup skips the restart (apply it later with: defenseclaw sandbox doctor --fix)."
+)
 
 # The largest auth.json sandboxcli.codexAuthKey reads.
 _CODEX_AUTH_MAX_BYTES = 1 << 20
@@ -4666,8 +4691,13 @@ def sandbox_wizard_fields(
             visible_when=is_setup,
         ),
     ]
+    # As setup does: the configured harnesses, else its defaults (the first
+    # the organization allows when it allows none of them).
+    defaults = {name for name, _label, _command in harnesses if name in DEFAULT_SANDBOX_HARNESSES} or {
+        name for name, _label, _command in harnesses[:1]
+    }
     for name, label, command in harnesses:
-        on = "yes" if not configured or name in configured else "no"
+        on = "yes" if (name in configured if configured else name in defaults) else "no"
         fields.append(
             WizardFormField(
                 label,
@@ -4718,7 +4748,8 @@ def sandbox_wizard_fields(
             value="yes",
             default="yes",
             hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
-            "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy.",
+            "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
+            "Turning bind mounts on " + _GATEWAY_RESTART_NOTE,
             visible_when=is_setup,
         ),
     ]
@@ -4730,7 +4761,7 @@ def sandbox_wizard_fields(
                 no_flag="--upstream-telemetry",
                 value="yes",
                 default="yes",
-                hint="Turn OpenShell's anonymous usage telemetry off.",
+                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + _GATEWAY_RESTART_NOTE,
                 visible_when=is_setup,
             )
         )
@@ -4742,8 +4773,8 @@ def sandbox_wizard_fields(
             "--no-wrappers",
             value="no",
             default="no",
-            hint="Make `claude` and `codex` run sandboxed when you type them (a marked block in your shell rc; "
-            "undo any time with defenseclaw sandbox disable <harness>).",
+            hint="Make the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them "
+            "(a marked block in your shell rc; undo any time with defenseclaw sandbox disable <harness>).",
             visible_when=is_setup,
         ),
         WizardFormField(
@@ -5015,7 +5046,12 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         if not _sandbox_selected_harnesses(fields):
             labels = {field.label for field in fields}
             offered = [label for _name, label, _command in SANDBOX_WIZARD_HARNESSES if label in labels]
-            missing.append(f"a harness ({' or '.join(offered)})" if offered else f"a harness ({ADMIN_POLICY_MESSAGE})")
+            if not offered:
+                missing.append(f"a harness ({ADMIN_POLICY_MESSAGE})")
+            elif len(offered) <= 2:
+                missing.append(f"a harness ({' or '.join(offered)})")
+            else:
+                missing.append("a harness (turn one on under Harnesses)")
     if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
         for label in ("Runtime Data Dir", "Token File"):
             if not wizard_field_value(fields, label):

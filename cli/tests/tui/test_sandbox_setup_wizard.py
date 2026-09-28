@@ -180,6 +180,66 @@ def test_either_action_clears_the_running_badge() -> None:
         assert model.wizard_status[SetupWizard.SANDBOX] == "done", args
 
 
+def _run_doctor(model: SetupPanelModel, *, success: bool = True):
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.form_fields = _set(model.form_fields, "Action", "doctor")
+    model.recompute_dependent_fields()
+    action = model.submit_wizard_form()
+    assert model.wizard_status[SetupWizard.SANDBOX] == "running..."
+    model.mark_wizard_complete(action.intent.args, success=success)
+    return action
+
+
+def test_doctor_is_named_doctor_and_never_marks_setup_done() -> None:
+    """R2-59: the doctor action only checks; its toast says doctor and the status stays."""
+    model = SetupPanelModel({}, os_name="linux")
+    action = _run_doctor(model)
+    # The toast is "<label> finished"; suggested_next_action keys off it too.
+    assert action.intent.label == "sandbox doctor"
+    assert model.wizard_status[SetupWizard.SANDBOX] == "checked"
+    _run_doctor(model, success=False)
+    assert model.wizard_status[SetupWizard.SANDBOX] == "check failed"
+    model.wizard_status[SetupWizard.SANDBOX] = "done"  # setup ran earlier
+    _run_doctor(model)
+    assert model.wizard_status[SetupWizard.SANDBOX] == "done"
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    setup = model.submit_wizard_form()
+    assert setup.intent.label == "setup Sandbox"
+
+
+HARNESS_LABELS = (
+    "Claude Code", "Codex", "Amp", "Antigravity", "GitHub Copilot CLI", "Cursor Agent",
+    "Devin CLI", "Hermes Agent", "Kiro CLI", "OmniGent", "OpenCode", "OpenHands",
+)  # fmt: skip
+
+
+def _harness_toggles(cfg) -> list[tuple[str, str]]:
+    return [(field.label, field.value) for field in sandbox_wizard_fields(cfg) if field.label in HARNESS_LABELS]
+
+
+def test_every_harness_is_offered_and_setups_defaults_are_on() -> None:
+    """R2-59: setup offers every harness (harness.Names()), not only Claude Code and Codex."""
+    toggles = _harness_toggles({})
+    assert [label for label, _value in toggles] == list(HARNESS_LABELS)
+    # sandboxcli.defaultHarnesses: only these are on when nothing is configured.
+    assert [label for label, value in toggles if value == "yes"] == ["Claude Code", "Codex"]
+    fields = _set(_set(list(sandbox_wizard_fields({})), "OpenCode", "yes"), "Codex", "no")
+    assert build_wizard_args(SetupWizard.SANDBOX, fields)[3:7] == ("--harness", "claudecode", "--harness", "opencode")
+    # Configured ones are on; an organization allowlist limits the choice.
+    assert [label for label, value in _harness_toggles({"openshell": {"harnesses": ["hermes"]}}) if value == "yes"] == [
+        "Hermes Agent"
+    ]
+    admin = {"openshell": {"admin": {"allowed_harnesses": ["opencode"]}}}
+    assert _harness_toggles(admin) == [("OpenCode", "yes")]
+
+
+def test_gateway_changes_warn_that_they_restart_the_gateway() -> None:
+    hints = {field.label: field.hint for field in sandbox_wizard_fields({}, os_name="linux")}
+    for label in ("Disable OpenShell Telemetry", "Mount Project Folder"):
+        assert "restarts the OpenShell gateway" in hints[label], label
+        assert "drops the connections of every running sandbox" in hints[label], label
+
+
 def test_other_sandbox_commands_never_mark_the_wizard() -> None:
     model = SetupPanelModel({}, os_name="linux")
     for args in (("sandbox", "enable", "claude"), ("sandbox", "doctor")):
@@ -544,3 +604,30 @@ def test_terminal_control_keys_reach_the_setup_form_by_name(
     assert len(events) == 1
     assert _panel_key(events[0]) == expected
     assert not (tmp_path / "keys.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_long_hints_wrap_instead_of_running_off_the_screen(monkeypatch) -> None:
+    """R2-59: a table row is one line, so long hints were cut at the screen edge."""
+    from defenseclaw.tui import sandbox_panel
+    from defenseclaw.tui.app import DefenseClawTUI
+    from textual.widgets import DataTable
+
+    monkeypatch.setattr(sandbox_panel, "probe_sandbox_machine", lambda: sandbox_machine_check(None, "not in tests"))
+    app = DefenseClawTUI(setup_model=SetupPanelModel({}, os_name="linux"))
+    width = 140
+    async with app.run_test(size=(width, 50)) as pilot:
+        await pilot.press("0")
+        await pilot.pause()
+        app.setup_model.active_wizard = SetupWizard.SANDBOX
+        app.setup_model.open_goal_menu(SetupWizard.SANDBOX)
+        app._render_chrome()  # noqa: SLF001
+        await pilot.pause()
+        _columns, rows = app._setup_table()  # noqa: SLF001
+        hints = {row[0]: row[3] for row in rows}
+        full = {field.label: field.hint for field in app.setup_model.form_fields}
+        mount = hints["Mount Project Folder"]
+        assert "\n" in mount and mount.replace("\n", " ") == full["Mount Project Folder"]
+        assert all(len(line) < width for line in mount.split("\n"))
+        table = app.query_one("#panel-table", DataTable)
+        assert any(row.height > 1 for row in table.rows.values())

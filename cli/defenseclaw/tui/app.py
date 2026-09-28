@@ -10,6 +10,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import textwrap
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -9606,7 +9607,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         )
         key = f"panel-row-{self._next_table_row_key}"
         self._next_table_row_key += 1
-        self._rendered_table_row_keys.append(table.add_row(*cells, key=key))
+        # A wrapped cell (a setup hint) makes its row as tall as it needs.
+        height = None if any(isinstance(value, str) and "\n" in value for value in row) else 1
+        self._rendered_table_row_keys.append(table.add_row(*cells, key=key, height=height))
 
     def _update_panel_table_delta(
         self,
@@ -10224,6 +10227,33 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         self._set_status("Sent input to running command.")
         return True
 
+    def _wrap_last_table_column(
+        self,
+        columns: tuple[str, ...],
+        rows: tuple[tuple[str, ...], ...],
+    ) -> tuple[tuple[str, ...], ...]:
+        """Wrap the last cell (a hint) to the room the other columns leave.
+
+        A table row is one line, so a long hint was cut at the screen edge;
+        wrapped, its row grows instead (``_append_panel_table_row``).
+        """
+        width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+        if width <= 0 or not rows:
+            return rows
+        # One column of padding each side per cell, plus the panel's border,
+        # padding and scrollbar.
+        others = sum(
+            max(len(column), *(len(str(row[index])) for row in rows)) + 2
+            for index, column in enumerate(columns[:-1])
+        )
+        room = width - others - 2 - 8
+        if room < 24:
+            return rows
+        return tuple(
+            (*row[:-1], "\n".join(textwrap.wrap(row[-1], room)) if len(row[-1]) > room else row[-1])
+            for row in rows
+        )
+
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         if self.first_run_model.active:
             return (
@@ -10236,16 +10266,20 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 tuple((goal.label, goal.summary) for goal in self.setup_model.goals),
             )
         if self.setup_model.form_active:
+            columns = ("Field", "Value", "Kind", "Hint")
             return (
-                ("Field", "Value", "Kind", "Hint"),
-                tuple(
-                    (
-                        field.label,
-                        render_wizard_value(field, reveal=self.setup_model.form_reveal),
-                        str(field.kind),
-                        field.hint,
-                    )
-                    for field in self.setup_model.form_fields
+                columns,
+                self._wrap_last_table_column(
+                    columns,
+                    tuple(
+                        (
+                            field.label,
+                            render_wizard_value(field, reveal=self.setup_model.form_reveal),
+                            str(field.kind),
+                            field.hint,
+                        )
+                        for field in self.setup_model.form_fields
+                    ),
                 ),
             )
         if self.setup_model.mode == "config":
