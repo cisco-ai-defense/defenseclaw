@@ -133,3 +133,18 @@ async def test_a_finished_task_command_clears_its_running_badge(app, wizard_name
         app.setup_model.wizard_status[wizard] = "running..."
         await app._handle_successful_command("defenseclaw", args)
         assert app.setup_model.wizard_status[wizard] == "done"
+
+
+@pytest.mark.parametrize("keys", [("c",), ("enter", "enter")], ids=["config editor", "wizard form"])
+async def test_colon_opens_the_command_palette_from_setup(app, keys) -> None:  # type: ignore[no-untyped-def]
+    from textual.widgets import Input
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press(*keys)
+        await pilot.pause()
+        await pilot.press("colon")
+        await pilot.pause()
+        assert app.query_one("#command-input", Input).has_class("open")
+        assert len(app.screen_stack) == 1  # no field editor opened with ":" typed

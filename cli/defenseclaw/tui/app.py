@@ -11497,9 +11497,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """Route a Setup key. ``character`` is the raw printable character
         (case and spaces intact) when the key typed one."""
 
-        # ``?`` is the global help overlay in every Setup view; it never
-        # types into a field.
-        if key == "?":
+        # ``?`` (help) and ``:`` (command palette) are global in every Setup
+        # view; they never type into a field.
+        if key in {"?", ":"}:
             return SetupPanelAction(False)
         if self.setup_model.goal_active:
             return self._handle_setup_goal_key(key)
