@@ -1937,13 +1937,25 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
                 return any(enabled_states)
         return True
     if sub == "sandbox":
-        # The gateway only reports the sandbox subsystem for a legacy
-        # standalone install (degraded until legacy-cleanup runs).
+        # The gateway runs the sandbox subsystem when OpenShell sandboxes are
+        # on (openshell.enabled: running, or degraded while a listener or the
+        # manager fails) and reports it degraded for a legacy standalone
+        # install until legacy-cleanup runs. Where sandboxes are unsupported
+        # (a platform other than Linux or macOS, managed_enterprise) it
+        # reports them disabled on purpose, which is no stale sidecar.
         oc = getattr(cfg, "openshell", None)
         if oc is None:
             return None
         is_standalone = getattr(oc, "is_standalone", None)
-        return bool(is_standalone()) if callable(is_standalone) else False
+        if callable(is_standalone) and is_standalone():
+            return True
+        if not bool(getattr(oc, "enabled", False)):
+            return False
+        if not sys.platform.startswith(("linux", "darwin")):
+            return None
+        if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            return None
+        return True
     # The local API has no off switch.
     return None
 
@@ -2049,7 +2061,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         detail_msg = f"disabled — {summary}" if summary else "disabled (reported by sidecar)"
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 elif normalized_state == "degraded":
-                    # Up but needs operator action (today: the legacy
+                    # Up but needs operator action (the sandbox subsystem
+                    # with a failed listener or manager, or the legacy
                     # standalone sandbox shim), so warn rather than fail.
                     last_error = info.get("last_error")
                     reason = last_error.strip() if isinstance(last_error, str) else ""
@@ -11197,8 +11210,10 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             continue
         state = raw_state.strip().lower()
         if subsystem == "sandbox" and state == "degraded":
-            # The legacy sandbox shim: a gateway restart cannot fix it, and it
-            # must not block repairs of real drift. The legacy check reports it.
+            # The legacy sandbox shim, or a sandbox listener or manager that
+            # failed: a gateway restart cannot be relied on to fix either,
+            # and neither may block repairs of real drift. The legacy check
+            # and `defenseclaw sandbox doctor` report them.
             continue
 
         if expected is True and state in inactive_states:

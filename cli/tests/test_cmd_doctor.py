@@ -2855,6 +2855,51 @@ class TestLegacySandboxDoctor(unittest.TestCase):
         self.assertEqual(sandbox["status"], "warn")
         self.assertIn("legacy-cleanup", sandbox["detail"])
 
+    def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
+        # openshell.enabled makes the gateway run the sandbox subsystem; its
+        # "running" must not read as a stale sidecar or drive restarts.
+        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
+
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {"state": "running", "details": {"ingress": "127.0.0.1:18971", "egress": "127.0.0.1:18972"}},
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.openshell.enabled = True
+            result = _DoctorResult()
+            with (
+                patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._http_probe",
+                    return_value=(200, json.dumps(health)),
+                ),
+            ):
+                _check_sidecar(cfg, result)
+                _status, detail = _gateway_service_health_assessment(cfg, health)
+        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
+        self.assertEqual(sandbox["status"], "pass", sandbox)
+        # Other subsystems of this fixture may drift; the sandbox does not.
+        self.assertNotIn("sandbox", detail)
+
+        # Sandboxes enabled but reported disabled is a stale sidecar, except
+        # where the gateway turns them off on purpose.
+        stale = dict(health, sandbox={"state": "disabled"})
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.openshell.enabled = True
+            with patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"):
+                status, detail = _gateway_service_health_assessment(cfg, stale)
+            self.assertEqual(status, "repairable", detail)
+            self.assertIn("sandbox is enabled in config but reports disabled", detail)
+            with patch("defenseclaw.commands.cmd_doctor.sys.platform", "win32"):
+                status, detail = _gateway_service_health_assessment(cfg, stale)
+            self.assertNotIn("sandbox", detail)
+
     def test_degraded_legacy_sandbox_does_not_block_gateway_repairs(self):
         from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
 
