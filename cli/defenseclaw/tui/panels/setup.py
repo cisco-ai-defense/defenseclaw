@@ -95,9 +95,11 @@ from defenseclaw.tui.services.setup_state import (
     SetupPreviewRisk,
     ValidationResult,
     apply_config_field,
+    blocking_validation_errors,
     build_readiness_checks,
     config_diff,
     get_config_value,
+    is_python_modeled,
     looks_like_secret_value,
     mask_secret,
     split_csv,
@@ -477,6 +479,12 @@ class SetupSaveRestartHints:
     restart_hint: str = ""
     saved_hint: str = ""
     action_bar: tuple[str, ...] = ()
+    # ``issues`` counts every validation error in the draft (untouched rows
+    # included, for display); ``blocking`` counts only errors on changed
+    # fields, which are the ones that stop a save.
+    issues: int = 0
+    blocking: int = 0
+    blocking_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -913,11 +921,14 @@ class SetupPanelModel:
     def validation_errors(self) -> tuple[str, ...]:
         return validation_errors(self.sections)
 
+    def blocking_validation_errors(self) -> tuple[str, ...]:
+        return blocking_validation_errors(self.sections)
+
     def has_changes(self) -> bool:
         return bool(self.config_diff())
 
     def review_save_action(self) -> SetupPanelAction:
-        errors = self.validation_errors()
+        errors = self.blocking_validation_errors()
         if errors:
             return SetupPanelAction(True, hint="Fix config validation: " + errors[0])
         changes = len(self.config_diff())
@@ -931,11 +942,12 @@ class SetupPanelModel:
 
     def save_restart_hints(self) -> SetupSaveRestartHints:
         errors = self.validation_errors()
+        blocking = self.blocking_validation_errors()
         changes = len(self.config_diff())
         field = self.current_field()
         save_hint = "No config changes to save."
-        if errors:
-            save_hint = "Fix config validation before saving: " + errors[0]
+        if blocking:
+            save_hint = "Fix config validation before saving: " + blocking[0]
         elif changes:
             save_hint = "Review and save applies changed fields, then queues a gateway restart when needed."
         restart_hint = ""
@@ -960,6 +972,9 @@ class SetupPanelModel:
             restart_hint=restart_hint,
             saved_hint=saved_hint,
             action_bar=tuple(actions),
+            issues=len(errors),
+            blocking=len(blocking),
+            blocking_errors=blocking,
         )
 
     def focused_row_action(self) -> SetupFocusedRowAction:
@@ -1665,12 +1680,12 @@ def build_setup_sections(
         ),
         ConfigSection(
             "Agent Hooks",
-            (*_agent_hook_fields(cfg, "Claude Code", "claude_code"), *_agent_hook_fields(cfg, "Codex", "codex")),
+            _agent_hook_summary_fields(),
             "Dedicated agent hook policy: when scans run, fail behavior, and watched paths.",
         ),
         ConfigSection(
             "Connector Hooks",
-            tuple(_connector_hook_map_fields(cfg)),
+            _connector_hook_summary_fields(cfg),
             "Advanced connector_hooks map for configured and future agent connectors.",
         ),
         ConfigSection(
@@ -1759,7 +1774,34 @@ def build_setup_sections(
             "manage via 'defenseclaw setup trusted-paths'.",
         ),
     ]
-    return tuple(sections)
+    return tuple(_lock_unmodeled_fields(section) for section in sections)
+
+
+UNMODELED_CONFIG_HINT = "Edit this in config.yaml"
+READ_ONLY_VALUE = "read-only"
+
+
+def _lock_unmodeled_fields(section: ConfigSection) -> ConfigSection:
+    """Turn rows ``Config.save()`` can't persist into read-only rows.
+
+    Editing such a row would look saved but be dropped on write, so it is
+    shown read-only with where to change it instead.
+    """
+
+    fields = tuple(
+        _read_only_row(field, UNMODELED_CONFIG_HINT)
+        if field.kind != "header" and field.key and not is_python_modeled(None, field.key)
+        else field
+        for field in section.fields
+    )
+    if fields == section.fields:
+        return section
+    return ConfigSection(section.name, fields, section.summary, section.help)
+
+
+def _read_only_row(field: ConfigField, hint: str) -> ConfigField:
+    shown = field.value or READ_ONLY_VALUE
+    return ConfigField(label=field.label, key=field.key, kind="header", value=shown, original=shown, hint=hint)
 
 
 def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
@@ -5719,9 +5761,15 @@ def _guardrail_wizard_fields_for(
         if connector_policy and connector
         else str(get_config_value(cfg, "guardrail.rule_pack_dir", "") or "")
     )
-    rule_pack = os.path.basename(rule_pack_dir.rstrip("/\\")).strip().lower() if rule_pack_dir else "default"
-    if rule_pack not in {"default", "strict", "permissive"}:
-        rule_pack = "default"
+    rule_pack_options: tuple[str, ...] = ("default", "strict", "permissive")
+    pack_name = os.path.basename(rule_pack_dir.rstrip("/\\")).strip() if rule_pack_dir else ""
+    rule_pack = pack_name.lower() or "default"
+    if rule_pack not in rule_pack_options:
+        # A custom pack is active. Show it as the untouched value so the form
+        # never emits ``--rule-pack default`` over it; picking a preset still
+        # emits that preset.
+        rule_pack = f"custom ({pack_name})"
+        rule_pack_options = (rule_pack, *rule_pack_options)
     judge_provider = "bedrock"
     judge_model = ""
     judge_provider_default = "bedrock"
@@ -5873,7 +5921,7 @@ def _guardrail_wizard_fields_for(
             "--rule-pack",
             value=rule_pack,
             default=rule_pack,
-            options=("default", "strict", "permissive"),
+            options=rule_pack_options,
         ),
         WizardFormField(
             "Block Message",
@@ -7662,43 +7710,36 @@ def _per_connector_asset_policy_fields(cfg: object | Mapping[str, Any] | None) -
     return rows
 
 
-def _agent_hook_fields(cfg: object | Mapping[str, Any] | None, label: str, prefix: str) -> tuple[ConfigField, ...]:
+def _hook_summary_row(label: str, key: str, connector: str) -> ConfigField:
+    alias = _connector_setup_alias(connector)
+    hint = f"Set by defenseclaw setup {alias}" if alias else UNMODELED_CONFIG_HINT
+    return ConfigField(label=label, key=key, kind="header", value=READ_ONLY_VALUE, original=READ_ONLY_VALUE, hint=hint)
+
+
+def _agent_hook_summary_fields() -> tuple[ConfigField, ...]:
+    """Read-only summary of the legacy ``claude_code`` / ``codex`` hook blocks.
+
+    The Python config doesn't model these blocks, so edits here could never
+    be saved; the connector setup commands own them.
+    """
+
     return (
-        _header(f".. {label} .."),
-        _field(cfg, "Enabled", prefix + ".enabled", "bool", hint=f"{label} hooks master switch."),
-        _field(
-            cfg, "Mode", prefix + ".mode", "choice", ("", "observe", "action"), "Blank inherits connector defaults."
-        ),
-        _field(cfg, "Fail Mode", prefix + ".fail_mode", "choice", ("", "open", "closed"), "Legacy policy-layer hint."),
-        _field(
-            cfg,
-            "Scan on Session Start",
-            prefix + ".scan_on_session_start",
-            "bool",
-            hint="Run checks when session begins.",
-        ),
-        _field(cfg, "Scan on Stop", prefix + ".scan_on_stop", "bool", hint="Run checks when session stops."),
-        _field(cfg, "Scan Paths", prefix + ".scan_paths", hint="CSV extra paths scanned by hooks."),
-        _field(
-            cfg,
-            "Component Scan Interval (min)",
-            prefix + ".component_scan_interval_minutes",
-            "int",
-            hint="Minimum minutes between repeated scans.",
-        ),
+        _hook_summary_row("Claude Code", "claude_code", "claudecode"),
+        _hook_summary_row("Codex", "codex", "codex"),
     )
 
 
-def _connector_hook_map_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+def _connector_hook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+    """One read-only row per connector for the ``connector_hooks`` map."""
+
     names = list(CONNECTORS)
     hooks = get_config_value(cfg, "connector_hooks", {}) or {}
     if isinstance(hooks, Mapping):
         names.extend(str(name) for name in hooks if str(name).strip())
-    unique = sorted(dict.fromkeys(names))
-    out: list[ConfigField] = []
-    for name in unique:
-        out.extend(_agent_hook_fields(cfg, _connector_hook_label(name), "connector_hooks." + name))
-    return tuple(out)
+    return tuple(
+        _hook_summary_row(_connector_hook_label(name), "connector_hooks." + name, name)
+        for name in sorted(dict.fromkeys(names))
+    )
 
 
 def _v8_observability_fields(
@@ -7959,6 +8000,7 @@ def _connector_setup_alias(wire: str) -> str:
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }:
         return normalized
     return ""

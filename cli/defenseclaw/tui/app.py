@@ -10734,7 +10734,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         return SetupPanelAction(False)
 
     def _save_setup_config(self, restart_reason: str = "config saved from Textual TUI") -> SetupPanelAction:
-        errors = self.setup_model.validation_errors()
+        # Only errors on fields the operator changed block the save; an
+        # untouched questionable value is written back exactly as loaded.
+        errors = self.setup_model.blocking_validation_errors()
         if errors:
             return SetupPanelAction(True, hint=f"Fix config validation: {errors[0]}")
         if not self.setup_model.has_changes():

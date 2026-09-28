@@ -12,8 +12,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import json
 import re
+import types
+import typing
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -495,6 +499,9 @@ def validate_config_field(field: ConfigField) -> ValidationResult:
     value = field.value.strip()
     if field.kind == "header":
         return ValidationResult()
+    if not value and not field.original.strip() and field.kind in {"bool", "int", "choice"}:
+        # Unset in config.yaml and still unset: the runtime default applies.
+        return ValidationResult()
 
     if field.kind == "bool" and value not in {"true", "false"}:
         return ValidationResult("error", "expected true or false")
@@ -559,15 +566,103 @@ def config_diff(sections: Sequence[ConfigSection]) -> tuple[ConfigDiffEntry, ...
 
 
 def validation_errors(sections: Sequence[ConfigSection]) -> tuple[str, ...]:
+    """Every error in the draft, including fields the operator didn't touch."""
+
+    return _collect_errors(sections, changed_only=False)
+
+
+def blocking_validation_errors(sections: Sequence[ConfigSection]) -> tuple[str, ...]:
+    """Errors that block a save: only fields whose value was changed.
+
+    An untouched field is written back exactly as loaded (only changed
+    fields are applied), so a questionable value already on disk must not
+    stop the operator from saving an unrelated edit.
+    """
+
+    return _collect_errors(sections, changed_only=True)
+
+
+def _collect_errors(sections: Sequence[ConfigSection], *, changed_only: bool) -> tuple[str, ...]:
     errors: list[str] = []
     for section in sections:
         for field_ in section.fields:
             if field_.kind == "header":
                 continue
+            if changed_only and field_.value == field_.original:
+                continue
             result = validate_config_field(field_)
             if result.severity == "error":
                 errors.append(f"{field_.key}: {result.message}")
     return tuple(errors)
+
+
+# Key prefixes whose editor writes go through a dedicated writer in
+# :func:`apply_config_field` that builds the typed dataclass entries itself.
+SPECIAL_WRITER_PREFIXES: tuple[str, ...] = (
+    "skill_actions.",
+    "mcp_actions.",
+    "plugin_actions.",
+    "asset_policy.connectors.",
+    "guardrail.connectors.",
+    "guardrail.judge.hook_connectors.",
+    "openshell.",
+)
+
+
+def is_python_modeled(cfg: object | Mapping[str, Any] | None, key: str) -> bool:
+    """Whether ``Config.save()`` persists an edit to ``key``.
+
+    ``Config`` serializes with :func:`dataclasses.asdict`, so a value set on
+    a path the dataclasses don't declare is silently dropped. The walk uses
+    the declared field types (``dict[str, X]`` segments accept any name), so
+    the answer doesn't depend on which optional entries the loaded config
+    happens to contain. ``cfg`` only picks the root type when it is a
+    dataclass; dict and namespace drafts are checked against ``Config``.
+    """
+
+    if not key:
+        return False
+    if key.startswith(SPECIAL_WRITER_PREFIXES):
+        return True
+    root: Any = type(cfg) if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type) else None
+    if root is None:
+        try:
+            from defenseclaw.config import Config  # noqa: PLC0415
+        except Exception:  # noqa: BLE001 - no schema available: don't lock rows.
+            return True
+        root = Config
+    return _type_models_path(root, tuple(key.split(".")))
+
+
+@functools.cache
+def _dataclass_hints(cls: type) -> dict[str, Any]:
+    try:
+        return typing.get_type_hints(cls)
+    except Exception:  # noqa: BLE001 - unresolved annotation: fall back to raw types.
+        return {item.name: item.type for item in dataclasses.fields(cls)}
+
+
+def _type_models_path(tp: Any, parts: tuple[str, ...]) -> bool:
+    if not parts:
+        return True
+    if tp is Any:
+        return True
+    origin = typing.get_origin(tp)
+    if origin in (typing.Union, types.UnionType):
+        return any(_type_models_path(arg, parts) for arg in typing.get_args(tp) if arg is not type(None))
+    if origin in (dict, Mapping) or tp is dict:
+        args = typing.get_args(tp)
+        return _type_models_path(args[1] if len(args) == 2 else Any, parts[1:])
+    if isinstance(tp, type) and dataclasses.is_dataclass(tp):
+        hints = _dataclass_hints(tp)
+        names = {item.name for item in dataclasses.fields(tp)}
+        head = parts[0]
+        for name in (head, head + "_"):
+            if name in names:
+                return _type_models_path(hints.get(name, Any), parts[1:])
+        return False
+    # Scalars and lists hold a value, not further named keys.
+    return False
 
 
 def mask_secret(value: str) -> str:
