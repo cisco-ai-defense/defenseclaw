@@ -29,7 +29,7 @@ func TestApplyEnterpriseHookMachinePolicyPreferencesFollowsConfig(t *testing.T) 
 	t.Cleanup(func() { cfg = previous })
 
 	cfg = &config.Config{}
-	var opts enterprisehooks.InstallOptions
+	opts := enterprisehooks.InstallOptions{ConnectorName: "cursor"}
 	if err := applyEnterpriseHookMachinePolicyPreferences(&opts); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestApplyEnterpriseHookMachinePolicyPreferencesFollowsConfig(t *testing.T) 
 			"cursor": {ApprovedForeignHooks: []string{"sha256:" + strings.ToUpper(digest)}},
 		},
 	}
-	opts = enterprisehooks.InstallOptions{}
+	opts = enterprisehooks.InstallOptions{ConnectorName: "cursor"}
 	if err := applyEnterpriseHookMachinePolicyPreferences(&opts); err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +61,44 @@ func TestApplyEnterpriseHookMachinePolicyPreferencesFollowsConfig(t *testing.T) 
 	cfg = &config.Config{ConnectorHooks: map[string]config.AgentHookConfig{
 		"cursor": {ApprovedForeignHooks: []string{"nope"}},
 	}}
-	if err := applyEnterpriseHookMachinePolicyPreferences(&enterprisehooks.InstallOptions{}); err == nil {
+	if err := applyEnterpriseHookMachinePolicyPreferences(&enterprisehooks.InstallOptions{ConnectorName: "cursor"}); err == nil {
 		t.Fatal("malformed allowlist accepted")
+	}
+}
+
+// The Cursor allowlist belongs to Cursor targets only: a malformed Cursor
+// entry must not stop install, verify or guardian repair of any other
+// managed connector, and other connectors never carry the list.
+func TestApplyEnterpriseHookMachinePolicyPreferencesScopesCursorAllowlist(t *testing.T) {
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+
+	cfg = &config.Config{
+		ClaudeCode: config.AgentHookConfig{AllowUnmanagedHooks: true},
+		ConnectorHooks: map[string]config.AgentHookConfig{
+			"cursor": {ApprovedForeignHooks: []string{strings.Repeat("a", 63)}},
+		},
+	}
+	for _, connector := range []string{"claudecode", "codex", "copilot", ""} {
+		opts := enterprisehooks.InstallOptions{
+			ConnectorName:              connector,
+			CursorApprovedForeignHooks: []string{strings.Repeat("b", 64)},
+		}
+		if err := applyEnterpriseHookMachinePolicyPreferences(&opts); err != nil {
+			t.Fatalf("%q target failed on a malformed Cursor allowlist: %v", connector, err)
+		}
+		if opts.CursorApprovedForeignHooks != nil {
+			t.Fatalf("%q target carries the Cursor allowlist: %v", connector, opts.CursorApprovedForeignHooks)
+		}
+		if !opts.ClaudeCodeAllowUnmanagedHooks {
+			t.Fatalf("%q target lost the Claude Code opt-out", connector)
+		}
+	}
+	for _, connector := range []string{"cursor", " Cursor "} {
+		err := applyEnterpriseHookMachinePolicyPreferences(&enterprisehooks.InstallOptions{ConnectorName: connector})
+		if err == nil || !strings.Contains(err.Error(), "connector_hooks.cursor.approved_foreign_hooks") {
+			t.Fatalf("%q target error = %v, want the malformed allowlist entry reported", connector, err)
+		}
 	}
 }
 
