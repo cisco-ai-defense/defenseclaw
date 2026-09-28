@@ -300,3 +300,100 @@ func TestReviewIgnoresMountPinsInBothOrders(t *testing.T) {
 		t.Fatalf("hook change not reported: %+v", rep.Flags)
 	}
 }
+
+// TestReviewFlagsNestedRepositoryControlChanges: a nested repository that
+// existed before the session is writable through the mount like the rest
+// of the folder, and the guard leaves it alone; the review reports what
+// the session changed in its git control files and its .git pointer.
+func TestReviewFlagsNestedRepositoryControlChanges(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	e.git(e.project, "init", "-q", filepath.Join(e.project, "vendor", "lib"))
+	e.git(e.project, "init", "-q", filepath.Join(e.project, "vendor", "quiet"))
+	writeFile(t, e.project, "wt/.git", "gitdir: ../vendor/lib/.git\n")
+	rec := mustSnapshot(t, e, "s1")
+	if _, ok := rec.NestedControl["vendor/lib/.git/config"]; !ok {
+		t.Fatalf("snapshot nested control = %v", rec.NestedControl)
+	}
+	if rep := review(t, e, "s1", []ContentScanner{}); len(rep.Flags) != 0 {
+		t.Fatalf("untouched nested repositories flagged: %+v", rep.Flags)
+	}
+
+	// The session: an inert marker stands in for a hostile setting.
+	writeFile(t, e.project, "vendor/lib/.git/config", readFile(t, e.project, "vendor/lib/.git/config")+"[core]\n\tpager = DCMARKER\n")
+	writeFileMode(t, e.project, "vendor/lib/.git/hooks/post-checkout", "#!/bin/sh\necho DCMARKER\n", 0o755)
+	writeFile(t, e.project, "vendor/lib/.git/info/attributes", "* filter=dcmarker\n")
+	writeFile(t, e.project, "wt/.git", "gitdir: ../elsewhere\n")
+
+	rep := review(t, e, "s1", []ContentScanner{})
+	for _, label := range []string{"vendor/lib/.git/config", "vendor/lib/.git/hooks", "vendor/lib/.git/info/attributes", "wt/.git"} {
+		f, ok := flagByLabel(rep, label)
+		if !ok || f.Kind != RiskGitControl || f.Severity != SeverityCritical {
+			t.Errorf("flag %s = %+v, %v; flags: %+v", label, f, ok, rep.Flags)
+		}
+	}
+	for _, f := range rep.Flags {
+		if strings.HasPrefix(f.Path, "vendor/quiet") {
+			t.Errorf("unchanged repository flagged: %+v", f)
+		}
+	}
+	if !rep.Sensitive() || !strings.Contains(rep.RiskLine(), "vendor/lib/.git/config") {
+		t.Errorf("risk line = %q", rep.RiskLine())
+	}
+}
+
+// TestReviewCaseVariantOfGitEntry: on a case-insensitive filesystem git
+// finds sub/.GIT as sub/.git, so the review reports it as a new nested
+// repository; on a case-sensitive one it is an ordinary folder.
+func TestReviewCaseVariantOfGitEntry(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	mustSnapshot(t, e, "s1")
+	writeFile(t, e.project, "sub/.GIT/config", "[core]\n")
+	_, err := os.Lstat(filepath.Join(e.project, "sub", ".git"))
+	insensitive := err == nil
+	rep := review(t, e, "s1", []ContentScanner{})
+	f, ok := flagByLabel(rep, "sub/.git")
+	if insensitive && (!ok || f.Kind != RiskNestedRepo) {
+		t.Fatalf("case-insensitive filesystem: flags = %+v", rep.Flags)
+	}
+	if !insensitive && ok {
+		t.Fatalf("case-sensitive filesystem: sub/.GIT flagged as a repository: %+v", f)
+	}
+}
+
+// TestReviewFlagsIgnoredHarnessConfig: harness configuration git ignores
+// (Claude Code's settings.local.json, CLAUDE.local.md) is not in the diff;
+// a sensitive-change pattern still flags it, while a bare file-name
+// pattern does not match build output deeper in an ignored folder.
+func TestReviewFlagsIgnoredHarnessConfig(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\n.claude/settings.local.json\nCLAUDE.local.md\ndist/\n")
+	e.git(e.project, "add", "-A")
+	e.git(e.project, "commit", "-q", "-m", "ignore")
+	writeFile(t, e.project, "dist/keep.txt", "x\n")
+	mustSnapshot(t, e, "s1")
+
+	writeFile(t, e.project, ".claude/settings.local.json", `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo DCMARKER"}]}]}}`)
+	writeFile(t, e.project, "CLAUDE.local.md", "DCMARKER\n")
+	writeFile(t, e.project, "dist/opencode.json", "{}\n")
+
+	rep, err := Review(bg, ReviewOptions{DataDir: e.data, Name: "s1", Scanners: []ContentScanner{},
+		SensitiveGlobs: []string{"**/.claude/**", "CLAUDE.local.md", "opencode.json"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{".claude/settings.local.json", "CLAUDE.local.md"} {
+		f, ok := flagByLabel(rep, label)
+		if !ok || f.Kind != RiskPolicy || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
+			t.Errorf("flag %s = %+v, %v; flags: %+v", label, f, ok, rep.Flags)
+		}
+	}
+	if f, ok := flagByLabel(rep, "dist/opencode.json"); ok {
+		t.Errorf("build output matched a bare file-name pattern: %+v", f)
+	}
+	if !strings.Contains(rep.RiskLine(), ".claude/settings.local.json") {
+		t.Errorf("risk line = %q", rep.RiskLine())
+	}
+}

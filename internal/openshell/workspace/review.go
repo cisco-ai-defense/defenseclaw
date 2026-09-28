@@ -181,7 +181,7 @@ func reviewGit(ctx context.Context, rec *SnapshotRecord, man *ignoredManifest, n
 	}
 	if man != nil {
 		nowRoots, _ := st.sh.ignoredEntries(ctx, maxIgnoredFiles+1)
-		reviewIgnored(rec, man, nowRoots, now, rep)
+		reviewIgnored(rec, man, nowRoots, now, opts, rep)
 	}
 	blobs := blobReader{g: st.sh.bare()}
 	var oids []string
@@ -288,7 +288,7 @@ func reviewCopy(rec *SnapshotRecord, man *ignoredManifest, now *sentinelScan, op
 	}
 	rep.Changes = changes
 	if man != nil {
-		reviewIgnored(rec, man, now.heavy, now, rep)
+		reviewIgnored(rec, man, now.heavy, now, opts, rep)
 	}
 	content := func(c TreeChange, after bool) ([]byte, bool) {
 		root := rec.Copy.Dir
@@ -314,7 +314,7 @@ func reviewCopy(rec *SnapshotRecord, man *ignoredManifest, now *sentinelScan, op
 // reviewIgnored flags what the session changed where the snapshot holds no
 // copy (see ignoredManifest); nowRoots are those places now. Sentinel
 // files are left to reviewSentinels.
-func reviewIgnored(rec *SnapshotRecord, man *ignoredManifest, nowRoots []string, now *sentinelScan, rep *ReviewReport) {
+func reviewIgnored(rec *SnapshotRecord, man *ignoredManifest, nowRoots []string, now *sentinelScan, opts ReviewOptions, rep *ReviewReport) {
 	exclude := changedPaths(rep.Changes)
 	for rel := range now.files {
 		exclude[rel] = struct{}{}
@@ -328,7 +328,7 @@ func reviewIgnored(rec *SnapshotRecord, man *ignoredManifest, nowRoots []string,
 		return
 	}
 	git := rec.Kind == SnapshotGit
-	flags, quiet := ignoredFlags(irep.Changes, git)
+	flags, quiet := ignoredFlags(irep.Changes, git, opts.SensitiveGlobs)
 	rep.Flags = append(rep.Flags, flags...)
 	if len(quiet) > 0 {
 		what := "Files git ignores"
@@ -415,6 +415,7 @@ func reviewSentinels(rec *SnapshotRecord, man *ignoredManifest, now *sentinelSca
 		}
 		rep.Flags = append(rep.Flags, Flag{Path: n, Label: label, Kind: RiskNestedRepo, Severity: SeverityCritical, Detail: detail})
 	}
+	reviewNestedControl(rec, rep)
 	for dir, fp := range now.deps {
 		if old, ok := rec.DependencyDirs[dir]; (ok && old == fp) || man.covers(dir) {
 			// Unchanged, or the ignored manifest compares it file by file.
@@ -425,6 +426,39 @@ func reviewSentinels(rec *SnapshotRecord, man *ignoredManifest, now *sentinelSca
 	}
 	if rec.SentinelsCapped || now.capped {
 		rep.Warnings = append(rep.Warnings, "the folder is too large to check every file for host-executable changes")
+	}
+}
+
+// reviewNestedControl flags the git control files of nested repositories
+// that existed before the session (SnapshotRecord.NestedControl) and that
+// the session created or changed, the .git entry itself included: the
+// mount leaves them writable, and the nested-repository guard only acts on
+// new repositories.
+func reviewNestedControl(rec *SnapshotRecord, rep *ReviewReport) {
+	var repos []string
+	for rel := range rec.NestedControl {
+		if dir, ok := strings.CutSuffix(rel, "/.git"); ok {
+			repos = append(repos, dir)
+		}
+	}
+	sort.Strings(repos)
+	for _, dir := range repos {
+		now := nestedControlState(rec.Project, dir)
+		changed := make([]string, 0, len(now))
+		for rel, after := range now {
+			if before := rec.NestedControl[rel]; after.Exists && !before.equal(after) {
+				changed = append(changed, rel)
+			}
+		}
+		sort.Strings(changed)
+		for _, rel := range changed {
+			rep.Flags = append(rep.Flags, Flag{Path: rel, Label: rel, Kind: RiskGitControl, Severity: SeverityCritical,
+				Detail: "git control file of the repository in " + dir + " changed during the session; it decides what git runs there on this machine, " +
+					"including from a git-aware shell prompt (undo does not restore it)"})
+		}
+	}
+	if rec.NestedControlCapped {
+		rep.Warnings = append(rep.Warnings, fmt.Sprintf("the folder holds more than %d nested git repositories; changes to the git configuration of the others are not reported", maxNestedControl))
 	}
 }
 

@@ -89,8 +89,16 @@ type SnapshotRecord struct {
 	NestedRepos     []string                  `json:"nested_repos,omitempty"`
 	DependencyDirs  map[string]DirFingerprint `json:"dependency_dirs,omitempty"`
 	SentinelsCapped bool                      `json:"sentinels_capped,omitempty"`
-	Warnings        []string                  `json:"warnings,omitempty"`
-	UndoneAt        *time.Time                `json:"undone_at,omitempty"`
+	// NestedControl are the git files of the nested repositories that
+	// existed before the session (NestedRepos) that decide what git runs
+	// in them ("vendor/lib/.git/config"), keyed by project-relative path;
+	// the .git entry itself is recorded too ("vendor/lib/.git"). The mount
+	// protects only the project's own repository and its submodules, so
+	// Review compares these.
+	NestedControl       map[string]FileState `json:"nested_control,omitempty"`
+	NestedControlCapped bool                 `json:"nested_control_capped,omitempty"`
+	Warnings            []string             `json:"warnings,omitempty"`
+	UndoneAt            *time.Time           `json:"undone_at,omitempty"`
 	// PostCommit is the shadow commit of the folder as it was when Undo
 	// ran, so an undo can itself be reverted.
 	PostCommit string `json:"post_commit,omitempty"`
@@ -162,7 +170,67 @@ const (
 	maxIgnoredEntries = 20_000
 	maxSentinels      = 5_000
 	keepControlBytes  = 256 << 10
+	// maxNestedControl bounds the nested repositories whose git control
+	// files a snapshot records.
+	maxNestedControl = 64
 )
+
+// nestedControl are the files of a nested repository's git directory that
+// decide what git runs there: its config (hooks path, fsmonitor, filter
+// drivers, aliases, pager), the per-worktree config, the hooks, the
+// commondir that points it at other git data, and the attributes that
+// switch filter drivers on.
+var nestedControl = []string{"config", "config.worktree", "commondir", "hooks", "info/attributes"}
+
+// captureNestedControl records the control files of the nested
+// repositories (project-relative dirs; "." is the project's own, which the
+// git snapshot covers) for Review. It reports whether there were more than
+// it records.
+func captureNestedControl(root string, nested []string) (map[string]FileState, bool) {
+	out := map[string]FileState{}
+	n := 0
+	for _, dir := range nested {
+		if dir == "." {
+			continue
+		}
+		if n++; n > maxNestedControl {
+			return out, true
+		}
+		for rel, st := range nestedControlState(root, dir) {
+			out[rel] = st
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, false
+}
+
+// nestedControlState records dir/.git (a gitdir pointer file or symlink by
+// content, a directory by its mode) and, for a directory, its nestedControl
+// files, absent ones included. Entries it cannot read are left out.
+func nestedControlState(root, dir string) map[string]FileState {
+	entry := path.Join(dir, ".git")
+	p := filepath.Join(root, filepath.FromSlash(entry))
+	out := map[string]FileState{}
+	info, err := os.Lstat(p)
+	if err != nil {
+		return out
+	}
+	if !info.IsDir() {
+		if st, err := captureState(p, 0); err == nil {
+			out[entry] = st
+		}
+		return out
+	}
+	out[entry] = FileState{Exists: true, Dir: true, Mode: uint32(info.Mode().Perm())}
+	for _, rel := range nestedControl {
+		if st, err := captureState(filepath.Join(p, filepath.FromSlash(rel)), 0); err == nil {
+			out[entry+"/"+rel] = st
+		}
+	}
+	return out
+}
 
 // Snapshot records the project before a session so Undo can restore it.
 func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error) {
@@ -225,6 +293,7 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 		return nil, err
 	}
 	rec.Sentinels, rec.NestedRepos, rec.DependencyDirs, rec.SentinelsCapped = sentinels.files, sentinels.nested, sentinels.deps, sentinels.capped
+	rec.NestedControl, rec.NestedControlCapped = captureNestedControl(src.Path, sentinels.nested)
 	manifest, err := recordIgnored(src.Path, ignoredRoots, toSet(opts.Skip))
 	if err != nil {
 		_ = removeSnapshotDir(dir)
@@ -583,14 +652,14 @@ func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 			}
 			return nil
 		}
-		if d.Name() == ".git" {
-			if rel == ".git" {
-				// Top-level .git: if this is a non-git snapshot (the folder
-				// was non-git when snapshotted), record it as a nested repo
-				// so Review flags it and Undo can remove it.
-				res.nested = append(res.nested, ".")
-			} else {
-				res.nested = append(res.nested, path.Dir(rel))
+		if isGitEntry(root, rel, d.Name()) {
+			// A top-level .git is recorded as "." too: if this is a non-git
+			// snapshot (the folder was non-git when snapshotted), Review
+			// flags it and Undo can remove it.
+			res.nested = append(res.nested, path.Dir(rel))
+			if d.IsDir() && d.Name() != ".git" {
+				// walkProject skips only the exact name.
+				return fs.SkipDir
 			}
 			return nil
 		}
@@ -623,6 +692,26 @@ func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 	res.capped = res.capped || truncated
 	sort.Strings(res.nested)
 	return res, nil
+}
+
+// isGitEntry reports whether the entry at rel under root, named name, is
+// what git finds as its folder's .git: that name, or on a case-insensitive
+// filesystem (macOS's default) another spelling (.GIT, .Git) that git's
+// lookup of .git resolves to.
+func isGitEntry(root, rel, name string) bool {
+	if name == ".git" {
+		return true
+	}
+	if !strings.EqualFold(name, ".git") {
+		return false
+	}
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	entry, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	lookup, err := os.Lstat(filepath.Join(filepath.Dir(p), ".git"))
+	return err == nil && os.SameFile(entry, lookup)
 }
 
 // sentinelKeep keeps the content of files Review parses (package.json

@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -545,10 +546,11 @@ func groupIgnored(deltas []ignoredDelta, roots map[string]bool) []IgnoredChange 
 }
 
 // ignoredFlags turns the changes into review flags: one per dependency
-// directory and bytecode cache, and one per executable elsewhere (up to
-// maxIgnoredFlags). It also returns the areas whose other changes no flag
+// directory and bytecode cache, and one per executable or file matching a
+// sensitive-change pattern elsewhere (up to maxIgnoredFlags; see
+// ignoredSensitive). It also returns the areas whose other changes no flag
 // names. gitProject picks the wording for why the diff misses them.
-func ignoredFlags(changes []IgnoredChange, gitProject bool) ([]Flag, []string) {
+func ignoredFlags(changes []IgnoredChange, gitProject bool, sensitive []string) ([]Flag, []string) {
 	dirWhy, fileWhy := "git ignores these files, so they are not in the diff", "git ignores it, so it is not in the diff"
 	if !gitProject {
 		dirWhy = "the undo snapshot does not copy this directory, so they are not in the diff"
@@ -579,8 +581,9 @@ func ignoredFlags(changes []IgnoredChange, gitProject bool) ([]Flag, []string) {
 		if c.Removed {
 			undo = "undo deletes it"
 		}
-		folded := 0
+		folded, named := 0, 0
 		for _, p := range c.execs {
+			named++
 			if perFile >= maxIgnoredFlags {
 				folded++
 				continue
@@ -589,11 +592,42 @@ func ignoredFlags(changes []IgnoredChange, gitProject bool) ([]Flag, []string) {
 			flags = append(flags, Flag{Path: p, Label: p, Kind: RiskExecutable, Severity: SeverityHigh,
 				Detail: "new or changed executable file; " + fileWhy + ", and " + undo})
 		}
-		if c.kind == ignoredOther && (folded > 0 || len(c.execs) < len(c.files) || c.Deleted > 0) {
+		for _, p := range c.files {
+			pattern, ok := ignoredSensitive(sensitive, p)
+			if !ok || slices.Contains(c.execs, p) {
+				continue
+			}
+			named++
+			if perFile >= maxIgnoredFlags {
+				folded++
+				continue
+			}
+			perFile++
+			flags = append(flags, Flag{Path: p, Label: p, Kind: RiskPolicy, Severity: SeverityHigh,
+				Detail: "matches the sensitive-change pattern " + pattern + "; " + fileWhy + ", and " + undo})
+		}
+		if c.kind == ignoredOther && (folded > 0 || named < len(c.files) || c.Deleted > 0) {
 			quiet = append(quiet, c.Path)
 		}
 	}
 	return flags, quiet
+}
+
+// ignoredSensitive matches a file git ignores (or the undo snapshot does
+// not copy) against the sensitive-change patterns. A pattern with a
+// directory in it (**/.claude/**) matches as usual; a bare file name
+// (.mcp.json, CLAUDE.local.md) only at the top of the folder, where the
+// harness that loads it looks, so build output such as dist/package.json
+// does not match.
+func ignoredSensitive(patterns []string, rel string) (string, bool) {
+	for _, p := range patterns {
+		if strings.Contains(strings.Trim(strings.TrimSpace(p), "/"), "/") || !strings.Contains(strings.Trim(rel, "/"), "/") {
+			if matchGlob(p, rel) {
+				return p, true
+			}
+		}
+	}
+	return "", false
 }
 
 func trimArea(paths []string, area string) []string {
