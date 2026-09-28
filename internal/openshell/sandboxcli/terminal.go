@@ -26,6 +26,8 @@ import (
 	"slices"
 	"sync/atomic"
 
+	"golang.org/x/term"
+
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
@@ -51,6 +53,12 @@ func (ForegroundTerminal) Run(ctx context.Context, inv openshell.Invocation) (in
 		return -1, err
 	}
 	defer cancel()
+	// The harness puts the terminal in raw mode. One that ends without
+	// undoing it (the forwarded SIGTERM, a crash, SIGKILL) would leave the
+	// end-of-session prompts reading raw input, where Enter sends no newline
+	// and Ctrl-C no interrupt: the terminal gets back the mode it had.
+	restore := saveTerminalMode(cmd.Stdin)
+	defer restore()
 	sig := make(chan os.Signal, 16)
 	signal.Notify(sig, append(append([]os.Signal(nil), terminalSignals...), forwardedSignals...)...)
 	defer signal.Stop(sig)
@@ -71,6 +79,21 @@ func (ForegroundTerminal) Run(ctx context.Context, inv openshell.Invocation) (in
 	close(sig)
 	<-drained
 	return exitStatus(err)
+}
+
+// saveTerminalMode records the mode of in when it is a terminal, and
+// returns what puts it back.
+func saveTerminalMode(in io.Reader) (restore func()) {
+	f, ok := in.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return func() {}
+	}
+	fd := int(f.Fd())
+	state, err := term.GetState(fd)
+	if err != nil {
+		return func() {}
+	}
+	return func() { _ = term.Restore(fd, state) }
 }
 
 // exitInterrupted is the exit status of a session a signal ended (a
