@@ -53,6 +53,7 @@ from defenseclaw.tui.executor import (
     resolve_subprocess_argv,
 )
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
+from defenseclaw.tui.panels import setup_catalog, setup_keys
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
 from defenseclaw.tui.panels.alerts import AlertPanelAction, AlertsPanelModel
@@ -85,8 +86,6 @@ from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
     WIZARD_DESCRIPTIONS,
-    WIZARD_HOW_TO,
-    WIZARD_NAMES,
     SetupPanelAction,
     SetupPanelModel,
     SetupWizard,
@@ -115,6 +114,7 @@ from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.model_picker import ModelPickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
+from defenseclaw.tui.screens.setup_picker import SetupPickerScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
     SetupResourceResult,
@@ -1290,7 +1290,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                     # exact same submission, cancellation, and field
                     # navigation semantics as the keystroke flow.
                     yield Button(
-                        "Run wizard",
+                        "Run",
                         id="setup-wizard-run",
                         compact=True,
                         variant="success",
@@ -1304,25 +1304,25 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                         tooltip="Close the wizard form without running (Esc)",
                     )
                     yield Button(
-                        "Prev field",
+                        "◂ Field",
                         id="setup-wizard-prev",
                         compact=True,
                         tooltip="Move to the previous field (Shift+Tab / ↑)",
                     )
                     yield Button(
-                        "Next field",
+                        "Field ▸",
                         id="setup-wizard-next",
                         compact=True,
                         tooltip="Move to the next field (Tab / ↓)",
                     )
                     yield Button(
-                        "Toggle reveal",
+                        "Reveal",
                         id="setup-wizard-reveal",
                         compact=True,
                         tooltip="Show/hide secret values (Ctrl+T)",
                     )
                     yield Button(
-                        "Clear field",
+                        "Clear",
                         id="setup-wizard-clear",
                         compact=True,
                         tooltip="Clear the current field's value (Ctrl+U)",
@@ -3531,6 +3531,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
+            # The body names the selected task, and a group header row
+            # hands the cursor on to the nearest task.
+            self._update_body_only()
+            if self._setup_cursor() != event.cursor_row:
+                with self._programmatic_table_update():
+                    event.data_table.move_cursor(row=self._setup_cursor(), animate=False)
 
     @on(events.DescendantFocus, "#panel-table")
     def _on_panel_table_focused(self, event: events.DescendantFocus) -> None:
@@ -3622,8 +3628,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             else:
                 self._update_body_only()
         elif self.active_panel == "setup":
+            on_header = self._setup_view() == "wizards" and setup_catalog.wizard_at(event.cursor_row) is None
             self._set_setup_cursor(event.cursor_row)
-            if repeated_click:
+            if repeated_click and not on_header:
                 self._apply_setup_action(self._handle_setup_key("enter"))
             else:
                 self._update_body_only()
@@ -4124,10 +4131,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 ("j/k or Up/Down", "Navigate registries"),
                 ("r", "Refresh"),
             ],
-            "setup": [
-                ("Enter", "Run wizard / step"),
-                ("r", "Refresh setup state"),
-            ],
+            "setup": setup_keys.help_rows(self._setup_view(), setup_keys.setup_conditions(self.setup_model)),
         }
         active_keys = panel_sheets.get(
             self.active_panel,
@@ -4137,6 +4141,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             (label for name, _key, label in PANELS if name == self.active_panel),
             self.active_panel.title(),
         )
+        if self.active_panel == "setup":
+            panel_label = f"{panel_label} ({_SETUP_VIEW_TITLES[self._setup_view()]})"
 
         running_section: list[tuple[str, str]] = [
             ("Ctrl+C", "Send SIGINT to the running subprocess"),
@@ -4536,17 +4542,13 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
         logs_filters.set_class(self.active_panel != "logs" or self.help_open, "hidden")
         registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
-        setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
-        # Wizard sub-bar is doubly-scoped: panel == setup AND a wizard
-        # form is open. Hide it during the wizard list, config editor,
-        # and any other panel so the bar doesn't advertise actions
-        # that wouldn't fire.
-        setup_wizard.set_class(
-            self.active_panel != "setup"
-            or self.help_open
-            or not self.setup_model.form_active,
-            "hidden",
+        # Each Setup bar shows only when the current Setup view uses one of
+        # its buttons (first-run and the goal menu use none).
+        setup_buttons = (
+            self._setup_visible_buttons() if self.active_panel == "setup" and not self.help_open else frozenset()
         )
+        setup.set_class(not setup_buttons.intersection(setup_keys.SETUP_BUTTON_IDS), "hidden")
+        setup_wizard.set_class(not setup_buttons.intersection(setup_keys.SETUP_WIZARD_BUTTON_IDS), "hidden")
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
@@ -4698,19 +4700,21 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         self.query_one("#registries-reject", Button).disabled = not entry_tab or selected_entry is None
         self.query_one("#registries-remove-source", Button).disabled = active != "sources" or selected_source is None
 
+    def _setup_view(self) -> setup_keys.SetupView:
+        return setup_keys.setup_view(self.setup_model, first_run=self.first_run_model.active)
+
+    def _setup_visible_buttons(self) -> frozenset[str]:
+        """Setup buttons the current Setup view uses (from its keymap)."""
+
+        view = self._setup_view()
+        return setup_keys.visible_buttons(view, setup_keys.setup_conditions(self.setup_model))
+
     def _sync_setup_controls(self) -> None:
-        self._set_button_active("#setup-mode-wizards", self.setup_model.mode == "wizards")
-        self._set_button_active("#setup-mode-config", self.setup_model.mode == "config")
-        current = self.setup_model.current_section()
-        self.query_one("#setup-edit-list", Button).disabled = not (
-            self.setup_model.mode == "config"
-            and current is not None
-            and current.name in {"Observability", "Webhooks"}
-        )
-        self.query_one("#setup-save", Button).disabled = self.setup_model.mode != "config"
-        self.query_one("#setup-revert", Button).disabled = self.setup_model.mode != "config"
-        self.query_one("#setup-restart", Button).disabled = not self.setup_model.restart_queue.pending
-        self.query_one("#setup-clear-restart", Button).disabled = not self.setup_model.restart_queue.pending
+        # Each Setup view shows only the buttons its keymap names; buttons
+        # that don't apply are hidden, not greyed out.
+        visible = self._setup_visible_buttons()
+        for button_id in (*setup_keys.SETUP_BUTTON_IDS, *setup_keys.SETUP_WIZARD_BUTTON_IDS):
+            self._set_button_visible(f"#{button_id}", button_id in visible)
 
     def _sync_setup_wizard_controls(self) -> None:
         """Light up the wizard form action bar to match the live form state.
@@ -5206,32 +5210,11 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         # `_apply_setup_action` pipe means CommandPreviewScreen,
         # CommandPreview gating, and `mark_wizard_complete` callbacks
         # all fire identically to Ctrl+R / Esc / Tab paths.
-        wizard_key_by_button = {
-            "setup-wizard-run": "ctrl+r",
-            "setup-wizard-cancel": "esc",
-            "setup-wizard-prev": "shift+tab",
-            "setup-wizard-next": "tab",
-            "setup-wizard-reveal": "ctrl+t",
-            "setup-wizard-clear": "ctrl+u",
-        }
-        if button_id in wizard_key_by_button:
+        if button_id in setup_keys.SETUP_WIZARD_BUTTON_IDS:
             if not self.setup_model.form_active:
                 self._set_status("Open a wizard first, then use these controls.")
                 return
-            self._apply_setup_action(
-                self._handle_setup_key(wizard_key_by_button[button_id])
-            )
-            return
-        key_by_button = {
-            "setup-open": "enter",
-            "setup-edit-list": "E",
-            "setup-save": "S",
-            "setup-revert": "R",
-            "setup-restart": "G",
-            "setup-clear-restart": "C",
-            "setup-refresh-credentials": "r",
-        }
-        key = key_by_button.get(button_id)
+        key = _SETUP_BUTTON_KEYS.get(button_id)
         if key is not None:
             self._apply_setup_action(self._handle_setup_key(key))
 
@@ -6955,6 +6938,28 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         self._panel_render_pending.pop(panel, None)
         self._panel_passive_refresh_pending.discard(panel)
 
+    def _handle_setup_section_nav_click(self, x: int, y: int) -> bool:
+        """Clicks on the config breadcrumb's ``◂ prev | next ▸``."""
+
+        if (
+            self.active_panel != "setup"
+            or self.help_open
+            or self._setup_view() != "config"
+            or y != 0
+        ):
+            return False
+        try:
+            first = Text.from_markup(self.body_text.split("\n", 1)[0]).plain
+        except Exception:  # noqa: BLE001 - malformed markup: no click target
+            return False
+        start = first.rfind(_SETUP_SECTION_NAV)
+        if start < 0 or not start <= x < start + len(_SETUP_SECTION_NAV):
+            return False
+        divider = start + _SETUP_SECTION_NAV.index("|")
+        self._move_setup_section(-1 if x < divider else 1)
+        self._render_chrome()
+        return True
+
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
 
@@ -6967,6 +6972,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         segment (the trailing hint) opens the filter picker as a fallback.
         """
 
+        if self._handle_setup_section_nav_click(x, y):
+            return True
         segments = self._chip_click_segments
         if not segments:
             return False
@@ -9332,11 +9339,21 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             command_elapsed_secs=elapsed_secs,
             logs_paused=bool(self.logs_model.paused),
             new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
-            panel_view=self.sandbox_model.view if active_panel == "sandboxes" else "",
+            panel_view=self._hint_panel_view(active_panel),
             panel_keys=self.sandbox_model.keys_line() if active_panel == "sandboxes" else "",
+            panel_conditions=(
+                tuple(sorted(setup_keys.setup_conditions(self.setup_model))) if self.active_panel == "setup" else ()
+            ),
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
+
+    def _hint_panel_view(self, active_panel: str) -> str:
+        if active_panel == "sandboxes":
+            return self.sandbox_model.view
+        if self.active_panel == "setup":
+            return self._setup_view()
+        return ""
 
     def _active_filter_label(self) -> str:
         if self.active_panel == "alerts":
@@ -9642,6 +9659,18 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 self.set_focus(None)
         elif self.focused is None:
             table.focus()
+        if (
+            self.active_panel == "setup"
+            and self._setup_view() == "wizards"
+            and cursor_row > 0
+            and setup_catalog.wizard_at(cursor_row - 1) is None
+        ):
+            # Keep a group's header row in view above its first task.
+            self.call_after_refresh(self._reveal_table_row, table, cursor_row - 1)
+
+    def _reveal_table_row(self, table: DataTable[Any], row: int) -> None:
+        if table.scroll_y > row:
+            table.scroll_to(y=row, animate=False)
 
     def _append_panel_table_row(
         self,
@@ -10218,6 +10247,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             # Pushed synchronously (not from a worker) so the very next key
             # already lands in the text box when someone types quickly.
             self._open_setup_field_editor(action.open_field_editor, action.field_editor_value)
+        if action.open_picker:
+            self.run_worker(self._open_setup_picker(action.open_picker), exclusive=False, thread=False)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
         if self.setup_model.sandbox_machine_wanted():
@@ -10226,6 +10257,57 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         if status_message:
             self._set_status(status_message)
         return True
+
+    async def _open_setup_picker(self, kind: str) -> None:
+        """``i`` task detail, ``g`` grouped sections, ``/`` field finder."""
+
+        model = self.setup_model
+        if kind == "detail":
+            info = model.active_wizard_info()
+            await self._open_detail_screen(
+                f"Setup · {setup_catalog.wizard_label(info.wizard)}",
+                setup_catalog.setup_detail_pairs(model),
+            )
+            return
+        if kind == "sections":
+            if not model.sections:
+                self._set_status("No config sections to show.")
+                return
+            choice = await self.push_screen_wait(
+                SetupPickerScreen(
+                    "Config sections",
+                    setup_catalog.section_picker_rows(model.sections, model.active_section),
+                    selected_id=str(model.active_section),
+                )
+            )
+            if choice is None:
+                return
+            model.select_section(int(choice))
+            self._set_status(f"Config · {model.sections[model.active_section].name}")
+            self._render_chrome()
+            return
+        if kind == "fields":
+            entries = setup_catalog.field_entries(model.sections)
+
+            def rows(query: str) -> tuple[Any, ...]:
+                return setup_catalog.field_picker_rows(setup_catalog.filter_field_entries(query, entries))
+
+            choice = await self.push_screen_wait(
+                SetupPickerScreen(
+                    "Find a config field",
+                    rows,
+                    filterable=True,
+                    placeholder="Field name or key, e.g. port or guardrail.mode",
+                )
+            )
+            if choice is None:
+                return
+            section_text, line_text = choice.split(":", 1)
+            model.select_section(int(section_text))
+            model.active_line = int(line_text)
+            field = model.current_field()
+            self._set_status(f"Found {field.label}." if field is not None else "Field found.")
+            self._render_chrome()
 
     def _apply_first_run_action(self, action: Any) -> bool:
         if not action.handled:
@@ -10352,125 +10434,146 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                     for field in section.fields
                 ),
             )
-        rows = []
-        for info in self.setup_model.wizard_infos():
-            rows.append((info.name, info.status, "defenseclaw " + " ".join(info.command), info.description))
-        return ("Wizard", "Status", "Command", "Description"), tuple(rows)
+        # Wizard list: group header rows, then the group's tasks. The
+        # Description column needs >= 100 columns, Command >= 120, so at
+        # 80x24 the task names stay readable.
+        width = self._setup_width()
+        show_description = width >= 100
+        show_command = width >= 120
+        infos = {info.wizard: info for info in self.setup_model.wizard_infos()}
+        columns: list[str] = ["Task", "Status"]
+        if show_command:
+            columns.append("Command")
+        if show_description:
+            columns.append("Description")
+        rows: list[tuple[str, ...]] = []
+        for display in setup_catalog.display_rows():
+            if display.wizard is None:
+                cells: list[str] = [f"── {display.label}", ""]
+                cells.extend("" for _ in range(len(columns) - 2))
+            else:
+                info = infos[display.wizard]
+                cells = [f"  {display.label}", info.status]
+                if show_command:
+                    cells.append("defenseclaw " + " ".join(info.command))
+                if show_description:
+                    cells.append(info.description)
+            rows.append(tuple(cells))
+        return tuple(columns), tuple(rows)
+
+    def _setup_width(self) -> int:
+        width = int(getattr(self.size, "width", 0) or 0)
+        return width if width > 0 else 80
+
+    def _setup_line(self, text: str, *, style: str = "", indent: int = 7) -> str:
+        """One body line: plain ``text`` cut to the body width, escaped, styled."""
+
+        plain = _truncate_ellipsis(" ".join(text.split()), max(20, self._setup_width() - indent))
+        escaped = rich_escape(plain)
+        return "[" + style + "]" + escaped + "[/]" if style else escaped
+
+    def _setup_readiness_summary(self) -> str:
+        checks = self.setup_model.readiness_checks
+        ok = sum(1 for check in checks if check.status == "pass")
+        attention = len(checks) - ok
+        parts = [f"{ok} ok"]
+        if attention:
+            parts.append(f"{attention} need{'s' if attention == 1 else ''} attention")
+        if self.setup_model.restart_queue.pending:
+            parts.append("gateway restart queued")
+        return " · ".join(parts)
 
     def _setup_body_text(self) -> str:
         self._chip_click_segments = []
+        model = self.setup_model
         if self.first_run_model.active:
-            self._chip_click_segments = []
             return (
                 "[bold #22D3EE]DefenseClaw first-run setup[/]\n"
-                f"{self.first_run_model.empty_state()}\n\n"
-                "Keys: up/down select, left/right change, Ctrl+R run init, 0 Setup.\n"
-                "This uses the canonical init backend and keeps the full setup wizard available."
+                + self._setup_line(self.first_run_model.empty_state(), style=TOKENS.text_secondary)
             )
-        if self.setup_model.goal_active:
-            wizard_idx = int(self.setup_model.active_wizard)
-            wizard = WIZARD_NAMES[wizard_idx]
-            summary = wizard_state_summary(self.setup_model.active_wizard, self.setup_model.config)
-            summary_line = f"[{TOKENS.text_secondary}]{rich_escape(summary)}[/]\n" if summary else ""
-            return (
-                f"[bold #22D3EE]Setup[/] · [bold]{wizard}[/] · What do you want to do?\n"
-                f"{summary_line}"
-                f"[{TOKENS.text_muted}]Enter choose · ↑/↓ move · Esc back · "
-                f"Advanced opens the full form[/]"
+        if model.goal_active:
+            label = setup_catalog.wizard_label(model.active_wizard)
+            summary = wizard_state_summary(model.active_wizard, model.config)
+            head = f"[bold #22D3EE]Setup[/] · [bold]{rich_escape(label)}[/] · What do you want to do?"
+            return head + (f"\n{self._setup_line(summary, style=TOKENS.text_secondary)}" if summary else "")
+        if model.form_active:
+            label = setup_catalog.wizard_label(model.active_wizard)
+            description = WIZARD_DESCRIPTIONS[int(model.active_wizard)]
+            focused = model.focused_row_metadata()
+            head = (
+                f"[bold #22D3EE]{rich_escape(label)}[/] "
+                + self._setup_line(f"— {description}", style=TOKENS.text_muted, indent=9 + len(label))
             )
-        if self.setup_model.form_active:
-            wizard_idx = int(self.setup_model.active_wizard)
-            wizard = WIZARD_NAMES[wizard_idx]
-            description = WIZARD_DESCRIPTIONS[wizard_idx]
-            how_to = WIZARD_HOW_TO[wizard_idx]
-            error = f"\n[#F87171]{self.setup_model.form_error}[/]" if self.setup_model.form_error else ""
-            focused = self.setup_model.focused_row_metadata()
-            reveal = "ON" if self.setup_model.form_reveal else "OFF"
-            preview = self.setup_model.wizard_command_preview()
-            missing = self.setup_model.missing_required_fields()
-            missing_line = (
-                f"\n[#FBBF24]Required fields still empty:[/] {', '.join(missing)}" if missing else ""
+            will_run = "[bold]Will run:[/] " + self._setup_line(
+                f"$ {model.wizard_command_preview()}", style=TOKENS.accent_green, indent=17
             )
-            disk_change_line = (
-                "\n[#FBBF24]Config changed on disk.[/] Your unsaved form values were preserved; "
-                "run or cancel this form to use refreshed defaults."
-                if self.setup_model.disk_change_pending
-                else ""
-            )
-            focused_line = (
-                f"[{TOKENS.accent_violet} bold]→ {focused.label}[/] "
-                f"[{TOKENS.text_secondary}]({focused.kind})[/]"
-            )
-            focused_action = (
-                f"  [{TOKENS.text_muted}]{focused.action.hotkey} {focused.action.description}[/]"
-                if focused.action
-                else ""
-            )
-            return (
-                f"[bold #22D3EE]Setup Wizard[/]  [bold]{wizard}[/]   "
-                f"[{TOKENS.text_muted}]{description}[/]\n"
-                f"[{TOKENS.text_secondary}]{how_to}[/]\n"
-                f"[bold]Will run:[/] [{TOKENS.accent_green}]$ {preview}[/]\n"
-                f"{focused_line}{focused_action}\n"
-                f"[{TOKENS.text_muted}]"
-                f"Keys: ↑/↓ move · ←/→ or space cycle choice · type to edit · "
-                f"Ctrl+T reveal={reveal} · [bold]Ctrl+R run[/] · Esc cancel"
-                f"[/]"
-                f"{disk_change_line}"
-                f"{missing_line}"
-                # Escape ``focused.hint`` so a wizard hint that quotes a
-                # bracketed identifier (e.g. ``set webhooks[0].url``) can't
-                # collapse the styled span via Rich's silent tag-drop.
-                f"{focused.hint and chr(10) + '[' + TOKENS.text_secondary + ']' + rich_escape(focused.hint) + '[/]' or ''}"
-                f"{error}"
-            )
-        if self.setup_model.mode == "config":
-            section = self.setup_model.sections[self.setup_model.active_section] if self.setup_model.sections else None
-            hints = self.setup_model.save_restart_hints()
-            focused = self.setup_model.focused_row_metadata()
-            sections = "  ".join(
-                f"[{TOKENS.accent_violet} bold]{label.name}[/]"
-                if label.active
-                else f"[{TOKENS.text_secondary}]{label.name}[/]"
-                for label in self.setup_model.section_labels()
-            )
-            disk_change_line = (
-                "\n[#FBBF24]Config changed on disk.[/] Your draft is preserved; "
-                "S merges edited fields or R reloads the disk version."
-                if self.setup_model.disk_change_pending
-                else ""
-            )
-            return (
-                f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
-                f"{sections}\n"
-                f"Focused: {focused.label}  Key: {focused.key or '-'}  "
-                f"Validation: {focused.validation.severity}"
-                f"{' - ' + focused.validation.message if focused.validation.message else ''}\n"
-                f"{focused.hint}\n"
-                f"Changes: {hints.changes}  Validation: {len(hints.validation_errors)}  "
-                f"{hints.save_hint}\n"
-                f"{hints.restart_hint}\n"
-                f"{'  '.join(hints.action_bar)}\n"
-                "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
-                "S save, R revert, w wizards."
-                f"{disk_change_line}"
-            ).strip()
-        readiness_rows = self.setup_model.readiness_checks
-        readiness = "\n".join(f"{check.status.upper()}: {check.title} - {check.detail}" for check in readiness_rows[:8])
-        credentials = self.setup_model.credential_empty_state()
-        suffix = f"\n\n{credentials}" if credentials else ""
-        info = self.setup_model.active_wizard_info()
-        focused = self.setup_model.focused_row_metadata()
+            # Third line: the most urgent fact wins — a submit error, a
+            # config change on disk, missing required fields, then the
+            # focused field's hint.
+            if model.form_error:
+                third = self._setup_line(model.form_error, style="#F87171")
+            elif model.disk_change_pending:
+                third = self._setup_line(
+                    "Config changed on disk. Your unsaved form values were preserved; "
+                    "run or cancel this form to use refreshed defaults.",
+                    style="#FBBF24",
+                )
+            else:
+                missing = model.missing_required_fields()
+                prefix = f"Required: {', '.join(missing)} · " if missing else ""
+                hint = focused.hint or (focused.action.description if focused.action else "")
+                third = self._setup_line(
+                    f"{prefix}{focused.label}: {hint}" if hint else f"{prefix}{focused.label}",
+                    style="#FBBF24" if missing else TOKENS.text_secondary,
+                )
+            return f"{head}\n{will_run}\n{third}"
+        if model.mode == "config":
+            return self._setup_config_body_text()
+        info = model.active_wizard_info()
+        label = setup_catalog.wizard_label(info.wizard)
+        if info.status == "unsupported":
+            second = f"{label}: {model.wizard_unavailable_reason(info.wizard)}"
+        else:
+            second = f"{label} — {info.description}"
         return (
-            "[bold #22D3EE]Setup Wizards[/]\n"
-            f"Selected workflow: {info.name} - {info.description}\n"
-            f"{info.how_to}\n"
-            f"Focused action: {focused.action.hotkey if focused.action else 'Enter'} "
-            f"{focused.action.description if focused.action else ''}\n"
-            "Keys: up/down select, Enter open form, c config editor, r refresh credentials, "
-            "credentials wizard: f fill missing, s set selected.\n\n"
-            f"{readiness}{suffix}"
+            "[bold #22D3EE]Setup[/] · "
+            + self._setup_line(f"{self._setup_readiness_summary()} — i details", indent=15)
+            + "\n"
+            + self._setup_line(second, style=TOKENS.text_secondary)
         )
+
+    def _setup_config_body_text(self) -> str:
+        model = self.setup_model
+        section = model.current_section()
+        if section is None:
+            return "[bold #22D3EE]Config[/] · no sections"
+        hints = model.save_restart_hints()
+        position, total = setup_catalog.section_position(model.sections, model.active_section)
+        blocking = len(getattr(hints, "blocking_errors", hints.validation_errors))
+        crumb = f"{section.name} ({position}/{total}) · {hints.changes} changed · {blocking} blocking"
+        head = (
+            "[bold #22D3EE]Config[/] · "
+            + self._setup_line(crumb, indent=7 + 9 + len(_SETUP_SECTION_NAV) + 3)
+            + f"   [{TOKENS.accent_cyan}]{rich_escape(_SETUP_SECTION_NAV)}[/]"
+        )
+        focused = model.focused_row_metadata()
+        name = f"{focused.label} ({focused.key})" if focused.key else focused.label
+        if focused.validation.severity == "error" and focused.validation.message:
+            second = self._setup_line(f"{name} · {focused.validation.message}", style="#F87171")
+        else:
+            detail = focused.hint or (focused.action.description if focused.action else "")
+            second = self._setup_line(f"{name} · {detail}" if detail else name, style=TOKENS.text_secondary)
+        facts: list[str] = []
+        if model.disk_change_pending:
+            facts.append("Config changed on disk; your draft is kept (save merges edited fields, revert reloads)")
+        if hints.restart_pending:
+            facts.append(f"Gateway restart queued: {hints.restart_reason}" if hints.restart_reason else "Gateway restart queued")
+        if hints.saved_hint:
+            facts.append(hints.saved_hint)
+        lines = [head, second]
+        if facts:
+            lines.append(self._setup_line(" · ".join(facts), style="#FBBF24"))
+        return "\n".join(lines)
 
     def _setup_cursor(self) -> int:
         if self.first_run_model.active:
@@ -10481,7 +10584,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             return getattr(self.setup_model, "form_cursor", 0)
         if self.setup_model.mode == "config":
             return self.setup_model.active_line
-        return int(self.setup_model.active_wizard)
+        return setup_catalog.row_for(self.setup_model.active_wizard)
 
     def _set_setup_cursor(self, row: int) -> None:
         if row < 0:
@@ -10497,7 +10600,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
                 section = self.setup_model.sections[self.setup_model.active_section]
                 self.setup_model.active_line = min(row, max(0, len(section.fields) - 1))
         else:
-            self.setup_model.active_wizard = SetupWizard(min(row, len(WIZARD_NAMES) - 1))
+            # A group header row isn't a task: land on the nearest task in
+            # the direction the cursor was moving.
+            current = setup_catalog.row_for(self.setup_model.active_wizard)
+            self.setup_model.active_wizard = setup_catalog.nearest_wizard(row, prefer_down=row >= current)
 
     def _move_setup_form_cursor(self, delta: int) -> None:
         fields = self.setup_model.form_fields
@@ -10529,8 +10635,11 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
     def _move_setup_section(self, delta: int) -> None:
         if not self.setup_model.sections:
             return
-        self.setup_model.active_section = (self.setup_model.active_section + delta) % len(self.setup_model.sections)
-        self.setup_model.active_line = self.setup_model.first_editable_line()
+        # Walk sections in the grouped order the breadcrumb counts in
+        # (Core ... Legacy), not raw build order.
+        self.setup_model.select_section(
+            setup_catalog.step_section(self.setup_model.sections, self.setup_model.active_section, delta)
+        )
 
     def _cycle_setup_config_field(self, delta: int) -> bool:
         field = self._current_setup_field()
@@ -10580,6 +10689,10 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         """Route a Setup key. ``character`` is the raw printable character
         (case and spaces intact) when the key typed one."""
 
+        # ``?`` is the global help overlay in every Setup view; it never
+        # types into a field.
+        if key == "?":
+            return SetupPanelAction(False)
         if self.setup_model.goal_active:
             return self._handle_setup_goal_key(key)
         if self.setup_model.form_active:
@@ -10603,23 +10716,22 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         return self._handle_setup_wizard_key(key)
 
     def _handle_setup_wizard_key(self, key: str) -> SetupPanelAction:
+        # Movement follows the grouped display order; group headers are
+        # skipped. Digits are left alone so they always switch panels.
         if key in {"up", "k"}:
-            self.setup_model.active_wizard = SetupWizard(max(0, int(self.setup_model.active_wizard) - 1))
+            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, -1)
             return SetupPanelAction(True)
         if key in {"down", "j"}:
-            self.setup_model.active_wizard = SetupWizard(
-                min(len(WIZARD_NAMES) - 1, int(self.setup_model.active_wizard) + 1)
-            )
+            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
         if key in {"left", "["}:
-            self.setup_model.active_wizard = SetupWizard(
-                (int(self.setup_model.active_wizard) + len(WIZARD_NAMES) - 1) % len(WIZARD_NAMES)
-            )
+            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, -1, wrap=True)
             return SetupPanelAction(True)
         if key in {"right", "]"}:
-            self.setup_model.active_wizard = SetupWizard((int(self.setup_model.active_wizard) + 1) % len(WIZARD_NAMES))
+            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1, wrap=True)
             return SetupPanelAction(True)
-        # Digits are not taken here: they switch panels, as the tab bar says.
+        if key == "i":
+            return SetupPanelAction(True, open_picker="detail")
         if key in {"enter", "e", "space"}:
             if not self.setup_model.wizard_available(self.setup_model.active_wizard):
                 return SetupPanelAction(
@@ -10717,6 +10829,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         return SetupPanelAction(True)
 
     def _handle_setup_config_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
+        # Navigation pickers: ``g`` lists sections by group, ``/`` finds a
+        # field in any section.
+        if key == "g":
+            return SetupPanelAction(True, open_picker="sections")
+        if key == "/":
+            return SetupPanelAction(True, open_picker="fields")
         if key in {"w", "`"}:
             self.setup_model.mode = "wizards"
             return SetupPanelAction(True, hint="Setup wizards opened.")
@@ -13768,6 +13886,47 @@ def _setup_config_validator(field: Any) -> Callable[[str], str | None]:
         return result.message if result.severity == "error" else None
 
     return validate
+
+
+_SETUP_VIEW_TITLES = {
+    "wizards": "task list",
+    "goals": "goal menu",
+    "form": "wizard form",
+    "config": "config editor",
+    "first-run": "first-run",
+}
+
+# The key each Setup button presses. Wizard-form buttons share the keystroke
+# handler so submit validation, reveal and field moves match Ctrl+R / Esc /
+# Tab exactly; test_setup_keys.py checks these against the Setup keymaps.
+_SETUP_BUTTON_KEYS = {
+    "setup-mode-wizards": "w",
+    "setup-mode-config": "c",
+    "setup-open": "enter",
+    "setup-edit-list": "E",
+    "setup-save": "S",
+    "setup-revert": "R",
+    "setup-restart": "G",
+    "setup-clear-restart": "C",
+    "setup-refresh-credentials": "r",
+    "setup-wizard-run": "ctrl+r",
+    "setup-wizard-cancel": "esc",
+    "setup-wizard-prev": "shift+tab",
+    "setup-wizard-next": "tab",
+    "setup-wizard-reveal": "ctrl+t",
+    "setup-wizard-clear": "ctrl+u",
+}
+
+# Clickable section arrows on the config editor's breadcrumb line.
+_SETUP_SECTION_NAV = "◂ prev | next ▸"
+
+
+def _truncate_ellipsis(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 1:
+        return value[:width]
+    return value[: width - 1] + "…"
 
 
 def _truncate_display(value: str, width: int) -> str:
