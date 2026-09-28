@@ -83,6 +83,11 @@ func (a *App) Enable(o WrapperOptions) error {
 	if err != nil {
 		return err
 	}
+	// The receipt finds the file again for disable, doctor and teardown
+	// when it is not the shell's usual rc file (--rc, another ZDOTDIR).
+	if err := a.recordWrapperFile(sh, ch.Path); err != nil {
+		a.warn("could not record " + a.tildePath(ch.Path) + " for teardown: " + err.Error())
+	}
 	a.recordWrappers()
 	if ch.Changed {
 		a.ok(fmt.Sprintf("`%s` now runs in a DefenseClaw sandbox in new %s sessions (%s)", spec.Command, sh, a.tildePath(ch.Path)))
@@ -114,11 +119,10 @@ func (a *App) Disable(o WrapperOptions) error {
 		}
 		targets = append(targets, target{sh, rc})
 	} else {
-		home, err := a.Home()
-		if err != nil {
+		if _, err := a.Home(); err != nil {
 			return err
 		}
-		for _, in := range wrapper.Scan(home, a.Getenv) {
+		for _, in := range a.wrapperFiles() {
 			targets = append(targets, target{in.Shell, in.Path})
 		}
 	}
@@ -135,6 +139,7 @@ func (a *App) Disable(o WrapperOptions) error {
 			a.ok(fmt.Sprintf("removed the `%s` wrapper from %s", spec.Command, a.tildePath(ch.Path)))
 		}
 	}
+	a.pruneWrapperFiles()
 	a.recordWrappers()
 	if removed == 0 && len(errs) == 0 {
 		a.ok(fmt.Sprintf("`%s` has no sandbox wrapper", spec.Command))
@@ -145,14 +150,82 @@ func (a *App) Disable(o WrapperOptions) error {
 	return errors.Join(errs...)
 }
 
+// wrapperFiles are the rc files that carry a wrapper block: each supported
+// shell's usual rc file under the home directory, and the files enable
+// recorded in the setup receipt (an --rc file, an earlier ZDOTDIR), once
+// each however they are reached.
+func (a *App) wrapperFiles() []wrapper.Installed {
+	var out []wrapper.Installed
+	seen := map[string]bool{}
+	add := func(in wrapper.Installed) {
+		key := in.Path
+		if real, err := filepath.EvalSymlinks(in.Path); err == nil {
+			key = real
+		}
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, in)
+		}
+	}
+	if home, err := a.Home(); err == nil {
+		for _, in := range wrapper.Scan(home, a.Getenv) {
+			add(in)
+		}
+	}
+	if r, err := a.loadReceipt(); err == nil {
+		for _, e := range r.Wrappers {
+			sh, err := wrapper.ParseShell(e.Shell)
+			if err != nil || !filepath.IsAbs(e.Path) {
+				continue
+			}
+			b, err := wrapper.Read(e.Path)
+			if err == nil && len(b.Wraps) == 0 {
+				continue
+			}
+			add(wrapper.Installed{Shell: sh, Path: e.Path, Block: b, Err: err})
+		}
+	}
+	return out
+}
+
+// recordWrapperFile adds an rc file enable wrote to the setup receipt.
+func (a *App) recordWrapperFile(sh wrapper.Shell, path string) error {
+	r, err := a.loadReceipt()
+	if err != nil {
+		return err
+	}
+	for _, e := range r.Wrappers {
+		if e.Path == path {
+			return nil
+		}
+	}
+	r.Wrappers = append(r.Wrappers, receiptEntry{Shell: string(sh), Path: path})
+	return a.saveReceipt(r)
+}
+
+// pruneWrapperFiles drops the receipt's rc files that no longer carry a
+// wrapper block (best effort).
+func (a *App) pruneWrapperFiles() {
+	r, err := a.loadReceipt()
+	if err != nil || len(r.Wrappers) == 0 {
+		return
+	}
+	kept := r.Wrappers[:0]
+	for _, e := range r.Wrappers {
+		if b, err := wrapper.Read(e.Path); err != nil || len(b.Wraps) > 0 {
+			kept = append(kept, e)
+		}
+	}
+	if len(kept) != len(r.Wrappers) {
+		r.Wrappers = kept
+		_ = a.saveReceipt(r)
+	}
+}
+
 // wrappedHarnesses lists the harnesses wrapped in any rc file.
 func (a *App) wrappedHarnesses() []string {
-	home, err := a.Home()
-	if err != nil {
-		return nil
-	}
 	var names []string
-	for _, in := range wrapper.Scan(home, a.Getenv) {
+	for _, in := range a.wrapperFiles() {
 		for _, w := range in.Block.Wraps {
 			if spec, err := ResolveHarness(w.Harness); err == nil && !slices.Contains(names, spec.Name) {
 				names = append(names, spec.Name)

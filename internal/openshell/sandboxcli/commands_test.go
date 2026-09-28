@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/wrapper"
 )
 
 func sampleSandbox(name string) sandboxapi.Sandbox {
@@ -923,6 +924,41 @@ func TestEnableDisableWrappers(t *testing.T) {
 	}
 	if err := ta.Enable(WrapperOptions{Harness: "claude", Shell: "tcsh"}); err == nil {
 		t.Fatal("an unsupported shell was accepted")
+	}
+}
+
+// A wrapper enable wrote to an --rc file is found again: by the wrapped
+// list, doctor, a disable without --rc, and teardown.
+func TestWrappersInACustomRCFile(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	custom := filepath.Join(ta.home, "dotfiles", "shell.rc")
+	if err := ta.Enable(WrapperOptions{Harness: "claude", Shell: "bash", RC: custom}); err != nil {
+		t.Fatal(err)
+	}
+	if c := loadConfig(t, ta); !slices.Equal(c.OpenShell.Wrappers, []string{"claudecode"}) {
+		t.Fatalf("openshell.wrappers = %v", c.OpenShell.Wrappers)
+	}
+	if c := ta.wrappersCheck(); !strings.Contains(c.Detail, "~/dotfiles/shell.rc") {
+		t.Fatalf("doctor = %+v", c)
+	}
+	if err := ta.Teardown(context.Background(), TeardownOptions{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ta.output(), "claude in ~/dotfiles/shell.rc") {
+		t.Fatalf("teardown plan:\n%s", ta.output())
+	}
+	if err := ta.Disable(WrapperOptions{Harness: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := wrapper.Read(custom); err != nil || len(b.Wraps) != 0 {
+		t.Fatalf("custom rc after disable = %+v, %v", b, err)
+	}
+	if c := loadConfig(t, ta); len(c.OpenShell.Wrappers) != 0 {
+		t.Fatalf("openshell.wrappers = %v", c.OpenShell.Wrappers)
+	}
+	if r, err := ta.loadReceipt(); err != nil || len(r.Wrappers) != 0 {
+		t.Fatalf("receipt wrappers after the last disable = %+v, %v", r, err)
 	}
 }
 

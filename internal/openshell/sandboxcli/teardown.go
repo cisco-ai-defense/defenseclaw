@@ -185,9 +185,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 			}
 		}
 	}
-	if home, err := a.Home(); err == nil {
-		p.wrappers = wrapper.Scan(home, a.Getenv)
-	}
+	p.wrappers = a.wrapperFiles()
 	return p, nil
 }
 
@@ -382,6 +380,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		}
 		a.ok("removed the shell wrappers from " + a.tildePath(w.Path))
 	}
+	a.pruneWrapperFiles()
 	if a.Cfg != nil && a.Cfg.OpenShell.Enabled {
 		if _, err := os.Stat(a.ConfigPath); err == nil {
 			if err := a.patchConfig(map[string]any{"openshell.enabled": false, "openshell.wrappers": []string{}}); err != nil {

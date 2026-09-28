@@ -212,13 +212,12 @@ func (a *App) imagesCheck() openshell.Check {
 
 func (a *App) wrappersCheck() openshell.Check {
 	c := openshell.Check{ID: CheckIDWrappers, Title: "Shell wrappers", Status: openshell.StatusPass}
-	home, err := a.Home()
-	if err != nil {
+	if _, err := a.Home(); err != nil {
 		c.Status, c.Detail = openshell.StatusSkip, err.Error()
 		return c
 	}
 	var parts, broken []string
-	for _, in := range wrapper.Scan(home, a.Getenv) {
+	for _, in := range a.wrapperFiles() {
 		if in.Err != nil {
 			broken = append(broken, a.tildePath(in.Path)+": "+in.Err.Error())
 			continue
