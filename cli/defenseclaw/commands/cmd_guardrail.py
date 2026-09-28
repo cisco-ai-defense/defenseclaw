@@ -2397,6 +2397,282 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     click.echo()
 
 
+@guardrail.command("use-pack")
+@click.argument("pack", required=False)
+@click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help="Switch only this connector (writes its per-connector override).",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    help="With --connector: drop that connector's override so it uses the global pack.",
+)
+@click.option(
+    "--no-validate",
+    "no_validate",
+    is_flag=True,
+    help="Skip rule-pack validation (only needed when the validator is unavailable).",
+)
+@click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+@pass_ctx
+def use_pack_cmd(
+    app: AppContext,
+    pack: str | None,
+    connector: str | None,
+    clear: bool,
+    no_validate: bool,
+    json_out: bool,
+) -> None:
+    """Switch the guardrail rule pack, globally or for one connector.
+
+    PACK is a built-in preset (default, strict, permissive), the name of a
+    pack under ``<policy_dir>/guardrail/``, or a directory path. The pack is
+    validated first; an invalid pack changes nothing. Without ``--connector``
+    every connector uses PACK and any per-connector overrides are removed.
+    With ``--connector X`` only X's override is written. ``--clear
+    --connector X`` removes X's override. The guardrail's on/off state, mode
+    and port are never changed; the running gateway applies the new pack
+    from config automatically.
+    """
+    from defenseclaw import policy_catalog, rulepack_validation
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        scope: str,
+        pack_name: str = "",
+        path: str = "",
+        cleared: list[str] | None = None,
+        validation: dict | None = None,
+        warning: str = "",
+    ) -> None:
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "connector": connector_key,
+                        "pack": pack_name,
+                        "path": path,
+                        "cleared_overrides": list(cleared or []),
+                        "validation": validation,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            if warning:
+                ux.warn(warning, indent="  ")
+            if ok:
+                ux.ok(message, indent="  ")
+            else:
+                ux.err(message, indent="  ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    scope = "connector" if connector else "global"
+    connector_key: str | None = None
+    gc = app.cfg.guardrail
+
+    if clear and not connector:
+        raise click.UsageError("--clear needs --connector NAME (the global pack can't be cleared, only switched).")
+    if clear and pack:
+        raise click.UsageError("Pass either PACK or --clear, not both.")
+    if not clear and not (pack or "").strip():
+        raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
+
+    if connector:
+        connector_key = _resolve_member_connector(app, connector)
+        if connector_key is None:
+            requested = normalize_connector(connector)
+            try:
+                actives = [normalize_connector(c) for c in app.cfg.active_connectors()]
+            except Exception:  # noqa: BLE001 — treat an unreadable roster as empty.
+                actives = []
+            conns = getattr(gc, "connectors", None) or {}
+            if not conns and requested in actives:
+                # Single-connector install: an override block for the one
+                # active connector keeps the active set unchanged.
+                connector_key = requested
+            else:
+                connector_key = requested
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    scope=scope,
+                    message=(
+                        f"{connector!r} is not an active connector here "
+                        f"(active: {', '.join(actives) or 'none'}); nothing was changed."
+                    ),
+                )
+
+    if clear:
+        block = (getattr(gc, "connectors", None) or {}).get(connector_key)
+        previous = (getattr(block, "rule_pack_dir", "") or "").strip() if block is not None else ""
+        fallback = policy_catalog.global_pack(app.cfg)
+        if not previous:
+            _finish(
+                ok=True,
+                exit_code=0,
+                scope=scope,
+                pack_name=fallback.pack,
+                path=fallback.path,
+                message=(
+                    f"{_connector_label(connector_key)} has no rule-pack override; it already uses the global pack."
+                ),
+            )
+            return
+        _preflight_config_write(app)
+        block.rule_pack_dir = ""
+        _save_use_pack(app, _finish, scope)
+        if app.logger:
+            app.logger.log_action("guardrail-use-pack", "config", f"connector={connector_key} cleared=true")
+        _finish(
+            ok=True,
+            exit_code=0,
+            scope=scope,
+            pack_name=fallback.pack,
+            path=fallback.path,
+            message=(
+                f"{_connector_label(connector_key)} now uses the global rule pack "
+                f"'{fallback.pack}' ({fallback.path})."
+            ),
+        )
+        return
+
+    # Resolve PACK -> (name, directory, kind).
+    raw = (pack or "").strip()
+    if raw in policy_catalog.RULE_PACK_PRESETS:
+        path = policy_catalog.preset_pack_dir(app.cfg, raw)
+        pack_name, kind = raw, "preset"
+    else:
+        candidate = policy_catalog.normalize_pack_path(raw)
+        if not os.path.isdir(candidate):
+            named = [
+                p for p in policy_catalog.discover_rule_packs(app.cfg) if p.name == raw and os.path.isdir(p.path)
+            ]
+            if not named or os.sep in raw or (os.altsep and os.altsep in raw):
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    scope=scope,
+                    pack_name=raw,
+                    path=candidate,
+                    message=(
+                        f"No rule pack {raw!r}: not a preset (default, strict, permissive) "
+                        "and not an existing directory. Nothing was changed."
+                    ),
+                )
+            candidate = named[0].path
+        path = candidate
+        pack_name, kind = policy_catalog.pack_name_for_path(app.cfg, path)
+
+    if kind == "preset" and not os.path.isdir(path):
+        _finish(
+            ok=False,
+            exit_code=1,
+            scope=scope,
+            pack_name=pack_name,
+            path=path,
+            message=f"The '{pack_name}' preset isn't installed at {path}; run defenseclaw init. Nothing was changed.",
+        )
+
+    validation: dict | None = None
+    warning = ""
+    if not no_validate:
+        try:
+            result = rulepack_validation.validate_rule_pack(path)
+        except rulepack_validation.RulePackValidationBridgeError as exc:
+            validation = rulepack_validation.bridge_error_wire(exc)
+            if kind != "preset":
+                _finish(
+                    ok=False,
+                    exit_code=2,
+                    scope=scope,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=(
+                        f"Can't validate {path} ({exc}). Nothing was changed; "
+                        "pass --no-validate to use it anyway."
+                    ),
+                )
+            warning = f"Couldn't validate the built-in '{pack_name}' pack ({exc}); using it anyway."
+        else:
+            validation = result.to_wire_dict()
+            if not result.valid:
+                issue = result.error
+                detail = f": {issue.code} at {issue.path}: {issue.reason}" if issue is not None else ""
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    scope=scope,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=f"Rule pack {path} is invalid{detail}. Nothing was changed.",
+                )
+
+    _preflight_config_write(app)
+    cleared: list[str] = []
+    if connector_key is None:
+        gc.rule_pack_dir = path
+        for name, block in sorted((getattr(gc, "connectors", None) or {}).items()):
+            if (getattr(block, "rule_pack_dir", "") or "").strip():
+                block.rule_pack_dir = ""
+                cleared.append(name)
+        message = f"All connectors now use the '{pack_name}' rule pack ({path})."
+        if cleared:
+            message += " Removed per-connector overrides for: " + ", ".join(cleared) + "."
+    else:
+        conns = getattr(gc, "connectors", None)
+        if conns is None:
+            conns = {}
+            gc.connectors = conns
+        block = conns.get(connector_key)
+        if block is None:
+            from defenseclaw.config import PerConnectorGuardrailConfig
+
+            block = PerConnectorGuardrailConfig()
+            conns[connector_key] = block
+        block.rule_pack_dir = path
+        message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack ({path})."
+
+    _save_use_pack(app, _finish, scope)
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-use-pack",
+            "config",
+            f"scope={scope} connector={connector_key or ''} pack={pack_name} cleared={','.join(cleared)}",
+        )
+    _finish(
+        ok=True,
+        exit_code=0,
+        scope=scope,
+        pack_name=pack_name,
+        path=path,
+        cleared=cleared,
+        validation=validation,
+        warning=warning,
+        message=message + " The running gateway applies it automatically.",
+    )
+
+
+def _save_use_pack(app: AppContext, finish, scope: str) -> None:
+    try:
+        app.cfg.save()
+    except (OSError, ValueError) as exc:
+        finish(ok=False, exit_code=1, scope=scope, message=f"Failed to save config: {exc}")
+
+
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The
 # judge is opt-in per hook connector via
 # ``guardrail.judge.hook_connectors`` — ``guardrail judge

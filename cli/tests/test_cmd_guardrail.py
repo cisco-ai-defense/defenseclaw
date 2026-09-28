@@ -1333,6 +1333,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "block-message",
                 "judge",
                 "list-packs",
+                "use-pack",
                 "validate-pack",
             },
         )
