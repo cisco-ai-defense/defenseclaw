@@ -114,10 +114,24 @@ DefenseClaw proxy never records URL paths. Blocked decisions default to
 MEDIUM, allowed ones to INFO. Each record also increments
 `defenseclaw.egress.events`.
 
+OpenShell's denials are recorded as they come (decision code
+`SANDBOX_EGRESS_OPENSHELL_DENIED`), including the connections it closes on a
+policy reload ("policy generation is stale") and the denials of this
+install's own ingress and egress ports; those two are not counted in the
+sandbox's blocked requests and are not shown as blocks on the activity feed.
+A denied connection to a host port is recorded with `server.address`
+`host.openshell.internal`, not OpenShell's synthetic address. A sandbox
+whose policy turned its web egress off while it ran is refused by the proxy
+with category `egress_off` (decision code `SANDBOX_EGRESS_EGRESS_OFF`).
+
 ### Approvals
 
 A rare ask: an OpenShell draft proposal (`defenseclaw.sandbox.approval.kind`
-`network_rule`) or a host-port consent (`host_port`). Both stages carry
+`network_rule`) or a host-port consent (`host_port`). OpenShell drafts no
+proposal for `host.openshell.internal`, so the manager raises the host-port
+ask of a port the run declared with `--host-port` itself, on the sandbox's
+first denied connection to it; approving it adds a policy rule (reason code
+`approval`). Both stages carry
 `defenseclaw.approval.id`, the destination as `server.address` and
 `server.port`, `defenseclaw.approval.dangerous` for triage-classified risky
 reach (private, IP-literal or credentialed destinations), and a bounded

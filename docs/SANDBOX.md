@@ -304,7 +304,12 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   `sandbox status` shows the posture the sandbox runs under now, and warns
   when it differs from the one it was created with, or when the policy now
   wants a copy of a project the sandbox mounts live (the mount stays until
-  the sandbox stops; it cannot start again).
+  the sandbox stops; it cannot start again). Its violations are the clamps
+  the current configuration applies, not the create-time ones. `yolo` and
+  `launch.yolo` are the next launch's skip-permissions mode; `session_yolo`
+  is the one the running session was launched with, and a warning says when
+  the session still runs in skip-permissions mode after the policy turned it
+  off (or uses a harness the policy no longer allows) until it ends.
 - A proposal's `allowed_ips` are judged as whole ranges against the same
   guard (`packs.Effective.AllowedIPReach`), because with `allowed_ips` set
   OpenShell skips its own private-address check for the rule and the name
@@ -473,6 +478,17 @@ attributes traffic to a sandbox and rate-limits it; it grants nothing the
 sandbox does not already have. A request without a credential gets a 407
 challenge; a wrong one also records an `auth_failed` event.
 
+A sandbox whose policy turns its web egress off while it runs (the deny
+network mode, as an organization's required `strict` pack or a raised
+`min_profile` sets, or a policy that no longer resolves) keeps its
+credential, suspended (`CredentialStore.Suspend`): the proxy answers its
+requests, and ends its open tunnels, with a 403 whose body has category
+`egress_off` and names the reason, for example "your organization's required
+sandbox pack (strict) turns web egress off for this sandbox
+(openshell.admin.required_pack)", instead of the 407 an unknown credential
+gets. The feed says so once per sandbox (`egress.blocked`, reason
+`egress_off`). A sandbox created with the deny mode has no proxy at all.
+
 The credential's principal also carries the sandbox's own `Decider`
 (`Principal.Decider`). The manager builds it from that sandbox's resolved
 pack and admin policy (`packs.Effective.EgressDecider`) and its unblocks. One
@@ -493,7 +509,8 @@ configuration no longer accepts one of its run flags. The manager does not
 keep serving it with the decider of its last good policy, because that
 decider holds the administrator's lists as they were then. Instead:
 
-- its proxy credential is revoked, so the proxy refuses the sandbox (407);
+- its proxy credential is suspended, so the proxy refuses the sandbox with a
+  403 that says the policy cannot be resolved;
 - triage leaves its proposals pending, and approvals report the error;
 - each reconcile judges its approved OpenShell rules by the organization's
   policy alone: the administrator's constraints and DefenseClaw's own, under
@@ -578,6 +595,14 @@ that decides wins:
 
 `Decision.Unblockable`, the 403 body's `unblockable` and `how_to_unblock`,
 blocked events and the feed's unblock action all follow steps 6 and 8.
+
+`sandbox unblock` refuses with the reason that applies, checked in this
+order: a host on the administrator's lists or the block list (only the
+list's owner opens it), this machine and what only it reaches (the refusal
+names `--host-port`), a sandbox without the proxy (`strict`: its direct
+connection requests ask instead, `defenseclaw sandbox approvals`), and only
+then `openshell.admin.allow_unblock: false`. A host the sandbox's policy
+already lets it reach is "not blocked".
 
 Host names are resolved on the proxy side as fully qualified names, never
 through the host's search domains. Every DNS answer passes the SSRF policy
@@ -904,7 +929,11 @@ feed. It keeps it too when it cannot compare the folder with the snapshot.
 `--no-snapshot` always keeps the previous one.
 
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
-preview mode. In a git project it:
+preview mode. A stop of a ready sandbox first sends SIGTERM to the harness's
+processes (found by the install root their executable or script lies under)
+and waits up to eight seconds for them to exit, so the harness ends its
+session as after `/exit` and its `SessionEnd` hook reaches DefenseClaw; the
+stop goes ahead whatever the sandbox answers. In a git project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;
@@ -1016,14 +1045,20 @@ The daemon therefore runs a nested-repository guard
   API), emitted as a `quarantine` `log.sandbox.workspace` record and a
   `sandbox.nested_repo` finding, and published on the activity feed, where
   the run UI, `sandbox activity` and the TUI show it. The end-of-session
-  summary lists it again.
+  summary lists it again. `git init` can recreate the `.git` the guard
+  renamed while it was still writing it: a `.git` that comes back in the
+  same folder within ten seconds is renamed too, but belongs to the same
+  detection (its `also` names), so one repository creation is one entry.
 
 So running git in the project on the host is safe while the guard runs: a
 repository the agent plants is quarantined before a host git command can use
 it. The guard runs only while the sandbox is ready. It also quarantines a
 repository you create in the folder yourself during a session (rename it
-back when you are done). Review still flags the quarantined entry, and undo
-removes it.
+back when you are done). The review shows each folder's quarantined
+repository once, as a critical entry, and leaves its files (git's sample
+hooks among them) out of the file counts, the scanners and the diff. Undo
+removes it: the restore takes its files, and undo removes the empty
+directory tree left of each quarantined name.
 
 For untrusted repositories or tasks, use copy mode. There the agent's work
 comes back as git objects in a verified bundle, which cannot carry another
@@ -1271,14 +1306,24 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
   sandbox's policy does not allow it. This is reported at once, also after
   hooks that got through. A connection OpenShell closes because the policy
   changed while it was open ("policy generation is stale"; every policy
-  reload does that) is no refusal and only counts as an attempt.
+  reload does that) is no refusal and only counts as an attempt. A
+  transparent-mapping denial (`transparent_tcp_mapping_denied`), which
+  OpenShell also answers while it republishes the host alias's mapping, is a
+  refusal only when no authenticated request follows it within 15 seconds.
 - OpenShell lets a hook connect but no authenticated request (hook, OTLP or
   notify) follows within 15 seconds: the ingress does not answer, or the
   sandbox token did not reach the hook.
-- The harness works (a model call, a local model endpoint, egress) for
-  `HookReachWindow` (30 seconds) without one authenticated hook. OTLP is no
-  sign of work: the Codex TUI exports it from its start and posts its first
-  hooks only with the first prompt.
+- The harness calls its model for `HookReachWindow` (30 seconds) without one
+  hook request reaching DefenseClaw. Only the harness's own model calls
+  count: a connection its binary makes under a provider rule
+  (`_provider_*`), or to a host port. Its start-up and onboarding traffic
+  (update checks, telemetry, downloads, through the egress proxy or around
+  it) comes before the first prompt fires a hook, so it starts no window,
+  and neither does anything in a sandbox with no harness session. OTLP is no
+  sign of work either: the Codex TUI exports it from its start and posts its
+  first hooks only with the first prompt. Since no hook was seen failing,
+  the warning then reads "No hook has reached DefenseClaw yet" (hook
+  coverage `no_hook_yet`) rather than claiming tool calls are blocked.
 
 An authenticated hook clears the flag (`hooks_restored` on the feed). The
 sandbox's hook coverage carries `unreachable`, `unreachable_reason` and
@@ -1430,7 +1475,12 @@ whose name the repository's `.codex/config.toml` also defines. Codex matches
 an allowlisted server by command only and merges a project table of the same
 name key by key, so the repository could otherwise add environment
 variables to it. The repository's own servers are listed in the create
-response's one-line notice and in `Sandbox.MCP`.
+response's one-line notice and in `Sandbox.MCP`. A server on this machine's
+loopback over HTTP whose port the run accepted with `--host-port` comes
+along, pointed at `host.openshell.internal:<port>`; it connects once you
+approve the sandbox's ask for the port. For another loopback port, the
+left-behind reason names the `--host-port` that would bring it; HTTPS servers
+on this machine stay behind (their certificates name `localhost`).
 
 Only Claude Code and Codex have per-run managed configuration
 (`connector.SandboxRunConfigProvider`). For the other harnesses the run's
@@ -1928,7 +1978,36 @@ The manager (`watch.go`) turns the records into the feed and the counts:
   synthetic=<addr>`, `Policy DNS staged unapproved name <name> …`) map the
   synthetic addresses in 198.18.0.0/15 to their names, so a later record of
   a connection to such an address names its destination;
-  `host.openshell.internal`'s address is handled as the host alias.
+  `host.openshell.internal`'s address is handled as the host alias. The host
+  alias's address and the ports its mapping covers are kept on the sandbox
+  record (`host_alias`), because a restarted daemon's watch resumes past the
+  mapping record; a synthetic address on DefenseClaw's own ingress or egress
+  port, or on a declared `--host-port`, is the host alias's too.
+- A connection OpenShell closed because the policy changed under it ("L7
+  tunnel closed before inspection because policy changed: policy generation
+  is stale"; every policy reload and provider update does that, the policy
+  still allows it and the client connects again) is audited but neither
+  counted as a blocked request nor shown as a block. Neither is a denial of
+  this install's own ingress or egress port, nor a mapping denial of a host
+  port the mapping covers (republished under the connection).
+- OpenShell drafts no proposal for a denied connection to
+  `host.openshell.internal`. The first one to a port the run declared with
+  `--host-port` becomes a DefenseClaw `host_port` ask (`sandbox approvals`,
+  the live notice), and approving it merges an
+  `allow_host_openshell_internal_<port>` rule, which opens the port. A
+  denied connection to another host port counts as blocked and gets one
+  feed line per session (reason `host_port_closed`) that names the
+  `--host-port` to run with. A rejected proposal for an address of this
+  machine says how to reach the service through a host port instead.
+- Every configuration change that moves a running sandbox's policy (pack,
+  profile, network mode, approvals, skip-permissions, project mode, the
+  organization's egress lists) puts one `sandbox.lifecycle` line on its feed
+  (reason `policy_changed`), such as "your organization's sandbox policy
+  changed: egress_block now includes example.com; applied to <name>".
+- A hook verdict that let the tool call run but flagged it (an alert, or a
+  block the event cannot enforce) is a `finding` on the feed (reason
+  `hook_finding`) with the verdict's severity; the agent reads "Allowed but
+  flagged by DefenseClaw rule …", not advice to try another approach.
 - A record from before the daemon started is a replay; its feed event
   carries `replayed: true` and the CLI adds `(while DefenseClaw was down)`.
 - The sandbox record keeps when the sandbox became ready (`ready_at`,

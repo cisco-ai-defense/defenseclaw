@@ -573,6 +573,25 @@ With the `strict` profile the proxy is off, so the sandbox has no web egress
 and nothing can be unblocked. With `allow_unblock: false`, no block can be
 unblocked.
 
+`sandbox unblock` says which of these applies, in this order: a host on your
+organization's or your own block list names that list, this machine's
+addresses name `--host-port`, a `strict` sandbox points you to its asks
+(`defenseclaw sandbox approvals`, where its direct connection requests wait
+for a one-time approval), and only then does it cite `allow_unblock: false`.
+A host the sandbox can already reach is reported as not blocked.
+
+When a configuration change moves the policy of a running sandbox (its pack,
+profile, network mode, approvals, skip-permissions, or your organization's
+egress lists), its activity feed gets one line that says what changed. If the
+change turns the sandbox's web egress off (for example
+`required_pack: strict`), the proxy answers the sandbox's requests with a
+403 that gives the reason, such as "your organization's required sandbox pack
+(strict) turns web egress off for this sandbox
+(openshell.admin.required_pack)", and the feed says so once. `sandbox status`
+shows the posture the sandbox runs under now; a session that started before
+your organization turned skip-permissions off keeps it until it ends, and
+status warns about that.
+
 The proxy also checks every address a host name resolves to when it
 connects. A name that points at this machine, link-local or metadata
 addresses is blocked. So is a name that points at a private network no allow
