@@ -366,17 +366,25 @@ func (b *Batcher) apply(ctx context.Context, sandbox string, items []Item) ([]Re
 		return failAll(items, err), nil
 	}
 	// Security-flagged chunks need the single call (the bulk call skips
-	// them); everything else lands in one revision.
+	// them); everything else lands in one revision. Of chunks naming the
+	// same rule only the first is applied: approving merges a chunk into
+	// the rule of its name, and a chunk judged before that rule existed
+	// must be judged again against it (FromChunk refuses a merge into
+	// another destination's rule), so the others wait for the next batch.
 	var bulk, single []Item
+	rules := map[string]bool{}
 	for _, it := range items {
 		c, done := a.check(draft, it)
+		rule := chunkRuleName(c)
 		switch {
 		case done:
+		case rule != "" && rules[rule]:
+			a.retry = append(a.retry, it)
 		case a.refused(it, c):
 		case c.SecurityNotes != "":
-			single = append(single, it)
+			single, rules[rule] = append(single, it), true
 		default:
-			bulk = append(bulk, it)
+			bulk, rules[rule] = append(bulk, it), true
 		}
 	}
 	if len(bulk) > 0 {
@@ -538,6 +546,15 @@ func (a *applyRun) single(draft map[string]openshell.PolicyChunk, it Item) {
 		}
 		a.result(r)
 	}
+}
+
+// chunkRuleName is the network_policies key approving c merges into
+// (FromChunk's RuleName).
+func chunkRuleName(c openshell.PolicyChunk) string {
+	if c.RuleName == "" && c.ProposedRule != nil {
+		return c.ProposedRule.Name
+	}
+	return c.RuleName
 }
 
 func failAll(items []Item, err error) []Result {

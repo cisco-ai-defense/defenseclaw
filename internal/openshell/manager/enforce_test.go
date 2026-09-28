@@ -181,6 +181,63 @@ func TestStricterPolicyRemovesAutomaticApprovals(t *testing.T) {
 	}
 }
 
+// TestAutomaticMergeTakesUserAuthority pins that an approval DefenseClaw
+// makes on its own and merges into a rule the user approved leaves the rule
+// automatic: the endpoints it added must not keep the user's approval once
+// the policy tightens. (Triage refuses a merge into another destination's
+// rule when OpenShell shows the rule; this fake shows none, which is the
+// worst case for the record.)
+func TestAutomaticMergeTakesUserAuthority(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	ctx := context.Background()
+	sb := e.create(sandboxapi.CreateRequest{Name: "merged"})
+	e.watch.waitStarted(t, sb.Name)
+	const rule = "allow_wiki_corp_443"
+	own := addChunk(e, sb.Name, chunk(rule, "wiki.corp", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	asks := waitAsks(t, e, sb.Name, 1)
+	if _, err := e.m.DecideApproval(ctx, asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the user's approval applied", func() bool { return chunkStatus(e, sb.Name, own) == "approved" })
+	eventually(t, "the user recorded as the approver", func() bool {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		return e.m.boxes[sb.Name].rec.ApprovedRules[rule] == actorOperator
+	})
+
+	// The agent names the user's rule for a public destination, which the
+	// open pack approves on its own.
+	auto := addChunk(e, sb.Name, chunk(rule, "auto.example.org", 443))
+	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	eventually(t, "the automatic approval applied", func() bool { return chunkStatus(e, sb.Name, auto) == "approved" })
+	eventually(t, "the merged rule recorded as automatic", func() bool {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		return e.m.boxes[sb.Name].rec.ApprovedRules[rule] == actorAutomatic
+	})
+	eventually(t, "the automatic approver saved", func() bool {
+		saved, errs := newRecordStore(e.dataDir).loadAll()
+		return len(errs) == 0 && len(saved) == 1 && saved[0].ApprovedRules[rule] == actorAutomatic
+	})
+
+	// A later user approval merged into it keeps it automatic.
+	e.m.mu.Lock()
+	changed := noteApprovedRule(e.m.boxes[sb.Name], rule, actorOperator)
+	e.m.mu.Unlock()
+	if changed {
+		t.Fatal("a user approval merged into an automatic rule made it the user's")
+	}
+
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.RequiredPack = "strict" })
+	e.m.refreshEgress()
+	e.m.enforceAll(ctx)
+	if hasRule(e, sb.Name, rule) {
+		t.Fatal("the rule holding an automatic approval survived the required strict pack")
+	}
+}
+
 // hold opens a CONNECT tunnel for sandbox's credential and keeps it open.
 func (lp *liveProxy) hold(t *testing.T, e *harnessEnv, sandbox, target string) (net.Conn, *bufio.Reader) {
 	t.Helper()

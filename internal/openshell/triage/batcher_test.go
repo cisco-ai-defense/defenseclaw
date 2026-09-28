@@ -502,3 +502,48 @@ func TestBatcherRechecksBeforeApplying(t *testing.T) {
 		t.Fatalf("recheck saw %v, want both chunks", seen)
 	}
 }
+
+// TestBatcherOneChunkPerRule pins that chunks naming the same rule land in
+// separate revisions: approving merges a chunk into the rule of its name,
+// so the second is checked again (Recheck) once the first one's rule
+// exists, where a merge into another destination's rule is refused.
+func TestBatcherOneChunkPerRule(t *testing.T) {
+	apply := newFakeApplier()
+	col := newCollector()
+	var mu sync.Mutex
+	var rechecked []string
+	recheck := func(_ context.Context, it Item, _ openshell.PolicyChunk) error {
+		mu.Lock()
+		rechecked = append(rechecked, it.ChunkID)
+		mu.Unlock()
+		return nil
+	}
+	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 20 * time.Millisecond, OnResult: col.add, Recheck: recheck})
+	first, second := item(apply, "box", "first"), item(apply, "box", "second")
+	apply.mu.Lock()
+	for _, id := range []string{"first", "second"} {
+		c := apply.chunks["box/"+id]
+		c.RuleName, c.ProposedRule.Name = "allow_shared_443", "allow_shared_443"
+	}
+	apply.mu.Unlock()
+	first.Digest, second.Digest = "", ""
+	b.Enqueue(first)
+	b.Enqueue(second)
+	b.Enqueue(item(apply, "box", "other"))
+	results := col.wait(t, 3)
+	for _, r := range results {
+		if r.Err != nil || r.Refused != nil || r.Stale || r.PolicyVersion == 0 {
+			t.Fatalf("result = %+v", r)
+		}
+	}
+	bulk, _ := apply.calls()
+	if len(bulk) != 2 || len(bulk[0]) != 2 || bulk[0][0] != "box/first" || bulk[0][1] != "box/other" ||
+		len(bulk[1]) != 1 || bulk[1][0] != "box/second" {
+		t.Fatalf("bulk calls = %v, want the second chunk of rule allow_shared_443 in a revision of its own", bulk)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rechecked) != 3 || rechecked[2] != "second" {
+		t.Fatalf("rechecked %v, want the second chunk checked again in its own batch", rechecked)
+	}
+}

@@ -774,9 +774,16 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 }
 
 // noteApprovedRule records who approved a triaged rule that was applied
-// (record.ApprovedRules): the user's approval of a rule stays with it,
-// whatever approves the rule later. It reports whether the record changed.
-// Callers hold Manager.mu and save the record after releasing it.
+// (record.ApprovedRules). A rule is the user's only while the user approved
+// everything in it: approving merges a chunk into the rule of its name, so
+// once DefenseClaw merged an approval of its own into a rule (another port
+// or binary for the destination, before or after the user's), the rule is
+// recorded as automatic and held to what the policy still approves on its
+// own (enforceApprovedRules), and a user approval merged into an automatic
+// rule leaves it automatic. Otherwise the endpoints DefenseClaw added
+// would keep the user's authority after the policy tightened. It reports
+// whether the record changed. Callers hold Manager.mu and save the record
+// after releasing it.
 func noteApprovedRule(b *box, rule, actor string) bool {
 	if rule == "" {
 		return false
@@ -785,7 +792,7 @@ func noteApprovedRule(b *box, rule, actor string) bool {
 	if actor == actorOperator {
 		origin = actorOperator
 	}
-	if cur := b.rec.ApprovedRules[rule]; cur == origin || cur == actorOperator {
+	if cur, ok := b.rec.ApprovedRules[rule]; ok && (cur == origin || cur == actorAutomatic) {
 		return false
 	}
 	next := maps.Clone(b.rec.ApprovedRules)

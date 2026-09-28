@@ -238,6 +238,12 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   it opens every endpoint, while an ask shows one destination, so each host
   must be its own proposal. An ask for several ports of one host names them
   all.
+- Approving merges a proposal into the rule of its name, and a rule name is
+  only a key: nothing ties `allow_<host>_<port>` to its host. A proposal
+  whose rule already exists for another host (in OpenShell's current or
+  candidate policy) is rejected, and the batcher applies one proposal per
+  rule name in each policy revision, so the next one is checked against
+  the rule the first one created.
 - What the proxy refuses and no unblock lifts is rejected: the
   administrator's lists, the block list, the blocklist feed, this machine,
   link-local and metadata addresses.
@@ -278,6 +284,10 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   taken off the allow list, an unblock taken back, or a port that is no
   longer an egress port. The agent's next direct connection asks you. Rules
   you approved yourself stay while the policy still lets you approve them.
+  A rule counts as yours only while you approved everything in it: once
+  DefenseClaw merges an approval of its own into it (another port or binary
+  for the destination), before or after yours, it is recorded as approved
+  on its own.
   `sandbox status` shows the posture the sandbox runs under now, and warns
   when it differs from the one it was created with, or when the policy now
   wants a copy of a project the sandbox mounts live (the mount stays until

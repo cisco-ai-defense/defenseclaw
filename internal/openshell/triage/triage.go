@@ -252,9 +252,33 @@ func FromChunk(sandbox string, c openshell.PolicyChunk) Proposal {
 					break
 				}
 			}
+			p.Unsupported = appendForeignHosts(p, existing)
+		}
+	}
+	// The candidate policy shows the rule as approving would leave it.
+	if c.CandidateEffectivePolicy != nil && p.RuleName != "" {
+		if merged, ok := c.CandidateEffectivePolicy.NetworkPolicies[p.RuleName]; ok {
+			p.Unsupported = appendForeignHosts(p, merged)
 		}
 	}
 	return p
+}
+
+// appendForeignHosts adds to p.Unsupported a merge into rule, the rule of
+// p's name, that holds a destination host other than p's own. A rule name
+// is only a map key: nothing ties allow_<host>_<port> to its host, so an
+// agent can name another destination's rule. The merged rule would open
+// p's destination under the rule and the approval (the user's, say) that
+// admitted the other host, which the ask for p never showed.
+func appendForeignHosts(p Proposal, rule v1.NetworkPolicyRule) []string {
+	hosts := destinationHosts(p)
+	out := p.Unsupported
+	for _, ep := range rule.Endpoints {
+		if host := NormalizeHost(ep.Host); !slices.Contains(hosts, host) {
+			out = appendUnique(out, "a merge into the existing rule "+p.RuleName+" for "+strconv.Quote(truncate(host, 80)))
+		}
+	}
+	return out
 }
 
 // endpointFeatures names the endpoint settings triage never approves. A
@@ -578,7 +602,8 @@ var mechanisticRuleName = regexp.MustCompile(`^allow_[a-z0-9][a-z0-9_.-]{0,200}$
 // judgeRule refuses proposals whose rule is not a plain host-and-port
 // allow: approving merges the proposal into network_policies[RuleName], so
 // a reserved or foreign name would add endpoints to DefenseClaw's egress
-// relay or a provider rule that injects credentials.
+// relay, a provider rule that injects credentials, or the rule of another
+// destination (FromChunk lists those merges in Unsupported).
 func judgeRule(p Proposal) (Decision, bool) {
 	d := Decision{Kind: KindNetworkRule}
 	name := p.RuleName

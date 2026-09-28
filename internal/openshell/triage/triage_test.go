@@ -427,6 +427,19 @@ func TestClassifyRuleShape(t *testing.T) {
 			c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{
 				{Host: "api.anthropic.com", Port: 443, Protocol: "rest", ProviderCredentialed: true}}}
 		},
+		// A rule name is only a map key: an agent can name the rule the
+		// user approved for another host, and the merged rule would carry
+		// the user's approval to this one.
+		"merge into another host's rule": func(c *openshell.PolicyChunk) {
+			c.RuleName, c.ProposedRule.Name = ruleName("wiki.intranet.example", 443), ruleName("wiki.intranet.example", 443)
+			c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{
+				{Host: "wiki.intranet.example", Port: 443}}}
+		},
+		"candidate merges another host": func(c *openshell.PolicyChunk) {
+			c.RuleName, c.ProposedRule.Name = ruleName("wiki.intranet.example", 443), ruleName("wiki.intranet.example", 443)
+			c.CandidateEffectivePolicy = &v1.SandboxPolicy{NetworkPolicies: map[string]v1.NetworkPolicyRule{c.RuleName: {
+				Endpoints: []v1.PolicyNetworkEndpoint{{Host: "wiki.intranet.example", Port: 443}, {Host: "www.example.net", Port: 443}}}}}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := liveChunk("www.example.net", 443)
@@ -437,9 +450,12 @@ func TestClassifyRuleShape(t *testing.T) {
 			}
 		})
 	}
-	// Merging into an earlier plain approval of the same rule is fine.
+	// Merging into an earlier plain approval of the same rule, for the same
+	// host, is fine; the candidate shows the merged rule.
 	c := liveChunk("www.example.net", 443)
-	c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{{Host: "www.example.net", Port: 443}}}
+	c.CurrentEffectivePolicy.NetworkPolicies[c.RuleName] = v1.NetworkPolicyRule{Endpoints: []v1.PolicyNetworkEndpoint{{Host: "WWW.example.net.", Port: 80}}}
+	c.CandidateEffectivePolicy = &v1.SandboxPolicy{NetworkPolicies: map[string]v1.NetworkPolicyRule{c.RuleName: {
+		Endpoints: []v1.PolicyNetworkEndpoint{{Host: "www.example.net", Port: 80}, {Host: "www.example.net", Port: 443}}}}}
 	if got := Classify(context.Background(), FromChunk("box", c), pol); got.Verdict != Approve {
 		t.Fatalf("merge into a plain rule = %+v", got)
 	}
