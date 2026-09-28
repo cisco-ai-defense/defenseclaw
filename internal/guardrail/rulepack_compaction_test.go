@@ -74,6 +74,7 @@ func TestCompactionRulePackValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defaultText := strings.ReplaceAll(string(defaultYAML), "\r\n", "\n")
 	embedded := mustLoadRulePack(t, "").Compaction
 	tests := []struct {
 		name string
@@ -87,11 +88,11 @@ func TestCompactionRulePackValidation(t *testing.T) {
 		{"oversize regex", "version: 1\nenabled: false\nrole_header: '" + strings.Repeat("a", maxRegexBytes+1) + "'\n", "pattern_size_limit"},
 		{"wrong enabled type", "version: 1\nenabled: 'false'\n", "yaml_invalid"},
 		{"unknown key", "version: 1\nenabled: false\nunsupported: '.*'\n", "yaml_invalid"},
-		{"blank enabled pattern", strings.Replace(string(defaultYAML), "role_header: |-\n  "+embedded.RoleHeader, "role_header: ''", 1), "validation"},
-		{"missing proof pattern", strings.Replace(string(defaultYAML), "approval: |-\n  "+embedded.Approval+"\n", "", 1), "validation"},
-		{"broadened approval", strings.Replace(string(defaultYAML), "approval: |-\n  "+embedded.Approval, "approval: '.*'", 1), "validation"},
-		{"broadened no-ask", strings.Replace(string(defaultYAML), "no_ask: |-\n  "+embedded.NoAsk, "no_ask: '.*'", 1), "validation"},
-		{"broadened command", strings.Replace(string(defaultYAML), "curl_pipe: |-\n  "+embedded.CurlPipe, "curl_pipe: '.*'", 1), "validation"},
+		{"blank enabled pattern", strings.Replace(defaultText, "role_header: |-\n  "+embedded.RoleHeader, "role_header: ''", 1), "validation"},
+		{"missing proof pattern", strings.Replace(defaultText, "approval: |-\n  "+embedded.Approval+"\n", "", 1), "validation"},
+		{"broadened approval", strings.Replace(defaultText, "approval: |-\n  "+embedded.Approval, "approval: '.*'", 1), "validation"},
+		{"broadened no-ask", strings.Replace(defaultText, "no_ask: |-\n  "+embedded.NoAsk, "no_ask: '.*'", 1), "validation"},
+		{"broadened command", strings.Replace(defaultText, "curl_pipe: |-\n  "+embedded.CurlPipe, "curl_pipe: '.*'", 1), "validation"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -111,9 +112,10 @@ func TestCompactionRulePackWarningRegexCanBeCustomized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defaultText := strings.ReplaceAll(string(defaultYAML), "\r\n", "\n")
 	embedded := mustLoadRulePack(t, "").Compaction
-	updated := strings.Replace(string(defaultYAML), "avoidance: |-\n  "+embedded.Avoidance, "avoidance: 'specific-warning-claim'", 1)
-	if updated == string(defaultYAML) {
+	updated := strings.Replace(defaultText, "avoidance: |-\n  "+embedded.Avoidance, "avoidance: 'specific-warning-claim'", 1)
+	if updated == defaultText {
 		t.Fatal("failed to prepare custom warning fixture")
 	}
 	dir := t.TempDir()
