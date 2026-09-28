@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
@@ -874,7 +875,8 @@ var reviewFloor = []string{
 	"**/.codex/**", "AGENTS.md", "AGENTS.override.md",
 	"**/.cursor/**", ".cursorrules",
 	"**/.gemini/**", "GEMINI.md",
-	"**/.windsurf/**", ".windsurfrules",
+	// Devin Desktop still reads its pre-rename project rules.
+	"**/" + legacyconnector.InventoryDotDirs[0] + "/**", "." + legacyconnector.VendorToken + "rules",
 	"**/.kiro/**", "**/.amazonq/**", "**/.continue/**", "**/.roo/**", ".roomodes",
 	".clinerules", "**/.clinerules/**", "**/.opencode/**", "opencode.json", "opencode.jsonc", ".aider.conf.yml",
 	"**/.devin/**", "**/.openhands/**", "**/.omnigent/**",

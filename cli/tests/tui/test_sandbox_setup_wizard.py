@@ -283,7 +283,7 @@ def test_harnesses_follow_the_organization_allowlist() -> None:
     assert "--harness claudecode" not in " ".join(build_wizard_args(SetupWizard.SANDBOX, fields))
     assert "allows: codex" in next(field for field in fields if field.label == "Harnesses").hint
 
-    model = SetupPanelModel({"openshell": {"admin": {"allowed_harnesses": ["geminicli"]}}}, os_name="linux")
+    model = SetupPanelModel({"openshell": {"admin": {"allowed_harnesses": ["openclaw"]}}}, os_name="linux")
     model.open_goal_menu(SetupWizard.SANDBOX)
     assert ADMIN_POLICY_MESSAGE in _row(model, "Harnesses").value
     assert model.submit_wizard_form().intent is None
@@ -515,7 +515,7 @@ def test_edits_are_written_with_the_go_types() -> None:
         ("openshell.resources.memory", "string", "4Gi", True),
         ("openshell.resources.memory", "string", "4 gigs", False),
         ("openshell.harnesses", "string", "claudecode,codex", True),
-        ("openshell.harnesses", "string", "geminicli", False),
+        ("openshell.harnesses", "string", "openclaw", False),
         ("openshell.workdir.git_depth", "int", "-1", False),
     ],
 )

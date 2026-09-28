@@ -241,14 +241,12 @@ func (w Workdir) clone() Workdir {
 }
 
 // CanonicalConnector lowercases a connector name and folds the aliases the
-// gateway accepts for Claude Code and Gemini CLI.
+// gateway accepts for Claude Code.
 func CanonicalConnector(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	switch name {
 	case "claude", "claude-code", "claude_code":
 		return "claudecode"
-	case "gemini", "gemini-cli", "gemini_cli":
-		return "geminicli"
 	default:
 		return name
 	}

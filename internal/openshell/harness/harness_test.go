@@ -103,9 +103,8 @@ func TestRegistry(t *testing.T) {
 			t.Fatalf("%s login %#v does not run through %s", name, login, spec.LauncherPath())
 		}
 	}
-	// Gemini CLI is out of scope for sandboxes (plan decision); OpenClaw
-	// and ZeptoClaw use the shims subprocess policy.
-	for _, name := range []string{"geminicli", "openclaw", "zeptoclaw"} {
+	// OpenClaw and ZeptoClaw use the shims subprocess policy.
+	for _, name := range []string{"openclaw", "zeptoclaw"} {
 		if _, ok := Get(name); ok {
 			t.Fatalf("%s must not be registered as a sandbox harness", name)
 		}

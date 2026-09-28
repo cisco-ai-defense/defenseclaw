@@ -197,7 +197,7 @@ func TestBindingSpecRoundTrip(t *testing.T) {
 
 func TestCanonicalConnector(t *testing.T) {
 	for in, want := range map[string]string{
-		"claude": "claudecode", "Claude_Code": "claudecode", "gemini-cli": "geminicli",
+		"claude": "claudecode", "Claude_Code": "claudecode", "claude-code": "claudecode",
 		" codex ": "codex", "cursor": "cursor",
 	} {
 		if got := CanonicalConnector(in); got != want {
