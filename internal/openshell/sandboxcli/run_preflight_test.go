@@ -314,6 +314,58 @@ func TestRunAnswersVersionAndHelpWithoutASandbox(t *testing.T) {
 	}
 }
 
+// `claude mcp add ...` through the shell wrapper manages Claude Code on
+// this machine: it runs with the installed harness, with no sandbox (a
+// first one would build the image) and no review; `claude mcp serve`, an
+// agent, and everything else still run in the sandbox.
+func TestRunManagesTheHostHarnessWithoutASandbox(t *testing.T) {
+	for _, args := range [][]string{{"mcp", "add", "dc-marker", "--", "echo"}, {"mcp", "list"}, {"mcp"}, {"config", "get", "theme"}, {"update"}} {
+		ta := newTestApp(t, "")
+		ta.Environ = func() []string { return []string{"PATH=/usr/bin"} }
+		if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Args: args}); err != nil {
+			t.Fatalf("%q: %v", args, err)
+		}
+		want := append([]string{"/usr/bin/claude", "claude"}, args...)
+		if len(ta.execs) != 1 || !slices.Equal(ta.execs[0], want) {
+			t.Fatalf("%q: execs = %q", args, ta.execs)
+		}
+		if paths := ta.daemon.paths(); len(paths) != 0 {
+			t.Fatalf("%q reached the daemon: %v", args, paths)
+		}
+		if !strings.Contains(ta.err.String(), "manages Claude Code on this machine, so it runs outside the sandbox") {
+			t.Fatalf("%q: stderr = %q", args, ta.err.String())
+		}
+	}
+	if !hostArgs(harnessSpec(t, "codex"), RunOptions{Args: []string{"login", "--with-api-key"}}) {
+		t.Fatal("codex login is not a host command")
+	}
+	for _, o := range []RunOptions{
+		{Args: []string{"mcp", "serve"}}, {Args: []string{"-p", "mcp list"}}, {Args: []string{"mcp", "list"}, Prompt: "x"},
+		{Args: []string{"fix", "the", "tests"}},
+	} {
+		if hostArgs(harnessSpec(t, "claudecode"), o) {
+			t.Errorf("hostArgs(%+v) = true; it must run in the sandbox", o)
+		}
+	}
+
+	// Not installed here: say where the harness is.
+	ta := newTestApp(t, "")
+	ta.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	err := ta.Run(context.Background(), RunOptions{Harness: "claude", Args: []string{"mcp", "list"}})
+	if err == nil || !strings.Contains(err.Error(), "manages Claude Code on this machine, where it is not installed") || len(ta.daemon.paths()) != 0 {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+func harnessSpec(t *testing.T, name string) *harness.Spec {
+	t.Helper()
+	spec, ok := harness.Get(name)
+	if !ok {
+		t.Fatalf("no harness %s", name)
+	}
+	return spec
+}
+
 // Detached runs of other harnesses keep their own output (no stream-json).
 func TestDetachedCodexKeepsItsArguments(t *testing.T) {
 	ta := newTestApp(t, "")

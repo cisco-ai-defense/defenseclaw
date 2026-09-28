@@ -101,6 +101,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	if infoArgs(o) {
 		return a.runInfo(spec, o.Args)
 	}
+	if hostArgs(spec, o) {
+		return a.runHost(spec, o.Args)
+	}
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}
@@ -430,6 +433,58 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	a.println(latest.HarnessVersion + " (" + spec.DisplayName + ", in the DefenseClaw sandbox image)")
 	return nil
+}
+
+// hostSubcommands are the harness subcommands (with the second words they
+// take, when they have some) that manage the harness installed on this
+// machine: its settings, MCP server list, plugins, login and updates. They
+// start no agent, and in a sandbox they would change only the sandbox's
+// copy (after creating one, image build included). Anything not listed,
+// `claude mcp serve` (Claude Code as an MCP server) among it, runs in the
+// sandbox.
+var hostSubcommands = map[string]map[string][]string{
+	"claudecode": {
+		"config": nil, "plugin": nil, "setup-token": nil, "doctor": nil, "update": nil, "install": nil, "migrate-installer": nil,
+		"mcp": {"add", "add-json", "add-from-claude-desktop", "get", "list", "remove", "reset-project-choices"},
+	},
+	"codex": {
+		"login": nil, "logout": nil, "completion": nil,
+		"mcp": {"add", "get", "list", "remove", "login", "logout"},
+	},
+}
+
+// hostArgs reports an invocation of one of spec's hostSubcommands (the
+// wrapper's `claude mcp add ...`).
+func hostArgs(spec *harness.Spec, o RunOptions) bool {
+	if len(o.Args) == 0 || o.Prompt != "" || o.Detach {
+		return false
+	}
+	second, ok := hostSubcommands[spec.Name][o.Args[0]]
+	if !ok {
+		return false
+	}
+	if second == nil || len(o.Args) == 1 {
+		// `claude mcp` alone prints its help.
+		return true
+	}
+	return o.Args[1] == "--help" || o.Args[1] == "-h" || slices.Contains(second, o.Args[1])
+}
+
+// runHost runs a hostSubcommands invocation with the harness installed on
+// this machine, the way the user would without the wrapper.
+func (a *App) runHost(spec *harness.Spec, args []string) error {
+	what := "`" + spec.Command + " " + args[0] + "`"
+	if a.Getenv(wrapper.EnvBypass) == "" {
+		if path, err := a.LookPath(spec.Command); err == nil {
+			fmt.Fprintln(a.IO.Err, terminalText(a.dim(what+" manages "+spec.DisplayName+" on this machine, so it runs outside the sandbox")))
+			// A command named like the harness that calls the sandbox again
+			// runs the harness directly.
+			env := append(a.Environ(), wrapper.EnvBypass+"=1")
+			return a.ExecProcess(path, append([]string{spec.Command}, args...), env)
+		}
+	}
+	return fmt.Errorf("%s manages %s on this machine, where it is not installed; a sandbox has its own copy: "+
+		"`%s connect NAME --shell` opens a shell in one", what, spec.DisplayName, CommandName)
 }
 
 // runNative execs the harness directly inside a sandbox.
