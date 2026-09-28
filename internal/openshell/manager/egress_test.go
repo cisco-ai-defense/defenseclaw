@@ -612,9 +612,11 @@ func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	}
 	sink.EgressEvent(egress.Event{Kind: egress.EventLargeUpload, Time: time.Now(), SandboxName: a.Name, Host: "files.example.net", BytesUp: 30 << 20})
 	sink.EgressEvent(blockedEvent(b.Name, "other.example"))
+	// The folded refusal is recorded before it is published to the feed.
 	eventually(t, "the other sandbox's refusal, the finding and the folded repeats", func() bool {
 		return len(where(&e.tel.mu, &e.tel.findings, nil)) == 1 && egressRecords(e, b.Name, nil) == 1 &&
-			egressRecords(e, a.Name, func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "9998 more like it") }) == 1
+			egressRecords(e, a.Name, func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "9998 more like it") }) == 1 &&
+			len(e.events(a.Name, sandboxapi.ActivityEgressBlocked, "")) >= 2
 	})
 	if n, feed := egressRecords(e, a.Name, nil), len(e.events(a.Name, sandboxapi.ActivityEgressBlocked, "")); n != 2 || feed != 2 {
 		t.Fatalf("%d egress records and %d feed events for 10000 identical refusals, want 2 each", n, feed)
