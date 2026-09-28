@@ -640,17 +640,16 @@ class PoliciesPanelModel:
         policy = self.selected_policy()
         if policy is None:
             return ""
+        # Four lines: the detail pane shares 24 rows with the table.
+        kind = "built-in" if policy.builtin else "custom"
+        effects = " · ".join(policy_side_effects(policy))
         lines = [
-            f"Policy · {policy.name}{' (active)' if policy.active else ''}",
-            f"description: {policy.description or '-'}",
-            f"kind: {'built-in' if policy.builtin else 'custom'} · {policy.path}",
-            f"guardrail: block {policy.block_at} · alert {policy.alert_at}",
-            f"installs blocked at: {policy.install_block_at}",
-            f"firewall default: {policy.firewall_default or 'unchanged'} · human approval: {_hilt_label(policy.hilt)}",
+            f"Policy · {policy.name} ({kind}{', active' if policy.active else ''})",
+            f"block {policy.block_at} · alert {policy.alert_at} · installs blocked at {policy.install_block_at} · "
+            f"firewall {policy.firewall_default or 'unchanged'} · approval {_hilt_label(policy.hilt)}",
+            policy.description or "-",
+            policy.path + (f"  (activating it: {effects})" if effects else ""),
         ]
-        effects = policy_side_effects(policy)
-        if effects:
-            lines.append("activating it: " + " · ".join(effects))
         return "\n".join(lines)
 
     # ---- internals --------------------------------------------------------
