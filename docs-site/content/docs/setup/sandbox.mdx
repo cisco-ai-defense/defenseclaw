@@ -283,7 +283,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
 | `Sandbox myapp-7f3a · …` | The sandbox name (`<folder>-<random>`, the folder name cut to fit OpenShell's 19 characters, unless you pass `--name`), the harness, and the permissions mode. `skip-permissions ON` means the harness runs with its own prompts off (`--dangerously-skip-permissions` for Claude Code, `--dangerously-bypass-approvals-and-sandbox` for Codex). With `--safe` it reads `skip-permissions OFF (harness prompts kept)`. |
 | `network: …` | `open + blocklist` for the default `open` profile, `allowlist (balanced)`, or `provider hosts only (strict)`. |
 | `Project` | Your folder and where it appears inside (`/work/<folder>`). `(live)` means the agent edits your folder directly. The snapshot is what undo restores; a resumed sandbox that kept an earlier undo point says `undo point from 14:02 kept` instead. A copy-mode run shows `(copy)` and the `pull` command instead. |
-| `Hidden` | Secret files that appear empty inside: `.env`, keys and certificates, cloud and Docker credentials, and similar. Committed templates such as `.env.example` stay visible. `--unmask PATH` shares one. |
+| `Hidden` | Secret files that appear empty inside: `.env`, keys and certificates, cloud and Docker credentials, and similar, also directly inside dependency and cache folders (Terraform keeps backend credentials in `.terraform/terraform.tfstate`). Committed templates such as `.env.example` stay visible. `--unmask PATH` shares one. The folders above a hidden or protected file cannot be renamed inside the sandbox. |
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook or a config setting that would run on your machine the next time you use git. |
 | `Not visible` | Nothing else on your machine is in the sandbox. |
 | `Context` | Extra reference folders you added with `--context`, read-only. |
@@ -632,6 +632,11 @@ starts, so the review flags the ones the session added or changed, and undo
 names each directory it cannot restore with what to do about it: delete
 `node_modules/` and reinstall, or recreate `.venv/`. Undo deletes what the
 session wrote to Python bytecode caches, which Python rebuilds.
+
+The agent runs as you, so it can take read permission away from a folder.
+Nothing can look inside such a folder, yet git still finds a repository in it
+by path, so the review flags it and undo refuses until you make it readable
+again (`chmod u+rwx FOLDER`).
 
 | Flag | Effect |
 | --- | --- |
@@ -1092,7 +1097,8 @@ section, and skips them while `openshell.enabled` is off.
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
-| `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, and credential folders such as `~/.ssh`. |
+| `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, credential folders such as `~/.ssh`, and agent homes such as `~/.claude` and `~/.codex`, whose settings and hooks run on your machine. |
+| `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
 | `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |
 | `the folder (for its undo snapshot) is …, above the 1.0 GiB limit` | A folder without git has a 1 GiB snapshot cap. Make it a git repository, or run with `--copy`, or with `--no-snapshot` (no undo). |
 | `blocked by your organization's DefenseClaw policy: <key>` | An `openshell.admin` limit refused the setting. `defenseclaw sandbox policy explain` shows which one. |

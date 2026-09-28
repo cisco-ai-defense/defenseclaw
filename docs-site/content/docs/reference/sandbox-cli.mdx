@@ -238,7 +238,8 @@ block up. To skip the sandbox for one call, run the command with
 `DEFENSECLAW_NO_SANDBOX=1` set. Inside a sandbox the function runs the harness
 directly. The bash and zsh block first drops an alias of the same name (Claude
 Code's installer adds one), which would otherwise keep running the harness
-outside the sandbox. `--version`, `--help` and the harness's own management
+outside the sandbox, and drops it again just before the first prompt, in case
+an installer or a file your rc sources defines one after the block. `--version`, `--help` and the harness's own management
 commands (`claude mcp add|list|…`, `claude config`, `claude update`,
 `claude setup-token`, `codex login`, `codex mcp …`) start no agent, so they
 run with the harness installed on this machine. Nothing outside the block
