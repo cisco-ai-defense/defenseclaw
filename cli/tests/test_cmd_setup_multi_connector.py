@@ -804,8 +804,12 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_offline_exception_is_not_suppressed_when_restart_was_requested(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
-        with _setup_patches(), self.assertRaises(CanonicalObservabilityUnavailableError):
-            _invoke(["codex", "--yes"], self.app)
+        with _setup_patches():
+            result = _invoke(["codex", "--yes"], self.app)
+        # Still fail-closed (non-zero exit), but as a plain error, not a traceback.
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("audit event couldn't be recorded", result.output)
+        self.assertIn("--no-restart", result.output)
 
     def test_no_restart_keeps_server_admission_rejection_fail_closed(self):
         self.app.logger = MagicMock()

@@ -253,9 +253,16 @@ def _log_setup_action(
         return
     try:
         app.logger.log_action(action, "config", details)
-    except CanonicalObservabilityUnavailableError:
+    except CanonicalObservabilityUnavailableError as exc:
         if not allow_offline:
-            raise
+            # Stay fail-closed, but say so plainly instead of a traceback: the
+            # change is already saved, only its audit event is missing.
+            raise click.ClickException(
+                "The change was saved, but the gateway isn't running, so its setup audit event "
+                "couldn't be recorded. Start defenseclaw-gateway and run the command again, or use "
+                "the command's offline option (--no-restart or --no-verify, where it has one) to "
+                "stage the change for the next gateway start."
+            ) from exc
         click.echo(
             "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
             "event was not recorded. Start defenseclaw-gateway before the next change.",
