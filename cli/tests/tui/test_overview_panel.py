@@ -1088,3 +1088,15 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     # Malformed entries degrade gracefully instead of raising.
     assert format_scanner_overrides_summary((("", "high", "file", "block"),)) == ""
     assert format_scanner_overrides_summary((("secrets", "low", "file"),)) == ""  # wrong arity
+
+
+def test_guardrail_detail_names_the_rule_pack_not_a_placeholder_strategy() -> None:
+    def detail(pack_dir: str) -> str:
+        cfg = OverviewConfig(
+            guardrail_enabled=True, guardrail_mode="observe", guardrail_port=4000, guardrail_rule_pack_dir=pack_dir
+        )
+        return OverviewPanelModel(cfg, version="test").guardrail_detail()
+
+    assert detail("/p/guardrail/strict") == "observe, port 4000, strict pack"
+    assert detail("/p/guardrail/protected-codex/default") == "observe, port 4000, protected-codex pack"
+    assert detail("") == "observe, port 4000"

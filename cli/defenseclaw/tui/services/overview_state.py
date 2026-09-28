@@ -1250,8 +1250,11 @@ class OverviewPanelModel:
             parts.append(self.cfg.guardrail_mode)
         if self.cfg.guardrail_port:
             parts.append(f"port {self.cfg.guardrail_port}")
-        if self.cfg.guardrail_strategy:
-            parts.append(self.cfg.guardrail_strategy)
+        # The rule pack, not guardrail_strategy: that is read from a
+        # "strategy" key the config doesn't have, so it always said "default".
+        pack = _rule_pack_label(self.cfg.guardrail_rule_pack_dir)
+        if pack:
+            parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:
             parts.append(f"judge:{self.cfg.guardrail_judge_model}")
         return ", ".join(parts)
@@ -1895,3 +1898,14 @@ __all__ = [
     "string_detail",
     "zero_connector_requests_notice",
 ]
+
+
+def _rule_pack_label(path: str) -> str:
+    """Folder name of a rule pack; a composed ``protected-<scope>/<profile>`` pack by its scope folder."""
+
+    if not path:
+        return ""
+    from defenseclaw.policy_catalog import is_protected_pack_path
+
+    norm = os.path.normpath(path)
+    return os.path.basename(os.path.dirname(norm) if is_protected_pack_path(path) else norm)
