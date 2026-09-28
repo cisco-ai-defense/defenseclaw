@@ -168,13 +168,15 @@ running gateway.
 
 ## Guardrail
 
-Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install `--connector` is rejected because there is only one posture, except for `mode`, `use-pack` and `protection`, which accept the one active connector and write its override block. All of these are on the Python `defenseclaw` CLI.
+Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install `--connector` is rejected because there is only one posture, except for `mode`, `block-at`, `alert-at`, `use-pack` and `protection`, which accept the one active connector and write its override block. All of these are on the Python `defenseclaw` CLI.
 
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw guardrail status [--connector X]` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector by default. Pass `--connector X` to narrow the view to one active connector. |
 | `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
 | `defenseclaw guardrail mode observe\|action [--connector X] [--clear] [--no-restart] [--json]` | Switch between observe (log findings, block nothing) and action (enforce) without re-running setup. Sets only `guardrail.mode`, or with `--connector X` only `guardrail.connectors.X.mode` (the block is created if needed); `--clear --connector X` removes X's override so it follows the global mode. Never touches the guardrail's on/off state, rule pack, or port. The running gateway applies a global change live. A per-connector change, or one that flips a hook connector's effective hook fail mode (hooks fail open in observe), restarts a running gateway unless you pass `--no-restart`. A global change names the connectors that keep their own mode. `--json` prints `{"version": 1, "ok", "scope", "mode", "previous", "mode_source", "changed", "not_covered", "gateway", "message"}`. |
+| `defenseclaw guardrail block-at LEVEL [--connector X] [--no-restart] [--json]` | Set the lowest severity at which tool calls are blocked. `LEVEL` is `CRITICAL`, `HIGH`, `MEDIUM` or `LOW` (any case), or `inherit` to clear the value. Sets only `guardrail.block_at`, or with `--connector X` only `guardrail.connectors.X.block_at` (the block is created if needed). A connector's own level wins over the global one, which wins over the level of the scope's rule pack (strict blocks MEDIUM+, default and permissive CRITICAL). It applies to tool-call decisions in action mode (hook tool calls, and tool calls the guardrail proxy finds in LLM responses); the named policy's thresholds for LLM traffic through the guardrail proxy are separate (`policy edit guardrail`). The running gateway applies a global change live; a per-connector change restarts a running gateway unless you pass `--no-restart`. A global change names the connectors that keep their own level and those whose stricter rule-pack level it replaces. See [Tool-call levels](#tool-call-levels). |
+| `defenseclaw guardrail alert-at LEVEL [--connector X] [--no-restart] [--json]` | The same for the lowest severity that raises an alert (`guardrail.alert_at`, pack levels: strict LOW+, default MEDIUM+, permissive HIGH+). Anything that blocks also alerts, so an alert level above the block level alerts from the block level. |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
 | `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
@@ -200,10 +202,52 @@ defenseclaw guardrail use-pack ~/packs/my-org --connector codex
 defenseclaw guardrail use-pack --clear --connector codex  # back to the global pack
 defenseclaw guardrail mode action                         # every connector without its own mode
 defenseclaw guardrail mode observe --connector codex      # codex only logs
+defenseclaw guardrail block-at HIGH                       # every connector without its own level
+defenseclaw guardrail block-at MEDIUM --connector codex   # codex blocks MEDIUM+
+defenseclaw guardrail alert-at inherit --connector codex  # back to the global or rule-pack level
 defenseclaw guardrail protection enable database-destruction-protection --connector codex
 ```
 
 See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) for the full multi-connector model.
+
+### Tool-call levels
+
+A tool call's finding is blocked at or above the block level and raises an
+alert at or above the alert level. Each level resolves on its own: the
+connector's `guardrail.connectors.<name>.block_at` / `alert_at`, else the
+global `guardrail.block_at` / `alert_at`, else the level the scope's rule pack
+implies (from its folder name: `strict` blocks MEDIUM+ and alerts on LOW+,
+`permissive` blocks CRITICAL and alerts on HIGH+, anything else blocks
+CRITICAL and alerts on MEDIUM+). The alert level is then lowered to the block
+level if it sits above it. A global level therefore also replaces a stricter
+pack's level on every connector without its own; the command names those.
+In observe mode nothing is blocked; the levels apply once the scope is in
+action mode.
+
+`block-at` and `alert-at --json` print:
+
+```json
+{
+  "version": 1,
+  "ok": true,
+  "scope": "codex",
+  "setting": "block_at",
+  "level": "CRITICAL",
+  "previous": "inherit",
+  "source": "override",
+  "effective_block_at": "CRITICAL",
+  "effective_alert_at": "LOW+",
+  "gateway": "restarted",
+  "message": "Codex (codex) now blocks tool calls at CRITICAL. Restarted the gateway; it is enforcing the change now."
+}
+```
+
+`level` and `previous` are the value the scope stores after and before the
+change (`inherit` when it has none; when the command fails, `level` is the one
+you asked for and nothing is written). `source` says where the scope's value of
+this setting comes from now: `override` (its own), `global`, or `pack`.
+`effective_block_at` and `effective_alert_at` are the scope's resulting levels
+(`CRITICAL`, `HIGH+`, `MEDIUM+`, `LOW+`).
 
 ### Opt-in protection packs
 
@@ -265,13 +309,13 @@ Each pack has `name`, `title`, `summary` (the README's first paragraph),
 `staged`), and `rules` (`id`, `severity`, `title`). Each scope has `scope`
 (`global` or a connector), `pack`, `path`, and `enabled` (the packs on there).
 
-`gateway` in the `mode`, `use-pack`, and `protection` results says how the
-saved change reached the gateway: `restarted`, `live` (applied without a
-restart), `not_running` (it loads the change when it starts), `guardrail_off`
-(takes effect when you run `defenseclaw guardrail enable`), `restart_needed`
-(`--no-restart`: the running gateway keeps the old setting until you restart
-it), or `restart_failed` (the change is saved but the restart failed; exit
-`1`).
+`gateway` in the `mode`, `block-at`, `alert-at`, `use-pack`, and `protection`
+results says how the saved change reached the gateway: `restarted`, `live`
+(applied without a restart), `not_running` (it loads the change when it
+starts), `guardrail_off` (takes effect when you run
+`defenseclaw guardrail enable`), `restart_needed` (`--no-restart`: the running
+gateway keeps the old setting until you restart it), or `restart_failed` (the
+change is saved but the restart failed; exit `1`).
 
 ## Policies
 
