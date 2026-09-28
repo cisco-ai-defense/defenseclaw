@@ -968,19 +968,30 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 // in the administrator's protected target set.
 const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 
+// unenrolledAccountExplanation is why an unenrolled account's call is blocked.
+const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
+	"policy has not enrolled it yet (enrollment runs while the account is signed in) or excludes it; ask your " +
+	"administrator if this continues"
+
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
 // an account the administrator has not enrolled (yet) or excludes, and says
-// so: the gateway is up, and the refusal is the enrollment policy.
+// so: the gateway is up, and the refusal is the enrollment policy. An agent
+// that shows its structured denial rather than stderr (Codex, Cursor and
+// the JSON-bodied hooks) gets the same explanation instead of the generic
+// failed-closed text.
 func failUnenrolled(opts Options, sp spec, reason string) int {
 	logHookFailure(opts, sp, reason, "transport", "closed")
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	fmt.Fprintf(opts.Stderr,
-		"defenseclaw: blocking %s: this account is not enrolled in DefenseClaw on this computer; the administrator's "+
-			"policy has not enrolled it yet (enrollment runs while the account is signed in) or excludes it; ask your "+
-			"administrator if this continues (%s)\n", sp.subject, reason)
-	return emitHookResult(opts, sp, sp.unreachableStrict)
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, unenrolledAccountExplanation, reason)
+	explanation := "DefenseClaw: " + unenrolledAccountExplanation
+	if sp.connector == "codex" {
+		return emitCodexBlock(opts, explanation)
+	}
+	result := sp.unreachableStrict
+	result.body = strings.ReplaceAll(result.body, failedClosed, explanation)
+	return emitHookResult(opts, sp, result)
 }
 
 func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
