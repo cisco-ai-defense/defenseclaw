@@ -200,7 +200,7 @@ See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) for the f
 
 ## Policies
 
-Named security policies (`default`, `strict`, `permissive`, plus any you create) set admission, skill actions, guardrail thresholds, and the firewall defaults. `policy list` shows only real security policies; the bundled host-firewall template (`firewall-deny-default`) is managed with `defenseclaw firewall`, and `policy activate` refuses it.
+Named security policies (`default`, `strict`, `permissive`, plus any you create) set admission, skill actions, guardrail thresholds, and the firewall defaults. `policy list` shows only real security policies: the bundled host-firewall template (`firewall-deny-default.yaml`) is not a named policy, so `policy list` skips it and `policy activate` refuses it.
 
 | Command | Use it for |
 | --- | --- |

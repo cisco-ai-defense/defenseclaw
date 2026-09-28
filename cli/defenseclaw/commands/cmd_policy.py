@@ -97,8 +97,7 @@ def _not_a_policy_error(name: str, data: object) -> None:
     if isinstance(data, dict) and {"rules", "default_action", "allowlist"} & set(data):
         click.echo(
             f"error: '{name}' is the host egress-firewall template, not a security policy. "
-            "Manage the host firewall with `defenseclaw firewall`; "
-            "list security policies with `defenseclaw policy list`.",
+            "List security policies with `defenseclaw policy list`.",
             err=True,
         )
     else:
