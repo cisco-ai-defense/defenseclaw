@@ -21,9 +21,15 @@ Examples (run from the repository root with the repo's venv):
     .venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --size 80x24 --keys 0 c
     .venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --keys : "text:policy list" enter
     .venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --first-run
+    .venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --panel setup --size 80x24 --expect Setup
+    .venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --panel alerts --svg /tmp/alerts.svg
 
 Keys use Textual names (``enter``, ``escape``, ``tab``, ``ctrl+p``, ``down``).
 ``text:<string>`` types each character of the string.
+
+``--expect TEXT`` (repeatable) exits 1 when TEXT is missing from any rendered
+size. ``--svg PATH`` also writes an SVG screenshot per size (``PATH`` gets a
+``-80x24`` style suffix when more than one size is rendered).
 """
 
 from __future__ import annotations
@@ -79,7 +85,14 @@ def _build_app(args: argparse.Namespace, home: Path):
     return fixtures.snapshot_app(app_home, setup_config=setup_config)
 
 
-async def _render(args: argparse.Namespace, size: tuple[int, int], home: Path) -> str:
+def _svg_path(base: str, size: tuple[int, int], many: bool) -> Path:
+    path = Path(base)
+    if not many:
+        return path
+    return path.with_name(f"{path.stem}-{size[0]}x{size[1]}{path.suffix or '.svg'}")
+
+
+async def _render(args: argparse.Namespace, size: tuple[int, int], home: Path, svg: Path | None = None) -> str:
     import fixtures
 
     app = _build_app(args, home)
@@ -97,6 +110,8 @@ async def _render(args: argparse.Namespace, size: tuple[int, int], home: Path) -
             await pilot.pause()
         await asyncio.sleep(args.wait)
         await pilot.pause()
+        if svg is not None:
+            svg.write_text(app.export_screenshot(), encoding="utf-8")
         return fixtures.screen_text(app)
 
 
@@ -118,6 +133,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Setup panel config: a full default config (default) or an empty one",
     )
     parser.add_argument("--wait", type=float, default=0.3, help="seconds to wait before the dump")
+    parser.add_argument(
+        "--expect",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="exit 1 if TEXT is not on screen at every size (repeatable)",
+    )
+    parser.add_argument("--svg", metavar="PATH", help="also write an SVG screenshot (one per size)")
     parser.add_argument("--list-panels", action="store_true", help="print panel names and keys, then exit")
     args = parser.parse_args(argv)
 
@@ -133,11 +156,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     label = "first-run" if args.first_run else " ".join(filter(None, [args.panel or "", *args.keys])) or "start"
-    for size in args.size or [(80, 24), (120, 40)]:
-        text = asyncio.run(_render(args, size, home))
+    sizes = args.size or [(80, 24), (120, 40)]
+    missing: list[str] = []
+    for size in sizes:
+        svg = _svg_path(args.svg, size, len(sizes) > 1) if args.svg else None
+        text = asyncio.run(_render(args, size, home, svg))
         print(f"===== {label} @ {size[0]}x{size[1]} =====")
         print(text.rstrip("\n"))
         print()
+        if svg is not None:
+            print(f"(svg written to {svg})")
+        missing.extend(f"{size[0]}x{size[1]}: {want!r}" for want in args.expect if want not in text)
+    if missing:
+        print("EXPECT FAILED - not on screen:", *missing, sep="\n  ", file=sys.stderr)
+        return 1
     return 0
 
 
