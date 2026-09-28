@@ -551,11 +551,28 @@ type fakeCopy struct {
 	// undo is what UndoApply answers (ErrNothingApplied when nil).
 	undo    *workspace.UndoApplyResult
 	undoErr error
+	// pending is what PendingWork answers per sandbox, with an execer
+	// (running) or without one (stopped); pendingErr fails it.
+	pending        map[string]workspace.CopyWork
+	pendingStopped map[string]workspace.CopyWork
+	pendingErr     error
 }
 
 func (f *fakeCopy) Discard(_, name string) error {
 	f.step("discard " + name)
 	return nil
+}
+
+func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.Execer) (workspace.CopyWork, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingErr != nil {
+		return workspace.CopyWorkUnknown, f.pendingErr
+	}
+	if ex == nil {
+		return f.pendingStopped[name], nil
+	}
+	return f.pending[name], nil
 }
 
 func (f *fakeCopy) UndoApply(_ context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {

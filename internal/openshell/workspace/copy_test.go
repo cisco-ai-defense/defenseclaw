@@ -1056,6 +1056,36 @@ func TestRefreshAfterPull(t *testing.T) {
 	}
 }
 
+// TestPendingWork: what deleting a copy-mode sandbox would discard, looked
+// up in the sandbox when it runs and in the last pull when it does not.
+func TestPendingWork(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	if work, err := PendingWork(bg, e.data, "none", nil); err != nil || work != CopyWorkNone {
+		t.Fatalf("no copy record: %v, %v", work, err)
+	}
+	_, fs := launchCopy(t, e, "c1", nil)
+	check := func(step string, ex Execer, want CopyWork) {
+		t.Helper()
+		if work, err := PendingWork(bg, e.data, "c1", ex); err != nil || work != want {
+			t.Fatalf("%s: PendingWork = %v, %v; want %v", step, work, err, want)
+		}
+	}
+	check("as uploaded", fs, CopyWorkNone)
+	check("stopped, never pulled", nil, CopyWorkUnknown)
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	check("agent work", fs, CopyWorkUnpulled)
+	pull(t, e, fs, "c1")
+	check("pulled, not applied", fs, CopyWorkUnapplied)
+	check("pulled, not applied, stopped", nil, CopyWorkUnapplied)
+	if res, err := apply(e, "c1", ApplyMerge, nil); err != nil || !res.Applied {
+		t.Fatalf("apply: %+v %v", res, err)
+	}
+	check("applied", fs, CopyWorkNone)
+	fs.write(remoteRepo+"/later.txt", "later\n")
+	check("work after the applied pull", fs, CopyWorkUnpulled)
+}
+
 type failUploader struct{ err error }
 
 func (u failUploader) Upload(context.Context, string, string, string) error { return u.err }

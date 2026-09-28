@@ -324,6 +324,66 @@ func TestReviewAndDelete(t *testing.T) {
 	}
 }
 
+// Deleting a copy-mode sandbox discards the work it holds that was never
+// pulled back: `delete` says so and defaults to no, --yes says it did, and
+// teardown names it before it asks.
+func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
+	copyBox := func(name, phase string) sandboxapi.Sandbox {
+		sb := sampleSandbox(name)
+		sb.WorkdirMode, sb.Phase = "copy", phase
+		return sb
+	}
+	ta := newTestApp(t, "\n")
+	ta.daemon.add(copyBox("fix-tests", "ready"))
+	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnpulled}
+	if err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"fix-tests"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ta.output(), "Sandbox fix-tests holds work that was never pulled back; `defenseclaw sandbox pull fix-tests --apply|--branch|--patch-out FILE` brings it back. Delete it and discard that work? [y/N]") {
+		t.Fatalf("question:\n%s", ta.output())
+	}
+	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/fix-tests")); n != 0 {
+		t.Fatal("the default deleted the work")
+	}
+
+	// A stopped sandbox is judged by its last pull; --yes deletes and says so.
+	ta = newTestApp(t, "")
+	ta.daemon.add(copyBox("docs", "stopped"))
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"docs": workspace.CopyWorkUnapplied}
+	if err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"docs"}, Yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ta.output(), "sandbox docs holds a pull that was never applied") || !strings.Contains(ta.output(), "deleting it discards that work (--yes)") {
+		t.Fatalf("output:\n%s", ta.output())
+	}
+	if n := len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/docs")); n != 1 {
+		t.Fatalf("delete calls = %d", n)
+	}
+
+	// A mount-mode sandbox has nothing of the kind.
+	ta = newTestApp(t, "y\n")
+	ta.daemon.add(sampleSandbox("live"))
+	ta.copy.pending = map[string]workspace.CopyWork{"live": workspace.CopyWorkUnpulled}
+	if err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"live"}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(ta.output(), "never pulled") {
+		t.Fatalf("output:\n%s", ta.output())
+	}
+
+	// Teardown lists it in its plan (a dry run changes nothing).
+	ta = newTestApp(t, "")
+	ta.daemon.add(copyBox("fix-tests", "stopped"))
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
+	if err := ta.Teardown(context.Background(), TeardownOptions{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ta.output(), "sandbox fix-tests may hold work that was never pulled back (it is not running, so it was not checked)") ||
+		!strings.Contains(ta.output(), "teardown deletes it") {
+		t.Fatalf("teardown plan:\n%s", ta.output())
+	}
+}
+
 func TestExecAndLogs(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.add(sampleSandbox("box"))

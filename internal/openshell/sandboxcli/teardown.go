@@ -60,6 +60,9 @@ type teardownPlan struct {
 	wrappers []wrapper.Installed
 	gwErr    error
 	client   openshell.Client
+	// unhanded says, per copy-mode sandbox, the work it holds that never
+	// came back to the folder (see unhandedWork).
+	unhanded []string
 }
 
 // Teardown removes everything DefenseClaw created for sandboxes: its
@@ -90,7 +93,11 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 	if o.DryRun {
 		return nil
 	}
-	yes, err := a.confirm("Remove all of it? (OpenShell itself stays installed)", o.Yes)
+	question := "Remove all of it? (OpenShell itself stays installed)"
+	if len(p.unhanded) > 0 {
+		question = "Remove all of it, and discard the work the sandboxes above hold? (OpenShell itself stays installed)"
+	}
+	yes, err := a.confirm(question, o.Yes)
 	if err != nil {
 		return err
 	}
@@ -128,7 +135,11 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 			p.daemon = true
 			for _, sb := range list {
 				p.sandboxes = append(p.sandboxes, sb.Name)
+				if lost := a.unhandedWork(ctx, &sb); lost != "" {
+					p.unhanded = append(p.unhanded, "sandbox "+sb.Name+" "+lost)
+				}
 			}
+			sort.Strings(p.unhanded)
 		}
 	}
 	// The gateway directly: sandboxes and providers the daemon does not
@@ -256,6 +267,9 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 	}
 	for _, f := range p.changed {
 		a.warn(f.Path + " changed after DefenseClaw edited it; it is left alone (DefenseClaw's backup: " + firstNonEmpty(f.Backup, "none") + ")")
+	}
+	for _, u := range p.unhanded {
+		a.warn(u + "; teardown deletes it")
 	}
 	for _, w := range p.wrappers {
 		a.line(fmt.Sprintf("%-18s%s in %s", "shell wrappers", strings.Join(w.Block.Commands(), ", "), a.tildePath(w.Path)))

@@ -62,6 +62,9 @@ class SandboxTeardownTests(unittest.TestCase):
             cmd_uninstall._render_plan(plan, dry_run=True)
         self.assertIn("sandbox teardown:", buf.getvalue())
         self.assertIn("OpenShell itself is kept", buf.getvalue())
+        # The teardown runs with --yes, so the plan warns about copy-mode work.
+        self.assertIn("never pulled back is deleted with it", buf.getvalue())
+        self.assertIn("sandbox teardown --dry-run", buf.getvalue())
 
     def test_teardown_runs_before_the_sidecar_stops(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)

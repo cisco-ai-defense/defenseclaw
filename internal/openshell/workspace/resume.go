@@ -123,22 +123,16 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 		return nil, err
 	}
 	live := old.inSandbox()
-	last, _ := LoadPull(opts.Stage.DataDir, name)
-	if last != nil && last.Baseline != old.Baseline {
-		last = nil // the pull of a copy this record replaced
-	}
+	last := lastPullOf(opts.Stage.DataDir, old)
 	if !opts.Force {
-		for _, c := range live {
-			state, err := inspectSandboxCopy(ctx, opts.Exec, c, last)
-			if err != nil {
-				return nil, err
-			}
-			if state == copyChanged {
-				return nil, fmt.Errorf("%w: pull or discard them first (sandbox %s)", ErrUnpulledChanges, name)
-			}
+		work, err := pendingWork(ctx, opts.Exec, live, last)
+		if err != nil {
+			return nil, err
 		}
 		switch {
-		case last == nil || last.handedOver():
+		case work == CopyWorkUnpulled:
+			return nil, fmt.Errorf("%w: pull or discard them first (sandbox %s)", ErrUnpulledChanges, name)
+		case work != CopyWorkUnapplied:
 		case last.Effective == "":
 			return nil, fmt.Errorf("%w: it was refused (%s); refresh with --force to discard it (sandbox %s)", ErrUnappliedPull, strings.Join(last.Blocking, "; "), name)
 		default:
@@ -189,6 +183,78 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 	}
 	installed = true
 	return rec, nil
+}
+
+// CopyWork is what a copy-mode sandbox holds that was never handed back to
+// the folder, which deleting or refreshing the sandbox discards.
+type CopyWork int
+
+const (
+	// CopyWorkNone: nothing (no copy, a copy as uploaded, or one whose
+	// last pull took exactly its state and was applied).
+	CopyWorkNone CopyWork = iota
+	// CopyWorkUnknown: the copy could not be looked at (the sandbox is not
+	// running) and nothing recorded says it was handed back.
+	CopyWorkUnknown
+	// CopyWorkUnpulled: the copy changed since it was uploaded and since
+	// its last pull.
+	CopyWorkUnpulled
+	// CopyWorkUnapplied: the last pull was never applied (or refused).
+	CopyWorkUnapplied
+)
+
+// PendingWork reports the work the copy-mode sandbox name holds that was
+// never handed back. ex looks at the copy inside the sandbox; a nil ex (the
+// sandbox is not running) judges by the last pull alone. A sandbox without
+// a copy record holds none.
+func PendingWork(ctx context.Context, dataDir, name string, ex Execer) (CopyWork, error) {
+	rec, err := LoadCopy(dataDir, name)
+	if errors.Is(err, ErrCopyNotFound) {
+		return CopyWorkNone, nil
+	}
+	if err != nil {
+		return CopyWorkUnknown, err
+	}
+	live := rec.inSandbox()
+	last := lastPullOf(dataDir, rec)
+	if ex == nil {
+		switch {
+		case last != nil && !last.handedOver():
+			return CopyWorkUnapplied, nil
+		case len(live) == 0:
+			return CopyWorkNone, nil
+		}
+		return CopyWorkUnknown, nil
+	}
+	return pendingWork(ctx, ex, live, last)
+}
+
+// lastPullOf is the last pull of rec's copy, nil when there is none (or it
+// was of a copy rec replaced).
+func lastPullOf(dataDir string, rec *CopyRecord) *PullResult {
+	last, _ := LoadPull(dataDir, rec.Name)
+	if last != nil && last.Baseline != rec.Baseline {
+		return nil
+	}
+	return last
+}
+
+// pendingWork looks at each copy the sandbox may hold (live) and then at
+// the last pull of the record's copy.
+func pendingWork(ctx context.Context, ex Execer, live []*CopyRecord, last *PullResult) (CopyWork, error) {
+	for _, c := range live {
+		state, err := inspectSandboxCopy(ctx, ex, c, last)
+		if err != nil {
+			return CopyWorkUnknown, err
+		}
+		if state == copyChanged {
+			return CopyWorkUnpulled, nil
+		}
+	}
+	if last != nil && !last.handedOver() {
+		return CopyWorkUnapplied, nil
+	}
+	return CopyWorkNone, nil
 }
 
 // copyState is what a refresh found in the sandbox copy.

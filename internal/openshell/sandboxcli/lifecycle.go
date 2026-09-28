@@ -518,7 +518,16 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	}
 	var errs []error
 	for _, name := range o.Names {
-		yes, err := a.confirm("Delete sandbox "+name+" (its providers, credentials and, unless --keep-snapshot, its undo snapshot)?", o.Yes)
+		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo snapshot)?"
+		if sb, err := api.Get(ctx, name); err == nil {
+			if lost := a.unhandedWork(ctx, sb); lost != "" {
+				question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
+				if o.Yes {
+					a.warn("sandbox " + name + " " + lost + "; deleting it discards that work (--yes)")
+				}
+			}
+		}
+		yes, err := a.confirm(question, o.Yes)
 		if err != nil {
 			return err
 		}
@@ -537,6 +546,35 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// unhandedWork says what work a copy-mode sandbox holds that never came
+// back to the folder, which deleting the sandbox discards: "" when there
+// is none. A running sandbox's copy is looked at; a stopped one is judged
+// by its last pull.
+func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
+	if sb == nil || sb.WorkdirMode != config.OpenShellWorkdirCopy {
+		return ""
+	}
+	var ex workspace.Execer
+	if sb.Phase == "ready" {
+		if gateway, err := a.gatewayName(ctx); err == nil {
+			ex = a.transport(a.cli(gateway))
+		}
+	}
+	work, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
+	switch {
+	case err != nil:
+		return "may hold work that was never pulled back (it could not be checked: " + truncate(err.Error(), 120) + "); " + pull + " brings it back"
+	case work == workspace.CopyWorkUnpulled:
+		return "holds work that was never pulled back; " + pull + " brings it back"
+	case work == workspace.CopyWorkUnapplied:
+		return "holds a pull that was never applied; " + pull + " applies it"
+	case work == workspace.CopyWorkUnknown:
+		return "may hold work that was never pulled back (it is not running, so it was not checked); " + pull + " looks"
+	}
+	return ""
 }
 
 // LogsOptions are the `sandbox logs` flags.

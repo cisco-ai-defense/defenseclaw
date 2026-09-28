@@ -636,6 +636,12 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     click.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
     if plan.sandbox_teardown:
         click.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
+        # Teardown runs with --yes: work a copy-mode sandbox holds is gone
+        # with it, so say where to see it before the confirmation.
+        click.echo(
+            f"      {ux.dim('·')} work a copy-mode sandbox holds that was never pulled back is deleted with it "
+            "(`defenseclaw sandbox teardown --dry-run` names it)"
+        )
     click.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
     if "openclaw" in display_connectors:
         click.echo(

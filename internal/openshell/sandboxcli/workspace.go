@@ -43,6 +43,9 @@ type CopyWorkspace interface {
 	// Discard removes a copy this run staged for a sandbox that was never
 	// created.
 	Discard(dataDir, name string) error
+	// PendingWork reports the work a sandbox's copy holds that was never
+	// brought back (workspace.PendingWork; a nil ex for a stopped one).
+	PendingWork(ctx context.Context, dataDir, name string, ex workspace.Execer) (workspace.CopyWork, error)
 }
 
 type defaultCopyWorkspace struct{}
@@ -73,6 +76,9 @@ func (defaultCopyWorkspace) Discard(dataDir, name string) error {
 		return err
 	}
 	return nil
+}
+func (defaultCopyWorkspace) PendingWork(ctx context.Context, dataDir, name string, ex workspace.Execer) (workspace.CopyWork, error) {
+	return workspace.PendingWork(ctx, dataDir, name, ex)
 }
 
 // UndoOptions are the `sandbox undo` flags.
