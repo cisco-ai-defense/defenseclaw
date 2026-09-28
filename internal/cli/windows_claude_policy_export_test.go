@@ -53,13 +53,14 @@ func TestWindowsClaudePolicyExportRoundTripsThroughTheHKLMGate(t *testing.T) {
 			if err := json.Unmarshal([]byte(out), &exported); err != nil {
 				t.Fatalf("export is not JSON: %v", err)
 			}
-			if len(exported) != 1 || exported["hooks"] == nil {
-				t.Fatalf("export must contain only the hooks matrix, got keys %v", exported)
+			if len(exported) != 2 || exported["hooks"] == nil || exported["allowManagedHooksOnly"] != true {
+				t.Fatalf("export must contain the hooks matrix and managed-only lock, got keys %v", exported)
 			}
 			if strings.Contains(out, "token") {
 				t.Fatal("export leaked credential material")
 			}
-			hklm, err := json.Marshal(map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"]})
+			exported["model"] = "managed-by-mdm"
+			hklm, err := json.Marshal(exported)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -108,7 +109,7 @@ func TestWindowsClaudePolicyExportRejectsUnsafeInputs(t *testing.T) {
 		"relative hook":     {"--hook-executable", `bin\defenseclaw-hook.exe`},
 		"unclean hook":      {"--hook-executable", root + `\x\..\defenseclaw-hook.exe`},
 		"other executable":  {"--hook-executable", filepath.Join(root, "evil.exe")},
-		"uncontracted":      {"--hook-executable", filepath.Join(root, "defenseclaw-hook.exe"), "--agent-version", "2.1.153"},
+		"uncontracted":      {"--hook-executable", filepath.Join(root, "defenseclaw-hook.exe"), "--agent-version", "2.1.151"},
 		"positional":        {"--hook-executable", filepath.Join(root, "defenseclaw-hook.exe"), "extra"},
 		"malformed version": {"--hook-executable", filepath.Join(root, "defenseclaw-hook.exe"), "--agent-version", "latest"},
 	} {
