@@ -89,6 +89,12 @@ from defenseclaw.tui.services.policy_state import (
 from defenseclaw.tui.theme import DEFAULT_TOKENS as TOKENS
 from defenseclaw.tui.widgets.panel_split import ASIDE_MIN_WIDTH, NAV_MIN_WIDTH, NAV_WIDTH, Aside, NavItem
 
+# #panel-aside's width beside the table (keep in sync with the app CSS).
+_ASIDE_SHARE = 0.38
+# Terminals with at least this many rows always show the detail; shorter
+# ones (the app's "compact" detail pane) open it with i.
+_TALL_ROWS = 30
+
 # Buttons of the panel's control bar, mapped to the key they press. The
 # views themselves are switched from the navigation list or with 1-7.
 POLICY_BUTTON_KEYS: dict[str, str] = {
@@ -303,8 +309,9 @@ class PolicyPanelMixin:
         """Characters the table gets: the body minus the nav list and the aside.
 
         Mirrors the split's CSS (widgets/panel_split.py and the app): the body
-        panel takes 6 columns, the nav list ``NAV_WIDTH`` + 1, the aside 40%
-        + 1, and the table's own border 2 once the nav list is shown.
+        panel takes 6 columns, the nav list ``NAV_WIDTH`` + 1, an aside beside
+        the table ``_ASIDE_SHARE`` + 1, and the table's own border 2 once the
+        nav list is shown.
         """
         width = self._policy_width()
         body = max(20, width - 6)
@@ -312,7 +319,7 @@ class PolicyPanelMixin:
         if width >= NAV_MIN_WIDTH:
             table -= NAV_WIDTH + 1 + 2
         if width >= ASIDE_MIN_WIDTH:
-            table -= round(body * 0.4) + 1
+            table -= round(body * _ASIDE_SHARE) + 1
         # A table taller than the screen draws a 2-column scrollbar.
         return max(20, table - 2)
 
@@ -321,8 +328,15 @@ class PolicyPanelMixin:
         return self._policy_width() >= NAV_MIN_WIDTH
 
     def _policy_aside_shown(self) -> bool:
-        """Whether the detail sits beside the table (instead of under it, with ``i``)."""
+        """Whether the detail sits beside the table (instead of under it)."""
         return self._policy_width() >= ASIDE_MIN_WIDTH
+
+    def _policy_detail_always(self) -> bool:
+        """Whether the detail is always on screen: beside the table, or below it
+        when the terminal has room; a short one opens it with ``i`` instead."""
+        size = getattr(self, "size", None)
+        height = int(getattr(size, "height", 0) or 0)
+        return self._policy_aside_shown() or height >= _TALL_ROWS
 
     def _policy_panel_nav(self) -> tuple[NavItem, ...]:
         """``_panel_nav`` for Policies: the seven views, badges with counts."""
@@ -333,12 +347,13 @@ class PolicyPanelMixin:
     def _policy_panel_aside(self) -> RenderableType | None:
         """``_panel_aside`` for Policies: the highlighted row's detail.
 
-        Always beside the table on a wide terminal; below it on a narrow one
-        only once ``i`` (or Enter on a read-only row) opened it, so the table
-        keeps its rows at 80x24.
+        Beside the table from ``ASIDE_MIN_WIDTH`` columns, below it on a
+        narrower terminal with at least ``_TALL_ROWS`` rows (the design
+        sketch), and on a short one only once ``i`` (or Enter on a read-only
+        row) opened it, so the table keeps its rows at 80x24.
         """
         model = self.policy_model
-        if not self._policy_aside_shown() and not model.detail_open:
+        if not self._policy_detail_always() and not model.detail_open:
             return None
         title, lines = model.aside()
         if not title:
@@ -404,7 +419,7 @@ class PolicyPanelMixin:
             "policies-change-pack": view == "packs" and model.global_pack is not None,
             # i and Enter open the details too; on a narrow Posture view the
             # five change buttons need the room.
-            "policies-details": not self._policy_aside_shown()
+            "policies-details": not self._policy_detail_always()
             and model.row_count() > 0
             and not (view == "posture" and not self._policy_nav_shown()),
             "policies-refresh": True,
