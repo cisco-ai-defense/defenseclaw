@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -140,6 +139,78 @@ func (f *sandboxIngressFixture) do(t *testing.T, method, path, token, body strin
 	return rec
 }
 
+// hook posts a hook that must be answered 200 and returns the decoded answer.
+func (f *sandboxIngressFixture) hook(t *testing.T, path, token, body string, headers ...string) map[string]interface{} {
+	t.Helper()
+	rec := f.do(t, http.MethodPost, path, token, body, headers...)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("hook %s: %d %s", path, rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// mint adds a harness sandbox's binding: mount mode with /work/app mapped
+// to project, or copy mode when project is "".
+func (f *sandboxIngressFixture) mint(t *testing.T, name, connectorName, version, contract, project string) (sandboxauth.Binding, string) {
+	t.Helper()
+	workdir := sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy}
+	if project != "" {
+		workdir = sandboxauth.Workdir{Mode: sandboxauth.WorkdirMount, Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: project}}}
+	}
+	b, token, err := f.store.Mint(sandboxauth.Spec{
+		SandboxName: name, Connector: connectorName, AgentVersion: version, HookContractID: contract,
+		PolicyProfile: "open", Workdir: workdir, HostUser: sandboxauth.HostUser{UID: "1000", Name: "dev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, token
+}
+
+// sandboxObserver collects what the ingress reports to the manager.
+type sandboxObserver struct {
+	mu        sync.Mutex
+	routes    []string // sandbox name and route of each served request
+	decisions []SandboxHookDecision
+	failures  []SandboxHookFailure
+}
+
+func (o *sandboxObserver) observe(c *SandboxIngressConfig) {
+	c.OnRequest = func(b sandboxauth.Binding, r sandboxauth.Route) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		o.routes = append(o.routes, b.SandboxName+" "+string(r))
+	}
+	c.OnHookDecision = func(d SandboxHookDecision) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		o.decisions = append(o.decisions, d)
+	}
+	c.OnHookFailure = func(fl SandboxHookFailure) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		o.failures = append(o.failures, fl)
+	}
+}
+
+// take returns what was observed since the last take.
+func (o *sandboxObserver) take() ([]SandboxHookDecision, []SandboxHookFailure) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	d, fl := o.decisions, o.failures
+	o.decisions, o.failures = nil, nil
+	return d, fl
+}
+
+// freeLoopbackAddr is a loopback address nothing listens on.
+func freeLoopbackAddr(t *testing.T) string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
+}
+
 func TestSetSandboxIngressValidatesConfig(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil)
 	store := staticMatcher{}
@@ -221,12 +292,7 @@ func TestRunSandboxIngressDrainsInFlightRequests(t *testing.T) {
 		overrun bool
 	}{{"drain", false}, {"overrun", true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Skipf("loopback listener unavailable: %v", err)
-			}
-			addr := ln.Addr().String()
-			_ = ln.Close()
+			addr := freeLoopbackAddr(t)
 			api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil)
 			if err := api.SetSandboxIngress(SandboxIngressConfig{Addr: addr, Bindings: staticMatcher{}}); err != nil {
 				t.Fatal(err)
@@ -262,9 +328,8 @@ func TestRunSandboxIngressDrainsInFlightRequests(t *testing.T) {
 			respCh := make(chan int, 1)
 			go func() {
 				client := &http.Client{Timeout: 10 * time.Second}
-				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-					resp, err := client.Post("http://"+addr+"/", "application/json", strings.NewReader(`{}`))
-					if err == nil {
+				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+					if resp, err := client.Post("http://"+addr+"/", "application/json", strings.NewReader(`{}`)); err == nil {
 						_ = resp.Body.Close()
 						respCh <- resp.StatusCode
 						return
@@ -275,7 +340,6 @@ func TestRunSandboxIngressDrainsInFlightRequests(t *testing.T) {
 						return
 					default:
 					}
-					time.Sleep(20 * time.Millisecond)
 				}
 				respCh <- -1
 			}()
@@ -842,79 +906,34 @@ func TestSandboxIngressCodexContractComesFromBinding(t *testing.T) {
 	}
 }
 
-func TestSandboxIngressObservers(t *testing.T) {
-	var mu sync.Mutex
-	var routes []sandboxauth.Route
-	var decisions []SandboxHookDecision
-	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
-		c.OnRequest = func(b sandboxauth.Binding, r sandboxauth.Route) {
-			mu.Lock()
-			defer mu.Unlock()
-			if b.SandboxName != "dc-claude-app" {
-				t.Errorf("observed binding %s", b.SandboxName)
-			}
-			routes = append(routes, r)
-		}
-		c.OnHookDecision = func(d SandboxHookDecision) {
-			mu.Lock()
-			defer mu.Unlock()
-			decisions = append(decisions, d)
-		}
-	})
-	body := `{"hook_event_name":"PreToolUse","session_id":"sess-obs","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/work/app"}`
-	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, body); rec.Code != http.StatusOK {
-		t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
-	}
-	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", "wrong-token", body); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("bad token: %d", rec.Code)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(routes) != 1 || routes[0] != sandboxauth.RouteHook {
-		t.Fatalf("observed routes = %v", routes)
+// TestSandboxIngressReportsHookFailures pins what the ingress reports to the
+// manager. Each served verdict is one decision and one observed route. A
+// failed hook is an authenticated hook or inspect post answered outside
+// 2xx, since the sandbox hooks fail closed on it. Verdicts, advisory
+// routes, requests no binding is known for and replays of an answer already
+// reported are not.
+func TestSandboxIngressReportsHookFailures(t *testing.T) {
+	var obs sandboxObserver
+	f := newSandboxIngressFixture(t, obs.observe)
+	hook := `{"hook_event_name":"PreToolUse","session_id":"sess-fail","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/work/app"}`
+
+	f.hook(t, "/api/v1/claude-code/hook", f.claudeTok, hook)
+	decisions, failures := obs.take()
+	if len(failures) != 0 {
+		t.Fatalf("a verdict was reported as a failure: %+v", failures)
 	}
 	if len(decisions) != 1 || decisions[0].BindingID != f.claude.ID || decisions[0].SandboxName != "dc-claude-app" ||
 		decisions[0].Event != "PreToolUse" || decisions[0].Tool != "Bash" || decisions[0].Action == "" {
 		t.Fatalf("decisions = %+v", decisions)
 	}
-}
-
-// TestSandboxIngressReportsHookFailures pins which answers count as a failed
-// hook: an authenticated hook or inspect post answered outside 2xx, since
-// the sandbox hooks fail closed on it. Verdicts, advisory routes, requests
-// no binding is known for and replays of an answer already reported do not.
-func TestSandboxIngressReportsHookFailures(t *testing.T) {
-	var mu sync.Mutex
-	var failures []SandboxHookFailure
-	var decisions int
-	observe := func(c *SandboxIngressConfig) {
-		c.OnHookFailure = func(f SandboxHookFailure) {
-			mu.Lock()
-			defer mu.Unlock()
-			failures = append(failures, f)
-		}
-		c.OnHookDecision = func(SandboxHookDecision) {
-			mu.Lock()
-			defer mu.Unlock()
-			decisions++
-		}
+	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", "wrong-token", hook); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("bad token: %d", rec.Code)
 	}
-	take := func() []SandboxHookFailure {
-		mu.Lock()
-		defer mu.Unlock()
-		out := failures
-		failures = nil
-		return out
+	obs.mu.Lock()
+	if len(obs.routes) != 1 || obs.routes[0] != "dc-claude-app "+string(sandboxauth.RouteHook) {
+		t.Fatalf("observed routes = %v", obs.routes)
 	}
-	f := newSandboxIngressFixture(t, observe)
-	hook := `{"hook_event_name":"PreToolUse","session_id":"sess-fail","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/work/app"}`
-
-	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, hook); rec.Code != http.StatusOK {
-		t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
-	}
-	if got := take(); len(got) != 0 {
-		t.Fatalf("a verdict was reported as a failure: %+v", got)
-	}
+	obs.mu.Unlock()
 
 	for _, tc := range []struct {
 		name, token, path, body string
@@ -937,8 +956,10 @@ func TestSandboxIngressReportsHookFailures(t *testing.T) {
 		if rec.Code != tc.status {
 			t.Fatalf("%s: status %d, want %d (%s)", tc.name, rec.Code, tc.status, rec.Body.String())
 		}
-		got := take()
+		d, got := obs.take()
 		switch {
+		case len(d) != 0:
+			t.Fatalf("%s: reported as a verdict: %+v", tc.name, d)
 		case tc.want == nil && len(got) != 0:
 			t.Fatalf("%s: reported %+v, want nothing", tc.name, got)
 		case tc.want != nil && (len(got) != 1 || got[0] != *tc.want):
@@ -953,50 +974,24 @@ func TestSandboxIngressReportsHookFailures(t *testing.T) {
 			t.Fatalf("attempt %d: %d replay=%q", i, rec.Code, rec.Header().Get(sandboxIdempotentReplayHeader))
 		}
 	}
-	if got := take(); len(got) != 1 || got[0].Status != http.StatusBadRequest {
-		t.Fatalf("retried failure reported %+v, want once", got)
+	if d, got := obs.take(); len(d) != 0 || len(got) != 1 || got[0].Status != http.StatusBadRequest {
+		t.Fatalf("retried failure reported %+v (decisions %+v), want one failure", got, d)
 	}
 
 	// The rate limit.
-	limited := newSandboxIngressFixture(t, observe, func(c *SandboxIngressConfig) {
+	limited := newSandboxIngressFixture(t, obs.observe, func(c *SandboxIngressConfig) {
 		c.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{HookRPS: 0.001, HookBurst: 1, OTLPRPS: 1, OTLPBurst: 1})
 	})
-	limited.do(t, http.MethodPost, "/api/v1/claude-code/hook", limited.claudeTok, hook)
+	limited.hook(t, "/api/v1/claude-code/hook", limited.claudeTok, hook)
 	if rec := limited.do(t, http.MethodPost, "/api/v1/claude-code/hook", limited.claudeTok, hook); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("second hook: %d", rec.Code)
 	}
-	if got := take(); len(got) != 1 || got[0].Status != http.StatusTooManyRequests || got[0].BindingID != limited.claude.ID {
+	decisions, got := obs.take()
+	if len(got) != 1 || got[0].Status != http.StatusTooManyRequests || got[0].BindingID != limited.claude.ID {
 		t.Fatalf("throttled hook reported %+v", got)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if decisions != 2 {
-		t.Fatalf("decisions = %d, want the two verdicts only", decisions)
-	}
-}
-
-func TestSandboxIngressIdempotentHookRetry(t *testing.T) {
-	f := newSandboxIngressFixture(t)
-	body := `{"hook_event_name":"UserPromptSubmit","session_id":"sess-idem","prompt":"hello","cwd":"/work/app"}`
-	first := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, body, SandboxHookIdempotencyHeader, "retry-key-0001")
-	if first.Code != http.StatusOK {
-		t.Fatalf("first: %d %s", first.Code, first.Body.String())
-	}
-	if first.Header().Get(sandboxIdempotentReplayHeader) != "" {
-		t.Fatal("first response marked as replay")
-	}
-	second := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, body, SandboxHookIdempotencyHeader, "retry-key-0001")
-	if second.Code != first.Code || second.Body.String() != first.Body.String() ||
-		second.Header().Get(sandboxIdempotentReplayHeader) != "true" {
-		t.Fatalf("retry was not replayed: %d %q", second.Code, second.Header().Get(sandboxIdempotentReplayHeader))
-	}
-	other := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok,
-		strings.Replace(body, "hello", "rm -rf ~", 1), SandboxHookIdempotencyHeader, "retry-key-0001")
-	if other.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("key reuse with a different body: %d", other.Code)
-	}
-	if rec := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, body, SandboxHookIdempotencyHeader, "bad key"); rec.Code != http.StatusBadRequest {
-		t.Fatalf("malformed key: %d", rec.Code)
+	if len(decisions) != 1 {
+		t.Fatalf("decisions = %d, want the one verdict only", len(decisions))
 	}
 }
 
@@ -1036,8 +1031,15 @@ func TestHookIdempotencyCache(t *testing.T) {
 
 	r1 := serve(idempotencyTestRequest(a, sandboxauth.RouteHook, "key-00000001", `{"x":1}`))
 	r2 := serve(idempotencyTestRequest(a, sandboxauth.RouteHook, "key-00000001", `{"x":1}`))
-	if calls.Load() != 1 || r2.Body.String() != r1.Body.String() || r2.Header().Get(sandboxIdempotentReplayHeader) != "true" {
+	if calls.Load() != 1 || r2.Body.String() != r1.Body.String() || r2.Header().Get(sandboxIdempotentReplayHeader) != "true" ||
+		r1.Header().Get(sandboxIdempotentReplayHeader) != "" {
 		t.Fatalf("replay: calls=%d first=%q second=%q", calls.Load(), r1.Body.String(), r2.Body.String())
+	}
+	// A key reused for another body is refused, as is a malformed key.
+	for key, want := range map[string]int{"key-00000001": http.StatusUnprocessableEntity, "bad key": http.StatusBadRequest} {
+		if rec := serve(idempotencyTestRequest(a, sandboxauth.RouteHook, key, `{"x":2}`)); rec.Code != want || calls.Load() != 1 {
+			t.Fatalf("key %q: %d (calls %d), want %d", key, rec.Code, calls.Load(), want)
+		}
 	}
 	// Keys are scoped per binding.
 	serve(idempotencyTestRequest(b, sandboxauth.RouteHook, "key-00000001", `{"x":1}`))
@@ -1269,12 +1271,7 @@ func TestMainAPIRefusesSandboxCredentialsOnEveryRoute(t *testing.T) {
 	if _, err := connector.EnsureHookAPIToken(f.dataDir, "claudecode"); err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("loopback listener unavailable: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	addr := freeLoopbackAddr(t)
 	cfg := &config.Config{DataDir: f.dataDir, Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
 	api := NewAPIServer(addr, NewSidecarHealth(), nil, nil, nil, cfg)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1286,18 +1283,13 @@ func TestMainAPIRefusesSandboxCredentialsOnEveryRoute(t *testing.T) {
 	}()
 	client := &http.Client{Timeout: 5 * time.Second}
 	base := "http://" + addr
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	eventuallyTrue(t, func() bool {
 		resp, err := client.Get(base + "/health")
 		if err == nil {
 			_ = resp.Body.Close()
-			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("main API did not start: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return err == nil
+	})
 
 	send := func(method, path string, header http.Header) int {
 		req, err := http.NewRequest(method, base+path, strings.NewReader(`{}`))
@@ -1374,53 +1366,6 @@ func TestRequestCarriesSandboxCredential(t *testing.T) {
 	}
 }
 
-func TestRunSandboxIngressServesAndShutsDown(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("loopback listener unavailable: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	f := newSandboxIngressFixture(t, func(cfg *SandboxIngressConfig) { cfg.Addr = addr })
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() { errCh <- f.api.RunSandboxIngress(ctx) }()
-	client := &http.Client{Timeout: 5 * time.Second}
-	deadline := time.Now().Add(5 * time.Second)
-	var status int
-	for {
-		req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/api/v1/claude-code/hook", strings.NewReader(`{}`))
-		req.Header.Set("Authorization", "Bearer "+f.claudeTok)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
-		resp, err := client.Do(req)
-		if err == nil {
-			status = resp.StatusCode
-			_ = resp.Body.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("ingress did not start: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if status == http.StatusUnauthorized || status == http.StatusNotFound {
-		t.Fatalf("ingress refused its own binding: %d", status)
-	}
-	cancel()
-	select {
-	case err := <-errCh:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("RunSandboxIngress: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("ingress did not shut down")
-	}
-	if _, err := os.Stat(f.store.Path()); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // copyModeHookEvent is one hook post of the copy-mode host-FS test.
 type copyModeHookEvent struct {
 	connector string
@@ -1435,15 +1380,7 @@ type copyModeHookEvent struct {
 // a host source file, and Stop scans.
 func copyModeHookEvents(root string) []copyModeHookEvent {
 	in := func(rel string) string { return filepath.Join(root, filepath.FromSlash(rel)) }
-	diff := strings.Join([]string{
-		"diff --git a/internal/gateway/rules.go b/internal/gateway/rules.go",
-		"index 1111111..2222222 100644",
-		"--- a/internal/gateway/rules.go",
-		"+++ b/internal/gateway/rules.go",
-		"@@ -1 +1,2 @@",
-		" package gateway",
-		"+" + codexObserveSourceTrustLiteral(),
-	}, "\n")
+	diff := codexObserveRulesDiff()
 	quote := func(v any) string {
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -1542,19 +1479,15 @@ func runCopyModeHooks(t *testing.T, root string) copyModeHookRun {
 		Mode:   sandboxauth.WorkdirCopy,
 		Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: root, ReadOnly: true}},
 	}
-	_, claudeToken, err := bindings.Mint(sandboxauth.Spec{
-		SandboxName: "dc-claude-copy", SandboxID: "sbx-claude-copy", Connector: "claudecode",
-		AgentVersion: "2.1.156", HookContractID: "claudecode-hooks-v1", Workdir: workdir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, codexToken, err := bindings.Mint(sandboxauth.Spec{
-		SandboxName: "dc-codex-copy", SandboxID: "sbx-codex-copy", Connector: "codex",
-		AgentVersion: "0.128.0", HookContractID: "codex-hooks-v1", Workdir: workdir,
-	})
-	if err != nil {
-		t.Fatal(err)
+	tokens := map[string]string{}
+	for _, spec := range []sandboxauth.Spec{
+		{SandboxName: "dc-claude-copy", SandboxID: "sbx-claude-copy", Connector: "claudecode", AgentVersion: "2.1.156", HookContractID: "claudecode-hooks-v1"},
+		{SandboxName: "dc-codex-copy", SandboxID: "sbx-codex-copy", Connector: "codex", AgentVersion: "0.128.0", HookContractID: "codex-hooks-v1"},
+	} {
+		spec.Workdir = workdir
+		if _, tokens[spec.Connector], err = bindings.Mint(spec); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fsys := &countingFS{}
 	if err := api.SetSandboxIngress(SandboxIngressConfig{Addr: "127.0.0.1:18971", Bindings: bindings, FS: fsys}); err != nil {
@@ -1566,18 +1499,16 @@ func runCopyModeHooks(t *testing.T, root string) copyModeHookRun {
 	}
 	var run copyModeHookRun
 	for _, event := range copyModeHookEvents(root) {
-		path, token := "/api/v1/claude-code/hook", claudeToken
+		path := map[string]string{"claudecode": "/api/v1/claude-code/hook", "codex": "/api/v1/codex/hook"}[event.connector]
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(event.body))
 		if event.connector == "codex" {
-			path, token = "/api/v1/codex/hook", codexToken
-			req = httptest.NewRequest(http.MethodPost, path, strings.NewReader(event.body))
 			var fields map[string]any
 			_ = json.Unmarshal([]byte(event.body), &fields)
 			req.Header.Set("X-DefenseClaw-Hook-Event", fmt.Sprint(fields["hook_event_name"]))
 			req.Header.Set("X-DefenseClaw-Hook-Contract", "codex-hooks-v1")
 		}
 		req.RemoteAddr = "127.0.0.1:43210"
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Bearer "+tokens[event.connector])
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-DefenseClaw-Client", event.connector+"-hook/1.0")
 		rec := httptest.NewRecorder()

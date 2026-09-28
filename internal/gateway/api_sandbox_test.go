@@ -47,121 +47,78 @@ type fakeSandboxController struct {
 	cancelled bool
 }
 
-func (f *fakeSandboxController) record(call string) error {
+// answer records call (keeping what keep saves) and returns v, or the
+// controller's error.
+func answer[T any](f *fakeSandboxController, call string, v T, keep ...func()) (T, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, k := range keep {
+		k()
+	}
 	f.calls = append(f.calls, call)
-	return f.err
+	if f.err != nil {
+		var zero T
+		return zero, f.err
+	}
+	return v, nil
 }
 
 func (f *fakeSandboxController) Status(context.Context) (*sandboxapi.Status, error) {
-	if err := f.record("status"); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.Status{Enabled: true, Available: true, Sandboxes: 1}, nil
+	return answer(f, "status", &sandboxapi.Status{Enabled: true, Available: true, Sandboxes: 1})
 }
 
 func (f *fakeSandboxController) List(context.Context) ([]sandboxapi.Sandbox, error) {
-	if err := f.record("list"); err != nil {
-		return nil, err
-	}
-	return []sandboxapi.Sandbox{{Name: "box", Phase: "ready"}}, nil
+	return answer(f, "list", []sandboxapi.Sandbox{{Name: "box", Phase: "ready"}})
 }
 
 func (f *fakeSandboxController) Get(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
-	if err := f.record("get " + name); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.Sandbox{Name: name, Phase: "ready"}, nil
+	return answer(f, "get "+name, &sandboxapi.Sandbox{Name: name, Phase: "ready"})
 }
 
 func (f *fakeSandboxController) Create(_ context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
-	f.mu.Lock()
-	f.createReq = req
-	f.mu.Unlock()
-	if err := f.record("create"); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.Sandbox{Name: req.Name, Harness: req.Harness, Phase: "ready"}, nil
+	return answer(f, "create", &sandboxapi.Sandbox{Name: req.Name, Harness: req.Harness, Phase: "ready"}, func() { f.createReq = req })
 }
 
-func (f *fakeSandboxController) Delete(_ context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
-	if err := f.record("delete " + name); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.DeleteResponse{Name: name, Deleted: true}, nil
+func (f *fakeSandboxController) Delete(_ context.Context, name string, _ sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
+	return answer(f, "delete "+name, &sandboxapi.DeleteResponse{Name: name, Deleted: true})
 }
 
 func (f *fakeSandboxController) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {
-	if err := f.record("stop " + name); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.Sandbox{Name: name, Phase: "stopped"}, nil
+	return answer(f, "stop "+name, &sandboxapi.Sandbox{Name: name, Phase: "stopped"})
 }
 
 func (f *fakeSandboxController) Start(_ context.Context, name string, _ sandboxapi.StartRequest) (*sandboxapi.Sandbox, error) {
-	if err := f.record("start " + name); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.Sandbox{Name: name, Phase: "ready"}, nil
+	return answer(f, "start "+name, &sandboxapi.Sandbox{Name: name, Phase: "ready"})
 }
 
 func (f *fakeSandboxController) Undo(_ context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error) {
-	f.mu.Lock()
-	f.undo = req
-	f.mu.Unlock()
-	if err := f.record("undo " + name); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.UndoResponse{Name: name, Stopped: req.Stop}, nil
+	return answer(f, "undo "+name, &sandboxapi.UndoResponse{Name: name, Stopped: req.Stop}, func() { f.undo = req })
 }
 
 func (f *fakeSandboxController) Review(_ context.Context, name string, _ sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error) {
-	if err := f.record("review " + name); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.ReviewResponse{Name: name, Summary: "1 file changed (+1 −0)"}, nil
+	return answer(f, "review "+name, &sandboxapi.ReviewResponse{Name: name, Summary: "1 file changed (+1 −0)"})
 }
 
 func (f *fakeSandboxController) ReportWorkspace(_ context.Context, name string, r sandboxapi.WorkspaceReport) error {
-	return f.record("workspace " + name + " " + r.Operation)
+	_, err := answer(f, "workspace "+name+" "+r.Operation, struct{}{})
+	return err
 }
 
 func (f *fakeSandboxController) Approvals(_ context.Context, sandbox string) ([]sandboxapi.Approval, error) {
-	if err := f.record("approvals " + sandbox); err != nil {
-		return nil, err
-	}
-	return nil, nil
+	return answer[[]sandboxapi.Approval](f, "approvals "+sandbox, nil)
 }
 
 func (f *fakeSandboxController) DecideApproval(_ context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error) {
-	f.mu.Lock()
-	f.decision = d
-	f.mu.Unlock()
-	if err := f.record("decide " + id); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.ApprovalResult{Approval: sandboxapi.Approval{ID: id, Status: sandboxapi.ApprovalQueued}}, nil
+	return answer(f, "decide "+id, &sandboxapi.ApprovalResult{Approval: sandboxapi.Approval{ID: id, Status: sandboxapi.ApprovalQueued}},
+		func() { f.decision = d })
 }
 
 func (f *fakeSandboxController) Unblock(_ context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error) {
-	f.mu.Lock()
-	f.unblock = req
-	f.mu.Unlock()
-	if err := f.record("unblock"); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.UnblockResponse{Host: req.Host, Scope: "sandbox"}, nil
+	return answer(f, "unblock", &sandboxapi.UnblockResponse{Host: req.Host, Scope: "sandbox"}, func() { f.unblock = req })
 }
 
 func (f *fakeSandboxController) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
-	f.mu.Lock()
-	f.explain = req
-	f.mu.Unlock()
-	if err := f.record("explain"); err != nil {
-		return nil, err
-	}
-	return &sandboxapi.Explain{Pack: "open", Profile: "open"}, nil
+	return answer(f, "explain", &sandboxapi.Explain{Pack: "open", Profile: "open"}, func() { f.explain = req })
 }
 
 func (f *fakeSandboxController) ActivitySince(since uint64, _ string) []sandboxapi.ActivityEvent {
@@ -308,25 +265,35 @@ func TestSandboxAPIRoutes(t *testing.T) {
 }
 
 // The status names the uid the daemon runs as, for the doctor's same-user
-// check, whether or not the sandbox subsystem runs.
+// check, whether or not the sandbox subsystem runs; while it does not, the
+// other routes say whether it is disabled or unavailable.
 func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
-	_, h := sandboxTestAPI(t, &fakeSandboxController{}, true)
-	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
-	var st sandboxapi.Status
-	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || w.Code != 200 {
-		t.Fatalf("status = %d %s", w.Code, w.Body.String())
-	}
-	checkDaemonUID(t, st)
-}
-
-func checkDaemonUID(t *testing.T, st sandboxapi.Status) {
-	t.Helper()
-	want := os.Getuid()
-	switch {
-	case want < 0 && st.DaemonUID != nil:
-		t.Fatalf("daemon uid = %d on a system without uids", *st.DaemonUID)
-	case want >= 0 && (st.DaemonUID == nil || *st.DaemonUID != want):
-		t.Fatalf("daemon uid = %v, want %d", st.DaemonUID, want)
+	for _, tc := range []struct {
+		name             string
+		ctl              SandboxController
+		enabled, running bool
+		listCode         string
+	}{
+		{"running", &fakeSandboxController{}, true, true, ""},
+		{"disabled", nil, false, false, sandboxapi.CodeDisabled},
+		{"unavailable", nil, true, false, sandboxapi.CodeUnavailable},
+	} {
+		_, h := sandboxTestAPI(t, tc.ctl, tc.enabled)
+		w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
+		var st sandboxapi.Status
+		if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || w.Code != 200 || st.Enabled != tc.enabled || st.Available != tc.running {
+			t.Fatalf("%s: status = %d %s", tc.name, w.Code, w.Body.String())
+		}
+		if want := os.Getuid(); (want < 0) != (st.DaemonUID == nil) || (want >= 0 && *st.DaemonUID != want) {
+			t.Fatalf("%s: daemon uid = %v, want %d", tc.name, st.DaemonUID, want)
+		}
+		if tc.running {
+			continue
+		}
+		w = serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
+		if w.Code != http.StatusServiceUnavailable || decodeSandboxError(t, w).Code != tc.listCode {
+			t.Fatalf("%s: list = %d %s", tc.name, w.Code, w.Body.String())
+		}
 	}
 }
 
@@ -362,27 +329,6 @@ func TestSandboxAPIErrors(t *testing.T) {
 	ctl.err = context.DeadlineExceeded
 	if w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, "")); w.Code != http.StatusGatewayTimeout {
 		t.Fatalf("timeout = %d", w.Code)
-	}
-}
-
-func TestSandboxAPIDisabled(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		_, h := sandboxTestAPI(t, nil, enabled)
-		w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
-		var st sandboxapi.Status
-		_ = json.Unmarshal(w.Body.Bytes(), &st)
-		if w.Code != 200 || st.Enabled != enabled || st.Available {
-			t.Fatalf("status (enabled=%v) = %d %+v", enabled, w.Code, st)
-		}
-		checkDaemonUID(t, st)
-		w = serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
-		want := sandboxapi.CodeDisabled
-		if enabled {
-			want = sandboxapi.CodeUnavailable
-		}
-		if w.Code != http.StatusServiceUnavailable || decodeSandboxError(t, w).Code != want {
-			t.Fatalf("list (enabled=%v) = %d %s", enabled, w.Code, w.Body.String())
-		}
 	}
 }
 

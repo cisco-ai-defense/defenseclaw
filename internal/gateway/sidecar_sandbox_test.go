@@ -123,40 +123,74 @@ func freePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
+// sandboxRuntimeFixture is the sandbox subsystem on free ports with no
+// OpenShell gateway to reach; squatter, if set, is another program holding
+// the egress port.
+type sandboxRuntimeFixture struct {
+	sc       *Sidecar
+	api      *APIServer
+	rt       *sandboxRuntime
+	cfg      *config.Config
+	squatter net.Listener
+}
+
+func newSandboxRuntimeFixture(t *testing.T, squat bool) *sandboxRuntimeFixture {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("sandboxes run on Linux and macOS only")
+	}
+	store, logger := testStoreAndLogger(t)
+	f := &sandboxRuntimeFixture{cfg: &config.Config{DataDir: t.TempDir()}}
+	f.cfg.Gateway.Token = "test-token"
+	f.cfg.Gateway.APIPort = freePort(t)
+	f.cfg.OpenShell.Enabled = true
+	f.cfg.OpenShell.IngressPort = freePort(t)
+	f.cfg.OpenShell.EgressPort = freePort(t)
+	f.cfg.OpenShell.Gateway.Name = "defenseclaw-test-missing"
+	if squat {
+		var err error
+		if f.squatter, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = f.squatter.Close() })
+		f.cfg.OpenShell.EgressPort = f.squatter.Addr().(*net.TCPAddr).Port
+	}
+	f.sc = &Sidecar{health: NewSidecarHealth(), logger: logger}
+	f.sc.cfgCurrent.Store(f.cfg)
+	f.api = NewAPIServer("127.0.0.1:0", f.sc.health, nil, store, logger, f.cfg)
+	rt, err := f.sc.newSandboxRuntime(f.api)
+	if err != nil || rt == nil {
+		t.Fatalf("runtime = %v, %v", rt, err)
+	}
+	f.rt = rt
+	return f
+}
+
+// run runs the subsystem until the test ends, with serveAPI standing in
+// for the API it serves with (nil: one that never reports running).
+func (f *sandboxRuntimeFixture) run(t *testing.T, serveAPI func(context.Context) error) {
+	if serveAPI == nil {
+		serveAPI = func(ctx context.Context) error { <-ctx.Done(); return nil }
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.rt.run(ctx, serveAPI) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil && f.squatter == nil {
+			t.Errorf("run: %v", err)
+		}
+	})
+}
+
 // TestSandboxRuntimeServesListeners runs the sandbox subsystem without an
 // OpenShell gateway: the ingress and the egress proxy still come up (hooks
 // fail closed, egress needs a credential), and the API reports the
 // subsystem as unavailable.
 func TestSandboxRuntimeServesListeners(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("sandboxes run on Linux and macOS only")
-	}
-	store, logger := testStoreAndLogger(t)
-	cfg := &config.Config{DataDir: t.TempDir()}
-	cfg.Gateway.Token = "test-token"
-	cfg.Gateway.APIPort = freePort(t)
-	cfg.OpenShell.Enabled = true
-	cfg.OpenShell.IngressPort = freePort(t)
-	cfg.OpenShell.EgressPort = freePort(t)
-	cfg.OpenShell.Gateway.Name = "defenseclaw-test-missing"
-	sc := &Sidecar{health: NewSidecarHealth(), logger: logger}
-	sc.cfgCurrent.Store(cfg)
-	api := NewAPIServer("127.0.0.1:0", sc.health, nil, store, logger, cfg)
-	rt, err := sc.newSandboxRuntime(api)
-	if err != nil || rt == nil {
-		t.Fatalf("runtime = %v, %v", rt, err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- rt.run(ctx, func(ctx context.Context) error { <-ctx.Done(); return nil }) }()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("run: %v", err)
-		}
-	}()
-
-	ingress := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.OpenShell.IngressPort))
+	f := newSandboxRuntimeFixture(t, false)
+	f.run(t, nil)
+	ingress := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.IngressPort))
 	eventuallyTrue(t, func() bool {
 		resp, err := http.Post(ingress+"/api/v1/claude-code/hook", "application/json", strings.NewReader("{}"))
 		if err != nil {
@@ -165,7 +199,7 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode == http.StatusUnauthorized
 	})
-	egressAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.OpenShell.EgressPort))
+	egressAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(f.cfg.OpenShell.EgressPort))
 	eventuallyTrue(t, func() bool {
 		conn, err := net.DialTimeout("tcp", egressAddr, time.Second)
 		if err != nil {
@@ -176,7 +210,7 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 		line, _ := bufio.NewReader(conn).ReadString('\n')
 		return strings.Contains(line, "407")
 	})
-	h := api.tokenAuth(api.apiCSRFProtect(api.sandboxAPIHandler()))
+	h := f.api.tokenAuth(f.api.apiCSRFProtect(f.api.sandboxAPIHandler()))
 	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
 	var st sandboxapi.Status
 	_ = json.Unmarshal(w.Body.Bytes(), &st)
@@ -186,7 +220,7 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 	// The listeners run; the missing OpenShell gateway degrades the
 	// subsystem and says why.
 	eventuallyTrue(t, func() bool {
-		snap := sc.health.Snapshot()
+		snap := f.sc.health.Snapshot()
 		return snap.Sandbox != nil && snap.Sandbox.State == StateDegraded && strings.Contains(snap.Sandbox.LastError, "openshell:")
 	})
 }
@@ -196,37 +230,9 @@ func TestSandboxRuntimeServesListeners(t *testing.T) {
 // OpenShell would relay the sandbox's hooks (with its real ingress token)
 // or egress to that program.
 func TestSandboxRuntimeRefusesSandboxesWithoutItsListeners(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("sandboxes run on Linux and macOS only")
-	}
-	store, logger := testStoreAndLogger(t)
-	cfg := &config.Config{DataDir: t.TempDir()}
-	cfg.Gateway.Token = "test-token"
-	cfg.Gateway.APIPort = freePort(t)
-	cfg.OpenShell.Enabled = true
-	cfg.OpenShell.IngressPort = freePort(t)
-	cfg.OpenShell.Gateway.Name = "defenseclaw-test-missing"
-	// Another program holds the egress port.
-	squatter, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer squatter.Close()
-	cfg.OpenShell.EgressPort = squatter.Addr().(*net.TCPAddr).Port
-	sc := &Sidecar{health: NewSidecarHealth(), logger: logger}
-	sc.cfgCurrent.Store(cfg)
-	api := NewAPIServer("127.0.0.1:0", sc.health, nil, store, logger, cfg)
-	rt, err := sc.newSandboxRuntime(api)
-	if err != nil || rt == nil {
-		t.Fatalf("runtime = %v, %v", rt, err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- rt.run(ctx, func(ctx context.Context) error { <-ctx.Done(); return nil }) }()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	f := newSandboxRuntimeFixture(t, true)
+	rt := f.rt
+	f.run(t, nil)
 	eventuallyTrue(t, func() bool {
 		rt.listenMu.Lock()
 		defer rt.listenMu.Unlock()
@@ -235,13 +241,13 @@ func TestSandboxRuntimeRefusesSandboxesWithoutItsListeners(t *testing.T) {
 	if err := rt.listenersReady(); err == nil || !strings.Contains(err.Error(), "egress") {
 		t.Fatalf("listeners ready while another program holds the egress port: %v", err)
 	}
-	_, err = rt.manager.Create(context.Background(), sandboxapi.CreateRequest{Harness: "claudecode", Project: t.TempDir()})
+	_, err := rt.manager.Create(context.Background(), sandboxapi.CreateRequest{Harness: "claudecode", Project: t.TempDir()})
 	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(err.Error(), "listeners") {
 		t.Fatalf("create while the egress port is someone else's = %v", err)
 	}
 	// Once the port is free the proxy takes it, and creates are allowed
 	// past this check again.
-	_ = squatter.Close()
+	_ = f.squatter.Close()
 	eventuallyTrue(t, func() bool { return rt.listenersReady() == nil })
 }
 
@@ -287,45 +293,53 @@ func (f *fakeSandboxFleet) stops() []string {
 	return slices.Clone(f.stopped)
 }
 
-func (f *fakeSandboxFleet) set(name, phase string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.phases[name] = phase
+// syncRecorder is a concurrency-safe list of what a fake was handed.
+type syncRecorder[T any] struct {
+	mu    sync.Mutex
+	items []T
 }
 
-type sandboxFeedRecorder struct {
-	mu     sync.Mutex
-	events []sandboxapi.ActivityEvent
-}
-
-func (r *sandboxFeedRecorder) publish(ev sandboxapi.ActivityEvent) {
+func (r *syncRecorder[T]) add(v T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.events = append(r.events, ev)
+	r.items = append(r.items, v)
 }
 
-func (r *sandboxFeedRecorder) snapshot() []sandboxapi.ActivityEvent {
+func (r *syncRecorder[T]) snapshot() []T {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return slices.Clone(r.events)
+	return slices.Clone(r.items)
 }
 
 type sandboxHealthRecords struct {
-	mu     sync.Mutex
-	events []audit.SandboxHealthEvent
+	syncRecorder[audit.SandboxHealthEvent]
 }
 
 func (r *sandboxHealthRecords) RecordSandboxHealth(_ context.Context, ev audit.SandboxHealthEvent) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.events = append(r.events, ev)
+	r.add(ev)
 	return nil
 }
 
-func (r *sandboxHealthRecords) snapshot() []audit.SandboxHealthEvent {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.events)
+// runContainment runs containListenerLoss until the test ends or the
+// returned stop is called.
+func runContainment(t *testing.T, fleet *fakeSandboxFleet, publish func(sandboxapi.ActivityEvent), part string,
+	every time.Duration, serving func() bool) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		containListenerLoss(ctx, fleet, publish, part, every, serving)
+	}()
+	stop = func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("containment did not end with its context")
+		}
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 // TestContainListenerLossStopsRunningSandboxes pins that while a sandbox
@@ -342,23 +356,15 @@ func TestContainListenerLossStopsRunningSandboxes(t *testing.T) {
 		},
 		failStops: map[string]int{"dc-stubborn": 3},
 	}
-	var feed sandboxFeedRecorder
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		containListenerLoss(ctx, fleet, feed.publish, "ingress", 5*time.Millisecond, nil)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	var feed syncRecorder[sandboxapi.ActivityEvent]
+	stop := runContainment(t, fleet, feed.add, "ingress", 5*time.Millisecond, nil)
 	eventuallyTrue(t, func() bool { return len(fleet.stops()) == 5 })
 	// A sandbox adopted after the loss, or started outside DefenseClaw.
-	fleet.set("dc-late", "ready")
+	fleet.mu.Lock()
+	fleet.phases["dc-late"] = "ready"
+	fleet.mu.Unlock()
 	eventuallyTrue(t, func() bool { return len(fleet.stops()) == 6 })
-	cancel()
-	<-done
+	stop()
 
 	got := fleet.stops()
 	slices.Sort(got)
@@ -392,18 +398,7 @@ func TestContainListenerLossStopsRunningSandboxes(t *testing.T) {
 // once the runtime stops, even while the manager cannot list sandboxes.
 func TestContainListenerLossEndsWithItsContext(t *testing.T) {
 	fleet := &fakeSandboxFleet{phases: map[string]string{"dc-ready": "ready"}, listErr: errors.New("not reconciled yet")}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		containListenerLoss(ctx, fleet, nil, "egress", time.Hour, nil)
-	}()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("containment did not end with its context")
-	}
+	runContainment(t, fleet, nil, "egress", time.Hour, nil)()
 	if got := fleet.stops(); len(got) != 0 {
 		t.Fatalf("stopped = %v", got)
 	}
@@ -417,19 +412,10 @@ func TestContainListenerLossWaitsForItsAPI(t *testing.T) {
 	fleet := &fakeSandboxFleet{phases: map[string]string{"dc-ready": "ready"}}
 	var serving atomic.Bool
 	var passes atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		containListenerLoss(ctx, fleet, nil, "ingress", 5*time.Millisecond, func() bool {
-			passes.Add(1)
-			return serving.Load()
-		})
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	runContainment(t, fleet, nil, "ingress", 5*time.Millisecond, func() bool {
+		passes.Add(1)
+		return serving.Load()
+	})
 	eventuallyTrue(t, func() bool { return passes.Load() >= 3 })
 	if got := fleet.stops(); len(got) != 0 {
 		t.Fatalf("stopped while another daemon may serve: %v", got)
@@ -444,53 +430,25 @@ func TestContainListenerLossWaitsForItsAPI(t *testing.T) {
 // their hooks with the real ingress token, to that program), the subsystem
 // reports why, and a durable health record says the listener failed.
 func TestSandboxRuntimeStopsSandboxesWhenAListenerIsLost(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("sandboxes run on Linux and macOS only")
-	}
-	store, logger := testStoreAndLogger(t)
-	cfg := &config.Config{DataDir: t.TempDir()}
-	cfg.Gateway.Token = "test-token"
-	cfg.Gateway.APIPort = freePort(t)
-	cfg.OpenShell.Enabled = true
-	cfg.OpenShell.IngressPort = freePort(t)
-	cfg.OpenShell.Gateway.Name = "defenseclaw-test-missing"
-	squatter, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer squatter.Close()
-	cfg.OpenShell.EgressPort = squatter.Addr().(*net.TCPAddr).Port
-	sc := &Sidecar{health: NewSidecarHealth(), logger: logger}
-	sc.cfgCurrent.Store(cfg)
-	api := NewAPIServer("127.0.0.1:0", sc.health, nil, store, logger, cfg)
-	rt, err := sc.newSandboxRuntime(api)
-	if err != nil || rt == nil {
-		t.Fatalf("runtime = %v, %v", rt, err)
-	}
+	f := newSandboxRuntimeFixture(t, true)
+	rt := f.rt
 	if rt.fleet == nil || rt.publish == nil || rt.tel == nil {
 		t.Fatal("the runtime cannot contain a lost listener")
 	}
 	fleet := &fakeSandboxFleet{phases: map[string]string{"dc-claude-app": "ready", "dc-old": "stopped"}}
-	var feed sandboxFeedRecorder
+	var feed syncRecorder[sandboxapi.ActivityEvent]
 	var records sandboxHealthRecords
-	rt.fleet, rt.publish, rt.tel = fleet, feed.publish, &records
+	rt.fleet, rt.publish, rt.tel = fleet, feed.add, &records
 	rt.listenBudget, rt.recheck = 50*time.Millisecond, 10*time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
 	// The API this runtime serves with, as api.Run reports it once bound.
-	serveAPI := func(ctx context.Context) error {
-		sc.health.SetAPI(StateRunning, "", nil)
+	f.run(t, func(ctx context.Context) error {
+		f.sc.health.SetAPI(StateRunning, "", nil)
 		<-ctx.Done()
 		return nil
-	}
-	go func() { done <- rt.run(ctx, serveAPI) }()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	})
 	eventuallyTrue(t, func() bool { return slices.Equal(fleet.stops(), []string{"dc-claude-app"}) })
 	eventuallyTrue(t, func() bool {
-		snap := sc.health.Snapshot()
+		snap := f.sc.health.Snapshot()
 		return snap.Sandbox != nil && snap.Sandbox.State == StateDegraded &&
 			strings.Contains(snap.Sandbox.LastError, "egress:") &&
 			strings.Contains(snap.Sandbox.LastError, "running sandboxes are stopped")

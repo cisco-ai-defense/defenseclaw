@@ -19,15 +19,17 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -59,6 +61,9 @@ func installSandboxMarkerRules(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// sandboxMarkerBlockReason is the plain reason of a marker rule block.
+const sandboxMarkerBlockReason = "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation
 
 func sandboxTestBinding(connectorName string) sandboxauth.Binding {
 	return sandboxauth.Binding{
@@ -146,29 +151,48 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}
 	body := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`)
 	payload := map[string]interface{}{"hook_event_name": "PreToolUse"}
-	if got := api.applySandboxVerdictReason(context.Background(), profile, "claudecode", req, body, payload, blocked); got.Reason != blocked.Reason {
+	apply := func(ctx context.Context, resp agentHookResponse) agentHookResponse {
+		return api.applySandboxVerdictReason(ctx, profile, "claudecode", req, body, payload, resp)
+	}
+	if got := apply(context.Background(), blocked); got.Reason != blocked.Reason {
 		t.Fatalf("host verdict rewritten: %q", got.Reason)
 	}
 	ctx := sandboxCtx(sandboxTestBinding("claudecode"))
 	allowed := agentHookResponse{Action: "allow", RawAction: "allow", Reason: "kept", Findings: []string{"X:quoted title"}}
-	if got := api.applySandboxVerdictReason(ctx, profile, "claudecode", req, body, payload, allowed); got.Reason != "kept" || got.Findings != nil {
+	if got := apply(ctx, allowed); got.Reason != "kept" || got.Findings != nil {
 		t.Fatalf("allowed verdict: reason %q findings %v", got.Reason, got.Findings)
+	}
+	// A plain allow of a HIGH finding (a profile can answer a HIGH rule so)
+	// is flagged instead of carrying the redacted verdict text, while the
+	// harness output stays that of an allow. Without a finding it is kept.
+	flagged := agentHookResponse{Action: "allow", RawAction: "allow", Severity: "HIGH", Reason: blocked.Reason,
+		RuleIDs: []string{"E2E-SANDBOX-MARKER"}, HookOutput: map[string]interface{}{"continue": true}}
+	got := apply(ctx, flagged)
+	if !strings.HasPrefix(got.Reason, "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER") ||
+		!strings.HasSuffix(got.Reason, sandboxFlaggedNote) || hookSourceReason(got) != flagged.Reason ||
+		got.AdditionalContext != "" || got.HookOutput["continue"] != true {
+		t.Fatalf("allow with a finding: reason %q source %q context %q output %v",
+			got.Reason, hookSourceReason(got), got.AdditionalContext, got.HookOutput)
+	}
+	flagged.Severity, flagged.Reason = "NONE", "kept"
+	if got := apply(ctx, flagged); got.Reason != "kept" {
+		t.Fatalf("plain allow reason = %q", got.Reason)
 	}
 	// A block Claude cannot enforce on a tool result is flagged, not
 	// blocked.
 	result := agentHookResponse{Action: "allow", RawAction: "block", WouldBlock: true, RuleIDs: []string{"E2E-SANDBOX-MARKER"}}
 	postReq := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PostToolUse"}
 	postBody := []byte(`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`)
-	got := api.applySandboxVerdictReason(ctx, profile, "claudecode", postReq, postBody, map[string]interface{}{}, result)
+	got = api.applySandboxVerdictReason(ctx, profile, "claudecode", postReq, postBody, map[string]interface{}{}, result)
 	if !strings.HasPrefix(got.Reason, "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER") ||
 		!strings.Contains(got.AdditionalContext, got.Reason) || strings.Contains(got.AdditionalContext, "would block") {
 		t.Fatalf("unenforced result: reason %q context %q", got.Reason, got.AdditionalContext)
 	}
 	// Another connector's binding is not this connector's sandbox.
-	if got := api.applySandboxVerdictReason(sandboxCtx(sandboxTestBinding("codex")), profile, "claudecode", req, body, payload, blocked); got.Reason != blocked.Reason {
+	if got := apply(sandboxCtx(sandboxTestBinding("codex")), blocked); got.Reason != blocked.Reason {
 		t.Fatalf("foreign binding rewrote the verdict: %q", got.Reason)
 	}
-	got = api.applySandboxVerdictReason(ctx, profile, "claudecode", req, body, payload, blocked)
+	got = apply(ctx, blocked)
 	if !strings.HasPrefix(got.Reason, "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER") || hookSourceReason(got) != blocked.Reason {
 		t.Fatalf("sandbox verdict: reason %q source %q", got.Reason, hookSourceReason(got))
 	}
@@ -177,108 +201,54 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 // TestSandboxHookBlockCarriesPlainReason drives the harmless marker command
 // through the sandbox ingress for both harnesses: the agent, the manager's
 // decision (last_blocked, activity feed) and the wire body see the plain
-// reason and never a redaction placeholder or a finding title.
+// reason and never a redaction placeholder or a finding title. The call's
+// PreToolUse and PostToolUse decisions reach the manager with the harness's
+// tool_use_id, the key hook tamper detection pairs them by.
 func TestSandboxHookBlockCarriesPlainReason(t *testing.T) {
 	installSandboxMarkerRules(t)
-	var mu sync.Mutex
-	var decisions []SandboxHookDecision
-	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
-		c.OnHookDecision = func(d SandboxHookDecision) {
-			mu.Lock()
-			defer mu.Unlock()
-			decisions = append(decisions, d)
-		}
-	})
-	want := "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation
-	for _, tc := range []struct {
-		name, path, token, field string
-		headers                  []string
-	}{
-		{"claudecode", "/api/v1/claude-code/hook", f.claudeTok, "claude_code_output", nil},
-		{"codex", "/api/v1/codex/hook", f.codexTok, "codex_output",
-			[]string{"X-DefenseClaw-Hook-Event", "PreToolUse", "X-DefenseClaw-Hook-Contract", "codex-hooks-v1"}},
+	var obs sandboxObserver
+	f := newSandboxIngressFixture(t, obs.observe)
+	for _, tc := range []struct{ name, path, token, field string }{
+		{"claudecode", "/api/v1/claude-code/hook", f.claudeTok, "claude_code_output"},
+		{"codex", "/api/v1/codex/hook", f.codexTok, "codex_output"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mu.Lock()
-			decisions = nil
-			mu.Unlock()
-			body := `{"hook_event_name":"PreToolUse","session_id":"sess-` + tc.name + `","tool_name":"Bash",` +
-				`"tool_input":{"command":"echo DCE2E-BLOCK-MARKER"},"tool_use_id":"toolu_dce2e_` + tc.name + `","cwd":"/work/app"}`
-			rec := f.do(t, http.MethodPost, tc.path, tc.token, body, tc.headers...)
-			if rec.Code != http.StatusOK {
-				t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
-			}
-			raw := rec.Body.String()
-			for _, leak := range []string{"<redacted", "DCE2E-BLOCK-MARKER"} {
-				if strings.Contains(raw, leak) {
-					t.Fatalf("response body carries %q: %s", leak, raw)
-				}
-			}
-			var resp struct {
-				Action   string   `json:"action"`
-				Reason   string   `json:"reason"`
-				Findings []string `json:"findings"`
-				RuleIDs  []string `json:"rule_ids"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-				t.Fatal(err)
-			}
-			var all map[string]interface{}
-			_ = json.Unmarshal(rec.Body.Bytes(), &all)
-			out, _ := all[tc.field].(map[string]interface{})
-			specific, _ := out["hookSpecificOutput"].(map[string]interface{})
-			if resp.Action != "block" || resp.Reason != want || len(resp.Findings) != 0 ||
-				specific["permissionDecision"] != "deny" || specific["permissionDecisionReason"] != want {
-				t.Fatalf("response = %s", raw)
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			if len(decisions) != 1 || decisions[0].Reason != want || decisions[0].Action != "block" ||
-				decisions[0].ToolUseID != "toolu_dce2e_"+tc.name || decisions[0].Event != "PreToolUse" {
-				t.Fatalf("decisions = %+v", decisions)
-			}
-		})
-	}
-}
-
-// TestSandboxHookDecisionsCarryToolUseID pins the first link of hook tamper
-// detection: both harnesses' PreToolUse and PostToolUse decisions reach the
-// manager with the harness's tool_use_id, the key that pairs them.
-func TestSandboxHookDecisionsCarryToolUseID(t *testing.T) {
-	var mu sync.Mutex
-	var decisions []SandboxHookDecision
-	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
-		c.OnHookDecision = func(d SandboxHookDecision) {
-			mu.Lock()
-			defer mu.Unlock()
-			decisions = append(decisions, d)
-		}
-	})
-	for _, tc := range []struct{ name, path, token string }{
-		{"claudecode", "/api/v1/claude-code/hook", f.claudeTok},
-		{"codex", "/api/v1/codex/hook", f.codexTok},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			mu.Lock()
-			decisions = nil
-			mu.Unlock()
-			id := "toolu_pair_" + tc.name
-			for _, event := range []string{"PreToolUse", "PostToolUse"} {
-				body := `{"hook_event_name":"` + event + `","session_id":"sess-pair-` + tc.name + `","tool_name":"Bash",` +
-					`"tool_input":{"command":"echo dce2e-pair"},"tool_response":{"stdout":"dce2e-pair\n"},` +
-					`"tool_use_id":"` + id + `","cwd":"/work/app"}`
+			obs.take()
+			id := "toolu_dce2e_" + tc.name
+			post := func(event, command, extra string) *httptest.ResponseRecorder {
 				var headers []string
 				if tc.name == "codex" {
 					headers = []string{"X-DefenseClaw-Hook-Event", event, "X-DefenseClaw-Hook-Contract", "codex-hooks-v1"}
 				}
-				if rec := f.do(t, http.MethodPost, tc.path, tc.token, body, headers...); rec.Code != http.StatusOK {
+				rec := f.do(t, http.MethodPost, tc.path, tc.token, `{"hook_event_name":"`+event+`","session_id":"sess-`+tc.name+`","tool_name":"Bash",`+
+					`"tool_input":{"command":"`+command+`"},`+extra+`"tool_use_id":"`+id+`","cwd":"/work/app"}`, headers...)
+				if rec.Code != http.StatusOK {
 					t.Fatalf("%s: %d %s", event, rec.Code, rec.Body.String())
 				}
+				return rec
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			if len(decisions) != 2 || decisions[0].Event != "PreToolUse" || decisions[1].Event != "PostToolUse" ||
-				decisions[0].ToolUseID != id || decisions[1].ToolUseID != id || decisions[0].Action != "allow" {
+			rec := post("PreToolUse", "echo DCE2E-BLOCK-MARKER", "")
+			for _, leak := range []string{"<redacted", "DCE2E-BLOCK-MARKER"} {
+				if strings.Contains(rec.Body.String(), leak) {
+					t.Fatalf("response body carries %q: %s", leak, rec.Body.String())
+				}
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			out, _ := resp[tc.field].(map[string]interface{})
+			specific, _ := out["hookSpecificOutput"].(map[string]interface{})
+			findings, _ := resp["findings"].([]interface{})
+			if resp["action"] != "block" || resp["reason"] != sandboxMarkerBlockReason || len(findings) != 0 ||
+				specific["permissionDecision"] != "deny" || specific["permissionDecisionReason"] != sandboxMarkerBlockReason {
+				t.Fatalf("response = %v", resp)
+			}
+			post("PostToolUse", "echo dce2e-pair", `"tool_response":{"stdout":"dce2e-pair\n"},`)
+			decisions, _ := obs.take()
+			if len(decisions) != 2 || decisions[0].Reason != sandboxMarkerBlockReason || decisions[0].Action != "block" ||
+				decisions[0].Event != "PreToolUse" || decisions[1].Event != "PostToolUse" ||
+				decisions[0].ToolUseID != id || decisions[1].ToolUseID != id {
 				t.Fatalf("decisions = %+v", decisions)
 			}
 		})
@@ -294,49 +264,13 @@ func TestSandboxHookDecisionsCarryToolUseID(t *testing.T) {
 // counted it as a failed hook. An ordinary policy block is not a failure.
 func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
 	installSandboxMarkerRules(t)
-	var mu sync.Mutex
-	var failures []SandboxHookFailure
-	var decisions []SandboxHookDecision
-	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
-		c.OnHookFailure = func(fl SandboxHookFailure) {
-			mu.Lock()
-			defer mu.Unlock()
-			failures = append(failures, fl)
-		}
-		c.OnHookDecision = func(d SandboxHookDecision) {
-			mu.Lock()
-			defer mu.Unlock()
-			decisions = append(decisions, d)
-		}
-	})
-	binding, token, err := f.store.Mint(sandboxauth.Spec{
-		SandboxName: "dc-hermes-crash", Connector: "hermes", AgentVersion: "0.19.0", HookContractID: "hermes-hooks-v1",
-		PolicyProfile: "open", Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-		HostUser: sandboxauth.HostUser{UID: "1000", Name: "dev"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	take := func() ([]SandboxHookFailure, []SandboxHookDecision) {
-		mu.Lock()
-		defer mu.Unlock()
-		fl, d := failures, decisions
-		failures, decisions = nil, nil
-		return fl, d
-	}
+	var obs sandboxObserver
+	f := newSandboxIngressFixture(t, obs.observe)
+	binding, token := f.mint(t, "dc-hermes-crash", "hermes", "0.19.0", "hermes-hooks-v1", "")
 	post := func(command string) map[string]interface{} {
 		t.Helper()
-		body := `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
-			`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`
-		rec := f.do(t, http.MethodPost, "/api/v1/hermes/hook", token, body)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
-		}
-		var resp map[string]interface{}
-		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-			t.Fatal(err)
-		}
-		return resp
+		return f.hook(t, "/api/v1/hermes/hook", token, `{"hook_event_name":"pre_tool_call","tool_name":"terminal",`+
+			`"tool_input":{"command":"`+command+`"},"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`)
 	}
 
 	prev := hookEvaluatorPanicHook
@@ -348,7 +282,7 @@ func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
 		out["decision"] != "block" || out["reason"] != sandboxInternalErrorReason {
 		t.Fatalf("crashed evaluation = %v", resp)
 	}
-	gotFailures, gotDecisions := take()
+	gotDecisions, gotFailures := obs.take()
 	want := SandboxHookFailure{BindingID: binding.ID, SandboxName: "dc-hermes-crash", Connector: "hermes",
 		Route: sandboxauth.RouteHook, Status: http.StatusInternalServerError}
 	if len(gotFailures) != 1 || gotFailures[0] != want {
@@ -363,7 +297,122 @@ func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
 	if resp["action"] != "block" || !strings.HasPrefix(resp["reason"].(string), "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER") {
 		t.Fatalf("policy block = %v", resp)
 	}
-	if gotFailures, _ := take(); len(gotFailures) != 0 {
+	if _, gotFailures := obs.take(); len(gotFailures) != 0 {
 		t.Fatalf("a policy block was reported as a failure: %+v", gotFailures)
+	}
+}
+
+// TestSandboxHookDecisionsNameEachHarnessCall pins the gateway half of hook
+// tamper detection for the hook-only harnesses: each one's pre-tool and
+// post-tool events reach the manager under the harness's own event names,
+// with what names the call. Cursor, OpenCode and Amp send a per-call ID;
+// Kiro CLI sends none (measured on 2.24.1), so the call's session and tool
+// input must reach the manager byte for byte the same from both events.
+func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
+	var obs sandboxObserver
+	f := newSandboxIngressFixture(t, obs.observe)
+	for _, tc := range []struct {
+		spec      *harness.Spec
+		path      string
+		pre, post string
+		// preBody and postBody are the harness's payloads (the plugins'
+		// for OpenCode and Amp).
+		preBody, postBody string
+		id, session       string
+		status            string
+	}{
+		{
+			spec: harness.Kiro, path: "/api/v1/kiro/hook", pre: "preToolUse", post: "postToolUse",
+			// Kiro CLI 2.24.1's own payloads.
+			preBody: `{"hook_event_name":"preToolUse","cwd":"/work/app","session_id":"c2197843-ce66-4011-a627-052241fa9da8",` +
+				`"tool_name":"shell","tool_input":{"command":"echo dce2e-pair"}}`,
+			postBody: `{"hook_event_name":"postToolUse","cwd":"/work/app","session_id":"c2197843-ce66-4011-a627-052241fa9da8",` +
+				`"tool_name":"shell","tool_input":{"command":"echo dce2e-pair"},"tool_response":{"items":[{"Text":"dce2e-pair\n"}]}}`,
+			session: "c2197843-ce66-4011-a627-052241fa9da8",
+		},
+		{
+			spec: harness.Cursor, path: "/api/v1/cursor/hook", pre: "preToolUse", post: "postToolUse",
+			preBody: `{"hook_event_name":"preToolUse","conversation_id":"conv-pair","generation_id":"gen-pair",` +
+				`"tool_name":"Shell","tool_input":{"command":"echo dce2e-pair"},"tool_use_id":"tool_cursor_pair","cwd":"/work/app"}`,
+			postBody: `{"hook_event_name":"postToolUse","conversation_id":"conv-pair","generation_id":"gen-pair",` +
+				`"tool_name":"Shell","tool_input":{"command":"echo dce2e-pair"},"tool_output":"dce2e-pair\n","tool_use_id":"tool_cursor_pair","cwd":"/work/app"}`,
+			id: "tool_cursor_pair",
+		},
+		{
+			spec: harness.OpenCode, path: "/api/v1/opencode/hook", pre: "tool.execute.before", post: "tool.execute.after",
+			preBody: `{"hook_event_name":"tool.execute.before","tool_name":"bash","tool_input":{"command":"echo dce2e-pair"},` +
+				`"session_id":"ses_pair","turn_id":"msg_pair","tool_call_id":"call_opencode_pair","cwd":"/work/app",` +
+				`"load_heartbeat":true,"arguments_authoritative":true,"mcp_identity_status":"not_mcp"}`,
+			postBody: `{"hook_event_name":"tool.execute.after","tool_name":"bash","tool_input":{"command":"echo dce2e-pair"},` +
+				`"session_id":"ses_pair","turn_id":"msg_pair","tool_call_id":"call_opencode_pair","cwd":"/work/app",` +
+				`"load_heartbeat":true,"arguments_authoritative":true,"mcp_identity_status":"not_mcp",` +
+				`"tool_response":{"title":"echo","output":"dce2e-pair\n","metadata":{"exit":0}}}`,
+			id: "call_opencode_pair",
+		},
+		{
+			spec: harness.Amp, path: "/api/v1/amp/hook", pre: "tool.call", post: "tool.result",
+			preBody: `{"hook_event_name":"tool.call","thread_id":"T-pair","session_id":"T-pair","tool_call_id":"toolu_amp_pair",` +
+				`"tool_name":"Bash","tool_input":{"cmd":"echo dce2e-pair"},"cwd":"/work/app"}`,
+			postBody: `{"hook_event_name":"tool.result","thread_id":"T-pair","session_id":"T-pair","tool_call_id":"toolu_amp_pair",` +
+				`"tool_name":"Bash","tool_input":{"cmd":"echo dce2e-pair"},"tool_response":{"output":"dce2e-pair\n"},` +
+				`"status":"done","error":"","cwd":"/work/app"}`,
+			id: "toolu_amp_pair", status: "done",
+		},
+	} {
+		t.Run(tc.spec.Name, func(t *testing.T) {
+			version := tc.spec.DefaultVersion
+			contract := connector.ResolveSandboxHookContract(tc.spec.Name, version)
+			if contract.Status != connector.HookCompatibilityKnown {
+				t.Fatalf("%s %s: no sandbox hook contract: %s", tc.spec.Name, version, contract.Reason)
+			}
+			_, token := f.mint(t, "dc-pair-"+tc.spec.Name, tc.spec.Name, version, contract.Contract.ContractID, "")
+			obs.take()
+			f.hook(t, tc.path, token, tc.preBody)
+			f.hook(t, tc.path, token, tc.postBody)
+			decisions, _ := obs.take()
+			if len(decisions) != 2 {
+				t.Fatalf("decisions = %+v", decisions)
+			}
+			pre, post := decisions[0], decisions[1]
+			if pre.Connector != tc.spec.Name || pre.Event != tc.pre || post.Event != tc.post || pre.Action != "allow" {
+				t.Fatalf("events: pre %+v post %+v", pre, post)
+			}
+			if pre.ToolUseID != tc.id || post.ToolUseID != tc.id {
+				t.Fatalf("tool-use IDs %q and %q, want %q", pre.ToolUseID, post.ToolUseID, tc.id)
+			}
+			if pre.ResultStatus != "" || post.ResultStatus != tc.status {
+				t.Fatalf("result status: pre %q post %q, want %q", pre.ResultStatus, post.ResultStatus, tc.status)
+			}
+			if tc.session != "" && (pre.SessionID != tc.session || post.SessionID != tc.session) {
+				t.Fatalf("sessions %q and %q, want %q", pre.SessionID, post.SessionID, tc.session)
+			}
+			if len(pre.ToolInput) == 0 || !bytes.Equal(pre.ToolInput, post.ToolInput) || pre.Tool == "" || pre.Tool != post.Tool {
+				t.Fatalf("the call's tool and input differ: pre %q %s, post %q %s", pre.Tool, pre.ToolInput, post.Tool, post.ToolInput)
+			}
+			var input map[string]interface{}
+			if err := json.Unmarshal(pre.ToolInput, &input); err != nil || len(input) != 1 {
+				t.Fatalf("tool input %s is not the call's input: %v", pre.ToolInput, err)
+			}
+		})
+	}
+}
+
+// A hook event without a tool input names no call by content: ToolArgs
+// falls back to the whole payload there, which a call's pre-tool and
+// post-tool events do not share.
+func TestSandboxDecisionToolInput(t *testing.T) {
+	withInput := agentHookRequest{
+		Payload:  map[string]interface{}{"tool_input": map[string]interface{}{"command": "ls"}},
+		ToolArgs: json.RawMessage(`{"command":"ls"}`),
+	}
+	if got := sandboxDecisionToolInput(withInput); string(got) != `{"command":"ls"}` {
+		t.Fatalf("tool input = %s", got)
+	}
+	without := agentHookRequest{
+		Payload:  map[string]interface{}{"hook_event_name": "stop", "assistant_response": "done"},
+		ToolArgs: json.RawMessage(`{"assistant_response":"done","hook_event_name":"stop"}`),
+	}
+	if got := sandboxDecisionToolInput(without); got != nil {
+		t.Fatalf("an event without a tool input named %s", got)
 	}
 }

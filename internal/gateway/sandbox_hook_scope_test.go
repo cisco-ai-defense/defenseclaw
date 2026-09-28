@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -124,16 +125,11 @@ func TestSandboxHooksAreEvaluatedWithoutAHostConnector(t *testing.T) {
 	if resp := api.evaluateClaudeCodeHook(context.Background(), req); resp.Action != "allow" {
 		t.Fatalf("host hook for an inactive connector = %q, want allow without a scan", resp.Action)
 	}
-	binding := sandboxauth.Binding{
-		ID: "sb_00000000000000000000000000000009", Connector: "claudecode", SandboxName: "dc-claude-app",
-		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-	}
+	binding := sandboxTestBinding("claudecode")
 	if resp := api.evaluateClaudeCodeHook(sandboxCtx(binding), req); resp.Action != "block" {
 		t.Fatalf("sandbox hook = %q, want block", resp.Action)
 	}
-	codex := binding
-	codex.Connector = "codex"
-	if !sandboxHookForConnector(sandboxCtx(binding), "claude-code") || sandboxHookForConnector(sandboxCtx(codex), "claudecode") {
+	if !sandboxHookForConnector(sandboxCtx(binding), "claude-code") || sandboxHookForConnector(sandboxCtx(sandboxTestBinding("codex")), "claudecode") {
 		t.Fatal("sandboxHookForConnector must match only the binding's own connector")
 	}
 }
@@ -152,18 +148,13 @@ func TestSandboxHooksEnforceInObserveMode(t *testing.T) {
 	if host.RawAction != "block" || host.Action != "allow" || !host.WouldBlock || host.Mode != "observe" {
 		t.Fatalf("host hook in observe mode = %+v, want allow with would_block", host)
 	}
-	binding := sandboxauth.Binding{
-		ID: "sb_0000000000000000000000000000000a", Connector: "claudecode", SandboxName: "dc-claude-app",
-		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-	}
+	binding := sandboxTestBinding("claudecode")
 	got := api.evaluateClaudeCodeHook(sandboxCtx(binding), req)
 	if got.Action != "block" || got.Mode != "action" {
 		t.Fatalf("sandbox hook in observe mode = %+v, want an enforced block", got)
 	}
 	for _, name := range []string{"codex", "opencode"} {
-		b := binding
-		b.Connector = name
-		if mode := sandboxHookMode(sandboxCtx(b), name, "observe"); mode != "action" {
+		if mode := sandboxHookMode(sandboxCtx(sandboxTestBinding(name)), name, "observe"); mode != "action" {
 			t.Fatalf("%s sandbox mode = %q", name, mode)
 		}
 		if mode := sandboxHookMode(sandboxCtx(binding), name, "observe"); mode != "observe" {
@@ -187,12 +178,7 @@ func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
 	if got := api.hookProfileForConnector("codex").ContractID; got != "codex-hooks-v2" {
 		t.Fatalf("host profile contract = %q, want the host lock", got)
 	}
-	binding := sandboxauth.Binding{
-		ID: "sb_00000000000000000000000000000003", Connector: "codex",
-		AgentVersion: "0.128.0", HookContractID: "codex-hooks-v1",
-		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-	}
-	ctx := sandboxauth.WithRequest(context.Background(), binding, nil)
+	ctx := sandboxauth.WithRequest(context.Background(), sessionScopeBinding("sb_00000000000000000000000000000003", "codex"), nil)
 	profile := api.hookProfileForRequest(ctx, "codex")
 	if profile.ContractID != "codex-hooks-v1" || profile.AgentVersion != "0.128.0" {
 		t.Fatalf("sandbox profile = %q/%q, want the binding's contract", profile.ContractID, profile.AgentVersion)
@@ -216,20 +202,16 @@ func TestHookProfileForRequestUsesBindingContract(t *testing.T) {
 
 	// The sandbox runs Linux whatever the host is: the macOS-only OpenHands
 	// native OTLP lane and the Windows compatibility band never apply.
-	openhands := sandboxauth.Binding{
-		ID: "sb_00000000000000000000000000000004", Connector: "openhands",
-		AgentVersion: "OpenHands 1.12.0", HookContractID: "openhands-hooks-v1",
-		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-	}
-	ohCtx := sandboxauth.WithRequest(context.Background(), openhands, nil)
-	if got := api.hookProfileForRequest(ohCtx, "openhands"); got.NativeOTLP != nil ||
-		got.CompatibilityStatus != connector.HookCompatibilityKnown {
-		t.Fatalf("sandbox openhands profile = %q native_otlp=%v", got.CompatibilityStatus, got.NativeOTLP != nil)
-	}
-	openhands.AgentVersion = "OpenHands 1.11.99"
-	ohCtx = sandboxauth.WithRequest(context.Background(), openhands, nil)
-	if got := api.hookProfileForRequest(ohCtx, "openhands"); got.CompatibilityStatus != connector.HookCompatibilityUnknown {
-		t.Fatalf("sandbox openhands below the Linux floor = %q", got.CompatibilityStatus)
+	openhands := sessionScopeBinding("sb_00000000000000000000000000000004", "openhands")
+	openhands.HookContractID = "openhands-hooks-v1"
+	for version, want := range map[string]string{
+		"OpenHands 1.12.0": connector.HookCompatibilityKnown, "OpenHands 1.11.99": connector.HookCompatibilityUnknown,
+	} {
+		openhands.AgentVersion = version
+		got := api.hookProfileForRequest(sandboxauth.WithRequest(context.Background(), openhands, nil), "openhands")
+		if got.NativeOTLP != nil || got.CompatibilityStatus != want {
+			t.Fatalf("sandbox %s profile = %q native_otlp=%v", version, got.CompatibilityStatus, got.NativeOTLP != nil)
+		}
 	}
 }
 
@@ -664,12 +646,7 @@ func TestCodexSessionStartSkipsHostRegistrationRepairInSandbox(t *testing.T) {
 	if code := post(withAuthenticatedHookConnector(context.Background(), "codex"), hostContract); code != http.StatusOK {
 		t.Fatalf("host SessionStart: %d", code)
 	}
-	binding := sandboxauth.Binding{
-		ID: "sb_00000000000000000000000000000004", Connector: "codex",
-		AgentVersion: "0.128.0", HookContractID: "codex-hooks-v1",
-		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-	}
-	if code := post(sandboxCtx(binding), "codex-hooks-v1"); code != http.StatusOK {
+	if code := post(sandboxCtx(sessionScopeBinding("sb_00000000000000000000000000000004", "codex")), "codex-hooks-v1"); code != http.StatusOK {
 		t.Fatalf("sandbox SessionStart: %d", code)
 	}
 	mu.Lock()
@@ -717,6 +694,20 @@ func TestSandboxCodeGuardScanGoesThroughTheView(t *testing.T) {
 	}
 }
 
+// codexObserveRulesDiff is a git diff adding the source-trust literal to
+// internal/gateway/rules.go.
+func codexObserveRulesDiff() string {
+	return strings.Join([]string{
+		"diff --git a/internal/gateway/rules.go b/internal/gateway/rules.go",
+		"index 1111111..2222222 100644",
+		"--- a/internal/gateway/rules.go",
+		"+++ b/internal/gateway/rules.go",
+		"@@ -1 +1,2 @@",
+		" package gateway",
+		"+" + codexObserveSourceTrustLiteral(),
+	}, "\n")
+}
+
 // TestSandboxToolResultsSkipHostSourceProofs covers Observe mode's
 // source-scope downgrade for tool results. On the host it verifies a git
 // diff by reading the current file under the working directory. For a
@@ -735,17 +726,8 @@ func TestSandboxToolResultsSkipHostSourceProofs(t *testing.T) {
 		[]byte("package gateway\n"+literal+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	diff := strings.Join([]string{
-		"diff --git a/internal/gateway/rules.go b/internal/gateway/rules.go",
-		"index 1111111..2222222 100644",
-		"--- a/internal/gateway/rules.go",
-		"+++ b/internal/gateway/rules.go",
-		"@@ -1 +1,2 @@",
-		" package gateway",
-		"+" + literal,
-	}, "\n")
 	input := map[string]interface{}{"command": "git diff -- internal/gateway/rules.go"}
-	output := map[string]interface{}{"stdout": diff}
+	output := map[string]interface{}{"stdout": codexObserveRulesDiff()}
 
 	for _, connectorName := range []string{"codex", "claudecode"} {
 		t.Run(connectorName, func(t *testing.T) {
@@ -753,21 +735,11 @@ func TestSandboxToolResultsSkipHostSourceProofs(t *testing.T) {
 			cfg.Guardrail.Mode = "observe"
 			cfg.Guardrail.Connector = connectorName
 			api := &APIServer{scannerCfg: cfg}
-			binding := sandboxauth.Binding{
-				ID:             "sb_00000000000000000000000000000003",
-				SandboxName:    "dc-" + connectorName + "-masked",
-				Connector:      connectorName,
-				AgentVersion:   "0.128.0",
-				HookContractID: "codex-hooks-v1",
-				Routes:         []sandboxauth.Route{sandboxauth.RouteHook},
-				Workdir: sandboxauth.Workdir{
-					Mode:   sandboxauth.WorkdirMount,
-					Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: root}},
-					Masks:  []string{"/work/app/internal/gateway/rules.go"},
-				},
-			}
-			if connectorName == "claudecode" {
-				binding.AgentVersion, binding.HookContractID = "2.1.156", "claudecode-hooks-v1"
+			binding := sessionScopeBinding("sb_00000000000000000000000000000003", connectorName)
+			binding.Workdir = sandboxauth.Workdir{
+				Mode:   sandboxauth.WorkdirMount,
+				Mounts: []sandboxauth.Mount{{SandboxPath: "/work/app", HostPath: root}},
+				Masks:  []string{"/work/app/internal/gateway/rules.go"},
 			}
 			fsys := &countingFS{}
 			view := sandboxauth.NewFSView(binding, fsys)
@@ -993,20 +965,10 @@ func TestSandboxInMemorySessionStateIsPerBinding(t *testing.T) {
 func TestSandboxHooksAreNotHostConnectorActivity(t *testing.T) {
 	installSandboxMarkerRules(t)
 	f := newSandboxIngressFixture(t)
-	_, token, err := f.store.Mint(sandboxauth.Spec{
-		SandboxName: "dc-hermes-health", Connector: "hermes", AgentVersion: "0.19.0", HookContractID: "hermes-hooks-v1",
-		PolicyProfile: "open", Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
-		HostUser: sandboxauth.HostUser{UID: "1000", Name: "dev"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, token := f.mint(t, "dc-hermes-health", "hermes", "0.19.0", "hermes-hooks-v1", "")
 	for i, command := range []string{"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt", "ls"} {
-		body := `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
-			`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_` + string(rune('1'+i)) + `","task_id":"t1"}}`
-		if rec := f.do(t, http.MethodPost, "/api/v1/hermes/hook", token, body); rec.Code != http.StatusOK {
-			t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
-		}
+		f.hook(t, "/api/v1/hermes/hook", token, `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"`+command+`"},`+
+			`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_`+string(rune('1'+i))+`","task_id":"t1"}}`)
 	}
 	hermes := func() *ConnectorHealth {
 		for _, c := range f.api.health.Snapshot().Connectors {
@@ -1024,5 +986,126 @@ func TestSandboxHooksAreNotHostConnectorActivity(t *testing.T) {
 	f.api.finalizeAgentHook(context.Background(), "hermes", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
 	if c := hermes(); c == nil || c.Requests != 1 || c.ToolBlocks != 1 || c.LastActivityAt == nil {
 		t.Fatalf("host hook health = %+v", c)
+	}
+}
+
+// TestSandboxCorrelationIgnoresLoopbackTrust pins that the correlation
+// fields a loopback caller may declare (its W3C trace, the policy id and
+// the destination app) are never taken from a sandbox. Sandbox traffic
+// reaches the ingress from loopback through the OpenShell supervisor, so
+// with the loopback gates alone a sandbox chose the trace id of its audit
+// rows and the parent of its hook spans, which could be any host trace. The
+// chain is the ingress's (trace extraction, request id, correlation) after
+// authentication; a host loopback hook keeps what it declares.
+func TestSandboxCorrelationIgnoresLoopbackTrust(t *testing.T) {
+	const (
+		traceID  = "4bf92f3577b34da6a3ce929d0e0e4736"
+		parent   = "00-" + traceID + "-00f067aa0ba902b7-01"
+		policy   = "dc-policy-7"
+		destApp  = "dc-dest-app"
+		hookPath = "/api/v1/hermes/hook"
+	)
+	type seen struct {
+		traceID     string
+		remote      trace.SpanContext
+		envelope    audit.CorrelationEnvelope
+		requestSeen bool
+	}
+	run := func(sandboxed bool) seen {
+		var got seen
+		var h http.Handler = http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			got = seen{
+				traceID:     TraceIDFromContext(r.Context()),
+				remote:      trace.SpanContextFromContext(r.Context()),
+				envelope:    audit.EnvelopeFromContext(r.Context()),
+				requestSeen: true,
+			}
+		})
+		h = CorrelationMiddleware(NewAgentRegistry("", ""))(h)
+		h = sandboxRequestIDMiddleware(h)
+		h = inboundTraceContextMiddleware(h)
+		if sandboxed {
+			inner := h
+			h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := sandboxauth.WithRequest(r.Context(), sandboxTestBinding("hermes"), nil)
+				inner.ServeHTTP(w, r.WithContext(ctx))
+			})
+		}
+		req := httptest.NewRequest(http.MethodPost, hookPath, nil).WithContext(context.Background())
+		req.RemoteAddr = "127.0.0.1:43210"
+		req.Header.Set("traceparent", parent)
+		req.Header.Set(PolicyIDHeader, policy)
+		req.Header.Set(DestinationAppHeader, destApp)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if !got.requestSeen {
+			t.Fatal("the handler was not reached")
+		}
+		return got
+	}
+
+	host := run(false)
+	if host.traceID != traceID || host.envelope.TraceID != traceID || !host.remote.IsRemote() ||
+		host.remote.TraceID().String() != traceID || host.envelope.PolicyID != policy || host.envelope.DestinationApp != destApp {
+		t.Fatalf("host loopback hook = %+v", host)
+	}
+	sandbox := run(true)
+	if sandbox.traceID == traceID || sandbox.envelope.TraceID == traceID || sandbox.remote.IsValid() {
+		t.Fatalf("a sandbox chose its trace: %+v", sandbox)
+	}
+	if sandbox.envelope.PolicyID != "" || sandbox.envelope.DestinationApp != "" {
+		t.Fatalf("a sandbox chose its policy id or destination app: %+v", sandbox.envelope)
+	}
+	if sandbox.envelope.SandboxName != "dc-hermes-app" {
+		t.Fatalf("sandbox envelope = %+v", sandbox.envelope)
+	}
+}
+
+// TestSandboxDefaultPackFlagsHomeCredentialReads pins that the default rule
+// pack's home credential rules judge a sandboxed tool call as they judge the
+// same call on the host. A harness names the sandbox HOME as "~", which the
+// shell parser treats as an expansion; with the trusted sandbox home that
+// expansion is exact, so PATH-SSH-KEY, whose owner needs an executed read,
+// fires for `cat ~/.ssh/id_rsa` (it used to be judged clean in and out of a
+// sandbox), and rules that match a home path by its spelling still fire.
+func TestSandboxDefaultPackFlagsHomeCredentialReads(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
+	p := newSandboxProject(t)
+	api := activeClaudeCodeTestAPI()
+	contexts := map[string]context.Context{
+		"sandbox": sandboxCtx(p.mount),
+		"host":    withAuthenticatedHookConnector(context.Background(), "claudecode"),
+	}
+	cases := []struct {
+		command string
+		want    string // rule ID, or "" for none of the home credential rules
+	}{
+		{command: "cat ~/.ssh/id_rsa", want: "PATH-SSH-KEY"},
+		{command: "head -n 5 ~/.ssh/id_ed25519", want: "PATH-SSH-KEY"},
+		{command: "cat ~/.aws/credentials", want: "PATH-AWS-CREDS"},
+		{command: "cat ~/.gnupg/pubring.kbx", want: "PATH-GNUPG"},
+		{command: "cat ~/.ssh/id_rsa.pub"},
+		{command: "ssh -i ~/.ssh/id_rsa build.example.com true"},
+	}
+	for _, tc := range cases {
+		for name, ctx := range contexts {
+			resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "home-rules", CWD: p.root, ToolName: "Bash",
+				ToolInput: map[string]interface{}{"command": tc.command},
+				Payload:   map[string]interface{}{"tool_name": "Bash"},
+			})
+			var got []string
+			for _, finding := range resp.Findings {
+				id, _, _ := strings.Cut(finding, ":")
+				if strings.HasPrefix(id, "PATH-") {
+					got = append(got, id)
+				}
+			}
+			switch {
+			case tc.want == "" && len(got) != 0:
+				t.Errorf("%s %q: findings %v, want no home credential rule", name, tc.command, resp.Findings)
+			case tc.want != "" && !containsRuleID(got, tc.want):
+				t.Errorf("%s %q: findings %v, want %s", name, tc.command, resp.Findings, tc.want)
+			}
+		}
 	}
 }

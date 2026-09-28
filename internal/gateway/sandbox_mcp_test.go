@@ -19,23 +19,16 @@ package gateway
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
 
 func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
-	store, err := audit.NewStore(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	if err := store.Init(); err != nil {
-		t.Fatal(err)
-	}
+	store, _ := newNativeSkillRuntimeTestStore(t)
 	pe := enforce.NewPolicyEngine(store)
 	if err := pe.Block("mcp", "globally-blocked", "scan verdict"); err != nil {
 		t.Fatal(err)
@@ -78,17 +71,11 @@ func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
 	for _, s := range skipped {
 		reasons[s.Name] = s.Reason
 	}
-	want := map[string]string{
+	if want := map[string]string{
 		"globally-blocked": "blocked by DefenseClaw", "claude-blocked": "blocked by DefenseClaw",
 		"policy-denied": "blocked by the MCP asset policy",
-	}
-	if len(reasons) != len(want) {
-		t.Fatalf("skipped = %v", reasons)
-	}
-	for name, reason := range want {
-		if reasons[name] != reason {
-			t.Fatalf("%s skipped for %q, want %q", name, reasons[name], reason)
-		}
+	}; !maps.Equal(reasons, want) {
+		t.Fatalf("skipped = %v, want %v", reasons, want)
 	}
 
 	// A connector-scoped block applies to that harness only.
