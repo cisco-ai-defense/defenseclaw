@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -57,6 +58,17 @@ type box struct {
 	deleted   bool
 	orphaned  bool
 	missing   bool
+	// violations are the clamps and refusals the current configuration
+	// applies to the sandbox's run flags, resolved with eff.
+	violations []packs.Violation
+	// posture is what the feed last heard of the policy the sandbox runs
+	// under (announcePosture).
+	posture *posture
+	// egressOff says why the policy turns the sandbox's web egress off
+	// ("" while it is on); egressSynced is set once it was first judged
+	// (noteEgressOff).
+	egressOff    string
+	egressSynced bool
 	// unrecorded marks a live sandbox adopted from its labels because the
 	// daemon has no readable record of it: the pack, profile and run flags
 	// it was created with are unknown, so it fails closed (see
@@ -250,10 +262,16 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// time it became ready (uptime); a real transition takes now.
 		if previous != audit.SandboxPhaseReady || b.rec.ReadyAt.IsZero() {
 			b.rec.ReadyAt = b.started.UTC()
+			// The session's harness launches with the skip-permissions
+			// mode the policy allows now; a later change applies from the
+			// next start (launchYolo).
+			yolo := launchYolo(b)
+			b.rec.SessionYolo = &yolo
 		}
 	}
 	if phase != audit.SandboxPhaseReady {
 		b.rec.ReadyAt = time.Time{}
+		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
 	id := b.identity()
@@ -350,6 +368,29 @@ func postureDrift(rec record, eff *packs.Effective) []string {
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && eff.Workspace.Mode != config.OpenShellWorkdirMount {
 		out = append(out, "the sandbox policy now works on a copy of this project, but this sandbox mounts it live; "+
 			"the mount stays until the sandbox stops, and it cannot start again: delete it and run it again")
+	}
+	return out
+}
+
+// sessionDrift explains how the session running now breaks the policy the
+// sandbox would start under today (eff): it keeps what it was launched
+// with until it ends, so an administrator checking compliance sees which
+// sessions still run out of policy. sessionYolo is the session's
+// skip-permissions mode, nextYolo the next launch's.
+func sessionDrift(rec record, eff *packs.Effective, sessionYolo, nextYolo bool) []string {
+	var out []string
+	if sessionYolo && !nextYolo {
+		why := "the sandbox policy now keeps the harness's permission prompts"
+		var v *packs.Violation
+		if err := eff.Allow(packs.Action{Kind: packs.ActionYolo}); errors.As(err, &v) && v.Admin() {
+			why = "your organization disabled it (" + v.Constraint + ")"
+		}
+		out = append(out, "skip-permissions stays on in the session running now, which began before "+why+
+			"; the harness keeps its permission prompts from the next start")
+	}
+	if err := eff.Allow(packActionHarness(rec.Harness)); err != nil {
+		out = append(out, "the session running now uses a harness the sandbox policy no longer allows ("+err.Error()+
+			"); it keeps running until it ends, and the sandbox cannot start again")
 	}
 	return out
 }
@@ -452,15 +493,27 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 	}
 	v.Egress.Blocked = b.blocked
+	running := b.phase == audit.SandboxPhaseReady && !b.started.IsZero()
+	if running {
+		v.SessionYolo = launchYolo(b)
+		if r.SessionYolo != nil {
+			v.SessionYolo = *r.SessionYolo
+		}
+	}
 	if e := b.eff; e != nil {
 		// The policy the sandbox runs under now: every configuration change
 		// re-resolves it (refreshEgress), so an administrator's change
-		// applies to it; the record keeps what it was created with.
+		// applies to it; the record keeps what it was created with, and so
+		// do the create-time clamps, which the current ones replace.
 		v.Profile, v.NetworkMode, v.Approvals = e.Profile, e.NetworkMode, e.Approvals
 		if e.Pack != nil {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
 		}
+		v.Violations = wireViolations(b.violations)
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
+		if running {
+			v.Warnings = append(v.Warnings, sessionDrift(r, e, v.SessionYolo, v.Yolo)...)
+		}
 	}
 	if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
 		v.Warnings = append(slices.Clip(v.Warnings), res.Message+

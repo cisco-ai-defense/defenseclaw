@@ -79,6 +79,10 @@ const (
 	CategoryRateLimited    Category = "rate_limited"
 	CategoryLargeUpload    Category = "large_upload"
 	CategoryIPLiteral      Category = "ip_literal"
+	// CategoryEgressOff is a sandbox whose policy turned its web egress off
+	// while it ran (a suspended credential, CredentialStore.Suspend): every
+	// request is refused, and nothing but the policy opens it again.
+	CategoryEgressOff Category = "egress_off"
 )
 
 var categoryReasons = map[Category]string{

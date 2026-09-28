@@ -86,7 +86,7 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		return nil, nil, err
 	}
 	m.mu.Lock()
-	b.eff, b.decider = eff, d
+	b.eff, b.decider, b.violations = eff, d, violations
 	failed := b.policyErr != ""
 	b.policyErr = ""
 	m.mu.Unlock()
@@ -137,8 +137,9 @@ func (m *Manager) checkPolicySources(mode, project string, eff *packs.Effective)
 // serving the sandbox with the decider of its last good policy would keep
 // it out of every later tightening. Instead its cached policy is dropped
 // (triage and approvals resolve it again and refuse while that fails) and
-// its egress proxy credential is revoked, so the proxy refuses the sandbox
-// altogether, as in the deny network mode. enforceAll judges its approved
+// its egress proxy credential is suspended, so the proxy refuses the sandbox
+// altogether (with a 403 that names the reason), as in the deny network
+// mode. enforceAll judges its approved
 // OpenShell rules by the organization's policy alone (orgPolicy). The first
 // failure (and every different one) is logged with
 // OPENSHELL_PACK_INVALID, recorded as degraded health and published to the
@@ -150,17 +151,24 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 		detail = apiErr.Detail
 	}
 	m.mu.Lock()
-	b.eff, b.decider = nil, nil
+	b.eff, b.decider, b.violations = nil, nil, nil
 	changed := b.policyErr != detail
 	b.policyErr = detail
 	name, bindingID, skip := b.rec.Name, b.rec.BindingID, b.creating || b.deleted
+	cred, sandboxID := b.cred, scopeID(b.rec.ID, b.rec.Name)
 	id := b.identity()
 	m.mu.Unlock()
 	if skip {
 		return
 	}
 	if bindingID != "" {
-		m.creds.Revoke(bindingID)
+		// The proxy answers the sandbox's requests with the reason (a 403)
+		// rather than the 407 of a credential it does not know.
+		why := egress.Decision{Category: egress.CategoryEgressOff, Source: egress.SourceDefault,
+			Reason: truncate("the sandbox policy cannot be resolved ("+detail+"); fix the pack or the configuration, or delete the sandbox", 512)}
+		if cred.Username == "" || m.creds.Suspend(cred, m.principal(bindingID, sandboxID, name, nil, nil), why) != nil {
+			m.creds.Revoke(bindingID)
+		}
 		m.recheckEgress(bindingID)
 	}
 	if !changed {

@@ -137,6 +137,10 @@ type record struct {
 	// it is not): a restarted daemon that finds it still ready reports its
 	// uptime from then. OpenShell 0.1.1 reports no transition times.
 	ReadyAt time.Time `json:"ready_at,omitempty"`
+	// SessionYolo is the skip-permissions mode the session that began at
+	// ReadyAt was launched with (launchYolo then); nil while the sandbox
+	// is not ready, and in records from before it was kept.
+	SessionYolo *bool `json:"session_yolo,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
 	// HostAlias is what OpenShell last reported of host.openshell.internal

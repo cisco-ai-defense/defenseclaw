@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -446,8 +447,10 @@ func TestUnresolvablePolicyFailsClosed(t *testing.T) {
 		t.Fatalf("openbox CONNECT example.org = %d %+v, want the admin block", status, body)
 	}
 	for _, target := range []string{"example.org:443", "keep.example.net:443"} {
-		if status, _ := proxy.connect(t, e, "teambox", target); status != http.StatusProxyAuthRequired {
-			t.Fatalf("teambox CONNECT %s with an unresolvable policy = %d, want its credential refused", target, status)
+		// Refused with the reason, not as a credential the proxy does not know.
+		if status, body := proxy.connect(t, e, "teambox", target); status != http.StatusForbidden ||
+			body.Category != egress.CategoryEgressOff || !strings.Contains(body.Reason, "cannot be resolved") {
+			t.Fatalf("teambox CONNECT %s with an unresolvable policy = %d %+v, want it refused with the reason", target, status, body)
 		}
 	}
 	var fed bool

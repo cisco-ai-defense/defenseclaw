@@ -92,6 +92,10 @@ func sandboxFlag(p Principal) string {
 // commands it names are the `defenseclaw sandbox unblock` surface.
 func DefaultUnblockHint(p Principal, d Decision) string {
 	switch {
+	case d.Category == CategoryEgressOff:
+		return "The sandbox's policy turned its web egress off while it runs, so no destination can be reached or " +
+			"unblocked; the proxy credentials are fine. Tell the user the reason above. Do not retry, and do not try " +
+			"to reach the destination another way."
 	case d.Category == CategoryIPLiteral && d.Unblockable:
 		return fmt.Sprintf("Retry with the site's host name instead of its IP address. If the IP address itself is needed, tell "+
 			"the user DefenseClaw blocked it; they can allow it with `defenseclaw sandbox unblock %s%s`. "+

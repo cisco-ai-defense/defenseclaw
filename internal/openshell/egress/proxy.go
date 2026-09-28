@@ -377,6 +377,14 @@ func (v revision) keep() bool { return !v.revoked && v.refusal == nil }
 func (p *Proxy) revise(t *tunnel) revision {
 	pr, ok := p.auth.Authenticate(t.cred.Username, t.cred.Password)
 	if !ok || pr.BindingID != t.principal.BindingID {
+		if spr, off, found := p.suspended(t.cred.Username, t.cred.Password); found && spr.BindingID == t.principal.BindingID {
+			// The policy turned the sandbox's egress off: the tunnel ends
+			// with the reason, not as a revoked credential.
+			dec := off
+			dec.Allowed, dec.Unblockable = false, false
+			dec.Host, dec.Port = t.dec.Host, t.dec.Port
+			return revision{refusal: &dec}
+		}
 		return revision{revoked: true}
 	}
 	d := deciderFor(pr, p.gen.Load())
@@ -730,21 +738,52 @@ func (p *Proxy) serveHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authenticate resolves the request's proxy credential. presented reports
-// whether the request carried any Proxy-Authorization at all.
-func (p *Proxy) authenticate(r *http.Request) (pr Principal, cred Credential, presented, ok bool) {
+// whether the request carried any Proxy-Authorization at all. A credential
+// the authenticator suspended (SuspendingAuthenticator) is not ok, but
+// comes with its principal and the refusal to answer it with (off).
+func (p *Proxy) authenticate(r *http.Request) (pr Principal, cred Credential, presented, ok bool, off *Decision) {
 	values := r.Header.Values("Proxy-Authorization")
 	if len(values) == 0 {
-		return Principal{}, Credential{}, false, false
+		return Principal{}, Credential{}, false, false, nil
 	}
 	user, pass, parsed := parseProxyAuthorization(values)
 	if !parsed {
-		return Principal{}, Credential{}, true, false
+		return Principal{}, Credential{}, true, false, nil
 	}
 	pr, ok = p.auth.Authenticate(user, pass)
 	if !ok || strings.TrimSpace(pr.BindingID) == "" {
-		return Principal{}, Credential{}, true, false
+		if spr, dec, found := p.suspended(user, pass); found {
+			return spr, Credential{}, true, false, &dec
+		}
+		return Principal{}, Credential{}, true, false, nil
 	}
-	return pr, Credential{Username: user, Password: pass}, true, true
+	return pr, Credential{Username: user, Password: pass}, true, true, nil
+}
+
+// suspended looks up a suspended credential (SuspendingAuthenticator).
+func (p *Proxy) suspended(user, pass string) (Principal, Decision, bool) {
+	sa, ok := p.auth.(SuspendingAuthenticator)
+	if !ok {
+		return Principal{}, Decision{}, false
+	}
+	pr, dec, found := sa.Suspended(user, pass)
+	if !found || strings.TrimSpace(pr.BindingID) == "" {
+		return Principal{}, Decision{}, false
+	}
+	return pr, dec, true
+}
+
+// suspendedRefusal is the refusal of a request to target from a suspended
+// credential: off, for that destination.
+func suspendedRefusal(off Decision, target string) Decision {
+	dec := off
+	dec.Allowed, dec.Unblockable = false, false
+	if host, port, err := splitAuthority(target); err == nil {
+		dec.Host, dec.Port = sanitizeHost(host), port
+	} else {
+		dec.Host = sanitizeHost(target)
+	}
+	return dec
 }
 
 // confirmTracked rechecks a tunnel or request once it is tracked, since a
@@ -845,7 +884,11 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		writeRaw(conn, http.StatusServiceUnavailable, "Service Unavailable", nil, shuttingDownResponse())
 		return
 	}
-	pr, cred, presented, ok := p.authenticate(r)
+	pr, cred, presented, ok, off := p.authenticate(r)
+	if off != nil {
+		p.refuseRaw(conn, pr, http.MethodConnect, suspendedRefusal(*off, target), start)
+		return
+	}
 	if !ok {
 		p.challenged(presented, http.MethodConnect, target, start)
 		writeAuthRequired(conn)

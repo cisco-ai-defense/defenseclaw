@@ -114,10 +114,11 @@ func (m *Manager) refreshEgress() {
 	for _, b := range boxes {
 		eff, err := m.resolveBox(b)
 		if err != nil {
-			// resolveBox revoked the credential (policyUnresolved).
+			// resolveBox suspended the credential (policyUnresolved).
 			continue
 		}
 		m.syncCredential(b, eff)
+		m.announcePosture(b, eff)
 	}
 	if proxy == nil {
 		return
@@ -130,10 +131,12 @@ func (m *Manager) refreshEgress() {
 }
 
 // syncCredential registers a sandbox's egress proxy credential with its
-// current principal and decider, or revokes it while the sandbox's network
+// current principal and decider, or suspends it while the sandbox's network
 // mode is deny (the strict profile, for example after an administrator
-// raised min_profile) or it has no decider: the proxy then refuses the
-// sandbox altogether instead of serving it under another policy.
+// required the strict pack or raised min_profile): the proxy then refuses
+// the sandbox altogether instead of serving it under another policy, with a
+// 403 that says why rather than the 407 of an unknown credential, and the
+// feed says so once. Without a decider the credential is revoked.
 func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	cred, rec, d := b.cred, b.rec, b.decider
@@ -141,12 +144,87 @@ func (m *Manager) syncCredential(b *box, eff *packs.Effective) {
 	if cred.Username == "" || rec.BindingID == "" || eff == nil {
 		return
 	}
-	if eff.NetworkMode == packs.NetworkDeny || d == nil {
+	pr := m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d, eff)
+	switch {
+	case eff.NetworkMode == packs.NetworkDeny:
+		why := egressOffReason(eff)
+		if err := m.creds.Suspend(cred, pr, egressOffDecision(eff, why)); err != nil {
+			m.creds.Revoke(rec.BindingID)
+		}
+		m.noteEgressOff(b, why)
+	case d == nil:
 		m.creds.Revoke(rec.BindingID)
-	} else {
-		_ = m.creds.Register(cred, m.principal(rec.BindingID, scopeID(rec.ID, rec.Name), rec.Name, d, eff))
+	default:
+		_ = m.creds.Register(cred, pr)
+		m.noteEgressOff(b, "")
 	}
 	m.recheckEgress(rec.BindingID)
+}
+
+// egressOffDecision is the refusal a sandbox's suspended egress proxy
+// credential is answered with.
+func egressOffDecision(eff *packs.Effective, why string) egress.Decision {
+	dec := egress.Decision{Category: egress.CategoryEgressOff, Reason: why, Source: egress.SourceDefault}
+	if eff != nil {
+		if s, ok := effSetting(eff, "network.mode"); ok && s.Source == packs.SourceAdmin {
+			dec.Source = egress.SourceAdmin
+		}
+		if s, ok := effSetting(eff, "pack"); ok && s.Source == packs.SourceAdmin {
+			dec.Source = egress.SourceAdmin
+		}
+	}
+	return dec
+}
+
+// egressOffReason says why a sandbox's policy turns its web egress off: an
+// organization's required pack or constraint, else the sandbox's own pack
+// or profile.
+func egressOffReason(eff *packs.Effective) string {
+	pack := ""
+	if eff.Pack != nil {
+		pack = eff.Pack.Name
+	}
+	if s, ok := effSetting(eff, "pack"); ok && s.Source == packs.SourceAdmin && pack != "" {
+		return "your organization's required sandbox pack (" + pack + ") turns web egress off for this sandbox (" + s.Origin + ")"
+	}
+	for _, key := range []string{"network.mode", "profile"} {
+		if s, ok := effSetting(eff, key); ok && s.Source == packs.SourceAdmin {
+			return "your organization's DefenseClaw policy turns web egress off for this sandbox (" + s.Origin + ")"
+		}
+	}
+	origin := "pack " + firstNonEmpty(pack, "-")
+	if s, ok := effSetting(eff, "network.mode"); ok && s.Origin != "" {
+		origin = s.Origin
+	}
+	return "the sandbox policy turns web egress off for this sandbox (network mode deny, from " + origin + ")"
+}
+
+// effSetting is one resolved setting of eff with its provenance.
+func effSetting(eff *packs.Effective, key string) (packs.Setting, bool) {
+	for _, s := range eff.Explain() {
+		if s.Key == key {
+			return s, true
+		}
+	}
+	return packs.Setting{}, false
+}
+
+// noteEgressOff records why a sandbox's web egress is off ("" while it is
+// on) and tells the feed when a policy change turns it off: a sandbox that
+// starts out that way (the strict pack) has no proxy to be refused by.
+func (m *Manager) noteEgressOff(b *box, why string) {
+	m.mu.Lock()
+	first := !b.egressSynced
+	b.egressSynced = true
+	changed := b.egressOff != why
+	b.egressOff = why
+	name, skip := b.rec.Name, b.creating || b.deleted
+	m.mu.Unlock()
+	if first || !changed || skip || why == "" {
+		return
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
+		Reason: sandboxapi.ReasonEgressOff, Message: truncate("✗ all web egress: "+why+"; the proxy refuses every request with that reason", 512)})
 }
 
 // recheckEgress applies a binding's revoked or re-registered egress proxy

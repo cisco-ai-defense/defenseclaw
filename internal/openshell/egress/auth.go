@@ -62,6 +62,15 @@ type Authenticator interface {
 	Authenticate(username, password string) (Principal, bool)
 }
 
+// SuspendingAuthenticator is an Authenticator that also knows the
+// credentials it suspended (CredentialStore.Suspend). Authenticate refuses
+// them; the proxy answers them with Suspended's refusal (a 403 that says
+// why) instead of the 407 challenge an unknown credential gets.
+type SuspendingAuthenticator interface {
+	Authenticator
+	Suspended(username, password string) (Principal, Decision, bool)
+}
+
 // Credential is a per-binding proxy credential. The sandbox receives it as
 // the userinfo of HTTPS_PROXY/HTTP_PROXY and clients send it as
 // Proxy-Authorization: Basic. It only authorizes egress the sandbox already
@@ -136,6 +145,9 @@ type CredentialStore struct {
 type storedCredential struct {
 	digest    [sha256.Size]byte
 	principal Principal
+	// suspended is the refusal of a suspended credential (Suspend), nil
+	// while it authenticates.
+	suspended *Decision
 }
 
 // dummyDigest keeps the unknown-username path doing the same comparison work
@@ -152,6 +164,26 @@ func NewCredentialStore() *CredentialStore {
 // (for example a profile change) without rotating. Open tunnels follow
 // either change once Proxy.Recheck runs.
 func (s *CredentialStore) Register(c Credential, p Principal) error {
+	return s.store(c, p, nil)
+}
+
+// Suspend registers c for p like Register, but refuses it: Authenticate
+// rejects it, and the proxy answers the sandbox's requests with why (a 403
+// whose body names the reason, and a blocked event) instead of the 407
+// challenge an unknown credential gets. It is for a sandbox whose policy
+// turns its web egress off while it runs, so neither its agent nor its user
+// goes debugging proxy credentials that are fine. Register lifts it, and
+// Revoke drops the credential; Proxy.Recheck ends the open tunnels. why
+// needs Category and Reason; Host and Port are taken from each request.
+func (s *CredentialStore) Suspend(c Credential, p Principal, why Decision) error {
+	if why.Category == "" || strings.TrimSpace(why.Reason) == "" {
+		return fmt.Errorf("%w: a suspension needs a category and a reason", ErrInvalidCredential)
+	}
+	why.Allowed, why.Unblockable = false, false
+	return s.store(c, p, &why)
+}
+
+func (s *CredentialStore) store(c Credential, p Principal, suspended *Decision) error {
 	if err := validateCredential(c); err != nil {
 		return err
 	}
@@ -169,9 +201,22 @@ func (s *CredentialStore) Register(c Credential, p Principal) error {
 	if old, ok := s.byBinding[p.BindingID]; ok && old != c.Username {
 		delete(s.byUser, old)
 	}
-	s.byUser[c.Username] = storedCredential{digest: sha256.Sum256([]byte(c.Password)), principal: p}
+	s.byUser[c.Username] = storedCredential{digest: sha256.Sum256([]byte(c.Password)), principal: p, suspended: suspended}
 	s.byBinding[p.BindingID] = c.Username
 	return nil
+}
+
+// Suspended implements SuspendingAuthenticator: the principal and refusal
+// of a suspended credential whose secret matches.
+func (s *CredentialStore) Suspended(username, password string) (Principal, Decision, bool) {
+	digest := sha256.Sum256([]byte(password))
+	s.mu.RLock()
+	stored, ok := s.byUser[username]
+	s.mu.RUnlock()
+	if !ok || stored.suspended == nil || subtle.ConstantTimeCompare(digest[:], stored.digest[:]) != 1 {
+		return Principal{}, Decision{}, false
+	}
+	return stored.principal, *stored.suspended, true
 }
 
 // Revoke removes the credential registered for bindingID and reports
@@ -189,12 +234,13 @@ func (s *CredentialStore) Revoke(bindingID string) bool {
 	return true
 }
 
-// Lookup returns the principal registered for bindingID.
+// Lookup returns the principal registered for bindingID; a suspended
+// credential (Suspend) has none.
 func (s *CredentialStore) Lookup(bindingID string) (Principal, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	user, ok := s.byBinding[bindingID]
-	if !ok {
+	if !ok || s.byUser[user].suspended != nil {
 		return Principal{}, false
 	}
 	return s.byUser[user].principal, true
@@ -217,7 +263,7 @@ func (s *CredentialStore) Authenticate(username, password string) (Principal, bo
 		subtle.ConstantTimeCompare(digest[:], dummyDigest[:])
 		return Principal{}, false
 	}
-	if subtle.ConstantTimeCompare(digest[:], stored.digest[:]) != 1 {
+	if subtle.ConstantTimeCompare(digest[:], stored.digest[:]) != 1 || stored.suspended != nil {
 		return Principal{}, false
 	}
 	return stored.principal, true

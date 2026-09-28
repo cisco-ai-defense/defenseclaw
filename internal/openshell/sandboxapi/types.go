@@ -166,6 +166,13 @@ type Sandbox struct {
 	NetworkMode string `json:"network_mode,omitempty"`
 	Approvals   string `json:"approvals,omitempty"`
 	Yolo        bool   `json:"yolo"`
+	// SessionYolo reports whether the session running now was launched in
+	// skip-permissions mode: Launch.Yolo as it was when the sandbox last
+	// became ready. Yolo and Launch.Yolo are what the next launch gets;
+	// after a policy change (openshell.admin.allow_yolo: false, say) the
+	// two differ until the session ends, and Warnings says so. False while
+	// the sandbox is not running.
+	SessionYolo bool `json:"session_yolo,omitempty"`
 	// WorkdirMode is mount or copy.
 	WorkdirMode string `json:"workdir_mode"`
 	Project     string `json:"project,omitempty"`
