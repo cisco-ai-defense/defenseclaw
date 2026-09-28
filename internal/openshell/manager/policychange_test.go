@@ -61,7 +61,7 @@ func TestRequiredStrictPackTurnsRunningEgressOff(t *testing.T) {
 		!strings.Contains(body.Reason, "required sandbox pack (strict)") || !strings.Contains(body.Reason, "openshell.admin.required_pack") {
 		t.Fatalf("CONNECT under the required strict pack = %d %+v", status, body)
 	}
-	off := feedWith(e, sb.Name, sandboxapi.ActivityEgressBlocked, sandboxapi.ReasonEgressOff)
+	off := feedWith(e, sb.Name, sandboxapi.ActivityLifecycle, sandboxapi.ReasonEgressOff)
 	if len(off) != 1 || !strings.HasPrefix(off[0].Message, "✗ all web egress: your organization's required sandbox pack (strict)") {
 		t.Fatalf("egress-off feed = %+v", off)
 	}
@@ -77,7 +77,7 @@ func TestRequiredStrictPackTurnsRunningEgressOff(t *testing.T) {
 
 	// The same configuration again moves nothing.
 	e.m.refreshEgress()
-	if n := len(feedWith(e, sb.Name, sandboxapi.ActivityEgressBlocked, sandboxapi.ReasonEgressOff)); n != 1 {
+	if n := len(feedWith(e, sb.Name, sandboxapi.ActivityLifecycle, sandboxapi.ReasonEgressOff)); n != 1 {
 		t.Fatalf("egress-off lines = %d", n)
 	}
 	if n := len(feedWith(e, sb.Name, sandboxapi.ActivityLifecycle, sandboxapi.ReasonPolicyChanged)); n != 1 {

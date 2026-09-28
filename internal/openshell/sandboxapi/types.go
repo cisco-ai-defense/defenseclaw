@@ -624,10 +624,12 @@ const ReasonHookFinding = "hook_finding"
 // organization's egress lists); the Message says what changed.
 const ReasonPolicyChanged = "policy_changed"
 
-// ReasonEgressOff is the Reason of the egress.blocked event a sandbox gets
-// when its policy turns its web egress off while it runs (the deny network
-// mode, as an organization's required strict pack sets): the egress proxy
-// answers its requests with a 403 that says why.
+// ReasonEgressOff is the Reason of the sandbox.lifecycle event a sandbox
+// gets when its policy turns its web egress off while it runs (the deny
+// network mode, as an organization's required strict pack sets); its
+// Message says why. The egress proxy answers the sandbox's requests with a
+// 403 that says so too, each an egress.blocked event with category
+// egress_off.
 const ReasonEgressOff = "egress_off"
 
 // ReasonHooksUnreachable is the Reason of the finding event a session gets

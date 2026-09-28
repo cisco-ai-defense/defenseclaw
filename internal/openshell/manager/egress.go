@@ -231,7 +231,9 @@ func (m *Manager) noteEgressOff(b *box, why string) {
 	if first || !changed || skip || why == "" {
 		return
 	}
-	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
+	// A change of the sandbox's state rather than one refused request
+	// (those follow as egress.blocked events with category egress_off).
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Source: sandboxapi.SourceProxy,
 		Reason: sandboxapi.ReasonEgressOff, Message: truncate("✗ all web egress: "+why+"; the proxy refuses every request with that reason", 512)})
 }
 

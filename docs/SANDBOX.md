@@ -486,7 +486,7 @@ requests, and ends its open tunnels, with a 403 whose body has category
 `egress_off` and names the reason, for example "your organization's required
 sandbox pack (strict) turns web egress off for this sandbox
 (openshell.admin.required_pack)", instead of the 407 an unknown credential
-gets. The feed says so once per sandbox (`egress.blocked`, reason
+gets. The feed says so once per sandbox (`sandbox.lifecycle`, reason
 `egress_off`). A sandbox created with the deny mode has no proxy at all.
 
 The credential's principal also carries the sandbox's own `Decider`
