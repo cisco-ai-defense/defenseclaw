@@ -163,6 +163,7 @@ from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from defenseclaw.tui.widgets.status_strip import render_status_strip
+from defenseclaw.tui.widgets.tab_fit import fit_tab_labels
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
 
@@ -422,7 +423,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
     }
 
     #title {
-        width: 28;
+        width: auto;
+        margin-right: 1;
         color: TOKEN_ACCENT_CYAN;
         text-style: bold;
     }
@@ -2172,13 +2174,17 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             tabs = self.query_one("#tabs", Tabs)
         except NoMatches:
             return
-        for name, key, label in PANELS:
-            if self._panel_hidden(name):
-                continue
-            unread = self._panel_unread_count(name)
-            text = f"{key} {label}"
-            if unread:
-                text = f"{text} ({unread})"
+        visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
+        # Under ~170 columns fifteen full names don't fit: shorten the
+        # inactive tabs (key letters always stay) instead of scrolling.
+        labels = fit_tab_labels(
+            visible,
+            self.active_panel,
+            {name: self._panel_unread_count(name) for name, _key, _label in visible},
+            self._tab_strip_width(),
+        )
+        for name, _key, _label in visible:
+            text = labels[name]
             # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` returns the tab
             # widget directly and avoids exception-as-control-flow here.
             tab = tabs.get_tab(f"tab-{name}")
@@ -2192,6 +2198,19 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             tab.label = text
             self._tab_label_cache[name] = text
 
+    def _tab_strip_width(self) -> int:
+        """Cells the tab strip gets: the header minus title and buttons."""
+
+        width = int(getattr(self.size, "width", 0) or 0)
+        if width <= 0:
+            return 0
+        title = len(f"DefenseClaw {__version__}") + 1
+        # Header padding (2) plus the ":" and "?" buttons (5 wide + 1 margin).
+        return max(0, width - 2 - title - 12)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_tab_labels()
+
     def action_switch_panel(self, panel: str) -> None:
         if panel not in PANEL_NAMES:
             visible = self._visible_panels()
@@ -2199,8 +2218,6 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         self._panel_passive_refresh_pending.clear()
         self.active_panel = panel
         self.help_open = False
-        if self.status_text.startswith("backend=textual  panel="):
-            self.status_text = ""
         if self._read_snapshot is not None:
             self._apply_read_snapshot(self._read_snapshot, panel)
         if panel == "logs":
@@ -4292,7 +4309,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         return self.body_text
 
     def _status_text(self) -> str:
-        return f"backend=textual  panel={self.active_panel}  hints=: command | ? help | q local close | Ctrl+C quit"
+        """Status line text when no action has reported a result yet."""
+
+        return "Ready."
 
     def _runtime_body_text(self) -> str:
         """Colored Runtime header: health first, then planes, coverage, findings."""
