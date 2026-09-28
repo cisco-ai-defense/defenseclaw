@@ -53,7 +53,7 @@ const (
 	foreignHookMaxRoots = 32
 	// foreignHookCacheLimit bounds the in-process parse cache.
 	foreignHookCacheLimit = 64
-	// foreignHookDescribeLimit bounds the payload text shown in a denial.
+	// foreignHookDescribeLimit bounds the handler text shown in a denial.
 	foreignHookDescribeLimit = 200
 
 	foreignHookScopeUser    = "user"
@@ -65,15 +65,22 @@ const (
 	foreignHookBlockedReason = "enterprise_foreign_hook_blocked"
 )
 
+// foreignHookGatedEvents are the events whose foreign handlers can change what
+// runs: preToolUse may return updated_input (updatedInput in the Claude
+// format). Permission-only and observational events cannot change what runs.
+var foreignHookGatedEvents = [...]string{"preToolUse"}
+
 // foreignHookFinding is one input-rewriting handler (or an unverifiable file)
 // found outside the administrator-managed hook source.
 type foreignHookFinding struct {
 	Scope string
 	// Path is the hook file. It is empty for a problem with the workspace
 	// roots in the payload.
-	Path    string
-	Event   string
-	Digest  string
+	Path   string
+	Event  string
+	Digest string
+	// Handler describes what the handler runs, for the user-facing denial.
+	Handler string
 	Problem string
 }
 
@@ -84,8 +91,11 @@ type foreignHookSource struct {
 }
 
 type foreignHookParsedHandler struct {
-	event   string
-	digest  string
+	event string
+	// entry is the registration the approval digest covers: the Cursor
+	// handler object, or the Claude-format matcher group reduced to this one
+	// handler so the matcher is covered too.
+	entry   map[string]interface{}
 	handler map[string]interface{}
 }
 
@@ -150,11 +160,21 @@ func scanCursorForeignHooks(opts Options, payload []byte) []foreignHookFinding {
 			if foreignHookHandlerOwned(handler.handler, opts.ForeignHookTrustedExecutable) {
 				continue
 			}
+			digest, err := foreignHookApprovalDigest(source.scope, handler.event, handler.entry)
+			if err != nil {
+				findings = append(findings, foreignHookFinding{
+					Scope:   source.scope,
+					Path:    source.path,
+					Problem: "cannot fingerprint a hook handler: " + err.Error(),
+				})
+				continue
+			}
 			findings = append(findings, foreignHookFinding{
-				Scope:  source.scope,
-				Path:   source.path,
-				Event:  handler.event,
-				Digest: handler.digest,
+				Scope:   source.scope,
+				Path:    source.path,
+				Event:   handler.event,
+				Digest:  digest,
+				Handler: describeForeignHookHandler(handler.handler),
 			})
 		}
 	}
@@ -301,17 +321,6 @@ func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-func quoteForeignHookText(value string) string {
-	if len(value) <= foreignHookDescribeLimit {
-		return strconv.Quote(value)
-	}
-	cut := foreignHookDescribeLimit
-	for cut > 0 && !utf8.RuneStart(value[cut]) {
-		cut--
-	}
-	return strconv.Quote(value[:cut]) + "..."
-}
-
 func readForeignHookSource(source foreignHookSource) foreignHookParseResult {
 	data, exists, err := readForeignHookFile(source.path)
 	if err != nil {
@@ -379,83 +388,110 @@ func readForeignHookFile(path string) ([]byte, bool, error) {
 	return data, true, nil
 }
 
-// parseForeignHookDocument extracts the preToolUse handlers from a Cursor or
-// Claude-format hook document. Only preToolUse can return updated_input
-// (Cursor) / updatedInput (Claude-format PreToolUse imported by Cursor);
-// permission-only and observational events cannot change what runs.
-func parseForeignHookDocument(format string, data []byte) foreignHookParseResult {
+// decodeForeignHookJSONObject decodes one JSON document, rejecting trailing
+// data. A JSON null yields an empty (nil) object.
+func decodeForeignHookJSONObject(data []byte) (map[string]interface{}, string) {
 	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var document map[string]interface{}
 	if err := decoder.Decode(&document); err != nil {
-		return foreignHookParseResult{problem: "the file is not valid JSON: " + err.Error()}
+		return nil, "the file is not valid JSON: " + err.Error()
 	}
 	var trailing interface{}
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return foreignHookParseResult{problem: "the file contains data after the JSON document"}
+		return nil, "the file contains data after the JSON document"
 	}
-	rawHooks, exists := document["hooks"]
+	return document, ""
+}
+
+// parseForeignHookDocument extracts the gated (preToolUse) handlers from a
+// Cursor or Claude-format hook document.
+func parseForeignHookDocument(format string, data []byte) foreignHookParseResult {
+	document, problem := decodeForeignHookJSONObject(data)
+	if problem != "" {
+		return foreignHookParseResult{problem: problem}
+	}
+	return parseForeignHookContainer(format, document)
+}
+
+// parseForeignHookContainer reads the event map under container's hooks key.
+func parseForeignHookContainer(format string, container map[string]interface{}) foreignHookParseResult {
+	var result foreignHookParseResult
+	rawHooks, exists := container["hooks"]
 	if !exists || rawHooks == nil {
-		return foreignHookParseResult{}
+		return result
 	}
 	hooks, ok := rawHooks.(map[string]interface{})
 	if !ok {
 		return foreignHookParseResult{problem: "the hooks value is not an object"}
 	}
-	events := make([]string, 0, len(hooks))
-	for event := range hooks {
-		if strings.EqualFold(strings.TrimSpace(event), "preToolUse") {
-			events = append(events, event)
-		}
-	}
-	sort.Strings(events)
-	var result foreignHookParseResult
-	for _, event := range events {
-		entries, ok := hooks[event].([]interface{})
-		if !ok {
-			if hooks[event] == nil {
-				continue
-			}
-			return foreignHookParseResult{problem: fmt.Sprintf("the %s value is not an array", event)}
-		}
-		for _, entry := range entries {
-			handlers, problem := foreignHookEntryHandlers(format, entry)
-			if problem != "" {
-				return foreignHookParseResult{problem: fmt.Sprintf("the %s entry %s", event, problem)}
-			}
-			for _, handler := range handlers {
-				digest, err := foreignHookHandlerDigest(handler)
-				if err != nil {
-					return foreignHookParseResult{problem: "cannot fingerprint a hook handler: " + err.Error()}
-				}
-				result.handlers = append(result.handlers, foreignHookParsedHandler{
-					event:   event,
-					digest:  digest,
-					handler: handler,
-				})
-			}
-		}
+	if problem := collectForeignHookEvents(format, hooks, &result); problem != "" {
+		return foreignHookParseResult{problem: problem}
 	}
 	return result
 }
 
-func foreignHookEntryHandlers(format string, entry interface{}) ([]map[string]interface{}, string) {
+func collectForeignHookEvents(format string, events map[string]interface{}, result *foreignHookParseResult) string {
+	names := make([]string, 0, len(events))
+	for event := range events {
+		if _, gated := foreignHookGatedEvent(event); gated {
+			names = append(names, event)
+		}
+	}
+	sort.Strings(names)
+	for _, event := range names {
+		canonical, _ := foreignHookGatedEvent(event)
+		entries, ok := events[event].([]interface{})
+		if !ok {
+			if events[event] == nil {
+				continue
+			}
+			return fmt.Sprintf("the %s value is not an array", event)
+		}
+		for _, entry := range entries {
+			handlers, problem := foreignHookEntryHandlers(format, entry)
+			if problem != "" {
+				return fmt.Sprintf("the %s entry %s", event, problem)
+			}
+			for _, handler := range handlers {
+				handler.event = canonical
+				result.handlers = append(result.handlers, handler)
+			}
+		}
+	}
+	return ""
+}
+
+// foreignHookGatedEvent returns the canonical name of a gated event. Event
+// names are compared case-insensitively because Cursor maps the Claude-format
+// PreToolUse name onto preToolUse.
+func foreignHookGatedEvent(event string) (string, bool) {
+	event = strings.TrimSpace(event)
+	for _, gated := range foreignHookGatedEvents {
+		if strings.EqualFold(event, gated) {
+			return gated, true
+		}
+	}
+	return "", false
+}
+
+func foreignHookEntryHandlers(format string, entry interface{}) ([]foreignHookParsedHandler, string) {
 	object, ok := entry.(map[string]interface{})
 	if !ok {
 		return nil, "is not an object"
 	}
+	rawHandlers, grouped := object["hooks"]
 	if format == foreignHookFormatCursor {
-		return []map[string]interface{}{object}, ""
+		return []foreignHookParsedHandler{{entry: object, handler: object}}, ""
 	}
-	rawHandlers, exists := object["hooks"]
-	if !exists {
+	if !grouped {
 		// A matcher group without handlers runs nothing. Treat an object that
 		// carries handler fields as a bare handler rather than assuming the
 		// consumer ignores it.
 		for _, key := range []string{"type", "command", "url", "prompt"} {
 			if _, ok := object[key]; ok {
-				return []map[string]interface{}{object}, ""
+				return []foreignHookParsedHandler{{entry: object, handler: object}}, ""
 			}
 		}
 		return nil, ""
@@ -464,29 +500,74 @@ func foreignHookEntryHandlers(format string, entry interface{}) ([]map[string]in
 	if !ok {
 		return nil, "has a hooks value that is not an array"
 	}
-	handlers := make([]map[string]interface{}, 0, len(list))
+	handlers := make([]foreignHookParsedHandler, 0, len(list))
 	for _, raw := range list {
 		handler, ok := raw.(map[string]interface{})
 		if !ok {
 			return nil, "has a handler that is not an object"
 		}
-		handlers = append(handlers, handler)
+		group := make(map[string]interface{}, len(object))
+		for key, value := range object {
+			if key != "hooks" {
+				group[key] = value
+			}
+		}
+		group["hooks"] = []interface{}{handler}
+		handlers = append(handlers, foreignHookParsedHandler{entry: group, handler: handler})
 	}
 	return handlers, ""
 }
 
-// foreignHookHandlerDigest is the sha256 of the handler's canonical JSON
-// (sorted keys, original number literals, no HTML escaping). Administrators
-// approve a handler by adding this digest to the allowlist.
-func foreignHookHandlerDigest(handler map[string]interface{}) (string, error) {
+// foreignHookApprovalDigest is the sha256 of the canonical JSON (sorted keys,
+// original number literals, no HTML escaping) of the handler's registration
+// together with its event and scope. Binding the event, scope and (for the
+// Claude format) matcher means approving a handler in a user file does not
+// approve the same text in a cloned project, and approving it for one event
+// or matcher does not approve it for another. Administrators approve
+// a handler by adding the digest the denial prints to the allowlist.
+func foreignHookApprovalDigest(scope, event string, entry map[string]interface{}) (string, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(handler); err != nil {
+	if err := encoder.Encode(map[string]interface{}{"entry": entry, "event": event, "scope": scope}); err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(bytes.TrimSuffix(buffer.Bytes(), []byte("\n")))
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// describeForeignHookHandler names what a handler runs (its command and
+// arguments, URL or prompt), quoted and bounded, so whoever reviews the
+// approval sees what it covers.
+func describeForeignHookHandler(handler map[string]interface{}) string {
+	for _, key := range []string{"command", "url", "prompt"} {
+		value, ok := handler[key].(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if key == "command" {
+			if args, ok := handler["args"].([]interface{}); ok {
+				for _, arg := range args {
+					if text, ok := arg.(string); ok {
+						value += " " + text
+					}
+				}
+			}
+		}
+		return key + " " + quoteForeignHookText(value)
+	}
+	return ""
+}
+
+func quoteForeignHookText(value string) string {
+	if len(value) <= foreignHookDescribeLimit {
+		return strconv.Quote(value)
+	}
+	cut := foreignHookDescribeLimit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return strconv.Quote(value[:cut]) + "..."
 }
 
 // foreignHookHandlerOwned accepts only an exact managed DefenseClaw
@@ -587,8 +668,9 @@ func (f foreignHookFinding) subject() string {
 }
 
 // cursorForeignHookDenyMessage names the first blocking file so the user or
-// administrator can act on it without reading logs.
-func cursorForeignHookDenyMessage(findings []foreignHookFinding) string {
+// administrator can act on it without reading logs. describeHandler adds what
+// the unapproved handler runs.
+func cursorForeignHookDenyMessage(findings []foreignHookFinding, describeHandler bool) string {
 	first := findings[0]
 	more := ""
 	if len(findings) > 1 {
@@ -607,20 +689,28 @@ func cursorForeignHookDenyMessage(findings []foreignHookFinding) string {
 			first.subject(), first.Problem, more, action,
 		)
 	}
+	runs := ""
+	if describeHandler && first.Handler != "" {
+		runs = " that runs " + first.Handler
+	}
 	return fmt.Sprintf(
-		"DefenseClaw blocked this tool call: %s registers a %s hook "+
+		"DefenseClaw blocked this tool call: %s registers a %s hook%s "+
 			"(sha256:%s) that the administrator has not approved%s. Remove it, or ask "+
 			"your administrator to approve it in connector_hooks.cursor.approved_foreign_hooks.",
-		first.subject(), first.Event, first.Digest, more,
+		first.subject(), first.Event, runs, first.Digest, more,
 	)
 }
 
-// denyCursorForeignHooks emits Cursor's preToolUse deny response.
+// denyCursorForeignHooks emits Cursor's preToolUse deny response. The user
+// message shows what the unapproved handler runs; the agent message leaves it
+// out so a command line from the user's files is not sent to the model.
 func denyCursorForeignHooks(opts Options, sp spec, findings []foreignHookFinding) int {
-	message := cursorForeignHookDenyMessage(findings)
-	logHookFailure(opts, sp, foreignHookBlockedReason+": "+message, "policy", "closed")
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", message)
-	quoted := mustJSONString(message)
-	fmt.Fprintln(opts.Stdout, `{"permission":"deny","user_message":`+quoted+`,"agent_message":`+quoted+`}`)
+	userMessage := cursorForeignHookDenyMessage(findings, true)
+	agentMessage := cursorForeignHookDenyMessage(findings, false)
+	logHookFailure(opts, sp, foreignHookBlockedReason+": "+userMessage, "policy", "closed")
+	fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", userMessage)
+	fmt.Fprintln(opts.Stdout,
+		`{"permission":"deny","user_message":`+mustJSONString(userMessage)+
+			`,"agent_message":`+mustJSONString(agentMessage)+`}`)
 	return 0
 }

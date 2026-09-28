@@ -141,9 +141,24 @@ func assertForeignHookDenied(t *testing.T, result runResult, path string) {
 	if !strings.Contains(message, path) {
 		t.Fatalf("deny message %q does not name %s", message, path)
 	}
-	if agent, _ := response["agent_message"].(string); agent != message {
+	agent, _ := response["agent_message"].(string)
+	if !strings.Contains(agent, path) || !strings.HasPrefix(agent, "DefenseClaw blocked this tool call") {
 		t.Fatalf("agent_message = %q, want the same guidance as user_message", agent)
 	}
+	if strings.Contains(agent, " that runs ") {
+		t.Fatalf("agent_message %q repeats the handler command line", agent)
+	}
+}
+
+func cursorDenyMessages(t *testing.T, stdout string) (string, string) {
+	t.Helper()
+	var response map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &response); err != nil {
+		t.Fatalf("stdout is not a Cursor response: %q", stdout)
+	}
+	user, _ := response["user_message"].(string)
+	agent, _ := response["agent_message"].(string)
+	return user, agent
 }
 
 // A user-level Cursor preToolUse hook can return updated_input after the
@@ -154,7 +169,7 @@ func TestCursorForeignHookGuardDeniesUserLevelRewriter(t *testing.T) {
 	writeForeignHookJSON(t, path, rewritingCursorHooks("node rewrite.js"))
 	result := fixture.run(t, "preToolUse", nil)
 	assertForeignHookDenied(t, result, path)
-	digest, err := foreignHookHandlerDigest(map[string]interface{}{"command": "node rewrite.js"})
+	digest, err := foreignHookApprovalDigest(foreignHookScopeUser, "preToolUse", map[string]interface{}{"command": "node rewrite.js"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +178,15 @@ func TestCursorForeignHookGuardDeniesUserLevelRewriter(t *testing.T) {
 	}
 	if !strings.Contains(result.stdout, "connector_hooks.cursor.approved_foreign_hooks") {
 		t.Fatalf("deny message does not name the allowlist key: %s", result.stdout)
+	}
+	// The user sees what the handler runs before asking for approval; the
+	// model does not receive the command line.
+	user, agent := cursorDenyMessages(t, result.stdout)
+	if !strings.Contains(user, `that runs command "node rewrite.js"`) {
+		t.Fatalf("user_message does not show the handler command: %s", user)
+	}
+	if strings.Contains(agent, "node rewrite.js") {
+		t.Fatalf("agent_message carries the handler command: %s", agent)
 	}
 }
 
@@ -209,7 +233,7 @@ func TestCursorForeignHookGuardAllowsApprovedDigestAndNonRewritingHooks(t *testi
 			"afterFileEdit":        []interface{}{map[string]interface{}{"command": "lint"}},
 		},
 	})
-	digest, err := foreignHookHandlerDigest(map[string]interface{}{"command": "approved-formatter"})
+	digest, err := foreignHookApprovalDigest(foreignHookScopeUser, "preToolUse", map[string]interface{}{"command": "approved-formatter"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +245,65 @@ func TestCursorForeignHookGuardAllowsApprovedDigestAndNonRewritingHooks(t *testi
 	}
 	if strings.Contains(result.stdout, "deny") {
 		t.Fatalf("approved hook was denied: %s", result.stdout)
+	}
+}
+
+// An approval covers one registration in one scope: the same handler text in
+// a project file, under a broader Claude-format matcher, or under another
+// event name is a different registration and still denies.
+func TestCursorForeignHookApprovalIsBoundToScopeAndMatcher(t *testing.T) {
+	handler := map[string]interface{}{"type": "command", "command": ".cursor/hooks/format.sh"}
+	claudeGroup := func(matcher string) map[string]interface{} {
+		return map[string]interface{}{"matcher": matcher, "hooks": []interface{}{handler}}
+	}
+	userDigest, err := foreignHookApprovalDigest(foreignHookScopeUser, "preToolUse", handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectReadDigest, err := foreignHookApprovalDigest(foreignHookScopeProject, "preToolUse", claudeGroup("Read"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approve := func(opts *Options) { opts.ApprovedForeignHooks = []string{userDigest, projectReadDigest} }
+
+	fixture := newForeignHookFixture(t)
+	writeForeignHookJSON(t, filepath.Join(fixture.profile, ".cursor", "hooks.json"), map[string]interface{}{
+		"hooks": map[string]interface{}{"preToolUse": []interface{}{handler}},
+	})
+	claudeSettings := filepath.Join(fixture.workspace, ".claude", "settings.json")
+	writeForeignHookJSON(t, claudeSettings, map[string]interface{}{
+		"hooks": map[string]interface{}{"PreToolUse": []interface{}{claudeGroup("Read")}},
+	})
+	if result := fixture.run(t, "preToolUse", approve); result.rt.requests != 1 {
+		t.Fatalf("approved registrations denied: %s", result.stdout)
+	}
+
+	// The user-scope approval does not cover the same text in a project file.
+	projectHooks := filepath.Join(fixture.workspace, ".cursor", "hooks.json")
+	writeForeignHookJSON(t, projectHooks, map[string]interface{}{
+		"hooks": map[string]interface{}{"preToolUse": []interface{}{handler}},
+	})
+	fixture.rt = ok(`{"action":"allow"}`)
+	assertForeignHookDenied(t, fixture.run(t, "preToolUse", approve), projectHooks)
+	if err := os.Remove(projectHooks); err != nil {
+		t.Fatal(err)
+	}
+
+	// The matcher is part of the Claude-format registration.
+	writeForeignHookJSON(t, claudeSettings, map[string]interface{}{
+		"hooks": map[string]interface{}{"PreToolUse": []interface{}{claudeGroup("*")}},
+	})
+	fixture.rt = ok(`{"action":"allow"}`)
+	assertForeignHookDenied(t, fixture.run(t, "preToolUse", approve), claudeSettings)
+
+	// Event names are canonical, so the Claude-format spelling of the same
+	// event keeps the approval.
+	writeForeignHookJSON(t, claudeSettings, map[string]interface{}{
+		"hooks": map[string]interface{}{"preToolUse": []interface{}{claudeGroup("Read")}},
+	})
+	fixture.rt = ok(`{"action":"allow"}`)
+	if result := fixture.run(t, "preToolUse", approve); result.rt.requests != 1 {
+		t.Fatalf("approved registration under the canonical event name denied: %s", result.stdout)
 	}
 }
 
