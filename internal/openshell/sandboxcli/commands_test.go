@@ -647,6 +647,78 @@ func TestLogsWithoutARunLog(t *testing.T) {
 	}
 }
 
+// A run's log is the agent's to write: on a terminal nothing in it drives
+// the terminal (a title sequence, the stand-in here for any escape the
+// agent could send, prints as U+FFFD), while color codes pass; a file or a
+// pipe gets the log as it is.
+func TestLogsCannotDriveTheTerminal(t *testing.T) {
+	const title, red = "\x1b]0;DCMARK\x07", "\x1b[31mred\x1b[0m"
+	for _, c := range []struct{ harness, log string }{
+		// Claude Code's stream-json carries the escapes JSON-encoded; the
+		// renderer decodes them.
+		{"claudecode", `{"type":"assistant","message":{"content":[{"type":"text","text":"\u001b]0;DCMARK\u0007 \u001b[31mred\u001b[0m"}]}}` + "\n"},
+		{"codex", title + " " + red + "\n"},
+	} {
+		for _, tty := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s tty=%t", c.harness, tty), func(t *testing.T) {
+				ta := newTestApp(t, "")
+				ta.IO.OutTTY = tty
+				sb := sampleSandbox("box")
+				sb.Harness = c.harness
+				ta.daemon.add(sb)
+				ta.stream.answer = func(argv []string) (int, string) {
+					if isRunStatus(sandboxCommand(argv)) {
+						return 0, "state=running\n"
+					}
+					return 0, c.log
+				}
+				if err := ta.Logs(context.Background(), LogsOptions{Name: "box"}); err != nil {
+					t.Fatalf("Logs: %v", err)
+				}
+				out := ta.out.String()
+				switch {
+				case !tty && !strings.Contains(out, title+" "+red):
+					t.Fatalf("a log that is not on a terminal changed:\n%q", out)
+				case tty && (strings.Contains(out, "\x1b]") || strings.Contains(out, "\x07")):
+					t.Fatalf("an escape sequence reached the terminal:\n%q", out)
+				case tty && (!strings.Contains(out, "�]0;DCMARK�") || !strings.Contains(out, red)):
+					t.Fatalf("the log on a terminal lost its text or its colors:\n%q", out)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxText(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"plain\ttext\n", "plain\ttext\n"},
+		{"\x1b[1;31mbold red\x1b[0m", "\x1b[1;31mbold red\x1b[0m"},
+		{"\x1b]52;c;DCMARK\x07", "�]52;c;DCMARK�"},
+		{"\x1b[2J\x1b[H", "�[2J�[H"},
+		{"over\rwrite", "over write"},
+		{"\u202eevil", "\ufffdevil"},
+		{"caf\xc3", "caf�"},
+	} {
+		if got := sandboxText(c.in); got != c.want {
+			t.Errorf("sandboxText(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// A line longer than sanitizingWriter holds goes out in pieces, none
+	// splitting a character.
+	var out bytes.Buffer
+	w, flush := sandboxOutput(&out, true)
+	long := strings.Repeat("é", maxSandboxLine)
+	if _, err := io.WriteString(w, long); err != nil {
+		t.Fatal(err)
+	}
+	if err := flush(); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != long {
+		t.Fatalf("a long line changed: %d bytes out of %d, valid %t", out.Len(), len(long), utf8.Valid(out.Bytes()))
+	}
+}
+
 // TestRunTailScript runs the script `sandbox logs` runs in the sandbox: no
 // log is exit runNoLog with nothing on stderr (not tail's complaint).
 func TestRunTailScript(t *testing.T) {

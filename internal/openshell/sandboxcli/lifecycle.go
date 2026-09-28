@@ -718,13 +718,15 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 }
 
 // runLogWriter is where a run's log goes: Claude Code's streamed events are
-// rendered as lines.
+// rendered as lines, and on a terminal nothing in it drives the terminal
+// (sandboxOutput).
 func (a *App) runLogWriter(sb *sandboxapi.Sandbox) (io.Writer, func() error) {
+	out, flush := sandboxOutput(a.IO.Out, a.IO.OutTTY)
 	if sb.Harness != "claudecode" {
-		return a.IO.Out, func() error { return nil }
+		return out, flush
 	}
-	r := &streamRenderer{w: a.IO.Out}
-	return r, r.Flush
+	r := &streamRenderer{w: out}
+	return r, func() error { return errors.Join(r.Flush(), flush()) }
 }
 
 // keptLogs prints the run log DefenseClaw kept when it stopped the sandbox.

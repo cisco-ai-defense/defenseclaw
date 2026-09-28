@@ -145,7 +145,11 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 		}
 		runCtx, interrupted, stopSignals := sessionContext(ctx)
 		defer stopSignals()
-		code, err := s.app.Streamer.Stream(runCtx, inv, s.app.IO.Out, s.app.IO.Err)
+		// What the agent answers cannot drive the user's terminal.
+		out, flushOut := sandboxOutput(s.app.IO.Out, s.app.IO.OutTTY)
+		errOut, flushErr := sandboxOutput(s.app.IO.Err, s.app.IO.ErrTTY)
+		code, err := s.app.Streamer.Stream(runCtx, inv, out, errOut)
+		_, _ = flushOut(), flushErr()
 		if interrupted() && ctx.Err() == nil {
 			// The harness was ended; the session ends as usual.
 			s.app.warnErr("interrupted: ending the session")

@@ -183,6 +183,33 @@ func TestHeadlessRmKeepsTheSnapshotOfUnacceptedChanges(t *testing.T) {
 	}
 }
 
+// A headless session prints the agent's answer: on a terminal it cannot
+// drive the terminal (a title sequence prints as U+FFFD); piped, it is as
+// the harness printed it.
+func TestHeadlessOutputCannotDriveTheTerminal(t *testing.T) {
+	const answer = "done \x1b]0;DCMARK\x07 \x1b[32mok\x1b[0m\n"
+	for _, tty := range []bool{true, false} {
+		ta := newTestApp(t, "")
+		ta.IO.TTY, ta.IO.OutTTY = false, tty
+		ta.stream.answer = func(argv []string) (int, string) {
+			if runsHarness(argv) {
+				return 0, answer
+			}
+			return 0, ""
+		}
+		if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Prompt: "fix it"}); err != nil {
+			t.Fatalf("Run (tty %t): %v\n%s", tty, err, ta.output())
+		}
+		out := ta.out.String()
+		switch {
+		case !tty && !strings.Contains(out, answer):
+			t.Fatalf("piped output changed:\n%q", out)
+		case tty && (strings.Contains(out, "\x1b]") || !strings.Contains(out, "done �]0;DCMARK� \x1b[32mok\x1b[0m\n")):
+			t.Fatalf("terminal output:\n%q", out)
+		}
+	}
+}
+
 // An ask waits for the user while the harness owns the terminal: the
 // banner says where asks are answered, each one is announced live with the
 // command that answers it, and the end of the session names those left.

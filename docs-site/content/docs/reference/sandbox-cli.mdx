@@ -538,7 +538,11 @@ defenseclaw sandbox exec fix-tests --no-tty -- git status --short
 Shows the output of a detached run (`run --detach`) and whether the run is
 still going, finished (with its exit status) or was interrupted. `-f` follows
 the output until the run ends. Once the sandbox is stopped, it shows the log
-`stop` kept on this machine.
+`stop` kept on this machine. The agent writes this log, so on a terminal
+its escape sequences (other than colors) and control characters print as
+`�` rather than acting on the terminal; piped or redirected to a file, the
+log is written as it is. A one-prompt `run --prompt` prints the harness's
+output the same way.
 
 ```bash
 defenseclaw sandbox logs fix-tests -f

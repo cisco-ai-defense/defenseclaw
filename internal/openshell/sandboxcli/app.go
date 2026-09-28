@@ -81,6 +81,10 @@ type IO struct {
 	Out, Err io.Writer
 	// TTY reports that In and Out are a terminal (prompts and attach).
 	TTY bool
+	// OutTTY and ErrTTY report that Out and Err are terminals: what a
+	// sandbox prints there (a run log, a headless harness's output) cannot
+	// drive them (sandboxOutput).
+	OutTTY, ErrTTY bool
 	// Color enables ANSI styling of Out.
 	Color bool
 }

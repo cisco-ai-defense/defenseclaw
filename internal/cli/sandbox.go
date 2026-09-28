@@ -38,8 +38,10 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 		Cfg: cfg,
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
-			TTY:   term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
-			Color: ColorEnabled(),
+			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
+			OutTTY: term.IsTerminal(int(os.Stdout.Fd())),
+			ErrTTY: term.IsTerminal(int(os.Stderr.Fd())),
+			Color:  ColorEnabled(),
 		},
 	}
 }
