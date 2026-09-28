@@ -97,8 +97,12 @@ type SnapshotRecord struct {
 	// Review compares these.
 	NestedControl       map[string]FileState `json:"nested_control,omitempty"`
 	NestedControlCapped bool                 `json:"nested_control_capped,omitempty"`
-	Warnings            []string             `json:"warnings,omitempty"`
-	UndoneAt            *time.Time           `json:"undone_at,omitempty"`
+	// Unreadable are the operator's folders the walk could not list before
+	// the session; one that is unreadable only after it is flagged by
+	// Review and refused by Undo.
+	Unreadable []string   `json:"unreadable,omitempty"`
+	Warnings   []string   `json:"warnings,omitempty"`
+	UndoneAt   *time.Time `json:"undone_at,omitempty"`
 	// PostCommit is the shadow commit of the folder as it was when Undo
 	// ran, so an undo can itself be reverted.
 	PostCommit string `json:"post_commit,omitempty"`
@@ -294,6 +298,7 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 	}
 	rec.Sentinels, rec.NestedRepos, rec.DependencyDirs, rec.SentinelsCapped = sentinels.files, sentinels.nested, sentinels.deps, sentinels.capped
 	rec.NestedControl, rec.NestedControlCapped = captureNestedControl(src.Path, sentinels.nested)
+	rec.Unreadable = sentinels.unreadable
 	manifest, err := recordIgnored(src.Path, ignoredRoots, toSet(opts.Skip))
 	if err != nil {
 		_ = removeSnapshotDir(dir)
@@ -635,17 +640,37 @@ type sentinelScan struct {
 	deps   map[string]DirFingerprint
 	// heavy are the dependency and cache directories the walk does not
 	// enter ("node_modules/"), at any depth.
-	heavy  []string
-	capped bool
+	heavy []string
+	// unreadable are the operator's folders the walk could not list.
+	unreadable []string
+	capped     bool
 }
 
 // scanSentinels walks the folder for host-executable files, nested git
 // repositories and dependency directories, whether or not git tracks or
 // ignores them.
+//
+// The sandbox runs as the operator's uid, so the agent can take read
+// permission off a folder it owns. The walk cannot list such a folder, but
+// with search permission left host git still reads a .git inside it by
+// path: that one is looked up by name, and the folder is recorded in
+// unreadable (folders of other users are left out; the agent cannot
+// change those).
 func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 	res := &sentinelScan{files: map[string]FileState{}, deps: map[string]DirFingerprint{}}
 	skipSet := toSet(skip)
-	truncated, err := walkProject(root, 0, func(rel string, d fs.DirEntry) error {
+	unreadable := func(rel string, d fs.DirEntry) {
+		if info, err := d.Info(); err == nil {
+			if uid, ok := ownerUID(info); ok && uid != os.Getuid() {
+				return
+			}
+		}
+		res.unreadable = append(res.unreadable, rel)
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel), ".git")); err == nil {
+			res.nested = append(res.nested, rel)
+		}
+	}
+	truncated, err := walkTree(root, walkOptions{unreadable: unreadable}, func(rel string, d fs.DirEntry) error {
 		if skipped(skipSet, rel) {
 			if d.IsDir() {
 				return fs.SkipDir
@@ -691,6 +716,7 @@ func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 	}
 	res.capped = res.capped || truncated
 	sort.Strings(res.nested)
+	sort.Strings(res.unreadable)
 	return res, nil
 }
 

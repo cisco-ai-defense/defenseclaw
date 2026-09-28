@@ -195,6 +195,9 @@ const (
 	RiskDependencies   RiskKind = "dependencies"
 	RiskPolicy         RiskKind = "sensitive-pattern"
 	RiskIgnoreRules    RiskKind = "ignore-rules"
+	// RiskUnreadable is a folder the session made unreadable: nothing
+	// inside it can be checked.
+	RiskUnreadable RiskKind = "unreadable"
 )
 
 // Severity orders review flags.

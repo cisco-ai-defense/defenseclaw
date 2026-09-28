@@ -429,6 +429,12 @@ func reviewSentinels(rec *SnapshotRecord, man *ignoredManifest, now *sentinelSca
 		}
 		rep.Flags = append(rep.Flags, Flag{Path: n, Label: label, Kind: RiskNestedRepo, Severity: SeverityCritical, Detail: detail})
 	}
+	for _, dir := range newUnreadable(rec, now) {
+		rep.Flags = append(rep.Flags, Flag{Path: dir, Label: dir + "/", Kind: RiskUnreadable, Severity: SeverityHigh,
+			Detail: "the session took read permission away from this folder, so neither this review nor git can see what it put there " +
+				"(a git repository whose config runs code when git runs inside it, or other files that run on this machine); " +
+				"make it readable again (chmod u+rwx) and review again — undo refuses until then"})
+	}
 	reviewNestedControl(rec, rep)
 	for dir, fp := range now.deps {
 		if old, ok := rec.DependencyDirs[dir]; (ok && old == fp) || man.covers(dir) {

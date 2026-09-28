@@ -19,6 +19,7 @@ package workspace
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
@@ -70,7 +71,25 @@ var (
 	// folder, so a live mount is refused rather than showing files nobody
 	// checked.
 	ErrScanIncomplete = errors.New("workspace: the secret scan could not check the whole folder")
+	// ErrUnreadableFolders: the session left folders DefenseClaw cannot
+	// list, so undo cannot tell what they hold.
+	ErrUnreadableFolders = errors.New("workspace: the session left folders that cannot be read")
 )
+
+// UnreadableError lists the folders a session made unreadable (see
+// ErrUnreadableFolders). Undo refuses until they can be read again: what
+// is inside, a planted git repository included, is unknown to it.
+type UnreadableError struct {
+	Project string
+	Dirs    []string
+}
+
+func (e *UnreadableError) Error() string {
+	return fmt.Sprintf("workspace: undo cannot look inside %s in %s: the session took read permission away, so what it put there is unknown; "+
+		"make them readable again (chmod u+rwx) and run undo again", strings.Join(firstN(e.Dirs, 5), ", "), e.Project)
+}
+
+func (e *UnreadableError) Unwrap() error { return ErrUnreadableFolders }
 
 // ScanIncompleteError reports a secret scan that stopped at its entry
 // limit before it had seen the whole folder.

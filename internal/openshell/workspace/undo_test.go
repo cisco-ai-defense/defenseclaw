@@ -279,6 +279,86 @@ func TestUndoRestoresControlFilesAndRemovesNestedRepos(t *testing.T) {
 	}
 }
 
+// chmodT sets a test folder's mode and puts it back to 0755 at cleanup, so
+// the temporary directory can be removed.
+func chmodT(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(dir, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+// TestReviewAndUndoSeeFoldersMadeUnreadable: the sandbox runs as the
+// operator's uid, so the agent can take read permission off a folder. No
+// walk can list it, yet host git reads a .git inside it by path while
+// search permission is left. Review flags the folder and that repository,
+// and undo refuses until the folder is readable again; a folder that was
+// already unreadable before the session is not the session's doing.
+func TestReviewAndUndoSeeFoldersMadeUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can list every folder")
+	}
+	for _, git := range []bool{true, false} {
+		t.Run(map[bool]string{true: "git", false: "plain"}[git], func(t *testing.T) {
+			testFoldersMadeUnreadable(t, git)
+		})
+	}
+}
+
+func testFoldersMadeUnreadable(t *testing.T, git bool) {
+	e := newEnv(t)
+	if git {
+		e.initRepo()
+	} else {
+		writeFile(t, e.project, "README.md", "hello\n")
+	}
+	mustMkdir(t, filepath.Join(e.project, "locked-before"))
+	chmodT(t, filepath.Join(e.project, "locked-before"), 0o311)
+	if rec := mustSnapshot(t, e, "s1"); strings.Join(rec.Unreadable, " ") != "locked-before" {
+		t.Fatalf("git=%v: snapshot unreadable = %v", git, rec.Unreadable)
+	}
+
+	// Session: a repository in a folder left with search and write
+	// permission but no read permission.
+	writeFile(t, e.project, "tools/.git/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, e.project, "tools/.git/config", "[core]\n")
+	writeFile(t, e.project, "tools/notes.txt", "agent marker\n")
+	chmodT(t, filepath.Join(e.project, "tools"), 0o311)
+
+	rep, err := Review(bg, ReviewOptions{DataDir: e.data, Name: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := flagByLabel(rep, "tools/"); !ok || f.Kind != RiskUnreadable || f.Severity != SeverityHigh {
+		t.Fatalf("git=%v: unreadable folder not flagged: %+v", git, rep.Flags)
+	}
+	if f, ok := flagByLabel(rep, "tools/.git"); !ok || f.Kind != RiskNestedRepo {
+		t.Fatalf("git=%v: repository in the unreadable folder not flagged: %+v", git, rep.Flags)
+	}
+	if _, ok := flagByLabel(rep, "locked-before/"); ok || !rep.Sensitive() {
+		t.Fatalf("git=%v: flags = %+v, sensitive %v", git, rep.Flags, rep.Sensitive())
+	}
+
+	for _, preview := range []bool{true, false} {
+		_, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1", Preview: preview})
+		var ue *UnreadableError
+		if !errors.Is(err, ErrUnreadableFolders) || !errors.As(err, &ue) || strings.Join(ue.Dirs, " ") != "tools" {
+			t.Fatalf("git=%v preview=%v: undo = %v, want it refused for tools", git, preview, err)
+		}
+	}
+	// Readable again, undo takes out what the session put there.
+	if err := os.Chmod(filepath.Join(e.project, "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustUndo(t, e, "s1", false)
+	for _, rel := range []string{"tools/.git", "tools/notes.txt"} {
+		if pathExists(filepath.Join(e.project, rel)) {
+			t.Fatalf("git=%v: undo left %s", git, rel)
+		}
+	}
+}
+
 func TestUndoRemovesTopLevelGitInPlainFolder(t *testing.T) {
 	// p1a-20: a top-level .git planted in a non-git folder must be removed by undo.
 	e := newEnv(t)

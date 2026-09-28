@@ -314,11 +314,16 @@ func emptyPin(s FileState) bool {
 }
 
 // newNestedRepos lists git repositories that appeared inside the folder
-// since the snapshot, from a fresh scan of it (also returned).
+// since the snapshot, from a fresh scan of it (also returned). A folder
+// the session made unreadable fails it with an *UnreadableError: undo
+// cannot tell what it holds.
 func newNestedRepos(rec *SnapshotRecord) ([]string, bool, *sentinelScan, error) {
 	now, err := scanSentinels(rec.Project, skipList(rec))
 	if err != nil {
 		return nil, false, nil, err
+	}
+	if dirs := newUnreadable(rec, now); len(dirs) > 0 {
+		return nil, false, nil, &UnreadableError{Project: rec.Project, Dirs: dirs}
 	}
 	before := toSet(rec.NestedRepos)
 	var out []string
@@ -328,6 +333,19 @@ func newNestedRepos(rec *SnapshotRecord) ([]string, bool, *sentinelScan, error) 
 		}
 	}
 	return out, rec.SentinelsCapped || now.capped, now, nil
+}
+
+// newUnreadable lists the operator's folders that cannot be listed now but
+// could be before the session.
+func newUnreadable(rec *SnapshotRecord, now *sentinelScan) []string {
+	before := toSet(rec.Unreadable)
+	var out []string
+	for _, dir := range now.unreadable {
+		if _, ok := before[dir]; !ok {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // undoIgnored fills res.Ignored from the snapshot's ignored manifest, if it
