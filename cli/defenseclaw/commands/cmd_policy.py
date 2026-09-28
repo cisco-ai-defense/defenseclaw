@@ -76,8 +76,8 @@ def _sanitize_policy_name(name: str) -> str:
     return safe
 
 
-def _find_policy(app: AppContext, name: str) -> str | None:
-    """Find a policy file by name (without .yaml extension)."""
+def _find_policy_file(app: AppContext, name: str) -> str | None:
+    """Find ``<name>.yaml`` (user dir, then bundled), whatever its content."""
     name = _sanitize_policy_name(name)
     user_dir = _policies_dir(app)
     candidate = os.path.join(user_dir, f"{name}.yaml")
@@ -90,6 +90,42 @@ def _find_policy(app: AppContext, name: str) -> str | None:
         return candidate
 
     return None
+
+
+def _not_a_policy_error(name: str, data: object) -> None:
+    """Explain why ``<name>.yaml`` can't be used as a named policy, then exit 1."""
+    if isinstance(data, dict) and {"rules", "default_action", "allowlist"} & set(data):
+        click.echo(
+            f"error: '{name}' is the host egress-firewall template, not a security policy. "
+            "Manage the host firewall with `defenseclaw firewall`; "
+            "list security policies with `defenseclaw policy list`.",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"error: '{name}.yaml' is not a DefenseClaw security policy "
+            "(no admission, skill_actions or guardrail section). "
+            "List security policies with `defenseclaw policy list`.",
+            err=True,
+        )
+    raise SystemExit(1)
+
+
+def _find_policy(app: AppContext, name: str) -> str | None:
+    """Find a named security policy file by name (without .yaml extension).
+
+    Returns ``None`` when no such file exists. A file that exists but is not
+    a named policy (e.g. the bundled ``firewall-deny-default`` host-firewall
+    template) exits 1 with a plain explanation instead of being treated as
+    one.
+    """
+    path = _find_policy_file(app, name)
+    if path is None:
+        return None
+    data = policy_catalog.load_policy_yaml(path)
+    if data is None or not policy_catalog.is_named_policy(data):
+        _not_a_policy_error(name, data)
+    return path
 
 
 @click.group()
