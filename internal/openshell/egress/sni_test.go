@@ -46,13 +46,11 @@ func realClientHello(t *testing.T, serverName string) []byte {
 	}()
 	_ = server.SetReadDeadline(time.Now().Add(5 * time.Second))
 	hdr := make([]byte, tlsRecordHeaderLen)
-	if _, err := io.ReadFull(server, hdr); err != nil {
-		t.Fatal(err)
-	}
+	_, err := io.ReadFull(server, hdr)
+	must(t, err)
 	body := make([]byte, binary.BigEndian.Uint16(hdr[3:]))
-	if _, err := io.ReadFull(server, body); err != nil {
-		t.Fatal(err)
-	}
+	_, err = io.ReadFull(server, body)
+	must(t, err)
 	return append(hdr, body...)
 }
 
@@ -218,10 +216,7 @@ func (c tunnelConn) Read(b []byte) (int, error) { return c.r.Read(b) }
 // serverName inside it; a nil pool skips certificate verification.
 func (h *harness) tlsThrough(target, serverName string, pool *x509.CertPool) (*tls.Conn, error) {
 	h.t.Helper()
-	conn, br, resp := h.connect(target, basicAuth(h.cred), nil)
-	if resp.status != http.StatusOK {
-		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
-	}
+	conn, br := h.tunnel(target, nil)
 	tc := tls.Client(tunnelConn{Conn: conn, r: br}, &tls.Config{ServerName: serverName, RootCAs: pool, InsecureSkipVerify: pool == nil})
 	return tc, tc.Handshake()
 }
@@ -242,20 +237,13 @@ func TestProxyIPLiteralCONNECT(t *testing.T) {
 	if resp.status != http.StatusForbidden || resp.reason != "Blocked by DefenseClaw (ip_literal)" {
 		t.Fatalf("CONNECT literal = %d %q", resp.status, resp.reason)
 	}
-	b := decodeBlock(t, resp.body)
-	if b.Category != CategoryIPLiteral || b.Source != SourceDefault || !b.Unblockable || b.Host != publicV4 ||
+	if b := decodeBlock(t, resp.body); b.Category != CategoryIPLiteral || b.Source != SourceDefault || !b.Unblockable || b.Host != publicV4 ||
 		!strings.Contains(b.HowToUnblock, "host name") ||
 		!strings.Contains(b.HowToUnblock, "defenseclaw sandbox unblock "+publicV4+" --sandbox sb-one") {
 		t.Errorf("block body = %+v", b)
 	}
-	resp2, err := h.clientFor(h.cred, nil).Get("http://[" + publicV6 + "]/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryIPLiteral {
-		t.Errorf("absolute-form literal = %d %s", resp2.StatusCode, body)
+	if resp, body := fetch(t, h.clientFor(h.cred, nil), "http://["+publicV6+"]/"); resp.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryIPLiteral {
+		t.Errorf("absolute-form literal = %d %s", resp.StatusCode, body)
 	}
 	if n := len(h.dialer.addresses()); n != 0 {
 		t.Errorf("refused literals dialed %d times", n)
@@ -263,9 +251,7 @@ func TestProxyIPLiteralCONNECT(t *testing.T) {
 
 	// Unblocked, the literal works, but its tunnel still cannot carry a
 	// blocklisted server name.
-	if err := h.unblocks.Add(Unblock{Pattern: publicV4, SandboxID: "sb-1"}); err != nil {
-		t.Fatal(err)
-	}
+	must(t, h.unblocks.Add(Unblock{Pattern: publicV4, SandboxID: "sb-1"}))
 	tc, err := h.tlsThrough(publicV4+":443", "example.com", pool)
 	if err != nil {
 		t.Fatalf("unblocked literal with an allowed server name: %v", err)
@@ -284,7 +270,6 @@ func TestProxyIPLiteralCONNECT(t *testing.T) {
 func TestProxyServerNameScreening(t *testing.T) {
 	h := newHarness(t, func(c *harnessConfig) { c.opts.HeaderTimeout = 300 * time.Millisecond })
 	h.dialer.route(443, startEcho(t))
-	alert := func(desc byte) []byte { return []byte{tlsRecordAlert, 3, 3, 0, 2, tlsAlertFatal, desc} }
 
 	tests := []struct {
 		name     string
@@ -312,14 +297,10 @@ func TestProxyServerNameScreening(t *testing.T) {
 			extra = tt.hello
 		}
 		before := len(h.sink.ofKind(EventBlocked))
-		conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), extra)
-		if resp.status != http.StatusOK {
-			t.Fatalf("%s: CONNECT = %d", tt.name, resp.status)
-		}
+		conn, br := h.tunnel("example.com:443", extra)
 		if !tt.pipeline {
-			if _, err := conn.Write(tt.hello); err != nil {
-				t.Fatal(err)
-			}
+			_, err := conn.Write(tt.hello)
+			must(t, err)
 		}
 		if tt.category == "" {
 			echo := make([]byte, len(tt.hello))
@@ -330,8 +311,8 @@ func TestProxyServerNameScreening(t *testing.T) {
 			continue
 		}
 		got, err := io.ReadAll(br)
-		if !bytes.Equal(got, alert(tt.alert)) {
-			t.Errorf("%s: client got %x (%v), want alert %x and EOF", tt.name, got, err, alert(tt.alert))
+		if alert := []byte{tlsRecordAlert, 3, 3, 0, 2, tlsAlertFatal, tt.alert}; !bytes.Equal(got, alert) {
+			t.Errorf("%s: client got %x (%v), want alert %x and EOF", tt.name, got, err, alert)
 		}
 		e := h.sink.wait(t, EventBlocked, before+1)[before]
 		if e.Category != tt.category || e.TunnelID == "" || e.Method != http.MethodConnect || e.BindingID != "binding-one" {
@@ -361,15 +342,11 @@ func TestProxyServerNameScreening(t *testing.T) {
 	}
 
 	// A ClientHello that stalls halfway ends the tunnel after HeaderTimeout.
-	conn, br, resp := h.connect("example.com:443", basicAuth(h.cred), []byte{tlsRecordHandshake, 3, 1})
-	if resp.status != http.StatusOK {
-		t.Fatal(resp.status)
-	}
+	_, br := h.tunnel("example.com:443", []byte{tlsRecordHandshake, 3, 1})
 	start := time.Now()
 	if got, _ := io.ReadAll(br); len(got) != 0 || time.Since(start) > 3*time.Second {
 		t.Errorf("stalled hello: got %x after %v", got, time.Since(start))
 	}
-	_ = conn.Close()
 }
 
 // In allowlist mode the server name must be allowed too, or a CONNECT to an
@@ -378,31 +355,19 @@ func TestProxyServerNameAllowlistMode(t *testing.T) {
 	h := newHarness(t, func(c *harnessConfig) { c.decider.Mode = ModeAllowlist })
 	h.dialer.route(443, startEcho(t))
 	h.resolver.set("registry.npmjs.org", []string{publicV4})
-	try := func(serverName string) []byte {
+	try := func(serverName string, want byte) {
 		t.Helper()
-		conn, br, resp := h.connect("registry.npmjs.org:443", basicAuth(h.cred), helloFor(serverName))
-		if resp.status != http.StatusOK {
-			t.Fatalf("CONNECT = %d %s", resp.status, resp.body)
-		}
+		conn, br := h.tunnel("registry.npmjs.org:443", helloFor(serverName))
 		defer conn.Close()
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		got := make([]byte, 7)
-		n, _ := io.ReadFull(br, got)
-		return got[:n]
+		if got, err := br.ReadByte(); err != nil || got != want {
+			t.Errorf("server name %s: got record type %x (%v), want %x", serverName, got, err, want)
+		}
 	}
-	if got := try("registry.npmjs.org"); got[0] != tlsRecordHandshake {
-		t.Errorf("allowlisted name: got %x", got)
-	}
-	if got := try("example.com"); got[0] != tlsRecordAlert {
-		t.Errorf("not-allowlisted server name: got %x", got)
-	}
+	try("registry.npmjs.org", tlsRecordHandshake)
+	try("example.com", tlsRecordAlert)
 	if e := h.sink.wait(t, EventBlocked, 1)[0]; e.Category != CategoryNotAllowlisted || e.Host != "example.com" || e.Mode != ModeAllowlist {
 		t.Errorf("blocked event = %+v", e)
 	}
-	if err := h.unblocks.Add(Unblock{Pattern: "example.com", SandboxID: "sb-1"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := try("example.com"); got[0] != tlsRecordHandshake {
-		t.Errorf("unblocked server name: got %x", got)
-	}
+	must(t, h.unblocks.Add(Unblock{Pattern: "example.com", SandboxID: "sb-1"}))
+	try("example.com", tlsRecordHandshake)
 }

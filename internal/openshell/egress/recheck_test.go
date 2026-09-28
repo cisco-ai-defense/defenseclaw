@@ -17,71 +17,14 @@
 package egress
 
 import (
-	"bufio"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/http/httptest"
-	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
-
-// newDecider builds a decider that sees the harness's fake interfaces.
-func (h *harness) newDecider(opts DeciderOptions) *Decider {
-	h.t.Helper()
-	d := mustDecider(h.t, opts)
-	d.local = h.local
-	return d
-}
-
-// openTunnel opens a CONNECT tunnel to target with cred and sends a TLS
-// ClientHello for serverName (target's host when empty), waiting for the
-// echo upstream to return it: the tunnel is established and screened.
-func (h *harness) openTunnel(cred Credential, target, serverName string) (net.Conn, *bufio.Reader) {
-	h.t.Helper()
-	if serverName == "" {
-		serverName, _, _ = net.SplitHostPort(target)
-	}
-	hello := helloFor(serverName)
-	conn, br, resp := h.connect(target, basicAuth(cred), nil)
-	if resp.status != http.StatusOK {
-		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
-	}
-	if _, err := conn.Write(hello); err != nil {
-		h.t.Fatal(err)
-	}
-	if _, err := io.ReadFull(br, make([]byte, len(hello))); err != nil {
-		h.t.Fatalf("tunnel to %s: %v", target, err)
-	}
-	return conn, br
-}
-
-// relays reports whether a tunnel still carries bytes to its echo upstream.
-func relays(conn net.Conn, br *bufio.Reader) bool {
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := conn.Write([]byte("probe")); err != nil {
-		return false
-	}
-	got := make([]byte, 5)
-	_, err := io.ReadFull(br, got)
-	return err == nil && string(got) == "probe"
-}
-
-// waitClosed fails unless the proxy closes the tunnel's client connection.
-func waitClosed(t *testing.T, what string, conn net.Conn, br *bufio.Reader) {
-	t.Helper()
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, err := br.ReadByte()
-	if err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("%s: the tunnel is still open (read: %v)", what, err)
-	}
-}
 
 func closedEvent(t *testing.T, h *harness, tunnelID string) Event {
 	t.Helper()
@@ -109,102 +52,97 @@ func allowedTunnel(t *testing.T, h *harness, binding, host string) string {
 	return ""
 }
 
-// A revoked credential ends its binding's open tunnels once the proxy
-// rechecks them, and only that binding's; the store alone cannot reach
-// them.
-func TestRecheckEndsTunnelsOfARevokedCredential(t *testing.T) {
+// Recheck makes the open tunnels follow their sandboxes' current policy,
+// which the credential store alone cannot reach: a tunnel whose credential
+// was revoked or rotated, or whose re-registered decider (an
+// administrator's block list, say) now refuses it, is closed and its closed
+// event says why; a refusal is also a blocked event of that tunnel. Recheck
+// of one binding touches only that binding, of "" every binding, and the
+// tunnels the current policy allows stay.
+func TestRecheckEndsTunnelsThePolicyNoLongerAllows(t *testing.T) {
 	h := newHarness(t, nil)
 	h.dialer.route(443, startEcho(t))
-	other := h.addPrincipal(Principal{BindingID: "binding-two", SandboxID: "sb-2", SandboxName: "sb-two"})
-	conn, br := h.openTunnel(h.cred, "example.com:443", "")
-	otherConn, otherBr := h.openTunnel(other, "example.com:443", "")
+	h.resolver.set("api.example.net", []string{publicV4Alt})
+	pa := Principal{BindingID: "b-a", SandboxID: "sb-a", SandboxName: "sb-a", Decider: h.newDecider(DeciderOptions{Unblocks: h.unblocks})}
+	a := h.addPrincipal(pa)
+	b := h.addPrincipal(Principal{BindingID: "b-b", SandboxID: "sb-b", SandboxName: "sb-b"})
+	c := h.addPrincipal(Principal{BindingID: "b-c", SandboxID: "sb-c", SandboxName: "sb-c"})
+	aConn, aBr := h.openTunnel(a, "example.com:443", "")
+	keptConn, keptBr := h.openTunnel(a, "api.example.net:443", "")
+	bConn, bBr := h.openTunnel(b, "example.com:443", "")
+	cConn, cBr := h.openTunnel(c, "example.com:443", "")
+	rotConn, rotBr := h.openTunnel(h.cred, "example.com:443", "")
+	if n := h.proxy.Recheck(""); n != 0 {
+		t.Fatalf("an unchanged policy closed %d tunnel(s)", n)
+	}
 
-	if !h.creds.Revoke("binding-one") {
+	// A revoked credential.
+	if !h.creds.Revoke("b-b") {
 		t.Fatal("no credential to revoke")
 	}
-	if !relays(conn, br) {
+	if !relays(bConn, bBr) {
 		t.Fatal("the tunnel closed before any recheck")
 	}
-	if n := h.proxy.Recheck("binding-one"); n != 1 {
-		t.Fatalf("Recheck ended %d tunnels, want 1", n)
+	if n := h.proxy.Recheck("b-b"); n != 1 {
+		t.Fatalf("Recheck ended %d tunnels of the revoked binding, want 1", n)
 	}
-	waitClosed(t, "revoked binding", conn, br)
-	if !relays(otherConn, otherBr) {
+	waitClosed(t, "revoked binding", bConn, bBr)
+	if !relays(cConn, cBr) {
 		t.Fatal("another binding's tunnel was ended")
 	}
-	if e := closedEvent(t, h, allowedTunnel(t, h, "binding-one", "example.com")); !e.Terminated {
-		t.Errorf("closed event = %+v, want terminated", e)
+	if e := closedEvent(t, h, allowedTunnel(t, h, "b-b", "example.com")); !e.Terminated || e.Reason != revokedReason {
+		t.Errorf("closed event = %+v, want terminated with the recheck's reason", e)
 	}
 	if blocked := h.sink.ofKind(EventBlocked); len(blocked) != 0 {
 		t.Errorf("a revocation is not a destination refusal: %+v", blocked)
 	}
-	if _, _, resp := h.connect("example.com:443", basicAuth(h.cred), nil); resp.status != http.StatusProxyAuthRequired {
+	if _, _, resp := h.connect("example.com:443", basicAuth(b), nil); resp.status != http.StatusProxyAuthRequired {
 		t.Errorf("CONNECT with the revoked credential = %d", resp.status)
 	}
-	if n := h.proxy.Recheck(""); n != 0 {
-		t.Errorf("a second Recheck ended %d more", n)
-	}
-}
 
-// A rotated credential ends the tunnels the old one opened.
-func TestRecheckEndsTunnelsOfARotatedCredential(t *testing.T) {
-	h := newHarness(t, nil)
-	h.dialer.route(443, startEcho(t))
-	conn, br := h.openTunnel(h.cred, "example.com:443", "")
+	// A rotated credential ends the tunnels the old one opened.
 	rotated, err := NewCredential()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := h.creds.Register(rotated, h.pr); err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
+	must(t, h.creds.Register(rotated, h.pr))
 	if n := h.proxy.Recheck("binding-one"); n != 1 {
-		t.Fatalf("Recheck ended %d tunnels, want 1", n)
+		t.Fatalf("Recheck ended %d tunnels of the rotated credential, want 1", n)
 	}
-	waitClosed(t, "rotated credential", conn, br)
+	waitClosed(t, "rotated credential", rotConn, rotBr)
 	newConn, newBr := h.openTunnel(rotated, "example.com:443", "")
 	if n := h.proxy.Recheck("binding-one"); n != 0 || !relays(newConn, newBr) {
 		t.Fatalf("Recheck ended %d tunnels of the current credential", n)
 	}
-}
 
-// Re-registering a credential with a tighter decider (an administrator's
-// block list, say) ends the open tunnels it now refuses, reported as
-// blocked events of those tunnels, and keeps the others.
-func TestRecheckAppliesAReregisteredDecider(t *testing.T) {
-	h := newHarness(t, nil)
-	h.dialer.route(443, startEcho(t))
-	h.resolver.set("api.example.net", []string{publicV4Alt})
-	pr := h.pr
-	pr.Decider = h.newDecider(DeciderOptions{Unblocks: h.unblocks})
-	if err := h.creds.Register(h.cred, pr); err != nil {
-		t.Fatal(err)
+	// A tighter re-registered decider and another revocation, in one
+	// Recheck of every binding.
+	pa.Decider = h.newDecider(DeciderOptions{AdminBlock: []string{"example.com"}, Unblocks: h.unblocks})
+	must(t, h.creds.Register(a, pa))
+	h.creds.Revoke("b-c")
+	if n := h.proxy.Recheck(""); n != 2 {
+		t.Fatalf("Recheck ended %d tunnels, want 2", n)
 	}
-	refusedConn, refusedBr := h.openTunnel(h.cred, "example.com:443", "")
-	keptConn, keptBr := h.openTunnel(h.cred, "api.example.net:443", "")
-
-	pr.Decider = h.newDecider(DeciderOptions{AdminBlock: []string{"example.com"}, Unblocks: h.unblocks})
-	if err := h.creds.Register(h.cred, pr); err != nil {
-		t.Fatal(err)
+	waitClosed(t, "admin-blocked destination", aConn, aBr)
+	waitClosed(t, "revoked binding", cConn, cBr)
+	if !relays(keptConn, keptBr) || !relays(newConn, newBr) {
+		t.Fatal("a tunnel the current policy allows was ended")
 	}
-	if n := h.proxy.Recheck("binding-one"); n != 1 {
-		t.Fatalf("Recheck ended %d tunnels, want 1", n)
-	}
-	waitClosed(t, "admin-blocked destination", refusedConn, refusedBr)
-	if !relays(keptConn, keptBr) {
-		t.Fatal("a tunnel the new decider allows was ended")
-	}
-	id := allowedTunnel(t, h, "binding-one", "example.com")
-	e := h.sink.wait(t, EventBlocked, 1)[0]
-	if e.TunnelID != id || e.Category != CategoryAdminBlock || e.Source != SourceAdmin || e.Host != "example.com" ||
-		e.Method != http.MethodConnect || e.Unblockable {
+	id := allowedTunnel(t, h, "b-a", "example.com")
+	if e := h.sink.wait(t, EventBlocked, 1)[0]; e.TunnelID != id || e.Category != CategoryAdminBlock || e.Source != SourceAdmin ||
+		e.Host != "example.com" || e.Method != http.MethodConnect || e.Unblockable {
 		t.Errorf("blocked event = %+v, want the admin block of tunnel %s", e, id)
 	}
-	if e := closedEvent(t, h, id); !e.Terminated {
-		t.Errorf("closed event = %+v, want terminated", e)
+	for _, id := range []string{id, allowedTunnel(t, h, "b-c", "example.com")} {
+		if e := closedEvent(t, h, id); !e.Terminated || e.Reason != revokedReason {
+			t.Errorf("closed event = %+v, want terminated with the recheck's reason", e)
+		}
 	}
-	if n := h.proxy.Recheck("binding-one"); n != 0 {
-		t.Errorf("a second Recheck ended %d more", n)
+	var open []string
+	for _, tn := range h.proxy.Tunnels() {
+		open = append(open, tn.BindingID+" "+tn.Host)
+	}
+	slices.Sort(open)
+	if !slices.Equal(open, []string{"b-a api.example.net", "binding-one example.com"}) || h.proxy.Recheck("") != 0 {
+		t.Errorf("open tunnels after the recheck = %q", open)
 	}
 }
 
@@ -219,8 +157,9 @@ func TestSetDeciderRechecksAddressAndServerName(t *testing.T) {
 	byName, byNameBr := h.openTunnel(h.cred, "cdn.example.net:443", "files.example.org")
 	kept, keptBr := h.openTunnel(h.cred, "cdn.example.net:443", "")
 
-	if err := h.proxy.SetDecider(h.newDecider(DeciderOptions{Block: []string{publicV4 + "/32", "files.example.org"}})); err != nil {
-		t.Fatal(err)
+	d := h.newDecider(DeciderOptions{Block: []string{publicV4 + "/32", "files.example.org"}})
+	if err := h.proxy.SetDecider(d); err != nil || h.proxy.Decider() != d || h.proxy.SetDecider(nil) == nil {
+		t.Fatalf("SetDecider = %v, or SetDecider(nil) accepted", err)
 	}
 	waitClosed(t, "blocked address", byAddr, byAddrBr)
 	waitClosed(t, "blocked server name", byName, byNameBr)
@@ -244,44 +183,43 @@ func TestSetDeciderRechecksAddressAndServerName(t *testing.T) {
 	}
 }
 
+// recheckChanges are the policy changes a recheck applies: a revoked
+// credential is answered with a 407, a tighter policy with its refusal.
+var recheckChanges = []struct {
+	name     string
+	change   func(h *harness)
+	status   int
+	category Category
+}{
+	{"revoked credential", func(h *harness) { h.creds.Revoke("binding-one") }, http.StatusProxyAuthRequired, ""},
+	{"tighter policy", func(h *harness) {
+		pr := h.pr
+		pr.Decider = h.newDecider(DeciderOptions{AdminBlock: []string{"example.com"}})
+		must(h.t, h.creds.Register(h.cred, pr))
+	}, http.StatusForbidden, CategoryAdminBlock},
+}
+
 // An in-flight forwarded request ends too: before its response began it is
 // answered with the refusal or the 407, after that its response is cut.
 func TestRecheckEndsInFlightForwardedRequests(t *testing.T) {
-	entered := make(chan string, 2)
-	release := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/stream" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, "first chunk")
-			w.(http.Flusher).Flush()
-		}
-		entered <- r.URL.Path
-		<-release
-		_, _ = io.WriteString(w, "rest")
-	}))
-	defer upstream.Close()
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
-	defer unblock()
-
-	for _, tc := range []struct {
-		name   string
-		change func(h *harness)
-		status int
-	}{
-		{"revoked credential", func(h *harness) { h.creds.Revoke("binding-one") }, http.StatusProxyAuthRequired},
-		{"tighter policy", func(h *harness) {
-			pr := h.pr
-			pr.Decider = h.newDecider(DeciderOptions{Block: []string{"example.com"}})
-			if err := h.creds.Register(h.cred, pr); err != nil {
-				h.t.Fatal(err)
-			}
-		}, http.StatusForbidden},
-	} {
+	for _, tc := range recheckChanges {
 		t.Run(tc.name, func(t *testing.T) {
+			entered := make(chan string, 2)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
 			h := newHarness(t, nil)
-			h.dialer.route(80, upstream.Listener.Addr().String())
-			waiting, streaming := h.clientFor(h.cred, nil), h.clientFor(h.cred, nil)
+			h.serve(80, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/stream" {
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, "first chunk")
+					w.(http.Flusher).Flush()
+				}
+				entered <- r.URL.Path
+				<-release
+				_, _ = io.WriteString(w, "rest")
+			})
 			type result struct {
 				status int
 				body   string
@@ -309,8 +247,8 @@ func TestRecheckEndsInFlightForwardedRequests(t *testing.T) {
 				out <- result{status: resp.StatusCode, body: string(head) + string(body), err: err}
 			}
 			waited, streamed, first := make(chan result, 1), make(chan result, 1), make(chan struct{})
-			go get(waiting, "http://example.com/wait", nil, waited)
-			go get(streaming, "http://example.com/stream", first, streamed)
+			go get(h.clientFor(h.cred, nil), "http://example.com/wait", nil, waited)
+			go get(h.clientFor(h.cred, nil), "http://example.com/stream", first, streamed)
 			for range 2 {
 				<-entered
 			}
@@ -322,7 +260,7 @@ func TestRecheckEndsInFlightForwardedRequests(t *testing.T) {
 			}
 			if r := <-waited; r.err != nil || r.status != tc.status {
 				t.Errorf("request waiting for its response = %d %q, %v; want %d", r.status, r.body, r.err, tc.status)
-			} else if tc.status == http.StatusForbidden && decodeBlock(t, []byte(r.body)).Category != CategoryOperatorBlock {
+			} else if tc.category != "" && decodeBlock(t, []byte(r.body)).Category != tc.category {
 				t.Errorf("refusal body = %s", r.body)
 			}
 			if r := <-streamed; r.err == nil || r.body != "first chunk" {
@@ -340,21 +278,7 @@ func TestRecheckEndsInFlightForwardedRequests(t *testing.T) {
 // dialed reaches it too: the Recheck that ran then could not see it yet, so
 // the tunnel is checked again once it is tracked, before its 200.
 func TestRecheckReachesTunnelsBeingDialed(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		change   func(h *harness)
-		status   int
-		category Category
-	}{
-		{"revoked credential", func(h *harness) { h.creds.Revoke("binding-one") }, http.StatusProxyAuthRequired, ""},
-		{"tighter policy", func(h *harness) {
-			pr := h.pr
-			pr.Decider = h.newDecider(DeciderOptions{AdminBlock: []string{"example.com"}})
-			if err := h.creds.Register(h.cred, pr); err != nil {
-				h.t.Fatal(err)
-			}
-		}, http.StatusForbidden, CategoryAdminBlock},
-	} {
+	for _, tc := range recheckChanges {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t, nil)
 			h.dialer.route(443, startEcho(t))
@@ -367,10 +291,7 @@ func TestRecheckReachesTunnelsBeingDialed(t *testing.T) {
 				})
 			})
 			conn, br := h.dialProxy()
-			if _, err := fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: %s\r\n\r\n",
-				basicAuth(h.cred)); err != nil {
-				t.Fatal(err)
-			}
+			fmt.Fprintf(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: %s\r\n\r\n", basicAuth(h.cred))
 			<-dialing
 			tc.change(h)
 			if n := h.proxy.Recheck("binding-one"); n != 0 {
@@ -395,75 +316,5 @@ func TestRecheckReachesTunnelsBeingDialed(t *testing.T) {
 				t.Errorf("allowed events = %+v, want none", got)
 			}
 		})
-	}
-}
-
-// TestProxyRecheckClosesRefusedTunnels pins that one Recheck of every
-// binding makes the open tunnels follow their sandboxes' current policy: a
-// tunnel its re-registered decider now refuses, or whose credential was
-// revoked, is closed and its closed event says why; the others stay.
-func TestProxyRecheckClosesRefusedTunnels(t *testing.T) {
-	h := newHarness(t, nil)
-	h.dialer.route(443, startEcho(t))
-	h.resolver.set("keep.example", []string{publicV4})
-	build := func(opts DeciderOptions) *Decider {
-		d := mustDecider(t, opts)
-		d.local = h.local
-		return d
-	}
-	pr := Principal{BindingID: "b-a", SandboxID: "sb-a", SandboxName: "sb-a", Decider: build(DeciderOptions{})}
-	cred := h.addPrincipal(pr)
-	other := h.addPrincipal(Principal{BindingID: "b-b", SandboxID: "sb-b", SandboxName: "sb-b", Decider: build(DeciderOptions{})})
-	open := func(c Credential, target string) *bufio.Reader {
-		t.Helper()
-		_, br, resp := h.connect(target, basicAuth(c), nil)
-		if resp.status != http.StatusOK {
-			t.Fatalf("CONNECT %s = %d", target, resp.status)
-		}
-		return br
-	}
-	openTunnels := func() []string {
-		var out []string
-		for _, tn := range h.proxy.Tunnels() {
-			out = append(out, tn.BindingID+" "+tn.Host)
-		}
-		slices.Sort(out)
-		return out
-	}
-	blocked := open(cred, "example.com:443")
-	open(cred, "keep.example:443")
-	revoked := open(other, "example.com:443")
-	eventually(t, "three open tunnels", func() bool { return len(openTunnels()) == 3 })
-	if n := h.proxy.Recheck(""); n != 0 {
-		t.Fatalf("an unchanged policy closed %d tunnel(s)", n)
-	}
-
-	// The sandbox's policy now blocks one destination; the other sandbox's
-	// credential is revoked.
-	pr.Decider = build(DeciderOptions{Block: []string{"example.com"}})
-	if err := h.creds.Register(cred, pr); err != nil {
-		t.Fatal(err)
-	}
-	h.creds.Revoke("b-b")
-	if n := h.proxy.Recheck(""); n != 2 {
-		t.Fatalf("Recheck closed %d tunnel(s), want 2", n)
-	}
-	for name, br := range map[string]*bufio.Reader{"blocked": blocked, "revoked": revoked} {
-		start := time.Now()
-		if _, err := br.ReadByte(); err == nil || time.Since(start) > 3*time.Second {
-			t.Fatalf("the %s tunnel is still open", name)
-		}
-	}
-	eventually(t, "only the allowed tunnel left", func() bool {
-		return slices.Equal(openTunnels(), []string{"b-a keep.example"})
-	})
-	var terminated int
-	for _, e := range h.sink.wait(t, EventClosed, 2) {
-		if e.Terminated && e.Reason == revokedReason {
-			terminated++
-		}
-	}
-	if terminated != 2 {
-		t.Fatalf("closed events for the rechecked tunnels: %d, want 2", terminated)
 	}
 }

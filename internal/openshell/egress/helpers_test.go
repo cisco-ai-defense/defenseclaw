@@ -19,13 +19,18 @@ package egress
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/textproto"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +38,14 @@ import (
 	"testing"
 	"time"
 )
+
+// must fails the test on an unexpected error.
+func must(t testing.TB, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
 
 // fakeResolver answers from a table. A host with several answer sets
 // returns them in turn (the last one repeats), which models rebinding.
@@ -110,12 +123,6 @@ type mapDialer struct {
 	onDial func(address string)
 }
 
-func (d *mapDialer) setOnDial(fn func(address string)) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.onDial = fn
-}
-
 func newMapDialer() *mapDialer {
 	return &mapDialer{targets: map[int]string{}, fail: map[string]error{}, hang: map[string]bool{}}
 }
@@ -124,6 +131,12 @@ func (d *mapDialer) route(port int, target string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.targets[port] = target
+}
+
+func (d *mapDialer) setOnDial(fn func(address string)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.onDial = fn
 }
 
 func (d *mapDialer) addresses() []string {
@@ -174,15 +187,11 @@ func (s *recordingSink) EgressEvent(e Event) {
 	s.mu.Unlock()
 }
 
-func (s *recordingSink) all() []Event {
+func (s *recordingSink) ofKind(kind EventKind) []Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.Clone(s.events)
-}
-
-func (s *recordingSink) ofKind(kind EventKind) []Event {
 	var out []Event
-	for _, e := range s.all() {
+	for _, e := range s.events {
 		if e.Kind == kind {
 			out = append(out, e)
 		}
@@ -193,17 +202,9 @@ func (s *recordingSink) ofKind(kind EventKind) []Event {
 // wait polls until n events of kind arrived and returns them.
 func (s *recordingSink) wait(t *testing.T, kind EventKind, n int) []Event {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		got := s.ofKind(kind)
-		if len(got) >= n {
-			return got
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d %q events; have %+v", n, kind, s.all())
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	var got []Event
+	eventually(t, fmt.Sprintf("%d %q events", n, kind), func() bool { got = s.ofKind(kind); return len(got) >= n })
+	return got
 }
 
 // harness runs a Proxy on a loopback listener with fake DNS and dialing.
@@ -222,9 +223,6 @@ type harness struct {
 	// dialer see instead of the test machine's.
 	local  *localAddrs
 	served chan error
-
-	clientsMu sync.Mutex
-	clients   []*http.Transport
 }
 
 type harnessConfig struct {
@@ -233,6 +231,11 @@ type harnessConfig struct {
 	counter *CounterOptions
 	// sink replaces the recording sink when set.
 	sink EventSink
+}
+
+// uploadBlock configures a harness to block large uploads past n bytes.
+func uploadBlock(n int64) func(*harnessConfig) {
+	return func(c *harnessConfig) { c.counter = &CounterOptions{LargeUploadBytes: n, BlockLargeUploads: true} }
 }
 
 func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
@@ -247,9 +250,8 @@ func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
 		served:   make(chan error, 1),
 	}
 	var err error
-	if h.unblocks, err = NewMemoryUnblocks(); err != nil {
-		t.Fatal(err)
-	}
+	h.unblocks, err = NewMemoryUnblocks()
+	must(t, err)
 	h.resolver.set("example.com", []string{publicV4})
 	h.resolver.set("webhook.site", []string{publicV4Alt})
 
@@ -257,11 +259,7 @@ func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
 	if configure != nil {
 		configure(cfg)
 	}
-	decider, err := NewDecider(cfg.decider)
-	if err != nil {
-		t.Fatalf("NewDecider: %v", err)
-	}
-	decider.local = h.local
+	decider := h.newDecider(cfg.decider)
 	opts := cfg.opts
 	opts.Auth, opts.Decider, opts.Sink = h.creds, decider, h.sink
 	if cfg.sink != nil {
@@ -276,39 +274,121 @@ func newHarness(t *testing.T, configure func(*harnessConfig)) *harness {
 	}
 	h.proxy.dialer.local = h.local
 
-	if h.cred, err = NewCredential(); err != nil {
-		t.Fatal(err)
-	}
 	h.pr = Principal{BindingID: "binding-one", SandboxID: "sb-1", SandboxName: "sb-one"}
-	if err := h.creds.Register(h.cred, h.pr); err != nil {
-		t.Fatal(err)
-	}
+	h.cred = h.addPrincipal(h.pr)
 
 	ln, err := Listen("127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	h.addr = ln.Addr().String()
 	go func() { h.served <- h.proxy.Serve(ln) }()
 	t.Cleanup(func() { _ = h.proxy.Close() })
 	return h
 }
 
+// newDecider builds a decider that sees the harness's fake interfaces.
+func (h *harness) newDecider(opts DeciderOptions) *Decider {
+	h.t.Helper()
+	d := mustDecider(h.t, opts)
+	d.local = h.local
+	return d
+}
+
 // addPrincipal registers another sandbox and returns its credential.
 func (h *harness) addPrincipal(pr Principal) Credential {
 	h.t.Helper()
 	cred, err := NewCredential()
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	if err := h.creds.Register(cred, pr); err != nil {
-		h.t.Fatal(err)
-	}
+	must(h.t, err)
+	must(h.t, h.creds.Register(cred, pr))
 	return cred
+}
+
+// serve runs an HTTP upstream the dialer reaches on port.
+func (h *harness) serve(port int, handler http.HandlerFunc) *httptest.Server {
+	s := httptest.NewServer(handler)
+	h.t.Cleanup(s.Close)
+	h.dialer.route(port, s.Listener.Addr().String())
+	return s
+}
+
+// answerOK is an upstream handler that answers "ok".
+func answerOK(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "ok") }
+
+// clientFor returns an http.Client that sends everything through the proxy
+// with cred, trusting the httptest TLS upstream.
+func (h *harness) clientFor(cred Credential, upstream *httptest.Server) *http.Client {
+	proxyURL, err := url.Parse(cred.ProxyURL("127.0.0.1", h.port()))
+	must(h.t, err)
+	tr := &http.Transport{Proxy: http.ProxyURL(proxyURL), ForceAttemptHTTP2: true}
+	if upstream != nil && upstream.TLS != nil {
+		pool := x509.NewCertPool()
+		pool.AddCert(upstream.Certificate())
+		tr.TLSClientConfig = &tls.Config{RootCAs: pool}
+	}
+	h.t.Cleanup(tr.CloseIdleConnections)
+	return &http.Client{Transport: tr, Timeout: 10 * time.Second}
+}
+
+func (h *harness) port() int {
+	_, p, _ := net.SplitHostPort(h.addr)
+	n, _ := strconv.Atoi(p)
+	return n
 }
 
 func basicAuth(c Credential) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(c.Username+":"+c.Password))
+}
+
+func decodeBlock(t *testing.T, body []byte) BlockResponse {
+	t.Helper()
+	var b BlockResponse
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatalf("block body %q: %v", body, err)
+	}
+	return b
+}
+
+// fetch GETs u with client and returns the response and its body.
+func fetch(t *testing.T, client *http.Client, u string) (*http.Response, []byte) {
+	t.Helper()
+	resp, err := client.Get(u)
+	if err != nil {
+		t.Fatalf("GET %s: %v", u, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, body
+}
+
+// readResponse reads one response and its body off br.
+func readResponse(t *testing.T, br *bufio.Reader) (*http.Response, []byte) {
+	t.Helper()
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, body
+}
+
+// sendGet writes an absolute-form GET of u with cred and the extra header
+// lines on conn.
+func sendGet(conn net.Conn, cred Credential, u, extra string) {
+	host := u
+	if parsed, err := url.Parse(u); err == nil {
+		host = parsed.Host
+	}
+	fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\n%sProxy-Authorization: %s\r\n\r\n", u, host, extra, basicAuth(cred))
+}
+
+// get sends an absolute-form GET of u on a new client connection and reads
+// the response, leaving the connection open for more requests.
+func (h *harness) get(cred Credential, u, extra string) (net.Conn, *bufio.Reader, *http.Response, []byte) {
+	h.t.Helper()
+	conn, br := h.dialProxy()
+	sendGet(conn, cred, u, extra)
+	resp, body := readResponse(h.t, br)
+	return conn, br, resp, body
 }
 
 // rawResponse is a proxy response read off a raw connection.
@@ -323,9 +403,7 @@ type rawResponse struct {
 func (h *harness) dialProxy() (net.Conn, *bufio.Reader) {
 	h.t.Helper()
 	conn, err := net.DialTimeout("tcp", h.addr, 5*time.Second)
-	if err != nil {
-		h.t.Fatal(err)
-	}
+	must(h.t, err)
 	h.t.Cleanup(func() { _ = conn.Close() })
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	return conn, bufio.NewReader(conn)
@@ -343,10 +421,78 @@ func (h *harness) connect(target, auth string, extra []byte) (net.Conn, *bufio.R
 		fmt.Fprintf(&b, "Proxy-Authorization: %s\r\n", auth)
 	}
 	b.WriteString("\r\n")
-	if _, err := conn.Write(append([]byte(b.String()), extra...)); err != nil {
-		h.t.Fatal(err)
-	}
+	_, err := conn.Write(append([]byte(b.String()), extra...))
+	must(h.t, err)
 	return conn, br, readRawResponse(h.t, br)
+}
+
+// refused sends a CONNECT to target with cred and returns the refusal.
+func (h *harness) refused(cred Credential, target string) (rawResponse, BlockResponse) {
+	h.t.Helper()
+	conn, _, resp := h.connect(target, basicAuth(cred), nil)
+	_ = conn.Close()
+	if resp.status == http.StatusOK {
+		h.t.Fatalf("CONNECT %s was allowed", target)
+	}
+	return resp, decodeBlock(h.t, resp.body)
+}
+
+// tunnel opens a CONNECT tunnel to target, sending extra with the CONNECT
+// head, and fails the test unless it is established.
+func (h *harness) tunnel(target string, extra []byte) (net.Conn, *bufio.Reader) {
+	h.t.Helper()
+	conn, br, resp := h.connect(target, basicAuth(h.cred), extra)
+	if resp.status != http.StatusOK {
+		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
+	}
+	return conn, br
+}
+
+// openTunnel opens a CONNECT tunnel to target with cred and sends a TLS
+// ClientHello for serverName (target's host when empty), waiting for the
+// echo upstream to return it: the tunnel is established and screened.
+func (h *harness) openTunnel(cred Credential, target, serverName string) (net.Conn, *bufio.Reader) {
+	h.t.Helper()
+	if serverName == "" {
+		serverName, _, _ = net.SplitHostPort(target)
+	}
+	hello := helloFor(serverName)
+	conn, br, resp := h.connect(target, basicAuth(cred), hello)
+	if resp.status != http.StatusOK {
+		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
+	}
+	if _, err := io.ReadFull(br, make([]byte, len(hello))); err != nil {
+		h.t.Fatalf("tunnel to %s: %v", target, err)
+	}
+	return conn, br
+}
+
+// relays reports whether a tunnel still carries bytes to its echo upstream.
+func relays(conn net.Conn, br *bufio.Reader) bool {
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write([]byte("probe")); err != nil {
+		return false
+	}
+	got := make([]byte, 5)
+	_, err := io.ReadFull(br, got)
+	return err == nil && string(got) == "probe"
+}
+
+// closedByProxy reports whether the proxy closed a client connection within
+// wait.
+func closedByProxy(conn net.Conn, br *bufio.Reader, wait time.Duration) bool {
+	_ = conn.SetReadDeadline(time.Now().Add(wait))
+	_, err := br.ReadByte()
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// waitClosed fails unless the proxy closes the client connection.
+func waitClosed(t *testing.T, what string, conn net.Conn, br *bufio.Reader) {
+	t.Helper()
+	if !closedByProxy(conn, br, 5*time.Second) {
+		t.Fatalf("%s: the connection is still open", what)
+	}
 }
 
 func readRawResponse(t *testing.T, br *bufio.Reader) rawResponse {
@@ -357,12 +503,9 @@ func readRawResponse(t *testing.T, br *bufio.Reader) rawResponse {
 		t.Fatalf("read status line: %v", err)
 	}
 	proto, rest, ok := strings.Cut(line, " ")
-	if !ok || !strings.HasPrefix(proto, "HTTP/1.") {
-		t.Fatalf("bad status line %q", line)
-	}
 	code, reason, _ := strings.Cut(rest, " ")
 	status, err := strconv.Atoi(code)
-	if err != nil {
+	if !ok || !strings.HasPrefix(proto, "HTTP/1.") || err != nil {
 		t.Fatalf("bad status line %q", line)
 	}
 	header, err := tp.ReadMIMEHeader()
@@ -380,13 +523,11 @@ func readRawResponse(t *testing.T, br *bufio.Reader) rawResponse {
 	return resp
 }
 
-// startEcho runs a TCP echo server and returns its address.
-func startEcho(t *testing.T) string {
+// startTCP runs a TCP server that hands every connection to serve.
+func startTCP(t *testing.T, serve func(net.Conn)) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -396,39 +537,29 @@ func startEcho(t *testing.T) string {
 			}
 			go func() {
 				defer c.Close()
-				_, _ = io.Copy(c, c)
+				serve(c)
 			}()
 		}
 	}()
 	return ln.Addr().String()
 }
 
+// startEcho runs a TCP echo server and returns its address.
+func startEcho(t *testing.T) string {
+	return startTCP(t, func(c net.Conn) { _, _ = io.Copy(c, c) })
+}
+
 // startSink runs a TCP server that counts and discards what it receives.
 func startSink(t *testing.T) (string, func() int64) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
 	var mu sync.Mutex
 	var total int64
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer c.Close()
-				n, _ := io.Copy(io.Discard, c)
-				mu.Lock()
-				total += n
-				mu.Unlock()
-			}()
-		}
-	}()
-	return ln.Addr().String(), func() int64 {
+	addr := startTCP(t, func(c net.Conn) {
+		n, _ := io.Copy(io.Discard, c)
+		mu.Lock()
+		total += n
+		mu.Unlock()
+	})
+	return addr, func() int64 {
 		mu.Lock()
 		defer mu.Unlock()
 		return total

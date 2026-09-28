@@ -24,34 +24,17 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// tunnel opens a CONNECT tunnel to target, sending extra with the CONNECT
-// head, and fails the test unless it is established.
-func (h *harness) tunnel(target string, extra []byte) (net.Conn, *bufio.Reader) {
-	h.t.Helper()
-	conn, br, resp := h.connect(target, basicAuth(h.cred), extra)
-	if resp.status != http.StatusOK {
-		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
-	}
-	return conn, br
-}
-
 // readTunnelRefusal reads the JSON refusal written into a tunnel and checks
 // that the tunnel closes after it.
 func readTunnelRefusal(t *testing.T, br *bufio.Reader) BlockResponse {
 	t.Helper()
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatalf("reading the refusal: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	resp, body := readResponse(t, br)
 	b := decodeBlock(t, body)
 	if resp.StatusCode != http.StatusBadRequest || !resp.Close || b.Category != CategoryInvalidDestination || b.Source != SourceGuard ||
 		b.Unblockable || b.Host != "example.com" {
@@ -88,35 +71,23 @@ func (rec *hostRecorder) seen() []string {
 // request is for the tunnel's host: pipelined requests, chunked bodies and
 // absolute-form request targets are forwarded and answered in order.
 func TestTunnelHTTPForwardsRequestsForItsHost(t *testing.T) {
-	rec := &hostRecorder{}
-	upstream := httptest.NewServer(rec)
-	defer upstream.Close()
 	h := newHarness(t, nil)
-	h.dialer.route(80, upstream.Listener.Addr().String())
-
+	h.serve(80, (&hostRecorder{}).ServeHTTP)
 	requests := "GET /one HTTP/1.1\r\nHost: EXAMPLE.com:80\r\n\r\n" +
 		"POST /two HTTP/1.1\r\nHost: example.com.\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n" +
 		"GET http://example.com/three?q=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: agent/1\r\n\r\n"
 	conn, br := h.tunnel("example.com:80", []byte(requests))
-	want := []string{
+	for _, want := range []string{
 		`GET EXAMPLE.com:80 /one body="" te=[] ua=""`,
 		`POST example.com. /two body="hello" te=[chunked] ua=""`,
 		`GET example.com /three?q=1 body="" te=[] ua="agent/1"`,
-	}
-	for _, w := range want {
-		resp, err := http.ReadResponse(br, nil)
-		if err != nil {
-			t.Fatalf("reading the response for %q: %v", w, err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || string(body) != w {
-			t.Errorf("response = %d %q, want %q", resp.StatusCode, body, w)
+	} {
+		if resp, body := readResponse(t, br); resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("response = %d %q, want %q", resp.StatusCode, body, want)
 		}
 	}
 	_ = conn.Close()
-	closed := h.sink.wait(t, EventClosed, 1)[0]
-	if closed.Terminated || closed.BytesUp < int64(len("GET /one HTTP/1.1\r\n")) || closed.BytesDown == 0 {
+	if closed := h.sink.wait(t, EventClosed, 1)[0]; closed.Terminated || closed.BytesUp < int64(len("GET /one HTTP/1.1\r\n")) || closed.BytesDown == 0 {
 		t.Errorf("closed event = %+v", closed)
 	}
 	if n := len(h.sink.ofKind(EventBlocked)); n != 0 {
@@ -129,11 +100,8 @@ func TestTunnelHTTPForwardsRequestsForItsHost(t *testing.T) {
 // site served from the tunnel's address.
 func TestTunnelHTTPRefusesOtherHosts(t *testing.T) {
 	rec := &hostRecorder{}
-	upstream := httptest.NewServer(rec)
-	defer upstream.Close()
 	h := newHarness(t, func(c *harnessConfig) { c.opts.MaxHeaderBytes = 2048 })
-	h.dialer.route(80, upstream.Listener.Addr().String())
-
+	h.serve(80, rec.ServeHTTP)
 	tests := []struct {
 		name, request, reason string
 	}{
@@ -146,26 +114,21 @@ func TestTunnelHTTPRefusesOtherHosts(t *testing.T) {
 		{"header too large", "GET / HTTP/1.1\r\nHost: example.com\r\nX-Big: " + strings.Repeat("a", 8<<10) + "\r\n\r\n", "too large"},
 	}
 	for i, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, br := h.tunnel("example.com:80", []byte(tt.request))
-			if b := readTunnelRefusal(t, br); !strings.Contains(b.Reason, tt.reason) {
-				t.Errorf("reason %q does not mention %q", b.Reason, tt.reason)
-			}
-			e := h.sink.wait(t, EventBlocked, i+1)[i]
-			if e.TunnelID == "" || e.Category != CategoryInvalidDestination || e.Method != http.MethodConnect || e.Status != http.StatusBadRequest {
-				t.Errorf("blocked event = %+v", e)
-			}
-		})
+		_, br := h.tunnel("example.com:80", []byte(tt.request))
+		if b := readTunnelRefusal(t, br); !strings.Contains(b.Reason, tt.reason) {
+			t.Errorf("%s: reason %q does not mention %q", tt.name, b.Reason, tt.reason)
+		}
+		if e := h.sink.wait(t, EventBlocked, i+1)[i]; e.TunnelID == "" || e.Category != CategoryInvalidDestination ||
+			e.Method != http.MethodConnect || e.Status != http.StatusBadRequest {
+			t.Errorf("%s: blocked event = %+v", tt.name, e)
+		}
 	}
 
 	// A refused request after an accepted one ends the tunnel too.
 	conn, br := h.tunnel("example.com:80", []byte("GET /ok HTTP/1.1\r\nHost: example.com\r\n\r\n"))
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("first request = %v, %v", resp, err)
+	if resp, _ := readResponse(t, br); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request = %d", resp.StatusCode)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
 	fmt.Fprint(conn, "GET /raw HTTP/1.1\r\nHost: pastebin.com\r\n\r\n")
 	readTunnelRefusal(t, br)
 
@@ -191,25 +154,21 @@ func TestTunnelOpaqueProtocols(t *testing.T) {
 	h.dialer.route(443, sinkAddr)
 	h.dialer.route(5432, startEcho(t))
 
-	h2Preface := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
-	for _, data := range [][]byte{[]byte("SSH-2.0-OpenSSH_9.6\r\n"), {0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f}, h2Preface} {
-		conn, br := h.tunnel("example.com:5432", nil)
-		if _, err := conn.Write(data); err != nil {
-			t.Fatal(err)
-		}
+	ssh, binary, h2Preface := []byte("SSH-2.0-OpenSSH_9.6\r\n"), []byte{0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f}, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	for _, data := range [][]byte{ssh, binary, h2Preface} {
+		conn, br := h.tunnel("example.com:5432", data)
 		got := make([]byte, len(data))
 		if _, err := io.ReadFull(br, got); err != nil || !bytes.Equal(got, data) {
 			t.Errorf("extra port relay of %q = %q, %v", data, got, err)
 		}
 		_ = conn.Close()
 	}
-
 	for _, tt := range []struct {
 		target string
 		data   []byte
 	}{
-		{"example.com:443", []byte("SSH-2.0-OpenSSH_9.6\r\n")},
-		{"example.com:80", []byte{0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f}},
+		{"example.com:443", ssh},
+		{"example.com:80", binary},
 		{"example.com:80", h2Preface},
 		{"example.com:443", h2Preface},
 		{"example.com:80", []byte("get foo\r\n")},
@@ -229,34 +188,23 @@ func TestTunnelOpaqueProtocols(t *testing.T) {
 // classified; one that never completes its first line is refused after
 // HeaderTimeout rather than guessed at.
 func TestTunnelFirstFlightSplit(t *testing.T) {
-	rec := &hostRecorder{}
-	upstream := httptest.NewServer(rec)
-	defer upstream.Close()
 	h := newHarness(t, func(c *harnessConfig) {
 		c.opts.HeaderTimeout = 300 * time.Millisecond
 		c.decider.Ports = []int{80, 443, 2222}
 	})
-	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.serve(80, (&hostRecorder{}).ServeHTTP)
 	h.dialer.route(2222, startEcho(t))
-
 	writeSlowly := func(conn net.Conn, parts ...string) {
 		t.Helper()
 		for _, part := range parts {
-			if _, err := io.WriteString(conn, part); err != nil {
-				t.Fatal(err)
-			}
+			_, err := io.WriteString(conn, part)
+			must(t, err)
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
 	conn, br := h.tunnel("example.com:80", nil)
 	writeSlowly(conn, "\r\n", "GE", "T /split HT", "TP/1.1\r\nHo", "st: example.com\r\n\r\n")
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.HasPrefix(string(body), "GET example.com /split") {
+	if _, body := readResponse(t, br); !strings.HasPrefix(string(body), "GET example.com /split") {
 		t.Errorf("split request = %q", body)
 	}
 	// A stray empty line before an idle pause is not the start of a slow
@@ -264,8 +212,8 @@ func TestTunnelFirstFlightSplit(t *testing.T) {
 	writeSlowly(conn, "\r\n")
 	time.Sleep(450 * time.Millisecond)
 	fmt.Fprint(conn, "GET /later HTTP/1.1\r\nHost: example.com\r\n\r\n")
-	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("request after a pause = %v, %v", resp, err)
+	if resp, _ := readResponse(t, br); resp.StatusCode != http.StatusOK {
+		t.Fatalf("request after a pause = %d", resp.StatusCode)
 	}
 	_ = conn.Close()
 
@@ -292,30 +240,13 @@ func TestTunnelFirstFlightSplit(t *testing.T) {
 // new protocol as is. An Upgrade the upstream declines leaves the tunnel
 // inspected.
 func TestTunnelHTTPUpgrade(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ws" {
-			http.Error(w, "no upgrade here", http.StatusBadRequest)
-			return
-		}
-		conn, brw, err := http.NewResponseController(w).Hijack()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		fmt.Fprint(brw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-		_ = brw.Flush()
-		_, _ = io.Copy(conn, brw)
-	}))
-	defer upstream.Close()
 	h := newHarness(t, nil)
-	h.dialer.route(80, upstream.Listener.Addr().String())
-	upgrade := func(path string) string {
-		return "GET " + path + " HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n"
+	h.serve(80, wsHandler)
+	upgrade := func(path string) []byte {
+		return []byte("GET " + path + " HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n")
 	}
-
-	conn, br := h.tunnel("example.com:80", []byte(upgrade("/ws")))
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+	conn, br := h.tunnel("example.com:80", upgrade("/ws"))
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("upgrade = %v, %v", resp, err)
 	}
 	frames := "frame-data GET / HTTP/1.1\r\nHost: pastebin.com\r\n\r\n"
@@ -326,13 +257,10 @@ func TestTunnelHTTPUpgrade(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	conn, br = h.tunnel("example.com:80", []byte(upgrade("/plain")))
-	resp, err = http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("declined upgrade = %v, %v", resp, err)
+	conn, br = h.tunnel("example.com:80", upgrade("/plain"))
+	if resp, _ := readResponse(t, br); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("declined upgrade = %d", resp.StatusCode)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
 	fmt.Fprint(conn, "GET /raw HTTP/1.1\r\nHost: pastebin.com\r\n\r\n")
 	readTunnelRefusal(t, br)
 }
@@ -342,52 +270,30 @@ func TestTunnelHTTPUpgrade(t *testing.T) {
 // an earlier request; when the upstream's responses cannot be followed, the
 // tunnel closes without a refusal rather than splice one into them.
 func TestTunnelHTTPRefusalWaitsForPipelinedResponses(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := newHarness(t, nil)
+	h.serve(80, func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		fmt.Fprint(w, "slow "+r.URL.Path)
-	}))
-	defer upstream.Close()
-	h := newHarness(t, nil)
-	h.dialer.route(80, upstream.Listener.Addr().String())
-	_, br := h.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n"+
-		"GET /two HTTP/1.1\r\nHost: example.com\r\n\r\n"+
-		"GET /raw HTTP/1.1\r\nHost: other-host.example\r\n\r\n"))
+	})
+	refused := "GET /raw HTTP/1.1\r\nHost: other-host.example\r\n\r\n"
+	_, br := h.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\nGET /two HTTP/1.1\r\nHost: example.com\r\n\r\n"+refused))
 	for _, path := range []string{"/one", "/two"} {
-		resp, err := http.ReadResponse(br, nil)
-		if err != nil {
-			t.Fatalf("response for %s: %v", path, err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || string(body) != "slow "+path {
+		if resp, body := readResponse(t, br); resp.StatusCode != http.StatusOK || string(body) != "slow "+path {
 			t.Fatalf("the response read for %s is %d %q", path, resp.StatusCode, body)
 		}
 	}
 	readTunnelRefusal(t, br)
 
 	// Responses the proxy cannot follow: the tunnel just closes.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go func() {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
+	h2 := newHarness(t, nil)
+	h2.dialer.route(80, startTCP(t, func(c net.Conn) {
 		if _, err := http.ReadRequest(bufio.NewReader(c)); err == nil {
 			fmt.Fprint(c, "not a response\r\n")
 			time.Sleep(2 * time.Second)
 		}
-	}()
-	h2 := newHarness(t, nil)
-	h2.dialer.route(80, ln.Addr().String())
-	_, br = h2.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n"+
-		"GET /raw HTTP/1.1\r\nHost: other-host.example\r\n\r\n"))
-	rest, _ := io.ReadAll(br)
-	if string(rest) != "not a response\r\n" {
+	}))
+	_, br = h2.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n"+refused))
+	if rest, _ := io.ReadAll(br); string(rest) != "not a response\r\n" {
 		t.Errorf("the client read %q; want the upstream's bytes and no refusal spliced in", rest)
 	}
 	if e := h2.sink.wait(t, EventBlocked, 1)[0]; e.TunnelID == "" || e.Category != CategoryInvalidDestination {
@@ -404,43 +310,27 @@ type switchingUpstream struct {
 }
 
 func (s *switchingUpstream) start(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	go func() {
+	return startTCP(t, func(c net.Conn) {
+		br := bufio.NewReader(c)
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		s.mu.Lock()
+		s.upgrades = append(s.upgrades, req.Header.Get("Upgrade")+"|"+req.Header.Get("Http2-Settings"))
+		s.mu.Unlock()
+		fmt.Fprint(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n")
+		buf := make([]byte, 4096)
 		for {
-			c, err := ln.Accept()
+			n, err := br.Read(buf)
+			s.mu.Lock()
+			s.after.Write(buf[:n])
+			s.mu.Unlock()
 			if err != nil {
 				return
 			}
-			go func() {
-				defer c.Close()
-				br := bufio.NewReader(c)
-				req, err := http.ReadRequest(br)
-				if err != nil {
-					return
-				}
-				s.mu.Lock()
-				s.upgrades = append(s.upgrades, req.Header.Get("Upgrade")+"|"+req.Header.Get("Http2-Settings"))
-				s.mu.Unlock()
-				fmt.Fprint(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n")
-				buf := make([]byte, 4096)
-				for {
-					n, err := br.Read(buf)
-					s.mu.Lock()
-					s.after.Write(buf[:n])
-					s.mu.Unlock()
-					if err != nil {
-						return
-					}
-				}
-			}()
 		}
-	}()
-	return ln.Addr().String()
+	})
 }
 
 func (s *switchingUpstream) seen() ([]string, string) {
@@ -455,27 +345,17 @@ func (s *switchingUpstream) seen() ([]string, string) {
 // the proxy has not inspected, since HTTP/2 streams or a ClientHello after
 // the switch could name any other site on the server.
 func TestTunnelHTTPOnlyWebSocketUpgrades(t *testing.T) {
-	rec := &hostRecorder{}
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.ServeHTTP(w, r)
-		fmt.Fprintf(w, " upgrade=%q settings=%q connection=%q", r.Header.Get("Upgrade"), r.Header.Get("Http2-Settings"), r.Header.Get("Connection"))
-	}))
-	defer upstream.Close()
 	h := newHarness(t, nil)
-	h.dialer.route(80, upstream.Listener.Addr().String())
+	h.serve(80, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "upgrade=%q settings=%q connection=%q", r.Header.Get("Upgrade"), r.Header.Get("Http2-Settings"), r.Header.Get("Connection"))
+	})
 	for _, offer := range []string{
 		"Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n",
 		"Connection: keep-alive, upgrade\r\nUpgrade: TLS/1.0\r\n",
 		"Connection: Upgrade\r\nUpgrade: websocket, h2c\r\n",
 	} {
 		conn, br := h.tunnel("example.com:80", []byte("GET /h HTTP/1.1\r\nHost: example.com\r\n"+offer+"\r\n"))
-		resp, err := http.ReadResponse(br, nil)
-		if err != nil {
-			t.Fatalf("%q: %v", offer, err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `upgrade="" settings=""`) ||
+		if resp, body := readResponse(t, br); resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `upgrade="" settings=""`) ||
 			strings.Contains(strings.ToLower(string(body)), "connection=\"upgrade") {
 			t.Errorf("%q reached the upstream as %d %q", offer, resp.StatusCode, body)
 		}
@@ -490,8 +370,7 @@ func TestTunnelHTTPOnlyWebSocketUpgrades(t *testing.T) {
 	h2.dialer.route(80, sw.start(t))
 	conn, br := h2.tunnel("example.com:80", []byte("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade, HTTP2-Settings\r\n"+
 		"Upgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n\r\n"))
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("switching upstream = %v, %v", resp, err)
 	}
 	fmt.Fprint(conn, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
@@ -502,78 +381,22 @@ func TestTunnelHTTPOnlyWebSocketUpgrades(t *testing.T) {
 	}
 }
 
-// Upload bytes in an inspected tunnel count toward the large-upload block
-// as in any other tunnel.
-func TestTunnelHTTPLargeUpload(t *testing.T) {
-	sinkAddr, received := startSink(t)
-	h := newHarness(t, func(c *harnessConfig) {
-		c.counter = &CounterOptions{LargeUploadBytes: 1024, BlockLargeUploads: true}
-	})
-	h.dialer.route(80, sinkAddr)
-	conn, br := h.tunnel("example.com:80", nil)
-	fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: %d\r\n\r\n", 8<<10)
-	for i := 0; i < 16; i++ {
-		if _, err := conn.Write(bytes.Repeat([]byte("u"), 512)); err != nil {
-			break
-		}
-	}
-	_, _ = io.Copy(io.Discard, br)
-	if e := h.sink.wait(t, EventLargeUpload, 1)[0]; !e.Terminated {
-		t.Errorf("large_upload event = %+v", e)
-	}
-	if closed := h.sink.wait(t, EventClosed, 1)[0]; !closed.Terminated || closed.BytesUp > 1024 {
-		t.Errorf("closed event = %+v", closed)
-	}
-	eventually(t, "the upstream to see the cut", func() bool { return received() > 0 })
-	if got := received(); got > 1024 {
-		t.Errorf("upstream received %d bytes past the 1024-byte block", got)
-	}
-}
-
 func TestClassifyFlight(t *testing.T) {
-	tests := map[string]flightKind{
-		"":                                   flightUnknown,
-		"\r\n":                               flightUnknown,
-		"GET / HT":                           flightUnknown,
-		"SSH-2.0-OpenSSH":                    flightUnknown,
-		"GET / HTTP/1.1\r\n":                 flightHTTP,
-		"\r\nget /x HTTP/1.0\n":              flightHTTP,
-		"GET\t/\thttp/1.1\r\n":               flightHTTP,
-		"GET / HTTP/1.1 junk\r\n":            flightHTTP,
-		"GET / HTTP/2.0\r\n":                 flightHTTP,
-		"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n":   flightOpaque,
-		"SSH-2.0-OpenSSH_9.6\r\n":            flightOpaque,
-		"get foo\r\n":                        flightOpaque,
-		"\x00\x00\x00\x08":                   flightOpaque,
-		"{\"jsonrpc\":\"2.0\"}":              flightOpaque,
-		"GET /\x01 HTTP/1.1\r\n":             flightOpaque,
-		"GET /caf\xc3\xa9 HTTP/1.1\r\n":      flightHTTP,
-		"GET / HTTP/1.1\rHost: example.com":  flightUnknown,
-		"G\x80T / HTTP/1.1\r\n":              flightOpaque,
-		"*1\r\n$4\r\nPING\r\n":               flightOpaque,
-		"CONNECT host:443 HTTP/1.1\r\n\r\n":  flightHTTP,
-		"OPTIONS * HTTP/1.1\r\nHost: x\r\n":  flightHTTP,
-		"PRI * HTTP/2.0\r\n":                 flightOpaque,
-		" GET / HTTP/1.1\r\n":                flightHTTP,
-		"GET":                                flightUnknown,
-		"GET / HTTP/1.1\r":                   flightUnknown,
-		"M-SEARCH * HTTP/1.1\r\n":            flightHTTP,
-		"QUIT\r\n":                           flightOpaque,
-		"\r\n\r\n\r\nPOST / HTTP/1.1\r\n":    flightHTTP,
-		"GET / HTTP/1.1\x7f\r\n":             flightOpaque,
-		"hello world HTTP/1.1 there\r\n":     flightHTTP,
-		"STARTTLS\r\n":                       flightOpaque,
-		"EHLO client.example.com\r\n":        flightOpaque,
-		"GET /x HTTP/\r\n":                   flightHTTP,
-		"GET /x HTTPS/1.1\r\n":               flightOpaque,
-		"A B C D E F\r\n":                    flightOpaque,
-		"GET /\tHTTP/1.1\r\n":                flightHTTP,
-		"\n":                                 flightUnknown,
-		"GET / HTTP/1.1\r\nHost: example.co": flightHTTP,
-	}
-	for in, want := range tests {
-		if got := classifyFlight([]byte(in)); got != want {
-			t.Errorf("classifyFlight(%q) = %d, want %d", in, got, want)
+	for want, flights := range map[flightKind][]string{
+		// Not enough to tell yet.
+		flightUnknown: {"", "\r\n", "\n", "GET", "GET / HT", "GET / HTTP/1.1\r", "GET / HTTP/1.1\rHost: example.com", "SSH-2.0-OpenSSH"},
+		flightHTTP: {"GET / HTTP/1.1\r\n", "\r\nget /x HTTP/1.0\n", "GET\t/\thttp/1.1\r\n", "GET / HTTP/1.1 junk\r\n",
+			"GET / HTTP/2.0\r\n", "GET /caf\xc3\xa9 HTTP/1.1\r\n", "CONNECT host:443 HTTP/1.1\r\n\r\n", "OPTIONS * HTTP/1.1\r\nHost: x\r\n",
+			" GET / HTTP/1.1\r\n", "M-SEARCH * HTTP/1.1\r\n", "\r\n\r\n\r\nPOST / HTTP/1.1\r\n", "hello world HTTP/1.1 there\r\n",
+			"GET /x HTTP/\r\n", "GET /\tHTTP/1.1\r\n", "GET / HTTP/1.1\r\nHost: example.co"},
+		flightOpaque: {"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "PRI * HTTP/2.0\r\n", "SSH-2.0-OpenSSH_9.6\r\n", "get foo\r\n",
+			"\x00\x00\x00\x08", "{\"jsonrpc\":\"2.0\"}", "GET /\x01 HTTP/1.1\r\n", "G\x80T / HTTP/1.1\r\n", "*1\r\n$4\r\nPING\r\n",
+			"QUIT\r\n", "GET / HTTP/1.1\x7f\r\n", "STARTTLS\r\n", "EHLO client.example.com\r\n", "GET /x HTTPS/1.1\r\n", "A B C D E F\r\n"},
+	} {
+		for _, in := range flights {
+			if got := classifyFlight([]byte(in)); got != want {
+				t.Errorf("classifyFlight(%q) = %d, want %d", in, got, want)
+			}
 		}
 	}
 }

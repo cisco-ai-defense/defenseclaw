@@ -32,19 +32,22 @@ func (c *fakeClock) now() time.Time {
 	return time.Unix(1_700_000_000, 0).Add(time.Duration(c.n.Add(1)) * time.Second)
 }
 
+// verdict fails unless an upload verdict signalled and cut as wanted.
+func verdict(t *testing.T, what string, v uploadVerdict, signal, cut bool) {
+	t.Helper()
+	if v.signal != signal || v.cut != cut {
+		t.Errorf("%s: verdict %+v, want signal %v cut %v", what, v, signal, cut)
+	}
+}
+
 func TestCounterAccumulates(t *testing.T) {
 	c := NewCounter(CounterOptions{LargeUploadBytes: -1})
-	p2 := Principal{BindingID: "b-2"}
-
 	f1, first := c.open(testPrincipal, "example.com", netip.Addr{})
-	if !first {
-		t.Error("first contact not reported")
+	f2, again := c.open(testPrincipal, "example.com", netip.Addr{})
+	if !first || again {
+		t.Errorf("first contact reported %v, then %v", first, again)
 	}
-	f2, first := c.open(testPrincipal, "example.com", netip.Addr{})
-	if first {
-		t.Error("second contact reported as first")
-	}
-	f3, _ := c.open(p2, "example.com", netip.Addr{})
+	f3, _ := c.open(Principal{BindingID: "b-2"}, "example.com", netip.Addr{})
 	f1.addUp(100, false)
 	f1.addDown(1000)
 	f2.addUp(10, false)
@@ -55,57 +58,40 @@ func TestCounterAccumulates(t *testing.T) {
 	if f1.up.Load() != 100 || f1.down.Load() != 1000 || f2.up.Load() != 10 {
 		t.Errorf("per-flow counts = %d/%d, %d", f1.up.Load(), f1.down.Load(), f2.up.Load())
 	}
-	got := c.DestinationsFor(testPrincipal.BindingID)
-	if len(got) != 1 {
-		t.Fatalf("DestinationsFor = %+v", got)
-	}
-	s := got[0]
-	if s.BytesUp != 110 || s.BytesDown != 1000 || s.Tunnels != 2 || s.Active != 1 || !s.Novel || s.LargeUpload {
-		t.Errorf("destination stats = %+v", s)
+	if got := c.DestinationsFor(testPrincipal.BindingID); len(got) != 1 || got[0].BytesUp != 110 || got[0].BytesDown != 1000 ||
+		got[0].Tunnels != 2 || got[0].Active != 1 || !got[0].Novel || got[0].LargeUpload {
+		t.Errorf("DestinationsFor = %+v", got)
 	}
 	c.recordBlocked(testPrincipal, "webhook.site")
 	all := c.Destinations()
 	if len(all) != 3 || all[0].BindingID != "b-1" || all[0].Host != "example.com" || all[1].Host != "webhook.site" || all[1].Blocked != 1 || all[2].BindingID != "b-2" {
 		t.Errorf("Destinations ordering/contents = %+v", all)
 	}
-	if n := c.Forget("b-1"); n != 2 {
-		t.Errorf("Forget = %d, want 2", n)
-	}
-	if len(c.DestinationsFor("b-1")) != 0 || len(c.Destinations()) != 1 {
-		t.Error("Forget left destinations behind")
+	if n := c.Forget("b-1"); n != 2 || len(c.DestinationsFor("b-1")) != 0 || len(c.Destinations()) != 1 {
+		t.Errorf("Forget = %d, left %+v", n, c.Destinations())
 	}
 	f1.addUp(1, false) // a detached flow keeps counting without panicking
 }
 
 func TestCounterLargeUploadSignal(t *testing.T) {
 	c := NewCounter(CounterOptions{LargeUploadBytes: 100})
-	if c.LargeUploadBytes() != 100 {
-		t.Fatal("threshold not applied")
+	if c.LargeUploadBytes() != 100 || NewCounter(CounterOptions{}).LargeUploadBytes() != DefaultLargeUploadBytes {
+		t.Fatal("threshold not applied, or zero does not use the default")
 	}
 	a, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
 	b, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
-	if v := a.addUp(60, false); v.signal || v.cut {
-		t.Fatalf("signalled early: %+v", v)
-	}
-	v := b.addUp(60, false)
-	if !v.signal || v.cut || v.total != 120 {
+	verdict(t, "below", a.addUp(60, false), false, false)
+	if v := b.addUp(60, false); !v.signal || v.cut || v.total != 120 {
 		t.Fatalf("crossing verdict = %+v", v)
 	}
-	if v := a.addUp(500, false); v.signal || v.cut {
-		t.Errorf("signalled twice: %+v", v)
-	}
-	if s := c.DestinationsFor("b-1")[0]; !s.LargeUpload || s.BytesUp != 620 {
-		t.Errorf("stats = %+v", s)
-	}
-	if c.uploadBlocked(testPrincipal, "drop.example") {
-		t.Error("alert-only counter blocks uploads")
+	verdict(t, "after the signal", a.addUp(500, false), false, false)
+	if s := c.DestinationsFor("b-1")[0]; !s.LargeUpload || s.BytesUp != 620 || c.uploadBlocked(testPrincipal, "drop.example") {
+		t.Errorf("stats = %+v; an alert-only counter must not block", s)
 	}
 	// Downloads never count toward the signal, and other bindings are separate.
 	other, _ := c.open(Principal{BindingID: "b-2"}, "drop.example", netip.Addr{})
 	other.addDown(1 << 20)
-	if v := other.addUp(99, false); v.signal {
-		t.Error("another binding inherited the upload total")
-	}
+	verdict(t, "another binding", other.addUp(99, false), false, false)
 }
 
 func TestCounterKnownHost(t *testing.T) {
@@ -118,14 +104,10 @@ func TestCounterKnownHost(t *testing.T) {
 		},
 	})
 	f, _ := c.open(testPrincipal, "github.com", netip.Addr{})
-	if v := f.addUp(1000, false); v.signal {
-		t.Error("known host raised the large-upload signal")
-	}
+	verdict(t, "known host", f.addUp(1000, false), false, false)
 	c.open(testPrincipal, "github.com", netip.Addr{})
 	g, _ := c.open(testPrincipal, "new.example", netip.Addr{})
-	if v := g.addUp(11, false); !v.signal {
-		t.Error("first-seen host did not raise the signal")
-	}
+	verdict(t, "first-seen host", g.addUp(11, false), true, false)
 	if calls.Load() != 2 {
 		t.Errorf("KnownHost called %d times, want once per destination", calls.Load())
 	}
@@ -137,58 +119,98 @@ func TestCounterKnownHost(t *testing.T) {
 func TestCounterBlockLargeUploads(t *testing.T) {
 	c := NewCounter(CounterOptions{LargeUploadBytes: 100, BlockLargeUploads: true})
 	f, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
-	if v := f.addUp(90, false); v.cut {
-		t.Fatal("cut below the threshold")
-	}
-	v := f.addUp(20, false)
-	if !v.signal || !v.cut || v.total != 90 {
+	verdict(t, "below the threshold", f.addUp(90, false), false, false)
+	if v := f.addUp(20, false); !v.signal || !v.cut || v.total != 90 {
 		t.Fatalf("crossing verdict = %+v (the crossing chunk must not be counted)", v)
 	}
-	if v := f.addUp(1, false); !v.cut || v.signal {
-		t.Errorf("after the block: %+v", v)
-	}
+	verdict(t, "after the block", f.addUp(1, false), false, true)
 	if !c.uploadBlocked(testPrincipal, "drop.example") || c.uploadBlocked(Principal{BindingID: "b-2"}, "drop.example") {
 		t.Error("uploadBlocked scope is wrong")
 	}
 	// Exempt flows (unblocked destinations) keep flowing.
 	e, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
-	if v := e.addUp(1000, true); v.cut {
-		t.Error("exempt flow cut")
-	}
+	verdict(t, "exempt flow", e.addUp(1000, true), false, false)
 
 	off := NewCounter(CounterOptions{LargeUploadBytes: -1, BlockLargeUploads: true})
 	g, _ := off.open(testPrincipal, "drop.example", netip.Addr{})
-	if v := g.addUp(1<<40, false); v.signal || v.cut || off.uploadBlocked(testPrincipal, "drop.example") {
-		t.Error("disabled threshold still signals or blocks")
-	}
-	if NewCounter(CounterOptions{}).LargeUploadBytes() != DefaultLargeUploadBytes {
-		t.Error("zero threshold does not use the default")
+	verdict(t, "disabled threshold", g.addUp(1<<40, false), false, false)
+	if off.uploadBlocked(testPrincipal, "drop.example") {
+		t.Error("disabled threshold still blocks")
 	}
 }
 
-func TestCounterEviction(t *testing.T) {
-	clock := &fakeClock{}
-	c := NewCounter(CounterOptions{MaxDestinations: 8, LargeUploadBytes: 1, Now: clock.now})
-	active, _ := c.open(testPrincipal, "active.example", netip.Addr{})
-	flagged, _ := c.open(testPrincipal, "flagged.example", netip.Addr{})
-	flagged.addUp(5, false)
-	flagged.close()
-	for i := 0; i < 40; i++ {
-		f, _ := c.open(testPrincipal, fmt.Sprintf("h%d.example", i), netip.Addr{})
-		f.close()
+// TestCounterPerPrincipalThreshold pins that each sandbox's large-upload
+// threshold is its own: a principal's LargeUploadBytes overrides the
+// counter's, negative turns the signal (and the block) off for it alone,
+// and zero keeps the counter's.
+func TestCounterPerPrincipalThreshold(t *testing.T) {
+	c := NewCounter(CounterOptions{LargeUploadBytes: 1000, BlockLargeUploads: true})
+	strict := Principal{BindingID: "b-strict", LargeUploadBytes: 100}
+	off := Principal{BindingID: "b-off", LargeUploadBytes: -1}
+	s, _ := c.open(strict, "drop.example", netip.Addr{})
+	verdict(t, "the sandbox's own 100-byte threshold", s.addUp(101, false), true, true)
+	if !c.uploadBlocked(strict, "drop.example") {
+		t.Fatal("the strict sandbox's block did not apply")
 	}
-	got := c.Destinations()
-	if len(got) > 8 {
-		t.Fatalf("%d destinations tracked, cap is 8", len(got))
+	d, _ := c.open(Principal{BindingID: "b-default"}, "drop.example", netip.Addr{})
+	verdict(t, "another sandbox", d.addUp(101, false), false, false)
+	verdict(t, "the counter's threshold", d.addUp(1000, false), true, true)
+	o, _ := c.open(off, "drop.example", netip.Addr{})
+	verdict(t, "signal off", o.addUp(1<<30, false), false, false)
+	if c.uploadBlocked(off, "drop.example") {
+		t.Fatal("a sandbox with the signal off was blocked")
 	}
-	kept := map[string]bool{}
-	for _, s := range got {
-		kept[s.Host] = true
+}
+
+// Eviction past MaxDestinations keeps live state: open flows, destinations
+// flagged for a large upload, the latest one, and upload totals toward the
+// threshold, which a flood of other destinations, or of refusals (which no
+// limit throttles), must not reset.
+func TestCounterEvictionKeepsLiveState(t *testing.T) {
+	for name, tc := range map[string]struct {
+		flood func(c *Counter)
+		max   int
+	}{
+		"contacts": {func(c *Counter) {
+			for i := 0; i < 40; i++ {
+				g, _ := c.open(testPrincipal, fmt.Sprintf("h%d.example", i), netip.Addr{})
+				g.addDown(1 << 20)
+				g.close()
+			}
+		}, 8},
+		// Refusal-only records are capped on their own.
+		"refusals": {func(c *Counter) {
+			for i := 0; i < 1000; i++ {
+				c.recordBlocked(testPrincipal, fmt.Sprintf("h%d.pastebin.com", i))
+			}
+		}, 16},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clock := &fakeClock{}
+			c := NewCounter(CounterOptions{MaxDestinations: 8, LargeUploadBytes: 100, BlockLargeUploads: true, Now: clock.now})
+			active, _ := c.open(testPrincipal, "active.example", netip.Addr{})
+			defer active.close()
+			flagged, _ := c.open(testPrincipal, "flagged.example", netip.Addr{})
+			flagged.addUp(101, false)
+			flagged.close()
+			f, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
+			verdict(t, "below the threshold", f.addUp(90, false), false, false)
+			f.close()
+			tc.flood(c)
+			kept := map[string]bool{}
+			for _, s := range c.Destinations() {
+				kept[s.Host] = true
+			}
+			if len(kept) > tc.max || !kept["active.example"] || !kept["flagged.example"] || (name == "contacts" && !kept["h39.example"]) {
+				t.Errorf("%d destinations tracked (cap %d); kept %v", len(kept), tc.max, kept)
+			}
+			g, first := c.open(testPrincipal, "drop.example", netip.Addr{})
+			defer g.close()
+			if v := g.addUp(20, false); first || !v.cut || v.total != 90 {
+				t.Errorf("drop.example after the flood: first %v, upload %+v; want a cut at 90", first, v)
+			}
+		})
 	}
-	if !kept["active.example"] || !kept["flagged.example"] || !kept["h39.example"] {
-		t.Errorf("eviction dropped live state: %v", kept)
-	}
-	active.close()
 }
 
 func TestCounterConcurrent(t *testing.T) {
@@ -211,12 +233,8 @@ func TestCounterConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	s := c.DestinationsFor("b-1")[0]
-	if s.BytesUp != 1600 || s.BytesDown != 3200 || s.Tunnels != 16 || s.Active != 0 {
-		t.Errorf("stats = %+v", s)
-	}
-	if signals.Load() != 1 {
-		t.Errorf("signal fired %d times, want 1", signals.Load())
+	if s := c.DestinationsFor("b-1")[0]; s.BytesUp != 1600 || s.BytesDown != 3200 || s.Tunnels != 16 || s.Active != 0 || signals.Load() != 1 {
+		t.Errorf("stats = %+v, signal fired %d times (want 1)", s, signals.Load())
 	}
 }
 
@@ -249,16 +267,12 @@ func TestCounterPendingFlow(t *testing.T) {
 	if g.open() || len(c.DestinationsFor("b-1")) != 1 {
 		t.Error("a closed flow opened")
 	}
-	if v := g.addUp(1, false); !v.cut {
-		t.Errorf("upload on a closed, never-opened flow = %+v", v)
-	}
+	verdict(t, "upload on a closed, never-opened flow", g.addUp(1, false), false, true)
 
 	// An upload opens a pending flow, so the threshold always applies.
 	u := c.pending(testPrincipal, "drop.example")
 	defer u.close()
-	if v := u.addUp(101, false); !v.cut || !v.signal {
-		t.Errorf("upload on a pending flow = %+v", v)
-	}
+	verdict(t, "upload on a pending flow", u.addUp(101, false), true, true)
 }
 
 // Refusals are not contact: they must not call KnownHost, use up the first
@@ -272,78 +286,22 @@ func TestCounterRefusalIsNotContact(t *testing.T) {
 	}})
 	c.recordBlocked(testPrincipal, "example.com")
 	c.recordBlocked(testPrincipal, "example.com")
-	if n := calls.Load(); n != 0 {
-		t.Errorf("KnownHost ran %d times for refusals", n)
-	}
 	s := c.DestinationsFor("b-1")
-	if len(s) != 1 || s[0].Blocked != 2 || s[0].Tunnels != 0 || s[0].Novel || s[0].FirstSeen.IsZero() {
-		t.Fatalf("refusal-only stats = %+v", s)
+	if len(s) != 1 || s[0].Blocked != 2 || s[0].Tunnels != 0 || s[0].Novel || s[0].FirstSeen.IsZero() || calls.Load() != 0 {
+		t.Fatalf("refusal-only stats = %+v, KnownHost ran %d times", s, calls.Load())
 	}
 	f, first := c.open(testPrincipal, "example.com", netip.Addr{})
 	defer f.close()
-	if !first {
-		t.Error("a refusal used up the first contact")
-	}
-	if n := calls.Load(); n != 1 {
-		t.Errorf("KnownHost ran %d times, want once at first contact", n)
+	if !first || calls.Load() != 1 {
+		t.Errorf("first contact %v, KnownHost ran %d times; want the refusals to leave it to the contact", first, calls.Load())
 	}
 	c.recordBlocked(testPrincipal, "example.com")
-	s = c.DestinationsFor("b-1")
-	if len(s) != 1 || s[0].Blocked != 3 || s[0].Tunnels != 1 || !s[0].Novel {
+	if s = c.DestinationsFor("b-1"); len(s) != 1 || s[0].Blocked != 3 || s[0].Tunnels != 1 || !s[0].Novel {
 		t.Errorf("stats after contact = %+v", s)
 	}
 	c.recordBlocked(testPrincipal, "webhook.site")
 	if n := c.Forget("b-1"); n != 2 || len(c.Destinations()) != 0 {
 		t.Errorf("Forget = %d, left %+v", n, c.Destinations())
-	}
-}
-
-// A flood of refusals, which no limit throttles, must not evict a
-// destination's upload total: that would reset its large-upload threshold.
-func TestCounterRefusalsKeepUploadState(t *testing.T) {
-	clock := &fakeClock{}
-	c := NewCounter(CounterOptions{MaxDestinations: 8, LargeUploadBytes: 100, BlockLargeUploads: true, Now: clock.now})
-	f, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
-	if v := f.addUp(90, false); v.cut {
-		t.Fatal("cut below the threshold")
-	}
-	f.close()
-	for i := 0; i < 1000; i++ {
-		c.recordBlocked(testPrincipal, fmt.Sprintf("h%d.pastebin.com", i))
-	}
-	if n := len(c.Destinations()); n > 16 {
-		t.Errorf("%d destinations tracked; refusal-only ones are not capped", n)
-	}
-	g, first := c.open(testPrincipal, "drop.example", netip.Addr{})
-	defer g.close()
-	if first {
-		t.Error("refusals evicted drop.example")
-	}
-	if v := g.addUp(20, false); !v.cut || v.total != 90 {
-		t.Errorf("upload after the refusal flood = %+v, want a cut at 90", v)
-	}
-}
-
-// Contacting many other destinations evicts those with nothing counted
-// toward the large-upload signal before one close to the threshold.
-func TestCounterEvictionKeepsUploadTotals(t *testing.T) {
-	clock := &fakeClock{}
-	c := NewCounter(CounterOptions{MaxDestinations: 8, LargeUploadBytes: 100, BlockLargeUploads: true, Now: clock.now})
-	f, _ := c.open(testPrincipal, "drop.example", netip.Addr{})
-	f.addUp(90, false)
-	f.close()
-	for i := 0; i < 40; i++ {
-		g, _ := c.open(testPrincipal, fmt.Sprintf("h%d.example", i), netip.Addr{})
-		g.addDown(1 << 20)
-		g.close()
-	}
-	if n := len(c.Destinations()); n > 8 {
-		t.Errorf("%d destinations tracked, cap is 8", n)
-	}
-	g, first := c.open(testPrincipal, "drop.example", netip.Addr{})
-	defer g.close()
-	if first || !g.addUp(20, false).cut {
-		t.Error("eviction reset drop.example's upload total")
 	}
 }
 
@@ -370,8 +328,7 @@ func TestCounterUploadReservationIsAtomic(t *testing.T) {
 		}
 		close(start)
 		wg.Wait()
-		s := c.DestinationsFor("b-1")[0]
-		if sent.Load() > threshold || s.BytesUp != sent.Load() || !s.LargeUpload {
+		if s := c.DestinationsFor("b-1")[0]; sent.Load() > threshold || s.BytesUp != sent.Load() || !s.LargeUpload {
 			t.Fatalf("round %d: %d bytes let through (counted %d) past a %d-byte block", round, sent.Load(), s.BytesUp, threshold)
 		}
 	}
@@ -379,17 +336,10 @@ func TestCounterUploadReservationIsAtomic(t *testing.T) {
 
 func TestRegistrableDomain(t *testing.T) {
 	for host, want := range map[string]string{
-		"example.com":                   "example.com",
-		"c7.attacker.example.com":       "example.com",
-		"a.b.example.co.uk":             "example.co.uk",
-		"co.uk":                         "co.uk",
-		"x1.workers.dev":                "workers.dev",
-		"a.b.x1.workers.dev":            "workers.dev",
-		"someone.github.io":             "github.io",
-		"bucket.s3.amazonaws.com":       "amazonaws.com",
-		"host.attacker.example":         "attacker.example",
-		"deep.host.corp.internal":       "corp.internal",
-		"registry.npmjs.org":            "npmjs.org",
+		"example.com": "example.com", "c7.attacker.example.com": "example.com", "a.b.example.co.uk": "example.co.uk",
+		"co.uk": "co.uk", "x1.workers.dev": "workers.dev", "a.b.x1.workers.dev": "workers.dev", "someone.github.io": "github.io",
+		"bucket.s3.amazonaws.com": "amazonaws.com", "host.attacker.example": "attacker.example",
+		"deep.host.corp.internal": "corp.internal", "registry.npmjs.org": "npmjs.org",
 		"objects.githubusercontent.com": "githubusercontent.com",
 	} {
 		if got := registrableDomain(host); got != want {
@@ -404,53 +354,38 @@ func TestRegistrableDomain(t *testing.T) {
 // threshold. Known hosts and exempt (unblocked or operator-allowed) flows
 // count only toward their own host.
 func TestCounterAggregatesUploads(t *testing.T) {
-	sink := netip.MustParseAddr("203.0.113.9")
 	c := NewCounter(CounterOptions{
 		LargeUploadBytes: 1000,
 		KnownHost:        func(_ Principal, host string) bool { return host == "known.attacker.example" },
 	})
-	send := func(host string, remote netip.Addr, n int64, exempt bool) uploadVerdict {
-		f, _ := c.open(testPrincipal, host, remote)
+	send := func(host, remote string, n int64, exempt bool) uploadVerdict {
+		addr, _ := netip.ParseAddr(remote)
+		f, _ := c.open(testPrincipal, host, addr)
 		defer f.close()
 		return f.addUp(n, exempt)
 	}
-	addr := func(i int) netip.Addr { return netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}) }
-
 	// Subdomain rotation: each host stays far below the threshold.
-	if v := send("known.attacker.example", addr(1), 5000, false); v.signal {
-		t.Errorf("a known host counted toward the domain: %+v", v)
-	}
-	for i := 0; i < 2; i++ {
-		if v := send(fmt.Sprintf("c%d.attacker.example", i), addr(10+i), 400, false); v.signal {
-			t.Fatalf("chunk %d signalled early: %+v", i, v)
-		}
-	}
-	if v := send("c9.attacker.example", addr(12), 1000, true); v.signal {
-		t.Errorf("an exempt flow counted toward the domain: %+v", v)
-	}
-	v := send("c2.attacker.example", addr(13), 400, false)
-	if !v.signal || v.cut || v.total != 1200 || !strings.Contains(v.scope, "under attacker.example") {
+	verdict(t, "a known host", send("known.attacker.example", "198.51.100.1", 5000, false), false, false)
+	verdict(t, "chunk 0", send("c0.attacker.example", "198.51.100.10", 400, false), false, false)
+	verdict(t, "chunk 1", send("c1.attacker.example", "198.51.100.11", 400, false), false, false)
+	verdict(t, "an exempt flow", send("c9.attacker.example", "198.51.100.12", 1000, true), false, false)
+	if v := send("c2.attacker.example", "198.51.100.13", 400, false); !v.signal || v.cut || v.total != 1200 || !strings.Contains(v.scope, "under attacker.example") {
 		t.Fatalf("crossing the domain total = %+v", v)
 	}
-	if v := send("c3.attacker.example", addr(14), 400, false); v.signal {
-		t.Errorf("the domain signalled twice: %+v", v)
-	}
+	verdict(t, "the domain again", send("c3.attacker.example", "198.51.100.14", 400, false), false, false)
 
-	// A provider's customer zones count as the provider's domain.
-	send("x1.workers.dev", addr(20), 600, false)
-	if v := send("x2.workers.dev", addr(21), 600, false); !v.signal || !strings.Contains(v.scope, "under workers.dev") {
-		t.Errorf("workers.dev rotation = %+v", v)
-	}
-
-	// Different domains at one address count together.
-	send("one.example", sink, 600, false)
-	if v := send("two.example", sink, 600, false); !v.signal || !strings.Contains(v.scope, "at 203.0.113.9") {
-		t.Errorf("one address behind two domains = %+v", v)
-	}
-	// An IPv6 server can answer on every address of its /64.
-	send("six-a.example", netip.MustParseAddr("2001:470:1:2::a"), 600, false)
-	if v := send("six-b.example", netip.MustParseAddr("2001:470:1:2::b"), 600, false); !v.signal || !strings.Contains(v.scope, "at 2001:470:1:2::/64") {
-		t.Errorf("one IPv6 /64 behind two domains = %+v", v)
+	for _, tc := range []struct{ a, b, remoteA, remoteB, scope string }{
+		// A provider's customer zones count as the provider's domain.
+		{"x1.workers.dev", "x2.workers.dev", "198.51.100.20", "198.51.100.21", "under workers.dev"},
+		// Different domains at one address count together.
+		{"one.example", "two.example", "203.0.113.9", "203.0.113.9", "at 203.0.113.9"},
+		// An IPv6 server can answer on every address of its /64.
+		{"six-a.example", "six-b.example", "2001:470:1:2::a", "2001:470:1:2::b", "at 2001:470:1:2::/64"},
+	} {
+		send(tc.a, tc.remoteA, 600, false)
+		if v := send(tc.b, tc.remoteB, 600, false); !v.signal || !strings.Contains(v.scope, tc.scope) {
+			t.Errorf("%s then %s = %+v, want the total %s", tc.a, tc.b, v, tc.scope)
+		}
 	}
 	if n := c.Forget("b-1"); n == 0 || len(c.aggs) != 0 {
 		t.Errorf("Forget left %d aggregates", len(c.aggs))
@@ -478,9 +413,7 @@ func TestCounterBlocksAggregates(t *testing.T) {
 		t.Error("uploadBlocked does not follow the domain total")
 	}
 	f, _ := c.open(testPrincipal, "new.attacker.example", netip.Addr{})
-	if v := f.addUp(1, false); !v.cut {
-		t.Errorf("a first-seen host under a blocked domain = %+v", v)
-	}
+	verdict(t, "a first-seen host under a blocked domain", f.addUp(1, false), false, true)
 	if v := f.addUp(5000, true); v.cut {
 		t.Errorf("an exempt flow was cut: %+v", v)
 	}
@@ -492,47 +425,43 @@ func TestCounterBlocksAggregates(t *testing.T) {
 func TestCounterUploadRefused(t *testing.T) {
 	addr := netip.MustParseAddr("198.51.100.7")
 	known := func(_ Principal, host string) bool { return host == "known.example" }
-	c := NewCounter(CounterOptions{LargeUploadBytes: 1000, BlockLargeUploads: true, KnownHost: known})
-	f, _ := c.open(testPrincipal, "big.example", addr)
-	if scope, refused := f.uploadRefused(false); refused {
-		t.Fatalf("a fresh flow is refused (%q)", scope)
-	}
-	if v := f.addUp(2000, false); !v.cut {
-		t.Fatalf("2000 bytes over a 1000-byte block = %+v", v)
-	}
-	f.close()
-	if scope, refused := f.uploadRefused(false); !refused || scope != "" {
-		t.Errorf("the flagged destination = %q, %v", scope, refused)
-	}
-	tests := []struct {
-		host    string
-		addr    netip.Addr
-		exempt  bool
-		scope   string
-		refused bool
-	}{
-		{host: "other.example", addr: addr, scope: "destinations at 198.51.100.7", refused: true},
-		{host: "cdn.big.example", scope: "destinations under big.example", refused: true},
-		{host: "other.example", addr: addr, exempt: true},
-		{host: "known.example", addr: addr},
-		{host: "elsewhere.example", addr: netip.MustParseAddr("198.51.100.8")},
-	}
-	for _, tt := range tests {
-		f, _ := c.open(testPrincipal, tt.host, tt.addr)
-		scope, refused := f.uploadRefused(tt.exempt)
-		if refused != tt.refused || scope != tt.scope {
-			t.Errorf("%s at %s (exempt %v) = %q, %v; want %q, %v", tt.host, tt.addr, tt.exempt, scope, refused, tt.scope, tt.refused)
+	for _, block := range []bool{true, false} {
+		c := NewCounter(CounterOptions{LargeUploadBytes: 1000, BlockLargeUploads: block, KnownHost: known})
+		f, _ := c.open(testPrincipal, "big.example", addr)
+		if scope, refused := f.uploadRefused(false); refused {
+			t.Fatalf("a fresh flow is refused (%q)", scope)
 		}
-		// addUp agrees: a refused flow's first chunk is cut.
-		if v := f.addUp(1, tt.exempt); v.cut != tt.refused {
-			t.Errorf("%s: addUp = %+v, uploadRefused %v", tt.host, v, refused)
-		}
+		verdict(t, "2000 bytes over a 1000-byte threshold", f.addUp(2000, false), true, block)
 		f.close()
-	}
-	alert := NewCounter(CounterOptions{LargeUploadBytes: 1000})
-	f, _ = alert.open(testPrincipal, "big.example", addr)
-	f.addUp(2000, false)
-	if _, refused := f.uploadRefused(false); refused {
-		t.Error("the alert-only mode refuses uploads")
+		if scope, refused := f.uploadRefused(false); refused != block || scope != "" {
+			t.Errorf("the flagged destination (block %v) = %q, %v", block, scope, refused)
+		}
+		if !block {
+			continue // the alert-only mode refuses nothing
+		}
+		for _, tt := range []struct {
+			host    string
+			addr    netip.Addr
+			exempt  bool
+			scope   string
+			refused bool
+		}{
+			{host: "other.example", addr: addr, scope: "destinations at 198.51.100.7", refused: true},
+			{host: "cdn.big.example", scope: "destinations under big.example", refused: true},
+			{host: "other.example", addr: addr, exempt: true},
+			{host: "known.example", addr: addr},
+			{host: "elsewhere.example", addr: netip.MustParseAddr("198.51.100.8")},
+		} {
+			f, _ := c.open(testPrincipal, tt.host, tt.addr)
+			scope, refused := f.uploadRefused(tt.exempt)
+			if refused != tt.refused || scope != tt.scope {
+				t.Errorf("%s at %s (exempt %v) = %q, %v; want %q, %v", tt.host, tt.addr, tt.exempt, scope, refused, tt.scope, tt.refused)
+			}
+			// addUp agrees: a refused flow's first chunk is cut.
+			if v := f.addUp(1, tt.exempt); v.cut != tt.refused {
+				t.Errorf("%s: addUp = %+v, uploadRefused %v", tt.host, v, refused)
+			}
+			f.close()
+		}
 	}
 }
