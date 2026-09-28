@@ -168,7 +168,8 @@ func TestRunWithHooksHasNoHookWarning(t *testing.T) {
 // An idle Codex TUI fires its first hook only with the first prompt but
 // exports OTLP from its start: authenticated telemetry proves the path, so
 // the run does not warn that hooks are overdue (live, the warning covered
-// the TUI of every session left idle for 45 seconds).
+// the TUI of every session left idle for 45 seconds), and a session closed
+// without a prompt ends without the warning and exits 0.
 func TestRunIdleTelemetryIsNoHookWarning(t *testing.T) {
 	ta := newTestApp(t, "")
 	stderr := liveErr(ta)
@@ -181,9 +182,31 @@ func TestRunIdleTelemetryIsNoHookWarning(t *testing.T) {
 		ta.daemon.mu.Unlock()
 		time.Sleep(50 * time.Millisecond) // past the window
 	}
-	_ = ta.Run(context.Background(), RunOptions{Harness: "codex"})
+	if err := ta.Run(context.Background(), RunOptions{Harness: "codex"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
 	if live := stderr.String(); strings.Contains(live, "not reaching") {
 		t.Fatalf("an idle session with authenticated telemetry was warned:\n%s", live)
+	}
+	if out := ta.output(); strings.Contains(out, "not reaching") {
+		t.Fatalf("the summary of an idle session with authenticated telemetry warned:\n%s", out)
+	}
+
+	// The daemon's verdict still counts: telemetry does not hide it.
+	ta = newTestApp(t, "")
+	ta.HookWindow = time.Hour
+	ta.term.hooks = nil
+	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+	ta.term.during = func() {
+		ta.daemon.mu.Lock()
+		sb := ta.daemon.sandboxes["dc-claude-proj-1a2b"]
+		sb.Hooks.LastOTLPAt = time.Now()
+		sb.Hooks.Unreachable, sb.Hooks.UnreachableReason = true, "the hook token was refused"
+		ta.daemon.mu.Unlock()
+	}
+	wantExit(t, ta.Run(context.Background(), RunOptions{Harness: "codex"}), ExitHooksUnreachable)
+	if out := ta.output(); !strings.Contains(out, "✗ "+hooksWarningText("the hook token was refused")) {
+		t.Fatalf("summary lacks the daemon's verdict:\n%s", out)
 	}
 }
 

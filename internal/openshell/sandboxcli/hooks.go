@@ -241,9 +241,11 @@ func (s *session) telemetryReached(after *sandboxapi.Sandbox) bool {
 // DefenseClaw with the warning, and marks the session for its exit status.
 // A harness that failed before it fired one (it exited with an error, and
 // the daemon saw nothing wrong with its hooks) is said to have failed; a
-// shell fires none.
+// shell fires none. A session whose authenticated telemetry got through
+// proved the path, as the live check counts it, unless the daemon says
+// otherwise.
 func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool) {
-	if s.shell || s.hooksReached(after) {
+	if s.shell || s.hooksReached(after) || (s.telemetryReached(after) && !after.Hooks.Unreachable) {
 		return
 	}
 	a := s.app
