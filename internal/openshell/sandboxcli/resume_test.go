@@ -277,7 +277,7 @@ func TestDetachedClaudeStreamsAndLogsRenderIt(t *testing.T) {
 	}
 }
 
-// Resuming after a session whose changes nobody kept (a headless run, a
+// Resuming after a session whose changes nobody kept (a detached run, a
 // terminal-less end) keeps its undo point, so `undo` still reverts them:
 // the daemon decides, and the banner says what it did. Once the user keeps
 // the changes at the end of a session, the next start asks for a new

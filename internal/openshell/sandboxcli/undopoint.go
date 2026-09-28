@@ -31,8 +31,8 @@ import (
 
 // The undo point of a mounted project. The daemon decides at every start:
 // it takes a fresh snapshot unless the folder still holds changes an
-// earlier session made that were neither undone nor accepted (a headless
-// or detached run, a terminal-less end), whose undo point it keeps so
+// earlier session made that were neither undone nor accepted (a detached
+// run, a terminal-less end), whose undo point it keeps so
 // `undo` still reverts them. The user accepts the changes by keeping them
 // at the end of a session ("Keep changes?" answered yes, --yes, or
 // on_exit: keep), which the CLI records here, or with `start

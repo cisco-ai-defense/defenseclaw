@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -105,6 +106,48 @@ func TestSessionWhoseReviewFailedKeepsUndo(t *testing.T) {
 	}
 	if del := ta.daemon.callsTo("DELETE", sbPath); len(del) != 1 || strings.Contains(string(del[0].Body), "keep_snapshot") {
 		t.Fatalf("delete calls after undo = %+v", del)
+	}
+}
+
+// A headless session (--prompt) on a terminal still asks "Keep changes?"
+// at its end, and keeping them makes them the next session's base; only a
+// session with no terminal to ask on leaves its changes unaccepted, so the
+// next start keeps the undo point.
+func TestHeadlessSessionOnATerminalAsksToKeepChanges(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		tty  bool
+	}{
+		{"terminal", true},
+		{"no terminal", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "y\n")
+			ta.IO.TTY = c.tty
+			sb := sampleSandbox("m1-a")
+			sb.Phase = "stopped"
+			sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: time.Date(2026, 9, 27, 9, 30, 0, 0, time.UTC)}
+			ta.daemon.add(sb)
+			if err := ta.Connect(context.Background(), ConnectOptions{Name: "m1-a", Prompt: "add the tests"}); err != nil {
+				t.Fatalf("Connect: %v\n%s", err, ta.output())
+			}
+			if len(ta.term.runs) != 0 {
+				t.Fatal("a headless session took the terminal")
+			}
+			if asked := strings.Contains(ta.output(), "Keep changes?"); asked != c.tty {
+				t.Fatalf("asked = %v, want %v:\n%s", asked, c.tty, ta.output())
+			}
+			if err := ta.Start(context.Background(), "m1-a", StartOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			starts := ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/m1-a/start")
+			if len(starts) != 2 {
+				t.Fatalf("start calls = %d", len(starts))
+			}
+			if fresh := strings.Contains(string(starts[1].Body), `"new_snapshot":true`); fresh != c.tty {
+				t.Fatalf("the next start asks for a new snapshot = %v, want %v (body %s)", fresh, c.tty, starts[1].Body)
+			}
+		})
 	}
 }
 

@@ -560,9 +560,9 @@ every run. With no changes, nothing is asked.
 
 Keeping the changes (Enter, `y`, `--yes`, or `on_exit: keep`) makes them
 the base of the next session: its start takes a fresh snapshot. A session
-whose changes nobody kept (a detached or headless run, or one without a
-terminal to ask on) leaves its undo point in place, so the next start keeps
-it and `undo` still reverts every session since.
+whose changes nobody kept (a detached run, or one without a terminal to ask
+on) leaves its undo point in place, so the next start keeps it and `undo`
+still reverts every session since.
 
 ### What the review flags
 

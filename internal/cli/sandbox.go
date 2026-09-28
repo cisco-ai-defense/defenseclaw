@@ -383,9 +383,9 @@ func newSandboxStartCmd() *cobra.Command {
 		Short: "Start a stopped sandbox for a new session",
 		Long: `Starts a stopped sandbox for a new session. A mounted project gets a fresh undo
 snapshot, unless the folder still holds changes an earlier session made that were
-neither undone nor kept at its end (a headless or detached run, say): then the earlier
-undo point stays, so "sandbox undo" still reverts them. --new-snapshot accepts those
-changes and takes a fresh snapshot.`,
+neither undone nor kept at its end (a detached run, or one without a terminal to ask
+on): then the earlier undo point stays, so "sandbox undo" still reverts them.
+--new-snapshot accepts those changes and takes a fresh snapshot.`,
 		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			return app.Start(ctx, args[0], o)
