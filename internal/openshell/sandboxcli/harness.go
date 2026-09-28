@@ -168,7 +168,7 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 		}
 	}
 	if choice == LLMNone {
-		return llmChoice{Note: "no model credential is shared (--llm none); log in inside the sandbox"}, nil
+		return llmChoice{Note: "no model credential is shared (--llm none); " + insideLoginCaveat}, nil
 	}
 	known := choice == LLMAuto
 	for _, c := range cands {
@@ -206,8 +206,13 @@ func (a *App) detectLLM(spec *harness.Spec, choice, region string, reserved map[
 	if choice != LLMAuto {
 		return llmChoice{}, fmt.Errorf("--llm %s: no credential found (%s)", choice, llmHint(spec.Name, choice))
 	}
-	return llmChoice{Note: "no model credential found (" + llmHint(spec.Name, choice) + "); log in inside the sandbox"}, nil
+	return llmChoice{Note: "no model credential found (" + llmHint(spec.Name, choice) + "); " + insideLoginCaveat}, nil
 }
+
+// insideLoginCaveat is what a login inside the sandbox costs: unlike a
+// shared credential, which the sandbox sees only as a placeholder, the
+// token it stores is real, and the agent can read it and send it out.
+const insideLoginCaveat = "a login inside the sandbox stores a real token there, which the agent can read"
 
 // sandboxLLM is the banner's model line for a sandbox that exists: the
 // provider profile it was created with, whose placeholder resolves only at
@@ -229,7 +234,9 @@ func llmHint(harnessName, choice string) string {
 	case choice == LLMBedrock:
 		return "set " + EnvBedrockToken
 	case harnessName == "claudecode":
-		return "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+		// A Claude subscription logs in on this machine: setup-token prints
+		// a token the sandbox then sees only as a placeholder.
+		return "set ANTHROPIC_API_KEY, or run `claude setup-token` here and set CLAUDE_CODE_OAUTH_TOKEN to the token it prints"
 	case harnessName == "codex":
 		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
 	case harnessName == "opencode":

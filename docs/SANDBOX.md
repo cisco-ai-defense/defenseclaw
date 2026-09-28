@@ -628,6 +628,12 @@ ahead of time):
 | `defenseclaw-kiro` | `KIRO_API_KEY` | bearer | `q.us-east-1.amazonaws.com:443`, `runtime.us-east-1.kiro.dev:443`, `management.us-east-1.kiro.dev:443`, `prod.us-east-1.auth.desktop.kiro.dev:443` |
 | `dc-cred-<hash>` | the `--credential` variable | bearer | the host and port it is bound to |
 
+A Claude subscription (Pro or Max) signs in on this machine: `claude
+setup-token` prints a long-lived token; exported as `CLAUDE_CODE_OAUTH_TOKEN`,
+it reaches the sandbox only as the `defenseclaw-claude-oauth` placeholder.
+Without a shared credential the run banner says so, and that a login inside
+the sandbox stores a real token there (see below).
+
 The Copilot GitHub-token, Amp, Cursor and Kiro endpoint sets come from the
 pinned CLIs, not from a live run (no account was available). Devin CLI has no
 provider profile: it authenticates with an interactive login inside the

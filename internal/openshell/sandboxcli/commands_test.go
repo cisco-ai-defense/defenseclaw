@@ -1059,6 +1059,27 @@ func TestDetectLLM(t *testing.T) {
 	}
 }
 
+// Without a shared credential a Claude subscriber is pointed at
+// `claude setup-token` on this machine (the sandbox then sees a
+// placeholder), and a login inside the sandbox is named for what it is: a
+// real token the agent can read.
+func TestDetectLLMWithoutACredentialPointsToSetupToken(t *testing.T) {
+	ta := newTestApp(t, "")
+	claude, _ := harness.Get("claudecode")
+	for _, choice := range []string{"", "none"} {
+		got, err := ta.detectLLM(claude, choice, "", nil)
+		if err != nil || got.Credential != nil || !strings.Contains(got.Note, "stores a real token there, which the agent can read") {
+			t.Fatalf("detectLLM(%q) = %+v, %v", choice, got, err)
+		}
+		if choice == "" && !strings.Contains(got.Note, "run `claude setup-token` here and set CLAUDE_CODE_OAUTH_TOKEN") {
+			t.Fatalf("note = %q", got.Note)
+		}
+	}
+	if _, err := ta.detectLLM(claude, "claude-oauth", "", nil); err == nil || !strings.Contains(err.Error(), "claude setup-token") {
+		t.Fatalf("--llm claude-oauth without a token = %v", err)
+	}
+}
+
 func TestParseCredentialAndEnv(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.env["STRIPE_API_KEY"] = "v"
