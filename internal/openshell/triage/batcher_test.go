@@ -48,8 +48,6 @@ type fakeApplier struct {
 	// race lands another policy change after each of the next race inbox
 	// reads, so the tokens just read are stale.
 	race int
-	// edit changes a chunk's proposed content after the next inbox read.
-	edit string
 }
 
 func newFakeApplier() *fakeApplier {
@@ -66,6 +64,13 @@ func (f *fakeApplier) add(sandbox, id string, notes string) string {
 	f.chunks[sandbox+"/"+id] = c
 	f.order = append(f.order, sandbox+"/"+id)
 	return ContentDigest(*c)
+}
+
+// change runs fn on the inbox under its lock.
+func (f *fakeApplier) change(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn()
 }
 
 func (f *fakeApplier) token(c *openshell.PolicyChunk) string {
@@ -100,12 +105,6 @@ func (f *fakeApplier) GetDraft(_ context.Context, sandbox, status string) (*open
 	if f.race > 0 {
 		f.race--
 		f.version++
-	}
-	if f.edit != "" {
-		if c := f.chunks[sandbox+"/"+f.edit]; c != nil {
-			c.ProposedRule.Endpoints[0].Ports = []uint32{443, 22}
-		}
-		f.edit = ""
 	}
 	return out, nil
 }
@@ -202,6 +201,15 @@ func (c *collector) wait(t *testing.T, n int) []Result {
 	}
 }
 
+// byID indexes results by chunk id.
+func byID(results []Result) map[string]Result {
+	out := map[string]Result{}
+	for _, r := range results {
+		out[r.Item.ChunkID] = r
+	}
+	return out
+}
+
 func runBatcher(t *testing.T, opts BatcherOptions) *Batcher {
 	t.Helper()
 	b := NewBatcher(opts)
@@ -212,180 +220,156 @@ func runBatcher(t *testing.T, opts BatcherOptions) *Batcher {
 	return b
 }
 
-// item queues chunk id of sandbox in the applier and returns its Item.
-func item(f *fakeApplier, sandbox, id string) Item {
-	return Item{Sandbox: sandbox, ChunkID: id, Digest: f.add(sandbox, id, "")}
+// startBatcher runs a batcher over a new fake inbox that reports to a new
+// collector, with a 5ms debounce unless edit changes the options.
+func startBatcher(t *testing.T, edit func(*BatcherOptions)) (*fakeApplier, *collector, *Batcher) {
+	t.Helper()
+	apply, col := newFakeApplier(), newCollector()
+	opts := BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add}
+	if edit != nil {
+		edit(&opts)
+	}
+	return apply, col, runBatcher(t, opts)
+}
+
+// item queues chunk id of sandbox in the applier and returns its Item,
+// attributed to binding when one is given.
+func item(f *fakeApplier, sandbox, id string, binding ...string) Item {
+	it := Item{Sandbox: sandbox, ChunkID: id, Digest: f.add(sandbox, id, "")}
+	if len(binding) > 0 {
+		it.BindingID = binding[0]
+	}
+	return it
+}
+
+// applied fails unless r is a clean approval that produced a policy
+// revision.
+func applied(t *testing.T, r Result) {
+	t.Helper()
+	if r.Err != nil || r.PolicyVersion == 0 || r.Skipped || r.Stale || r.Changed || r.Gone || r.Refused != nil {
+		t.Fatalf("result = %+v, want an applied approval", r)
+	}
 }
 
 func TestBatcherDebouncesIntoOneRevision(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 40 * time.Millisecond, OnResult: col.add})
+	apply, col, b := startBatcher(t, func(o *BatcherOptions) { o.Debounce = 40 * time.Millisecond })
 	for _, id := range []string{"a", "b", "c"} {
 		b.Enqueue(item(apply, "box", id))
 		time.Sleep(5 * time.Millisecond)
 	}
 	b.Enqueue(Item{Sandbox: "box", ChunkID: "a"}) // duplicate
 	b.Enqueue(item(apply, "other", "z"))
-	results := col.wait(t, 4)
-	bulk, single := apply.calls()
-	if len(single) != 0 {
-		t.Fatalf("single approvals = %v", single)
+	for _, r := range col.wait(t, 4) {
+		applied(t, r)
 	}
+	bulk, single := apply.calls()
 	byBox := map[string]int{}
 	for _, call := range bulk {
-		byBox[call[0][:3]] += 1
+		byBox[call[0][:3]]++
 		if call[0][:3] == "box" && len(call) != 3 {
 			t.Fatalf("box batch = %v, want the three chunks in one revision", call)
 		}
 	}
-	if byBox["box"] != 1 || byBox["oth"] != 1 {
-		t.Fatalf("bulk calls = %v", bulk)
-	}
-	for _, r := range results {
-		if r.Err != nil || r.PolicyVersion == 0 || r.Skipped || r.Stale || r.Changed || r.Gone {
-			t.Fatalf("result = %+v", r)
-		}
-	}
-	if b.Pending("box") != 0 {
-		t.Fatal("queue not drained")
+	if len(single) != 0 || byBox["box"] != 1 || byBox["oth"] != 1 || b.Pending("box") != 0 {
+		t.Fatalf("bulk calls = %v, single %v, %d still queued", bulk, single, b.Pending("box"))
 	}
 }
 
-// TestBatcherUsesLiveReviewTokens pins that an approval decided while other
-// approvals landed still applies: the batch reads the tokens again right
-// before it approves instead of using the ones read at triage time.
-func TestBatcherUsesLiveReviewTokens(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add})
-	it := item(apply, "box", "a")
-	apply.mu.Lock()
-	apply.version += 5 // other approvals landed since the chunk was triaged
-	apply.mu.Unlock()
-	b.Enqueue(it)
-	results := col.wait(t, 1)
-	if r := results[0]; r.Err != nil || r.Skipped || r.Stale || r.PolicyVersion == 0 {
-		t.Fatalf("result = %+v", r)
-	}
-	if apply.status("box", "a") != "approved" {
-		t.Fatal("chunk not approved")
-	}
-}
-
-// TestBatcherAttributesBulkResultsByStatus pins that a bulk approval whose
-// tokens went stale under a concurrent policy change is retried with fresh
-// tokens, and that results are read from the inbox, not guessed from the
-// skip count.
-func TestBatcherAttributesBulkResultsByStatus(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add})
-	apply.mu.Lock()
-	apply.race = 1 // the first read's tokens are stale by the time they are used
-	apply.mu.Unlock()
-	b.Enqueue(item(apply, "box", "a"))
-	b.Enqueue(item(apply, "box", "b"))
-	results := col.wait(t, 2)
-	for _, r := range results {
-		if r.Err != nil || r.Skipped || r.Stale || r.Gone || r.Changed {
-			t.Fatalf("result = %+v", r)
-		}
-	}
-	if apply.status("box", "a") != "approved" || apply.status("box", "b") != "approved" {
-		t.Fatal("chunks not approved after the retry")
-	}
-	if bulk, _ := apply.calls(); len(bulk) != 2 {
-		t.Fatalf("bulk calls = %v, want the stale attempt and the retry", bulk)
-	}
-}
-
-func TestBatcherGivesUpOnStaleTokens(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add})
-	apply.mu.Lock()
-	apply.race = 100
-	apply.mu.Unlock()
-	b.Enqueue(item(apply, "box", "a"))
-	results := col.wait(t, 1)
-	if !results[0].Stale || results[0].Err != nil {
-		t.Fatalf("result = %+v, want stale", results[0])
-	}
-	if bulk, _ := apply.calls(); len(bulk) != maxApplyAttempts {
-		t.Fatalf("attempts = %d", len(bulk))
-	}
-	if apply.status("box", "a") != "pending" {
-		t.Fatal("stale chunk approved")
+// Approvals apply with the review tokens read right before the batch
+// approves, not the ones read at triage time: other approvals may have
+// landed in between. A bulk approval whose tokens went stale under a
+// concurrent policy change is retried with fresh tokens, its results read
+// from the inbox rather than guessed from the skip count, and given up as
+// stale after maxApplyAttempts.
+func TestBatcherReviewTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		bump, race    int
+		ids           []string
+		stale         bool
+		bulkAttempts  int
+		approvedAfter string
+	}{
+		{"tokens changed since triage", 5, 0, []string{"a"}, false, 1, "approved"},
+		{"stale once", 0, 1, []string{"a", "b"}, false, 2, "approved"},
+		{"always stale", 0, 100, []string{"a"}, true, maxApplyAttempts, "pending"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			apply, col, b := startBatcher(t, nil)
+			var items []Item
+			for _, id := range tc.ids {
+				items = append(items, item(apply, "box", id))
+			}
+			apply.change(func() { apply.version += uint32(tc.bump); apply.race = tc.race })
+			for _, it := range items {
+				b.Enqueue(it)
+			}
+			for _, r := range col.wait(t, len(tc.ids)) {
+				if tc.stale {
+					if !r.Stale || r.Err != nil {
+						t.Fatalf("result = %+v, want stale", r)
+					}
+				} else {
+					applied(t, r)
+				}
+			}
+			for _, id := range tc.ids {
+				if got := apply.status("box", id); got != tc.approvedAfter {
+					t.Fatalf("chunk %s is %s, want %s", id, got, tc.approvedAfter)
+				}
+			}
+			if bulk, _ := apply.calls(); len(bulk) != tc.bulkAttempts {
+				t.Fatalf("bulk calls = %v, want %d attempts", bulk, tc.bulkAttempts)
+			}
+		})
 	}
 }
 
 func TestBatcherSkipsChangedAndGoneChunks(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add})
-	changed := item(apply, "box", "a")
-	gone := item(apply, "box", "b")
-	apply.mu.Lock()
-	apply.chunks["box/a"].ProposedRule.Endpoints[0].Ports = []uint32{443, 22}
-	apply.chunks["box/b"].Status = "rejected"
-	apply.mu.Unlock()
+	apply, col, b := startBatcher(t, nil)
+	changed, gone := item(apply, "box", "a"), item(apply, "box", "b")
+	apply.change(func() {
+		apply.chunks["box/a"].ProposedRule.Endpoints[0].Ports = []uint32{443, 22}
+		apply.chunks["box/b"].Status = "rejected"
+	})
 	b.Enqueue(changed)
 	b.Enqueue(gone)
 	b.Enqueue(Item{Sandbox: "box", ChunkID: "missing"})
-	results := col.wait(t, 3)
-	byID := map[string]Result{}
-	for _, r := range results {
-		byID[r.Item.ChunkID] = r
+	if r := byID(col.wait(t, 3)); !r["a"].Changed || !r["b"].Gone || !r["missing"].Gone {
+		t.Fatalf("results = %+v", r)
 	}
-	if !byID["a"].Changed || !byID["b"].Gone || !byID["missing"].Gone {
-		t.Fatalf("results = %+v", results)
-	}
-	if apply.status("box", "a") != "pending" {
-		t.Fatal("changed chunk approved")
-	}
-	if bulk, single := apply.calls(); len(bulk)+len(single) != 0 {
+	if bulk, single := apply.calls(); len(bulk)+len(single) != 0 || apply.status("box", "a") != "pending" {
 		t.Fatalf("approved anything: %v %v", bulk, single)
 	}
 }
 
+// A batch waits for the binding's hook requests to end and the idle
+// interval to pass, and is forced after MaxWait when they never end.
 func TestBatcherWaitsForQuiescence(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
 	inflight := sandboxauth.NewInFlight(nil)
 	end := inflight.Begin("sb_1")
-	b := runBatcher(t, BatcherOptions{Apply: apply, Quiesce: inflight, Debounce: 10 * time.Millisecond, Idle: 20 * time.Millisecond, OnResult: col.add})
-	it := item(apply, "box", "a")
-	it.BindingID = "sb_1"
-	b.Enqueue(it)
+	apply, col, b := startBatcher(t, func(o *BatcherOptions) {
+		o.Quiesce, o.Debounce, o.Idle = inflight, 10*time.Millisecond, 20*time.Millisecond
+	})
+	b.Enqueue(item(apply, "box", "a", "sb_1"))
 	time.Sleep(100 * time.Millisecond)
 	if bulk, _ := apply.calls(); len(bulk) != 0 {
 		t.Fatalf("applied while a hook request was open: %v", bulk)
 	}
 	ended := time.Now()
 	end()
-	results := col.wait(t, 1)
-	if results[0].Forced || results[0].Err != nil {
-		t.Fatalf("result = %+v", results[0])
+	if r := col.wait(t, 1)[0]; r.Forced || r.Err != nil {
+		t.Fatalf("result = %+v", r)
 	}
 	if waited := time.Since(ended); waited < 20*time.Millisecond {
 		t.Fatalf("applied %v after the last request, before the idle interval", waited)
 	}
-}
 
-func TestBatcherForcesAfterMaxWait(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	inflight := sandboxauth.NewInFlight(nil)
 	_ = inflight.Begin("sb_1") // never ends
-	b := runBatcher(t, BatcherOptions{Apply: apply, Quiesce: inflight, Debounce: 5 * time.Millisecond,
-		MaxWait: 30 * time.Millisecond, OnResult: col.add})
-	it := item(apply, "box", "a")
-	it.BindingID = "sb_1"
-	b.Enqueue(it)
-	results := col.wait(t, 1)
-	if !results[0].Forced {
-		t.Fatalf("result = %+v, want forced", results[0])
+	forcedApply, forced, fb := startBatcher(t, func(o *BatcherOptions) { o.Quiesce, o.MaxWait = inflight, 30*time.Millisecond })
+	fb.Enqueue(item(forcedApply, "box", "a", "sb_1"))
+	if r := forced.wait(t, 1)[0]; !r.Forced {
+		t.Fatalf("result = %+v, want forced", r)
 	}
 }
 
@@ -396,13 +380,11 @@ type fakeTunnels struct {
 	open  int
 	moved int64
 	busy  bool
-	reads int
 }
 
 func (f *fakeTunnels) BindingActivity(bindingID string) (int, int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.reads++
 	if bindingID != "sb_1" {
 		return 0, 0
 	}
@@ -424,44 +406,34 @@ func (f *fakeTunnels) set(open int, busy bool) {
 // open but idle does not, and a transfer that never ends gets the batch
 // after MaxWait. The hooks must be quiet at the same time.
 func TestBatcherWaitsForIdleTunnels(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
 	inflight := sandboxauth.NewInFlight(nil)
 	tunnels := &fakeTunnels{}
 	tunnels.set(1, true)
-	b := runBatcher(t, BatcherOptions{Apply: apply, Quiesce: inflight, Tunnels: tunnels, Debounce: 5 * time.Millisecond,
-		Idle: 20 * time.Millisecond, OnResult: col.add})
-	it := item(apply, "box", "a")
-	it.BindingID = "sb_1"
-	b.Enqueue(it)
+	apply, col, b := startBatcher(t, func(o *BatcherOptions) { o.Quiesce, o.Tunnels, o.Idle = inflight, tunnels, 20*time.Millisecond })
+	b.Enqueue(item(apply, "box", "a", "sb_1"))
 	time.Sleep(120 * time.Millisecond)
 	if bulk, _ := apply.calls(); len(bulk) != 0 {
 		t.Fatalf("applied while a tunnel was moving data: %v", bulk)
 	}
 	// The transfer ends; its tunnel stays open, idle.
 	tunnels.set(1, false)
-	results := col.wait(t, 1)
-	if results[0].Forced || results[0].Err != nil || results[0].PolicyVersion == 0 {
-		t.Fatalf("result = %+v", results[0])
+	if r := col.wait(t, 1)[0]; r.Forced || r.Err != nil || r.PolicyVersion == 0 {
+		t.Fatalf("result = %+v", r)
 	}
 
 	// A transfer that never ends gets the batch after MaxWait.
-	forcedApply, forcedCol := newFakeApplier(), newCollector()
 	busy := &fakeTunnels{}
 	busy.set(2, true)
-	fb := runBatcher(t, BatcherOptions{Apply: forcedApply, Quiesce: inflight, Tunnels: busy, Debounce: 5 * time.Millisecond,
-		Idle: 10 * time.Millisecond, MaxWait: 60 * time.Millisecond, OnResult: forcedCol.add})
-	fit := item(forcedApply, "box", "b")
-	fit.BindingID = "sb_1"
-	fb.Enqueue(fit)
-	if got := forcedCol.wait(t, 1); !got[0].Forced {
+	forcedApply, forced, fb := startBatcher(t, func(o *BatcherOptions) {
+		o.Quiesce, o.Tunnels, o.Idle, o.MaxWait = inflight, busy, 10*time.Millisecond, 60*time.Millisecond
+	})
+	fb.Enqueue(item(forcedApply, "box", "b", "sb_1"))
+	if got := forced.wait(t, 1); !got[0].Forced {
 		t.Fatalf("result = %+v, want forced", got[0])
 	}
 	// Another binding's tunnels never hold a batch.
-	other := item(forcedApply, "box", "c")
-	other.BindingID = "sb_2"
-	fb.Enqueue(other)
-	if got := forcedCol.wait(t, 2); got[1].Forced || got[1].Err != nil {
+	fb.Enqueue(item(forcedApply, "box", "c", "sb_2"))
+	if got := forced.wait(t, 2); got[1].Forced || got[1].Err != nil {
 		t.Fatalf("result = %+v", got[1])
 	}
 }
@@ -470,66 +442,49 @@ func TestBatcherWaitsForIdleTunnels(t *testing.T) {
 // chunk goes through the single call with a token read after the bulk
 // approval landed (which made the first read stale).
 func TestBatcherFlaggedChunksGoSingle(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add})
+	apply, col, b := startBatcher(t, nil)
 	b.Enqueue(Item{Sandbox: "box", ChunkID: "flagged", Digest: apply.add("box", "flagged", "downloads executables")})
 	b.Enqueue(item(apply, "box", "plain"))
-	results := col.wait(t, 2)
-	for _, r := range results {
+	for _, r := range col.wait(t, 2) {
 		if r.Err != nil || r.Stale || r.Skipped {
 			t.Fatalf("result = %+v", r)
 		}
 	}
 	bulk, single := apply.calls()
-	if len(single) != 1 || single[0] != "box/flagged" || len(bulk) != 1 || bulk[0][0] != "box/plain" {
-		t.Fatalf("bulk %v single %v", bulk, single)
-	}
-	if apply.status("box", "flagged") != "approved" {
-		t.Fatal("flagged chunk not approved")
+	if len(single) != 1 || single[0] != "box/flagged" || len(bulk) != 1 || bulk[0][0] != "box/plain" || apply.status("box", "flagged") != "approved" {
+		t.Fatalf("bulk %v single %v; the flagged chunk must be approved on its own", bulk, single)
 	}
 }
 
-func TestBatcherFailures(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add})
+// A failing inbox is reported; Forget drops a sandbox's queue, Drain
+// returns once nothing is queued, and a batcher runs once.
+func TestBatcherLifecycle(t *testing.T) {
+	apply, col, b := startBatcher(t, nil)
 	it := item(apply, "box", "later")
-	apply.mu.Lock()
-	apply.err = errors.New("gateway down")
-	apply.mu.Unlock()
+	apply.change(func() { apply.err = errors.New("gateway down") })
 	b.Enqueue(it)
-	results := col.wait(t, 1)
-	if results[0].Err == nil {
-		t.Fatalf("failed batch reported %+v", results[0])
+	if r := col.wait(t, 1)[0]; r.Err == nil {
+		t.Fatalf("failed batch reported %+v", r)
 	}
-}
+	defaults := runBatcher(t, BatcherOptions{Apply: newFakeApplier()})
+	time.Sleep(10 * time.Millisecond)
+	if err := defaults.Run(context.Background()); err == nil {
+		t.Fatal("second Run accepted")
+	}
 
-func TestBatcherForget(t *testing.T) {
-	apply := newFakeApplier()
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: time.Hour})
-	b.Enqueue(item(apply, "box", "a"))
-	if b.Pending("box") != 1 {
+	held := newFakeApplier()
+	hb := runBatcher(t, BatcherOptions{Apply: held, Debounce: time.Hour})
+	hb.Enqueue(item(held, "box", "a"))
+	if hb.Pending("box") != 1 {
 		t.Fatal("not queued")
 	}
-	if dropped := b.Forget("box"); len(dropped) != 1 {
-		t.Fatalf("forget = %v", dropped)
-	}
-	if b.Pending("box") != 0 {
-		t.Fatal("still queued")
+	if dropped := hb.Forget("box"); len(dropped) != 1 || hb.Pending("box") != 0 {
+		t.Fatalf("forget = %v, %d still queued", dropped, hb.Pending("box"))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := b.Drain(ctx); err != nil {
+	if err := hb.Drain(ctx); err != nil {
 		t.Fatalf("drain: %v", err)
-	}
-}
-
-func TestBatcherRunTwice(t *testing.T) {
-	b := runBatcher(t, BatcherOptions{Apply: newFakeApplier()})
-	time.Sleep(10 * time.Millisecond)
-	if err := b.Run(context.Background()); err == nil {
-		t.Fatal("second Run accepted")
 	}
 }
 
@@ -538,34 +493,25 @@ func TestBatcherRunTwice(t *testing.T) {
 // rest of the batch still lands, and Recheck sees the chunk as it is when
 // the batch is applied.
 func TestBatcherRechecksBeforeApplying(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
 	var mu sync.Mutex
 	var seen []string
-	recheck := func(_ context.Context, it Item, c openshell.PolicyChunk) error {
-		mu.Lock()
-		seen = append(seen, c.ProposedRule.Endpoints[0].Host)
-		mu.Unlock()
-		if it.ChunkID == "rebind" {
-			return errors.New("rebind.example.org resolves to an address of this machine")
+	apply, col, b := startBatcher(t, func(o *BatcherOptions) {
+		o.Recheck = func(_ context.Context, it Item, c openshell.PolicyChunk) error {
+			mu.Lock()
+			seen = append(seen, c.ProposedRule.Endpoints[0].Host)
+			mu.Unlock()
+			if it.ChunkID == "rebind" {
+				return errors.New("rebind.example.org resolves to an address of this machine")
+			}
+			return nil
 		}
-		return nil
-	}
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 5 * time.Millisecond, OnResult: col.add, Recheck: recheck})
+	})
 	b.Enqueue(item(apply, "box", "ok"))
 	b.Enqueue(item(apply, "box", "rebind"))
-	results := col.wait(t, 2)
-	for _, r := range results {
-		switch r.Item.ChunkID {
-		case "ok":
-			if r.Err != nil || r.Refused != nil || r.PolicyVersion == 0 {
-				t.Fatalf("ok result = %+v", r)
-			}
-		case "rebind":
-			if r.Refused == nil || !strings.Contains(r.Refused.Error(), "this machine") || r.Err != nil || r.PolicyVersion != 0 {
-				t.Fatalf("rebind result = %+v", r)
-			}
-		}
+	results := byID(col.wait(t, 2))
+	applied(t, results["ok"])
+	if r := results["rebind"]; r.Refused == nil || !strings.Contains(r.Refused.Error(), "this machine") || r.Err != nil || r.PolicyVersion != 0 {
+		t.Fatalf("rebind result = %+v", r)
 	}
 	if apply.status("box", "ok") != "approved" || apply.status("box", "rebind") != "pending" {
 		t.Fatalf("statuses = %s, %s", apply.status("box", "ok"), apply.status("box", "rebind"))
@@ -585,33 +531,30 @@ func TestBatcherRechecksBeforeApplying(t *testing.T) {
 // so the second is checked again (Recheck) once the first one's rule
 // exists, where a merge into another destination's rule is refused.
 func TestBatcherOneChunkPerRule(t *testing.T) {
-	apply := newFakeApplier()
-	col := newCollector()
 	var mu sync.Mutex
 	var rechecked []string
-	recheck := func(_ context.Context, it Item, _ openshell.PolicyChunk) error {
-		mu.Lock()
-		rechecked = append(rechecked, it.ChunkID)
-		mu.Unlock()
-		return nil
-	}
-	b := runBatcher(t, BatcherOptions{Apply: apply, Debounce: 20 * time.Millisecond, OnResult: col.add, Recheck: recheck})
+	apply, col, b := startBatcher(t, func(o *BatcherOptions) {
+		o.Debounce = 20 * time.Millisecond
+		o.Recheck = func(_ context.Context, it Item, _ openshell.PolicyChunk) error {
+			mu.Lock()
+			rechecked = append(rechecked, it.ChunkID)
+			mu.Unlock()
+			return nil
+		}
+	})
 	first, second := item(apply, "box", "first"), item(apply, "box", "second")
-	apply.mu.Lock()
-	for _, id := range []string{"first", "second"} {
-		c := apply.chunks["box/"+id]
-		c.RuleName, c.ProposedRule.Name = "allow_shared_443", "allow_shared_443"
-	}
-	apply.mu.Unlock()
+	apply.change(func() {
+		for _, id := range []string{"first", "second"} {
+			c := apply.chunks["box/"+id]
+			c.RuleName, c.ProposedRule.Name = "allow_shared_443", "allow_shared_443"
+		}
+	})
 	first.Digest, second.Digest = "", ""
 	b.Enqueue(first)
 	b.Enqueue(second)
 	b.Enqueue(item(apply, "box", "other"))
-	results := col.wait(t, 3)
-	for _, r := range results {
-		if r.Err != nil || r.Refused != nil || r.Stale || r.PolicyVersion == 0 {
-			t.Fatalf("result = %+v", r)
-		}
+	for _, r := range col.wait(t, 3) {
+		applied(t, r)
 	}
 	bulk, _ := apply.calls()
 	if len(bulk) != 2 || len(bulk[0]) != 2 || bulk[0][0] != "box/first" || bulk[0][1] != "box/other" ||
