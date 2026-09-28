@@ -118,9 +118,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// machine. With none yet (the check offers to download the base image
 	// the harness images are built on), setup downloads it and asks again,
 	// before it installs anything that could never run.
-	if c := rep.Get(openshell.CheckIDLandlock); c != nil && c.Status == openshell.StatusWarn && c.Fix != nil && c.Fix.Apply != nil {
+	if c := rep.Get(openshell.CheckIDLandlock); c != nil && c.Status == openshell.StatusWarn {
+		download := c.Fix != nil && c.Fix.Apply != nil
 		pull := false
-		if !o.SkipImages {
+		if download && !o.SkipImages {
 			var err error
 			pull, err = a.ask("Download the OpenShell base image now to check Docker Desktop's Linux VM for Landlock? (about 4 GB; the harness images are built on it)", true, assume)
 			if err != nil {
@@ -129,7 +130,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		if !pull {
 			a.warn("Landlock: " + c.Detail)
-			skipped = append(skipped, "checking Docker Desktop's Linux VM for Landlock (`"+CommandName+" doctor --fix` downloads the base image and checks it)")
+			if download {
+				skipped = append(skipped, "checking Docker Desktop's Linux VM for Landlock (`"+CommandName+" doctor --fix` downloads the base image and checks it)")
+			}
 		} else {
 			a.note("Downloading the OpenShell base image (about 4 GB)…")
 			if err := c.Fix.Apply(ctx); err != nil {

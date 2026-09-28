@@ -469,6 +469,18 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 		if pulled != 0 {
 			t.Fatal("pulled the base image with --skip-images")
 		}
+
+		// A probe that failed says why, and nothing downloads.
+		ta = setupApp(t, "", "", true)
+		ta.GOOS = "darwin"
+		failed := "could not check Docker Desktop's Linux VM (kernel 6.12.65-linuxkit): landlock_create_ruleset failed with errno 1 EPERM"
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+			c := r.Get(openshell.CheckIDLandlock)
+			c.Status, c.Detail = openshell.StatusWarn, failed
+		})
+		ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true, NoWrappers: true}))
+		has(t, ta.output(), "⚠ Landlock not checked", "⚠ Landlock: "+failed)
+		lacks(t, ta.output(), "Download the OpenShell base image now", "skipped: checking Docker Desktop's Linux VM")
 	})
 
 	t.Run("checks in the images it built", func(t *testing.T) {
