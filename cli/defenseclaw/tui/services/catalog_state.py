@@ -20,6 +20,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
+from rich.markup import escape as rich_escape
+
 from defenseclaw.connector_paths import (
     connector_config_files,
     connector_home,
@@ -1943,6 +1945,12 @@ _STATUS_COLOR: Mapping[str, str] = {
 }
 
 
+def _esc(value: object) -> str:
+    """Escape row data (names, commands, reasons) for the Rich-markup detail pane."""
+
+    return rich_escape(str(value))
+
+
 def _colored(value: str, palette: Mapping[str, str]) -> str:
     """Return ``value`` wrapped in Rich color markup when the key is
     known. Unknown values fall through unstyled so we never emit an
@@ -1952,7 +1960,7 @@ def _colored(value: str, palette: Mapping[str, str]) -> str:
     if not value:
         return "-"
     color = palette.get(value.upper(), palette.get(value, ""))
-    return f"[{color}]{value}[/]" if color else value
+    return f"[{color}]{_esc(value)}[/]" if color else _esc(value)
 
 
 def _format_severity(severity: str) -> str:
@@ -1971,7 +1979,7 @@ def _format_decisions(file_action: str, install_action: str, runtime_action: str
     the current status, instead of guessing from the Actions column.
     """
 
-    return f"install={install_action or '-'}  runtime={runtime_action or '-'}  file={file_action or '-'}"
+    return _esc(f"install={install_action or '-'}  runtime={runtime_action or '-'}  file={file_action or '-'}")
 
 
 _SEVERITY_BUCKET_LABEL: Mapping[str, str] = {
@@ -2032,28 +2040,28 @@ def _scan_line(
     if breakdown:
         parts.append(breakdown)
     if target:
-        parts.append(f"target={target}")
+        parts.append(f"target={_esc(target)}")
     return " · ".join(parts)
 
 
 def _format_skill_detail(row: SkillRow) -> str:
     lines = [
-        f"[bold #22D3EE]Skill[/] {row.name}",
-        f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
+        f"[bold #22D3EE]Skill[/] {_esc(row.name)}",
+        f"  Status     {_format_status(row.status)}    Actions  {_esc(row.actions)}",
         f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
         f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target, row.severity_counts)}",
     ]
     if row.source:
-        lines.append(f"  Source     {row.source}")
+        lines.append(f"  Source     {_esc(row.source)}")
     if row.registry_badge:
-        lines.append(f"  Registry   {row.registry_badge}")
+        lines.append(f"  Registry   {_esc(row.registry_badge)}")
     if row.description:
         lines.append("")
-        lines.append(f"  {row.description}")
+        lines.append(f"  {_esc(row.description)}")
     if row.verdict and row.verdict not in {row.status, row.severity}:
-        lines.append(f"  Verdict    {row.verdict}")
+        lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
-        lines.append(f"  Reason     {row.reason}")
+        lines.append(f"  Reason     {_esc(row.reason)}")
     lines.append("")
     lines.append(_skill_action_legend(row.status))
     return "\n".join(lines)
@@ -2061,25 +2069,25 @@ def _format_skill_detail(row: SkillRow) -> str:
 
 def _format_mcp_detail(row: MCPRow) -> str:
     lines = [
-        f"[bold #22D3EE]MCP[/] {row.name}",
-        f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
+        f"[bold #22D3EE]MCP[/] {_esc(row.name)}",
+        f"  Status     {_format_status(row.status)}    Actions  {_esc(row.actions)}",
         f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
-        f"  Transport  {row.transport or '-'}",
+        f"  Transport  {_esc(row.transport or '-')}",
     ]
     if row.server_url:
-        lines.append(f"  URL        {row.server_url}")
+        lines.append(f"  URL        {_esc(row.server_url)}")
     if row.command:
-        lines.append(f"  Command    {row.command}")
+        lines.append(f"  Command    {_esc(row.command)}")
     if row.total_findings > 0 or row.severity or row.scan_target:
         lines.append(
             f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target, row.severity_counts)}"
         )
     if row.registry_badge:
-        lines.append(f"  Registry   {row.registry_badge}")
+        lines.append(f"  Registry   {_esc(row.registry_badge)}")
     if row.verdict and row.verdict not in {row.status, row.severity}:
-        lines.append(f"  Verdict    {row.verdict}")
+        lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.reason:
-        lines.append(f"  Reason     {row.reason}")
+        lines.append(f"  Reason     {_esc(row.reason)}")
     lines.append("")
     lines.append(_mcp_action_legend(row.status))
     return "\n".join(lines)
@@ -2089,13 +2097,13 @@ def _format_plugin_detail(row: PluginRow) -> str:
     status = row.status or ("enabled" if row.enabled else "disabled")
     enabled_label = "yes" if row.enabled else "no"
     lines = [
-        f"[bold #22D3EE]Plugin[/] {row.display_name}",
+        f"[bold #22D3EE]Plugin[/] {_esc(row.display_name)}",
         f"  Status     {_format_status(status)}    Enabled  {enabled_label}",
     ]
     if row.version:
-        lines.append(f"  Version    {row.version}")
+        lines.append(f"  Version    {_esc(row.version)}")
     if row.origin:
-        lines.append(f"  Origin     {row.origin}")
+        lines.append(f"  Origin     {_esc(row.origin)}")
     if row.scan is not None:
         # E4i: plugin scans carry the same per-severity breakdown; reuse
         # ``_scan_line`` (no target for plugins) so the rendering matches
@@ -2111,10 +2119,10 @@ def _format_plugin_detail(row: PluginRow) -> str:
             )
         )
     if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
-        lines.append(f"  Verdict    {row.verdict}")
+        lines.append(f"  Verdict    {_esc(row.verdict)}")
     if row.description:
         lines.append("")
-        lines.append(f"  {row.description}")
+        lines.append(f"  {_esc(row.description)}")
     lines.append("")
     lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
     return "\n".join(lines)
@@ -2122,14 +2130,14 @@ def _format_plugin_detail(row: PluginRow) -> str:
 
 def _format_tool_detail(row: ToolRow) -> str:
     lines = [
-        f"[bold #22D3EE]Tool[/] {row.name}",
+        f"[bold #22D3EE]Tool[/] {_esc(row.name)}",
         f"  Status     {_format_status(row.status)}",
-        f"  Scope      {row.display_scope}",
+        f"  Scope      {_esc(row.display_scope)}",
     ]
     if row.reason:
-        lines.append(f"  Reason     {row.reason}")
+        lines.append(f"  Reason     {_esc(row.reason)}")
     if row.target_name and row.target_name != row.name:
-        lines.append(f"  Target     {row.target_name}")
+        lines.append(f"  Target     {_esc(row.target_name)}")
     return "\n".join(lines)
 
 
@@ -2146,7 +2154,10 @@ def _action_legend(actions: tuple[CatalogMenuAction, ...]) -> str:
         return "  [dim]No actions available for this row.[/]"
     chunks: list[str] = []
     for action in actions:
-        label = f"[{action.key}] {action.label}"
+        # ``[s] Scan`` must be escaped: Rich reads ``[s]``/``[b]``/``[i]`` as
+        # style tags and ``[a]``/``[q]`` as invalid ones, which dropped the
+        # whole detail pane to unstyled text with raw markup showing.
+        label = f"{_esc(f'[{action.key}]')} {_esc(action.label)}"
         chunks.append(f"[dim]{label}[/]" if action.disabled else label)
     return "  [dim]Actions:[/] " + "  ·  ".join(chunks)
 

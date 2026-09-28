@@ -142,7 +142,7 @@ class ModelPickerScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="model-picker-dialog"):
-            yield Static(f"Pick a model for {self._provider}", id="model-picker-title")
+            yield Static(f"Pick a model for {self._provider}", id="model-picker-title", markup=False)
             yield Input(
                 value=self._current,
                 placeholder="Type to filter or enter a custom model id…",

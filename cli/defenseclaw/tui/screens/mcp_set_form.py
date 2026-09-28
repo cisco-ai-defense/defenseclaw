@@ -199,7 +199,9 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
             yield Input(id="mcp-env")
             yield Static(MCP_FIELD_LABELS[6], classes="mcp-set-label")
             yield Checkbox("Skip scan before adding", id="mcp-skip-scan")
-            yield Static("", id="mcp-set-status")
+            # Validation errors echo what was typed (``env [/]``); never parse
+            # them as markup or the modal crashes the app.
+            yield Static("", id="mcp-set-status", markup=False)
             with Horizontal(id="mcp-set-buttons"):
                 yield Button("Cancel", id="mcp-set-cancel", variant="default")
                 yield Button("Set MCP", id="mcp-set-submit", variant="success")

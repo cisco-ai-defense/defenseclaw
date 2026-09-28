@@ -110,7 +110,7 @@ class DetailScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="detail-dialog"):
-            yield Static(self.model.title, id="detail-title")
+            yield Static(self.model.title, id="detail-title", markup=False)
             yield Static(self.model.table(), id="detail-body")
             yield Button("Close", id="detail-close", variant="default")
 

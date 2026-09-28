@@ -318,6 +318,20 @@ class _OverviewBanner:
         return Measurement(len(_DEFENSECLAW_WORDMARK), _DEFENSECLAW_LOGO_WIDTH)
 
 
+def _detail_pairs_markup(title: str, pairs: Iterable[tuple[object, object]]) -> str:
+    """Detail-pane markup for a title and ``key: value`` rows.
+
+    Titles, keys and values are event/registry/inventory data (target
+    names, audit details, source ids), so they are escaped: a value such
+    as ``[red]x`` or ``[/]`` must show literally instead of restyling or
+    breaking the whole pane.
+    """
+
+    lines = [f"[bold #A78BFA]{rich_escape(str(title))}[/]"]
+    lines.extend(f"{rich_escape(str(key))}: {rich_escape(str(value))}" for key, value in pairs)
+    return "\n".join(lines)
+
+
 def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
     """Return a small block-glyph bar suitable for inline use in panels."""
 
@@ -347,6 +361,12 @@ PANELS = (
 )
 
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+
+
+def _panel_label(panel: str) -> str:
+    """The tab label for ``panel`` ("MCPs", not ``"mcps".title()`` = "Mcps")."""
+
+    return next((label for name, _key, label in PANELS if name == panel), panel.title())
 PANEL_NAMES = {name for name, _key, _label in PANELS}
 
 
@@ -9940,21 +9960,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             detail = self.registries_model.selected_detail_info()
             if detail is None:
                 return ""
-            lines = [f"[bold #A78BFA]{detail.title}[/]"]
-            lines.extend(f"{key}: {value}" for key, value in detail.fields)
-            return "\n".join(lines)
+            return _detail_pairs_markup(detail.title, detail.fields)
         if self.active_panel == "audit" and self.audit_model.detail_open:
             pairs = self.audit_model.detail_pairs()
             if not pairs:
                 return ""
-            return "[bold #A78BFA]EVENT[/]\n" + "\n".join(f"{key}: {value}" for key, value in pairs[:18])
+            return _detail_pairs_markup("EVENT", pairs[:18])
         if self.active_panel == "inventory" and self.inventory_model.detail_open:
             detail = self.inventory_model.detail_info()
             if detail is None:
                 return ""
-            lines = ["[bold #A78BFA]" + detail.title + "[/]"]
-            lines.extend(f"{key}: {value}" for key, value in detail.fields)
-            return "\n".join(lines)
+            return _detail_pairs_markup(detail.title, detail.fields)
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
             if model.detail_open:
@@ -9964,9 +9980,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "logs" and self.logs_model.source in {"verdicts", "otel"}:
             pairs = self.logs_model.selected_detail_pairs()
             if pairs:
-                return "[bold #A78BFA]LOG DETAIL[/]\n" + "\n".join(
-                    f"{key}: {value}" for key, value in pairs[:14]
-                )
+                return _detail_pairs_markup("LOG DETAIL", pairs[:14])
         return ""
 
     def _ai_discovery_detail_text(self) -> str:
@@ -11798,7 +11812,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         subtitle = getattr(selected, "name", "") if selected is not None else ""
         choice = await self.push_screen_wait(
             ActionMenuScreen(
-                f"{panel.title()} Actions",
+                f"{_panel_label(panel)} actions",
                 tuple(_menu_action(action) for action in actions),
                 subtitle=subtitle,
             )

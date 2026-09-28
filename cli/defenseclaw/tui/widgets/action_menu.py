@@ -220,9 +220,12 @@ class ActionMenuScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="action-menu-dialog"):
-            yield Static(self.title, id="action-menu-title")
+            # Titles and subtitles carry data (a skill, MCP or host name),
+            # never styling: a name such as ``[/]`` used to raise
+            # MarkupError while composing and take the whole app down.
+            yield Static(self.title, id="action-menu-title", markup=False)
             if self.subtitle:
-                yield Static(self.subtitle, id="action-menu-subtitle")
+                yield Static(self.subtitle, id="action-menu-subtitle", markup=False)
             yield ActionMenu(
                 self.actions,
                 selected_index=self.selected_index,

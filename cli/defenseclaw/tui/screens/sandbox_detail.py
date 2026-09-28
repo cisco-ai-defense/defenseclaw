@@ -94,7 +94,7 @@ class SandboxDetailScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="sandbox-detail-dialog"):
-            yield Static(self.model.title, id="sandbox-detail-title")
+            yield Static(self.model.title, id="sandbox-detail-title", markup=False)
             with VerticalScroll(id="sandbox-detail-scroll"):
                 yield Static(self.model.table(), id="sandbox-detail-body")
             if self.keys_hint:
