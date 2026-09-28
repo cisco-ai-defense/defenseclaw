@@ -437,6 +437,42 @@ func TestWatchTerminalErrors(t *testing.T) {
 	}
 }
 
+// TestWatchEndsWhenItsConnectionIsClosed pins that a watch whose gateway
+// connection is closed under it (the manager dropped the connection) ends,
+// instead of resubscribing on the dead connection for good.
+func TestWatchEndsWhenItsConnectionIsClosed(t *testing.T) {
+	g, conn := startGateway(t, []step{{send: statusEvent(pb.SandboxPhase_SANDBOX_PHASE_READY)}, {block: true}})
+	rec := &recorder{}
+	w := newWatcher(t, conn, rec, Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx, rec.handle) }()
+	deadline := time.After(5 * time.Second)
+	for len(rec.ofKind(KindStatus)) == 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("no status event; events: %v", rec.kinds())
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		t.Fatalf("the watch kept retrying on a closed connection (%d subscriptions, %d backoffs)", g.calls(), len(rec.sleeps))
+	}
+	if ctx.Err() != nil || status.Code(errors.Unwrap(err)) != codes.Canceled {
+		t.Fatalf("Run = %v, want the closed connection's error", err)
+	}
+	if n := len(rec.sleeps); n > 1 {
+		t.Fatalf("the watch backed off %d times on a closed connection", n)
+	}
+}
+
 func TestWatchBackoffGrowsAndCaps(t *testing.T) {
 	var scripts [][]step
 	for i := 0; i < 6; i++ {

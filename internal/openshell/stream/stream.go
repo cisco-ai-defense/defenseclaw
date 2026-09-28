@@ -275,8 +275,9 @@ func (w *Watcher) Cursor() string { return w.cursor }
 
 // Run follows the sandbox until ctx ends (returning ctx.Err()) or the
 // watch hits a terminal error: the sandbox is gone (ErrSandboxNotFound),
-// or the gateway refuses the caller (permission, authentication,
-// unimplemented). handle runs synchronously on the receive loop.
+// the gateway refuses the caller (permission, authentication,
+// unimplemented), or the connection was closed under a live ctx
+// (codes.Canceled). handle runs synchronously on the receive loop.
 func (w *Watcher) Run(ctx context.Context, handle func(Event)) error {
 	if handle == nil {
 		return errors.New("stream: nil event handler")
@@ -305,6 +306,12 @@ func (w *Watcher) Run(ctx context.Context, handle func(Event)) error {
 			return fmt.Errorf("%w: %s: %s", ErrSandboxNotFound, w.cfg.Sandbox, status.Convert(err).Message())
 		case code == codes.PermissionDenied, code == codes.Unauthenticated, code == codes.Unimplemented, code == codes.InvalidArgument:
 			return fmt.Errorf("stream: watch %s: %w", w.cfg.Sandbox, err)
+		case code == codes.Canceled:
+			// ctx is live, so the connection itself was closed under the
+			// watch (grpc: the client connection is closing): every
+			// resubscription on it fails the same way. The caller follows
+			// a new connection.
+			return fmt.Errorf("stream: watch %s: the gateway connection was closed: %w", w.cfg.Sandbox, err)
 		}
 
 		wait := w.jitter(delay)
