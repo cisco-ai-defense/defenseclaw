@@ -19,7 +19,6 @@
 package nestguard
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -38,11 +37,8 @@ func TestRequarantineWithinTheWindowMerges(t *testing.T) {
 	now := fixedNow()
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
-	var detected, merged collector
-	g, err := New(Options{Root: root, OnDetect: detected.add, OnMerge: merged.add, Now: clock, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
+	var merged collector
+	g, detected := guard(t, Options{Root: root, OnMerge: merged.add, Now: clock})
 	mkdir(t, filepath.Join(root, "vendor", "tool", ".git", "objects"))
 	g.sweep(".")
 	// git init writes on into the .git it recreates.
@@ -60,22 +56,16 @@ func TestRequarantineWithinTheWindowMerges(t *testing.T) {
 		t.Fatalf("merged = %+v", m)
 	}
 	for _, name := range append([]string{m[0].Quarantined}, m[0].Also...) {
-		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(name))); err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
+		present(t, filepath.Join(root, filepath.FromSlash(name)))
 	}
-	if _, err := os.Lstat(filepath.Join(root, "vendor", "tool", ".git")); !os.IsNotExist(err) {
-		t.Fatalf(".git is still there: %v", err)
-	}
+	gone(t, filepath.Join(root, "vendor", "tool", ".git"))
 	if all := g.Detections(); len(all) != 1 || len(all[0].Also) != 1 {
 		t.Fatalf("Detections = %+v", all)
 	}
-
 	// Later, it is another repository.
 	advance(MergeWindow + time.Second)
 	mkdir(t, filepath.Join(root, "vendor", "tool", ".git"))
-	g.sweep(".")
-	if got := detected.list(); len(got) != 2 {
-		t.Fatalf("detections after the window = %+v", got)
+	if g.sweep("."); len(detected.list()) != 2 {
+		t.Fatalf("detections after the window = %+v", detected.list())
 	}
 }

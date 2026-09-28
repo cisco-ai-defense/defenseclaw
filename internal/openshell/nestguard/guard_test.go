@@ -86,9 +86,57 @@ func write(t *testing.T, p, content string) {
 	}
 }
 
+// gone fails unless nothing is at p.
+func gone(t *testing.T, p string) {
+	t.Helper()
+	if _, err := os.Lstat(p); !os.IsNotExist(err) {
+		t.Fatalf("%s is still there: %v", p, err)
+	}
+}
+
+// present fails unless an entry is at p.
+func present(t *testing.T, p string) {
+	t.Helper()
+	if _, err := os.Lstat(p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
 var fixedNow = func() time.Time { return time.Date(2026, 9, 27, 10, 0, 0, 0, time.UTC) }
 
 func noLinks(context.Context, string) ([]string, error) { return nil, nil }
+
+func baseline(t *testing.T, root string) Baseline {
+	t.Helper()
+	b, err := TakeBaseline(context.Background(), root, 0, noLinks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// guard builds a guard that reports into the returned collector and reads
+// no gitlinks unless opts says otherwise.
+func guard(t *testing.T, opts Options) (*Guard, *collector) {
+	t.Helper()
+	c := &collector{}
+	opts.OnDetect = c.add
+	if opts.Gitlinks == nil {
+		opts.Gitlinks = noLinks
+	}
+	g, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g, c
+}
 
 func TestTakeBaseline(t *testing.T) {
 	root := realTemp(t)
@@ -99,24 +147,17 @@ func TestTakeBaseline(t *testing.T) {
 	mkdir(t, filepath.Join(root, "src", QuarantinePrefix+"20260101T000000Z"))
 	outside := realTemp(t)
 	mkdir(t, filepath.Join(outside, "evil", ".git"))
-	if err := os.Symlink(filepath.Join(outside, "evil"), filepath.Join(root, "link")); err != nil {
-		t.Fatal(err)
-	}
+	symlink(t, filepath.Join(outside, "evil"), filepath.Join(root, "link"))
 	b, err := TakeBaseline(context.Background(), root, 0, func(context.Context, string) ([]string, error) {
 		return []string{"third_party/sub"}, nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{".", "node_modules/dep", "vendor/lib", "worktree"}
-	if !slices.Equal(b.Repos, want) {
-		t.Fatalf("baseline repos = %v, want %v (symlinks not followed)", b.Repos, want)
+	if want := []string{".", "node_modules/dep", "vendor/lib", "worktree"}; err != nil || !slices.Equal(b.Repos, want) {
+		t.Fatalf("baseline repos = %v, %v; want %v (symlinks not followed)", b.Repos, err, want)
 	}
 	if !slices.Equal(b.Gitlinks, []string{"third_party/sub"}) {
 		t.Fatalf("baseline gitlinks = %v", b.Gitlinks)
 	}
-	nonGit := realTemp(t)
-	b, err = TakeBaseline(context.Background(), nonGit, 0, func(context.Context, string) ([]string, error) {
+	b, err = TakeBaseline(context.Background(), realTemp(t), 0, func(context.Context, string) ([]string, error) {
 		t.Fatal("gitlinks read for a non-git folder")
 		return nil, nil
 	})
@@ -129,18 +170,10 @@ func TestSweepQuarantinesNewRepositories(t *testing.T) {
 	root := realTemp(t)
 	mkdir(t, filepath.Join(root, ".git"))
 	mkdir(t, filepath.Join(root, "old", ".git"))
-	baseline, err := TakeBaseline(context.Background(), root, 0, noLinks)
-	if err != nil {
-		t.Fatal(err)
-	}
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Now: fixedNow})
 	mkdir(t, filepath.Join(root, "a", "b", ".git", "hooks"))
 	write(t, filepath.Join(root, "a", "b", ".git", "config"), "[core]\n")
 	write(t, filepath.Join(root, "file-repo", ".git"), "gitdir: ../x\n")
-	var c, merged collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, OnMerge: merged.add, Now: fixedNow, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
 	g.sweep(".")
 	got := c.list()
 	if len(got) != 2 {
@@ -150,39 +183,18 @@ func TestSweepQuarantinesNewRepositories(t *testing.T) {
 		if d.Error != "" || d.Kind != KindRepository || !strings.HasPrefix(filepath.Base(d.Quarantined), QuarantinePrefix+"20260927T100000Z") {
 			t.Fatalf("detection = %+v", d)
 		}
-		if _, err := os.Lstat(filepath.Join(root, d.Dir, GitEntry)); !os.IsNotExist(err) {
-			t.Fatalf("%s/.git still exists", d.Dir)
+		gone(t, filepath.Join(root, d.Dir, GitEntry))
+		present(t, filepath.Join(root, filepath.FromSlash(d.Quarantined)))
+		if d.Dir == "a/b" {
+			present(t, filepath.Join(root, filepath.FromSlash(d.Quarantined), "config"))
 		}
-		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(d.Quarantined))); err != nil {
-			t.Fatalf("quarantined entry %s missing: %v", d.Quarantined, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(root, "a", "b", filepath.Base(got[0].Quarantined), "config")); err != nil && got[0].Dir == "a/b" {
-		t.Fatalf("quarantine lost the repository's content: %v", err)
 	}
 	for _, keep := range []string{".git", "old/.git"} {
-		if _, err := os.Lstat(filepath.Join(root, keep)); err != nil {
-			t.Fatalf("baseline %s was touched: %v", keep, err)
-		}
+		present(t, filepath.Join(root, keep))
 	}
-	// A second sweep finds nothing new; a .git created again in a folder
-	// whose first one was quarantined is quarantined too, under a fresh
-	// name, and so is a third. Within MergeWindow (the fixed clock) they
-	// belong to the first detection.
-	g.sweep(".")
-	if n := len(c.list()); n != 2 {
-		t.Fatalf("second sweep detections = %d", n)
-	}
-	for i, suffix := range []string{"-1", "-2"} {
-		mkdir(t, filepath.Join(root, "a", "b", ".git"))
-		g.sweep(".")
-		m := merged.list()
-		if len(c.list()) != 2 || len(m) != 1+i || m[i].Dir != "a/b" || len(m[i].Also) != 1+i || !strings.HasSuffix(m[i].Also[i], suffix) {
-			t.Fatalf("repeat quarantine %d = %+v, merged %+v", i+1, c.list(), m)
-		}
-		if _, err := os.Lstat(filepath.Join(root, "a", "b", ".git")); !os.IsNotExist(err) {
-			t.Fatalf("repeat %d: a/b/.git still exists", i+1)
-		}
+	// A second sweep finds nothing new.
+	if g.sweep("."); len(c.list()) != 2 {
+		t.Fatalf("second sweep detections = %+v", c.list())
 	}
 }
 
@@ -194,29 +206,16 @@ func TestRepeatRepositoryInEventsMode(t *testing.T) {
 	}
 	root := realTemp(t)
 	mkdir(t, filepath.Join(root, "src"))
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
-	var c collector
 	// A clock the loop moves past MergeWindow: each .git is a repository
 	// of its own.
 	var mu sync.Mutex
 	now := time.Now()
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: ModeEvents, Gitlinks: noLinks, Now: clock})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- g.Run(ctx) }()
-	defer func() {
-		cancel()
-		<-done
-	}()
-	waitMode(t, g, ModeEvents)
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Mode: ModeEvents, Now: clock})
+	runGuard(t, g, ModeEvents)
 	for i := 1; i <= 2; i++ {
 		mkdir(t, filepath.Join(root, "src", ".git"))
-		got := c.wait(t, i)
-		if got[i-1].Dir != "src" || got[i-1].Quarantined == "" {
+		if got := c.wait(t, i); got[i-1].Dir != "src" || got[i-1].Quarantined == "" {
 			t.Fatalf("detection %d = %+v", i, got[i-1])
 		}
 		mu.Lock()
@@ -227,31 +226,31 @@ func TestRepeatRepositoryInEventsMode(t *testing.T) {
 
 // TestQuarantineRestoresWritePermission: the agent runs as the operator's
 // uid and can take write permission off the folder that holds its .git;
-// the guard gets it back for the rename and restores the folder's mode.
+// the guard gets it back for the rename and restores the folder's mode. A
+// top-level .git in a folder that had none is quarantined too.
 func TestQuarantineRestoresWritePermission(t *testing.T) {
 	root := realTemp(t)
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Now: fixedNow})
+	mkdir(t, filepath.Join(root, ".git"))
 	sub := filepath.Join(root, "sub")
 	write(t, filepath.Join(sub, ".git", "config"), "[core]\n")
 	if err := os.Chmod(sub, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
 	g.sweep(".")
 	got := c.list()
-	if len(got) != 1 || got[0].Error != "" || got[0].Quarantined == "" {
+	if len(got) != 2 || got[0].Dir != "." || got[0].Label() != ".git" || got[1].Dir != "sub" {
 		t.Fatalf("detections = %+v", got)
 	}
-	if _, err := os.Lstat(filepath.Join(sub, ".git")); !os.IsNotExist(err) {
-		t.Fatal("sub/.git was not quarantined")
+	for _, d := range got {
+		if d.Error != "" || d.Quarantined == "" {
+			t.Fatalf("detection = %+v", d)
+		}
 	}
-	info, err := os.Stat(sub)
-	if err != nil || info.Mode().Perm() != 0o555 {
+	gone(t, filepath.Join(root, ".git"))
+	gone(t, filepath.Join(sub, ".git"))
+	if info, err := os.Stat(sub); err != nil || info.Mode().Perm() != 0o555 {
 		t.Fatalf("sub mode = %v, %v; want the agent's 0555 back", info, err)
 	}
 }
@@ -261,7 +260,7 @@ func TestQuarantineRestoresWritePermission(t *testing.T) {
 // fails differently or the repository comes back after going away.
 func TestFailedQuarantineReportedOnce(t *testing.T) {
 	root := realTemp(t)
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Now: fixedNow})
 	sub := filepath.Join(root, "sub")
 	mkdir(t, filepath.Join(sub, ".git"))
 	// Every name the quarantine could use is taken.
@@ -270,16 +269,10 @@ func TestFailedQuarantineReportedOnce(t *testing.T) {
 	for i := 1; i < 100; i++ {
 		mkdir(t, filepath.Join(sub, name+"-"+strconv.Itoa(i)))
 	}
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
 	for i := 0; i < 3; i++ {
 		g.sweep(".")
 	}
-	got := c.list()
-	if len(got) != 1 || got[0].Error == "" {
+	if got := c.list(); len(got) != 1 || got[0].Error == "" {
 		t.Fatalf("detections after three failing sweeps = %+v; want one failure", got)
 	}
 	if err := os.RemoveAll(filepath.Join(sub, ".git")); err != nil {
@@ -307,15 +300,10 @@ func TestFailedQuarantineReportedOnce(t *testing.T) {
 // inside.
 func TestCaseVariantOfGitEntry(t *testing.T) {
 	root := realTemp(t)
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Now: fixedNow})
 	write(t, filepath.Join(root, "sub", ".GIT", "config"), "[core]\n")
 	_, err := os.Lstat(filepath.Join(root, "sub", ".git"))
 	insensitive := err == nil
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
 	g.sweep(".")
 	got := c.list()
 	if !insensitive {
@@ -332,13 +320,11 @@ func TestCaseVariantOfGitEntry(t *testing.T) {
 	if len(got) != 1 || got[0].Dir != "sub" || got[0].Quarantined == "" {
 		t.Fatalf("case-insensitive filesystem: detections = %+v", got)
 	}
-	if _, err := os.Lstat(filepath.Join(root, "sub", ".GIT")); !os.IsNotExist(err) {
-		t.Fatal("sub/.GIT was not quarantined")
-	}
+	gone(t, filepath.Join(root, "sub", ".GIT"))
 	// The baseline recognizes the spelling too.
 	write(t, filepath.Join(root, "old", ".Git", "config"), "[core]\n")
-	if b, err := TakeBaseline(context.Background(), root, 0, noLinks); err != nil || !slices.Contains(b.Repos, "old") {
-		t.Fatalf("baseline = %+v, %v", b, err)
+	if b := baseline(t, root); !slices.Contains(b.Repos, "old") {
+		t.Fatalf("baseline = %+v", b)
 	}
 }
 
@@ -352,18 +338,14 @@ func TestTruncatedBaselineLeavesOlderRepositories(t *testing.T) {
 		write(t, filepath.Join(root, "a", "f"+strconv.Itoa(i)), "x")
 	}
 	mkdir(t, filepath.Join(root, "z", ".git"))
-	baseline, err := TakeBaseline(context.Background(), root, 10, noLinks)
-	if err != nil || !baseline.Truncated || slices.Contains(baseline.Repos, "z") || baseline.At.IsZero() {
-		t.Fatalf("baseline = %+v, %v; want a truncated one without z", baseline, err)
+	base, err := TakeBaseline(context.Background(), root, 10, noLinks)
+	if err != nil || !base.Truncated || slices.Contains(base.Repos, "z") || base.At.IsZero() {
+		t.Fatalf("baseline = %+v, %v; want a truncated one without z", base, err)
 	}
 	run := func(at time.Time) []Detection {
-		b := baseline
+		b := base
 		b.At = at
-		var c collector
-		g, err := New(Options{Root: root, Baseline: b, OnDetect: c.add, Now: fixedNow, Gitlinks: noLinks})
-		if err != nil {
-			t.Fatal(err)
-		}
+		g, c := guard(t, Options{Root: root, Baseline: b, Now: fixedNow})
 		g.sweep(".")
 		g.sweep(".")
 		return c.list()
@@ -372,37 +354,16 @@ func TestTruncatedBaselineLeavesOlderRepositories(t *testing.T) {
 	if got := run(time.Now().Add(time.Minute)); len(got) != 0 {
 		t.Fatalf("an older repository was quarantined: %+v", got)
 	}
-	if _, err := os.Lstat(filepath.Join(root, "z", ".git")); err != nil {
-		t.Fatal("z/.git was moved")
-	}
+	present(t, filepath.Join(root, "z", ".git"))
 	// The session started before it.
 	if got := run(time.Now().Add(-time.Minute)); len(got) != 1 || got[0].Dir != "z" || got[0].Quarantined == "" {
 		t.Fatalf("a newer repository = %+v", got)
 	}
 	// A complete baseline never exempts anything.
-	baseline.Truncated = false
+	base.Truncated = false
 	mkdir(t, filepath.Join(root, "z", ".git"))
 	if got := run(time.Now().Add(time.Minute)); len(got) != 1 || got[0].Dir != "z" {
 		t.Fatalf("complete baseline = %+v", got)
-	}
-}
-
-func TestTopLevelRepositoryInNonGitFolder(t *testing.T) {
-	root := realTemp(t)
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
-	mkdir(t, filepath.Join(root, ".git"))
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
-	g.sweep(".")
-	got := c.list()
-	if len(got) != 1 || got[0].Dir != "." || got[0].Label() != ".git" || got[0].Quarantined == "" {
-		t.Fatalf("detections = %+v", got)
-	}
-	if _, err := os.Lstat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
-		t.Fatal("top-level .git not quarantined")
 	}
 }
 
@@ -412,22 +373,16 @@ func TestTopLevelRepositoryInNonGitFolder(t *testing.T) {
 func TestQuarantineRefusesSymlinkedParents(t *testing.T) {
 	root := realTemp(t)
 	mkdir(t, filepath.Join(root, ".git"))
-	if err := os.Symlink(".", filepath.Join(root, "loop")); err != nil {
-		t.Fatal(err)
-	}
+	symlink(t, ".", filepath.Join(root, "loop"))
 	if _, err := quarantine(root, "loop", QuarantinePrefix+"x", time.Time{}); err == nil {
 		t.Fatal("quarantine followed a symlinked directory")
 	}
-	if _, err := os.Lstat(filepath.Join(root, ".git")); err != nil {
-		t.Fatal("the project repository was renamed through a symlink")
-	}
+	present(t, filepath.Join(root, ".git"))
 	// A .git symlink itself is renamed, not followed.
 	target := filepath.Join(realTemp(t), "gitdir")
 	mkdir(t, target)
 	mkdir(t, filepath.Join(root, "sub"))
-	if err := os.Symlink(target, filepath.Join(root, "sub", ".git")); err != nil {
-		t.Fatal(err)
-	}
+	symlink(t, target, filepath.Join(root, "sub", ".git"))
 	name, err := quarantine(root, "sub", QuarantinePrefix+"y", time.Time{})
 	if err != nil {
 		t.Fatal(err)
@@ -435,9 +390,7 @@ func TestQuarantineRefusesSymlinkedParents(t *testing.T) {
 	if info, err := os.Lstat(filepath.Join(root, "sub", name)); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("renamed entry = %v, %v; want the symlink itself", info, err)
 	}
-	if _, err := os.Stat(target); err != nil {
-		t.Fatal("the symlink target was touched")
-	}
+	present(t, target)
 	if _, err := quarantine(root, "../x", "n", time.Time{}); err == nil {
 		t.Fatal("a path outside the root was accepted")
 	}
@@ -458,26 +411,10 @@ func testRun(t *testing.T, mode Mode) {
 	root := realTemp(t)
 	mkdir(t, filepath.Join(root, ".git"))
 	mkdir(t, filepath.Join(root, "src"))
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: mode, PollInterval: 50 * time.Millisecond, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- g.Run(ctx) }()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("Run: %v", err)
-		}
-	}()
-	waitMode(t, g, mode)
-
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Mode: mode, PollInterval: 50 * time.Millisecond})
+	runGuard(t, g, mode)
 	mkdir(t, filepath.Join(root, "src", "deep", "er", ".git"))
-	got := c.wait(t, 1)
-	if got[0].Dir != "src/deep/er" || got[0].Quarantined == "" {
+	if got := c.wait(t, 1); got[0].Dir != "src/deep/er" || got[0].Quarantined == "" {
 		t.Fatalf("detection = %+v", got[0])
 	}
 	// A tree moved in whole: the event is for its top directory only.
@@ -486,13 +423,10 @@ func testRun(t *testing.T, mode Mode) {
 	if err := os.Rename(staged, filepath.Join(root, "src", "pkg")); err != nil {
 		t.Skipf("cross-device rename: %v", err)
 	}
-	got = c.wait(t, 2)
-	if got[1].Dir != "src/pkg/inner" {
+	if got := c.wait(t, 2); got[1].Dir != "src/pkg/inner" {
 		t.Fatalf("moved-in detection = %+v", got[1])
 	}
-	if _, err := os.Lstat(filepath.Join(root, ".git")); err != nil {
-		t.Fatal("the project repository was quarantined")
-	}
+	present(t, filepath.Join(root, ".git"))
 }
 
 func waitMode(t *testing.T, g *Guard, want Mode) {
@@ -554,14 +488,8 @@ func TestEventsWatchFolderCreatedUnreadable(t *testing.T) {
 	}
 	skipRoot(t)
 	root := realTemp(t)
-	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: ModeEvents, PollInterval: time.Hour, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
+	g, c := guard(t, Options{Root: root, Baseline: baseline(t, root), Mode: ModeEvents, PollInterval: time.Hour})
 	runGuard(t, g, ModeEvents)
-
 	dir := filepath.Join(root, "late")
 	mkdirMode(t, dir, 0)
 	time.Sleep(200 * time.Millisecond)
@@ -570,8 +498,7 @@ func TestEventsWatchFolderCreatedUnreadable(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 	mkdir(t, filepath.Join(dir, ".git"))
-	got := c.wait(t, 1)
-	if got[0].Dir != "late" || got[0].Quarantined == "" {
+	if got := c.wait(t, 1); got[0].Dir != "late" || got[0].Quarantined == "" {
 		t.Fatalf("detection = %+v", got[0])
 	}
 }
@@ -596,15 +523,11 @@ func TestRepositoryInUnlistableFolder(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(old, 0o755) })
-			baseline, err := TakeBaseline(context.Background(), root, 0, noLinks)
-			if err != nil || !slices.Equal(baseline.Repos, []string{"old"}) {
-				t.Fatalf("baseline = %+v, %v; want the repository in the unlistable folder", baseline, err)
+			base := baseline(t, root)
+			if !slices.Equal(base.Repos, []string{"old"}) {
+				t.Fatalf("baseline = %+v; want the repository in the unlistable folder", base)
 			}
-			var c collector
-			g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: mode, PollInterval: 50 * time.Millisecond, Gitlinks: noLinks})
-			if err != nil {
-				t.Fatal(err)
-			}
+			g, c := guard(t, Options{Root: root, Baseline: base, Mode: mode, PollInterval: 50 * time.Millisecond})
 			runGuard(t, g, mode)
 
 			dir := filepath.Join(root, "hidden")
@@ -613,24 +536,16 @@ func TestRepositoryInUnlistableFolder(t *testing.T) {
 			if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			got := c.wait(t, 1)
-			if got[0].Dir != "hidden" {
+			if got := c.wait(t, 1); got[0].Dir != "hidden" || (runtime.GOOS == "linux" && got[0].Quarantined == "") {
 				t.Fatalf("detection = %+v", got[0])
 			}
 			if runtime.GOOS == "linux" {
-				if got[0].Quarantined == "" {
-					t.Fatalf("not quarantined: %+v", got[0])
-				}
-				if _, err := os.Lstat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
-					t.Fatal("hidden/.git is still in place")
-				}
+				gone(t, filepath.Join(dir, ".git"))
 				if info, err := os.Lstat(dir); err != nil || info.Mode().Perm() != 0o300 {
 					t.Fatalf("hidden mode = %v, %v; want the agent's 0300 kept", info, err)
 				}
 			}
-			if _, err := os.Lstat(filepath.Join(old, ".git")); err != nil {
-				t.Fatal("the pre-session repository was quarantined")
-			}
+			present(t, filepath.Join(old, ".git"))
 			if n := len(c.list()); n != 1 {
 				t.Fatalf("detections = %+v", c.list())
 			}
@@ -650,11 +565,7 @@ func TestManyUnwatchableFoldersFallBackToPolling(t *testing.T) {
 	for i := 0; i <= maxUnwatched; i++ {
 		mkdirMode(t, filepath.Join(root, "d"+strconv.Itoa(i)), 0)
 	}
-	var c collector
-	g, err := New(Options{Root: root, OnDetect: c.add, Mode: ModeEvents, PollInterval: 50 * time.Millisecond, Gitlinks: noLinks})
-	if err != nil {
-		t.Fatal(err)
-	}
+	g, _ := guard(t, Options{Root: root, Mode: ModeEvents, PollInterval: 50 * time.Millisecond})
 	runGuard(t, g, ModePoll)
 }
 
@@ -668,105 +579,66 @@ func TestWatchLimitFallsBackToPolling(t *testing.T) {
 	}
 	var logs []string
 	var mu sync.Mutex
-	var c collector
-	g, err := New(Options{Root: root, OnDetect: c.add, Mode: ModeEvents, MaxWatches: 2, PollInterval: 50 * time.Millisecond,
-		Gitlinks: noLinks, Logf: func(f string, a ...any) { mu.Lock(); logs = append(logs, f); mu.Unlock() }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = g.Run(ctx) }()
-	waitMode(t, g, ModePoll)
+	g, c := guard(t, Options{Root: root, Mode: ModeEvents, MaxWatches: 2, PollInterval: 50 * time.Millisecond,
+		Logf: func(f string, a ...any) { mu.Lock(); logs = append(logs, f); mu.Unlock() }})
+	runGuard(t, g, ModePoll)
 	mkdir(t, filepath.Join(root, "c", ".git"))
 	if got := c.wait(t, 1); got[0].Dir != "c" {
 		t.Fatalf("detection = %+v", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(logs) == 0 || !strings.Contains(strings.Join(logs, " "), "polling") {
+	if !strings.Contains(strings.Join(logs, " "), "polling") {
 		t.Fatalf("no fallback notice: %v", logs)
 	}
 }
 
-func TestGitlinks(t *testing.T) {
-	root := realTemp(t)
-	mkdir(t, filepath.Join(root, ".git"))
-	links := []string{"old"}
-	var mu sync.Mutex
-	read := func(context.Context, string) ([]string, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		return append([]string(nil), links...), nil
-	}
-	baseline, _ := TakeBaseline(context.Background(), root, 0, read)
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Gitlinks: read, Now: fixedNow})
-	if err != nil {
-		t.Fatal(err)
-	}
-	g.checkGitlinks(context.Background())
-	if n := len(c.list()); n != 0 {
-		t.Fatalf("baseline gitlink reported: %+v", c.list())
-	}
-	mu.Lock()
-	links = append(links, "evil/sub")
-	mu.Unlock()
-	g.checkGitlinks(context.Background())
-	g.checkGitlinks(context.Background())
-	got := c.list()
-	if len(got) != 1 || got[0].Kind != KindGitlink || got[0].Dir != "evil/sub" || got[0].Label() != "evil/sub (gitlink)" {
-		t.Fatalf("gitlink detections = %+v", got)
-	}
-}
-
 // TestRunOnceSweepsAndReturns pins the final pass: Run with Once
-// quarantines what appeared since the baseline, reports new gitlinks and
-// returns without watching.
+// quarantines what appeared since the baseline, reports a new gitlink once
+// (never one of the baseline) and returns without watching.
 func TestRunOnceSweepsAndReturns(t *testing.T) {
 	root := realTemp(t)
 	mkdir(t, filepath.Join(root, ".git"))
-	baseline, err := TakeBaseline(context.Background(), root, 0, noLinks)
-	if err != nil {
-		t.Fatal(err)
+	links := []string{"old"}
+	read := func(context.Context, string) ([]string, error) { return append([]string(nil), links...), nil }
+	base, _ := TakeBaseline(context.Background(), root, 0, read)
+	g, c := guard(t, Options{Root: root, Baseline: base, Now: fixedNow, Gitlinks: read, Once: true})
+	runOnce := func() {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- g.Run(context.Background()) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run with Once kept watching")
+		}
+	}
+	if runOnce(); len(c.list()) != 0 {
+		t.Fatalf("baseline gitlink reported: %+v", c.list())
 	}
 	mkdir(t, filepath.Join(root, "late", ".git"))
-	links := func(context.Context, string) ([]string, error) { return []string{"late/sub"}, nil }
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: links, Once: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- g.Run(context.Background()) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run with Once kept watching")
-	}
-	got := c.list()
-	if len(got) != 2 || got[0].Kind != KindRepository || got[0].Dir != "late" || got[1].Kind != KindGitlink {
+	links = append(links, "late/sub")
+	runOnce()
+	runOnce()
+	if got := c.list(); len(got) != 2 || got[0].Kind != KindRepository || got[0].Dir != "late" ||
+		got[1].Kind != KindGitlink || got[1].Label() != "late/sub (gitlink)" {
 		t.Fatalf("detections = %+v", got)
 	}
-	if _, err := os.Lstat(filepath.Join(root, "late", ".git")); !os.IsNotExist(err) {
-		t.Fatal("the late repository was not quarantined")
-	}
+	gone(t, filepath.Join(root, "late", ".git"))
 }
 
-func TestParseGitlinks(t *testing.T) {
+// TestGitGitlinks reads the gitlinks of a real index, and parses paths with
+// tabs out of NUL-separated ls-files output.
+func TestGitGitlinks(t *testing.T) {
 	out := "100644 0123456789012345678901234567890123456789 0\tREADME.md\x00" +
 		"160000 abcdefabcdefabcdefabcdefabcdefabcdefabcd 0\tvendor/sub\x00" +
 		"160000 abcdefabcdefabcdefabcdefabcdefabcdefabcd 0\tpath with\ttab\x00"
-	got := parseGitlinks([]byte(out))
-	if !slices.Equal(got, []string{"vendor/sub", "path with\ttab"}) {
+	if got := parseGitlinks([]byte(out)); !slices.Equal(got, []string{"vendor/sub", "path with\ttab"}) {
 		t.Fatalf("gitlinks = %q", got)
 	}
-}
-
-func TestGitGitlinksAgainstRealGit(t *testing.T) {
 	gitBin, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("git not installed")
@@ -783,8 +655,7 @@ func TestGitGitlinksAgainstRealGit(t *testing.T) {
 	write(t, filepath.Join(root, "a.txt"), "a\n")
 	run("add", "a.txt")
 	run("update-index", "--add", "--cacheinfo", "160000,1234567890123456789012345678901234567890,mod/sub")
-	got, err := GitGitlinks(context.Background(), root)
-	if err != nil || !slices.Equal(got, []string{"mod/sub"}) {
+	if got, err := GitGitlinks(context.Background(), root); err != nil || !slices.Equal(got, []string{"mod/sub"}) {
 		t.Fatalf("GitGitlinks = %v, %v", got, err)
 	}
 }
