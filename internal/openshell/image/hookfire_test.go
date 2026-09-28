@@ -704,6 +704,10 @@ func TestHookFireBuiltinRefusesUnverifiedHarness(t *testing.T) {
 	if err == nil || errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), "AMP_API_KEY") {
 		t.Fatalf("error = %v", err)
 	}
+	// `sandbox image build amp` prints it: no Go API names.
+	if msg := err.Error(); strings.Contains(msg, "HookFireOptions") || !strings.Contains(msg, "image stays unverified") {
+		t.Fatalf("error = %v", err)
+	}
 }
 
 // TestBuiltinMockLaunchReachesTheMock checks the built-in mock wiring of the

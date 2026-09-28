@@ -676,7 +676,9 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 			if v := c.Spec.Harness.Verification(); v.Status == harness.Unverified && v.Note != "" {
 				reason += ": " + v.Note
 			}
-			return result, fmt.Errorf("openshell image: %s has %s; verify it with HookFireOptions naming a model the harness can reach", c.Spec.Harness.Name, reason)
+			// The message reaches `sandbox image build` and setup: name
+			// the consequence, not the Go option a caller could set.
+			return result, fmt.Errorf("openshell image: %s has %s, so DefenseClaw cannot prove its hooks fire and its image stays unverified", c.Spec.Harness.Name, reason)
 		}
 	}
 	// p2-render-7: in host mode, serialize probes that bind the same address
