@@ -109,7 +109,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 // rules (there only candidates) and name the reason. A verdict at least as
 // strong is returned unchanged.
 func mergeSandboxShellCommandVerdict(cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
-	action := guardrailRuntimeActionForFindings(cfg, connectorName, findings, true)
+	action := guardrailToolCallActionForFindings(cfg, connectorName, findings, true)
 	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
 		return verdict
 	}

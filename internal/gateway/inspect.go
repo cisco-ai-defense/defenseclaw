@@ -715,11 +715,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := guardrailRuntimeActionForFindings(
+		runtimeAction := guardrailToolCallActionForFindings(
 			a.scannerCfg, req.Connector, ruleFindings, true,
 		)
 		if enforceableSeverity != "NONE" {
-			codeGuardAction := guardrailRuntimeActionForConnector(
+			codeGuardAction := guardrailToolCallActionForConnector(
 				a.scannerCfg, req.Connector, enforceableSeverity, true,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
@@ -997,7 +997,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
+		action = guardrailToolCallActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {

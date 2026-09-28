@@ -284,12 +284,15 @@ guardrail:
       alert_at: MEDIUM
 ```
 
-The levels apply wherever this table does: hook decisions such as tool calls,
-and the guardrail proxy's checks of tool calls in LLM responses. Human approval
-only ever applies below the block level: anything at or above it blocks without
+The levels apply to tool-call decisions only: hook tool calls (including
+bounded chains, CodeGuard on file writes and sandbox shell commands) and the
+guardrail proxy's checks of tool calls in LLM responses. Prompts, completions,
+tool responses and message content keep the pack's levels. Human approval only
+ever applies below the block level: anything at or above it blocks without
 asking. The pack decides everything else, such as which rules run, and the
 named policy's thresholds for LLM traffic through the guardrail proxy don't
-change.
+change. A running gateway restarts to apply a level change: hook decisions
+read the configuration the gateway started with.
 
 ### Low-noise rollout
 
