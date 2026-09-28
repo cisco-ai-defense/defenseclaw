@@ -903,24 +903,20 @@ def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
     assert "[d] Disable" in out
 
 
-def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
-    """The header now groups navigation and action keys on separate
-    lines so operators see the action set (including the previously
-    hidden ``o open menu``) without scanning a single dense line.
+def test_catalog_summary_text_is_one_header_line() -> None:
+    """The header is the title and the row count; keys live in the hint
+    bar, the ``?`` sheet and the detail pane's action legend so the table
+    stays on screen at 80x24.
     """
 
     panel = SkillsPanelModel()
     panel.apply_loaded([SkillRow(name="alpha", status="active")])
 
     text = panel.summary_text("Skills")
-    # Action set is on its own line so it can't be missed.
-    assert "[dim]Actions:[/]" in text
-    assert "o open menu" in text
-    assert "u unblock" in text
-    # Navigation primer is on the row above, not jammed in with actions.
-    assert "[dim]Navigate:[/]" in text
-    # Filter / detail metadata still on line 2.
-    assert "1 of 1 rows" in text
+    assert "\n" not in text
+    assert "1 of 1" in text
+    panel.set_filter("al")
+    assert "filter:" in panel.summary_text("Skills")
 
 
 # ---------------------------------------------------------------------------

@@ -588,21 +588,15 @@ class CatalogListModel(Generic[RowT]):
         return self.row_connector(row) or "—"
 
     def summary_text(self, title: str) -> str:
-        filter_text = f" filter={self.filter_text!r}" if self.filter_text else ""
-        detail = " detail=open" if self.detail_open else ""
-        # Group navigation vs. action keys on separate lines so the
-        # eye lands on the action set (which is what operators reach
-        # for) instead of getting buried in the navigation primer.
-        # The legacy single-line hint hid ``o`` between ``Enter`` and
-        # ``r`` so operators couldn't tell that pressing ``o`` opens
-        # the per-row action menu.
-        return (
-            f"[bold #22D3EE]{title}[/]\n"
-            f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
-            "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  "
-            "u unblock  ·  R reveal in registry"
-        )
+        """One header line: the title and how many rows the filter shows.
+
+        Keys are in the hint bar, the ``?`` sheet and (per row) the detail
+        pane's action legend; repeating them here cost four rows, which at
+        80x24 hid the table rows and the detail pane.
+        """
+
+        filter_text = f"  [dim]filter:[/] {rich_escape(self.filter_text)}" if self.filter_text else ""
+        return f"[bold #22D3EE]{title}[/]  {len(self.filtered)} of {len(self.items)}{filter_text}"
 
     def _haystack(self, row: RowT) -> str:
         parts = [str(getattr(row, field_name, "")) for field_name in self._filter_fields]

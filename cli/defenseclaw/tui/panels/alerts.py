@@ -885,25 +885,32 @@ class AlertsPanelModel:
         return AlertPanelAction(False)
 
     def summary_text(self) -> str:
+        """One header line: the counts for the current scope.
+
+        Keys live in the hint bar and the ``?`` sheet, and the scope and
+        severity chips are the button bar right below, so the body no
+        longer spends five rows on instructions: at 80x24 those rows pushed
+        the alert table and its detail pane off the screen.
+        """
+
         metrics = self._scope_metrics()
         counts = metrics.severity_counts
-        active = self.active_scope_label()
         selected = len(self.selected_ids)
-        filter_label = f"  search={self.filter_text!r}" if self.filter_text else ""
+        selected_label = f"  [bold #A78BFA]{selected} selected[/]" if selected else ""
         # ``filter_text`` is operator-typed search input that may
         # contain bracketed tokens (``target:[skill]``). Escape so the
         # markup parser can't drop the bracketed substring or, worse,
         # leave the span unclosed when the user types a stray ``[``.
+        filter_label = (
+            f"  [#9FB2CC]search:[/] {rich_escape(self.filter_text)}" if self.filter_text and not self.filtering else ""
+        )
         search_prompt = f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]" if self.filtering else ""
         return (
-            "[bold #22D3EE]Alerts[/]  [#9FB2CC]Alert queue. Click a scope or severity chip above; 1-5 selects All/Critical/High/Medium/Low.[/]\n"
-            f"[bold]Actionable {metrics.actionable_count}[/]  [bold]In scope {metrics.total_count}[/]  "
-            f"[#F87171]Critical {counts['CRITICAL']}[/]  [#FB923C]High {counts['HIGH']}[/]  "
-            f"[#FBBF24]Medium {counts['MEDIUM']}[/]  [#60A5FA]Low {counts['LOW']}[/]  "
-            f"active={active}  selected={selected}"
-            f"{filter_label}{search_prompt}\n"
-            "Next: Enter opens detail, Space selects a row, Ack selected marks chosen alerts, "
-            "Dismiss filtered clears the active view, / searches target/action/details."
+            "[bold #22D3EE]Alerts[/]  "
+            f"[bold]Actionable {metrics.actionable_count}[/] · In scope {metrics.total_count} · "
+            f"[#F87171]Critical {counts['CRITICAL']}[/] [#FB923C]High {counts['HIGH']}[/] "
+            f"[#FBBF24]Medium {counts['MEDIUM']}[/] [#60A5FA]Low {counts['LOW']}[/]"
+            f"{selected_label}{filter_label}{search_prompt}"
         )
 
     def data_table_columns(self) -> tuple[str, ...]:

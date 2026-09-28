@@ -23,7 +23,7 @@ from defenseclaw.tui.widgets.hint_bar import HintBar, HintEngine
         ("skills", "R registries"),
         ("mcps", "n add server"),
         ("plugins", "plugin install"),
-        ("inventory", "h/l switch sub-tabs"),
+        ("inventory", "h/l sub-tab"),
         ("tools", "tool block"),
         ("ai", "vendor/product/component"),
         ("registries", "S sync all"),

@@ -80,6 +80,8 @@ class HintEngine:
             return self._ai_discovery_hint(state)
         if panel in {"registry", "registries"}:
             return self._registries_hint(state)
+        if panel == "runtime":
+            return self._runtime_hint(state)
         if panel == "sandboxes":
             from defenseclaw.tui.services.sandbox_state import sandbox_keys_hint
 
@@ -175,8 +177,8 @@ class HintEngine:
                 "Enter opens details, Dismiss filtered clears the view."
             )
         return (
-            "KEYS  j/k move | Enter detail | click severity chips | Space select | "
-            "x ack | c dismiss | / search | Esc close."
+            "KEYS  j/k move | Enter detail | 1-5 severity | Space select | x ack selected | "
+            "d dismiss | c dismiss filtered | / search."
         )
 
     def _audit_hint(self, state: HintState) -> str:
@@ -214,17 +216,26 @@ class HintEngine:
     def _plugins_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "KEYS  j/k move | Enter detail | o actions | s scan | r refresh | / filter | : plugin install <name>."
+        return (
+            "KEYS  j/k move | Enter detail | o actions | s scan | b block | a allow | u unblock | "
+            "r refresh | / filter | : plugin install <name>."
+        )
 
     def _inventory_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "h/l switch sub-tabs · 1-4 filter active list · j/k scroll · Enter detail · o fast scope · r scan."
+        return (
+            "KEYS  h/l sub-tab | j/k move | Enter detail | 1 all, 2-4 filter Skills/Plugins | "
+            "o fast scan scope | r scan."
+        )
 
     def _logs_hint(self, state: HintState) -> str:
         if state.logs_paused:
             return f"Paused. Space resumes. New lines since pause: +{state.new_lines_since_pause}."
-        return "Streaming live. Space pauses, / searches, e filters errors, w filters warnings."
+        return (
+            "KEYS  h/l source | 1-8 filter | Space pause | / search | e errors | w warnings | "
+            "Enter detail | g/G top/end."
+        )
 
     def _activity_hint(self, state: HintState) -> str:
         if state.command_running:
@@ -244,12 +255,24 @@ class HintEngine:
     def _ai_discovery_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "KEYS  j/k move | Enter detail | s scan | r refresh | / search vendor/product/component."
+        return (
+            "KEYS  j/k move | t switch table | a all models | Enter detail | s scan | r refresh | "
+            "/ search vendor/product/component."
+        )
 
     def _registries_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "1 sources · 2 entries · 3 approved · s sync source · S sync all · a approve · x reject."
+        return (
+            "KEYS  1/2/3 sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
+            "a approve | x reject | d remove source."
+        )
+
+    def _runtime_hint(self, state: HintState) -> str:
+        return (
+            "KEYS  j/k move | Enter finding | / filter | e enable | s poll now | r refresh | "
+            "p planes detail."
+        )
 
     def _setup_hint(self, state: HintState, status: StatusModel | None) -> str:
         if self._command_running(state, status):

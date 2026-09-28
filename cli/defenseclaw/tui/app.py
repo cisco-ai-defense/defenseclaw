@@ -4200,11 +4200,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 / 0 / V N R A", "Switch panel by hotkey (7 Sandboxes)"),
+            ("1-9 0 A V N R", "Switch panel (panels that use digits keep them; use Tab or Ctrl+P there)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
-            ("?", "Toggle this help overlay"),
+            ("?", "Toggle this help overlay (j/k or PgUp/PgDn scroll it)"),
+            ("Ctrl+\\", "Pick a colour theme"),
+            ("Y / Ctrl+S", "Copy / save the last command's output"),
+            ("D", "Run doctor in the background"),
             ("Ctrl+C", "Cancel running command (or quit when idle)"),
         ]
 
@@ -4213,73 +4216,110 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # placeholder so the overlay never goes blank on weird panels.
         panel_sheets: dict[str, list[tuple[str, str]]] = {
             "overview": [
+                ("j/k or PgUp/PgDn", "Scroll the dashboard"),
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
                 ("m", "Switch connector mode"),
                 ("i / l", "Jump to Inventory / Logs"),
+                ("N", "Turn notifications on or off"),
+                ("u / X", "Upgrade / uninstall (both preview first)"),
             ],
             "alerts": [
                 ("j/k or Up/Down", "Navigate alerts"),
                 ("Enter", "Toggle detail pane"),
                 ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low)"),
+                ("/", "Search target / action / details"),
                 ("Space", "Toggle select current alert"),
                 ("a / A or X", "Select all filtered / deselect all"),
                 ("x", "Acknowledge selected alerts"),
-                ("c / C", "Clear filtered / Clear ALL alerts"),
+                ("d", "Dismiss the highlighted alert"),
+                ("c / C", "Dismiss filtered / dismiss ALL alerts"),
                 ("y", "Copy alert details to clipboard"),
+                ("r", "Refresh"),
+                ("Esc", "Close detail / clear search"),
             ],
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("/", "Filter (Enter or Esc returns to the list)"),
+                ("s / b / a / u", "Scan / block / allow / unblock selected"),
+                ("o", "Open the action menu (every action for the row)"),
+                ("R", "Show the row's registry entry"),
                 ("r", "Refresh"),
-                ("s / b / a", "Scan / block / allow selected"),
-                ("o", "Open action menu"),
             ],
             "mcps": [
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("/", "Filter (Enter or Esc returns to the list)"),
+                ("s / b / a / u", "Scan / block / allow / unblock selected"),
+                ("n", "Add or update an MCP server"),
+                ("o", "Open the action menu (every action for the row)"),
+                ("R", "Show the row's registry entry"),
                 ("r", "Refresh"),
-                ("s / b / a", "Scan / block / allow selected"),
-                ("o", "Open action menu"),
             ],
             "plugins": [
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("/", "Filter (Enter or Esc returns to the list)"),
+                ("s / b / a / u", "Scan / block / allow / unblock selected"),
+                ("o", "Open the action menu (every action for the row)"),
                 ("r", "Refresh"),
-                ("s / b / a", "Scan / block / allow selected"),
             ],
             "inventory": [
+                ("h/l or Tab", "Switch sub-tab"),
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
-                ("r", "Refresh"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("1 / 2-4", "Show all / filter the Skills and Plugins sub-tabs"),
+                ("o", "Toggle a faster scan of skills and plugins only"),
+                ("r", "Scan inventory"),
             ],
             "logs": [
+                ("h/l", "Switch source (Gateway / Verdicts / OTEL / Watchdog)"),
+                ("j/k or Up/Down", "Select a line"),
+                ("Enter", "Open the selected line"),
+                ("1-8 / f", "Filter preset / cycle presets"),
+                ("e / w", "Errors only / warnings and worse"),
                 ("Space", "Pause / resume auto-scroll"),
                 ("/", "Search"),
-                ("e", "Errors only"),
-                ("w", "Warnings+"),
                 ("G / g", "Jump to end / start"),
+                ("a / t / s", "Verdicts: filter action / event type / severity"),
+                ("J", "Verdicts: judge response history"),
+                ("N", "Turn notifications on or off"),
             ],
             "audit": [
                 ("j/k or Up/Down", "Navigate entries"),
-                ("/", "Filter"),
-                ("e", "Export to JSON"),
                 ("Enter", "Open detail"),
+                ("1-5", "All / risk / blocks / scans / credentials"),
+                ("/", "Search with field:value terms"),
+                ("t / u", "Same target / same run as the selected event"),
+                ("e", "Export to JSON"),
+                ("r", "Refresh"),
             ],
             "activity": [
+                ("1 / 2", "Commands / gateway activity"),
                 ("j/k or Up/Down", "Navigate entries"),
                 ("Enter", "Expand / collapse output"),
+                ("t / Esc", "Terminal view / back to the history"),
                 ("!", "Rerun last command"),
-                ("Y", "Copy selected output"),
-                ("Ctrl+S", "Save selected output to file"),
             ],
             "ai": [
                 ("j/k or Up/Down", "Navigate the selected table"),
                 ("t", "Switch product / model table"),
+                ("Enter", "Open detail"),
+                ("/", "Search vendor / product / component"),
                 ("a", "Show all / recommended models"),
+                ("s", "Scan now"),
                 ("r", "Refresh discovery"),
-                ("e", "Export snapshot"),
+            ],
+            "runtime": [
+                ("j/k or Up/Down", "Navigate findings"),
+                ("Enter / Esc", "Open / close a finding"),
+                ("/", "Filter findings (Enter keeps it, Esc clears it)"),
+                ("e", "Enable the user-level planes"),
+                ("s", "Poll the planes now"),
+                ("p", "Expand / collapse the plane list"),
+                ("r", "Refresh"),
             ],
             "sandboxes": [
                 ("j/k or Up/Down", "Navigate the selected view"),
@@ -4294,7 +4334,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
             ],
             "registries": [
-                ("j/k or Up/Down", "Navigate registries"),
+                ("1 / 2 / 3", "Sources / entries / approved"),
+                ("j/k or Up/Down", "Navigate rows"),
+                ("Enter / Esc", "Open / close detail"),
+                ("s / S", "Sync the selected source / sync all"),
+                ("a / x", "Approve / reject the selected entry"),
+                ("R", "Require registry approval for the entry's type"),
+                ("d", "Remove the selected source"),
                 ("r", "Refresh"),
             ],
             "policies": [
@@ -4321,10 +4367,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         running_section: list[tuple[str, str]] = [
             ("Ctrl+C", "Send SIGINT to the running subprocess"),
-            ("!", "Rerun the most recent command"),
-            ("Y", "Copy current output to clipboard"),
-            ("Ctrl+S", "Save current output to ~/.defenseclaw/tui/last-run.log"),
-            ("D", "Run defenseclaw doctor in the background"),
+            ("A", "Open Activity to watch the output live"),
+            ("Y / Ctrl+S", "Copy / save its output (~/.defenseclaw/tui/last-run.log)"),
         ]
 
         return [
@@ -4397,13 +4441,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._table_rows = self.registries_model.data_table_rows()
             tab = self.registries_model.current_tab.name.title()
             empty = self.registries_model.empty_state()
-            suffix = f"\n\n{empty}" if empty else ""
-            self.body_text = (
-                f"[bold #22D3EE]Registries[/]  {tab}\n"
-                "Keys: 1 sources, 2 entries, 3 approved, r refresh, s sync source, S sync all, "
-                "a approve, x reject, d remove source."
-                f"{suffix}"
-            )
+            suffix = f"\n{rich_escape(empty)}" if empty else ""
+            # Keys are in the hint bar and the ? sheet; the body stays one
+            # line so the table is on screen at 80x24.
+            self.body_text = f"[bold #22D3EE]Registries[/]  {tab}{suffix}"
             return self.body_text
         if self.active_panel == "inventory":
             self._sync_catalog_connector_filters()
@@ -4416,25 +4457,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "ai":
             self._table_columns = self.ai_discovery_model.data_table_columns()
             self._table_rows = self.ai_discovery_model.data_table_rows()
-            detail = ""
-            if self.ai_discovery_model.detail_open:
-                detail = self._ai_discovery_detail_text()
             empty = self.ai_discovery_model.empty_state()
-            header = ", ".join(self.ai_discovery_model.header_parts())
+            # "active=0" -> "active 0": the header is for people, not a log line.
+            header = " · ".join(
+                part.replace("model-lookup", "model lookup").replace("=", " ")
+                for part in self.ai_discovery_model.header_parts()
+            )
             filter_prompt = ""
             if self.ai_discovery_model.filtering:
                 filter_prompt = f"\nFilter: / {rich_escape(self.ai_discovery_model.filter_text)}"
             elif self.ai_discovery_model.filter_text:
                 filter_prompt = f"\nFilter: {rich_escape(self.ai_discovery_model.filter_text)}"
-            suffix = f"\n\n{detail}" if detail else f"\n\n{empty}" if empty else ""
-            self.body_text = (
-                f"[bold #22D3EE]AI Discovery[/]  {header}\n"
-                "Keys: r refresh usage, s scan, t switch table, a all/recommended models, "
-                "Enter detail, / filter. "
-                "Click either table to select a row."
-                f"{filter_prompt}"
-                f"{suffix}"
-            )
+            # The open row's detail is drawn once, in the detail pane below
+            # the tables; it used to be repeated here, which squeezed the
+            # product table down to its header. Keys are in the hint bar
+            # and the ? sheet.
+            suffix = f"\n{rich_escape(empty)}" if empty else ""
+            self.body_text = f"[bold #22D3EE]AI Discovery[/]  {rich_escape(header)}{filter_prompt}{suffix}"
             return self.body_text
         if self.active_panel == "runtime":
             self._table_columns = self.runtime_model.data_table_columns()
@@ -4524,20 +4563,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if snap.scanned_at:
             meta.append(f"[{TOKENS.text_muted}]polled {rich_escape(snap.scanned_at)}[/]")
 
+        # One header line and one sentence of health, then only what adds
+        # information: at 80x24 the old layout (blank spacer rows, a COVERAGE
+        # block of zeros, a "Keys:" line and "Click Enable Runtime" four
+        # times) pushed the findings table and the buttons off the screen.
         lines = [
-            f"[bold {TOKENS.accent_cyan}]AI Discovery Runtime[/]  "
+            f"[bold {TOKENS.accent_cyan}]Runtime[/]  "
             f"[bold {color}]● {title}[/]  "
             + "  ".join(meta),
-            "",
-            f"[bold {color}]{title}[/]  [{TOKENS.text_secondary}]{rich_escape(model.health_explanation())}[/]",
-            "",
-            f"[bold {TOKENS.text_primary}]PLANES[/]",
+            f"[{TOKENS.text_secondary}]{rich_escape(model.health_explanation())}[/]",
         ]
         if not snap.planes:
-            lines.append(
-                f"  [{TOKENS.text_muted}]plane health unavailable: the gateway reported no planes[/]"
-            )
-        elif model.planes_expanded:
+            if snap.enabled:
+                lines.append(f"[{TOKENS.text_muted}]Planes: the gateway has not reported any yet.[/]")
+        elif model.planes_expanded == (self.size.height >= 32 or self.size.height == 0):
+            # Short terminals start on the one-line plane strip (p expands
+            # it) so the findings table stays on screen.
+            lines.append(f"[bold {TOKENS.text_primary}]PLANES[/]")
             for plane in snap.planes:
                 badge = plane.badge.upper()
                 hue = badge_color.get(plane.badge, TOKENS.text_muted)
@@ -4553,50 +4595,44 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 if fix:
                     lines.append(f"           [{TOKENS.accent_cyan}]→ {rich_escape(fix)}[/]")
         else:
-            for compact in model.plane_strip():
-                lines.append(f"  [{TOKENS.text_secondary}]{rich_escape(compact)}[/]")
+            strip = "  ·  ".join(rich_escape(compact) for compact in model.plane_strip())
+            lines.append(f"[{TOKENS.text_secondary}]Planes: {strip}[/]")
 
-        skipped = f"  [{TOKENS.text_muted}]({snap.processes_skipped} partial)[/]" if snap.processes_skipped else ""
-        unattrib = (
-            f"  [{TOKENS.accent_amber}]({snap.connections_unattributed} unattributed)[/]"
-            if snap.connections_unattributed
-            else ""
-        )
-        context = model.findings_context()
-        next_action = model.next_action()
-        lines.extend(
-            [
-                "",
-                f"[bold {TOKENS.text_primary}]COVERAGE[/]",
-                f"  [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes watched{skipped}",
-                f"  [{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections seen{unattrib}",
-                f"  [{TOKENS.accent_cyan}]{snap.host_plane_observations}[/] Plane C kernel events classified; "
-                f"[{TOKENS.text_muted}]{snap.host_plane_gated} excluded outside AI-agent lineage[/]",
-                f"  [{TOKENS.text_secondary}]{rich_escape(context)}[/]",
-            ]
-        )
-        if next_action:
-            lines.append(f"  [{TOKENS.accent_cyan}]→ {rich_escape(next_action)}[/]")
-
-        keys = (
-            "Keys: e enable user-level planes · r refresh · s poll now · p compact planes · "
-            "Enter finding · / filter"
-        )
-        lines.extend(["", f"[{TOKENS.text_muted}]{keys}[/]"])
+        if not snap.enabled:
+            lines.append(
+                f"[{TOKENS.text_muted}]Or run:[/] defenseclaw agent discovery runtime enable --no-enable-host-plane"
+            )
+        else:
+            skipped = f" ({snap.processes_skipped} partial)" if snap.processes_skipped else ""
+            unattrib = f" ({snap.connections_unattributed} unattributed)" if snap.connections_unattributed else ""
+            coverage = (
+                f"Watching [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes{skipped} · "
+                f"[{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections{unattrib}"
+            )
+            if snap.scanned_at:
+                # The findings context already says how much was watched.
+                coverage = f"[{TOKENS.text_secondary}]{rich_escape(model.findings_context())}[/]"
+            if snap.host_plane_observations or snap.host_plane_gated:
+                coverage += (
+                    f" · [{TOKENS.accent_cyan}]{snap.host_plane_observations}[/] kernel events from AI agents"
+                    f" [{TOKENS.text_muted}]({snap.host_plane_gated} from other processes ignored)[/]"
+                )
+            lines.append(coverage)
+            next_action = model.next_action()
+            if next_action:
+                lines.append(f"[{TOKENS.accent_cyan}]→ {rich_escape(next_action)}[/]")
 
         if model.filtering:
             lines.append(f"Filter: / {rich_escape(model.filter_text)}")
         elif model.filter_text:
             lines.append(f"Filter: {rich_escape(model.filter_text)}")
+        if model.filter_text and not model.filtered:
+            lines.append(f"[{TOKENS.text_muted}]No findings match the filter. Esc clears it.[/]")
 
         if model.detail_open:
             detail = model.detail_text()
             if detail:
                 lines.extend(["", rich_escape(detail)])
-        else:
-            empty = model.empty_state()
-            if empty and not model.filtered:
-                lines.extend(["", f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]"])
         return "\n".join(lines)
 
     def _render_native_widgets(self) -> None:
@@ -9323,51 +9359,68 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             for tab in self.inventory_model.subtab_info()
         )
         scope = self.inventory_model.scope_state()
-        chips = " ".join(
-            f"[{TOKENS.accent_violet} bold]{chip.label}[/]"
-            if chip.active
-            else f"[{TOKENS.text_muted}]{chip.label}[/]"
-            for chip in scope.chips
+        scanned = [chip.category for chip in scope.chips if chip.active]
+        scan_scope = (
+            "all categories"
+            if not self.inventory_model.category_scope
+            else ", ".join(scanned) + (" (fast)" if self.inventory_model.is_fast_scan() else "")
         )
-        filter_text = f"  filter={self.inventory_model.filter or 'all'}"
+        filter_text = (
+            f"  [{TOKENS.text_muted}]showing:[/] {self.inventory_model.filter}" if self.inventory_model.filter else ""
+        )
         # 8.13: surface the shared connector filter chip (multi-connector
         # installs) so it's explicit which connector's inventory is shown and
         # how to change it. Empty for single-connector installs.
         connector_chip = self._connector_chip_text()
+        # Keys are in the hint bar and the ? sheet; a "Keys:" line here
+        # pushed the table below the fold at 80x24.
         return (
-            "[bold #22D3EE]Inventory[/]\n"
+            f"[bold #22D3EE]Inventory[/]  [{TOKENS.text_muted}]r scans:[/] {scan_scope}{filter_text}\n"
             f"{connector_chip}"
-            f"{tabs}\n"
-            f"{scope.label}: {chips} {scope.hint}{filter_text}\n"
-            "Keys: h/l sub-tabs, 1 all, 2/3/4 filter Skills or Plugins, r reload, o fast scope, Enter detail."
+            f"{tabs}"
         )
 
     def _logs_body_text(self) -> str:
+        """Header, search and (for Verdicts) the extra filter rows.
+
+        The source tabs and filter presets are the two button bars right
+        below, so they are not repeated here. They were, with numbers
+        ("2 Verdicts") that read as shortcuts although 1-8 pick filter
+        presets, and at 80x24 those rows hid every log line.
+        """
+
         header = self.logs_model.header_state()
-        tabs = "  ".join(
-            f"[{TOKENS.accent_violet} bold]{index}:{tab.label}[/]"
-            if tab.active
-            else f"[{TOKENS.text_secondary}]{index} {tab.label}[/]"
-            for index, tab in enumerate(header.tabs, start=1)
-        )
+        source = next((tab.label for tab in header.tabs if tab.active), "")
         status_color = TOKENS.accent_green if header.status.style_key == "live" else TOKENS.accent_amber
         lines = [
-            "[bold #22D3EE]Logs[/]",
-            f"{tabs}  [{status_color} bold]{header.status.label}[/]  {header.line_count_label}",
+            f"[bold #22D3EE]Logs[/]  [{TOKENS.accent_violet} bold]{rich_escape(source)}[/]  "
+            f"[{status_color} bold]{header.status.label}[/]  {header.line_count_label}",
         ]
         if header.search_label:
-            lines.append(f"[{TOKENS.accent_cyan}]{header.search_label}[/]")
+            lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(header.search_label)}[/]")
         if header.search_prompt:
-            lines.append(f"[{TOKENS.accent_cyan}]{header.search_prompt}[/]")
+            lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(header.search_prompt)}[/]")
         for group in self.logs_model.chip_groups():
+            if group.group == "preset":
+                continue
             chips = "  ".join(
-                f"[{TOKENS.accent_violet} bold]{(chip.shortcut + ' ' if chip.shortcut else '')}{chip.label}[/]"
+                f"[{TOKENS.accent_violet} bold]{chip.label}[/]"
                 if chip.active
-                else f"[{TOKENS.text_secondary}]{(chip.shortcut + ' ' if chip.shortcut else '')}{chip.label}[/]"
+                else f"[{TOKENS.text_secondary}]{chip.label}[/]"
                 for chip in group.chips
             )
-            lines.append(f"{group.label} {chips}")
-        lines.append(self.logs_model.hint_text())
+            lines.append(f"{group.shortcut} {group.label} {chips}")
+        if not self._table_rows:
+            error = self.logs_model.error_messages.get(self.logs_model.source, "")
+            if error:
+                lines.append(f"[{TOKENS.accent_amber}]{rich_escape(error)}[/]")
+            elif self.logs_model.lines.get(self.logs_model.source):
+                lines.append(f"[{TOKENS.text_muted}]No lines match this filter. Press 1 for All.[/]")
+            else:
+                lines.append(
+                    f"[{TOKENS.text_muted}]No {rich_escape(source)} lines yet. They appear here once "
+                    "the gateway is running (run doctor from : if it isn't).[/]"
+                )
         return "\n".join(lines)
 
     def _audit_body_text(self) -> str:
@@ -9383,10 +9436,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # ``_render_chrome`` call after a setup change like toggling
         # redaction).
         actions = "  ".join(f"\\[{action.key}] {action.label}" for action in toolbar.actions)
-        lines = [
-            "[bold #22D3EE]Audit Trail[/]  [#9FB2CC]Click common filters above, or search with field:value terms.[/]",
-            f"{toolbar.summary_label}  {actions}",
-        ]
+        # The rest of the keys are in the hint bar and the ? sheet; the body
+        # keeps to one header line, the active filter and the search prompt
+        # so the event table stays on screen at 80x24.
+        lines = [f"[bold #22D3EE]Audit Trail[/]  {toolbar.summary_label}  [{TOKENS.text_muted}]{actions}[/]"]
         # ``filter_label`` and ``search_prompt`` are operator-supplied:
         # the filter chip and the ``/`` search field both echo whatever
         # the user typed (e.g. ``target:[skill]``). Without escaping,
@@ -9399,15 +9452,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             lines.append(rich_escape(toolbar.filter_label))
         if toolbar.search_prompt:
             lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(toolbar.search_prompt)}[/]")
+            lines.append(
+                f"[{TOKENS.text_muted}]Search by field: severity:HIGH action:block target:skill run:<id>. "
+                "Enter applies, Esc clears.[/]"
+            )
         if self.audit_model.error_message:
             lines.append(
                 f"[{TOKENS.accent_amber}]{rich_escape(self.audit_model.error_message)}; "
                 "showing the last successful snapshot.[/]"
             )
-        lines.append(
-            "Search examples: severity:HIGH action:block target:skill run:<id>. "
-            "Use Same target or Same run to correlate the selected event."
-        )
+        if not self.audit_model.items and not self.audit_model.error_message:
+            lines.append(
+                f"[{TOKENS.text_muted}]No audit events yet. Scans, blocks, approvals and config "
+                "changes are recorded here as they happen.[/]"
+            )
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
