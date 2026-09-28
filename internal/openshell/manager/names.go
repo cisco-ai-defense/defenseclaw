@@ -68,6 +68,16 @@ func (m *Manager) managedSelector() map[string]string {
 	return map[string]string{LabelManaged: "true", LabelOwner: m.opts.Owner}
 }
 
+// ownsLabels reports labels of an object this data dir created.
+func (m *Manager) ownsLabels(labels map[string]string) bool {
+	return managedBy(labels, m.opts.Owner)
+}
+
+// managedBy reports labels of an object DefenseClaw created for owner.
+func managedBy(labels map[string]string, owner string) bool {
+	return owner != "" && labels[LabelManaged] == "true" && labels[LabelOwner] == owner
+}
+
 var dnsUnsafe = regexp.MustCompile(`[^a-z0-9-]+`)
 
 // nameSuffixLen is the "-<rand4>" of a generated name.

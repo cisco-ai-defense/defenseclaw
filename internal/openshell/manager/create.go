@@ -466,16 +466,15 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	m.toolCalls.Begin(rec.BindingID)
 	m.lifecycle(ctx, b, audit.SandboxPhaseCreating, audit.SandboxTriggerCreate, false, nil, nil)
 	sbSpec := &openshell.SandboxSpec{Environment: envOut, Template: tmpl, Providers: providerNames, Policy: pol}
+	// Registered before the request: a failure that leaves open whether
+	// OpenShell created the sandbox (the gateway restarting under the
+	// call, a deadline) must not leave one behind that holds the project
+	// mount and providers with no record.
+	rb.add("delete sandbox", func(ctx context.Context) error { return m.deleteCreated(ctx, gw, name) })
 	if _, err := gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
 		m.dropGateway(gw, err)
 		return nil, upstream("create sandbox "+name, err)
 	}
-	rb.add("delete sandbox", func(ctx context.Context) error {
-		if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil {
-			return err
-		}
-		return gw.Client.WaitDeleted(ctx, name)
-	})
 	sb, err := gw.Client.WaitReady(ctx, name)
 	if err != nil {
 		var rejected *openshell.ConfigurationRejectedError
@@ -509,6 +508,38 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	m.refreshEgress()
 	view := m.viewOf(b)
 	return &view, nil
+}
+
+// deleteCreated is a failed create's rollback of its sandbox: it deletes
+// the sandbox of that name when it carries this data dir's labels (create
+// checked that none existed before, so it is the one this create made),
+// and leaves a sandbox someone else created under the name alone.
+func (m *Manager) deleteCreated(ctx context.Context, gw *Gateway, name string) error {
+	gw = m.liveGateway(ctx, gw)
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	switch {
+	case openshell.IsNotFound(err):
+		return nil
+	case err != nil:
+		return err
+	case !m.ownsLabels(sb.Labels):
+		return nil
+	}
+	if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil && !openshell.IsNotFound(err) {
+		return err
+	}
+	return gw.Client.WaitDeleted(ctx, name)
+}
+
+// liveGateway is the connection for a step that must not fail only because
+// gw was dropped meanwhile (a rollback after the gateway went away under
+// the create): the current connection, redialled when there is none, else
+// gw.
+func (m *Manager) liveGateway(ctx context.Context, gw *Gateway) *Gateway {
+	if cur, err := m.gateway(ctx); err == nil {
+		return cur
+	}
+	return gw
 }
 
 // createFailed reports a failed create after its rollback.
@@ -562,7 +593,10 @@ func (m *Manager) providers(ctx context.Context, gw *Gateway, cfg *config.Config
 			}
 		}
 		rb.add("delete provider "+pname, func(ctx context.Context) error {
-			_, err := gw.Client.DeleteProvider(ctx, pname)
+			_, err := m.liveGateway(ctx, gw).Client.DeleteProvider(ctx, pname)
+			if openshell.IsNotFound(err) {
+				err = nil
+			}
 			return err
 		})
 		names = append(names, pname)
@@ -600,6 +634,19 @@ func (m *Manager) providers(ctx context.Context, gw *Gateway, cfg *config.Config
 		if err := create(roleLLM, 0, llm.profile.ID, llm.credentials); err != nil {
 			return nil, nil, err
 		}
+	}
+	if len(creds) > 0 {
+		// Rolled back after the providers (steps run newest first): the
+		// --credential profiles this create imported are collected once no
+		// provider uses them, as a delete collects them.
+		ids := make([]string, 0, len(creds))
+		for _, c := range creds {
+			ids = append(ids, c.profile.ID)
+		}
+		rb.add("release credential profiles", func(ctx context.Context) error {
+			m.releaseCredentialProfiles(ctx, m.liveGateway(ctx, gw), ids)
+			return nil
+		})
 	}
 	for i, c := range creds {
 		if err := m.credentialProvider(ctx, gw, c, func() error {
