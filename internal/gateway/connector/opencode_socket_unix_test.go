@@ -147,7 +147,7 @@ for (const call of ["c1", "c2"]) {
 
 	deny, dir := fakeForeignHookGuard(t, `{"deny":true,"reason":"enterprise_foreign_hook_blocked: The project file /work/repo/.opencode/plugins/x.js adds a plugin"}`)
 	got := run(deny)
-	if strings.Count(got, "THREW:DefenseClaw blocked this tool call under policy, so it did not run: enterprise_foreign_hook_blocked") != 2 {
+	if strings.Count(got, "THREW:DefenseClaw blocked this tool call under policy, so it did not run: The project file /work/repo/.opencode/plugins/x.js") != 2 {
 		t.Fatalf("a denying guard must abort every call: %q", got)
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args"))

@@ -23,7 +23,7 @@ Two lifecycle actions report on a deployment. Neither one changes the host.
 
 | Action | What it does | Use it for |
 | --- | --- | --- |
-| `status` | Reports the recorded state: installed version, services, readiness, machine policy, and enrollment counts | Inventory and dashboards |
+| `status` | Reports the recorded state: installed version, services, readiness, machine policy, and enrollment counts. On Linux and macOS it also runs the basic checks (files, services, gateway health); each problem is an error, and the command exits non-zero | Inventory and dashboards |
 | `verify` | Runs every check. On Linux and macOS: file digests, owners and modes, the config and credentials against what was last applied, the runtime descriptor, the service account, required services, gateway health, and the guardian's authorization ledger. On Windows: files, DACLs, service settings, the mode pin, and readiness. Each problem is an error, and the command exits non-zero | Compliance and alerting |
 
 ```bash title="Linux"

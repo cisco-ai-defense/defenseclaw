@@ -146,7 +146,8 @@ for (const [stdout, exit, pattern] of [
 // which the gateway records.
 {
   const hooks = await load({ guard: JSON.stringify({ deny: true, reason: "enterprise_foreign_hook_blocked: rewrite.js" }) });
-  await assert.rejects(before(hooks), /rewrite\.js/);
+  // The notice reads from DefenseClaw's sentence to the guard's; the reason code stays in the audit.
+  await assert.rejects(before(hooks), /under your organization's policy, so it did not run: rewrite\.js/);
   answer("guard.json", JSON.stringify({ deny: false }));
   resetCalls();
   await assert.rejects(before(hooks), /rewrite\.js/);
@@ -154,6 +155,12 @@ for (const [stdout, exit, pattern] of [
   assert.equal(rest.length, 0, "a blocked process never forwards the call");
   assert.ok(check && check.args.includes("--foreign-hook-check"), "a denied call runs the guard check");
   assert.equal(JSON.parse(check.stdin).hook_event_name, "tool.execute.before");
+}
+// A guard reason that starts with DefenseClaw after its code still gets the
+// sentence that the call did not run.
+{
+  const hooks = await load({ guard: JSON.stringify({ deny: true, reason: "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record." }) });
+  await assert.rejects(before(hooks), /so it did not run: DefenseClaw cannot verify/);
 }
 {
   const hooks = await load({ guard: "garbage" });

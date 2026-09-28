@@ -287,6 +287,15 @@ function foreignCheckFailure(event: string, why: string): string {
 	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
 }
 
+// foreignBlockText is the guard's block reason for the user and the model:
+// what DefenseClaw did, then the guard's sentence without its reason code
+// (the audit keeps it). A reason this plugin wrote already says it.
+function foreignBlockText(what: string, reason: string): string {
+	const text = reason.trim()
+	if (/^DefenseClaw\b/.test(text)) return text
+	return `${what}: ${text.replace(/^enterprise_foreign_hook_blocked:\s*/, "")}`
+}
+
 // deploymentRemoved reports whether the managed deployment that rendered this
 // plugin was uninstalled: its install marker is definitively absent. Any
 // other inspection result keeps the plugin enforcing.
@@ -515,12 +524,15 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			const blocked = await foreignHookCheck("agent.start")
 			if (blocked) {
 				await ctx.thread.cancel()
+				const notice = foreignBlockText("DefenseClaw stopped this turn", blocked)
 				try {
-					await ctx.ui.notify(blocked)
+					await ctx.ui.notify(notice)
 				} catch {
 					// Cancellation is the policy action; notice is best effort.
 				}
-				return {}
+				// The notice fades after a few seconds; the message stays in
+				// the thread with the prompt.
+				return { message: { content: notice, display: true } }
 			}
 		}
 		const threadID = stringID(event.thread.id)
@@ -545,7 +557,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 	amp.on("tool.call", async (event, ctx): Promise<ToolCallResult> => {
 		const blocked = await foreignHookCheck("tool.call")
-		if (blocked) return { action: "reject-and-continue", message: blocked }
+		if (blocked) return { action: "reject-and-continue", message: foreignBlockText("DefenseClaw blocked this tool call", blocked) }
 		const threadID = stringID(event.thread.id)
 		const toolUseID = stringID(event.toolUseID)
 		const verdict = await post({
