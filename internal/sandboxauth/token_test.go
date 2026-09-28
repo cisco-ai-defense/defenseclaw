@@ -16,52 +16,42 @@
 
 package sandboxauth
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTokenShapeAndUniqueness(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 64; i++ {
 		tok, err := newToken()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !LooksLikeToken(tok) || !HasTokenPrefix(tok) {
-			t.Fatalf("token %q has the wrong shape", tok)
-		}
-		if seen[tok] {
-			t.Fatal("token repeated")
+		if err != nil || !LooksLikeToken(tok) || !HasTokenPrefix(tok) || seen[tok] {
+			t.Fatalf("token %q (%v) has the wrong shape or repeated", tok, err)
 		}
 		seen[tok] = true
-		id, err := newBindingID()
-		if err != nil || !bindingIDPattern.MatchString(id) {
+		if id, err := newBindingID(); err != nil || !bindingIDPattern.MatchString(id) {
 			t.Fatalf("binding id %q: %v", id, err)
 		}
 	}
 }
 
-func TestHashToken(t *testing.T) {
+func TestHashAndLooksLikeToken(t *testing.T) {
 	// printf dcsb_test | shasum -a 256
 	const want = "e3a49790fc6fd0819767d9a13a62c3cc498a48676a275f8e2c9bfcbce93d78c6"
-	if got := HashToken("dcsb_test"); got != want {
-		t.Fatalf("HashToken = %q, want %q", got, want)
+	if got := HashToken("dcsb_test"); got != want || !tokenHashPattern.MatchString(got) || HashToken("dcsb_tesT") == want {
+		t.Fatalf("HashToken = %q, want the lowercase hex sha256 %q", got, want)
 	}
-	if !tokenHashPattern.MatchString(want) || HashToken("dcsb_tesT") == want {
-		t.Fatal("hash is not a lowercase hex sha256 digest")
-	}
-}
-
-func TestLooksLikeToken(t *testing.T) {
 	for s, want := range map[string]bool{
-		"":                          false,
-		"dcsb_":                     false,
-		"dcsb_" + repeat("A", 42):   false,
-		"dcsb_" + repeat("A", 43):   true,
-		"dcsb_" + repeat("-", 43):   true,
-		"dcsb_" + repeat("A", 44):   false,
-		"dcsb_" + repeat("+", 43):   false,
-		" dcsb_" + repeat("A", 43):  false,
-		"DCSB_" + repeat("A", 43):   false,
-		"openshell:resolve:env:KEY": false,
+		"":                                 false,
+		"dcsb_":                            false,
+		"dcsb_" + strings.Repeat("A", 42):  false,
+		"dcsb_" + strings.Repeat("A", 43):  true,
+		"dcsb_" + strings.Repeat("-", 43):  true,
+		"dcsb_" + strings.Repeat("A", 44):  false,
+		"dcsb_" + strings.Repeat("+", 43):  false,
+		" dcsb_" + strings.Repeat("A", 43): false,
+		"DCSB_" + strings.Repeat("A", 43):  false,
+		"openshell:resolve:env:KEY":        false,
 	} {
 		if got := LooksLikeToken(s); got != want {
 			t.Errorf("LooksLikeToken(%q) = %v, want %v", s, got, want)
@@ -70,12 +60,4 @@ func TestLooksLikeToken(t *testing.T) {
 	if !HasTokenPrefix(" dcsb_x") || HasTokenPrefix("xdcsb_") {
 		t.Fatal("HasTokenPrefix")
 	}
-}
-
-func repeat(s string, n int) string {
-	out := ""
-	for i := 0; i < n; i++ {
-		out += s
-	}
-	return out
 }

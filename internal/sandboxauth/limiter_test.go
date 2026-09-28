@@ -23,43 +23,38 @@ import (
 	"time"
 )
 
+// admit takes one slot and returns it at once, failing when the limiter refuses.
+func admit(t *testing.T, l *Limiter, b Binding, route Route) {
+	t.Helper()
+	release, err := l.Acquire(b, route)
+	if err != nil {
+		t.Fatalf("Acquire(%s, %s): %v", b.ID, route, err)
+	}
+	release()
+}
+
+// refuse checks that the limiter turns a request away with want.
+func refuse(t *testing.T, l *Limiter, b Binding, route Route, want error) {
+	t.Helper()
+	if _, err := l.Acquire(b, route); !errors.Is(err, want) {
+		t.Fatalf("Acquire(%s, %s) = %v, want %v", b.ID, route, err, want)
+	}
+}
+
 func TestLimiterBurstRefillAndIsolation(t *testing.T) {
-	clock := newFakeNow()
+	clock := newTestClock()
 	l := NewLimiter(LimiterConfig{HookRPS: 2, HookBurst: 3, OTLPRPS: 1, OTLPBurst: 1, MaxInFlight: 100, Now: clock.Now})
-	a := Binding{ID: "sb_a"}
-	b := Binding{ID: "sb_b"}
+	a, b := Binding{ID: "sb_a"}, Binding{ID: "sb_b"}
 	for i := 0; i < 3; i++ {
-		release, err := l.Acquire(a, RouteHook)
-		if err != nil {
-			t.Fatalf("hook %d: %v", i, err)
-		}
-		release()
+		admit(t, l, a, RouteHook)
 	}
-	if _, err := l.Acquire(a, RouteHook); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("burst exhausted: %v", err)
-	}
-	// Another binding has its own bucket.
-	if release, err := l.Acquire(b, RouteHook); err != nil {
-		t.Fatalf("other binding throttled: %v", err)
-	} else {
-		release()
-	}
-	// OTLP has its own bucket, so telemetry cannot starve hooks and hooks
-	// cannot starve telemetry.
-	if release, err := l.Acquire(a, RouteOTLP); err != nil {
-		t.Fatalf("otlp bucket shared with hooks: %v", err)
-	} else {
-		release()
-	}
-	if _, err := l.Acquire(a, RouteOTLP); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("otlp burst exhausted: %v", err)
-	}
+	refuse(t, l, a, RouteHook, ErrRateLimited)
+	admit(t, l, b, RouteHook) // another binding has its own bucket
+	// OTLP has its own bucket, so telemetry and hooks cannot starve each other.
+	admit(t, l, a, RouteOTLP)
+	refuse(t, l, a, RouteOTLP, ErrRateLimited)
 	clock.Advance(500 * time.Millisecond)
-	if release, err := l.Acquire(a, RouteHook); err != nil {
-		t.Fatalf("bucket did not refill: %v", err)
-	} else {
-		release()
-	}
+	admit(t, l, a, RouteHook)
 }
 
 func TestLimiterInFlightCap(t *testing.T) {
@@ -73,16 +68,10 @@ func TestLimiterInFlightCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Acquire(b, RouteNotify); !errors.Is(err, ErrTooManyInFlight) {
-		t.Fatalf("cap not enforced: %v", err)
-	}
+	refuse(t, l, b, RouteNotify, ErrTooManyInFlight)
 	r1()
 	r1() // idempotent
-	if r3, err := l.Acquire(b, RouteHook); err != nil {
-		t.Fatalf("slot not returned: %v", err)
-	} else {
-		r3()
-	}
+	admit(t, l, b, RouteHook)
 	r2()
 }
 
@@ -96,7 +85,7 @@ func TestLimiterOTLPHasItsOwnSlots(t *testing.T) {
 	})
 	a, b, c := Binding{ID: "sb_a"}, Binding{ID: "sb_b"}, Binding{ID: "sb_c"}
 	var releases []func()
-	acquire := func(binding Binding, route Route) {
+	hold := func(binding Binding, route Route) {
 		t.Helper()
 		release, err := l.Acquire(binding, route)
 		if err != nil {
@@ -104,35 +93,21 @@ func TestLimiterOTLPHasItsOwnSlots(t *testing.T) {
 		}
 		releases = append(releases, release)
 	}
-	acquire(a, RouteOTLP)
-	acquire(a, RouteOTLP)
-	if _, err := l.Acquire(a, RouteOTLP); !errors.Is(err, ErrTooManyInFlight) {
-		t.Fatalf("per-binding otlp cap: %v", err)
-	}
+	hold(a, RouteOTLP)
+	hold(a, RouteOTLP)
+	refuse(t, l, a, RouteOTLP, ErrTooManyInFlight) // per-binding otlp cap
 	// Open uploads do not hold the hook slot.
-	acquire(a, RouteHook)
-	if _, err := l.Acquire(a, RouteHook); !errors.Is(err, ErrTooManyInFlight) {
-		t.Fatalf("hook cap: %v", err)
-	}
+	hold(a, RouteHook)
+	refuse(t, l, a, RouteHook, ErrTooManyInFlight)
 	// A full hook slot does not block telemetry of another binding, but the
-	// cross-binding total does.
-	acquire(b, RouteOTLP)
-	if _, err := l.Acquire(c, RouteOTLP); !errors.Is(err, ErrTooManyInFlight) {
-		t.Fatalf("total otlp cap: %v", err)
-	}
-	if r, err := l.Acquire(c, RouteHook); err != nil {
-		t.Fatalf("hooks limited by the otlp total: %v", err)
-	} else {
-		r()
-	}
+	// cross-binding total does, and it never limits hooks.
+	hold(b, RouteOTLP)
+	refuse(t, l, c, RouteOTLP, ErrTooManyInFlight)
+	admit(t, l, c, RouteHook)
 	// A forgotten binding's open upload still returns its share of the total.
 	l.Forget(a.ID)
 	releases[0]()
-	if r, err := l.Acquire(c, RouteOTLP); err != nil {
-		t.Fatalf("total not returned after forget: %v", err)
-	} else {
-		r()
-	}
+	admit(t, l, c, RouteOTLP)
 	for _, release := range releases {
 		release()
 	}
@@ -151,46 +126,24 @@ func TestLimiterBindingOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := l.Acquire(b, RouteHook); !errors.Is(err, ErrTooManyInFlight) {
-		t.Fatalf("override cap: %v", err)
-	}
+	refuse(t, l, b, RouteHook, ErrTooManyInFlight)
 	// A changed override rebuilds the buckets but keeps the open request.
 	b.RateLimit = RateLimit{RequestsPerSecond: 10, Burst: 10, MaxInFlight: 1}
-	if _, err := l.Acquire(b, RouteHook); !errors.Is(err, ErrTooManyInFlight) {
-		t.Fatalf("override change reset the concurrency cap: %v", err)
-	}
+	refuse(t, l, b, RouteHook, ErrTooManyInFlight)
 	release()
-	if r, err := l.Acquire(b, RouteHook); err != nil {
-		t.Fatalf("after release: %v", err)
-	} else {
-		r()
-	}
+	admit(t, l, b, RouteHook)
 }
 
 func TestLimiterForgetAndSweep(t *testing.T) {
-	clock := newFakeNow()
+	clock := newTestClock()
 	l := NewLimiter(LimiterConfig{HookRPS: 1, HookBurst: 1, IdleTTL: time.Minute, Now: clock.Now})
 	b := Binding{ID: "sb_a"}
-	r, err := l.Acquire(b, RouteHook)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r()
-	if _, err := l.Acquire(b, RouteHook); !errors.Is(err, ErrRateLimited) {
-		t.Fatalf("expected throttle: %v", err)
-	}
+	admit(t, l, b, RouteHook)
+	refuse(t, l, b, RouteHook, ErrRateLimited)
 	l.Forget(b.ID)
-	if r, err := l.Acquire(b, RouteHook); err != nil {
-		t.Fatalf("forget did not reset state: %v", err)
-	} else {
-		r()
-	}
+	admit(t, l, b, RouteHook)
 	clock.Advance(2 * time.Minute)
-	if r, err := l.Acquire(Binding{ID: "sb_b"}, RouteHook); err != nil {
-		t.Fatal(err)
-	} else {
-		r()
-	}
+	admit(t, l, Binding{ID: "sb_b"}, RouteHook)
 	l.mu.Lock()
 	_, stillThere := l.bindings[b.ID]
 	l.mu.Unlock()
@@ -200,7 +153,7 @@ func TestLimiterForgetAndSweep(t *testing.T) {
 }
 
 func TestInFlightQuiescence(t *testing.T) {
-	clock := newFakeNow()
+	clock := newTestClock()
 	f := NewInFlight(clock.Now)
 	if !f.Quiescent("sb_a", time.Second) || f.Active("sb_a") != 0 || !f.LastActivity("sb_a").IsZero() {
 		t.Fatal("unknown binding must be quiescent")

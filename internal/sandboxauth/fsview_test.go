@@ -73,30 +73,50 @@ func TestCopyModeViewNeverTouchesHost(t *testing.T) {
 		t.Fatal("copy-mode view claims host access")
 	}
 	for _, p := range []string{"/work/app", "/work/app/src/main.go", host, filepath.Join(host, "x"), "/etc/passwd", "relative"} {
-		if _, err := view.HostPath(p); !errors.Is(err, ErrNoHostView) {
-			t.Errorf("HostPath(%q) = %v", p, err)
-		}
-		if _, err := view.HostDir(p); !errors.Is(err, ErrNoHostView) {
-			t.Errorf("HostDir(%q) = %v", p, err)
-		}
-		if _, err := view.ContainHostPath(p); !errors.Is(err, ErrNoHostView) {
-			t.Errorf("ContainHostPath(%q) = %v", p, err)
-		}
-		if _, _, err := view.ReadFile(p, 1024); !errors.Is(err, ErrNoHostView) {
-			t.Errorf("ReadFile(%q) = %v", p, err)
+		_, errPath := view.HostPath(p)
+		_, errDir := view.HostDir(p)
+		_, errContain := view.ContainHostPath(p)
+		_, _, errRead := view.ReadFile(p, 1024)
+		for _, err := range []error{errPath, errDir, errContain, errRead} {
+			if !errors.Is(err, ErrNoHostView) {
+				t.Errorf("copy-mode access to %q = %v, want ErrNoHostView", p, err)
+			}
 		}
 		if _, ok := view.SandboxPath(p); ok {
 			t.Errorf("SandboxPath(%q) mapped in copy mode", p)
 		}
 	}
 	// Through the request context too.
-	ctx := WithRequest(context.Background(), b, view)
-	if got, ok := ViewFromContext(ctx); !ok || got != view {
+	if got, ok := ViewFromContext(WithRequest(context.Background(), b, view)); !ok || got != view {
 		t.Fatal("context lost the view")
 	}
 	if len(fsys.calls) != 0 {
 		t.Fatalf("host calls: %v", fsys.calls)
 	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func symlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mountView maps /work/app onto root with the given masks.
+func mountView(root string, fsys FS, masks ...string) *FSView {
+	return NewFSView(Binding{Workdir: Workdir{
+		Mode: WorkdirMount, Mounts: []Mount{{SandboxPath: "/work/app", HostPath: root}}, Masks: masks,
+	}}, fsys)
 }
 
 type project struct {
@@ -111,23 +131,11 @@ func newProject(t *testing.T, extraMounts ...Mount) project {
 	base := t.TempDir()
 	root := filepath.Join(base, "app")
 	outside := filepath.Join(base, "home")
-	for _, dir := range []string{
-		filepath.Join(root, "src"), filepath.Join(root, ".git"), filepath.Join(root, "certs"), outside,
-	} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write := func(p, content string) {
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write(filepath.Join(root, "src", "main.go"), "package main\n")
-	write(filepath.Join(root, ".env"), "SECRET=1\n")
-	write(filepath.Join(root, "certs", "dev.pem"), "-----BEGIN-----\n")
-	write(filepath.Join(root, ".git", "config"), "[core]\n")
-	write(filepath.Join(outside, "id_rsa"), "PRIVATE\n")
+	writeFile(t, filepath.Join(root, "src", "main.go"), "package main\n")
+	writeFile(t, filepath.Join(root, ".env"), "SECRET=1\n")
+	writeFile(t, filepath.Join(root, "certs", "dev.pem"), "-----BEGIN-----\n")
+	writeFile(t, filepath.Join(root, ".git", "config"), "[core]\n")
+	writeFile(t, filepath.Join(outside, "id_rsa"), "PRIVATE\n")
 	real, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
@@ -143,9 +151,12 @@ func newProject(t *testing.T, extraMounts ...Mount) project {
 
 func TestMountViewMapsProjectPaths(t *testing.T) {
 	p := newProject(t)
-	got, err := p.view.HostPath("/work/app/src/main.go")
-	if err != nil || got != filepath.Join(p.real, "src", "main.go") {
-		t.Fatalf("HostPath = %q, %v", got, err)
+	symlink(t, "main.go", filepath.Join(p.root, "src", "alias.go")) // a link inside the project is followed
+	mainGo := filepath.Join(p.real, "src", "main.go")
+	for _, name := range []string{"/work/app/src/main.go", "/work/app/src/alias.go"} {
+		if got, err := p.view.HostPath(name); err != nil || got != mainGo {
+			t.Fatalf("HostPath(%s) = %q, %v", name, got, err)
+		}
 	}
 	if got, err := p.view.HostDir("/work/app/src/../src/"); err != nil || got != filepath.Join(p.real, "src") {
 		t.Fatalf("HostDir = %q, %v", got, err)
@@ -159,7 +170,7 @@ func TestMountViewMapsProjectPaths(t *testing.T) {
 	if _, err := p.view.HostPath("/work/app/missing.go"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("missing path: %v", err)
 	}
-	if got, ok := p.view.SandboxPath(filepath.Join(p.real, "src", "main.go")); !ok || got != "/work/app/src/main.go" {
+	if got, ok := p.view.SandboxPath(mainGo); !ok || got != "/work/app/src/main.go" {
 		t.Fatalf("SandboxPath(real) = %q %v", got, ok)
 	}
 	if got, ok := p.view.SandboxPath(filepath.Join(p.root, "src")); !ok || got != "/work/app/src" {
@@ -168,32 +179,23 @@ func TestMountViewMapsProjectPaths(t *testing.T) {
 	if _, ok := p.view.SandboxPath(p.outside); ok {
 		t.Fatal("SandboxPath mapped a path outside the mount")
 	}
-	data, info, err := p.view.ReadFile("/work/app/src/main.go", 1024)
-	if err != nil || string(data) != "package main\n" || !info.Mode().IsRegular() {
-		t.Fatalf("ReadFile = %q %v", data, err)
+	for _, name := range []string{"/work/app/src/main.go", "/work/app/src/alias.go", mainGo} {
+		data, info, err := p.view.ReadFile(name, 1024)
+		if err != nil || string(data) != "package main\n" || !info.Mode().IsRegular() {
+			t.Fatalf("ReadFile(%s) = %q %v", name, data, err)
+		}
 	}
-	data, _, err = p.view.ReadFile(filepath.Join(p.real, "src", "main.go"), 1024)
-	if err != nil || string(data) != "package main\n" {
-		t.Fatalf("ReadFile(host path) = %q %v", data, err)
-	}
-	if got, err := p.view.ContainHostPath(filepath.Join(p.root, "src", "main.go")); err != nil ||
-		got != filepath.Join(p.real, "src", "main.go") {
+	if got, err := p.view.ContainHostPath(filepath.Join(p.root, "src", "main.go")); err != nil || got != mainGo {
 		t.Fatalf("ContainHostPath = %q %v", got, err)
 	}
 }
 
 func TestMountViewRefusesEscapes(t *testing.T) {
 	p := newProject(t)
-	if err := os.Symlink(filepath.Join(p.outside, "id_rsa"), filepath.Join(p.root, "src", "key")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(p.outside, filepath.Join(p.root, "home")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("../../home/id_rsa", filepath.Join(p.root, "src", "rel")); err != nil {
-		t.Fatal(err)
-	}
-	cases := []string{
+	symlink(t, filepath.Join(p.outside, "id_rsa"), filepath.Join(p.root, "src", "key"))
+	symlink(t, p.outside, filepath.Join(p.root, "home"))
+	symlink(t, "../../home/id_rsa", filepath.Join(p.root, "src", "rel"))
+	for _, name := range []string{
 		"/work/app/src/key",           // absolute link out of the project
 		"/work/app/home/id_rsa",       // linked directory out of the project
 		"/work/app/src/rel",           // relative link out of the project
@@ -203,8 +205,7 @@ func TestMountViewRefusesEscapes(t *testing.T) {
 		"work/app/src/main.go",        // relative
 		"",                            // empty
 		"/work/app/src/main.go\x00.x", // NUL
-	}
-	for _, name := range cases {
+	} {
 		if _, err := p.view.HostPath(name); err == nil {
 			t.Errorf("HostPath(%q) escaped", name)
 		} else if !errors.Is(err, ErrOutsideView) && !errors.Is(err, fs.ErrNotExist) {
@@ -214,59 +215,38 @@ func TestMountViewRefusesEscapes(t *testing.T) {
 			t.Errorf("ReadFile(%q) escaped", name)
 		}
 	}
-	if _, err := p.view.ContainHostPath(filepath.Join(p.outside, "id_rsa")); !errors.Is(err, ErrOutsideView) {
-		t.Fatalf("ContainHostPath(outside) = %v", err)
-	}
-	if _, err := p.view.ContainHostPath(filepath.Join(p.root, "src", "key")); !errors.Is(err, ErrOutsideView) {
-		t.Fatalf("ContainHostPath(link out) = %v", err)
-	}
-	if _, err := p.view.ContainHostPath(filepath.Join(p.root, "..", "home", "id_rsa")); !errors.Is(err, ErrOutsideView) {
-		t.Fatalf("ContainHostPath(dotdot) = %v", err)
+	for _, host := range []string{
+		filepath.Join(p.outside, "id_rsa"), filepath.Join(p.root, "src", "key"), filepath.Join(p.root, "..", "home", "id_rsa"),
+	} {
+		if _, err := p.view.ContainHostPath(host); !errors.Is(err, ErrOutsideView) {
+			t.Errorf("ContainHostPath(%s) = %v", host, err)
+		}
 	}
 }
 
-func TestMountViewFollowsLinksInsideProject(t *testing.T) {
-	p := newProject(t)
-	if err := os.Symlink("main.go", filepath.Join(p.root, "src", "alias.go")); err != nil {
-		t.Fatal(err)
-	}
-	got, err := p.view.HostPath("/work/app/src/alias.go")
-	if err != nil || got != filepath.Join(p.real, "src", "main.go") {
-		t.Fatalf("HostPath(alias) = %q %v", got, err)
-	}
-	data, _, err := p.view.ReadFile("/work/app/src/alias.go", 1024)
-	if err != nil || string(data) != "package main\n" {
-		t.Fatalf("ReadFile(alias) = %q %v", data, err)
-	}
-}
-
+// TestMountViewRefusesMasks covers masked names and the links an agent can
+// plant in the project: a symlink to a masked file or directory and a hard
+// link to a masked file are refused by the identity of the opened file, not
+// only by name.
 func TestMountViewRefusesMasks(t *testing.T) {
 	p := newProject(t)
-	if err := os.Symlink("../.env", filepath.Join(p.root, "src", "env-link")); err != nil {
-		t.Fatal(err)
-	}
+	symlink(t, "../.env", filepath.Join(p.root, "src", "env-link"))
+	symlink(t, "../certs", filepath.Join(p.root, "src", "certs-link"))
 	if err := os.Link(filepath.Join(p.root, ".env"), filepath.Join(p.root, "src", "env-hardlink")); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"/work/app/.env",
-		"/work/app/certs/dev.pem",
-		"/work/app/certs",
-		filepath.Join(p.root, ".env"),
-		filepath.Join(p.real, "certs", "dev.pem"),
+		"/work/app/.env", "/work/app/certs/dev.pem", "/work/app/src/env-link", "/work/app/src/env-hardlink",
+		"/work/app/src/certs-link/dev.pem",
 	} {
+		if _, err := p.view.HostPath(name); !errors.Is(err, ErrMasked) {
+			t.Errorf("HostPath(%q) = %v, want ErrMasked", name, err)
+		}
 		if _, _, err := p.view.ReadFile(name, 1024); !errors.Is(err, ErrMasked) {
 			t.Errorf("ReadFile(%q) = %v, want ErrMasked", name, err)
 		}
 	}
-	for _, name := range []string{"/work/app/.env", "/work/app/src/env-link", "/work/app/certs/dev.pem"} {
-		if _, err := p.view.HostPath(name); !errors.Is(err, ErrMasked) {
-			t.Errorf("HostPath(%q) = %v, want ErrMasked", name, err)
-		}
-	}
-	// A symlink or hard link to a mask is refused by the identity of the
-	// opened file, not only by name.
-	for _, name := range []string{"/work/app/src/env-link", "/work/app/src/env-hardlink"} {
+	for _, name := range []string{"/work/app/certs", filepath.Join(p.root, ".env"), filepath.Join(p.real, "certs", "dev.pem")} {
 		if _, _, err := p.view.ReadFile(name, 1024); !errors.Is(err, ErrMasked) {
 			t.Errorf("ReadFile(%q) = %v, want ErrMasked", name, err)
 		}
@@ -306,12 +286,7 @@ func (f foldingFS) OpenInRoot(root, name string) (fs.File, error) {
 // /work/app/CERTS/dev.pem lies inside the masked certs directory.
 func TestMountViewRefusesMasksUnderAnotherSpelling(t *testing.T) {
 	p := newProject(t)
-	b := Binding{Workdir: Workdir{
-		Mode:   WorkdirMount,
-		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: p.root}},
-		Masks:  []string{"/work/app/.env", "/work/app/certs"},
-	}}
-	view := NewFSView(b, foldingFS{root: p.root})
+	view := mountView(p.root, foldingFS{root: p.root}, "/work/app/.env", "/work/app/certs")
 	for _, name := range []string{
 		"/work/app/.ENV",
 		"/work/app/.Env",
@@ -332,27 +307,6 @@ func TestMountViewRefusesMasksUnderAnotherSpelling(t *testing.T) {
 	}
 	if _, err := view.HostPath("/work/app/Src/Main.go"); err != nil {
 		t.Fatalf("HostPath of an unmasked spelling: %v", err)
-	}
-}
-
-// TestMountViewRefusesLinksIntoMaskedDirectories covers the links an agent
-// can plant in the project: a symlink to a masked directory and a hard
-// link to a masked file.
-func TestMountViewRefusesLinksIntoMaskedDirectories(t *testing.T) {
-	p := newProject(t)
-	if err := os.Symlink("../certs", filepath.Join(p.root, "src", "certs-link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Link(filepath.Join(p.root, ".env"), filepath.Join(p.root, "src", "env-hardlink")); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"/work/app/src/certs-link/dev.pem", "/work/app/src/env-hardlink"} {
-		if _, _, err := p.view.ReadFile(name, 1024); !errors.Is(err, ErrMasked) {
-			t.Errorf("ReadFile(%q) = %v, want ErrMasked", name, err)
-		}
-		if _, err := p.view.HostPath(name); !errors.Is(err, ErrMasked) {
-			t.Errorf("HostPath(%q) = %v, want ErrMasked", name, err)
-		}
 	}
 }
 
@@ -387,17 +341,10 @@ func TestMountViewReadFileLimits(t *testing.T) {
 }
 
 func TestMountViewNestedMountsUseLongestPrefix(t *testing.T) {
-	base := t.TempDir()
-	lib := filepath.Join(base, "lib")
-	if err := os.MkdirAll(lib, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(lib, "README"), []byte("lib\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	lib := filepath.Join(t.TempDir(), "lib")
+	writeFile(t, filepath.Join(lib, "README"), "lib\n")
 	p := newProject(t, Mount{SandboxPath: "/work/app/vendor/lib", HostPath: lib, ReadOnly: true})
-	data, _, err := p.view.ReadFile("/work/app/vendor/lib/README", 1024)
-	if err != nil || string(data) != "lib\n" {
+	if data, _, err := p.view.ReadFile("/work/app/vendor/lib/README", 1024); err != nil || string(data) != "lib\n" {
 		t.Fatalf("nested mount read = %q %v", data, err)
 	}
 	realLib, _ := filepath.EvalSymlinks(lib)
@@ -410,8 +357,7 @@ func TestMountViewNestedMountsUseLongestPrefix(t *testing.T) {
 }
 
 func TestMountViewMissingRootFailsClosed(t *testing.T) {
-	b := Binding{Workdir: Workdir{Mode: WorkdirMount, Mounts: []Mount{{SandboxPath: "/work/app", HostPath: "/nonexistent/defenseclaw/app"}}}}
-	view := NewFSView(b, nil)
+	view := mountView("/nonexistent/defenseclaw/app", nil)
 	if _, err := view.HostPath("/work/app/x"); err == nil {
 		t.Fatal("missing mount root resolved")
 	}
@@ -442,54 +388,25 @@ func TestContextHelpers(t *testing.T) {
 	}
 }
 
-// TestMaskBypassViaDirectoryRename reproduces p2-ingress-1: mask checks are
-// tied to lexical host paths computed at construction time. When a directory
-// containing a masked file is renamed, the mask still covers the file inside
-// the container, but the host path changes and lexical checks fail.
+// TestMaskBypassViaDirectoryRename reproduces p2-ingress-1: renaming the
+// directory of a masked file moves its host path away from the lexical mask,
+// yet inside the container the mask still covers it. The view must refuse
+// the file by its identity.
 func TestMaskBypassViaDirectoryRename(t *testing.T) {
-	base := t.TempDir()
-	project := filepath.Join(base, "project")
-	configDir := filepath.Join(project, "config")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	envFile := filepath.Join(configDir, ".env")
-	secret := []byte("SECRET_KEY=supersecret\n")
-	if err := os.WriteFile(envFile, secret, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create FSView with /work/app/config/.env masked.
-	b := Binding{Workdir: Workdir{
-		Mode:   WorkdirMount,
-		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: project}},
-		Masks:  []string{"/work/app/config/.env"},
-	}}
-	view := NewFSView(b, nil)
-
-	// Before rename: mask works.
+	project := filepath.Join(t.TempDir(), "project")
+	writeFile(t, filepath.Join(project, "config", ".env"), "SECRET_KEY=supersecret\n")
+	view := mountView(project, nil, "/work/app/config/.env")
 	if _, err := view.HostPath("/work/app/config/.env"); !errors.Is(err, ErrMasked) {
 		t.Fatalf("before rename, mask should block: got %v", err)
 	}
-
-	// Rename config → config2. The file now lives at project/config2/.env on
-	// the host, but the FSView's hostMasks still contain project/config/.env.
-	// If we only use lexical checks, the mask no longer applies.
 	renamedDir := filepath.Join(project, "config2")
-	if err := os.Rename(configDir, renamedDir); err != nil {
+	if err := os.Rename(filepath.Join(project, "config"), renamedDir); err != nil {
 		t.Fatal(err)
 	}
-
-	// After rename: a lexical-only implementation allows access.
-	// A correct implementation records the mask's file identity at construction
-	// or first use and detects that the opened file is still the masked one.
 	if _, err := view.HostPath("/work/app/config/.env"); !errors.Is(err, ErrMasked) {
 		t.Errorf("after rename, sandbox path still masked: got %v", err)
 	}
-
-	// Attempting to read the file through its new host path should also fail.
-	renamedEnv := filepath.Join(renamedDir, ".env")
-	if _, err := view.ContainHostPath(renamedEnv); !errors.Is(err, ErrMasked) {
+	if _, err := view.ContainHostPath(filepath.Join(renamedDir, ".env")); !errors.Is(err, ErrMasked) {
 		t.Errorf("after rename, host path should detect mask: got %v", err)
 	}
 	if data, _, err := view.ReadFile("/work/app/config/.env", 1024); !errors.Is(err, ErrMasked) {
@@ -507,28 +424,17 @@ func TestMaskResolutionPerRequestView(t *testing.T) {
 	if err := os.Remove(filepath.Join(p.root, ".env")); err != nil {
 		t.Fatal(err)
 	}
-	b := Binding{Workdir: Workdir{
-		Mode:   WorkdirMount,
-		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: p.root}},
-		Masks:  []string{"/work/app/.env", "/work/app/certs"},
-	}}
-	view := NewFSView(b, nil)
+	view := mountView(p.root, nil, "/work/app/.env", "/work/app/certs")
 	if _, _, err := view.ReadFile("/work/app/src/main.go", 1024); err != nil {
 		t.Fatalf("deleted mask disabled the view: %v", err)
 	}
 	if _, _, err := view.ReadFile("/work/app/certs/dev.pem", 1024); !errors.Is(err, ErrMasked) {
 		t.Fatalf("remaining mask not enforced: %v", err)
 	}
-
 	if err := os.Rename(filepath.Join(p.root, "certs"), filepath.Join(p.root, "certs-moved")); err != nil {
 		t.Fatal(err)
 	}
-	renamedParent := Binding{Workdir: Workdir{
-		Mode:   WorkdirMount,
-		Mounts: []Mount{{SandboxPath: "/work/app", HostPath: p.root}},
-		Masks:  []string{"/work/app/certs/dev.pem"},
-	}}
-	view = NewFSView(renamedParent, nil)
+	view = mountView(p.root, nil, "/work/app/certs/dev.pem")
 	if _, _, err := view.ReadFile("/work/app/certs-moved/dev.pem", 1024); !errors.Is(err, ErrMasked) {
 		t.Fatalf("a mask whose directory moved must fail closed, got %v", err)
 	}

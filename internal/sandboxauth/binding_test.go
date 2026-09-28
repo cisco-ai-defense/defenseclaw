@@ -19,7 +19,6 @@ package sandboxauth
 import (
 	"errors"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -46,43 +45,28 @@ func TestSpecNormalizeCanonicalises(t *testing.T) {
 	spec.Workdir.Masks = []string{"/work/app/.env", "/work/app/.env"}
 	spec.TTL = 90*time.Second + 400*time.Millisecond
 	got, err := spec.normalize()
-	if err != nil {
-		t.Fatalf("normalize: %v", err)
+	if err != nil || got.Connector != "claudecode" || !slices.Equal(got.Routes, []Route{RouteHook, RouteOTLP}) ||
+		got.PolicyProfile != "open" || !slices.Equal(got.Workdir.Masks, []string{"/work/app/.env"}) || got.TTL != 90*time.Second {
+		t.Fatalf("normalize = %+v, %v", got, err)
 	}
-	if got.Connector != "claudecode" {
-		t.Fatalf("connector = %q, want claudecode", got.Connector)
-	}
-	if !slices.Equal(got.Routes, []Route{RouteHook, RouteOTLP}) {
-		t.Fatalf("routes = %v", got.Routes)
-	}
-	if got.PolicyProfile != "open" {
-		t.Fatalf("profile = %q", got.PolicyProfile)
-	}
-	if !slices.Equal(got.Workdir.Masks, []string{"/work/app/.env"}) {
-		t.Fatalf("masks = %v", got.Workdir.Masks)
-	}
-	if got.TTL != 90*time.Second {
-		t.Fatalf("ttl = %v, want truncation to whole seconds", got.TTL)
-	}
-}
-
-func TestSpecNormalizeDefaultRoutes(t *testing.T) {
-	for _, tc := range []struct {
-		connector string
-		want      []Route
-	}{
-		{"claudecode", []Route{RouteHook, RouteOTLP}},
-		{"codex", []Route{RouteHook, RouteNotify, RouteOTLP}},
-		{"cursor", []Route{RouteHook, RouteOTLP}},
+	for connector, want := range map[string][]Route{
+		"claudecode": {RouteHook, RouteOTLP},
+		"codex":      {RouteHook, RouteNotify, RouteOTLP},
+		"cursor":     {RouteHook, RouteOTLP},
 	} {
-		spec := mountSpec("dc-"+tc.connector, tc.connector)
-		got, err := spec.normalize()
-		if err != nil {
-			t.Fatalf("%s: %v", tc.connector, err)
+		if got, err := mountSpec("dc-"+connector, connector).normalize(); err != nil || !slices.Equal(got.Routes, want) {
+			t.Errorf("%s default routes = %v, %v; want %v", connector, got.Routes, err, want)
 		}
-		if !slices.Equal(got.Routes, tc.want) {
-			t.Errorf("%s routes = %v, want %v", tc.connector, got.Routes, tc.want)
-		}
+	}
+	// Copy mode may record the context mounts, or none.
+	spec = mountSpec("dc-app", "codex")
+	spec.Workdir.Mode = WorkdirCopy
+	if _, err := spec.normalize(); err != nil {
+		t.Fatalf("copy mode with context mounts: %v", err)
+	}
+	spec.Workdir.Mounts = nil
+	if _, err := spec.normalize(); err != nil {
+		t.Fatalf("copy mode without mounts: %v", err)
 	}
 }
 
@@ -131,18 +115,6 @@ func TestSpecNormalizeRejects(t *testing.T) {
 	}
 }
 
-func TestCopyModeMayRecordContextMounts(t *testing.T) {
-	spec := mountSpec("dc-app", "codex")
-	spec.Workdir.Mode = WorkdirCopy
-	if _, err := spec.normalize(); err != nil {
-		t.Fatalf("copy mode with context mounts: %v", err)
-	}
-	spec.Workdir.Mounts = nil
-	if _, err := spec.normalize(); err != nil {
-		t.Fatalf("copy mode without mounts: %v", err)
-	}
-}
-
 func TestBindingAuthorize(t *testing.T) {
 	b := Binding{Connector: "claudecode", Routes: []Route{RouteHook, RouteOTLP}}
 	for _, tc := range []struct {
@@ -166,15 +138,9 @@ func TestBindingAuthorize(t *testing.T) {
 
 func TestBindingExpired(t *testing.T) {
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	if (Binding{}).Expired(now) {
-		t.Fatal("zero expiry must never expire")
-	}
 	b := Binding{ExpiresAt: now}
-	if !b.Expired(now) {
-		t.Fatal("expiry instant is expired")
-	}
-	if b.Expired(now.Add(-time.Nanosecond)) {
-		t.Fatal("before expiry is live")
+	if (Binding{}).Expired(now) || !b.Expired(now) || b.Expired(now.Add(-time.Nanosecond)) {
+		t.Fatal("a zero expiry never expires; a binding expires at its expiry instant, not before")
 	}
 }
 
@@ -203,8 +169,5 @@ func TestCanonicalConnector(t *testing.T) {
 		if got := CanonicalConnector(in); got != want {
 			t.Errorf("CanonicalConnector(%q) = %q, want %q", in, got, want)
 		}
-	}
-	if !strings.HasPrefix(TokenPrefix, "dcsb") {
-		t.Fatal("token prefix changed")
 	}
 }

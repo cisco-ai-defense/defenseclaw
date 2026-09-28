@@ -41,10 +41,3 @@ func (c *testClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 	c.mu.Unlock()
 }
-
-type fakeNow struct{ c *testClock }
-
-func newFakeNow() fakeNow { return fakeNow{c: newTestClock()} }
-
-func (f fakeNow) Now() time.Time          { return f.c.Now() }
-func (f fakeNow) Advance(d time.Duration) { f.c.Advance(d) }

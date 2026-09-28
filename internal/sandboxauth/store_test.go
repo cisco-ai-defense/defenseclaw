@@ -32,49 +32,34 @@ import (
 func newStore(t *testing.T, opts ...StoreOption) (*FileStore, string) {
 	t.Helper()
 	path := DefaultStorePath(t.TempDir())
+	return openStore(t, path, opts...), path
+}
+
+// openStore opens a table the way another gateway process would.
+func openStore(t *testing.T, path string, opts ...StoreOption) *FileStore {
+	t.Helper()
 	s, err := OpenFileStore(path, opts...)
 	if err != nil {
 		t.Fatalf("OpenFileStore: %v", err)
 	}
-	return s, path
+	return s
 }
 
-func TestMintMatchAndPersistence(t *testing.T) {
-	s, path := newStore(t)
-	b, token, err := s.Mint(mountSpec("dc-claude-app", "claudecode"))
+// mint mints a binding for a codex sandbox with the given name.
+func mint(t *testing.T, s *FileStore, name string) (Binding, string) {
+	t.Helper()
+	b, token, err := s.Mint(mountSpec(name, "codex"))
 	if err != nil {
-		t.Fatalf("Mint: %v", err)
+		t.Fatalf("Mint(%s): %v", name, err)
 	}
-	if !LooksLikeToken(token) {
-		t.Fatalf("token %q has the wrong shape", token)
-	}
-	if b.TokenHash != HashToken(token) || b.Generation != 1 || b.ID == "" {
-		t.Fatalf("binding = %+v", b)
-	}
-	got, err := s.Match(token)
-	if err != nil || got.ID != b.ID {
-		t.Fatalf("Match = %+v, %v", got, err)
-	}
+	return b, token
+}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(data), token) || strings.Contains(string(data), strings.TrimPrefix(token, TokenPrefix)) {
-		t.Fatal("binding table contains the credential")
-	}
-	if !strings.Contains(string(data), b.TokenHash) {
-		t.Fatal("binding table is missing the credential hash")
-	}
-	assertMode(t, path, 0o600)
-	assertMode(t, filepath.Dir(path), 0o700)
-
-	reopened, err := OpenFileStore(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	if got, err := reopened.Match(token); err != nil || got.ID != b.ID {
-		t.Fatalf("reopened Match = %+v, %v", got, err)
+// refused checks that a store no longer honours a credential.
+func refused(t *testing.T, s *FileStore, token, why string) {
+	t.Helper()
+	if _, err := s.Match(token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("%s: Match = %v, want ErrUnauthenticated", why, err)
 	}
 }
 
@@ -89,19 +74,33 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-func TestMatchRejects(t *testing.T) {
-	s, _ := newStore(t)
-	_, token, err := s.Mint(mountSpec("dc-app", "codex"))
+func TestMintMatchAndPersistence(t *testing.T) {
+	s, path := newStore(t)
+	b, token := mint(t, s, "dc-app")
+	if !LooksLikeToken(token) || b.TokenHash != HashToken(token) || b.Generation != 1 || b.ID == "" {
+		t.Fatalf("minted %q, binding = %+v", token, b)
+	}
+	if got, err := s.Match(token); err != nil || got.ID != b.ID {
+		t.Fatalf("Match = %+v, %v", got, err)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(string(data), token) || strings.Contains(string(data), strings.TrimPrefix(token, TokenPrefix)) ||
+		!strings.Contains(string(data), b.TokenHash) {
+		t.Fatal("the binding table must hold the credential hash, never the credential")
+	}
+	assertMode(t, path, 0o600)
+	assertMode(t, filepath.Dir(path), 0o700)
+	if got, err := openStore(t, path).Match(token); err != nil || got.ID != b.ID {
+		t.Fatalf("reopened Match = %+v, %v", got, err)
 	}
 	for _, presented := range []string{
 		"", "Bearer " + token, token + "x", strings.ToUpper(token), TokenPrefix + strings.Repeat("A", 43),
 		"openshell:resolve:env:v1_DEFENSECLAW_SANDBOX_TOKEN", strings.Repeat("a", 64),
 	} {
-		if _, err := s.Match(presented); !errors.Is(err, ErrUnauthenticated) {
-			t.Errorf("Match(%q) = %v, want ErrUnauthenticated", presented, err)
-		}
+		refused(t, s, presented, fmt.Sprintf("presented %q", presented))
 	}
 }
 
@@ -125,7 +124,7 @@ func TestMintRefusesDuplicateSandbox(t *testing.T) {
 	}
 }
 
-func TestRotateInvalidatesPreviousCredential(t *testing.T) {
+func TestRotateRevokeAndExpiry(t *testing.T) {
 	clock := newTestClock()
 	s, _ := newStore(t, WithClock(clock.Now))
 	spec := mountSpec("dc-app", "codex")
@@ -136,84 +135,46 @@ func TestRotateInvalidatesPreviousCredential(t *testing.T) {
 	}
 	clock.Advance(30 * time.Minute)
 	rotated, newToken, err := s.Rotate(b.ID)
-	if err != nil {
-		t.Fatalf("Rotate: %v", err)
-	}
-	if newToken == oldToken || rotated.Generation != 2 || rotated.TokenHash == b.TokenHash {
-		t.Fatalf("rotation did not replace the credential: %+v", rotated)
+	if err != nil || newToken == oldToken || rotated.Generation != 2 || rotated.TokenHash == b.TokenHash {
+		t.Fatalf("rotation did not replace the credential: %+v, %v", rotated, err)
 	}
 	if !rotated.ExpiresAt.Equal(clock.Now().Add(time.Hour)) {
 		t.Fatalf("rotation must restart the ttl window, expires %v", rotated.ExpiresAt)
 	}
-	if _, err := s.Match(oldToken); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("old credential after rotate: %v", err)
-	}
+	refused(t, s, oldToken, "old credential after rotate")
 	if got, err := s.Match(newToken); err != nil || got.Generation != 2 {
 		t.Fatalf("new credential: %+v %v", got, err)
 	}
 	if _, _, err := s.Rotate("sb_ffffffffffffffffffffffffffffffff"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rotate unknown: %v", err)
 	}
-}
+	clock.Advance(time.Hour)
+	refused(t, s, newToken, "expired credential")
 
-func TestRevoke(t *testing.T) {
-	s, _ := newStore(t)
-	b, token, err := s.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Revoke(b.ID); err != nil {
+	revoked, token := mint(t, s, "dc-revoked")
+	if err := s.Revoke(revoked.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	if _, err := s.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("revoked credential: %v", err)
-	}
-	if err := s.Revoke(b.ID); !errors.Is(err, ErrNotFound) {
+	refused(t, s, token, "revoked credential")
+	if err := s.Revoke(revoked.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second revoke: %v", err)
 	}
-	if _, err := s.Get(b.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Get(revoked.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get revoked: %v", err)
 	}
-	// The name is free again once revoked.
-	if _, _, err := s.Mint(mountSpec("dc-app", "codex")); err != nil {
-		t.Fatalf("re-mint after revoke: %v", err)
-	}
-}
-
-func TestExpiry(t *testing.T) {
-	clock := newTestClock()
-	s, _ := newStore(t, WithClock(clock.Now))
-	spec := mountSpec("dc-app", "codex")
-	spec.TTL = time.Minute
-	_, token, err := s.Mint(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Match(token); err != nil {
-		t.Fatalf("live credential: %v", err)
-	}
-	clock.Advance(time.Minute)
-	if _, err := s.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("expired credential: %v", err)
-	}
+	mint(t, s, "dc-revoked") // the name is free again once revoked
 }
 
 func TestUpdate(t *testing.T) {
 	s, _ := newStore(t)
-	b, token, err := s.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	b, token := mint(t, s, "dc-app")
 	updated, err := s.Update(b.ID, func(spec *Spec) error {
 		spec.SandboxID = "0f5c7a3e-1111-2222-3333-444455556666"
 		spec.HookContractID = "codex-hooks-v4"
 		return nil
 	})
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-	if updated.SandboxID == "" || updated.TokenHash != b.TokenHash || updated.Generation != b.Generation {
-		t.Fatalf("updated = %+v", updated)
+	if err != nil || updated.SandboxID == "" || updated.TokenHash != b.TokenHash || updated.Generation != b.Generation {
+		t.Fatalf("Update = %+v, %v", updated, err)
 	}
 	if got, err := s.Match(token); err != nil || got.HookContractID != "codex-hooks-v4" {
 		t.Fatalf("Match after update = %+v, %v", got, err)
@@ -233,35 +194,23 @@ func TestUpdate(t *testing.T) {
 		updated.TTLSeconds != 3600 || updated.ExpiresAt.IsZero() {
 		t.Fatalf("Update of non-authority fields = %+v, %v", updated, err)
 	}
-	for name, mutate := range map[string]func(*Spec) error{
-		"connector": func(spec *Spec) error { spec.Connector = "claudecode"; return nil },
-		"name":      func(spec *Spec) error { spec.SandboxName = "dc-renamed"; return nil },
-		"invalid":   func(spec *Spec) error { spec.Workdir.Mode = "bogus"; return nil },
-		"add route": func(spec *Spec) error { spec.Routes = append(spec.Routes, RouteInspect); return nil },
-		"drop route": func(spec *Spec) error {
-			spec.Routes = []Route{RouteHook}
-			return nil
-		},
-		"mode": func(spec *Spec) error {
-			spec.Workdir = Workdir{Mode: WorkdirCopy}
-			return nil
-		},
-		"mount host path": func(spec *Spec) error {
-			spec.Workdir.Mounts[0].HostPath = "/home/dev"
-			return nil
-		},
-		"add mount": func(spec *Spec) error {
+	// What a live credential may call or read needs a new binding.
+	for name, mutate := range map[string]func(*Spec){
+		"connector":       func(spec *Spec) { spec.Connector = "claudecode" },
+		"name":            func(spec *Spec) { spec.SandboxName = "dc-renamed" },
+		"invalid":         func(spec *Spec) { spec.Workdir.Mode = "bogus" },
+		"add route":       func(spec *Spec) { spec.Routes = append(spec.Routes, RouteInspect) },
+		"drop route":      func(spec *Spec) { spec.Routes = []Route{RouteHook} },
+		"mode":            func(spec *Spec) { spec.Workdir = Workdir{Mode: WorkdirCopy} },
+		"mount host path": func(spec *Spec) { spec.Workdir.Mounts[0].HostPath = "/home/dev" },
+		"add mount": func(spec *Spec) {
 			spec.Workdir.Mounts = append(spec.Workdir.Mounts, Mount{SandboxPath: "/work/other", HostPath: "/home/dev/other"})
-			return nil
 		},
-		"read-only flag": func(spec *Spec) error { spec.Workdir.Mounts[0].ReadOnly = true; return nil },
-		"drop mask":      func(spec *Spec) error { spec.Workdir.Masks = nil; return nil },
-		"add mask": func(spec *Spec) error {
-			spec.Workdir.Masks = append(spec.Workdir.Masks, "/work/app/secrets.json")
-			return nil
-		},
+		"read-only flag": func(spec *Spec) { spec.Workdir.Mounts[0].ReadOnly = true },
+		"drop mask":      func(spec *Spec) { spec.Workdir.Masks = nil },
+		"add mask":       func(spec *Spec) { spec.Workdir.Masks = append(spec.Workdir.Masks, "/work/app/secrets.json") },
 	} {
-		if _, err := s.Update(b.ID, mutate); !errors.Is(err, ErrInvalidSpec) {
+		if _, err := s.Update(b.ID, func(spec *Spec) error { mutate(spec); return nil }); !errors.Is(err, ErrInvalidSpec) {
 			t.Errorf("update %s: %v", name, err)
 		}
 	}
@@ -281,9 +230,7 @@ func TestUpdate(t *testing.T) {
 func TestListLookupGet(t *testing.T) {
 	s, _ := newStore(t)
 	for _, name := range []string{"dc-b", "dc-a", "dc-c"} {
-		if _, _, err := s.Mint(mountSpec(name, "codex")); err != nil {
-			t.Fatal(err)
-		}
+		mint(t, s, name)
 	}
 	list := s.List()
 	if len(list) != 3 || list[0].SandboxName != "dc-a" || list[2].SandboxName != "dc-c" {
@@ -307,39 +254,22 @@ func TestListLookupGet(t *testing.T) {
 
 func TestCrossProcessVisibility(t *testing.T) {
 	a, path := newStore(t, WithRefreshInterval(0))
-	b, err := OpenFileStore(path, WithRefreshInterval(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, token, err := a.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := openStore(t, path, WithRefreshInterval(0))
+	binding, token := mint(t, a, "dc-app")
 	if got, err := b.Match(token); err != nil || got.ID != binding.ID {
 		t.Fatalf("second store did not see mint: %+v %v", got, err)
 	}
 	if err := b.Revoke(binding.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("first store still honours a revoked credential: %v", err)
-	}
+	refused(t, a, token, "first store after a revoke by the second")
 }
 
 func TestRefreshIntervalBoundsDiskChecks(t *testing.T) {
 	clock := newTestClock()
 	a, path := newStore(t, WithClock(clock.Now), WithRefreshInterval(time.Second))
-	other, err := OpenFileStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, token, err := other.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("store refreshed before its interval: %v", err)
-	}
+	_, token := mint(t, openStore(t, path), "dc-app")
+	refused(t, a, token, "store refreshed before its interval")
 	clock.Advance(time.Second)
 	if _, err := a.Match(token); err != nil {
 		t.Fatalf("store did not refresh after its interval: %v", err)
@@ -348,10 +278,7 @@ func TestRefreshIntervalBoundsDiskChecks(t *testing.T) {
 
 func TestConcurrentWritersAcrossStores(t *testing.T) {
 	a, path := newStore(t)
-	b, err := OpenFileStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	b := openStore(t, path)
 	var wg sync.WaitGroup
 	errs := make(chan error, 40)
 	for i := 0; i < 40; i++ {
@@ -373,11 +300,7 @@ func TestConcurrentWritersAcrossStores(t *testing.T) {
 			t.Fatalf("concurrent mint: %v", err)
 		}
 	}
-	reopened, err := OpenFileStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := len(reopened.List()); n != 40 {
+	if n := len(openStore(t, path).List()); n != 40 {
 		t.Fatalf("lost updates: %d bindings, want 40", n)
 	}
 }
@@ -389,18 +312,9 @@ func TestConcurrentWritersAcrossStores(t *testing.T) {
 // credential authenticating until some unrelated mutation.
 func TestRefreshRereadsATableReplacedDuringTheRead(t *testing.T) {
 	a, path := newStore(t, WithRefreshInterval(0))
-	b, err := OpenFileStore(path, WithRefreshInterval(0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	revoked, token, err := a.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Another write makes a's next Match re-read the table.
-	if _, _, err := b.Mint(mountSpec("dc-other", "codex")); err != nil {
-		t.Fatal(err)
-	}
+	b := openStore(t, path, WithRefreshInterval(0))
+	revoked, token := mint(t, a, "dc-app")
+	mint(t, b, "dc-other") // makes a's next Match re-read the table
 	var once sync.Once
 	a.afterRead = func() {
 		once.Do(func() {
@@ -409,14 +323,10 @@ func TestRefreshRereadsATableReplacedDuringTheRead(t *testing.T) {
 			}
 		})
 	}
-	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("Match during a concurrent revoke = %v, want the re-read table", err)
-	}
+	refused(t, a, token, "Match during a concurrent revoke")
 	a.afterRead = nil
 	for i := 0; i < 3; i++ {
-		if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
-			t.Fatalf("revoked credential still authenticates on check %d: %v", i, err)
-		}
+		refused(t, a, token, fmt.Sprintf("revoked credential on check %d", i))
 	}
 	a.mu.RLock()
 	loaded := a.loaded
@@ -436,17 +346,8 @@ func TestRefreshRereadsATableReplacedDuringTheRead(t *testing.T) {
 func TestRefreshNeverOverwritesANewerMutation(t *testing.T) {
 	clock := newTestClock()
 	a, path := newStore(t, WithClock(clock.Now), WithRefreshInterval(time.Second))
-	other, err := OpenFileStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	revoked, token, err := a.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := other.Mint(mountSpec("dc-other", "codex")); err != nil {
-		t.Fatal(err)
-	}
+	revoked, token := mint(t, a, "dc-app")
+	mint(t, openStore(t, path), "dc-other")
 	clock.Advance(time.Second)
 	var once sync.Once
 	a.beforeRefreshInstall = func() {
@@ -456,14 +357,10 @@ func TestRefreshNeverOverwritesANewerMutation(t *testing.T) {
 			}
 		})
 	}
-	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("refresh reinstalled the pre-revoke table: %v", err)
-	}
+	refused(t, a, token, "refresh reinstalled the pre-revoke table")
 	a.beforeRefreshInstall = nil
 	// No refresh is due, so this is served from memory.
-	if _, err := a.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("revoked credential authenticates from memory: %v", err)
-	}
+	refused(t, a, token, "revoked credential from memory")
 	if len(a.List()) != 1 {
 		t.Fatalf("in-memory table = %+v, want only the other binding", a.List())
 	}
@@ -471,9 +368,7 @@ func TestRefreshNeverOverwritesANewerMutation(t *testing.T) {
 
 func TestReadStateGivesUpOnATableThatNeverSettles(t *testing.T) {
 	s, _ := newStore(t)
-	if _, _, err := s.Mint(mountSpec("dc-app", "codex")); err != nil {
-		t.Fatal(err)
-	}
+	mint(t, s, "dc-app")
 	// Every read is followed by a write, as if another process rewrote the
 	// table continuously. The hook skips the nested read Mint itself does.
 	n, inHook := 0, false
@@ -498,16 +393,11 @@ func TestReadStateGivesUpOnATableThatNeverSettles(t *testing.T) {
 
 func TestTamperedTableFailsClosed(t *testing.T) {
 	s, path := newStore(t, WithRefreshInterval(0))
-	_, token, err := s.Mint(mountSpec("dc-app", "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, token := mint(t, s, "dc-app")
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Match(token); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("world-readable table still authenticates: %v", err)
-	}
+	refused(t, s, token, "world-readable table")
 	if _, err := OpenFileStore(path); err == nil {
 		t.Fatal("OpenFileStore accepted a world-readable table")
 	}
@@ -516,28 +406,27 @@ func TestTamperedTableFailsClosed(t *testing.T) {
 	}
 }
 
-func TestCorruptTablesAreRejected(t *testing.T) {
-	valid := func(t *testing.T) string {
-		s, path := newStore(t)
-		if _, _, err := s.Mint(mountSpec("dc-app", "codex")); err != nil {
-			t.Fatal(err)
+func TestOpenFileStoreRejectsUnsafeTables(t *testing.T) {
+	for _, path := range []string{"bindings.json", "/tmp/x/../bindings.json"} {
+		if _, err := OpenFileStore(path); err == nil {
+			t.Errorf("OpenFileStore(%q) accepted a relative or unclean path", path)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(data)
 	}
-	for name, mutate := range map[string]func(string) string{
-		"not json":       func(string) string { return "{" },
-		"trailing data":  func(s string) string { return s + "{}" },
-		"unknown field":  func(s string) string { return strings.Replace(s, `"version"`, `"extra": 1, "version"`, 1) },
-		"future version": func(s string) string { return strings.Replace(s, `"version": 1`, `"version": 2`, 1) },
-		"bad hash":       func(s string) string { return strings.Replace(s, `"token_sha256": "`, `"token_sha256": "zz`, 1) },
-		"bad connector":  func(s string) string { return strings.Replace(s, `"connector": "codex"`, `"connector": "Codex/.."`, 1) },
-		"zero generation": func(s string) string {
-			return strings.Replace(s, `"generation": 1`, `"generation": 0`, 1)
-		},
+	s, validPath := newStore(t)
+	mint(t, s, "dc-app")
+	valid, err := os.ReadFile(validPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"not json":        "{",
+		"trailing data":   string(valid) + "{}",
+		"unknown field":   strings.Replace(string(valid), `"version"`, `"extra": 1, "version"`, 1),
+		"future version":  strings.Replace(string(valid), `"version": 1`, `"version": 2`, 1),
+		"bad hash":        strings.Replace(string(valid), `"token_sha256": "`, `"token_sha256": "zz`, 1),
+		"bad connector":   strings.Replace(string(valid), `"connector": "codex"`, `"connector": "Codex/.."`, 1),
+		"zero generation": strings.Replace(string(valid), `"generation": 1`, `"generation": 0`, 1),
+		"symlink":         "",
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -545,39 +434,21 @@ func TestCorruptTablesAreRejected(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, []byte(mutate(valid(t))), 0o600); err != nil {
+			if name == "symlink" {
+				// A symlinked table is refused even when its target is valid.
+				target := filepath.Join(dir, "elsewhere.json")
+				if err := os.WriteFile(target, []byte(`{"version":1,"bindings":[]}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := OpenFileStore(path); err == nil {
-				t.Fatal("OpenFileStore accepted a corrupt table")
+				t.Fatal("OpenFileStore accepted an unsafe table")
 			}
 		})
-	}
-}
-
-func TestOpenFileStoreRejectsRelativePath(t *testing.T) {
-	if _, err := OpenFileStore("bindings.json"); err == nil {
-		t.Fatal("relative path accepted")
-	}
-	if _, err := OpenFileStore("/tmp/x/../bindings.json"); err == nil {
-		t.Fatal("unclean path accepted")
-	}
-}
-
-func TestSymlinkedTableIsRejected(t *testing.T) {
-	dir := t.TempDir()
-	path := DefaultStorePath(dir)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(dir, "elsewhere.json")
-	if err := os.WriteFile(target, []byte(`{"version":1,"bindings":[]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(target, path); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := OpenFileStore(path); err == nil {
-		t.Fatal("symlinked binding table accepted")
 	}
 }
