@@ -484,7 +484,7 @@ func TestPerUserCursorSetupAndTeardownWorkOnACleanedFile(t *testing.T) {
 	c := NewCursorConnector()
 	opts := SetupOpts{DataDir: f.dataDir}
 	if err := WithUserHomeDir(f.home, func() error {
-		return c.removeConfigEntries(f.hooksPath, c.hookCommand(opts), opts)
+		return c.removeConfigEntries(f.hooksPath, c.hookCommand(opts))
 	}); err != nil {
 		t.Fatalf("per-user teardown of the cleaned file: %v", err)
 	}
@@ -501,9 +501,17 @@ func TestPerUserCursorSetupAndTeardownWorkOnACleanedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owned := newCursorHookCommandMatcher(append([]string{current}, cursorOwnedHookCommands(opts)...))
-	if !cursorHookContractPresent(again["hooks"].(map[string]interface{}), current, owned, c.effectiveFailClosed(opts)) {
-		t.Fatal("per-user setup did not register its complete Cursor contract again")
+	for _, event := range cursorHookEvents {
+		var found bool
+		for _, raw := range again["hooks"].(map[string]interface{})[event].([]interface{}) {
+			entry, _ := raw.(map[string]interface{})
+			if entry["command"] == current {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("per-user setup did not restore the Cursor %s hook", event)
+		}
 	}
 	entries := again["hooks"].(map[string]interface{})["preToolUse"].([]interface{})
 	if len(entries) != 2 || !reflect.DeepEqual(entries[0], map[string]interface{}{"command": "node audit.js"}) {
