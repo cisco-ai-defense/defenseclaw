@@ -118,6 +118,10 @@ func TestDecideOpenMode(t *testing.T) {
 		{"224.0.0.1", 443, host},
 		{"240.0.0.1", 443, host},
 		{"255.255.255.255", 443, host},
+		// Host services on addresses netguard passes as public: the Azure
+		// WireServer.
+		{"168.63.129.16", 80, host},
+		{"168.63.129.17", 443, literal},
 
 		// IPv6 literals the guard refuses, bracketed or not.
 		{"[::1]", 443, host},
@@ -127,6 +131,13 @@ func TestDecideOpenMode(t *testing.T) {
 		{"[fc00::1]", 443, private},
 		{"[fd00::1]", 443, private},
 		{"[fd00:ec2::254]", 80, host},
+		// IPv6 metadata servers in unique local space (Google Cloud, Oracle
+		// Cloud) and the deprecated site-local range.
+		{"[fd20:ce::254]", 80, host},
+		{"[fd00:c1::a9fe:a9fe]", 80, host},
+		{"[fd20:ce::253]", 80, private},
+		{"[fec0::1]", 443, host},
+		{"[feff:ffff::1]", 443, host},
 		{"[::ffff:127.0.0.1]", 443, host},
 		{"[::ffff:10.1.2.3]", 443, private},
 		{"[::ffff:169.254.169.254]", 80, host},
@@ -278,6 +289,7 @@ func TestDecidePrivateNetworksOpenThroughOperatorAllow(t *testing.T) {
 			"10.20.0.0/16", "192.168.1.50", "fd12:3456::/32", "2620:fe::/64", "100.64.0.0/10",
 			"*.corp", "artifactory.example.internal", "0.0.0.0/0", "::/0", "172.0.0.0/8",
 			"127.0.0.1", "localhost", "*.openshell.internal", "metadata.google.internal", "169.254.169.254", ownV4,
+			"fd20:ce::/32", "fd20:ce::254", "168.63.129.16", "fec0::/10",
 		},
 		Block: []string{"10.20.9.9", "blocked.corp"},
 	})
@@ -318,6 +330,10 @@ func TestDecidePrivateNetworksOpenThroughOperatorAllow(t *testing.T) {
 		{"metadata.google.internal", host},
 		{"169.254.169.254", host},
 		{ownV4, host},
+		{"[fd20:ce::254]", host},
+		{"168.63.129.16", host},
+		{"[fec0::1]", host},
+		{"[fd20:ce::1]", withRule(operator, "fd20:ce::/32")},
 	}
 	for _, tt := range tests {
 		got := checkDecision(t, d, testPrincipal, tt.host, 443, tt.want)

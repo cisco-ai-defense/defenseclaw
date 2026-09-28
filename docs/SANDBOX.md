@@ -528,7 +528,12 @@ that decides wins:
    - This machine and what only it reaches are never reachable
      (`host_internal`): loopback, its own addresses, `localhost`,
      `host.openshell.internal`, link-local and cloud metadata addresses, and
-     reserved ranges.
+     reserved ranges. Cloud host services outside the link-local range count
+     too (`egress.NeverReachPrefixes`): the Azure WireServer
+     (`168.63.129.16`), the IPv6 metadata servers of Google Cloud
+     (`fd20:ce::254`) and Oracle Cloud (`fd00:c1::a9fe:a9fe`), and the
+     deprecated IPv6 site-local range `fec0::/10`. No allow entry opens
+     them, and a proposal's `allowed_ips` that overlap them are rejected.
    - Private networks are reachable only where an allow entry names them
      (`private_network`). These are RFC 1918, carrier-grade NAT and IPv6
      unique local addresses, the other hosts on this machine's subnets, and

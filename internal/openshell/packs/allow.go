@@ -461,8 +461,9 @@ func ClassifyAllowedIP(entry string) (netip.Prefix, AllowedIPClass, error) {
 var (
 	mappedPrefix = netip.MustParsePrefix("::ffff:0:0/96")
 	// neverOpenPrefixes mirror netguard's v8 address policy with private
-	// networks allowed: what stays prohibited is never approved.
-	neverOpenPrefixes = []netip.Prefix{
+	// networks allowed, plus what the sandbox guard alone refuses
+	// (egress.NeverReachPrefixes): what stays prohibited is never approved.
+	neverOpenPrefixes = append([]netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("127.0.0.0/8"),
 		netip.MustParsePrefix("169.254.0.0/16"),
@@ -486,9 +487,8 @@ var (
 		netip.MustParsePrefix("5f00::/16"),
 		netip.MustParsePrefix("fd00:ec2::254/128"),
 		netip.MustParsePrefix("fe80::/10"),
-		netip.MustParsePrefix("fec0::/10"),
 		netip.MustParsePrefix("ff00::/8"),
-	}
+	}, egress.NeverReachPrefixes()...)
 	privatePrefixes = []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),
 		netip.MustParsePrefix("172.16.0.0/12"),

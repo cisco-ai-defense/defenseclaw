@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
@@ -46,6 +47,28 @@ var privateRanges = []netip.Prefix{
 	netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("fc00::/7"),
 }
+
+// neverReach are addresses no sandbox reaches, whatever else would admit
+// them, that netguard's address policy (built for the daemon's own
+// exporters) passes as public or treats as private: cloud metadata and host
+// services outside the link-local range, and the deprecated IPv6 site-local
+// range (RFC 3879), which netguard does not reserve. They are refused as
+// host-internal, like 169.254.169.254, and allowed_ips ranges that overlap
+// them are never approved (NeverReachPrefixes, packs.ClassifyAllowedIP).
+var neverReach = []netip.Prefix{
+	// Azure WireServer: the VM agent's host channel, a public address
+	// reachable only from inside Azure.
+	netip.MustParsePrefix("168.63.129.16/32"),
+	// Google Cloud's IPv6 metadata server.
+	netip.MustParsePrefix("fd20:ce::254/128"),
+	// Oracle Cloud's IPv6 instance metadata service.
+	netip.MustParsePrefix("fd00:c1::a9fe:a9fe/128"),
+	netip.MustParsePrefix("fec0::/10"),
+}
+
+// NeverReachPrefixes returns the addresses the sandbox guard refuses as
+// host-internal beyond netguard's metadata and reserved ranges.
+func NeverReachPrefixes() []netip.Prefix { return slices.Clone(neverReach) }
 
 // guardClass is how the guard treats a destination.
 type guardClass uint8
@@ -140,6 +163,11 @@ func classifyAddr(addr netip.Addr, local *localAddrs) guardVerdict {
 		return guardVerdict{class: guardHost, what: "an address of this machine",
 			reason: "The address belongs to this machine; sandboxes never reach services on the host through it."}
 	}
+	for _, never := range neverReach {
+		if never.Contains(addr) {
+			return guardVerdict{class: guardHost, what: reservedWhat, reason: reservedReason}
+		}
+	}
 	ip := net.IP(addr.AsSlice())
 	if guardPolicy.ValidateIP(ip) == nil {
 		if subnet.IsValid() {
@@ -158,11 +186,13 @@ func classifyAddr(addr netip.Addr, local *localAddrs) guardVerdict {
 			}
 		}
 	}
-	return guardVerdict{class: guardHost, what: reservedWhat,
-		reason: "The address is loopback, link-local, cloud metadata, multicast, reserved or otherwise not publicly routable."}
+	return guardVerdict{class: guardHost, what: reservedWhat, reason: reservedReason}
 }
 
-const reservedWhat = "a loopback, link-local, cloud metadata, multicast or reserved address"
+const (
+	reservedWhat   = "a loopback, link-local, cloud metadata, multicast or reserved address"
+	reservedReason = "The address is loopback, link-local, cloud metadata, multicast, reserved or otherwise not publicly routable."
+)
 
 // allowsPrivate reports the operator allow rule (or administrator
 // allow-only entry) that opens a private destination: any allow pattern

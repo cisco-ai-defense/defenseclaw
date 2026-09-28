@@ -19,10 +19,12 @@ package packs
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 )
 
 func withHostname(t *testing.T, name string) {
@@ -588,6 +590,11 @@ func TestClassifyAllowedIP(t *testing.T) {
 		"2002::/16":              AllowedIPNever,
 		"::ffff:0:0/95":          AllowedIPNever,
 		"::ffff:169.254.0.0/112": AllowedIPNever,
+		"168.63.129.16":          AllowedIPNever,
+		"168.63.0.0/16":          AllowedIPNever,
+		"fd20:ce::254":           AllowedIPNever,
+		"fd20::/16":              AllowedIPNever,
+		"fec0::/10":              AllowedIPNever,
 	} {
 		_, got, err := ClassifyAllowedIP(entry)
 		if err != nil || got != want {
@@ -599,4 +606,40 @@ func TestClassifyAllowedIP(t *testing.T) {
 			t.Errorf("ClassifyAllowedIP(%q) accepted", bad)
 		}
 	}
+}
+
+// TestNeverOpenPrefixesAreGuarded pins that what triage never approves in
+// allowed_ips is what the egress proxy's guard refuses outright: the first
+// and last address of every never-open range resolve to a host-internal
+// refusal at dial time, and every range the guard alone adds to netguard's
+// is never opened.
+func TestNeverOpenPrefixesAreGuarded(t *testing.T) {
+	withInterfaceAddrs(t)
+	eff, _ := mustResolve(t, testConfig(nil), Flags{})
+	d, err := eff.EgressDecider(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := egress.Decision{Allowed: true, Host: "probe.example.com", Source: egress.SourceDefault}
+	for _, prefix := range neverOpenPrefixes {
+		for _, addr := range []netip.Addr{prefix.Masked().Addr(), lastAddr(prefix)} {
+			if got := d.CheckAddrs(policyProbe, probe, []netip.Addr{addr}); got.Category != egress.CategoryHostInternal {
+				t.Errorf("%s (in never-open %s) at dial time = %+v, want a host-internal refusal", addr, prefix, got)
+			}
+		}
+	}
+	for _, prefix := range egress.NeverReachPrefixes() {
+		if _, class, err := ClassifyAllowedIP(prefix.String()); err != nil || class != AllowedIPNever {
+			t.Errorf("ClassifyAllowedIP(%s) = %v, %v; want never", prefix, class, err)
+		}
+	}
+}
+
+func lastAddr(prefix netip.Prefix) netip.Addr {
+	b := prefix.Masked().Addr().AsSlice()
+	for i := prefix.Bits(); i < len(b)*8; i++ {
+		b[i/8] |= 1 << (7 - i%8)
+	}
+	addr, _ := netip.AddrFromSlice(b)
+	return addr
 }
