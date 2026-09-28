@@ -80,3 +80,31 @@ async def test_ctrl_p_opens_the_panel_jumper(tmp_path) -> None:
         await pilot.press("ctrl+p")
         await pilot.pause()
         assert isinstance(app.screen, PanelJumperScreen)
+
+
+async def test_enter_in_the_filter_box_chooses_the_highlighted_row() -> None:
+    from defenseclaw.tui.panels.setup_catalog import PickerRow
+    from defenseclaw.tui.screens.setup_picker import SetupPickerScreen
+
+    rows = (PickerRow("0:1", "Block Message"), PickerRow("0:2", "Mode"))
+    results: list[str | None] = []
+
+    class Harness(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(
+                SetupPickerScreen(
+                    "Find a config field",
+                    lambda query: tuple(row for row in rows if query.lower() in row.label.lower()),
+                    filterable=True,
+                ),
+                results.append,
+            )
+
+    app = Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press(*"mode")
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert results == ["0:2"]

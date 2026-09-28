@@ -167,6 +167,15 @@ class SetupPickerScreen(ModalScreen[str | None]):
         self.selected = first_selectable(self.rows)
         self._refresh_list()
 
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # The filter box has focus, and an Input consumes Enter itself (it
+        # posts Submitted), so the screen's enter binding never fires: choose
+        # the highlighted row from here.
+        if event.input.id != "setup-picker-input":
+            return
+        event.stop()
+        self.action_choose()
+
     def on_key(self, event: events.Key) -> None:
         # Without a filter box, j/k move too.
         if not self._filterable and event.key in {"j", "k"}:
