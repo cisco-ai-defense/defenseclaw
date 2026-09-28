@@ -1010,7 +1010,8 @@ def _prompt_connector_selection(
     wizard's per-connector questions out so several agents can be brought
     up in one pass. The selected names become the active connector set.
     Defaults to every installed hook connector so the
-    common "start everything I have" case is a single Enter."""
+    common "start everything I have" case is a single Enter; clearing
+    every box returns ``["none"]``."""
     if connector:
         names = _parse_connector_list(connector)
         if names:
@@ -1043,22 +1044,33 @@ def _prompt_connector_selection(
         click.echo()
     _note_proxy_connectors(disc)
     installed = _installed_hook_connectors(disc)
+    # Choosing no connector is the interactive form of --connector none, for
+    # someone who only wants sandboxes or will add an agent later.
+    later = "'defenseclaw setup <connector>' can add one later"
+    if _sandboxes_possible():
+        later = "OpenShell sandboxes still work, and " + later
     if installed:
-        return _prompt_checkbox_selection(
+        ux.subhead(f"Clear every box to protect no host agent now; {later}.")
+        selected = _prompt_checkbox_selection(
             installed,
             default_selected=installed,
             title="Select active connector(s). Detected connectors are pre-selected.",
-            empty_ok=False,
+            empty_ok=True,
         )
+        if selected:
+            return selected
+        ux.subhead("No host connector selected; DefenseClaw will not protect a host agent.")
+        return ["none"]
 
     fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
+    ux.subhead(f"Choose none to protect no host agent now; {later}.")
     choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
     if fallback not in choices:
         fallback = choices[0] if choices else "codex"
     raw = click.prompt(
         "  Connector",
-        type=click.Choice(choices, case_sensitive=False),
+        type=click.Choice([*choices, "none"], case_sensitive=False),
         default=fallback,
         show_default=True,
     )

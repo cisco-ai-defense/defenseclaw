@@ -3380,6 +3380,61 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertTrue(verify)
         self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
 
+    def test_prompt_first_run_empty_connector_choice_continues_with_none(self):
+        """Clearing every detected connector must continue as --connector none, not refuse."""
+        from defenseclaw.commands import cmd_init
+
+        for sandboxes in (True, False):
+            with self.subTest(sandboxes=sandboxes):
+                keys = iter(["n", "\r"])  # clear every box, continue
+                prompts = iter(["local"])  # scanner mode
+                confirms = iter([False, True])  # start_gateway, verify
+                emitted: list[str] = []
+
+                with patch.object(
+                    cmd_init.agent_discovery, "discover_agents", return_value=self._disc({"codex", "claudecode"})
+                ), \
+                        patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                        patch.object(cmd_init, "_supports_terminal_redraw", return_value=False), \
+                        patch.object(cmd_init, "_sandboxes_possible", return_value=sandboxes), \
+                        patch.object(cmd_init.click, "getchar", side_effect=lambda: next(keys)), \
+                        patch.object(
+                            cmd_init.click, "echo", side_effect=lambda message="", **_k: emitted.append(str(message))
+                        ), \
+                        patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                        patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+                    settings, _scanner, with_judge, _judge, _start, _verify = cmd_init._prompt_first_run(
+                        connector=None, profile=None, scanner_mode="local", with_judge=False,
+                        fail_mode=None, human_approval=None, hilt_min_severity=None,
+                        start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                    )
+
+                output = "\n".join(emitted)
+                self.assertEqual([(s["connector"], s["profile"]) for s in settings], [("none", "observe")])
+                self.assertFalse(with_judge)
+                self.assertIn("Clear every box to protect no host agent now", output)
+                self.assertIn("'defenseclaw setup <connector>' can add one later", output)
+                self.assertEqual("OpenShell sandboxes still work" in output, sandboxes)
+                self.assertIn("No host connector selected", output)
+                self.assertNotIn("Select at least one connector.", output)
+
+    def test_connector_selection_without_detected_connectors_offers_none(self):
+        from defenseclaw.commands import cmd_init
+
+        prompt_types = []
+
+        def prompt(_text, **kwargs):
+            prompt_types.append(kwargs["type"])
+            return "none"
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=self._disc(set())), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init.click, "prompt", side_effect=prompt):
+            got = cmd_init._prompt_connector_selection(None, False)
+
+        self.assertEqual(got, ["none"])
+        self.assertIn("none", prompt_types[0].choices)
+
     def test_prompt_first_run_connector_none_skips_action_enforcement(self):
         """``--connector none`` must not offer "none" for action mode or the judge."""
         from defenseclaw.commands import cmd_init
