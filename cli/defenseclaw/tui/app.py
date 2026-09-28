@@ -14138,7 +14138,8 @@ def _panel_key(event: events.Key) -> str:
         # ``D`` (background doctor) and ``Y`` (copy last output) are global
         # bindings: folding them to ``d``/``y`` let Alerts turn Shift+D into
         # "dismiss alert" and Overview into a foreground doctor preview.
-        if event.character in {"A", "C", "D", "E", "G", "J", "M", "N", "R", "S", "T", "V", "X", "Y"}:
+        # ``P`` is the Policies shortcut; Runtime keeps ``p`` for its planes.
+        if event.character in {"A", "C", "D", "E", "G", "J", "M", "N", "P", "R", "S", "T", "V", "X", "Y"}:
             return event.character
         return event.character.lower()
     return event.key

@@ -116,10 +116,6 @@ async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: 
             ("ctrl+p",),
             PanelJumperScreen,
             id="panel-jumper",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="Ctrl+P opens Textual's built-in command palette, not the panel jumper",
-            ),
         ),
         pytest.param("overview", ("ctrl+backslash",), ThemePickerScreen, id="theme-picker"),
         pytest.param("overview", ("m",), ModePickerScreen, id="mode-picker"),
@@ -208,6 +204,19 @@ async def test_every_panel_shortcut_switches_from_overview(tmp_path) -> None:
             await pilot.press(key.lower())
             await pilot.pause()
             assert app.active_panel == name, f"shortcut {key!r} did not open {name}"
+
+
+async def test_shift_p_opens_policies_where_p_is_a_panel_key(tmp_path) -> None:
+    # Runtime keeps a local ``p`` (planes strip); Shift+P must still reach the
+    # Policies shortcut instead of being folded into ``p``.
+    app = fixtures.snapshot_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("runtime")
+        await pilot.pause()
+        await pilot.press("P")
+        await pilot.pause()
+        assert app.active_panel == "policies"
 
 
 async def test_tab_moves_to_next_panel(tmp_path) -> None:
