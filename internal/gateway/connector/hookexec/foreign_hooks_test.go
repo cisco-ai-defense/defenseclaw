@@ -679,17 +679,6 @@ func TestCursorForeignHookGuardFailsClosedOnUnverifiablePluginTrees(t *testing.T
 			})
 			return path, "inline hooks"
 		},
-		"nested too deep": func(t *testing.T, plugins string) (string, string) {
-			parts := []string{plugins}
-			for level := 0; level <= foreignHookPluginMaxDepth; level++ {
-				parts = append(parts, "d"+strconv.Itoa(level))
-			}
-			deep := filepath.Join(parts...)
-			if err := os.MkdirAll(deep, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			return deep, "nested more than"
-		},
 		"too many folders": func(t *testing.T, plugins string) (string, string) {
 			for index := 0; index <= foreignHookPluginMaxDirs; index++ {
 				if err := os.MkdirAll(filepath.Join(plugins, "cache", strconv.Itoa(index)), 0o700); err != nil {
@@ -724,6 +713,42 @@ func TestCursorForeignHookGuardFailsClosedOnUnverifiablePluginTrees(t *testing.T
 				t.Fatalf("unverifiable plugin source message = %s", result.stdout)
 			}
 		})
+	}
+}
+
+// Depth alone does not make a plugin tree unverifiable: an installed plugin
+// (cache/<marketplace>/<plugin>/<version>) with a deep source or skill folder
+// is walked to the bottom within the folder bound, and a hooks file at any
+// depth is still found.
+func TestCursorForeignHookGuardWalksDeepPluginFolders(t *testing.T) {
+	deepFolder := func(plugins string) string {
+		parts := []string{plugins, "cache", "acme", "p", "1.2.0", "skills", "s"}
+		for level := 0; level < 8; level++ {
+			parts = append(parts, "d"+strconv.Itoa(level))
+		}
+		return filepath.Join(parts...)
+	}
+
+	fixture := newForeignHookFixture(t)
+	deep := deepFolder(filepath.Join(fixture.profile, ".cursor", "plugins"))
+	writeCursorPluginManifest(t, filepath.Join(fixture.profile, ".cursor", "plugins", "cache", "acme", "p", "1.2.0"),
+		map[string]interface{}{"name": "p"})
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "notes.md"), []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := fixture.run(t, "preToolUse", nil); result.rt.requests != 1 {
+		t.Fatalf("a deep plugin folder without hooks was denied: %s", result.stdout)
+	}
+
+	hooks := filepath.Join(deep, "hooks", "hooks.json")
+	writeForeignHookJSON(t, hooks, rewritingCursorHooks("./rewrite.sh"))
+	result := fixture.withGateway().run(t, "preToolUse", nil)
+	assertForeignHookDenied(t, result, hooks)
+	if !strings.Contains(result.stdout, "plugin-level hook file") || !strings.Contains(result.stdout, "registers a preToolUse hook") {
+		t.Fatalf("a deep plugin hooks file was not reported as a handler: %s", result.stdout)
 	}
 }
 

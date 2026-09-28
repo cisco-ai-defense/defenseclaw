@@ -53,11 +53,9 @@ const (
 	// foreignHookMaxRoots bounds the distinct workspace roots taken from the
 	// payload. A payload that reports more cannot be verified and denies.
 	foreignHookMaxRoots = 32
-	// foreignHookPluginMaxDepth and foreignHookPluginMaxDirs bound the walk of
-	// <home>/.cursor/plugins. A tree that exceeds either bound cannot be
-	// verified and denies.
-	foreignHookPluginMaxDepth = 8
-	foreignHookPluginMaxDirs  = 4096
+	// foreignHookPluginMaxDirs bounds the walk of <home>/.cursor/plugins. A
+	// tree with more folders cannot be verified and denies.
+	foreignHookPluginMaxDirs = 4096
 	// foreignHookDescribeLimit bounds the handler text shown in a denial.
 	foreignHookDescribeLimit = 200
 
@@ -276,8 +274,10 @@ func (o Options) getenv(key string) string {
 // configs its plugin.json and marketplace.json declare, and every
 // hooks/hooks.json in the tree is scanned. The walk never follows links or
 // reparse points, skips version-control and package folders that are not
-// plugins themselves, and stops at a bounded depth and size. Anything it
-// cannot verify is reported as a problem so the guard denies.
+// plugins themselves, and lists at most foreignHookPluginMaxDirs folders; it
+// has no depth limit, because the folder bound already limits its cost and
+// a deep folder can hold hooks like any other. Anything it cannot verify is
+// reported as a problem so the guard denies.
 func scanCursorPluginTree(
 	tree string,
 	addSource func(foreignHookSource),
@@ -301,11 +301,7 @@ func scanCursorPluginTree(
 	if !info.IsDir() {
 		return
 	}
-	type pending struct {
-		dir   string
-		depth int
-	}
-	queue := []pending{{dir: tree}}
+	queue := []string{tree}
 	for listed := 0; len(queue) > 0; listed++ {
 		if listed == foreignHookPluginMaxDirs {
 			folderProblem(tree, fmt.Sprintf("the plugin folders hold more than %d directories", foreignHookPluginMaxDirs))
@@ -313,15 +309,15 @@ func scanCursorPluginTree(
 		}
 		current := queue[0]
 		queue = queue[1:]
-		entries, err := os.ReadDir(current.dir)
+		entries, err := os.ReadDir(current)
 		if err != nil {
-			folderProblem(current.dir, fmt.Sprintf("cannot list the folder: %v", err))
+			folderProblem(current, fmt.Sprintf("cannot list the folder: %v", err))
 			continue
 		}
-		scanCursorPluginMetadata(current.dir, entries, addSource, problem)
+		scanCursorPluginMetadata(current, entries, addSource, problem)
 		for _, entry := range entries {
 			name := entry.Name()
-			path := filepath.Join(current.dir, name)
+			path := filepath.Join(current, name)
 			mode := entry.Type()
 			switch {
 			case foreignHookLinkMode(mode):
@@ -333,12 +329,8 @@ func scanCursorPluginTree(
 				// Version-control and package folders are not plugin sources
 				// unless the folder is itself a plugin.
 			case mode.IsDir():
-				if current.depth+1 > foreignHookPluginMaxDepth {
-					folderProblem(path, fmt.Sprintf("the folder is nested more than %d levels deep", foreignHookPluginMaxDepth))
-					continue
-				}
-				queue = append(queue, pending{dir: path, depth: current.depth + 1})
-			case foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(current.dir), "hooks"):
+				queue = append(queue, path)
+			case foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(current), "hooks"):
 				addSource(foreignHookSource{scope: foreignHookScopePlugin, path: path, format: foreignHookFormatPlugin})
 			}
 		}
