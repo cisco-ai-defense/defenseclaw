@@ -54,6 +54,7 @@ _HILT_WORDS = {
     "CRITICAL": "Ask a human for CRITICAL findings the block level lets through",
     "HIGH+": "Ask a human for HIGH and above (below the block level)",
     "MEDIUM+": "Ask a human for MEDIUM and above (below the block level)",
+    "LOW+": "Ask a human for every finding below the block level",
 }
 
 
@@ -77,7 +78,7 @@ def threshold_choices(kind: str, current: str) -> tuple[LevelChoice, ...]:
 
 
 def approval_choices(current: str) -> tuple[LevelChoice, ...]:
-    """Human-approval choices (off, CRITICAL, HIGH+, MEDIUM+)."""
+    """Human-approval choices (off, CRITICAL, HIGH+, MEDIUM+, LOW+)."""
     now = (current or "off").strip()
     now = now if now == "off" else now.upper()
     return tuple(

@@ -37,6 +37,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from rich.console import RenderableType
 from rich.markup import escape as rich_escape
 
 from defenseclaw.platform_support import openshell_sandboxes_supported
@@ -59,6 +60,7 @@ from defenseclaw.tui.screens.rule_pack_picker import (
 )
 from defenseclaw.tui.services.policy_state import (
     PROTECTED_PACK_PREFIX,
+    VIEW_SHORT_TITLES,
     PackRule,
     PackValidation,
     PoliciesPanelModel,
@@ -77,6 +79,7 @@ from defenseclaw.tui.services.policy_state import (
     policy_weakenings,
     posture_summary,
     profile_levels,
+    protection_claim,
     protection_intent,
     severity_actions,
     threshold_intent,
@@ -84,6 +87,7 @@ from defenseclaw.tui.services.policy_state import (
     use_pack_intent,
 )
 from defenseclaw.tui.theme import DEFAULT_TOKENS as TOKENS
+from defenseclaw.tui.widgets.panel_split import ASIDE_MIN_WIDTH, NAV_MIN_WIDTH, NAV_WIDTH, Aside, NavItem
 
 # Buttons of the panel's control bar, mapped to the key they press. The
 # views themselves are switched from the navigation list or with 1-7.
@@ -99,19 +103,6 @@ POLICY_BUTTON_KEYS: dict[str, str] = {
     "policies-change-pack": "enter",
     "policies-details": "i",
     "policies-refresh": "r",
-}
-
-# The aside shows the highlighted row's detail from this width up; below
-# it the same text opens under the table with ``i``.
-ASIDE_COLUMNS = 120
-
-# What turning a production-protection pack on asserts about the scope.
-_PROTECTED_CONTEXT = {
-    "database-destruction-protection": "a protected database",
-    "kubernetes-production-protection": "a protected production Kubernetes cluster",
-    "cloud-production-protection": "protected production cloud accounts",
-    "infrastructure-destruction-protection": "protected production hosts and infrastructure",
-    "privacy-high-assurance": "high-assurance personal data",
 }
 
 # Consequence modals list at most this many of a pack's rules.
@@ -299,13 +290,61 @@ class PolicyPanelMixin:
         size = getattr(self, "size", None)
         return int(getattr(size, "width", 0) or 120)
 
+    def _policy_table_width(self) -> int:
+        """Characters the table gets: the body minus the nav list and the aside.
+
+        Mirrors the split's CSS (widgets/panel_split.py and the app): the body
+        panel takes 6 columns, the nav list ``NAV_WIDTH`` + 1, the aside 40%
+        + 1, and the table's own border 2 once the nav list is shown.
+        """
+        width = self._policy_width()
+        body = max(20, width - 6)
+        table = body
+        if width >= NAV_MIN_WIDTH:
+            table -= NAV_WIDTH + 1 + 2
+        if width >= ASIDE_MIN_WIDTH:
+            table -= round(body * 0.4) + 1
+        # A table taller than the screen draws a 2-column scrollbar.
+        return max(20, table - 2)
+
     def _policy_nav_shown(self) -> bool:
         """Whether the navigation list replaces the one-line view switcher."""
-        return callable(getattr(self, "_panel_nav", None)) and self._policy_width() >= 100
+        return self._policy_width() >= NAV_MIN_WIDTH
 
     def _policy_aside_shown(self) -> bool:
         """Whether the detail sits beside the table (instead of under it, with ``i``)."""
-        return callable(getattr(self, "_panel_aside", None)) and self._policy_width() >= ASIDE_COLUMNS
+        return self._policy_width() >= ASIDE_MIN_WIDTH
+
+    def _policy_panel_nav(self) -> tuple[NavItem, ...]:
+        """``_panel_nav`` for Policies: the seven views, badges with counts."""
+        return tuple(
+            NavItem(view, title, badge, active) for view, title, badge, active in self.policy_model.nav_entries()
+        )
+
+    def _policy_panel_aside(self) -> RenderableType | None:
+        """``_panel_aside`` for Policies: the highlighted row's detail.
+
+        Always beside the table on a wide terminal; below it on a narrow one
+        only once ``i`` (or Enter on a read-only row) opened it, so the table
+        keeps its rows at 80x24.
+        """
+        model = self.policy_model
+        if not self._policy_aside_shown() and not model.detail_open:
+            return None
+        title, lines = model.aside()
+        if not title:
+            return None
+        return Aside(title, "\n".join(rich_escape(line) for line in lines))
+
+    def _select_policy_nav(self, key: str) -> bool:
+        """A click on a nav item or switcher segment: the same as its 1-7 key."""
+        model = self.policy_model
+        if key not in model.views() or key == model.view:
+            return False
+        action = model.handle_key(str(model.views().index(key) + 1))
+        if action.kind == "load_sandbox_packs":
+            self._schedule_policy_load(sandbox=True)
+        return True
 
     def _policies_body_text(self) -> str:
         """Up to three lines: header, view switcher (narrow), the view's status line."""
@@ -319,12 +358,11 @@ class PolicyPanelMixin:
             head = f"[{TOKENS.text_secondary}]{rich_escape(header)}[/]"
         lines = [f"[bold {TOKENS.accent_cyan}]Policies[/]  {head}"]
         if not self._policy_nav_shown():
-            lines.append(
-                "  ".join(
-                    f"[bold reverse] {key} {title} [/]" if active else f"[{TOKENS.text_muted}]{key} {title}[/]"
-                    for key, title, active in model.view_switcher()
-                )
+            short = tuple(
+                NavItem(key_view, VIEW_SHORT_TITLES[key_view], active=active)
+                for key_view, _title, _badge, active in model.nav_entries()
             )
+            lines.append(self._body_nav_switcher(short, len(lines)))  # type: ignore[attr-defined]
         failed = (
             model.error
             or (model.view == "packs" and model.pack_error)
@@ -336,22 +374,8 @@ class PolicyPanelMixin:
             lines.append(f"[{TOKENS.text_secondary}]{rich_escape(fit(empty, width))}[/]")
         else:
             color = TOKENS.accent_amber if failed else TOKENS.text_secondary
-            lines.append(f"[{color}]{rich_escape(fit(model.headline(), width))}[/]")
+            lines.append(f"[{color}]{rich_escape(fit(model.headline(width), width))}[/]")
         return "\n".join(lines)
-
-    def _policy_aside_markup(self) -> str:
-        """The highlighted row's detail as markup ("" when nothing is selected)."""
-        title, lines = self.policy_model.aside()
-        if not title:
-            return ""
-        body = "\n".join(rich_escape(line) for line in lines)
-        return f"[bold {TOKENS.accent_violet}]{rich_escape(title)}[/]\n{body}"
-
-    def _policy_detail_markup(self) -> str:
-        """``#detail-panel`` text: only when opened, and only while no aside shows it."""
-        if self._policy_aside_shown() or not self.policy_model.detail_open:
-            return ""
-        return self._policy_aside_markup()
 
     def _sync_policy_controls(self) -> None:
         model = self.policy_model
@@ -369,7 +393,11 @@ class PolicyPanelMixin:
             "policies-scope": view in {"optin", "families"} and len(model.postures) > 1,
             "policies-activate": view == "policies" and model.selected_policy() is not None,
             "policies-change-pack": view == "packs" and model.global_pack is not None,
-            "policies-details": not self._policy_aside_shown() and model.row_count() > 0,
+            # i and Enter open the details too; on a narrow Posture view the
+            # five change buttons need the room.
+            "policies-details": not self._policy_aside_shown()
+            and model.row_count() > 0
+            and not (view == "posture" and not self._policy_nav_shown()),
             "policies-refresh": True,
         }
         for button_id, show in visible.items():
@@ -849,8 +877,7 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
     consequence = ""
     weaker = not enable
     if enable:
-        context = _PROTECTED_CONTEXT.get(name, "a protected environment")
-        summary = f"Turning it on tells DefenseClaw {scope} works with {context}."
+        summary = protection_claim(name, scope)
         details.append(f"It blocks: {covers}." if covers else "It adds the pack's blocking rules.")
         rules = model.pack_rules.get(name) or ()
         for rule in rules[:_MODAL_RULES]:
@@ -894,7 +921,6 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
 
 
 __all__ = [
-    "ASIDE_COLUMNS",
     "POLICY_BUTTON_KEYS",
     "PolicyCatalogRead",
     "PolicyPanelMixin",

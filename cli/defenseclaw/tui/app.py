@@ -4688,9 +4688,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.body_text = self._sandbox_body_text()
             return self.body_text
         if self.active_panel == "policies":
-            width = int(getattr(self.size, "width", 0) or 0)
-            self._table_columns = self.policy_model.data_table_columns(width)
-            self._table_rows = self.policy_model.data_table_rows(width)
+            self._table_columns, self._table_rows = self.policy_model.table(self._policy_table_width())
             self.body_text = self._policies_body_text()
             return self.body_text
         if self.active_panel == "setup":
@@ -10263,6 +10261,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if panel == "setup":
             return self._setup_panel_nav()
+        if panel == "policies":
+            return self._policy_panel_nav()
         return ()
 
     def _panel_aside(self, panel: str) -> RenderableType | None:
@@ -10275,6 +10275,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if panel == "setup":
             return self._setup_panel_aside()
+        if panel == "policies":
+            return self._policy_panel_aside()
         return None
 
     def _select_panel_nav(self, panel: str, key: str) -> bool:
@@ -10287,6 +10289,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if panel == "setup":
             return self._select_setup_nav(key)
+        if panel == "policies":
+            return self._select_policy_nav(key)
         return False
 
     def _body_nav_switcher(self, items: tuple[NavItem, ...], line: int) -> str:
@@ -10445,7 +10449,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "alerts":
             return self.alerts_model.detail_text()
         if self.active_panel == "policies":
-            return self._policy_detail_markup()
+            # The aside hook carries the Policies detail (right of the table,
+            # or below it once opened with i on a narrow terminal).
+            return ""
         if self.active_panel == "registries" and self.registries_model.detail_open:
             detail = self.registries_model.selected_detail_info()
             if detail is None:

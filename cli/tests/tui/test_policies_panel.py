@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from textual.widgets import DataTable
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -170,13 +171,17 @@ async def test_m_on_a_connector_switches_it_to_observe_after_a_second_confirm(tm
 
 
 @pytest.mark.asyncio
-async def test_protection_center_renders_every_scope_at_160x45(tmp_path, monkeypatch) -> None:
+async def test_protection_center_shows_nav_table_and_aside_at_160x45(tmp_path, monkeypatch) -> None:
     app, _reads, _captured, _runs = policies_app(tmp_path, monkeypatch)
     async with app.run_test(size=(160, 45)) as pilot:
         await until(pilot, lambda: app.policy_model.loaded)
-        await pilot.press("P")
+        await pilot.press("P", "down")
         await pilot.pause()
         text = screen_text(app)
+        nav, aside = app.query_one("#panel-nav"), app.query_one("#panel-aside")
+        assert not nav.has_class("hidden") and not aside.has_class("hidden")
+        assert str(aside.border_title).endswith("codex")  # the highlighted scope's detail
+        # The scope rows keep their levels beside the nav list and the aside.
+        assert len(app.query_one("#panel-table", DataTable).columns) >= 6
     for scope in ("global", "codex", "claudecode"):
         assert scope in text
-    assert "Blocks at" in text  # the wide table's columns

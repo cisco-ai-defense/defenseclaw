@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import re
 import string
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
-from defenseclaw.policy_catalog import ConnectorPack
+from defenseclaw.policy_catalog import ConnectorPack, ProtectionPack, RuleFamily, ScopePosture, ToolChain
 from defenseclaw.tui import policy_panel
 from defenseclaw.tui.policy_panel import (
     hilt_change_modal,
@@ -50,49 +49,49 @@ from defenseclaw.tui.services.policy_state import (
 from test_policy_state import DEFAULT, PERMISSIVE, STRICT
 
 
-# The policy_catalog contracts (ScopePosture, ProtectionPack, ToolChain, RuleFamily).
-@dataclass(frozen=True)
-class Posture:
-    scope: str
-    mode: str = "observe"
-    mode_source: str = "global"
-    hilt: str = "off"
-    pack: str = "default"
-    pack_path: str = "/p/guardrail/default"
-    pack_source: str = "global"
-    protection: tuple[str, ...] = ()
+# Built from the policy_catalog contracts, so a field rename fails here.
+def Posture(scope: str, **fields: object) -> ScopePosture:  # noqa: N802 - reads like the dataclass
+    values: dict[str, object] = {
+        "mode": "observe",
+        "mode_source": "global",
+        "hilt": "off",
+        "pack": "default",
+        "pack_path": "/p/guardrail/default",
+        "pack_source": "global",
+        "protection": (),
+    }
+    values.update(fields)
+    return ScopePosture(scope=scope, **values)  # type: ignore[arg-type]
 
 
-@dataclass(frozen=True)
-class Pack:
-    name: str
-    title: str
-    summary: str = "Blocks what it covers."
-    covers: str = "what it covers"
-    rule_count: int = 3
-    rule_ids: tuple[str, ...] = ("a", "b", "c")
-    status: str = "selectable"
+def Pack(name: str, title: str, **fields: object) -> ProtectionPack:  # noqa: N802
+    values: dict[str, object] = {
+        "summary": "Blocks what it covers.",
+        "covers": "what it covers",
+        "rule_count": 3,
+        "rule_ids": ("a", "b", "c"),
+        "status": "selectable",
+    }
+    values.update(fields)
+    return ProtectionPack(name=name, title=title, **values)  # type: ignore[arg-type]
 
 
-@dataclass(frozen=True)
-class Chain:
-    id: str
-    title: str
-    severity: str = "HIGH"
-    domain: str = "sql"
-    can_block: bool = False
-    event_window: int = 9
-    time_window_seconds: int = 1800
-    requires: tuple[str, ...] = ("same session",)
-    note: str = ""
+def Chain(id: str, title: str, **fields: object) -> ToolChain:  # noqa: A002, N802
+    values: dict[str, object] = {
+        "severity": "HIGH",
+        "domain": "sql",
+        "can_block": False,
+        "event_window": 9,
+        "time_window_seconds": 1800,
+        "requires": ("same session",),
+        "note": "",
+    }
+    values.update(fields)
+    return ToolChain(id=id, title=title, **values)  # type: ignore[arg-type]
 
 
-@dataclass(frozen=True)
-class Family:
-    name: str
-    rules: int
-    enabled: int
-    description: str = ""
+def Family(name: str, rules: int, enabled: int, description: str = "") -> RuleFamily:  # noqa: N802
+    return RuleFamily(name=name, rules=rules, enabled=enabled, description=description)
 
 
 POSTURES = (
@@ -125,7 +124,10 @@ CHAINS = (
     Chain("chain.mystery", "Something new", domain="quantum"),
 )
 FAMILIES = {
-    "/p/guardrail/default": (Family("command", 128, 128, "Execution and destructive commands"), Family("secret", 23, 23)),
+    "/p/guardrail/default": (
+        Family("command", 128, 128, "Execution and destructive commands"),
+        Family("secret", 23, 23),
+    ),
     "/p/guardrail/strict": (Family("command", 139, 139),),
 }
 
@@ -214,7 +216,14 @@ def test_posture_keys_ask_for_the_right_flow_on_the_highlighted_scope() -> None:
 
 
 def test_intents_build_the_exact_argv() -> None:
-    assert mode_intent("observe", "codex").argv == ("defenseclaw", "guardrail", "mode", "observe", "--connector", "codex")
+    assert mode_intent("observe", "codex").argv == (
+        "defenseclaw",
+        "guardrail",
+        "mode",
+        "observe",
+        "--connector",
+        "codex",
+    )
     assert mode_intent("action").args == ("guardrail", "mode", "action")
     assert threshold_intent("block", "HIGH+").args == ("policy", "edit", "guardrail", "--block-threshold", "3")
     assert threshold_intent("alert", "LOW+").args == ("policy", "edit", "guardrail", "--alert-threshold", "1")
@@ -266,9 +275,9 @@ def test_weakening_rules_for_mode_levels_and_approval() -> None:
     assert not threshold_weakens("CRITICAL", "HIGH+")
     assert hilt_weakens("HIGH+", "off") and hilt_weakens("HIGH+", "CRITICAL")
     assert not hilt_weakens("off", "HIGH+") and not hilt_weakens("HIGH+", "MEDIUM+")
-    assert actions_weaken(severity_actions("CRITICAL", "MEDIUM+", "HIGH+"), severity_actions("CRITICAL", "MEDIUM+", "off")) == (
-        "HIGH",
-    )
+    assert actions_weaken(
+        severity_actions("CRITICAL", "MEDIUM+", "HIGH+"), severity_actions("CRITICAL", "MEDIUM+", "off")
+    ) == ("HIGH",)
 
 
 def test_consequence_modals_turn_red_only_when_protection_weakens() -> None:

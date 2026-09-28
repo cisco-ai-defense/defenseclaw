@@ -74,9 +74,6 @@ VIEW_SHORT_TITLES = {
 }
 VIEW_KEYS = {str(index): view for index, view in enumerate(POLICY_VIEWS, start=1)}
 
-# Under this many columns the tables drop what the detail shows.
-WIDE_COLUMNS = 100
-
 # Sandbox packs: the gateway's packs.DefaultPack.
 DEFAULT_SANDBOX_PACK = "open"
 
@@ -96,7 +93,7 @@ LEVEL_FOR_RANK = {4: "CRITICAL", 3: "HIGH+", 2: "MEDIUM+", 1: "LOW+"}
 BLOCK_LEVELS = ("CRITICAL", "HIGH+", "MEDIUM+")
 ALERT_LEVELS = ("HIGH+", "MEDIUM+", "LOW+")
 # Human approval (``guardrail hilt``): off, or the lowest severity that asks.
-HILT_LEVELS = ("off", "CRITICAL", "HIGH+", "MEDIUM+")
+HILT_LEVELS = ("off", "CRITICAL", "HIGH+", "MEDIUM+", "LOW+")
 
 # Tool-call block/alert levels per rule-pack profile (decision.go
 # ``guardrailThresholdsForConnector``).
@@ -141,9 +138,9 @@ def level_rank(label: str) -> int | None:
 
 
 def hilt_rank(label: str) -> int:
-    """How little approval asks for (2 = MEDIUM+ … 4 = CRITICAL, 5 = off)."""
+    """How little approval asks for (1 = LOW+ … 4 = CRITICAL, 5 = off)."""
     rank = level_rank(label)
-    return rank if rank is not None and rank >= 2 else 5
+    return rank if rank is not None else 5
 
 
 def fit(text: str, width: int) -> str:
@@ -576,6 +573,31 @@ class PackRule:
     id: str
     severity: str = ""
     title: str = ""
+
+
+# What turning a production-protection pack on asserts about the scope
+# (deterministic-detection docs: assigning one asserts the context is protected).
+PROTECTED_CONTEXT = {
+    "database-destruction-protection": "a protected database",
+    "kubernetes-production-protection": "a protected production Kubernetes cluster",
+    "cloud-production-protection": "protected production cloud accounts",
+    "infrastructure-destruction-protection": "protected production hosts and infrastructure",
+    "privacy-high-assurance": "high-assurance personal data",
+}
+
+
+def protection_claim(name: str, scope: str) -> str:
+    """The sentence a scope's user agrees to by turning pack ``name`` on."""
+    context = PROTECTED_CONTEXT.get(name, "a protected environment")
+    if scope in {"", "global"}:
+        return f"Turning it on tells DefenseClaw that every connector using the global pack works with {context}."
+    return f"Turning it on tells DefenseClaw that {scope} works with {context}."
+
+
+def pack_short_title(title: str) -> str:
+    """``Database destruction protection`` → ``Database destruction`` for a table cell."""
+    short = title[: -len(" protection")] if title.lower().endswith(" protection") else title
+    return short or title
 
 
 def chain_domain_label(domain: str) -> str:
@@ -1125,7 +1147,7 @@ class PoliciesPanelModel:
             text = " · ".join(short)
         return fit(text, width)
 
-    def headline(self) -> str:
+    def headline(self, width: int = 0) -> str:
         """The view's status line: errors, loading, or what the view is about."""
         if self.loading and not self.loaded:
             return "Loading policies…"
@@ -1146,10 +1168,11 @@ class PoliciesPanelModel:
             active = self.active_policy()
             if active is None:
                 return "Levels come from each scope's rule pack · no policy is active for LLM traffic"
-            return (
-                f"LLM traffic ({active.name} policy): blocks {active.block_at or '?'}, "
-                f"alerts {active.alert_at or '?'} · tool calls: each scope's rule pack"
+            text = (
+                f"LLM traffic ({active.name} policy): blocks {active.block_at or '?'}, alerts {active.alert_at or '?'}"
             )
+            wide = f"{text} · tool calls: each scope's rule pack"
+            return wide if not width or len(wide) <= width else text
         if view in {"optin", "families"}:
             scope = self.scope_name() or "-"
             if view == "optin":
@@ -1159,9 +1182,10 @@ class PoliciesPanelModel:
             pack = str(_attr(row, "pack")) if row is not None else "-"
             return f"Scope: {scope} ▾  ·  {pack} pack"
         if view == "chains":
+            blocking = self.blocking_chains()
             return (
-                f"{len(self.chains)} bounded chains · ✓ {self.blocking_chains()} can block · "
-                "◐ the rest alert only · built in, not configurable"
+                f"{len(self.chains)} bounded chains · ✓ {blocking} can block · "
+                f"◐ {len(self.chains) - blocking} alert only · built in, read-only"
             )
         active = self.active_policy()
         policy = f"active policy {active.name}" if active is not None else "no policy activated yet"
@@ -1212,129 +1236,227 @@ class PoliciesPanelModel:
         return tuple((view, VIEW_TITLES[view], badges[view], view == self.view) for view in self.views())
 
     def data_table_columns(self, width: int = 0) -> tuple[str, ...]:
-        wide = width >= WIDE_COLUMNS
-        view = self.view
-        if view == "posture":
-            if wide:
-                return ("Scope", "Mode", "Blocks at", "Alerts at", "Approval", "Rule pack", "Opt-in")
-            return ("Scope", "Mode", "Blocks", "Alerts", "Approval", "Pack", "Opt-in")
-        if view == "optin":
-            return ("Pack", "Covers", "Rules", "State") if wide else ("Pack", "Rules", "State")
-        if view == "chains":
-            return ("", "Chain", "Severity", "Posture") if wide else ("", "Chain", "Sev")
-        if view == "families":
-            return ("Family", "Rules", "Enabled", "What it catches") if wide else ("Family", "Rules", "On", "Catches")
-        if view == "packs":
-            return ("Scope", "Pack", "Source", "Folder") if wide else ("Scope", "Pack", "Source")
-        if view == "sandbox_packs":
-            if wide:
-                return ("", "Pack", "Kind", "Profile", "Digest", "Description")
-            return ("", "Pack", "Kind", "Profile", "Digest")
-        if wide:
-            return ("", "Policy", "Kind", "Block at", "Alert at", "Install block", "Firewall", "Description")
-        return ("", "Policy", "Kind", "Block", "Alert", "Install block")
+        """Column titles for a table ``width`` characters wide (0 = unknown, narrow)."""
+        return self.table(width)[0]
 
     def data_table_rows(self, width: int = 0) -> tuple[tuple[str, ...], ...]:
-        wide = width >= WIDE_COLUMNS
+        return self.table(width)[1]
+
+    def table(self, width: int = 0) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        """``(columns, rows)`` that fit a table ``width`` characters wide.
+
+        ``width`` is the table's own width: beside a navigation list and an
+        aside it is much narrower than the terminal, so each view drops the
+        columns the aside (or ``i``) shows for the highlighted row.
+        """
         view = self.view
         if view == "posture":
-            return tuple(self._posture_cells(row, wide) for row in self.postures)
+            return self._posture_table(width)
         if view == "optin":
-            return tuple(self._protection_cells(pack, wide) for pack in self.protection)
+            return self._protection_table(width)
         if view == "chains":
-            return tuple(self._chain_cells(label, chain, wide, width) for label, chain in self.chain_rows())
+            return self._chain_table(width)
         if view == "families":
-            rows = []
-            for family in self.scope_families():
-                description = str(_attr(family, "description")) or "-"
-                cells = (
-                    str(_attr(family, "name")),
-                    str(_attr(family, "rules", 0)),
-                    str(_attr(family, "enabled", 0)),
-                    fit(description, max(20, width - 44) if wide else 34),
-                )
-                rows.append(cells)
-            return tuple(rows)
+            return self._family_table(width)
         if view == "packs":
-            rows = []
-            for row in self.pack_rows():
-                scope = "global" if row.connector == "global" else row.connector
-                source = {"global": "uses global", "override": "own pack", "default": "built-in default"}.get(
-                    row.source, row.source
-                )
-                if row.connector == "global":
-                    source = "configured" if row.source == "global" else "built-in default"
-                cells = (scope, row.pack or "-", source)
-                rows.append((*cells, fit(row.path or "-", 48)) if wide else cells)
-            return tuple(rows)
+            return self._pack_table(width)
         if view == "sandbox_packs":
-            rows = []
-            for pack in self.sandbox_packs:
-                marker = "●" if pack.name == self.sandbox_active else ""
-                digest = "invalid" if pack.error else (pack.digest[:12] or "-")
-                cells = (marker, pack.name, "built-in" if pack.builtin else "custom", pack.profile or "-", digest)
-                rows.append((*cells, fit(pack.description or "-", 40)) if wide else cells)
-            return tuple(rows)
+            return self._sandbox_table(width)
+        return self._policy_table(width)
+
+    def _posture_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        total = self.protection_total()
+        rows = []
+        for row in self.postures:
+            block, alert = self.scope_levels(row)
+            own = bool(self.connector_of(row))
+            mode = str(_attr(row, "mode")) or "observe"
+            pack = str(_attr(row, "pack")) or "-"
+            on = len(self.scope_protection(row))
+            scope = str(_attr(row, "scope"))
+            hilt = str(_attr(row, "hilt")) or "off"
+            if width >= 90:
+                if own and _attr(row, "mode_source") == "override":
+                    mode += " (own)"
+                if own and _attr(row, "pack_source") == "override":
+                    pack += " (own)"
+                optin = f"{on} of {total}" if total else str(on)
+                rows.append((fit(scope, 16), mode, block, alert, hilt, fit(pack, 22), optin))
+            elif width >= 69:
+                optin = f"{on}/{total}" if total else str(on)
+                rows.append((fit(scope, 11), mode, block, alert, hilt, fit(pack, 11), optin))
+            elif width >= 55:
+                optin = f"{on}/{total}" if total else str(on)
+                rows.append((fit(scope, 11), mode, block, alert, hilt, optin))
+            elif width >= 47:
+                optin = f"{on}/{total}" if total else str(on)
+                rows.append((fit(scope, 11), mode, block, hilt, optin))
+            else:
+                rows.append((fit(scope, 11), mode, block))
+        if width >= 90:
+            columns = ("Scope", "Mode", "Blocks at", "Alerts at", "Approval", "Rule pack", "Opt-in")
+        elif width >= 69:
+            columns = ("Scope", "Mode", "Blocks", "Alerts", "Approval", "Pack", "Opt-in")
+        elif width >= 55:
+            columns = ("Scope", "Mode", "Blocks", "Alerts", "Approval", "Opt-in")
+        elif width >= 47:
+            columns = ("Scope", "Mode", "Blocks", "Approval", "Opt-in")
+        else:
+            columns = ("Scope", "Mode", "Blocks")
+        return columns, tuple(rows)
+
+    def _protection_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        rows = []
+        for pack in self.protection:
+            name = str(_attr(pack, "name"))
+            title = pack_short_title(str(_attr(pack, "title")) or name)
+            staged = _attr(pack, "status") == "staged"
+            if staged:
+                state, rules = "─ staged", "-"
+            else:
+                state = "● on" if name in self.scope_protection() else "○ off"
+                rules = str(_attr(pack, "rule_count", 0))
+            covers = "staged, not available yet" if staged else str(_attr(pack, "covers")) or "-"
+            if width >= 66:
+                rows.append((fit(title, 26), fit(covers, width - 26 - 5 - 8 - 8), rules, state))
+            elif width >= 44:
+                rows.append((fit(title, 26), rules, state))
+            else:
+                rows.append((fit(title, max(8, width - 12)), state))
+        if width >= 66:
+            columns: tuple[str, ...] = ("Pack", "Covers", "Rules", "State")
+        elif width >= 44:
+            columns = ("Pack", "Rules", "State")
+        else:
+            columns = ("Pack", "State")
+        return columns, tuple(rows)
+
+    def _chain_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        full = width >= 60
+        severity_width = 8 if full else 4
+        title_width = max(12, width - 1 - severity_width - 6)
+        rows = []
+        for label, chain in self.chain_rows():
+            if chain is None:
+                rows.append(("", f"── {label}", ""))
+                continue
+            marker = "✓" if _attr(chain, "can_block", False) else "◐"
+            severity = str(_attr(chain, "severity")) or "-"
+            rows.append((marker, fit(str(_attr(chain, "title")), title_width), severity[:severity_width]))
+        return ("", "Chain", "Severity" if full else "Sev"), tuple(rows)
+
+    def _family_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        rows = []
+        for family in self.scope_families():
+            name = fit(str(_attr(family, "name")), 15)
+            counts = (str(_attr(family, "rules", 0)), str(_attr(family, "enabled", 0)))
+            if width >= 60:
+                what = fit(str(_attr(family, "description")) or "-", width - 15 - 5 - 7 - 8)
+                rows.append((name, *counts, what))
+            elif width >= 34:
+                rows.append((name, *counts))
+            else:
+                rows.append((name, counts[0]))
+        if width >= 60:
+            columns: tuple[str, ...] = ("Family", "Rules", "Enabled", "What it catches")
+        elif width >= 34:
+            columns = ("Family", "Rules", "On")
+        else:
+            columns = ("Family", "Rules")
+        return columns, tuple(rows)
+
+    def _pack_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        rows = []
+        for row in self.pack_rows():
+            scope = "global" if row.connector == "global" else row.connector
+            source = {"global": "uses global", "override": "own pack", "default": "built-in default"}.get(
+                row.source, row.source
+            )
+            if row.connector == "global":
+                source = "configured" if row.source == "global" else "built-in default"
+            if width >= 100:
+                rows.append((scope, row.pack or "-", source, fit(row.path or "-", 48)))
+            elif width >= 44:
+                rows.append((scope, row.pack or "-", source))
+            else:
+                rows.append((fit(scope, 12), fit(row.pack or "-", max(8, width - 18))))
+        if width >= 100:
+            columns: tuple[str, ...] = ("Scope", "Pack", "Source", "Folder")
+        elif width >= 44:
+            columns = ("Scope", "Pack", "Source")
+        else:
+            columns = ("Scope", "Pack")
+        return columns, tuple(rows)
+
+    def _sandbox_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        rows = []
+        for pack in self.sandbox_packs:
+            marker = "●" if pack.name == self.sandbox_active else ""
+            digest = "invalid" if pack.error else (pack.digest[:12] or "-")
+            kind = "built-in" if pack.builtin else "custom"
+            if width >= 100:
+                rows.append((marker, pack.name, kind, pack.profile or "-", digest, fit(pack.description or "-", 40)))
+            elif width >= 56:
+                rows.append((marker, pack.name, kind, pack.profile or "-", digest))
+            else:
+                rows.append((marker, fit(pack.name, max(8, width - 16)), kind))
+        if width >= 100:
+            columns: tuple[str, ...] = ("", "Pack", "Kind", "Profile", "Digest", "Description")
+        elif width >= 56:
+            columns = ("", "Pack", "Kind", "Profile", "Digest")
+        else:
+            columns = ("", "Pack", "Kind")
+        return columns, tuple(rows)
+
+    def _policy_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         rows = []
         for policy in self.policies:
-            cells = (
-                "●" if policy.active else "",
-                fit(policy.name, 24 if wide else 16),
-                "built-in" if policy.builtin else "custom",
-                policy.block_at or "-",
-                policy.alert_at or "-",
-                policy.install_block_at or "-",
+            active = "●" if policy.active else ""
+            kind = "built-in" if policy.builtin else "custom"
+            if width >= 100:
+                rows.append(
+                    (
+                        active,
+                        fit(policy.name, 24),
+                        kind,
+                        policy.block_at or "-",
+                        policy.alert_at or "-",
+                        policy.install_block_at or "-",
+                        policy.firewall_default or "-",
+                        fit(policy.description or "-", 40),
+                    )
+                )
+            elif width >= 62:
+                rows.append(
+                    (
+                        active,
+                        fit(policy.name, 14),
+                        kind,
+                        policy.block_at or "-",
+                        policy.alert_at or "-",
+                        policy.install_block_at or "-",
+                    )
+                )
+            else:
+                rows.append(
+                    (active, fit(policy.name, max(8, width - 26)), policy.block_at or "-", policy.alert_at or "-")
+                )
+        if width >= 100:
+            columns: tuple[str, ...] = (
+                "",
+                "Policy",
+                "Kind",
+                "Block at",
+                "Alert at",
+                "Install block",
+                "Firewall",
+                "Description",
             )
-            if wide:
-                cells = (*cells, policy.firewall_default or "-", fit(policy.description or "-", 40))
-            rows.append(cells)
-        return tuple(rows)
-
-    def _posture_cells(self, row: object, wide: bool) -> tuple[str, ...]:
-        block, alert = self.scope_levels(row)
-        mode = str(_attr(row, "mode")) or "observe"
-        if wide and _attr(row, "mode_source") == "override" and self.connector_of(row):
-            mode += " (own)"
-        pack = str(_attr(row, "pack")) or "-"
-        if wide and _attr(row, "pack_source") == "override" and self.connector_of(row):
-            pack += " (own)"
-        total = self.protection_total()
-        on = len(self.scope_protection(row))
-        optin = (f"{on} of {total}" if wide else f"{on}/{total}") if total else str(on)
-        return (
-            fit(str(_attr(row, "scope")), 16 if wide else 11),
-            mode,
-            block,
-            alert,
-            str(_attr(row, "hilt")) or "off",
-            fit(pack, 24 if wide else 11),
-            optin,
-        )
-
-    def _protection_cells(self, pack: object, wide: bool) -> tuple[str, ...]:
-        name = str(_attr(pack, "name"))
-        title = str(_attr(pack, "title")) or name
-        staged = _attr(pack, "status") == "staged"
-        if staged:
-            state, rules = "─ staged", "-"
+        elif width >= 62:
+            columns = ("", "Policy", "Kind", "Block", "Alert", "Install block")
         else:
-            state = "● on" if name in self.scope_protection() else "○ off"
-            rules = str(_attr(pack, "rule_count", 0))
-        covers = "staged, not available yet" if staged else str(_attr(pack, "covers")) or "-"
-        if wide:
-            return (fit(title, 32), fit(covers, 40), rules, state)
-        return (fit(title, 40), rules, state)
-
-    def _chain_cells(self, label: str, chain: object | None, wide: bool, width: int) -> tuple[str, ...]:
-        if chain is None:
-            return ("", f"── {label}", "", "") if wide else ("", f"── {label}", "")
-        can_block = bool(_attr(chain, "can_block", False))
-        marker = "✓" if can_block else "◐"
-        severity = str(_attr(chain, "severity")) or "-"
-        if wide:
-            title = fit(str(_attr(chain, "title")), max(40, width - 44))
-            return (marker, title, severity, "can block" if can_block else "alert only")
-        return (marker, fit(str(_attr(chain, "title")), 56), severity[:4])
+            columns = ("", "Policy", "Block", "Alert")
+        return columns, tuple(rows)
 
     def aside(self) -> tuple[str, tuple[str, ...]]:
         """``(title, lines)`` describing the highlighted row ("" title when nothing)."""
@@ -1406,9 +1528,9 @@ class PoliciesPanelModel:
         if _attr(pack, "status") == "staged":
             lines.append("Staged: this pack is a contract only and can't be turned on yet.")
         else:
-            scope = self.scope_name() or "-"
+            scope = self.scope_name() or "global"
             state = "on" if name in self.scope_protection() else "off"
-            lines.append(f"{scope}: {state}. Turning it on tells DefenseClaw {scope} works in a protected context.")
+            lines.append(f"{scope}: {state}. {protection_claim(name, scope)}")
         rules = self.pack_rules.get(name) or tuple(PackRule(rule_id) for rule_id in _attr(pack, "rule_ids", ()) or ())
         if rules:
             lines.append("")
@@ -1540,6 +1662,7 @@ __all__ = [
     "POLICY_KEYMAP",
     "POLICY_VIEWS",
     "PROFILE_LEVELS",
+    "PROTECTED_CONTEXT",
     "PROTECTED_PACK_PREFIX",
     "VIEW_KEYS",
     "VIEW_SHORT_TITLES",
@@ -1563,6 +1686,7 @@ __all__ = [
     "mode_intent",
     "mode_weakens",
     "pack_profile",
+    "pack_short_title",
     "pack_weakens",
     "parse_validation",
     "policies_keys_hint",
@@ -1573,6 +1697,7 @@ __all__ = [
     "policy_weakenings",
     "posture_summary",
     "profile_levels",
+    "protection_claim",
     "protection_intent",
     "severity_actions",
     "threshold_intent",
