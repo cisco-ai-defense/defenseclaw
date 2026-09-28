@@ -1104,6 +1104,17 @@ class PoliciesPanelModel:
             return resolve_levels(path, shared)
         return resolve_levels(path, shared, own if own is not None else self.own_levels(row))
 
+    def levels_with_pack(self, connector: str, pack_path: str) -> tuple[ScopeLevels, ScopeLevels]:
+        """``(the scope's tool-call levels on pack_path, that pack's own levels)``.
+
+        A scope with ``block_at`` / ``alert_at`` set (its own or the global
+        value) keeps them whatever pack it switches to.
+        """
+        shared = self.own_levels(self.scope_row(""))
+        row = self.scope_row(connector) if connector else None
+        own = self.own_levels(row) if row is not None else None
+        return resolve_levels(pack_path, shared, own), resolve_levels(pack_path)
+
     def level_change(self, kind: str, row: object, choice: str) -> LevelChange:
         """What picking ``choice`` (a picker value or :data:`INHERIT`) on ``row`` changes.
 

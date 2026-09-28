@@ -801,6 +801,18 @@ def rule_pack_change_modal(model: PoliciesPanelModel, choice: RulePackChoice) ->
             details.append("Clears the own pack of: " + ", ".join(cleared))
         else:
             details.append("Every connector uses the global pack.")
+    # guardrail.block_at / alert_at win over the pack's own levels.
+    levels, pack_levels = model.levels_with_pack(connector, choice.path or choice.pack)
+    held = [
+        f"{verb} at {now} (not the pack's {theirs})"
+        for verb, source, now, theirs in (
+            ("block", levels.block_source, levels.block_at, pack_levels.block_at),
+            ("alert", levels.alert_source, levels.alert_at, pack_levels.alert_at),
+        )
+        if source != "pack" and now != theirs
+    ]
+    if held:
+        details.append("Tool calls still " + " and ".join(held) + ", as set with block-at / alert-at.")
     details.append(f"Validation: {choice.validation.summary}")
     details.append(_run_line(use_pack_intent(choice.pack, connector)))
     consequence = ""

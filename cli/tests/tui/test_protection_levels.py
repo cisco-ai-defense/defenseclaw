@@ -190,3 +190,25 @@ async def test_b_on_a_connector_sets_its_block_level(tmp_path, monkeypatch) -> N
         await pilot.press("enter")  # consequence: one press, nothing weakens
         await until(pilot, lambda: bool(runs))
     assert runs == [("defenseclaw", ("guardrail", "block-at", "HIGH", "--connector", "codex"))]
+
+
+def test_a_pack_switch_says_when_set_levels_win_over_the_pack() -> None:
+    from defenseclaw.tui.policy_panel import rule_pack_change_modal
+    from defenseclaw.tui.screens.rule_pack_picker import RulePackChoice
+    from defenseclaw.tui.services.policy_state import PackValidation
+
+    valid = PackValidation("valid", rule_count=3, enabled_rule_count=3, rule_file_count=1)
+
+    def held(connector: str, pack: str, **kwargs: object) -> list[str]:
+        choice = RulePackChoice(connector, pack, pack, f"/p/guardrail/{pack}", True, valid)
+        modal = rule_pack_change_modal(levels_model(**kwargs), choice)  # type: ignore[arg-type]
+        return [line for line in modal.details if line.startswith("Tool calls still")]
+
+    # claudecode blocks MEDIUM itself, so the default pack's CRITICAL doesn't apply.
+    assert held("claudecode", "default") == [
+        "Tool calls still block at MEDIUM+ (not the pack's CRITICAL), as set with block-at / alert-at."
+    ]
+    # Strict blocks MEDIUM+ anyway: nothing to say.
+    assert held("claudecode", "strict") == []
+    # Nothing set anywhere: the pack's levels apply.
+    assert held("", "strict", multi=False, global_block="") == []
