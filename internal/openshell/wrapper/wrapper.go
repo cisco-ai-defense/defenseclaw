@@ -192,8 +192,45 @@ func Render(shell Shell, b Block) (string, error) {
 			return "", fmt.Errorf("wrapper: unsupported shell %q", shell)
 		}
 	}
+	writeRealias(&sb, shell, wraps)
 	sb.WriteString(EndMarker + "\n")
 	return sb.String(), nil
+}
+
+// realiasHook is the shell function writeRealias installs.
+const realiasHook = "__defenseclaw_unalias"
+
+// writeRealias makes bash and zsh drop an alias of a wrapped command again
+// just before the first prompt. The unalias above only removes the aliases
+// defined before the block; one an installer or the user appends after it
+// (or in a file sourced later) is expanded before functions are looked up
+// when the command is typed, so the harness would run outside the sandbox
+// while the wrapper looks enabled. The hook keeps $? for the prompt hooks
+// after it and acts once per sourcing of the block.
+func writeRealias(sb *strings.Builder, shell Shell, wraps []Wrap) {
+	var unalias strings.Builder
+	for _, w := range wraps {
+		fmt.Fprintf(&unalias, "  unalias %s 2>/dev/null\n", w.Command)
+	}
+	switch shell {
+	case Bash:
+		sb.WriteString("# An alias defined after this block would win over the functions when typed: drop it before the first prompt.\n")
+		fmt.Fprintf(sb, "unset %s_done\n", realiasHook)
+		fmt.Fprintf(sb, "%s() {\n  local rc=$?\n", realiasHook)
+		fmt.Fprintf(sb, "  if [ -n \"${%s_done:-}\" ]; then return $rc; fi\n  %s_done=1\n", realiasHook, realiasHook)
+		sb.WriteString(unalias.String())
+		sb.WriteString("  return $rc\n}\n")
+		fmt.Fprintf(sb, "case \";${PROMPT_COMMAND:-};\" in\n  *\";%s;\"*) ;;\n", realiasHook)
+		fmt.Fprintf(sb, "  *) PROMPT_COMMAND=\"%s${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;;\nesac\n", realiasHook)
+	case Zsh:
+		sb.WriteString("# An alias defined after this block would win over the functions when typed: drop it before the first prompt.\n")
+		fmt.Fprintf(sb, "%s() {\n  local rc=$?\n", realiasHook)
+		fmt.Fprintf(sb, "  precmd_functions=(${precmd_functions:#%s})\n", realiasHook)
+		sb.WriteString(unalias.String())
+		sb.WriteString("  return $rc\n}\n")
+		sb.WriteString("typeset -ga precmd_functions\n")
+		fmt.Fprintf(sb, "precmd_functions=(${precmd_functions:#%s} %s)\n", realiasHook, realiasHook)
+	}
 }
 
 // missingMessage is what a wrapper prints when the DefenseClaw binary it

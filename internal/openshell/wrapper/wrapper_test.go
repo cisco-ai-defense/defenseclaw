@@ -334,6 +334,78 @@ func TestPOSIXWrapperReplacesAlias(t *testing.T) {
 	}
 }
 
+// TestPOSIXWrapperDropsAliasDefinedLater: an alias of the harness defined
+// after the block (an installer appending to the rc file) is expanded
+// before functions are looked up when the command is typed, so it would
+// run the harness natively while the wrapper looks enabled. The block
+// drops it again before the first prompt of an interactive shell, keeps
+// the exit status the prompt shows, and does not pile up hooks when the rc
+// file is sourced again.
+func TestPOSIXWrapperDropsAliasDefinedLater(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dc")
+	writeScript(t, bin, "#!/bin/sh\nprintf 'sandbox:'; for a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\n")
+	native := filepath.Join(dir, "native-claude")
+	writeScript(t, native, "#!/bin/sh\necho native\n")
+	// Typed as an interactive user would: a command, the status a prompt
+	// hook must keep, the rc file sourced twice more (the hooks it then
+	// registers are counted), and the command again.
+	input := "claude -p x\nfalse\necho \"status=$?\"\n. \"$DC_RC\"; . \"$DC_RC\"; HOOKS\nclaude -p y\necho \"hooks=$DC_HOOKS\"\nexit\n"
+	for _, tc := range []struct {
+		shell Shell
+		bin   string
+		// hooks prints how often the hook is registered.
+		hooks string
+		args  func(rc string) ([]string, []string)
+	}{
+		{Bash, "bash", `DC_HOOKS=$(printf %s "$PROMPT_COMMAND" | grep -o __defenseclaw_unalias | wc -l | tr -d " ")`, func(rc string) ([]string, []string) {
+			return []string{"--noprofile", "--rcfile", rc, "-i"}, nil
+		}},
+		{Zsh, "zsh", `DC_HOOKS=${#${(M)precmd_functions:#__defenseclaw_unalias}}`, func(rc string) ([]string, []string) {
+			return []string{"-d", "-i"}, []string{"ZDOTDIR=" + filepath.Dir(rc)}
+		}},
+	} {
+		sh, err := exec.LookPath(tc.bin)
+		if err != nil {
+			t.Logf("%s not installed", tc.bin)
+			continue
+		}
+		rcDir := t.TempDir()
+		rc := filepath.Join(rcDir, ".zshrc")
+		if _, err := Enable(tc.shell, rc, bin, claude); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.OpenFile(rc, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString("alias claude='" + native + "'\n")
+		_ = f.Close()
+		in := strings.Replace(input, "HOOKS", tc.hooks, 1)
+		args, env := tc.args(rc)
+		cmd := exec.Command(sh, args...)
+		cmd.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + rcDir, "TERM=dumb", "DC_RC=" + rc}, env...)
+		cmd.Stdin = strings.NewReader(in)
+		var stdout, stderr strings.Builder
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%s -i: %v\n%s", tc.bin, err, stderr.String())
+		}
+		got := stdout.String()
+		for _, want := range []string{"sandbox:[sandbox][run][claude][--][-p][x]", "status=1", "sandbox:[sandbox][run][claude][--][-p][y]", "hooks=1"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: output lacks %q:\n%s\nstderr:\n%s", tc.bin, want, got, stderr.String())
+			}
+		}
+		if strings.Contains(got, "native") {
+			t.Errorf("%s: an alias defined after the block ran the harness natively:\n%s", tc.bin, got)
+		}
+	}
+}
+
 func TestFishWrapperSyntax(t *testing.T) {
 	fish, err := exec.LookPath("fish")
 	if err != nil {
