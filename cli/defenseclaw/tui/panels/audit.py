@@ -254,8 +254,14 @@ class AuditPanelModel:
         if filter_label:
             filtered_label = filter_label
             filter_label = f"Showing {len(self.filtered)} of {len(self.items)}: {filter_label}"
+        summary = f"{len(self.filtered)} shown of {len(self.items)} events"
+        hidden = self.hidden_routine_count()
+        if hidden:
+            # The default view hides routine events (gateway starts, reloads,
+            # migrations); say so, or a table of zero rows looks broken.
+            summary += f" · {hidden} routine hidden, 1 shows all"
         return AuditToolbarState(
-            summary_label=f"{len(self.filtered)} shown of {len(self.items)} events",
+            summary_label=summary,
             filter_label=filter_label,
             filtered_label=filtered_label,
             search_prompt=f"/ {self.filter_text}" if self.filtering else "",
@@ -512,6 +518,14 @@ class AuditPanelModel:
     def filtered_count(self) -> int:
         return len(self.filtered)
 
+    def hidden_routine_count(self) -> int:
+        """Events the default view leaves out as routine (0 once any filter or "all" is on)."""
+        if self.show_all_events or self.common_filter or self.filter_text:
+            return 0
+        if self.correlation_target or self.correlation_run_id:
+            return 0
+        return sum(1 for event in self.items if _is_low_signal_event(event))
+
     def get_detail_info(self) -> AuditDetailInfo | None:
         selected = self.selected()
         if selected is None:
@@ -667,7 +681,11 @@ class AuditPanelModel:
             prefix.append(f"/ {self.filter_text}")
         header = "\n".join(prefix)
         if not self.filtered and not self.filter_text:
-            body = "No audit events yet. Events are recorded when you scan, block, allow, or configure DefenseClaw."
+            hidden = self.hidden_routine_count()
+            if hidden:
+                body = f"{hidden} routine events are hidden (gateway starts, reloads). Press 1 to show all events."
+            else:
+                body = "No audit events yet. Events are recorded when you scan, block, allow, or configure DefenseClaw."
             return f"{header}\n{body}".strip()
         if not self.filtered:
             return f"{header}\nNo events match the filter.".strip()

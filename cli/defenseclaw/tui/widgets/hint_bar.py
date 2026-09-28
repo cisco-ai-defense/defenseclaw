@@ -190,7 +190,7 @@ class HintEngine:
                 "Same target/run correlates rows."
             )
         return (
-            "KEYS  j/k move | Enter detail | click common filters | / search field:value | "
+            "KEYS  j/k move | Enter detail | 1 all 2 risk 3 blocks 4 scans 5 keys | / search field:value | "
             "t same target | u same run | e export | Esc close."
         )
 
