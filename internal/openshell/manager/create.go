@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -294,6 +295,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		// provider's gateway profile may be a regional one.
 		rec.CredentialProfile, rec.BedrockRegion = llm.profile.Template, in.req.LLM.BedrockRegion
 	}
+	for _, c := range creds {
+		rec.Credentials = append(rec.Credentials, sandboxapi.CredentialGrant{Name: c.binding.Name, Host: c.binding.Host, Port: c.binding.Port})
+	}
+	rec.HostPorts = slices.Clone(eff.MCP.HostPorts)
 	workdir := sandboxauth.Workdir{Mode: sandboxauth.WorkdirMode(in.mode)}
 	var plan *workspace.MountPlan
 	if in.mode == config.OpenShellWorkdirMount {

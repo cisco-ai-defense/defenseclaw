@@ -202,6 +202,17 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	row("Permissions", yolo)
 	row("Policy", fmt.Sprintf("profile %s, pack %s %s, network %s, approvals %s", sb.Profile, firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest), networkLabel(sb), sb.Approvals))
+	// What it was created with beyond the policy, which a resume keeps.
+	for _, c := range grantTexts(sb.Credentials) {
+		row("Secret", c)
+	}
+	if len(sb.HostPorts) > 0 {
+		var hosts []string
+		for _, p := range sb.HostPorts {
+			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
+		}
+		row("Host ports", strings.Join(hosts, " ")+" (each an ask at the sandbox's first connection)")
+	}
 	row("Hooks", fmt.Sprintf("%s tier, contract %s", firstNonEmpty(sb.TamperTier, "unknown"), firstNonEmpty(sb.HookContract, "-")))
 	cov := plural(sb.Hooks.HookRequests, "request", "requests") + ", " + plural(sb.Hooks.ToolCalls, "tool call", "tool calls") +
 		fmt.Sprintf(", %d blocked", sb.Hooks.ToolBlocked)

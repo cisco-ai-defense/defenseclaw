@@ -56,10 +56,20 @@ func TestCreateMountMode(t *testing.T) {
 		Credentials: []sandboxapi.CredentialBinding{
 			{Name: "STRIPE_API_KEY", Value: "stripe-secret", Host: "api.stripe.com"},
 		},
-		Env: map[string]string{"MY_FLAG": "1"},
+		HostPorts: []int{5432},
+		Env:       map[string]string{"MY_FLAG": "1"},
 	})
 	if sb.Name != "claude-myapp-1a2b" || sb.Phase != "ready" || sb.WorkdirMode != "mount" || sb.Workdir != "/work/myapp" {
 		t.Fatalf("sandbox = %+v", sb)
+	}
+	// The grants a resume keeps are shown with the sandbox, the
+	// credential's value never.
+	if !slices.Equal(sb.Credentials, []sandboxapi.CredentialGrant{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443}}) ||
+		!slices.Equal(sb.HostPorts, []int{5432}) {
+		t.Fatalf("grants = %+v, host ports %v", sb.Credentials, sb.HostPorts)
+	}
+	if again, err := e.m.Get(context.Background(), sb.Name); err != nil || !slices.Equal(again.Credentials, sb.Credentials) {
+		t.Fatalf("Get grants = %+v, %v", again, err)
 	}
 	if sb.Profile != "open" || !sb.Yolo || sb.Pack != "open" || sb.Launch.CredentialProfile != profiles.AnthropicID {
 		t.Fatalf("posture = %+v", sb)

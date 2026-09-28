@@ -150,6 +150,15 @@ type CredentialBinding struct {
 	Port int `json:"port,omitempty"`
 }
 
+// CredentialGrant is a --credential binding a sandbox holds: the
+// placeholder's name and the host and port it resolves at (never the
+// value).
+type CredentialGrant struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+	Port int    `json:"port,omitempty"`
+}
+
 // Sandbox is one DefenseClaw sandbox as the daemon sees it.
 type Sandbox struct {
 	Name string `json:"name"`
@@ -193,10 +202,15 @@ type Sandbox struct {
 	UptimeSeconds int64     `json:"uptime_seconds,omitempty"`
 	ExitCode      *int32    `json:"exit_code,omitempty"`
 	// Launch is what the CLI needs to start the harness in the sandbox.
-	Launch    Launch       `json:"launch"`
-	Hooks     HookCoverage `json:"hooks"`
-	Endpoints []Endpoint   `json:"endpoints,omitempty"`
-	Egress    EgressStats  `json:"egress"`
+	Launch Launch `json:"launch"`
+	// Credentials are the sandbox's --credential bindings (--github-write's
+	// among them), and HostPorts the host loopback ports it may ask to
+	// reach: grants it was created with, which it keeps when resumed.
+	Credentials []CredentialGrant `json:"credentials,omitempty"`
+	HostPorts   []int             `json:"host_ports,omitempty"`
+	Hooks       HookCoverage      `json:"hooks"`
+	Endpoints   []Endpoint        `json:"endpoints,omitempty"`
+	Egress      EgressStats       `json:"egress"`
 	// PendingApprovals counts asks waiting for the user.
 	PendingApprovals int `json:"pending_approvals"`
 	// Workspace is the mount-mode banner view.

@@ -183,8 +183,10 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 
 	// Resume this folder's sandbox instead of starting another. The
 	// sandbox keeps the settings it was created with, so flags that only a
-	// new sandbox takes (and it does not have already) turn the default
-	// answer to no. A sandbox the policy would not start is not offered.
+	// new sandbox takes (and it does not have already), and grants
+	// (credentials, host ports) it holds that this run did not ask for, turn
+	// the default answer to no. A sandbox the policy would not start is not
+	// offered.
 	if !o.New && o.Name == "" && a.IO.TTY && !o.Detach {
 		if sb := a.resumable(ctx, api, project, spec.Name); sb != nil {
 			if why := a.startRefusal(ctx, api, sb); why != "" {
@@ -856,12 +858,21 @@ func (a *App) offerResume(ctx context.Context, o RunOptions, sb *sandboxapi.Sand
 		// Both sessions share it: neither's end stops it under the other.
 		held += fmt.Sprintf(", and %s attached to it", plural(int64(n), "session is", "sessions are"))
 	}
-	question := held + ". Resume it?"
+	question := held + ". "
+	grants := resumeGrants(o, sb)
+	if len(grants) > 0 {
+		question += "It keeps grants this run did not ask for: " + strings.Join(grants, ", ") + ". "
+	}
 	ignored := resumeIgnores(o, sb, run)
 	if len(ignored) > 0 {
-		question = held + ". Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". Resume it anyway?"
+		question += "Resuming it keeps its own settings and ignores " + strings.Join(ignored, ", ") + ". "
 	}
-	resume, err := a.ask(question, len(ignored) == 0, false)
+	if len(ignored) > 0 || len(grants) > 0 {
+		question += "Resume it anyway?"
+	} else {
+		question += "Resume it?"
+	}
+	resume, err := a.ask(question, len(ignored) == 0 && len(grants) == 0, false)
 	if err != nil || !resume {
 		return false, err
 	}
@@ -989,9 +1000,14 @@ func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []strin
 	add(o.Copy && sb.WorkdirMode != config.OpenShellWorkdirCopy, "--copy")
 	add(len(o.Context) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Context, r.Context) }), "--context")
 	add(len(o.Unmask) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Unmask, r.Unmask) }), "--unmask")
-	add(len(o.HostPorts) > 0 && !had(func(r *runLaunch) bool { return samePorts(o.HostPorts, r.HostPorts) }), "--host-port")
-	add(len(o.Credentials) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Credentials, r.Credentials) }), "--credential")
-	add(o.GitHubWrite && !had(func(r *runLaunch) bool { return r.GitHubWrite }), "--github-write")
+	// The grants sb holds already (as the daemon reports them) are kept.
+	add(len(o.HostPorts) > 0 && !had(func(r *runLaunch) bool { return samePorts(o.HostPorts, r.HostPorts) }) &&
+		slices.ContainsFunc(o.HostPorts, func(p int) bool { return !slices.Contains(sb.HostPorts, p) }), "--host-port")
+	add(len(o.Credentials) > 0 && !had(func(r *runLaunch) bool { return sameSet(o.Credentials, r.Credentials) }) &&
+		slices.ContainsFunc(o.Credentials, func(spec string) bool {
+			return !slices.ContainsFunc(sb.Credentials, func(c sandboxapi.CredentialGrant) bool { return grantMatches(spec, c) })
+		}), "--credential")
+	add(o.GitHubWrite && !had(func(r *runLaunch) bool { return r.GitHubWrite }) && !slices.ContainsFunc(sb.Credentials, githubWrite), "--github-write")
 	add(o.NoMCP && !had(func(r *runLaunch) bool { return r.NoMCP }), "--no-mcp")
 	add(o.LLM != "" && !strings.EqualFold(o.LLM, LLMAuto) && !had(func(r *runLaunch) bool { return strings.EqualFold(o.LLM, r.LLM) }), "--llm "+o.LLM)
 	add(o.BedrockRegion != "" && o.BedrockRegion != sb.Launch.BedrockRegion &&
@@ -1177,7 +1193,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	if caveat := launchCaveat(sb, b.o); caveat != "" {
 		row("", "⚠ "+caveat)
 	}
-	for _, c := range sbCredentials(b.o) {
+	for _, c := range bannerCredentials(sb, b.o) {
 		row("Secret", c)
 	}
 	if ports := bannerHostPorts(sb, b.o); len(ports) > 0 {
@@ -1215,10 +1231,15 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	a.println()
 }
 
-// bannerHostPorts are the --host-port flags the policy accepted: the ones
-// no violation refused (the pack, the organization, or a DefenseClaw port).
-// None is open yet: the sandbox's first connection to one is an ask.
+// bannerHostPorts are the host ports the sandbox may ask to reach, as the
+// daemon reports them; from a daemon that does not, the --host-port flags
+// the policy accepted: the ones no violation refused (the pack, the
+// organization, or a DefenseClaw port). None is open yet: the sandbox's
+// first connection to one is an ask.
 func bannerHostPorts(sb *sandboxapi.Sandbox, o RunOptions) []int {
+	if len(sb.HostPorts) > 0 {
+		return sb.HostPorts
+	}
 	refused := map[string]bool{}
 	for _, v := range sb.Violations {
 		if v.Key == "mcp.host_ports" {
@@ -1300,7 +1321,20 @@ func (a *App) clock(t time.Time) string {
 	return t.Format("Jan 2 15:04")
 }
 
-func sbCredentials(o RunOptions) []string {
+// githubWriteText is the banner's line for --github-write. OpenShell binds a
+// placeholder to a host, not to a repository: the token works there with
+// everything it may do, and git's own HTTPS traffic goes to github.com,
+// which it is not bound to.
+const githubWriteText = "GH_TOKEN/GITHUB_TOKEN → api.github.com only: gh and the GitHub API (pull requests, issues) with everything the token may do, " +
+	"in any repository it reaches; `git push` over HTTPS is not authenticated"
+
+// bannerCredentials are the banner's Secret rows: the sandbox's credential
+// bindings as the daemon reports them (a resumed sandbox keeps those it was
+// created with), else this run's --credential and --github-write.
+func bannerCredentials(sb *sandboxapi.Sandbox, o RunOptions) []string {
+	if len(sb.Credentials) > 0 {
+		return grantTexts(sb.Credentials)
+	}
 	var out []string
 	for _, c := range o.Credentials {
 		if name, host, ok := strings.Cut(c, "="); ok {
@@ -1308,11 +1342,63 @@ func sbCredentials(o RunOptions) []string {
 		}
 	}
 	if o.GitHubWrite {
-		// OpenShell binds a placeholder to a host, not to a repository:
-		// the token works there with everything it may do, and git's own
-		// HTTPS traffic goes to github.com, which it is not bound to.
-		out = append(out, "GH_TOKEN/GITHUB_TOKEN → api.github.com only: gh and the GitHub API (pull requests, issues) with everything the token may do, "+
-			"in any repository it reaches; `git push` over HTTPS is not authenticated")
+		out = append(out, githubWriteText)
+	}
+	return out
+}
+
+// githubWrite reports a --github-write binding: the GitHub token variables
+// bound to api.github.com.
+func githubWrite(c sandboxapi.CredentialGrant) bool {
+	return (c.Name == "GH_TOKEN" || c.Name == "GITHUB_TOKEN") && c.Host == "api.github.com" && (c.Port == 0 || c.Port == 443)
+}
+
+// grantTexts renders credential bindings: "NAME → host only", with the
+// port when it is not 443, and one line for --github-write's pair.
+func grantTexts(list []sandboxapi.CredentialGrant) []string {
+	var out []string
+	github := false
+	for _, c := range list {
+		if githubWrite(c) {
+			if !github {
+				out = append(out, githubWriteText)
+				github = true
+			}
+			continue
+		}
+		out = append(out, c.Name+" → "+grantEndpoint(c)+" only")
+	}
+	return out
+}
+
+func grantEndpoint(c sandboxapi.CredentialGrant) string {
+	if c.Port != 0 && c.Port != 443 {
+		return c.Host + ":" + strconv.Itoa(c.Port)
+	}
+	return c.Host
+}
+
+// resumeGrants lists what sb holds that this run did not ask for: a resume
+// keeps the credential bindings and host ports sb was created with, which
+// the run's own flags cannot take away.
+func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
+	var out []string
+	github := false
+	for _, c := range sb.Credentials {
+		switch {
+		case githubWrite(c) && !o.GitHubWrite:
+			if !github {
+				out = append(out, "--github-write (the GitHub token for api.github.com)")
+				github = true
+			}
+		case !githubWrite(c) && !slices.ContainsFunc(o.Credentials, func(spec string) bool { return grantMatches(spec, c) }):
+			out = append(out, "--credential "+c.Name+" → "+grantEndpoint(c))
+		}
+	}
+	for _, p := range sb.HostPorts {
+		if !slices.Contains(o.HostPorts, p) {
+			out = append(out, fmt.Sprintf("--host-port %d", p))
+		}
 	}
 	return out
 }

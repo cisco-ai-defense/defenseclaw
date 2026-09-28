@@ -126,6 +126,11 @@ type record struct {
 	// endpoints (enforceProviderEndpoints).
 	ProviderEndpoints []providerEndpoint `json:"provider_endpoints,omitempty"`
 	DetachedProviders []string           `json:"detached_providers,omitempty"`
+	// Credentials are the --credential bindings (names and endpoints, never
+	// values), and HostPorts the --host-port ports the policy accepted, at
+	// create: shown with the sandbox, since a resume keeps them.
+	Credentials []sandboxapi.CredentialGrant `json:"credentials,omitempty"`
+	HostPorts   []int                        `json:"host_ports,omitempty"`
 	// EgressUser is the proxy credential's username (the password is in
 	// the sandbox environment only).
 	EgressUser string `json:"egress_user,omitempty"`

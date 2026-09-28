@@ -346,30 +346,56 @@ var credentialNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 // ParseCredential parses --credential NAME=host[:port]. The secret is the
 // value of the variable NAME in this environment.
 func (a *App) ParseCredential(spec string) (sandboxapi.CredentialBinding, error) {
-	name, target, ok := strings.Cut(strings.TrimSpace(spec), "=")
-	if !ok || !credentialNamePattern.MatchString(name) || target == "" {
-		return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %q: use NAME=host[:port]", spec)
-	}
-	if strings.Contains(target, "://") {
-		return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %q: name a host, not a URL (like %s=api.stripe.com or %s=host:8443)", spec, name, name)
-	}
-	host, port := target, 0
-	if h, p, err := net.SplitHostPort(target); err == nil {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 1 || n > 65535 {
-			return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %q: invalid port", spec)
-		}
-		host, port = h, n
-	}
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	if host == "" || strings.ContainsAny(host, "/*@ ") {
-		return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %q: name one host, like api.stripe.com", spec)
+	name, host, port, err := parseCredentialTarget(spec)
+	if err != nil {
+		return sandboxapi.CredentialBinding{}, err
 	}
 	value := a.Getenv(name)
 	if value == "" {
 		return sandboxapi.CredentialBinding{}, fmt.Errorf("--credential %s: the variable %s is not set in this shell", spec, name)
 	}
 	return sandboxapi.CredentialBinding{Name: name, Value: value, Host: host, Port: port}, nil
+}
+
+// parseCredentialTarget splits --credential NAME=host[:port] (port 0: the
+// default, 443).
+func parseCredentialTarget(spec string) (name, host string, port int, err error) {
+	name, target, ok := strings.Cut(strings.TrimSpace(spec), "=")
+	if !ok || !credentialNamePattern.MatchString(name) || target == "" {
+		return "", "", 0, fmt.Errorf("--credential %q: use NAME=host[:port]", spec)
+	}
+	if strings.Contains(target, "://") {
+		return "", "", 0, fmt.Errorf("--credential %q: name a host, not a URL (like %s=api.stripe.com or %s=host:8443)", spec, name, name)
+	}
+	host = target
+	if h, p, err := net.SplitHostPort(target); err == nil {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return "", "", 0, fmt.Errorf("--credential %q: invalid port", spec)
+		}
+		host, port = h, n
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" || strings.ContainsAny(host, "/*@ ") {
+		return "", "", 0, fmt.Errorf("--credential %q: name one host, like api.stripe.com", spec)
+	}
+	return name, host, port, nil
+}
+
+// grantMatches reports whether --credential spec asks for exactly the
+// binding c: the same name, host and port.
+func grantMatches(spec string, c sandboxapi.CredentialGrant) bool {
+	name, host, port, err := parseCredentialTarget(spec)
+	if err != nil {
+		return false
+	}
+	orDefault := func(p int) int {
+		if p == 0 {
+			return 443
+		}
+		return p
+	}
+	return name == c.Name && host == c.Host && orDefault(port) == orDefault(c.Port)
 }
 
 // githubToken finds the user's GitHub token for --github-write.

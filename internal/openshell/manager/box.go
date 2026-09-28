@@ -441,7 +441,8 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
-		Launch: sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+		Launch:      sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+		Credentials: slices.Clone(r.Credentials), HostPorts: slices.Clone(r.HostPorts),
 	}
 	if spec, ok := harness.Get(r.Harness); ok {
 		v.HarnessName = spec.DisplayName
@@ -506,6 +507,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		// applies to it; the record keeps what it was created with, and so
 		// do the create-time clamps, which the current ones replace.
 		v.Profile, v.NetworkMode, v.Approvals = e.Profile, e.NetworkMode, e.Approvals
+		v.HostPorts = slices.Clone(e.MCP.HostPorts)
 		if e.Pack != nil {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
 		}

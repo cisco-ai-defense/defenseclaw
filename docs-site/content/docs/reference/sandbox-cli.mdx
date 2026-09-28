@@ -372,8 +372,10 @@ sandbox of the same harness, `run` offers to resume it; `--new` starts
 another one instead. A resumed sandbox keeps the settings it was created
 with, so when you pass flags only a new sandbox takes (`--safe`, `--pack`,
 `--credential`, `--env` and the like) and the sandbox doesn't already have
-them, the offer names them and defaults to no. Typing the run's own command
-again is a plain resume. A sandbox the current policy would not start (a
+them, the offer names them and defaults to no. It keeps its credential
+bindings and host ports too: the offer names those this run did not ask for
+and defaults to no, and the banner and `sandbox status NAME` show the
+sandbox's own. Typing the run's own command again is a plain resume. A sandbox the current policy would not start (a
 live mount your organization now runs on a copy, a harness it no longer
 allows) is not offered: `run` names it and the `sandbox delete` command,
 and `status` and `connect` say the same. Only one sandbox can mount a

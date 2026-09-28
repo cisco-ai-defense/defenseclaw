@@ -645,7 +645,9 @@ plain reason, tamper counts, and whether hooks are `silent` or
 `workspace` and `mcp` banner views, `snapshot`, `violations` (settings the
 policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
 nested-repository guard found in a mounted project). `launch` holds what the
-CLI needs to start the harness.
+CLI needs to start the harness. `credentials` lists the sandbox's
+`--credential` bindings (`name`, `host` and `port`, never the value) and
+`host_ports` the host ports it may ask to reach: what a resume keeps.
 
 ### Approvals and unblocks
 

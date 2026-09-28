@@ -448,6 +448,66 @@ func TestConnectRunsOnePromptHeadless(t *testing.T) {
 	}
 }
 
+// A resumed sandbox keeps the credential bindings and host ports it was
+// created with. The offer names those this run did not ask for and
+// defaults to a new sandbox; the banner and the status show the sandbox's
+// own, whatever this invocation passed.
+func TestResumeNamesTheGrantsItKeeps(t *testing.T) {
+	existing := func(ta *testApp) {
+		ta.daemon.add(sandboxapi.Sandbox{Name: "proj-0a1b", ID: "sb-proj-0a1b", Harness: "claudecode", HarnessName: "Claude Code", Phase: "stopped",
+			WorkdirMode: "mount", Project: ta.project, Workdir: "/work/proj", Pack: "open", Profile: "open", Yolo: true,
+			Launch: sandboxapi.Launch{Yolo: true}, CreatedAt: time.Now(), HostPorts: []int{5432},
+			Credentials: []sandboxapi.CredentialGrant{{Name: "STRIPE_API_KEY", Host: "api.stripe.com", Port: 443},
+				{Name: "GH_TOKEN", Host: "api.github.com", Port: 443}, {Name: "GITHUB_TOKEN", Host: "api.github.com", Port: 443}}})
+		ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
+	}
+	// No to the resume (the default), a copy for the folder the old sandbox
+	// still mounts live, and skip bringing the copy's changes back.
+	ta := newTestApp(t, "\n\ns\n")
+	existing(ta)
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	want := "It keeps grants this run did not ask for: --credential STRIPE_API_KEY → api.stripe.com, --github-write (the GitHub token for api.github.com), " +
+		"--host-port 5432. Resume it anyway? [y/N]"
+	if out := ta.output(); !strings.Contains(out, want) {
+		t.Fatalf("offer:\n%s", out)
+	}
+	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/proj-0a1b/start")); n != 0 {
+		t.Fatal("the default resumed the sandbox")
+	}
+
+	// Asked for, a grant is not named; resumed, the banner shows the
+	// sandbox's own grants.
+	ta = newTestApp(t, "y\ny\n")
+	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	existing(ta)
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", GitHubWrite: true, HostPorts: []int{5432}}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	out := ta.output()
+	for _, want := range []string{"It keeps grants this run did not ask for: --credential STRIPE_API_KEY → api.stripe.com. Resume it anyway?",
+		"Secret    STRIPE_API_KEY → api.stripe.com only", "Secret    GH_TOKEN/GITHUB_TOKEN → api.github.com only",
+		"Host      localhost:5432"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "--github-write") || strings.Contains(out, "ignores") {
+		t.Errorf("a grant this run asked for, which the sandbox holds, was named:\n%s", out)
+	}
+
+	ta.out.Reset()
+	if err := ta.Status(context.Background(), "proj-0a1b", OutputText); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Secret        STRIPE_API_KEY → api.stripe.com only", "Host ports    localhost:5432"} {
+		if !strings.Contains(ta.output(), want) {
+			t.Errorf("status lacks %q:\n%s", want, ta.output())
+		}
+	}
+}
+
 // A connect that started the sandbox for a session that never began (the
 // probe failed) stops it again.
 func TestConnectStopsWhatItStartedWhenTheSessionFails(t *testing.T) {
