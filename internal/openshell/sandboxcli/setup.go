@@ -223,8 +223,17 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	updates := map[string]any{
 		"openshell.enabled": true, "openshell.harnesses": names, "openshell.upstream_telemetry": !telemetryOff,
 	}
-	if copyOnly && (a.Cfg.OpenShell.Workdir.Mode == "" || a.Cfg.OpenShell.Workdir.Mode == config.OpenShellWorkdirMount) {
+	mode := a.Cfg.OpenShell.Workdir.Mode
+	switch {
+	case copyOnly && (mode == "" || mode == config.OpenShellWorkdirMount):
 		updates["openshell.workdir.mode"] = config.OpenShellWorkdirCopy
+	case changes.EnableBindMounts && mode == config.OpenShellWorkdirCopy:
+		// Mounts were just allowed; the copy mode an earlier setup
+		// without them recorded goes, and the pack decides again.
+		updates["openshell.workdir.mode"] = ""
+	case !copyOnly && mode == config.OpenShellWorkdirCopy:
+		a.note("openshell.workdir.mode is copy in " + a.tildePath(a.ConfigPath) + ", so runs still work on a copy; " +
+			"set it to mount (or remove it) to mount the folder live")
 	}
 	if err := a.patchConfig(updates); err != nil {
 		return err

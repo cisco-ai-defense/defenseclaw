@@ -186,6 +186,31 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	if c.OpenShell.Workdir.Mode != "copy" || !slices.Equal(c.OpenShell.Harnesses, []string{"codex"}) {
 		t.Fatalf("config = %+v", c.OpenShell)
 	}
+
+	// Setup again, allowing the mounts this time: the copy mode the first
+	// setup recorded goes, so the answer takes effect.
+	ta.Cfg.OpenShell.Workdir.Mode = c.OpenShell.Workdir.Mode
+	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+	if err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}); err != nil {
+		t.Fatalf("second Setup: %v\n%s", err, ta.output())
+	}
+	if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts {
+		t.Fatalf("gateway plans = %+v", ta.gateway.planned)
+	}
+	if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != "" {
+		t.Fatalf("workdir.mode after allowing mounts = %q, want the pack's", c.OpenShell.Workdir.Mode)
+	}
+
+	// Mounts already on and a copy mode in the config: setup says why runs
+	// still copy.
+	ta.gateway.state.BindMounts = openshell.BindMounts{AllowDriverConfig: true, EnableBindMounts: true}
+	ta.Cfg.OpenShell.Workdir.Mode = "copy"
+	if err := ta.Setup(context.Background(), SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}); err != nil {
+		t.Fatalf("third Setup: %v\n%s", err, ta.output())
+	}
+	if !strings.Contains(ta.output(), "openshell.workdir.mode is copy") {
+		t.Fatalf("output:\n%s", ta.output())
+	}
 }
 
 // TestSetupOnMacOSLeavesTelemetryAlone: the Homebrew gateway does not read
