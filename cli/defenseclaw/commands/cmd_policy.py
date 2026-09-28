@@ -438,13 +438,90 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
 
 @policy.command()
 @click.argument("name")
+@click.option(
+    "--reload/--no-reload",
+    "reload_gateway",
+    default=True,
+    show_default=True,
+    help="Ask the running gateway to reload its policy after saving.",
+)
 @pass_ctx
-def activate(app: AppContext, name: str) -> None:
-    """Activate a policy — applies it to config.yaml and syncs OPA data.json."""
+def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
+    """Activate a policy — applies it to config.yaml and syncs OPA data.json.
+
+    By default the running gateway is then asked to reload its policy
+    (POST /policy/reload) so the change takes effect immediately. If the
+    gateway isn't running, it loads the policy when it next starts.
+    """
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
     if app.logger:
         app.logger.log_action("policy-activate", name, f"source={path}")
+    if not reload_gateway:
+        return
+
+    outcome, detail = _reload_gateway_policy(app)
+    if outcome == "reloaded":
+        ux.ok("Gateway reloaded the policy; it is enforcing it now.")
+        return
+    if outcome == "unreachable":
+        click.echo("saved; the gateway isn't running, it loads this policy when it starts")
+        return
+    click.echo(
+        f"error: policy '{name}' was saved, but the running gateway rejected the reload"
+        + (f" ({detail})" if detail else "")
+        + ". Run `defenseclaw policy validate` to find the problem, fix it, then activate again.",
+        err=True,
+    )
+    raise SystemExit(1)
+
+
+def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
+    """POST /policy/reload to the running gateway.
+
+    Returns ``(outcome, detail)`` where outcome is ``"reloaded"``,
+    ``"unreachable"`` (nothing listening / timed out / no API port) or
+    ``"rejected"`` (HTTP error or malformed response; *detail* says why).
+    """
+    import requests
+
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    gateway = getattr(app.cfg, "gateway", None)
+    port = int(getattr(gateway, "api_port", 0) or 0) if gateway is not None else 0
+    if port <= 0:
+        return "unreachable", ""
+    resolver = getattr(gateway, "resolved_token", None)
+    try:
+        token = resolver() if callable(resolver) else str(getattr(gateway, "token", "") or "")
+    except Exception:  # noqa: BLE001 — a token lookup failure is an auth problem, not a crash.
+        token = ""
+    client = OrchestratorClient(
+        host=gateway_api_client_host(app.cfg),
+        port=port,
+        token=(token or "").strip(),
+        timeout=5,
+    )
+    try:
+        client.reload_policy()
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status in (401, 403):
+            return "rejected", "the gateway refused the request; check the gateway token"
+        reason = ""
+        if exc.response is not None:
+            try:
+                body = exc.response.json()
+                if isinstance(body, dict):
+                    reason = str(body.get("error") or "")
+            except ValueError:
+                reason = ""
+        return "rejected", reason[:300] or f"HTTP {status}"
+    except (requests.ConnectionError, requests.Timeout, OSError):
+        return "unreachable", ""
+    except ValueError:
+        return "rejected", "the gateway sent an unexpected reply"
+    return "reloaded", ""
 
 
 def _activate_policy(app: AppContext, name: str) -> str:

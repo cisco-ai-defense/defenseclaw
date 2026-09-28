@@ -353,6 +353,26 @@ class OrchestratorClient:
             raise ValueError("sidecar returned a malformed provider reload response")
         return data
 
+    def reload_policy(self) -> dict[str, Any]:
+        """POST /policy/reload so the gateway recompiles OPA policy from disk.
+
+        Raises ``requests.HTTPError`` when the gateway rejects the reload
+        (e.g. the Rego/data.json no longer compiles) and ``ValueError`` on a
+        malformed success body. Connection errors propagate unchanged so
+        callers can tell "not running" from "rejected".
+        """
+        resp = self._session.post(
+            f"{self.base_url}/policy/reload",
+            json={},
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or data.get("status") != "reloaded":
+            raise ValueError("gateway returned a malformed policy reload response")
+        return data
+
     def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
         """Hand one raw Python-CLI fact to the canonical v8 runtime.
 
