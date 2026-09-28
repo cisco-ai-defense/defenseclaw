@@ -1754,6 +1754,7 @@ def test_the_launch_dialog_starts_in_a_sandbox_project(tmp_path: Path, monkeypat
 # --- manual round 2 -------------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX SIGINT regression; os.kill(SIGINT) ends the process on Windows")
 @pytest.mark.asyncio
 async def test_ctrl_c_during_the_handover_never_reaches_the_tui(fetch, monkeypatch) -> None:
     """R2-46: Ctrl-C at the child's prompt reaches the TUI too (same foreground group).
