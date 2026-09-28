@@ -103,7 +103,7 @@ func TestSandboxVerdictReason(t *testing.T) {
 		{"confirm", "confirm", []string{"E2E-SANDBOX-MARKER"}, nil,
 			"Held for approval by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation},
 		{"alert", "alert", []string{"E2E-SANDBOX-MARKER"}, nil,
-			"Flagged by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxDefaultRemediation},
+			"Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. " + sandboxFlaggedNote},
 		// The most severe rule leads; the others are named.
 		{"several rules", "block", []string{"E2E-QUOTING-TITLE", "E2E-SANDBOX-MARKER", "E2E-SANDBOX-MARKER"}, nil,
 			"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command (also E2E-QUOTING-TITLE). " +
@@ -160,7 +160,7 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 	postReq := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PostToolUse"}
 	postBody := []byte(`{"hook_event_name":"PostToolUse","tool_name":"Bash"}`)
 	got := api.applySandboxVerdictReason(ctx, profile, "claudecode", postReq, postBody, map[string]interface{}{}, result)
-	if !strings.HasPrefix(got.Reason, "Flagged by DefenseClaw rule E2E-SANDBOX-MARKER") ||
+	if !strings.HasPrefix(got.Reason, "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER") ||
 		!strings.Contains(got.AdditionalContext, got.Reason) || strings.Contains(got.AdditionalContext, "would block") {
 		t.Fatalf("unenforced result: reason %q context %q", got.Reason, got.AdditionalContext)
 	}

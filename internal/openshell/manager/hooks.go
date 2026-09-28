@@ -148,6 +148,18 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
 	}
+	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !isConfirmAction(d.Action) {
+		// A verdict that let the tool call run but flagged it (an alert,
+		// or a block the event could not enforce) is a finding of the
+		// session: the feed shows every one.
+		what := firstNonEmpty(d.Tool, d.Event, "a hook event")
+		msg := "⚠ " + what + " allowed but flagged by DefenseClaw"
+		if reason != "" {
+			msg = "⚠ " + what + ": " + truncate(reason, 300)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Tool: d.Tool,
+			Event: d.Event, Severity: severity, Reason: sandboxapi.ReasonHookFinding, Message: msg})
+	}
 	if alarm != nil {
 		m.raiseTamper(b, *alarm)
 	}
@@ -238,6 +250,24 @@ func isBlockAction(action string) bool {
 		return true
 	}
 	return false
+}
+
+func isConfirmAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "confirm", "ask":
+		return true
+	}
+	return false
+}
+
+// flaggedSeverity is a verdict's severity when it carries a finding (LOW or
+// worse), upper-cased, else "".
+func flaggedSeverity(severity string) string {
+	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
+	case "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		return s
+	}
+	return ""
 }
 
 // tamperAlarm is one detected hook tamper, captured under Manager.mu.

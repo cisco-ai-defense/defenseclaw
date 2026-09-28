@@ -66,6 +66,12 @@ var sandboxCategoryRemediation = map[string]string{
 const sandboxDefaultRemediation = "Try another approach that does not need this action, or ask the user to " +
 	"review the DefenseClaw policy."
 
+// sandboxFlaggedNote closes the reason of a verdict that let the action run
+// (an alert, or a block the hook event cannot enforce): telling the agent
+// to try another approach would have it abandon or redo work that went
+// through.
+const sandboxFlaggedNote = "The action was allowed; DefenseClaw recorded the finding for the user's review."
+
 // sandboxRule is the static metadata of one deciding rule.
 type sandboxRule struct {
 	id, title, remediation string
@@ -77,14 +83,17 @@ type sandboxRule struct {
 // ("RULE-ID:Title").
 func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []string) string {
 	rules := sandboxVerdictRules(connectorName, ruleIDs, findings)
-	verb := "Flagged by"
+	verb, flagged := "Allowed but flagged by", true
 	switch action {
 	case "block":
-		verb = "Blocked by"
+		verb, flagged = "Blocked by", false
 	case "confirm":
-		verb = "Held for approval by"
+		verb, flagged = "Held for approval by", false
 	}
 	if len(rules) == 0 {
+		if flagged {
+			return verb + " DefenseClaw policy. " + sandboxFlaggedNote
+		}
 		return verb + " DefenseClaw policy. " + sandboxDefaultRemediation
 	}
 	first := rules[0]
@@ -101,6 +110,10 @@ func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []stri
 		b.WriteString(" (also " + strings.Join(others, ", ") + ")")
 	}
 	b.WriteString(". ")
+	if flagged {
+		b.WriteString(sandboxFlaggedNote)
+		return b.String()
+	}
 	remediation := first.remediation
 	if remediation == "" {
 		remediation = sandboxDefaultRemediation
