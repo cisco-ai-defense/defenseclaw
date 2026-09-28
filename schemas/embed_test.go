@@ -1067,6 +1067,7 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		{"host glob with space", openshell(map[string]any{"egress": map[string]any{"allow": []any{"a b.example"}}})},
 		{"host glob with two trailing dots", openshell(map[string]any{"egress": map[string]any{"block": []any{"example.com.."}}})},
 		{"host glob label too long", openshell(map[string]any{"egress": map[string]any{"block": []any{strings.Repeat("a", 64) + ".example"}}})},
+		{"catch-all pattern", openshell(map[string]any{"admin": map[string]any{"egress_block": []any{"*"}}})},
 		{"pack digest format", openshell(map[string]any{"admin": map[string]any{"required_pack_digest": "sha256:ABC"}})},
 		{"harness name with space", openshell(map[string]any{"harnesses": []any{"claude code"}})},
 		{"string yolo", openshell(map[string]any{"yolo": "yes"})},
@@ -1095,8 +1096,8 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		{"millicores and binary memory", openshell(map[string]any{
 			"resources": map[string]any{"cpu": "1500m", "memory": "512Mi"},
 		})},
-		{"ip literal and wildcard globs", openshell(map[string]any{
-			"admin": map[string]any{"egress_block": []any{"203.0.113.7", "*", "[2001:db8::1]", "2001:db8::2", "*.Ngrok.IO", "paste.example."}},
+		{"ip literals, prefixes and wildcard patterns", openshell(map[string]any{
+			"admin": map[string]any{"egress_block": []any{"203.0.113.7", "198.51.100.0/24", "[2001:db8::1]", "2001:db8::2", "2001:db8::/32", "*.Ngrok.IO", "paste.example."}},
 		})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
