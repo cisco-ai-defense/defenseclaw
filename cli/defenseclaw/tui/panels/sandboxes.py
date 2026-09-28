@@ -29,8 +29,10 @@ from defenseclaw.tui.services.sandbox_state import (
     decode_sandbox,
     decode_status,
     review_pairs,
+    undo_done_text,
     undo_is_empty,
     undo_preview_text,
+    undo_unrestored_lines,
 )
 
 __all__ = [
@@ -50,6 +52,8 @@ __all__ = [
     "decode_sandbox",
     "decode_status",
     "review_pairs",
+    "undo_done_text",
     "undo_is_empty",
     "undo_preview_text",
+    "undo_unrestored_lines",
 ]

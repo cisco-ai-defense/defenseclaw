@@ -1706,35 +1706,137 @@ def review_pairs(response: Any) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def undo_preview_text(response: Any) -> str:
-    """What undo would change, in one short paragraph for the confirmation."""
+def _plural(count: int, one: str, many: str) -> str:
+    return f"{count} {one if count == 1 else many}"
+
+
+def _first(items: list[str], count: int) -> str:
+    """``items`` joined, the first ``count`` of them (sandboxcli.firstN)."""
+    shown = items[:count]
+    if len(items) > count:
+        shown.append(f"(+{len(items) - count} more)")
+    return ", ".join(shown)
+
+
+def _ignored(result: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_dict(c) for c in _list(result.get("ignored")) if _dict(c).get("path")]
+
+
+def undo_unrestored(response: Any) -> tuple[dict[str, Any], ...]:
+    """The changes undo cannot put back (``UndoResult.Unrestored``).
+
+    Files the snapshot holds no copy of: what git ignores and, outside git,
+    dependency folders. Undo deletes only Python bytecode caches (removed).
+    """
+    result = _dict(_dict(response).get("result"))
+    return tuple(c for c in _ignored(result) if not c.get("removed"))
+
+
+def undo_unrestored_lines(response: Any, limit: int = 8) -> tuple[str, ...]:
+    """One warning per change undo cannot restore, with what to do (sandboxcli.printUnrestored)."""
+    unrestored = undo_unrestored(response)
+    lines: list[str] = []
+    for change in unrestored[:limit]:
+        path = _text(change.get("path"))
+        parts = []
+        if touched := _int(change.get("added")) + _int(change.get("modified")):
+            parts.append(f"{_plural(touched, 'file', 'files')} added or changed")
+        if deleted := _int(change.get("deleted")):
+            parts.append(f"{_plural(deleted, 'file', 'files')} deleted")
+        what = ", ".join(parts) + " during the session"
+        executables = [_text(e).removeprefix(path) for e in _list(change.get("executables"))]
+        count = _int(change.get("executable_count"))
+        if count:
+            what += ", including " + ", ".join(executables)
+            if count > len(executables):
+                what += f" and {count - len(executables)} more that run on this machine"
+        remedy = _text(change.get("remedy"))
+        lines.append(f"undo cannot restore {path} ({what})" + (f": {remedy}" if remedy else ""))
+    if len(unrestored) > limit:
+        lines.append(
+            f"… and {len(unrestored) - limit} more places undo cannot restore (`defenseclaw sandbox review` lists them)"
+        )
+    return tuple(lines)
+
+
+def undo_preview_lines(response: Any, unrestored_limit: int = 8) -> tuple[str, ...]:
+    """What undo would change and what it cannot put back (sandboxcli.printUndo)."""
     data = _dict(response)
     result = _dict(data.get("result"))
+    lines: list[str] = []
+    if data.get("summary"):
+        lines.append(_text(data.get("summary")))
     changes = _list(result.get("changes"))
-    parts: list[str] = []
     if changes:
         paths = [_text(_dict(c).get("path")) for c in changes[:5]]
         more = f" and {len(changes) - 5} more" if len(changes) > 5 else ""
-        parts.append(f"{len(changes)} file(s) go back to the snapshot: {', '.join(paths)}{more}.")
-    nested = _list(result.get("nested_repos"))
-    if nested:
-        parts.append(f"{len(nested)} planted git repositor{'y' if len(nested) == 1 else 'ies'} removed.")
+        lines.append(f"{len(changes)} file(s) go back to the snapshot: {', '.join(paths)}{more}.")
+    head_before, head_after = _text(result.get("head_before")), _text(result.get("head_after"))
+    branch_before, branch_after = _text(result.get("branch_before")), _text(result.get("branch_after"))
+    if branch_before and branch_before != branch_after:
+        lines.append(f"Switches back to branch {branch_before} at {head_before[:7] or 'its snapshot commit'}.")
+    elif head_before and head_before != head_after:
+        on = f" ({branch_before})" if branch_before else ""
+        lines.append(
+            f"Resets HEAD{on} from {head_after[:7] or 'none'} back to {head_before[:7]} "
+            "(undo saves the session's state first)."
+        )
     refs = _list(result.get("ref_changes"))
     if refs:
-        parts.append(f"{len(refs)} branch/tag change(s) reset.")
-    if data.get("summary"):
-        parts.insert(0, _text(data.get("summary")))
-    return " ".join(parts) or "Nothing changed since the snapshot; undo has nothing to do."
+        lines.append(f"{len(refs)} branch/tag change(s) reset.")
+    control = [_text(c) for c in _list(result.get("control_changes"))]
+    if control:
+        lines.append(f"Resets {_plural(len(control), 'git control file', 'git control files')}: {_first(control, 6)}.")
+    if lost := len(_list(result.get("lost_objects"))):
+        lines.append(f"Brings back {_plural(lost, 'pre-session commit', 'pre-session commits')} the session deleted.")
+    if hidden := len(_list(result.get("hidden_removed"))):
+        lines.append(f"Removes {_plural(hidden, 'file', 'files')} the session hid from git with changed ignore rules.")
+    nested = _list(result.get("nested_repos"))
+    if nested:
+        lines.append(f"{len(nested)} planted git repositor{'y' if len(nested) == 1 else 'ies'} removed.")
+    for change in _ignored(result):
+        if change.get("removed"):
+            touched = _int(change.get("added")) + _int(change.get("modified"))
+            lines.append(
+                f"Removes {_plural(touched, 'file', 'files')} the session wrote to {_text(change.get('path'))} "
+                "(a Python bytecode cache)."
+            )
+    for pinned in _list(result.get("pinned_changes")):
+        lines.append(f"{_text(pinned)} changed on this machine during the session; it is kept.")
+    lines.extend(undo_unrestored_lines(response, unrestored_limit))
+    return tuple(lines)
+
+
+def undo_preview_text(response: Any, unrestored_limit: int = 8) -> str:
+    """What undo would change, one line each, for the confirmation."""
+    lines = undo_preview_lines(response, unrestored_limit)
+    return "\n".join(lines) or "Nothing changed since the snapshot; undo has nothing to do."
 
 
 def undo_is_empty(response: Any) -> bool:
-    """Whether the folder already matches the snapshot (``UndoResult.Empty``)."""
+    """Whether undo has nothing to put back (``UndoResult.Empty``).
+
+    Changes undo cannot restore do not count (undo_unrestored lists them);
+    bytecode caches it would delete do.
+    """
     result = _dict(_dict(response).get("result"))
     if not result:
         return True
     lists = ("changes", "ref_changes", "control_changes", "nested_repos", "lost_objects")
     if any(_list(result.get(key)) for key in lists):
         return False
+    if any(change.get("removed") for change in _ignored(result)):
+        return False
     return _text(result.get("head_before")) == _text(result.get("head_after")) and _text(
         result.get("branch_before")
     ) == _text(result.get("branch_after"))
+
+
+def undo_done_text(response: Any, name: str) -> str:
+    """What a finished undo restored, except what it could not (sandboxcli.undoDone)."""
+    data = _dict(response)
+    message = _text(data.get("summary")) or f"{name}: the project folder is back to its pre-session snapshot"
+    left = [_text(c.get("path")) for c in undo_unrestored(response)]
+    if left:
+        message += f", except {_first(left, 6)} (undo cannot restore them)"
+    return message

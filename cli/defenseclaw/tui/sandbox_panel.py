@@ -59,8 +59,11 @@ from defenseclaw.tui.services.sandbox_state import (
     fit,
     harness_command,
     review_pairs,
+    undo_done_text,
     undo_is_empty,
     undo_preview_text,
+    undo_unrestored,
+    undo_unrestored_lines,
 )
 from defenseclaw.tui.theme import DEFAULT_TOKENS as TOKENS
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
@@ -816,14 +819,23 @@ class SandboxPanelMixin:
             self._run_sandbox_cli("undo", name)
             return
         preview = await self._sandbox_call("undo_sandbox", name, preview=True, stop=False)
+        unrestored = undo_unrestored_lines(preview)
         if undo_is_empty(preview):
+            if unrestored:
+                await self._show_unrestored(name, preview)
+                return
             message = f"Nothing to undo: {name}'s folder matches its pre-session snapshot."
             self._set_status(message)  # type: ignore[attr-defined]
             self.notify_toast("info", message)  # type: ignore[attr-defined]
             return
         confirmed = await self._confirm(
             f"Undo {name}?",
-            "Puts the project folder back to its pre-session snapshot. " + undo_preview_text(preview),
+            # Paths come from the sandbox: no markup. The menu does not
+            # scroll, so it names the first few places undo cannot restore.
+            rich_escape(
+                "Puts the project folder back to its pre-session snapshot.\n"
+                + undo_preview_text(preview, unrestored_limit=3)
+            ),
             MenuAction("undo", "Undo everything", variant="warning"),
             cancel_first=True,
         )
@@ -833,9 +845,25 @@ class SandboxPanelMixin:
         # Not stop=True: a sandbox that started meanwhile is refused (stop it
         # with s, which looks for a detached run first) rather than stopped here.
         result = await self._sandbox_call("undo_sandbox", name, stop=False)
-        message = str(result.get("summary") or f"{name}: the project folder is back to its snapshot")
+        message = undo_done_text(result, name)
         self._set_status(message)  # type: ignore[attr-defined]
-        self.notify_toast("success", message)  # type: ignore[attr-defined]
+        self.notify_toast("warn" if undo_unrestored(result) else "success", message)  # type: ignore[attr-defined]
+
+    async def _show_unrestored(self, name: str, preview: Any) -> None:
+        """Undo has nothing to put back, but the session changed what it cannot restore."""
+        lines = undo_unrestored_lines(preview)
+        places = len(undo_unrestored(preview))
+        message = (
+            f"Nothing else to undo in {name}, but undo cannot restore {places} place(s) the session changed; "
+            "they are listed."
+        )
+        self._set_status(message)  # type: ignore[attr-defined]
+        self.notify_toast("warn", message)  # type: ignore[attr-defined]
+        pairs = [("Undo", f"nothing else to undo: the rest of {name}'s folder matches its pre-session snapshot")]
+        pairs.extend(("Not restored", line.removeprefix("undo cannot restore ")) for line in lines)
+        await self.push_screen_wait(  # type: ignore[attr-defined]
+            SandboxDetailScreen(f"Undo {name}", tuple(pairs), keys_hint="Esc close")
+        )
 
     async def _sandbox_review(self, name: str) -> None:
         self._set_status(f"Reviewing {name}...")  # type: ignore[attr-defined]

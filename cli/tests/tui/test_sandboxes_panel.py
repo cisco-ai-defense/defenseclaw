@@ -1022,6 +1022,96 @@ def test_undo_is_empty_mirrors_go() -> None:
     assert undo_is_empty({"result": {"head_before": "a", "head_after": "b"}}) is False
     assert undo_is_empty({"result": {"nested_repos": ["vendor/x"]}}) is False
     assert undo_is_empty({"result": {"changes": [{"path": "a"}]}}) is False
+    # UndoResult.Empty: what undo cannot restore does not count, the
+    # bytecode caches it deletes do.
+    assert undo_is_empty({"result": {"ignored": [NODE_MODULES]}}) is True
+    assert undo_is_empty({"result": {"ignored": [PYCACHE]}}) is False
+
+
+# UndoResult.Ignored entries: a dependency folder with a host executable,
+# which undo leaves as the session did, and a bytecode cache it deletes.
+NODE_MODULES = {
+    "path": "node_modules/",
+    "added": 2,
+    "modified": 1,
+    "executables": ["node_modules/.bin/tool"],
+    "executable_count": 3,
+    "dependencies": True,
+    "remedy": "delete it and reinstall the packages (for example `npm ci`)",
+}
+PYCACHE = {"path": "calc/__pycache__/", "added": 2, "removed": True}
+
+
+def test_undo_preview_says_what_undo_cannot_restore() -> None:
+    from defenseclaw.tui.services.sandbox_state import undo_done_text, undo_unrestored_lines
+
+    preview = {"result": {"changes": [{"path": "a.txt"}], "ignored": [NODE_MODULES, PYCACHE]}}
+    expected = (
+        "undo cannot restore node_modules/ (3 files added or changed during the session, including .bin/tool "
+        "and 2 more that run on this machine): delete it and reinstall the packages (for example `npm ci`)"
+    )
+    assert undo_unrestored_lines(preview) == (expected,)
+    text = undo_preview_text(preview)
+    assert "1 file(s) go back to the snapshot: a.txt." in text
+    assert "Removes 2 files the session wrote to calc/__pycache__/ (a Python bytecode cache)." in text
+    assert expected in text
+    many = {"result": {"ignored": [{**NODE_MODULES, "path": f"d{i}/"} for i in range(10)]}}
+    lines = undo_unrestored_lines(many)
+    assert len(lines) == 9
+    assert lines[-1] == "… and 2 more places undo cannot restore (`defenseclaw sandbox review` lists them)"
+    assert undo_done_text({"summary": "restored 1 file", **preview}, "docs") == (
+        "restored 1 file, except node_modules/ (undo cannot restore them)"
+    )
+    assert undo_done_text({}, "docs") == "docs: the project folder is back to its pre-session snapshot"
+
+
+@pytest.mark.asyncio
+async def test_undo_with_only_changes_it_cannot_restore_lists_them(fetch, monkeypatch) -> None:
+    """Not "nothing to undo": the session changed host executables undo leaves in place."""
+    from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
+
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"result": {"kind": "git", "ignored": [NODE_MODULES]}})
+    toasts: list[tuple[str, str]] = []
+    shown: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        shown.append(screen)
+        return None
+
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._sandbox_undo("docs")  # noqa: SLF001
+    assert [method for method, _args, _kwargs in calls.calls] == ["undo_sandbox"]
+    assert toasts[-1][0] == "warn" and "cannot restore 1 place(s)" in toasts[-1][1]
+    assert len(shown) == 1 and isinstance(shown[0], SandboxDetailScreen)
+    values = [value for _label, value in shown[0].model.pairs]
+    assert any("node_modules/" in value and ".bin/tool" in value and "npm ci" in value for value in values)
+
+
+@pytest.mark.asyncio
+async def test_undo_confirmation_and_result_name_what_it_cannot_restore(fetch, monkeypatch) -> None:
+    from defenseclaw.tui.widgets.action_menu import ActionMenuScreen
+
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls({"summary": "restored 1 file", "result": {"changes": [{"path": "a.txt"}], "ignored": [NODE_MODULES]}})
+    toasts: list[tuple[str, str]] = []
+    shown: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        shown.append(screen)
+        return "undo"
+
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._sandbox_undo("docs")  # noqa: SLF001
+    assert isinstance(shown[0], ActionMenuScreen)
+    assert "undo cannot restore node_modules/" in shown[0].subtitle
+    assert toasts[-1] == ("warn", "restored 1 file, except node_modules/ (undo cannot restore them)")
 
 
 @pytest.mark.asyncio
