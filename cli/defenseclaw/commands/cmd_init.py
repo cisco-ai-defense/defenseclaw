@@ -1540,11 +1540,16 @@ def _prompt_first_run(
     # Every connector defaults to observe. The operator names the subset to
     # enforce instead of choosing observe/action for each one. An explicit
     # `--profile` with a single explicit `--connector` keeps the legacy
-    # single-connector intent without re-prompting.
-    if connector and profile is not None and len(connectors) == 1:
+    # single-connector intent without re-prompting. "none" is not a host
+    # connector, so it is never offered for action mode.
+    host_connectors = [c for c in connectors if c != "none"]
+    if not host_connectors:
+        requested_action = []
+        ux.subhead("Action enforcement: skipped because no host connector is selected.")
+    elif connector and profile is not None and len(connectors) == 1:
         requested_action = list(connectors) if profile.lower() == "action" else []
     else:
-        requested_action = _prompt_action_connectors(connectors)
+        requested_action = _prompt_action_connectors(host_connectors)
 
     # Gate action connectors on hook-contract support; unverified ones are
     # downgraded to observe (still guarded, just non-blocking).

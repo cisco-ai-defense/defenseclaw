@@ -3380,6 +3380,37 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertTrue(verify)
         self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
 
+    def test_prompt_first_run_connector_none_skips_action_enforcement(self):
+        """``--connector none`` must not offer "none" for action mode or the judge."""
+        from defenseclaw.commands import cmd_init
+
+        for profile in (None, "action"):
+            with self.subTest(profile=profile):
+                prompts = iter(["local"])  # scanner mode
+                confirms = iter([False, True])  # start_gateway, verify
+                checkbox_calls: list[list[str]] = []
+
+                def checkbox(options, **_kwargs):
+                    checkbox_calls.append(list(options))
+                    return list(options)
+
+                with patch.object(
+                    cmd_init.agent_discovery, "discover_agents", return_value=self._disc({"codex"})
+                ), \
+                        patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=checkbox), \
+                        patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                        patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+                    settings, _scanner, with_judge, judge_connectors, _start, _verify = cmd_init._prompt_first_run(
+                        connector="none", profile=profile, scanner_mode="local", with_judge=False,
+                        fail_mode=None, human_approval=None, hilt_min_severity=None,
+                        start_gateway=False, verify=None, rescan_agents=False, data_dir=self.tmp_dir,
+                    )
+
+                self.assertEqual(checkbox_calls, [])
+                self.assertEqual([(s["connector"], s["profile"]) for s in settings], [("none", "observe")])
+                self.assertFalse(with_judge)
+                self.assertEqual(judge_connectors, [])
+
     def test_prompt_first_run_judge_lists_requested_action_after_downgrade(self):
         """A hook-contract downgrade must not hide a requested action connector
         from the optional LLM judge checkbox."""
