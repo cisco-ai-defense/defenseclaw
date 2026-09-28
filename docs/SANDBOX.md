@@ -598,10 +598,15 @@ exact host or `*.` for every subdomain (not the apex).
   profile narrows destinations; it is not an exfiltration barrier for those
   hosts.
 
-`FirewallBlockPatterns` carries over only outbound TCP deny rules with a
-destination that cover the proxy's ports. The host firewall's default action
-and allowlist scope what the DefenseClaw host itself may reach and are not
-applied to sandboxes.
+The deny rules of the host egress firewall (`firewall.config_file`,
+`firewall.yaml` in the data directory) join every sandbox's block list, so
+the proxy refuses those destinations and no unblock or approval opens them;
+`sandbox policy explain` shows them under `egress.block`. Only outbound TCP
+deny rules with a destination that cover the proxy's ports carry over
+(`egress.FirewallBlockPatterns`). The host firewall's default action, allow
+rules and allowlist scope what the DefenseClaw host itself may reach and are
+not applied to sandboxes. A firewall configuration that cannot be read or
+parsed fails the sandbox policy rather than dropping the denials.
 
 ### Byte counts and large uploads
 

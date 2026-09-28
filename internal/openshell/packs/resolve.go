@@ -296,6 +296,9 @@ type Effective struct {
 	// hostNames are this machine's own names, which reach the host.
 	hostNames []string
 	settings  map[string]Setting
+	// firewallBlock are the Egress.Block entries the host egress firewall's
+	// deny rules contribute (firewallBlock), named apart in refusals.
+	firewallBlock []string
 	// curatedAllow are the Egress.Allow entries only DefenseClaw's curated
 	// allowlist put there (resolveAllow). They reach the decider as its
 	// allowlist feed, not as operator allow entries (EgressOptions).
@@ -362,6 +365,10 @@ type resolver struct {
 	violations []Violation
 	// loaded caches the packs this Resolve read (loadPack).
 	loaded map[packCacheKey]*Pack
+	// firewallFile is the host egress firewall configuration
+	// (firewall.config_file), whose deny rules join the block list
+	// (firewallBlock).
+	firewallFile string
 }
 
 const requiredPackConstraint = "openshell.admin.required_pack"
@@ -388,8 +395,9 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	}
 	home, _ := userHomeDir()
 	r := &resolver{
-		admin:   o.Admin,
-		managed: managed.IsManagedEnterprise(cfg.DeploymentMode),
+		admin:        o.Admin,
+		managed:      managed.IsManagedEnterprise(cfg.DeploymentMode),
+		firewallFile: cfg.Firewall.ConfigFile,
 		eff: &Effective{
 			Admin:         AdminStatusFor(cfg),
 			admin:         o.Admin,
@@ -1011,6 +1019,19 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 	r.set("egress.allow_only", listValue(eg.AllowOnly), layer{SourceAdmin, "openshell.admin.egress_allow_only"})
 
 	r.resolvePorts(o)
+	// The host firewall's deny rules apply for the ports the proxy carries,
+	// so they are read once those are known.
+	fwBlock, err := firewallBlock(r.firewallFile, eg.Ports)
+	if err != nil {
+		return err
+	}
+	if len(fwBlock) > 0 {
+		r.eff.firewallBlock = fwBlock
+		eg.Block = mergeLists(eg.Block, fwBlock)
+		blockFrom := mergedLayer(r.packLayer, len(userBlock) > 0, "openshell.egress.block")
+		blockFrom = layer{SourceUser, blockFrom.origin + " + the deny rules of " + r.firewallFile}
+		r.set("egress.block", listValue(eg.Block), blockFrom)
+	}
 	eg.LargeUploadMB, from = pack.Egress.LargeUploadMB, r.packLayer
 	if o.Egress.LargeUploadMB > 0 {
 		eg.LargeUploadMB, from = o.Egress.LargeUploadMB, layer{SourceUser, "openshell.egress.large_upload_mb"}

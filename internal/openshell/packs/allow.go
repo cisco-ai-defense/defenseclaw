@@ -241,6 +241,13 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 			Message: packMessage(e.Pack.Name, key), Detail: host + " matches " + glob + " on the pack's block list",
 		}
 	}
+	if fwGlob, ok := firstMatch(e.firewallBlock, host); ok {
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: "firewall.config_file",
+			Message: "blocked by a deny rule of the host egress firewall: " + key,
+			Detail:  host + " matches " + fwGlob + "; remove the deny rule from the firewall configuration to reach it",
+		}
+	}
 	return &Violation{
 		Key: key, Source: SourceUser, Attempted: host, Constraint: "openshell.egress.block",
 		Message: "blocked by your own openshell.egress.block list: " + key,

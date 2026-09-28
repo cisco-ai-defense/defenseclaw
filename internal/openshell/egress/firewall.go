@@ -25,7 +25,9 @@ import (
 
 // FirewallBlockPatterns converts the deny rules of the host egress firewall
 // configuration into DeciderOptions.Block patterns, so a destination the
-// operator denies for the host is denied for sandboxes too.
+// operator denies for the host is denied for sandboxes too. The sandbox
+// policy (packs.Resolve) adds them to its block list from
+// firewall.config_file.
 //
 // Only deny rules carry over. The host firewall's default_action and
 // allowlist are not a sandbox egress allowlist and are ignored: they scope
