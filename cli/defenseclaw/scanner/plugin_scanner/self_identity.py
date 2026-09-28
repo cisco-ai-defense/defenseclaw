@@ -70,13 +70,13 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "ba9a5688d4fbee4cd964e59142385813cd5ec2227cceabaeb0955f145ec83533",  # amp-plugin.ts
+            "530b7fd8ea132c81836a4266a8bbe0be1b3d419d07717b41f54c7f3b7cbe2a9f",  # amp-plugin.ts
             "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "4c1c8bb44e4452c66afbbe7c51baf3a3e6ba46d0ec14d0d7e862b9d0dcf0c963",  # opencode-plugin.js
+            "d92065e6362a760dab9b82b5ec706fa3890d8e3531312762d55a4e7998b9b141",  # opencode-plugin.js
             "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
         }
     ),

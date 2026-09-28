@@ -146,7 +146,8 @@ for (const [stdout, exit, pattern] of [
 // which the gateway records.
 {
   const hooks = await load({ guard: JSON.stringify({ deny: true, reason: "enterprise_foreign_hook_blocked: rewrite.js" }) });
-  await assert.rejects(before(hooks), /rewrite\.js/);
+  // The notice reads from DefenseClaw's sentence to the guard's; the reason code stays in the audit.
+  await assert.rejects(before(hooks), /under your organization's policy, so it did not run: rewrite\.js/);
   answer("guard.json", JSON.stringify({ deny: false }));
   resetCalls();
   await assert.rejects(before(hooks), /rewrite\.js/);

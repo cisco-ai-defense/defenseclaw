@@ -107,6 +107,11 @@ rest also reach per-user installs.
 - **OpenCode and Amp say to restart after a failed start-up check.** When
   the plugin's load-time check for unapproved plugins fails, its blocks say
   so and ask the user to restart the agent once DefenseClaw is available.
+- **OpenCode and Amp explain a block for an unapproved plugin.** The message
+  started with the internal code `enterprise_foreign_hook_blocked:`. It now
+  starts with what DefenseClaw did, and the audit keeps the code. When Amp
+  stops a turn for such a plugin, the message also stays in the thread
+  instead of only in a notice that fades after a few seconds.
 - **`defenseclaw doctor` passes a global Kiro install.** `Connector scope
   [kiro]` failed every install without `claw.workspace_dir`. It now passes
   when the global `~/.kiro/hooks/defenseclaw.json`, which recent Kiro builds

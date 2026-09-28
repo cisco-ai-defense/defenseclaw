@@ -366,8 +366,9 @@ function defenseclawForeignCheckFailure(event, why) {
 // defenseclawBlockError is the error a blocked tool call fails with. OpenCode
 // shows it as the tool's error and hands it to the model, so it says that
 // DefenseClaw blocked the call under policy and that the call did not run.
+// The foreign-plugin guard's reason code is left out; the audit keeps it.
 function defenseclawBlockError(reason) {
-  const text = String(reason || "").trim();
+  const text = String(reason || "").trim().replace(/^enterprise_foreign_hook_blocked:\s*/, "");
   if (/^DefenseClaw\b/.test(text)) return new Error(text);
   return new Error("DefenseClaw blocked this tool call under policy, so it did not run: " + (text || "no reason was given"));
 }

@@ -152,11 +152,14 @@ const ctx = {
   },
   ui: { notify: async (message) => { notice = message; } },
 };
-await handlers["agent.start"]({ thread: { id: "T" }, id: "M", message: "use a tool" }, ctx);
-console.log(cancelled ? "cancelled:" + notice : "started");
+const result = await handlers["agent.start"]({ thread: { id: "T" }, id: "M", message: "use a tool" }, ctx);
+console.log(cancelled ? "cancelled:" + notice + "|" + JSON.stringify(result) : "started");
 `
-	if got := strings.Join(runNodeHarness(t, harness, plugin), "\n"); !strings.HasPrefix(got, "cancelled:enterprise_foreign_hook_blocked") {
-		t.Fatalf("Amp must cancel the turn at agent.start when the guard denies: %q", got)
+	// The notice fades, so the text also stays in the thread, and it leaves
+	// the guard's reason code to the audit.
+	if got := strings.Join(runNodeHarness(t, harness, plugin), "\n"); !strings.HasPrefix(got, "cancelled:DefenseClaw") ||
+		strings.Contains(got, "enterprise_foreign_hook_blocked") || !strings.HasSuffix(got, `rewrite.ts","display":true}}`) {
+		t.Fatalf("Amp must cancel the turn at agent.start when the guard denies, and say so in the thread: %q", got)
 	}
 	if err := os.WriteFile(allow, nil, 0o600); err != nil {
 		t.Fatal(err)
