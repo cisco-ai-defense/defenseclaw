@@ -325,14 +325,16 @@ type Config struct {
 // Kept in config package to avoid circular imports; the gateway adapter
 // converts to routing.RoutingConfig at boot.
 type RoutingConfig struct {
-	Enabled   bool                  `mapstructure:"enabled"       yaml:"enabled"`
-	Version   string                `mapstructure:"version"       yaml:"version,omitempty"`
-	Port      int                   `mapstructure:"port"          yaml:"port,omitempty"`
-	Algorithm string                `mapstructure:"algorithm"     yaml:"algorithm,omitempty"`
-	Remote    RoutingRemoteConfig   `mapstructure:"remote"        yaml:"remote,omitempty"`
-	Models    []RoutingModelBackend `mapstructure:"models"        yaml:"models,omitempty"`
-	Signals   RoutingSignalConfig   `mapstructure:"signals"       yaml:"signals,omitempty"`
-	Decisions []RoutingDecisionRule `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+	Enabled        bool                   `mapstructure:"enabled"            yaml:"enabled"`
+	ModelSelection bool                   `mapstructure:"model_selection"    yaml:"model_selection,omitempty"`
+	Version        string                 `mapstructure:"version"            yaml:"version,omitempty"`
+	Port           int                    `mapstructure:"port"               yaml:"port,omitempty"`
+	Algorithm      string                 `mapstructure:"algorithm"          yaml:"algorithm,omitempty"`
+	Embeddings     RoutingEmbeddingsConfig `mapstructure:"embeddings"        yaml:"embeddings,omitempty"`
+	Remote         RoutingRemoteConfig    `mapstructure:"remote"             yaml:"remote,omitempty"`
+	Models         []RoutingModelBackend  `mapstructure:"models"             yaml:"models,omitempty"`
+	Signals        RoutingSignalConfig    `mapstructure:"signals"            yaml:"signals,omitempty"`
+	Decisions      []RoutingDecisionRule  `mapstructure:"decisions"          yaml:"decisions,omitempty"`
 }
 
 type RoutingModelBackend struct {
@@ -340,12 +342,16 @@ type RoutingModelBackend struct {
 	Provider     string   `mapstructure:"provider"          yaml:"provider"`
 	Model        string   `mapstructure:"model"             yaml:"model"`
 	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
+	HostHeader   string   `mapstructure:"host_header"       yaml:"host_header,omitempty"`
 	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
 	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
 }
 
 type RoutingSignalConfig struct {
-	Keywords []RoutingKeywordSignal `mapstructure:"keywords" yaml:"keywords,omitempty"`
+	Keywords   []RoutingKeywordSignal    `mapstructure:"keywords"   yaml:"keywords,omitempty"`
+	Embeddings []RoutingEmbeddingSignal  `mapstructure:"embeddings" yaml:"embeddings,omitempty"`
+	Domains    []RoutingDomainSignal     `mapstructure:"domains"    yaml:"domains,omitempty"`
+	Complexity []RoutingComplexitySignal `mapstructure:"complexity" yaml:"complexity,omitempty"`
 }
 
 type RoutingKeywordSignal struct {
@@ -364,8 +370,34 @@ type RoutingDecisionRule struct {
 }
 
 type RoutingCondition struct {
-	Type string `mapstructure:"type" yaml:"type"`
-	Name string `mapstructure:"name" yaml:"name"`
+	Type          string  `mapstructure:"type"           yaml:"type"`
+	Name          string  `mapstructure:"name"           yaml:"name"`
+	MinConfidence float64 `mapstructure:"min_confidence" yaml:"min_confidence,omitempty"`
+}
+
+type RoutingEmbeddingsConfig struct {
+	MMBertModelPath string `mapstructure:"mmbert_model_path" yaml:"mmbert_model_path,omitempty"`
+	Qwen3ModelPath  string `mapstructure:"qwen3_model_path"  yaml:"qwen3_model_path,omitempty"`
+}
+
+type RoutingEmbeddingSignal struct {
+	Name        string   `mapstructure:"name"        yaml:"name"`
+	Description string   `mapstructure:"description" yaml:"description,omitempty"`
+	Examples    []string `mapstructure:"examples"    yaml:"examples"`
+}
+
+type RoutingDomainSignal struct {
+	Name       string   `mapstructure:"name"       yaml:"name"`
+	Categories []string `mapstructure:"categories" yaml:"categories"`
+}
+
+type RoutingComplexitySignal struct {
+	Name             string   `mapstructure:"name"               yaml:"name"`
+	MinMessageLength int      `mapstructure:"min_message_length" yaml:"min_message_length,omitempty"`
+	MaxMessageLength int      `mapstructure:"max_message_length" yaml:"max_message_length,omitempty"`
+	MinToolCount     int      `mapstructure:"min_tool_count"     yaml:"min_tool_count,omitempty"`
+	MaxToolCount     int      `mapstructure:"max_tool_count"     yaml:"max_tool_count,omitempty"`
+	Indicators       []string `mapstructure:"indicators"         yaml:"indicators,omitempty"`
 }
 
 type RoutingRemoteConfig struct {
