@@ -11860,11 +11860,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         self.inventory_model.show_connector_column = False
         intent = self.inventory_model.load_intent()
-        self._set_status(intent.hint or "Loading inventory...")
+        loading = intent.hint or "Loading inventory..."
+        self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             self.inventory_model.apply_loaded(None, exc)
+            self._finish_load_status(loading, self.inventory_model.message)
             self._render_chrome()
             return
         if returncode != 0:
@@ -11872,12 +11874,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 None,
                 stderr.decode(errors="replace").strip() or f"exit {returncode}",
             )
+            self._finish_load_status(loading, self.inventory_model.message)
             self._render_chrome()
             return
         try:
             self.inventory_model.apply_json(stdout.decode(errors="replace"))
         except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
             self.inventory_model.apply_loaded(None, exc)
+        self._finish_load_status(loading, self.inventory_model.message or "Inventory updated.")
         self._render_chrome()
 
     async def _load_inventory_merged(self, names: list[str]) -> None:
@@ -11889,7 +11893,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         narrowed to the active connector filter in-memory.
         """
 
-        self._set_status(f"Loading inventory for {len(names)} connectors...")
+        loading = f"Loading inventory for {len(names)} connectors..."
+        self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
             intent = self.inventory_model.load_intent_for(name)
@@ -11906,12 +11911,18 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not any(text for _name, text in results):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
+        self._finish_load_status(loading, self.inventory_model.message or "Inventory updated.")
         self._render_chrome()
 
     async def _load_runtime_model(self) -> None:
         """Fetch the runtime-plane snapshot into the panel."""
-        self._set_status("Loading runtime planes...")
-        await self._refresh_runtime_snapshot(render=True)
+        loading = "Loading runtime planes..."
+        self._set_status(loading)
+        answered = await self._refresh_runtime_snapshot(render=True)
+        self._finish_load_status(
+            loading,
+            "Runtime updated." if answered else "Runtime: the gateway did not answer; showing the last snapshot.",
+        )
 
     def _schedule_runtime_poll(self) -> None:
         if getattr(self, "_app_shutting_down", False):
@@ -11929,7 +11940,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._runtime_poll_running = False
 
-    async def _refresh_runtime_snapshot(self, *, render: bool) -> None:
+    async def _refresh_runtime_snapshot(self, *, render: bool) -> bool:
+        """Fetch the runtime snapshot; True when the gateway answered."""
+
         payload = await asyncio.to_thread(_fetch_ai_runtime, self.config)
         if payload is not None:
             self.runtime_model.set_snapshot(payload)
@@ -11939,6 +11952,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self._schedule_overview_sampled_refresh()
             else:
                 self._render_chrome()
+        return payload is not None
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
@@ -12129,11 +12143,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         model.show_connector_column = False
         intent = model.load_intent_for(names[0]) if asset_panel and names else model.load_intent()
-        self._set_status(intent.hint or f"Loading {panel}...")
+        loading = intent.hint or f"Loading {panel}..."
+        self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             model.apply_loaded([], exc)
+            self._finish_load_status(loading, model.message)
             self._render_chrome()
             return
 
@@ -12144,7 +12160,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
                 model.apply_loaded([], exc)
+        self._finish_load_status(loading, model.message or f"{_panel_label(panel)}: {len(model.items)} loaded.")
         self._render_chrome()
+
+    def _finish_load_status(self, loading: str, result: str) -> None:
+        """Replace a "Loading ..." status with how the load ended.
+
+        Loads used to leave "Loading skills..." on the status line forever,
+        even after an error. Only the load's own message is replaced, so a
+        status the operator caused meanwhile is kept.
+        """
+
+        if self.status_text == loading:
+            self._set_status(result)
 
     async def _load_catalog_merged(
         self, panel: str, model: Any, names: list[str]
@@ -12157,7 +12185,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         rows are then narrowed to the active connector filter in-memory.
         """
 
-        self._set_status(f"Loading {panel} for {len(names)} connectors...")
+        loading = f"Loading {panel} for {len(names)} connectors..."
+        self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
             intent = model.load_intent_for(name)
@@ -12174,6 +12203,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not any(text for _name, text in results):
             model.message = f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
+        self._finish_load_status(loading, model.message or f"{_panel_label(panel)}: {len(model.items)} loaded.")
         self._render_chrome()
 
     async def _confirm_and_run_intent(self, intent: Any) -> int | None:

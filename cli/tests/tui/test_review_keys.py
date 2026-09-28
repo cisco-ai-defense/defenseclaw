@@ -116,3 +116,18 @@ async def test_shift_d_runs_the_background_doctor_on_alerts(tmp_path) -> None:
         await pilot.pause()
         assert calls == ["diagnose"]
         assert len(app.screen_stack) == 1
+
+
+async def test_a_failed_catalog_load_replaces_the_loading_status(tmp_path, monkeypatch) -> None:
+    import defenseclaw.tui.app as app_module
+
+    async def failing(binary, args, **_kwargs):
+        return 1, b"", b"skill list exploded"
+
+    monkeypatch.setattr(app_module, "_communicate_captured", failing)
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await app._load_catalog_model("skills")
+        assert "Loading" not in app.status_text
+        assert "skill list exploded" in app.status_text
