@@ -51,6 +51,10 @@ var (
 	// ErrStaleCLI means the new CLI was installed but an old one comes
 	// first on PATH, so `openshell` still runs the old one.
 	ErrStaleCLI = errors.New("openshell: an old openshell CLI shadows the installed one")
+	// ErrHomebrewInstall means the installer failed on macOS, where it
+	// installs the nvidia/openshell Homebrew formula; Homebrew's output
+	// says why.
+	ErrHomebrewInstall = errors.New("openshell: Homebrew could not install the nvidia/openshell formula")
 )
 
 // linuxPackageCLI is where the deb and rpm packages install the CLI.
@@ -193,9 +197,14 @@ type Installer struct {
 	GatewayWait   time.Duration
 	// MaxScriptBytes caps the download (default 1 MiB).
 	MaxScriptBytes int64
+	// GOOS is the platform installed on (default runtime.GOOS).
+	GOOS string
 }
 
 func (i *Installer) defaults() {
+	if i.GOOS == "" {
+		i.GOOS = runtime.GOOS
+	}
 	if i.HTTPClient == nil {
 		i.HTTPClient = netguard.SafeHTTPClient(2 * time.Minute)
 	}
@@ -225,7 +234,7 @@ func (i *Installer) defaults() {
 			i.Candidates = append([]string{filepath.Join(home, ".local", "bin", "openshell")}, i.Candidates...)
 		}
 	}
-	if i.PackageCLI == "" && runtime.GOOS == "linux" {
+	if i.PackageCLI == "" && i.GOOS == "linux" {
 		i.PackageCLI = linuxPackageCLI
 	}
 	if i.Out == nil {
@@ -250,7 +259,7 @@ func (i *Installer) defaults() {
 // gateway.
 func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	i.defaults()
-	if err := CheckPlatform(runtime.GOOS); err != nil {
+	if err := CheckPlatform(i.GOOS); err != nil {
 		return nil, err
 	}
 	if i.Consent == nil {
@@ -260,7 +269,7 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		return nil, fmt.Errorf("openshell: installer URL must be https, got %q", i.URL)
 	}
 	existing := i.findExisting(ctx)
-	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: runtime.GOOS}
+	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS}
 	if existing != nil && existing.Version != (Version{}) {
 		v := existing.Version
 		if err := CheckSupported(v); err == nil {
@@ -332,6 +341,12 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 
 	if err := i.Runner.Run(ctx, Command{Name: plan.Command[0], Args: plan.Command[1:], Env: plan.Env, Unset: installerEnvUnset(os.Environ())}); err != nil {
+		if i.GOOS == "darwin" && ctx.Err() == nil {
+			// Homebrew printed why. Most often it would not build the
+			// formula (NVIDIA's tap has no bottle for this macOS) with an
+			// Xcode or Command Line Tools older than the newest release.
+			return nil, fmt.Errorf("%w (%w)", ErrHomebrewInstall, err)
+		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}
 

@@ -1105,6 +1105,7 @@ section, and skips them while `openshell.enabled` is off.
 | You see | Do this |
 | --- | --- |
 | ``OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on`` | Run setup. |
+| `install OpenShell: Homebrew could not install the nvidia/openshell formula` (macOS) | Read Homebrew's `Error:` line just above it. When NVIDIA's tap has no bottle (prebuilt package) for your macOS release, Homebrew builds the formula and first checks your developer tools: it stops when Xcode or the Command Line Tools are older than the newest release (`Your Xcode (26.2) … is too outdated`). Update them as Homebrew says (Xcode from the App Store, the Command Line Tools from Software Update in System Settings), then run `defenseclaw sandbox setup` again. |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |

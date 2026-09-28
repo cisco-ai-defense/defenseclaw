@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -134,6 +135,8 @@ func readyImages(ta *testApp) []image.Record {
 type fakeInstaller struct {
 	consent func(*openshell.InstallPlan) (bool, error)
 	ran     bool
+	// err is the installer's failure once it runs.
+	err error
 }
 
 func (f *fakeInstaller) Install(context.Context) (*openshell.InstallResult, error) {
@@ -141,6 +144,9 @@ func (f *fakeInstaller) Install(context.Context) (*openshell.InstallResult, erro
 		return nil, errors.New("declined")
 	}
 	f.ran = true
+	if f.err != nil {
+		return nil, f.err
+	}
 	v, _ := openshell.ParseVersion("0.1.1")
 	return &openshell.InstallResult{Installed: true, CLIVersion: v}, nil
 }
@@ -275,6 +281,33 @@ func TestSetupNeedsConsentToInstall(t *testing.T) {
 	if !inst.ran {
 		t.Fatal("the installer did not run")
 	}
+}
+
+// TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
+// Homebrew refuses the nvidia/openshell formula (an Xcode older than it
+// wants), and setup said only "install OpenShell: openshell: installer
+// failed: /bin/sh: exit status 1"; it names Homebrew and the next step
+// (manual test M6).
+func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	inst := &fakeInstaller{err: fmt.Errorf("%w (/bin/sh: exit status 1)", openshell.ErrHomebrewInstall)}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	var silent *Silent
+	if !errors.As(err, &silent) || !errors.Is(err, openshell.ErrHomebrewInstall) {
+		t.Fatalf("Setup = %v, want the Homebrew failure, already printed", err)
+	}
+	has(t, ta.output(), "✗ install OpenShell: Homebrew could not install the nvidia/openshell formula\n",
+		"Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants",
+		"then run `defenseclaw sandbox setup` again", "docs/setup/sandbox/#troubleshooting")
 }
 
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo

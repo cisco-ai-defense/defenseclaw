@@ -107,6 +107,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		LookPath:   func(string) (string, error) { return "", errors.New("not on PATH") },
 		Candidates: []string{f.cliPath},
 		PackageCLI: f.cliPath,
+		GOOS:       "linux",
 		Out:        &f.out,
 		Consent: func(p *openshell.InstallPlan) (bool, error) {
 			if !strings.Contains(f.out.String(), p.SHA256) {
@@ -412,5 +413,22 @@ func TestInstallVerifiesOutcome(t *testing.T) {
 			}
 			f.assertNoLeftovers()
 		})
+	}
+}
+
+// TestInstallFailureOnMacOSNamesHomebrew: on macOS the script installs the
+// nvidia/openshell Homebrew formula, which Homebrew refuses to build with
+// an Xcode older than it wants; the failure says Homebrew failed, where it
+// used to say only "installer failed: /bin/sh: exit status 1" (manual test
+// M6).
+func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
+	for goos, homebrew := range map[string]bool{"darwin": true, "linux": false} {
+		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f.inst.GOOS = goos
+		f.runner.On("/bin/sh", "", errors.New("exit status 1"))
+		_, err := f.inst.Install(context.Background())
+		if err == nil || errors.Is(err, openshell.ErrHomebrewInstall) != homebrew || !strings.Contains(err.Error(), "exit status 1") {
+			t.Fatalf("%s: Install = %v", goos, err)
+		}
 	}
 }

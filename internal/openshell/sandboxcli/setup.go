@@ -57,6 +57,9 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 	}
 }
 
+// setupTroubleshootingURL is the sandbox guide's troubleshooting section.
+const setupTroubleshootingURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/#troubleshooting"
+
 // SetupOptions are the `sandbox setup` flags.
 type SetupOptions struct {
 	InstallOpenShell bool
@@ -141,6 +144,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return a.ask("Run this plan?", false, false)
 		})
 		res, err := inst.Install(ctx)
+		if errors.Is(err, openshell.ErrHomebrewInstall) {
+			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
+			a.note("→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
+				"Update them as it says, then run `" + CommandName + " setup` again (see " + setupTroubleshootingURL + ")")
+			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+		}
 		if err != nil {
 			return fmt.Errorf("install OpenShell: %w", err)
 		}
