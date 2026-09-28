@@ -99,7 +99,7 @@ func bootProfileSidecar(t *testing.T, posture profilePosture) *config.Config {
 	cfg.Enterprise.Profile = posture.profile
 	setManagedEnterpriseRedactionPosture(!posture.aidOnly)
 	setManagedServiceHosted(!posture.hosted)
-	sidecar, err := NewSidecar(cfg, store, nil, nil)
+	sidecar, err := NewSidecar(cfg, store, nil)
 	if err != nil || sidecar == nil {
 		t.Fatalf("NewSidecar(%s) = %v", posture.name, err)
 	}
