@@ -65,4 +65,11 @@ package ipc
 // peerauth_unix.go, so `go build -tags ga` now succeeds on every OS.
 // The release-time assertion on the reported kind is
 // TestEffectivePeerAuthKindManagedEnterprise in internal/config.
+//
+// Open item not covered by this gate: peer auth admits the Secure
+// Client GUI executable, not a particular interactive user, so every
+// admitted GUI instance on a multi-session host receives the same
+// machine-wide notification, stats and health stream (macOS behaves
+// the same way). Per-session scoping needs the originating session on
+// block events, which the gateway does not record yet.
 var _ = authpostureGAApproved

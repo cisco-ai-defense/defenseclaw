@@ -69,7 +69,6 @@ func productionWindowsPeerResolvers() windowsPeerResolvers {
 		peerPID:   afUnixPeerPID,
 		process:   queryWindowsPeerProcess,
 		openImage: openWindowsPeerImage,
-		now:       time.Now,
 	}
 }
 
@@ -90,11 +89,45 @@ func newWindowsSecureClientListener(
 		[]string{roots.ProgramFilesX86, roots.ProgramFiles},
 		images,
 		signers,
+		dosDeviceForDrive,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return newWindowsPeerAuthListener(inner, policy, productionWindowsPeerResolvers(), logReject)
+}
+
+// dosDeviceForDrive returns the NT device a drive letter ("C:") names
+// in this process's DOS device namespace, for example
+// `\Device\HarddiskVolume3`. The gateway service resolves it for the
+// trusted Program Files roots only, so a drive mapping made inside an
+// interactive user's logon session does not apply.
+func dosDeviceForDrive(drive string) (string, error) {
+	if len(drive) != 2 || drive[1] != ':' {
+		return "", fmt.Errorf("drive %q is not a drive letter", drive)
+	}
+	name, err := windows.UTF16PtrFromString(drive)
+	if err != nil {
+		return "", fmt.Errorf("encode drive: %w", err)
+	}
+	buffer := make([]uint16, windows.MAX_PATH)
+	for attempt := 0; attempt < 4; attempt++ {
+		n, err := windows.QueryDosDevice(name, &buffer[0], uint32(len(buffer)))
+		if err == windows.ERROR_INSUFFICIENT_BUFFER {
+			buffer = make([]uint16, len(buffer)*4)
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("QueryDosDevice(%s): %w", drive, err)
+		}
+		if n == 0 || int(n) > len(buffer) {
+			return "", fmt.Errorf("QueryDosDevice(%s) returned no target", drive)
+		}
+		// The result is a REG_MULTI_SZ-style list whose first entry is
+		// the current mapping.
+		return windows.UTF16ToString(buffer[:n]), nil
+	}
+	return "", fmt.Errorf("QueryDosDevice(%s) target kept growing", drive)
 }
 
 // afUnixPeerPID asks the AF_UNIX provider which process holds the
@@ -273,11 +306,12 @@ type openedWindowsPeerImage struct {
 	finalPath string
 }
 
-// openWindowsPeerImage opens the executable named by an NT device path
-// (what the kernel reports) or a drive-letter path, and resolves the
-// canonical path of the file actually opened.
-func openWindowsPeerImage(imagePath string) (windowsPeerImage, error) {
-	openPath, err := win32OpenPathForImage(imagePath)
+// openWindowsPeerImage opens an allowed executable by its canonical
+// drive-letter path and resolves the canonical path of the file
+// actually opened. The listener calls it only with a path from the
+// admission policy.
+func openWindowsPeerImage(drivePath string) (windowsPeerImage, error) {
+	openPath, err := win32OpenPathForImage(drivePath)
 	if err != nil {
 		return nil, err
 	}
@@ -320,19 +354,17 @@ func openWindowsPeerImage(imagePath string) (windowsPeerImage, error) {
 	return image, nil
 }
 
-// win32OpenPathForImage maps a kernel image name to a path CreateFile
-// accepts. NT device paths are reached through the GLOBALROOT link.
-func win32OpenPathForImage(imagePath string) (string, error) {
-	if imagePath == "" || strings.ContainsRune(imagePath, 0) {
+// win32OpenPathForImage maps a canonical drive-letter path to the
+// extended-length form CreateFile is given. Device, UNC and relative
+// paths are refused.
+func win32OpenPathForImage(drivePath string) (string, error) {
+	if drivePath == "" || strings.ContainsRune(drivePath, 0) {
 		return "", errors.New("image path is empty or contains NUL")
 	}
-	if strings.HasPrefix(imagePath, `\Device\`) {
-		return `\\?\GLOBALROOT` + imagePath, nil
+	if !isCanonicalWindowsDrivePath(drivePath) {
+		return "", fmt.Errorf("image path %q is not a canonical drive path", drivePath)
 	}
-	if isCanonicalWindowsDrivePath(imagePath) {
-		return winpath.Extended(imagePath)
-	}
-	return "", fmt.Errorf("image path %q is neither an NT device path nor a drive path", imagePath)
+	return winpath.Extended(drivePath)
 }
 
 // finalDrivePathForHandle returns the normalized drive-letter path of

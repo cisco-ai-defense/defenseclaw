@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,8 +22,20 @@ const (
 	testProgramFilesX86 = `C:\Program Files (x86)`
 	testProgramFiles    = `C:\Program Files`
 	testGUIImage        = `C:\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+	testGUIKernelImage  = `\Device\HarddiskVolume3\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
 	testCiscoSigner     = "Cisco Systems, Inc."
 )
+
+// testDriveDevice stands in for QueryDosDevice.
+func testDriveDevice(drive string) (string, error) {
+	switch drive {
+	case "C:":
+		return `\Device\HarddiskVolume3`, nil
+	case "D:":
+		return `\Device\HarddiskVolume4`, nil
+	}
+	return "", errors.New("no such drive")
+}
 
 func testWindowsPeerPolicy(t *testing.T) windowsPeerPolicy {
 	t.Helper()
@@ -30,6 +43,7 @@ func testWindowsPeerPolicy(t *testing.T) windowsPeerPolicy {
 		[]string{testProgramFilesX86, testProgramFiles},
 		[]string{`UI\csc_ui.exe`},
 		[]string{testCiscoSigner},
+		testDriveDevice,
 	)
 	if err != nil {
 		t.Fatalf("newWindowsPeerPolicy: %v", err)
@@ -70,17 +84,26 @@ type fakeWindowsPeer struct {
 	processErr error
 	image      *fakeWindowsPeerImage
 	imageErr   error
+
+	mu         sync.Mutex
+	openedPath []string
 }
 
-var testAcceptedAt = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+func (f *fakeWindowsPeer) opened() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.openedPath...)
+}
+
+var testProcessCreatedAt = time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
 
 func genuineWindowsPeer() *fakeWindowsPeer {
 	return &fakeWindowsPeer{
 		pid: 4242,
 		process: windowsPeerProcess{
-			ImagePath: `\Device\HarddiskVolume3\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+			ImagePath: testGUIKernelImage,
 			SessionID: 1,
-			CreatedAt: testAcceptedAt.Add(-time.Hour),
+			CreatedAt: testProcessCreatedAt,
 		},
 		image: &fakeWindowsPeerImage{
 			finalPath: testGUIImage,
@@ -101,13 +124,15 @@ func (f *fakeWindowsPeer) resolvers() windowsPeerResolvers {
 			}
 			return f.process, f.processErr
 		},
-		openImage: func(string) (windowsPeerImage, error) {
+		openImage: func(path string) (windowsPeerImage, error) {
+			f.mu.Lock()
+			f.openedPath = append(f.openedPath, path)
+			f.mu.Unlock()
 			if f.imageErr != nil {
 				return nil, f.imageErr
 			}
 			return f.image, nil
 		},
-		now: func() time.Time { return testAcceptedAt },
 	}
 }
 
@@ -117,7 +142,7 @@ func authenticateFake(t *testing.T, peer *fakeWindowsPeer) (windowsPeerIdentity,
 	if err != nil {
 		t.Fatalf("newWindowsPeerAuthListener: %v", err)
 	}
-	return listener.authenticate(nil, testAcceptedAt)
+	return listener.authenticate(nil)
 }
 
 type stubListener struct{}
@@ -138,17 +163,69 @@ func TestWindowsPeerAuthAdmitsGenuineSecureClientGUI(t *testing.T) {
 	if !peer.image.verified || !peer.image.closed {
 		t.Fatalf("image verified=%v closed=%v, want both", peer.image.verified, peer.image.closed)
 	}
+	// The file opened is the policy's own path, not the kernel string.
+	if opened := peer.opened(); len(opened) != 1 || opened[0] != testGUIImage {
+		t.Fatalf("opened = %q, want [%q]", opened, testGUIImage)
+	}
 }
 
 func TestWindowsPeerAuthAdmitsGUIFromEitherProgramFilesRootCaseInsensitively(t *testing.T) {
-	for _, path := range []string{
-		`C:\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
-		`c:\program files (x86)\cisco\cisco secure client\ui\CSC_UI.EXE`,
+	for _, tc := range []struct{ kernel, final string }{
+		{
+			`\Device\HarddiskVolume3\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+			`C:\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		},
+		{
+			`\device\harddiskvolume3\program files (x86)\cisco\cisco secure client\ui\CSC_UI.EXE`,
+			`c:\program files (x86)\cisco\cisco secure client\ui\CSC_UI.EXE`,
+		},
 	} {
 		peer := genuineWindowsPeer()
-		peer.image.finalPath = path
+		peer.process.ImagePath = tc.kernel
+		peer.image.finalPath = tc.final
 		if _, reason := authenticateFake(t, peer); reason != "" {
-			t.Errorf("%s rejected: %s", path, reason)
+			t.Errorf("%s rejected: %s", tc.kernel, reason)
+		}
+	}
+}
+
+// TestWindowsPeerAuthToleratesWallClockStepBack admits a GUI whose
+// recorded creation time is later than the current wall clock, as it
+// is after the system clock is stepped backwards.
+func TestWindowsPeerAuthToleratesWallClockStepBack(t *testing.T) {
+	peer := genuineWindowsPeer()
+	peer.process.CreatedAt = time.Now().Add(time.Hour)
+	if _, reason := authenticateFake(t, peer); reason != "" {
+		t.Fatalf("GUI rejected after a clock step: %s", reason)
+	}
+}
+
+// TestWindowsPeerAuthDoesNotOpenImagesOutsideThePolicy checks that a
+// process whose image name is not an allowed executable is refused by
+// string comparison alone: the gateway opens nothing on its behalf.
+func TestWindowsPeerAuthDoesNotOpenImagesOutsideThePolicy(t *testing.T) {
+	for _, kernelPath := range []string{
+		`\Device\Mup\server\share\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		`\Device\Mup\;LanmanRedirector\server\share\csc_ui.exe`,
+		`\Device\LanmanRedirector\server\share\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		`\Device\WebDavRedirector\host\DavWWWRoot\csc_ui.exe`,
+		`\Device\HarddiskVolume3\Users\alice\Downloads\csc_ui.exe`,
+		`\Device\HarddiskVolume9\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\Program Files (x86)\Cisco\Cisco Secure Client\UI\..\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\\?\GLOBALROOT\Device\HarddiskVolume3\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		`\\server\share\csc_ui.exe`,
+		testGUIImage,
+		"",
+	} {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = kernelPath
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+			t.Errorf("%q: reason = %q", kernelPath, reason)
+		}
+		if opened := peer.opened(); len(opened) != 0 {
+			t.Errorf("%q: gateway opened %q", kernelPath, opened)
 		}
 	}
 }
@@ -183,13 +260,6 @@ func TestWindowsPeerAuthRejectsUnauthenticatedPeers(t *testing.T) {
 			wantReason: "creation time unavailable",
 		},
 		{
-			name: "process created after accept (reused pid)",
-			mutate: func(p *fakeWindowsPeer) {
-				p.process.CreatedAt = testAcceptedAt.Add(time.Millisecond)
-			},
-			wantReason: "created after the connection was accepted",
-		},
-		{
 			name:       "image cannot be opened",
 			mutate:     func(p *fakeWindowsPeer) { p.imageErr = errors.New("sharing violation") },
 			wantReason: "peer image unavailable",
@@ -197,35 +267,49 @@ func TestWindowsPeerAuthRejectsUnauthenticatedPeers(t *testing.T) {
 		{
 			name: "arbitrary user tool",
 			mutate: func(p *fakeWindowsPeer) {
-				p.image.finalPath = `C:\Users\alice\Downloads\tool.exe`
+				p.process.ImagePath = `\Device\HarddiskVolume3\Users\alice\Downloads\tool.exe`
 			},
 			wantReason: "not an allowed Secure Client GUI executable",
 		},
 		{
 			name: "genuine GUI copied outside Program Files",
 			mutate: func(p *fakeWindowsPeer) {
-				p.image.finalPath = `C:\Users\alice\AppData\Local\Temp\UI\csc_ui.exe`
+				p.process.ImagePath = `\Device\HarddiskVolume3\Users\alice\AppData\Local\Temp\UI\csc_ui.exe`
 			},
 			wantReason: "not an allowed Secure Client GUI executable",
 		},
 		{
 			name: "other Cisco binary in the Secure Client tree",
 			mutate: func(p *fakeWindowsPeer) {
-				p.image.finalPath = `C:\Program Files (x86)\Cisco\Cisco Secure Client\vpnagent.exe`
+				p.process.ImagePath = `\Device\HarddiskVolume3\Program Files (x86)\Cisco\Cisco Secure Client\vpnagent.exe`
 			},
 			wantReason: "not an allowed Secure Client GUI executable",
 		},
 		{
 			name: "GUI name in a sibling directory",
 			mutate: func(p *fakeWindowsPeer) {
-				p.image.finalPath = `C:\Program Files (x86)\Cisco\Cisco Secure Client\DefenseClaw\UI\csc_ui.exe`
+				p.process.ImagePath = `\Device\HarddiskVolume3\Program Files (x86)\Cisco\Cisco Secure Client\DefenseClaw\UI\csc_ui.exe`
 			},
 			wantReason: "not an allowed Secure Client GUI executable",
 		},
 		{
-			name: "GUI path under another drive",
+			name: "GUI path under another volume",
 			mutate: func(p *fakeWindowsPeer) {
-				p.image.finalPath = `D:\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+				p.process.ImagePath = `\Device\HarddiskVolume4\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+			},
+			wantReason: "not an allowed Secure Client GUI executable",
+		},
+		{
+			name: "opened file resolves outside the allowed path",
+			mutate: func(p *fakeWindowsPeer) {
+				p.image.finalPath = `C:\Users\alice\AppData\Local\Temp\UI\csc_ui.exe`
+			},
+			wantReason: "not an allowed Secure Client GUI executable",
+		},
+		{
+			name: "opened file resolves to the other allowed root",
+			mutate: func(p *fakeWindowsPeer) {
+				p.image.finalPath = `C:\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`
 			},
 			wantReason: "not an allowed Secure Client GUI executable",
 		},
@@ -283,9 +367,7 @@ func TestWindowsPeerAuthRejectsUnauthenticatedPeers(t *testing.T) {
 			if peer.image.verified != tc.wantVerify {
 				t.Fatalf("WinVerifyTrust ran = %v, want %v (path checks must run first)", peer.image.verified, tc.wantVerify)
 			}
-			if peer.imageErr == nil && peer.processErr == nil && peer.pidErr == nil &&
-				peer.pid > 4 && !peer.process.CreatedAt.IsZero() &&
-				!peer.process.CreatedAt.After(testAcceptedAt) && !peer.image.closed {
+			if len(peer.opened()) > 0 && peer.imageErr == nil && !peer.image.closed {
 				t.Fatal("opened image was not closed")
 			}
 		})
@@ -300,10 +382,9 @@ func TestWindowsPeerAuthListenerClosesRejectedConnections(t *testing.T) {
 	acceptedServer, acceptedClient := net.Pipe()
 	defer rejectedClient.Close()
 	defer acceptedClient.Close()
-	inner := &queueListener{conns: []net.Conn{rejectedServer, acceptedServer}}
+	inner := newQueueListener(rejectedServer, acceptedServer)
 
 	genuine := genuineWindowsPeer()
-	imposterImage := &fakeWindowsPeerImage{finalPath: `C:\Users\mallory\gui.exe`}
 	resolvers := genuine.resolvers()
 	resolvers.peerPID = func(c net.Conn) (uint32, error) {
 		if c == rejectedServer {
@@ -313,28 +394,27 @@ func TestWindowsPeerAuthListenerClosesRejectedConnections(t *testing.T) {
 	}
 	resolvers.process = func(pid uint32) (windowsPeerProcess, error) {
 		if pid == 5150 {
-			return windowsPeerProcess{ImagePath: `C:\Users\mallory\gui.exe`, SessionID: 2, CreatedAt: testAcceptedAt.Add(-time.Minute)}, nil
+			return windowsPeerProcess{
+				ImagePath: `\Device\HarddiskVolume3\Users\mallory\gui.exe`,
+				SessionID: 2,
+				CreatedAt: testProcessCreatedAt,
+			}, nil
 		}
 		return genuine.process, nil
 	}
-	resolvers.openImage = func(path string) (windowsPeerImage, error) {
-		if strings.Contains(path, "mallory") {
-			return imposterImage, nil
-		}
-		return genuine.image, nil
-	}
 
-	var rejected []windowsPeerIdentity
+	rejected := make(chan windowsPeerIdentity, 4)
 	listener, err := newWindowsPeerAuthListener(inner, testWindowsPeerPolicy(t), resolvers,
 		func(id windowsPeerIdentity, reason string) {
 			if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
 				t.Errorf("reject reason = %q", reason)
 			}
-			rejected = append(rejected, id)
+			rejected <- id
 		})
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer listener.Close()
 	got, err := listener.Accept()
 	if err != nil {
 		t.Fatalf("Accept: %v", err)
@@ -342,34 +422,286 @@ func TestWindowsPeerAuthListenerClosesRejectedConnections(t *testing.T) {
 	if got != acceptedServer {
 		t.Fatal("Accept returned the rejected connection")
 	}
-	if len(rejected) != 1 || rejected[0].PID != 5150 || rejected[0].SessionID != 2 {
-		t.Fatalf("rejected = %+v", rejected)
+	select {
+	case id := <-rejected:
+		if id.PID != 5150 || id.SessionID != 2 {
+			t.Fatalf("rejected = %+v", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("rejection was not logged")
 	}
-	if imposterImage.verified {
-		t.Fatal("imposter image reached WinVerifyTrust")
+	if opened := genuine.opened(); len(opened) != 1 || opened[0] != testGUIImage {
+		t.Fatalf("opened = %q, want only the genuine GUI's policy path", opened)
 	}
-	_ = rejectedClient.SetReadDeadline(time.Now().Add(time.Second))
+	_ = rejectedClient.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := rejectedClient.Read(make([]byte, 1)); err == nil {
 		t.Fatal("rejected connection is still open")
 	}
 }
 
+// blockingPeerResolvers returns resolvers under which every connection
+// is a genuine GUI. For connections in slow, the process lookup blocks
+// until release is closed; inFlight and maxInFlight count those
+// blocked lookups.
+func blockingPeerResolvers(slow map[net.Conn]bool, release <-chan struct{}, inFlight, maxInFlight *atomic.Int32) windowsPeerResolvers {
+	const slowPID = 7000
+	genuine := genuineWindowsPeer()
+	resolvers := genuine.resolvers()
+	resolvers.peerPID = func(c net.Conn) (uint32, error) {
+		if slow[c] {
+			return slowPID, nil
+		}
+		return genuine.pid, nil
+	}
+	resolvers.process = func(pid uint32) (windowsPeerProcess, error) {
+		if pid == slowPID {
+			n := inFlight.Add(1)
+			for {
+				seen := maxInFlight.Load()
+				if n <= seen || maxInFlight.CompareAndSwap(seen, n) {
+					break
+				}
+			}
+			<-release
+			inFlight.Add(-1)
+		}
+		return genuine.process, nil
+	}
+	return resolvers
+}
+
+// TestWindowsPeerAuthListenerSlowCheckDoesNotStallOthers keeps one
+// peer's check blocked and verifies that a genuine GUI connecting
+// after it is still admitted, that the blocked connection is closed at
+// the deadline, and that Close returns while the check is in flight.
+func TestWindowsPeerAuthListenerSlowCheckDoesNotStallOthers(t *testing.T) {
+	slowServer, slowClient := net.Pipe()
+	genuineServer, genuineClient := net.Pipe()
+	defer slowClient.Close()
+	defer genuineClient.Close()
+	inner := newQueueListener(slowServer, genuineServer)
+
+	release := make(chan struct{})
+	defer close(release)
+	var inFlight, maxInFlight atomic.Int32
+	resolvers := blockingPeerResolvers(map[net.Conn]bool{slowServer: true}, release, &inFlight, &maxInFlight)
+
+	rejected := make(chan string, 4)
+	listener, err := newWindowsPeerAuthListenerWithLimits(inner, testWindowsPeerPolicy(t), resolvers,
+		func(_ windowsPeerIdentity, reason string) { rejected <- reason },
+		100*time.Millisecond, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	select {
+	case c := <-accepted:
+		if c != genuineServer {
+			t.Fatal("Accept returned the connection whose check is still running")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a blocked peer check stalled admission of the genuine GUI")
+	}
+
+	select {
+	case reason := <-rejected:
+		if !strings.Contains(reason, "did not finish within") {
+			t.Fatalf("reason = %q, want a timeout", reason)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked peer check was not timed out")
+	}
+	_ = slowClient.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := slowClient.Read(make([]byte, 1)); err == nil {
+		t.Fatal("timed-out connection is still open")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- listener.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close waited for an in-flight peer check")
+	}
+	acceptErr := make(chan error, 1)
+	go func() {
+		_, err := listener.Accept()
+		acceptErr <- err
+	}()
+	select {
+	case err := <-acceptErr:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("Accept after Close = %v, want net.ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept after Close did not return")
+	}
+}
+
+// TestWindowsPeerAuthListenerBoundsConcurrentChecks keeps every check
+// blocked and verifies the number running at once never exceeds the
+// cap, then releases them and admits the genuine peers.
+func TestWindowsPeerAuthListenerBoundsConcurrentChecks(t *testing.T) {
+	const maxPending = 2
+	var servers []net.Conn
+	slow := make(map[net.Conn]bool)
+	for i := 0; i < 5; i++ {
+		server, client := net.Pipe()
+		defer client.Close()
+		servers = append(servers, server)
+		slow[server] = true
+	}
+	inner := newQueueListener(servers...)
+	release := make(chan struct{})
+	var inFlight, maxInFlight atomic.Int32
+	resolvers := blockingPeerResolvers(slow, release, &inFlight, &maxInFlight)
+	listener, err := newWindowsPeerAuthListenerWithLimits(inner, testWindowsPeerPolicy(t), resolvers,
+		func(windowsPeerIdentity, string) {}, time.Minute, maxPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	admitted := make(chan net.Conn, len(servers))
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			admitted <- c
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for inFlight.Load() < maxPending && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := inFlight.Load(); got != maxPending {
+		t.Fatalf("in-flight checks = %d, want %d", got, maxPending)
+	}
+	close(release)
+	for i := range servers {
+		select {
+		case <-admitted:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d peers admitted after release", i, len(servers))
+		}
+	}
+	if got := maxInFlight.Load(); got > maxPending {
+		t.Fatalf("max in-flight checks = %d, cap %d", got, maxPending)
+	}
+}
+
+// TestWindowsPeerAuthListenerPassesInnerErrors checks that a transient
+// inner Accept error reaches the caller without stopping the loop, and
+// a permanent one ends it.
+func TestWindowsPeerAuthListenerPassesInnerErrors(t *testing.T) {
+	genuineServer, genuineClient := net.Pipe()
+	defer genuineClient.Close()
+	transient := &scriptedListener{steps: []scriptedAccept{
+		{err: temporaryError{}},
+		{conn: genuineServer},
+	}, closed: make(chan struct{})}
+	listener, err := newWindowsPeerAuthListener(transient, testWindowsPeerPolicy(t), genuineWindowsPeer().resolvers(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if _, err := listener.Accept(); !errors.As(err, new(temporaryError)) {
+		t.Fatalf("first Accept = %v, want the transient error", err)
+	}
+	if c, err := listener.Accept(); err != nil || c != genuineServer {
+		t.Fatalf("second Accept = %v, %v, want the genuine conn", c, err)
+	}
+
+	permanentErr := errors.New("listener broke")
+	permanent := &scriptedListener{steps: []scriptedAccept{{err: permanentErr}}, closed: make(chan struct{})}
+	broken, err := newWindowsPeerAuthListener(permanent, testWindowsPeerPolicy(t), genuineWindowsPeer().resolvers(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broken.Close()
+	for i := 0; i < 2; i++ {
+		if _, err := broken.Accept(); !errors.Is(err, permanentErr) {
+			t.Fatalf("Accept after permanent failure = %v, want %v", err, permanentErr)
+		}
+	}
+}
+
+type temporaryError struct{}
+
+func (temporaryError) Error() string   { return "temporary accept failure" }
+func (temporaryError) Temporary() bool { return true }
+
+type scriptedAccept struct {
+	conn net.Conn
+	err  error
+}
+
+// scriptedListener plays its steps in order, then blocks until closed.
+type scriptedListener struct {
+	mu     sync.Mutex
+	steps  []scriptedAccept
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *scriptedListener) Accept() (net.Conn, error) {
+	s.mu.Lock()
+	if len(s.steps) > 0 {
+		step := s.steps[0]
+		s.steps = s.steps[1:]
+		s.mu.Unlock()
+		return step.conn, step.err
+	}
+	s.mu.Unlock()
+	<-s.closed
+	return nil, net.ErrClosed
+}
+
+func (s *scriptedListener) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
+}
+func (s *scriptedListener) Addr() net.Addr { return &net.UnixAddr{Name: "scripted", Net: "unix"} }
+
+// queueListener hands out the queued connections, then blocks until
+// closed, like a listening socket with nothing pending.
 type queueListener struct {
-	mu    sync.Mutex
-	conns []net.Conn
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newQueueListener(conns ...net.Conn) *queueListener {
+	q := &queueListener{conns: make(chan net.Conn, len(conns)), closed: make(chan struct{})}
+	for _, c := range conns {
+		q.conns <- c
+	}
+	return q
 }
 
 func (q *queueListener) Accept() (net.Conn, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.conns) == 0 {
+	select {
+	case c := <-q.conns:
+		return c, nil
+	case <-q.closed:
 		return nil, net.ErrClosed
 	}
-	c := q.conns[0]
-	q.conns = q.conns[1:]
-	return c, nil
 }
-func (q *queueListener) Close() error   { return nil }
+
+func (q *queueListener) Close() error {
+	q.once.Do(func() { close(q.closed) })
+	return nil
+}
 func (q *queueListener) Addr() net.Addr { return &net.UnixAddr{Name: "queue", Net: "unix"} }
 
 func TestNewWindowsPeerPolicyFailsClosed(t *testing.T) {
@@ -393,9 +725,31 @@ func TestNewWindowsPeerPolicyFailsClosed(t *testing.T) {
 		"stream-suffixed image": {roots, []string{`UI\csc_ui.exe:evil`}, signers},
 	}
 	for name, tc := range cases {
-		if _, err := newWindowsPeerPolicy(tc.roots, tc.images, tc.signers); err == nil {
+		if _, err := newWindowsPeerPolicy(tc.roots, tc.images, tc.signers, testDriveDevice); err == nil {
 			t.Errorf("%s: newWindowsPeerPolicy accepted an unsafe policy", name)
 		}
+	}
+	if _, err := newWindowsPeerPolicy(roots, images, signers, nil); err == nil {
+		t.Error("newWindowsPeerPolicy accepted a nil drive device resolver")
+	}
+	for _, device := range []string{
+		"",
+		`\??\C:\substituted`,
+		`\Device\LanmanRedirector\;Z:0000000000012345\server\share`,
+		`\Device\Mup`,
+		`\Device\WebDavRedirector`,
+		`\Device\HarddiskVolume3\`,
+		`C:`,
+		"\\Device\\Harddisk\x00Volume3",
+	} {
+		resolve := func(string) (string, error) { return device, nil }
+		if _, err := newWindowsPeerPolicy(roots, images, signers, resolve); err == nil {
+			t.Errorf("newWindowsPeerPolicy accepted drive device %q", device)
+		}
+	}
+	failing := func(string) (string, error) { return "", errors.New("no mapping") }
+	if _, err := newWindowsPeerPolicy(roots, images, signers, failing); err == nil {
+		t.Error("newWindowsPeerPolicy accepted an unresolvable drive")
 	}
 	if _, err := newWindowsPeerAuthListener(stubListener{}, windowsPeerPolicy{}, genuineWindowsPeer().resolvers(), nil); err == nil {
 		t.Error("listener accepted an empty policy")
@@ -405,23 +759,52 @@ func TestNewWindowsPeerPolicyFailsClosed(t *testing.T) {
 	if _, err := newWindowsPeerAuthListener(stubListener{}, testWindowsPeerPolicy(t), incomplete, nil); err == nil {
 		t.Error("listener accepted an incomplete resolver set")
 	}
+	for _, limits := range []struct {
+		timeout    time.Duration
+		maxPending int
+	}{{0, 1}, {time.Second, 0}} {
+		if _, err := newWindowsPeerAuthListenerWithLimits(stubListener{}, testWindowsPeerPolicy(t),
+			genuineWindowsPeer().resolvers(), nil, limits.timeout, limits.maxPending); err == nil {
+			t.Errorf("listener accepted limits %+v", limits)
+		}
+	}
 }
 
 func TestNewWindowsPeerPolicyJoinsRootsAndImages(t *testing.T) {
+	var resolvedDrives []string
 	policy, err := newWindowsPeerPolicy(
-		[]string{testProgramFilesX86, testProgramFiles, `C:\Program Files (x86)\`},
+		[]string{testProgramFilesX86, testProgramFiles, `C:\Program Files (x86)\`, `d:\Apps`},
 		[]string{`UI\csc_ui.exe`, `UI\CSC_UI.EXE`},
 		[]string{testCiscoSigner},
+		func(drive string) (string, error) {
+			resolvedDrives = append(resolvedDrives, drive)
+			return testDriveDevice(drive)
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{
-		testGUIImage,
-		`C:\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+	want := []windowsPeerAllowedImage{
+		{testGUIImage, testGUIKernelImage},
+		{
+			`C:\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+			`\Device\HarddiskVolume3\Program Files\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		},
+		{
+			`d:\Apps\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+			`\Device\HarddiskVolume4\Apps\Cisco\Cisco Secure Client\UI\csc_ui.exe`,
+		},
 	}
-	if strings.Join(policy.images, "|") != strings.Join(want, "|") {
-		t.Fatalf("images = %q, want %q", policy.images, want)
+	if len(policy.images) != len(want) {
+		t.Fatalf("images = %+v, want %+v", policy.images, want)
+	}
+	for i := range want {
+		if policy.images[i] != want[i] {
+			t.Fatalf("images[%d] = %+v, want %+v", i, policy.images[i], want[i])
+		}
+	}
+	if strings.Join(resolvedDrives, ",") != "C:,D:" {
+		t.Fatalf("resolved drives = %q, want each drive once", resolvedDrives)
 	}
 }
 

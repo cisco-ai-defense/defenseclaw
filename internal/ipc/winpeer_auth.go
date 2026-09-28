@@ -18,12 +18,20 @@ package ipc
 // through windowsPeerResolvers, implemented in peerauth_windows.go.
 // Keeping the decision logic free of syscalls lets every build host
 // run its tests.
+//
+// Admission authenticates the executable, not the interactive user.
+// Every admitted Secure Client GUI instance receives the same
+// machine-wide health, stats and notification stream, as on macOS.
+// Scoping records to one session would need the originating session on
+// block events, which the gateway does not record today.
 
 import (
 	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -42,8 +50,10 @@ type windowsPeerProcess struct {
 	// the kernel recorded it (an NT device path in production).
 	ImagePath string
 	SessionID uint32
-	// CreatedAt is the process creation time. A process created after
-	// the connection was accepted cannot be the process that connected.
+	// CreatedAt is the process creation time. The production resolver
+	// reads it before and after the image lookup and refuses a PID
+	// whose creation time changed in between; a zero value means that
+	// bracket did not run.
 	CreatedAt time.Time
 }
 
@@ -72,31 +82,47 @@ type windowsPeerImage interface {
 // needs. Tests substitute fakes; peerauth_windows.go wires the real
 // implementations.
 type windowsPeerResolvers struct {
-	peerPID   func(net.Conn) (uint32, error)
-	process   func(pid uint32) (windowsPeerProcess, error)
-	openImage func(imagePath string) (windowsPeerImage, error)
-	now       func() time.Time
+	peerPID func(net.Conn) (uint32, error)
+	process func(pid uint32) (windowsPeerProcess, error)
+	// openImage opens one of the policy's allowed drive paths. It is
+	// never called with a path reported by, or chosen by, the peer.
+	openImage func(drivePath string) (windowsPeerImage, error)
 }
 
 func (r windowsPeerResolvers) complete() bool {
-	return r.peerPID != nil && r.process != nil && r.openImage != nil && r.now != nil
+	return r.peerPID != nil && r.process != nil && r.openImage != nil
+}
+
+// windowsPeerAllowedImage is one executable the policy admits, in the
+// two forms the listener compares: the drive-letter path the opened
+// file must resolve to, and the NT device path the kernel records as a
+// process image name.
+type windowsPeerAllowedImage struct {
+	drivePath  string
+	kernelPath string
 }
 
 // windowsPeerPolicy is the resolved admission policy: the exact
 // executables that may connect and the signers they must carry.
 type windowsPeerPolicy struct {
-	images  []string
+	images  []windowsPeerAllowedImage
 	signers map[string]struct{}
 }
 
 // newWindowsPeerPolicy joins every install-relative image with every
 // trusted Program Files root. Roots must be absolute drive paths from
-// protected machine registration, never the process environment. Any
-// empty input or malformed entry is an error: an empty policy would
-// admit nothing, and silently starting a server nobody can reach hides
-// a misconfiguration.
-func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string) (windowsPeerPolicy, error) {
+// protected machine registration, never the process environment.
+// driveDevice maps a drive ("C:") to the NT device it names in the
+// service's DOS device namespace, so each allowed executable also has
+// the kernel form a process image name is compared against. Any empty
+// input or malformed entry is an error: an empty policy would admit
+// nothing, and silently starting a server nobody can reach hides a
+// misconfiguration.
+func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string, driveDevice func(drive string) (string, error)) (windowsPeerPolicy, error) {
 	var policy windowsPeerPolicy
+	if driveDevice == nil {
+		return policy, errors.New("ipc: windows peer auth: no drive device resolver")
+	}
 	if len(programFilesRoots) == 0 {
 		return policy, errors.New("ipc: windows peer auth: no trusted Program Files root")
 	}
@@ -107,10 +133,24 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string) (
 		return policy, errors.New("ipc: windows peer auth: no allowed Authenticode signer")
 	}
 	seen := make(map[string]struct{})
+	devices := make(map[string]string)
 	for _, root := range programFilesRoots {
 		root = strings.TrimRight(root, `\`)
 		if !isCanonicalWindowsDrivePath(root) {
 			return windowsPeerPolicy{}, fmt.Errorf("ipc: windows peer auth: Program Files root %q is not a canonical drive path", root)
+		}
+		drive := strings.ToUpper(root[:2])
+		device, ok := devices[drive]
+		if !ok {
+			resolved, err := driveDevice(drive)
+			if err != nil {
+				return windowsPeerPolicy{}, fmt.Errorf("ipc: windows peer auth: resolve device of %s: %w", drive, err)
+			}
+			if !isLocalNTDeviceName(resolved) {
+				return windowsPeerPolicy{}, fmt.Errorf("ipc: windows peer auth: drive %s maps to %q, not a local NT device", drive, resolved)
+			}
+			device = resolved
+			devices[drive] = device
 		}
 		for _, rel := range relativeImages {
 			if err := config.ValidateWindowsSecureClientImage(rel); err != nil {
@@ -122,7 +162,10 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string) (
 				continue
 			}
 			seen[key] = struct{}{}
-			policy.images = append(policy.images, full)
+			policy.images = append(policy.images, windowsPeerAllowedImage{
+				drivePath:  full,
+				kernelPath: device + full[2:],
+			})
 		}
 	}
 	policy.signers = make(map[string]struct{}, len(signers))
@@ -146,11 +189,46 @@ func (p windowsPeerPolicy) allowsImage(finalPath string) bool {
 		return false
 	}
 	for _, image := range p.images {
-		if strings.EqualFold(finalPath, image) {
+		if strings.EqualFold(finalPath, image.drivePath) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchKernelImage returns the allowed drive path whose NT form is
+// exactly kernelPath (case-insensitively), or false. It is a string
+// comparison only: nothing is opened for a process whose image name
+// is not already one of the allowed executables.
+func (p windowsPeerPolicy) matchKernelImage(kernelPath string) (string, bool) {
+	for _, image := range p.images {
+		if strings.EqualFold(kernelPath, image.kernelPath) {
+			return image.drivePath, true
+		}
+	}
+	return "", false
+}
+
+// isLocalNTDeviceName accepts a single-segment NT device name such as
+// `\Device\HarddiskVolume3`. Redirector mappings (which carry the
+// share after the device name) and \??\ substitutions are refused, so
+// the kernel form of an allowed path always names a local volume.
+func isLocalNTDeviceName(device string) bool {
+	name, ok := strings.CutPrefix(device, `\Device\`)
+	if !ok || name == "" {
+		return false
+	}
+	if strings.ContainsAny(name, `\/:*?"<>|`) {
+		return false
+	}
+	if strings.IndexFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return false
+	}
+	switch strings.ToLower(name) {
+	case "mup", "lanmanredirector", "webdavredirector", "rdpdr":
+		return false
+	}
+	return true
 }
 
 // signerRejection returns "" when the signer's subject common name is
@@ -213,6 +291,20 @@ type windowsPeerIdentity struct {
 	Signer    string
 }
 
+// Bounds on the accept-time check. Each accepted connection is
+// authenticated in its own goroutine, so one slow check cannot stop the
+// listener from admitting other peers or from closing.
+const (
+	// windowsPeerAuthTimeout is how long one peer check may take before
+	// its connection is closed. A local image lookup and WinVerifyTrust
+	// on the GUI executable finish in well under a second.
+	windowsPeerAuthTimeout = 10 * time.Second
+	// windowsPeerAuthMaxPending caps concurrent peer checks. When every
+	// slot is busy the listener stops pulling connections off the
+	// socket backlog until one finishes.
+	windowsPeerAuthMaxPending = 8
+)
+
 // windowsPeerAuthListener admits a connection only when the process on
 // the other end is an allowed, Authenticode-verified Secure Client GUI
 // executable. Every other peer is closed before gRPC reads a byte, so
@@ -222,6 +314,18 @@ type windowsPeerAuthListener struct {
 	policy    windowsPeerPolicy
 	resolve   windowsPeerResolvers
 	logReject func(windowsPeerIdentity, string)
+	timeout   time.Duration
+
+	start     sync.Once
+	slots     chan struct{}
+	admitted  chan net.Conn
+	transient chan error
+	closed    chan struct{}
+	closeOnce sync.Once
+	// loopDone is closed when the accept loop stops; loopErr, written
+	// before the close, is the error that stopped it.
+	loopDone chan struct{}
+	loopErr  error
 }
 
 func newWindowsPeerAuthListener(
@@ -229,6 +333,18 @@ func newWindowsPeerAuthListener(
 	policy windowsPeerPolicy,
 	resolve windowsPeerResolvers,
 	logReject func(windowsPeerIdentity, string),
+) (*windowsPeerAuthListener, error) {
+	return newWindowsPeerAuthListenerWithLimits(inner, policy, resolve, logReject,
+		windowsPeerAuthTimeout, windowsPeerAuthMaxPending)
+}
+
+func newWindowsPeerAuthListenerWithLimits(
+	inner net.Listener,
+	policy windowsPeerPolicy,
+	resolve windowsPeerResolvers,
+	logReject func(windowsPeerIdentity, string),
+	timeout time.Duration,
+	maxPending int,
 ) (*windowsPeerAuthListener, error) {
 	if inner == nil {
 		return nil, errors.New("ipc: windows peer auth: nil listener")
@@ -239,31 +355,118 @@ func newWindowsPeerAuthListener(
 	if len(policy.images) == 0 || len(policy.signers) == 0 {
 		return nil, errors.New("ipc: windows peer auth: empty policy")
 	}
-	return &windowsPeerAuthListener{inner: inner, policy: policy, resolve: resolve, logReject: logReject}, nil
+	if timeout <= 0 || maxPending <= 0 {
+		return nil, errors.New("ipc: windows peer auth: invalid check limits")
+	}
+	return &windowsPeerAuthListener{
+		inner:     inner,
+		policy:    policy,
+		resolve:   resolve,
+		logReject: logReject,
+		timeout:   timeout,
+		slots:     make(chan struct{}, maxPending),
+		admitted:  make(chan net.Conn),
+		transient: make(chan error),
+		closed:    make(chan struct{}),
+		loopDone:  make(chan struct{}),
+	}, nil
 }
 
+// Accept returns the next authenticated connection. The accept loop
+// starts on the first call.
 func (l *windowsPeerAuthListener) Accept() (net.Conn, error) {
-	for {
-		c, err := l.inner.Accept()
-		if err != nil {
-			return nil, err
-		}
-		acceptedAt := l.resolve.now()
-		id, reason := l.authenticate(c, acceptedAt)
-		if reason != "" {
-			if l.logReject != nil {
-				l.logReject(id, reason)
-			}
-			_ = c.Close()
-			continue
-		}
+	l.start.Do(func() { go l.acceptLoop() })
+	select {
+	case c := <-l.admitted:
 		return c, nil
+	case err := <-l.transient:
+		return nil, err
+	case <-l.closed:
+		return nil, net.ErrClosed
+	case <-l.loopDone:
+		return nil, l.loopErr
 	}
 }
 
-// authenticate orders the checks cheapest first, so a peer that is not
-// even running an allowed executable never costs a WinVerifyTrust.
-func (l *windowsPeerAuthListener) authenticate(c net.Conn, acceptedAt time.Time) (windowsPeerIdentity, string) {
+func (l *windowsPeerAuthListener) acceptLoop() {
+	err := l.runAcceptLoop()
+	l.loopErr = err
+	close(l.loopDone)
+}
+
+func (l *windowsPeerAuthListener) runAcceptLoop() error {
+	for {
+		c, err := l.inner.Accept()
+		if err != nil {
+			select {
+			case <-l.closed:
+				return net.ErrClosed
+			default:
+			}
+			// Hand transient errors to the caller, which backs off
+			// (grpc.Server does), and keep accepting.
+			var temporary interface{ Temporary() bool }
+			if errors.As(err, &temporary) && temporary.Temporary() {
+				select {
+				case l.transient <- err:
+					continue
+				case <-l.closed:
+					return net.ErrClosed
+				}
+			}
+			return err
+		}
+		select {
+		case l.slots <- struct{}{}:
+		case <-l.closed:
+			_ = c.Close()
+			return net.ErrClosed
+		}
+		go l.admit(c)
+	}
+}
+
+// admit authenticates one connection and hands it to Accept, or closes
+// it. The slot is released only when the check itself returns, so the
+// number of in-flight checks stays bounded even after a timeout.
+func (l *windowsPeerAuthListener) admit(c net.Conn) {
+	defer func() { <-l.slots }()
+	var decided atomic.Bool
+	timer := time.AfterFunc(l.timeout, func() {
+		if decided.CompareAndSwap(false, true) {
+			l.reject(windowsPeerIdentity{}, fmt.Sprintf("peer authentication did not finish within %s", l.timeout))
+			_ = c.Close()
+		}
+	})
+	id, reason := l.authenticate(c)
+	timer.Stop()
+	if !decided.CompareAndSwap(false, true) {
+		// Timed out: the connection is already closed and logged.
+		return
+	}
+	if reason != "" {
+		l.reject(id, reason)
+		_ = c.Close()
+		return
+	}
+	select {
+	case l.admitted <- c:
+	case <-l.closed:
+		_ = c.Close()
+	}
+}
+
+func (l *windowsPeerAuthListener) reject(id windowsPeerIdentity, reason string) {
+	if l.logReject != nil {
+		l.logReject(id, reason)
+	}
+}
+
+// authenticate runs the checks in order. The process image name the
+// kernel reports must already equal an allowed executable, by string
+// comparison, before anything is opened; the file that is then opened
+// is the policy's own path, never one supplied by the peer.
+func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity, string) {
 	var id windowsPeerIdentity
 	pid, err := l.resolve.peerPID(c)
 	if err != nil {
@@ -284,17 +487,18 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn, acceptedAt time.Time)
 	if process.CreatedAt.IsZero() {
 		return id, "peer process creation time unavailable"
 	}
-	if process.CreatedAt.After(acceptedAt) {
-		return id, "peer process was created after the connection was accepted"
+	drivePath, ok := l.policy.matchKernelImage(process.ImagePath)
+	if !ok {
+		return id, "peer image is not an allowed Secure Client GUI executable"
 	}
-	image, err := l.resolve.openImage(process.ImagePath)
+	image, err := l.resolve.openImage(drivePath)
 	if err != nil {
 		return id, fmt.Sprintf("peer image unavailable: %v", err)
 	}
 	defer image.Close()
 	finalPath := image.FinalPath()
 	id.ImagePath = finalPath
-	if !l.policy.allowsImage(finalPath) {
+	if !l.policy.allowsImage(finalPath) || !strings.EqualFold(finalPath, drivePath) {
 		return id, "peer image is not an allowed Secure Client GUI executable"
 	}
 	signer, err := image.VerifySigner()
@@ -308,5 +512,15 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn, acceptedAt time.Time)
 	return id, ""
 }
 
-func (l *windowsPeerAuthListener) Close() error   { return l.inner.Close() }
+// Close stops accepting. Checks still in flight finish on their own
+// and close their connections; Close does not wait for them.
+func (l *windowsPeerAuthListener) Close() error {
+	err := net.ErrClosed
+	l.closeOnce.Do(func() {
+		close(l.closed)
+		err = l.inner.Close()
+	})
+	return err
+}
+
 func (l *windowsPeerAuthListener) Addr() net.Addr { return l.inner.Addr() }

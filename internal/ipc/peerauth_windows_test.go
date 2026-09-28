@@ -103,6 +103,18 @@ func selfExecutable(t *testing.T) string {
 	return resolved
 }
 
+// selfKernelImagePath is the NT form of this test binary's path, built
+// the same way the admission policy builds its kernel paths.
+func selfKernelImagePath(t *testing.T) string {
+	t.Helper()
+	self := selfExecutable(t)
+	device, err := dosDeviceForDrive(strings.ToUpper(self[:2]))
+	if err != nil {
+		t.Fatalf("dosDeviceForDrive: %v", err)
+	}
+	return device + self[2:]
+}
+
 func TestQueryWindowsPeerProcessResolvesImageWithoutProcessHandle(t *testing.T) {
 	process, err := queryWindowsPeerProcess(uint32(os.Getpid()))
 	if err != nil {
@@ -111,6 +123,12 @@ func TestQueryWindowsPeerProcessResolvesImageWithoutProcessHandle(t *testing.T) 
 	if !strings.HasPrefix(process.ImagePath, `\Device\`) {
 		t.Fatalf("image path = %q, want an NT device path", process.ImagePath)
 	}
+	// The kernel image name must equal the policy-style NT form of the
+	// executable's drive path, or the string pre-check would refuse a
+	// genuine GUI.
+	if want := selfKernelImagePath(t); !strings.EqualFold(process.ImagePath, want) {
+		t.Fatalf("image path = %q, want %q", process.ImagePath, want)
+	}
 	if process.CreatedAt.IsZero() || process.CreatedAt.After(time.Now()) {
 		t.Fatalf("creation time = %v", process.CreatedAt)
 	}
@@ -118,7 +136,7 @@ func TestQueryWindowsPeerProcessResolvesImageWithoutProcessHandle(t *testing.T) 
 	if err := windows.ProcessIdToSessionId(uint32(os.Getpid()), &session); err == nil && session != process.SessionID {
 		t.Fatalf("session = %d, want %d", process.SessionID, session)
 	}
-	image, err := openWindowsPeerImage(process.ImagePath)
+	image, err := openWindowsPeerImage(selfExecutable(t))
 	if err != nil {
 		t.Fatalf("openWindowsPeerImage: %v", err)
 	}
@@ -128,6 +146,25 @@ func TestQueryWindowsPeerProcessResolvesImageWithoutProcessHandle(t *testing.T) 
 	}
 	if _, err := queryWindowsPeerProcess(0xfffffff0); err == nil {
 		t.Fatal("queryWindowsPeerProcess accepted a pid that is not running")
+	}
+}
+
+func TestDOSDeviceForDriveMapsSystemDrive(t *testing.T) {
+	systemDrive := strings.ToUpper(os.Getenv("SystemDrive"))
+	if len(systemDrive) != 2 {
+		t.Skipf("SystemDrive = %q", systemDrive)
+	}
+	device, err := dosDeviceForDrive(systemDrive)
+	if err != nil {
+		t.Fatalf("dosDeviceForDrive(%s): %v", systemDrive, err)
+	}
+	if !isLocalNTDeviceName(device) {
+		t.Fatalf("system drive maps to %q, want a local NT device", device)
+	}
+	for _, drive := range []string{"", "C", `C:\`, "CC"} {
+		if got, err := dosDeviceForDrive(drive); err == nil {
+			t.Errorf("dosDeviceForDrive(%q) = %q, want an error", drive, got)
+		}
 	}
 }
 
@@ -158,7 +195,11 @@ func TestOpenWindowsPeerImageRejectsDirectoriesAndRelativePaths(t *testing.T) {
 	if _, err := openWindowsPeerImage(t.TempDir()); err == nil {
 		t.Fatal("openWindowsPeerImage accepted a directory")
 	}
-	for _, path := range []string{"", `relative\gui.exe`, `\\server\share\gui.exe`, "C:\\gui\x00.exe"} {
+	for _, path := range []string{
+		"", `relative\gui.exe`, `\\server\share\gui.exe`, "C:\\gui\x00.exe",
+		`\Device\Mup\server\share\gui.exe`, `\Device\HarddiskVolume1\gui.exe`,
+		`\\?\GLOBALROOT\Device\Mup\server\share\gui.exe`, `\\?\C:\gui.exe`,
+	} {
 		if _, err := openWindowsPeerImage(path); err == nil {
 			t.Errorf("openWindowsPeerImage(%q) succeeded", path)
 		}
@@ -208,7 +249,7 @@ func TestVerifySignerExtractsLeafOfSignedBinary(t *testing.T) {
 			t.Fatalf("%s: policy admitted non-Cisco signer %q", resolved, signer.CommonName)
 		}
 		allowOwn, err := newWindowsPeerPolicy([]string{testProgramFiles}, []string{`UI\csc_ui.exe`},
-			append([]string{signer.CommonName}, signer.Organizations...))
+			append([]string{signer.CommonName}, signer.Organizations...), testDriveDevice)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -322,8 +363,9 @@ func TestWindowsSecureClientListenerRejectsSameUserTool(t *testing.T) {
 	if first.id.PID != uint32(os.Getpid()) {
 		t.Fatalf("rejected pid = %d, want %d", first.id.PID, os.Getpid())
 	}
-	if !strings.EqualFold(first.id.ImagePath, selfExecutable(t)) {
-		t.Fatalf("rejected image = %q, want %q", first.id.ImagePath, selfExecutable(t))
+	// Refused on the kernel image name, before anything was opened.
+	if want := selfKernelImagePath(t); !strings.EqualFold(first.id.ImagePath, want) {
+		t.Fatalf("rejected image = %q, want %q", first.id.ImagePath, want)
 	}
 	if !strings.Contains(first.reason, "not an allowed Secure Client GUI executable") {
 		t.Fatalf("reason = %q", first.reason)
@@ -338,8 +380,14 @@ func TestWindowsSecureClientListenerRejectsUnsignedClient(t *testing.T) {
 	if os.Getenv(peerAuthHelperSocketEnv) != "" {
 		t.Skip("running as helper")
 	}
-	root := shortSocketDir(t)
-	guiDir := filepath.Join(root, "Cisco", "Cisco Secure Client", "UI")
+	// Resolve the scratch root to its long, canonical form first and
+	// launch the client from there, so the kernel records the same
+	// image name the policy expects.
+	resolvedRoot, err := filepath.EvalSymlinks(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guiDir := filepath.Join(resolvedRoot, "Cisco", "Cisco Secure Client", "UI")
 	if err := os.MkdirAll(guiDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -351,11 +399,7 @@ func TestWindowsSecureClientListenerRejectsUnsignedClient(t *testing.T) {
 	if err := os.WriteFile(gui, source, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	policy, err := newWindowsPeerPolicy([]string{resolvedRoot}, []string{`UI\csc_ui.exe`}, []string{testCiscoSigner})
+	policy, err := newWindowsPeerPolicy([]string{resolvedRoot}, []string{`UI\csc_ui.exe`}, []string{testCiscoSigner}, dosDeviceForDrive)
 	if err != nil {
 		t.Fatal(err)
 	}
