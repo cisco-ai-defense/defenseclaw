@@ -463,16 +463,27 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         assert app.overview_model.cfg.guardrail_mode == "observe"
         cli_log = tmp_path / "setup-cli.log"
         with cli_log.open("wb") as output_stream:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                cwd=repo_root,
-                env=environment,
-                stdout=output_stream,
-                stderr=subprocess.STDOUT,
-                timeout=90,
-                check=False,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    command,
+                    cwd=repo_root,
+                    env=environment,
+                    # --yes is the whole interaction; never hand the CLI (or
+                    # the probes it starts) the test runner's stdin.
+                    stdin=subprocess.DEVNULL,
+                    stdout=output_stream,
+                    stderr=subprocess.STDOUT,
+                    timeout=90,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                # Name the step the CLI was still in rather than only the
+                # expired budget.
+                pytest.fail(
+                    "setup CLI did not finish within 90s; its output so far:\n"
+                    + cli_log.read_text(encoding="utf-8", errors="replace")
+                )
         output = cli_log.read_text(encoding="utf-8", errors="replace")
         assert result.returncode == 0, output
         assert "Config saved" in output
