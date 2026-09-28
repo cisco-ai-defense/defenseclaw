@@ -175,6 +175,9 @@ func (a *ApplicationProtectionConfig) Validate() error {
 			return fmt.Errorf("application_protection.guardrail: %w", err)
 		}
 	}
+	if err := rejectGuardrailLevelOverlay(a.Guardrail); err != nil {
+		return fmt.Errorf("application_protection.guardrail: %w", err)
+	}
 	if err := validateAssetPolicyMode(a.AssetPolicy.Mode); err != nil {
 		return fmt.Errorf("application_protection.asset_policy: %w", err)
 	}
@@ -213,8 +216,31 @@ func (a *ApplicationProtectionConfig) Validate() error {
 				return fmt.Errorf("application_protection.connectors[%q].guardrail: %w", name, err)
 			}
 		}
+		if err := rejectGuardrailLevelOverlay(pc.Guardrail); err != nil {
+			return fmt.Errorf("application_protection.connectors[%q].guardrail: %w", name, err)
+		}
 		if err := validateAssetPolicyMode(pc.AssetPolicy.Mode); err != nil {
 			return fmt.Errorf("application_protection.connectors[%q].asset_policy: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// rejectGuardrailLevelOverlay refuses block_at / alert_at in an
+// application_protection guardrail overlay. The overlay shares
+// PerConnectorGuardrailConfig with guardrail.connectors, but the gateway
+// reads tool-call levels only from guardrail.block_at / alert_at and
+// guardrail.connectors, so accepting them here would silently do nothing.
+func rejectGuardrailLevelOverlay(pc PerConnectorGuardrailConfig) error {
+	for _, field := range []struct{ key, value string }{
+		{"block_at", pc.BlockAt},
+		{"alert_at", pc.AlertAt},
+	} {
+		if strings.TrimSpace(field.value) != "" {
+			return fmt.Errorf(
+				"%s is not supported in application_protection; the gateway reads it only from guardrail.%s and guardrail.connectors.<name>.%s",
+				field.key, field.key, field.key,
+			)
 		}
 	}
 	return nil

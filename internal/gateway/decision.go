@@ -182,7 +182,9 @@ func strongerGuardrailAction(left, right string) string {
 // global pack). This gives each connector its own enforcement posture —
 // strict on one agent, permissive on another — matching single-connector
 // behavior where the pack IS the posture. An empty connector resolves to the
-// global pack, so existing single-connector callers are unaffected.
+// global pack, so existing single-connector callers are unaffected. When set,
+// guardrail.block_at / alert_at (per connector, else global) replace the
+// pack's levels; see guardrailThresholdsForConfigConnector.
 func guardrailRuntimeActionForConnector(cfg *config.Config, connector, severity string, confirmable bool) string {
 	if cfg == nil {
 		return guardrailRuntimeActionForGuardrailConnector(nil, connector, severity, confirmable)
@@ -228,8 +230,39 @@ func guardrailThresholds(gc *config.GuardrailConfig) (blockThreshold int, alertT
 	return guardrailThresholdsForConnector(gc, "")
 }
 
+// guardrailThresholdsForConnector returns the block and alert severity ranks
+// for connector from a bare GuardrailConfig: the levels of the connector's
+// rule-pack profile, replaced by guardrail.block_at / alert_at when set (see
+// guardrailLevelThresholds). A nil gc resolves no levels, only the default
+// profile.
 func guardrailThresholdsForConnector(gc *config.GuardrailConfig, connector string) (blockThreshold int, alertThreshold int) {
-	switch guardrailProfileForConnector(gc, connector) {
+	blockThreshold, alertThreshold = guardrailProfileThresholds(guardrailProfileForConnector(gc, connector))
+	return guardrailLevelThresholds(
+		blockThreshold, alertThreshold,
+		gc.EffectiveBlockAt(connector), gc.EffectiveAlertAt(connector),
+	)
+}
+
+// guardrailThresholdsForConfigConnector is guardrailThresholdsForConnector
+// for a full Config, whose rule pack also honors application_protection
+// overlays. The block_at / alert_at levels come from guardrail.connectors and
+// the global guardrail block only; the overlays can't set them.
+func guardrailThresholdsForConfigConnector(cfg *config.Config, connector string) (blockThreshold int, alertThreshold int) {
+	blockThreshold, alertThreshold = guardrailProfileThresholds(guardrailProfileForConfigConnector(cfg, connector))
+	if cfg == nil {
+		return blockThreshold, alertThreshold
+	}
+	return guardrailLevelThresholds(
+		blockThreshold, alertThreshold,
+		cfg.Guardrail.EffectiveBlockAt(connector), cfg.Guardrail.EffectiveAlertAt(connector),
+	)
+}
+
+// guardrailProfileThresholds maps a rule-pack profile to its block and alert
+// severity ranks: strict blocks MEDIUM+ and alerts LOW+, permissive blocks
+// CRITICAL and alerts HIGH+, default blocks CRITICAL and alerts MEDIUM+.
+func guardrailProfileThresholds(profile string) (blockThreshold int, alertThreshold int) {
+	switch profile {
 	case "strict":
 		return severityMedium, severityLow
 	case "permissive":
@@ -239,15 +272,21 @@ func guardrailThresholdsForConnector(gc *config.GuardrailConfig, connector strin
 	}
 }
 
-func guardrailThresholdsForConfigConnector(cfg *config.Config, connector string) (blockThreshold int, alertThreshold int) {
-	switch guardrailProfileForConfigConnector(cfg, connector) {
-	case "strict":
-		return severityMedium, severityLow
-	case "permissive":
-		return severityCritical, severityHigh
-	default:
-		return severityCritical, severityMedium
+// guardrailLevelThresholds applies the resolved block_at / alert_at levels to
+// the rule pack's ranks. The per-connector value wins over the global one
+// (config.GuardrailConfig.EffectiveBlockAt), and an empty level keeps the
+// pack's rank. The alert rank is then clamped to the block rank, so anything
+// that blocks also alerts. Every level ranks at most CRITICAL, so CRITICAL
+// findings block whatever the levels say.
+func guardrailLevelThresholds(packBlock, packAlert int, blockAt, alertAt string) (blockThreshold int, alertThreshold int) {
+	blockThreshold, alertThreshold = packBlock, packAlert
+	if rank := guardrailSeverityRank(blockAt); rank > severityNone {
+		blockThreshold = rank
 	}
+	if rank := guardrailSeverityRank(alertAt); rank > severityNone {
+		alertThreshold = rank
+	}
+	return blockThreshold, min(alertThreshold, blockThreshold)
 }
 
 func guardrailProfile(gc *config.GuardrailConfig) string {
