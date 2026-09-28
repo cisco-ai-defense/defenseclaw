@@ -1417,8 +1417,10 @@ class SetupPanelModel:
         except Exception:  # noqa: BLE001
             command = WIZARD_COMMANDS.get(self.active_wizard, ())
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
+        from defenseclaw.tui.command_line import display_argv  # the CLI tree; keep it off the model import
+
         masked = mask_wizard_secret_values(self.form_fields, args)
-        return "defenseclaw " + " ".join(masked) if masked else "defenseclaw"
+        return "defenseclaw " + display_argv(masked) if masked else "defenseclaw"
 
     def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
