@@ -483,8 +483,11 @@ const interactiveDoneText = "marker file was written"
 // quiet for two seconds, types argv[2] and Enter, waits up to argv[1]
 // seconds for argv[3] (escape sequences and line breaks removed), types
 // argv[4] and Enter, and exits with the harness's status (128+n for a
-// signal), ending it if it does not quit. It answers cursor-position
-// requests as a terminal would.
+// signal), ending it if it does not quit (SIGTERM, then SIGKILL, 5 s
+// apart). It waits for that status by the clock, not by reads: the
+// terminal closes as the harness exits, a moment before the kernel lets
+// its status be collected, and a closed terminal answers at once. It
+// answers cursor-position requests as a terminal would.
 const ptyDriver = `import fcntl, os, pty, re, select, signal, struct, sys, termios, time
 limit, keys, done, quit = float(sys.argv[1]), sys.argv[2], sys.argv[3].encode(), sys.argv[4]
 pid, fd = pty.fork()
@@ -538,14 +541,15 @@ for sig in (None, signal.SIGTERM, signal.SIGKILL):
             os.kill(pid, sig)
         except ProcessLookupError:
             pass
-    got = 0
-    for _ in range(50):
+    end = time.time() + 5
+    while True:
         got, status = os.waitpid(pid, os.WNOHANG)
-        if got:
-            code = os.waitstatus_to_exitcode(status)
+        if got or time.time() >= end:
             break
-        pump(0.1)
+        if not pump(0.1):
+            time.sleep(0.05)
     if got:
+        code = os.waitstatus_to_exitcode(status)
         break
 log.close()
 sys.exit(128 - code if code < 0 else code)

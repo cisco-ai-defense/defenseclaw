@@ -117,11 +117,11 @@ func TestHookFireProbeStartsOmniGentOnATerminal(t *testing.T) {
 	}
 }
 
-// TestPTYDriverTypesThePromptAndQuits runs the probe's pty driver against a
-// stand-in TUI: it must wait for the prompt, type the scenario prompt, wait
-// for the closing text across line breaks, type quit and pass on the exit
-// status.
-func TestPTYDriverTypesThePromptAndQuits(t *testing.T) {
+// runPTYDriver runs the probe's pty driver against a stand-in TUI, a bash
+// script with this body, and returns the driver's output, what it logged
+// of the TUI and its error.
+func runPTYDriver(t *testing.T, body string) (string, string, error) {
+	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required")
@@ -131,21 +131,47 @@ func TestPTYDriverTypesThePromptAndQuits(t *testing.T) {
 	}
 	dir := t.TempDir()
 	tui := filepath.Join(dir, "tui")
-	body := "#!/bin/bash\nprintf 'ready> '\nIFS= read -r line\n[ \"$line\" = \"hello probe\" ] || exit 3\n" +
-		"printf 'working\\r\\nDone: the marker\\r\\n file was written.\\r\\n> '\nIFS= read -r q\n[ \"$q\" = /exit ] && exit 7\nexit 4\n"
-	if err := os.WriteFile(tui, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(tui, []byte("#!/bin/bash\n"+body), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	logPath := filepath.Join(dir, "out")
 	cmd := exec.Command(python, "-I", "-S", "-c", ptyDriver, "20", "hello probe", interactiveDoneText, "/exit", tui)
 	cmd.Env = append(os.Environ(), "DC_HOOKFIRE_OUT="+logPath)
 	out, err := cmd.CombinedOutput()
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
-		t.Fatalf("driver = %v, want the TUI's exit status 7\n%s", err, out)
-	}
 	logged, _ := os.ReadFile(logPath)
-	if !strings.Contains(string(logged), "ready> ") || !strings.Contains(string(logged), "file was written") {
+	return string(out), string(logged), err
+}
+
+func wantDriverExit(t *testing.T, err error, out string, code int) {
+	t.Helper()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != code {
+		t.Fatalf("driver = %v, want the TUI's exit status %d\n%s", err, code, out)
+	}
+}
+
+// TestPTYDriverTypesThePromptAndQuits runs the probe's pty driver against a
+// stand-in TUI: it must wait for the prompt, type the scenario prompt, wait
+// for the closing text across line breaks, type quit and pass on the exit
+// status.
+func TestPTYDriverTypesThePromptAndQuits(t *testing.T) {
+	out, logged, err := runPTYDriver(t, "printf 'ready> '\nIFS= read -r line\n[ \"$line\" = \"hello probe\" ] || exit 3\n"+
+		"printf 'working\\r\\nDone: the marker\\r\\n file was written.\\r\\n> '\nIFS= read -r q\n[ \"$q\" = /exit ] && exit 7\nexit 4\n")
+	wantDriverExit(t, err, out, 7)
+	if !strings.Contains(logged, "ready> ") || !strings.Contains(logged, "file was written") {
 		t.Fatalf("driver log = %q", logged)
 	}
+}
+
+// The driver exited 125 for a TUI that had quit (a loaded Linux host): the
+// terminal closes as the TUI exits, a moment before the kernel lets its
+// status be collected, and the driver's wait counted reads of the closed
+// terminal, which return at once, rather than time. A TUI that lets go of
+// its terminal a second before it exits still has its own status passed
+// on, not a signal's.
+func TestPTYDriverWaitsForTheStatusAfterTheTerminalCloses(t *testing.T) {
+	out, _, err := runPTYDriver(t, "printf 'ready> '\nIFS= read -r line\n"+
+		"printf 'Done: the marker file was written.\\r\\n> '\nIFS= read -r q\n"+
+		"exec </dev/null >/dev/null 2>&1\nsleep 1\n[ \"$q\" = /exit ] && exit 7\nexit 4\n")
+	wantDriverExit(t, err, out, 7)
 }
