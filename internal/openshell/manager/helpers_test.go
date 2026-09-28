@@ -17,9 +17,16 @@
 package manager
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"maps"
 	"net"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -29,12 +36,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -50,22 +62,87 @@ const (
 	testClaudeBin   = "/opt/defenseclaw-harness/claudecode/bin/claude"
 )
 
+// TestMain pins this machine's interface addresses: the egress guard refuses
+// ranges and literals that hold them, so verdicts must not depend on the
+// machine. The public addresses' subnets are the "local network".
+func TestMain(m *testing.M) {
+	restore := egress.OverrideInterfaceAddrsForTest(func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)},
+			&net.IPNet{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},
+			&net.IPNet{IP: net.ParseIP("185.199.9.9"), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.ParseIP("2a00:1450:9::fe"), Mask: net.CIDRMask(64, 128)},
+		}, nil
+	})
+	code := m.Run()
+	restore()
+	os.Exit(code)
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFile writes data to p, making its directories.
+func writeFile(t *testing.T, p, data string) string {
+	t.Helper()
+	must(t, os.MkdirAll(filepath.Dir(p), 0o755))
+	must(t, os.WriteFile(p, []byte(data), 0o644))
+	return p
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+func wantCode(t *testing.T, err error, code string) *sandboxapi.Error {
+	t.Helper()
+	var e *sandboxapi.Error
+	if !errors.As(err, &e) || e.Code != code {
+		t.Fatalf("error = %v, want code %s", err, code)
+	}
+	return e
+}
+
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// where returns the elements of *list, read under mu, that match (all for nil).
+func where[T any](mu *sync.Mutex, list *[]T, match func(T) bool) []T {
+	mu.Lock()
+	defer mu.Unlock()
+	var out []T
+	for _, v := range *list {
+		if match == nil || match(v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // fakeImages hands out one verified record.
 type fakeImages struct {
-	mu    sync.Mutex
-	rec   image.Record
-	err   error
-	calls int
-	build []bool
+	mu  sync.Mutex
+	rec image.Record
+	err error
 	// fixedUID keeps rec's UID/GID instead of the build spec's.
 	fixedUID bool
 }
 
-func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, build bool) (image.Record, error) {
+func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, _ bool) (image.Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls++
-	f.build = append(f.build, build)
 	if f.err != nil {
 		return image.Record{}, f.err
 	}
@@ -79,35 +156,18 @@ func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, build bool
 
 // fakeWorkspace records workspace calls and plans a mount under /work.
 type fakeWorkspace struct {
-	mu           sync.Mutex
-	planErr      error
-	snapErr      error
-	undoErr      error
-	planned      []string
-	released     []string
-	snapshots    map[string]*workspace.SnapshotRecord
-	deleted      []string
-	deletedCopy  []string
-	undone       []string
-	reviewed     []string
-	masked       []workspace.MaskedPath
-	lastSnapshot workspace.SnapshotOptions
-	lastMount    workspace.MountOptions
-	lastUndo     workspace.UndoOptions
-	// clean makes Review report a folder without changes.
-	clean bool
-	// onUndo and onDeleteSnapshot run first in Undo and DeleteSnapshot,
-	// with their context (a caller going away mid-step, say).
-	onUndo, onDeleteSnapshot func(ctx context.Context)
-	// scanned is what ScanSecrets finds now (default: masked, what the
-	// mount plan masks); scanErr fails it.
-	scanned  []workspace.MaskedPath
-	scanErr  error
-	lastScan workspace.MountOptions
-}
-
-func newFakeWorkspace() *fakeWorkspace {
-	return &fakeWorkspace{snapshots: map[string]*workspace.SnapshotRecord{}}
+	mu                                 sync.Mutex
+	planErr, snapErr                   error
+	planned, released, deleted, undone []string
+	snapshots                          map[string]*workspace.SnapshotRecord
+	masked                             []workspace.MaskedPath
+	lastSnapshot                       workspace.SnapshotOptions
+	lastMount, lastScan                workspace.MountOptions
+	lastUndo                           workspace.UndoOptions
+	clean                              bool // Review reports a folder without changes
+	onUndo, onDeleteSnapshot           func(ctx context.Context)
+	scanned                            []workspace.MaskedPath // ScanSecrets' answer (default: masked)
+	scanErr                            error
 }
 
 func (f *fakeWorkspace) PlanMount(_ context.Context, opts workspace.MountOptions) (*workspace.MountPlan, error) {
@@ -120,17 +180,14 @@ func (f *fakeWorkspace) PlanMount(_ context.Context, opts workspace.MountOptions
 	f.lastMount = opts
 	repo := workspace.RepoName(opts.Project)
 	target := path.Join("/work", repo)
-	plan := &workspace.MountPlan{
+	return &workspace.MountPlan{
 		Name: opts.Name, Project: opts.Project, RepoName: repo, Target: target,
 		Mounts: []workspace.Mount{
 			{Kind: workspace.MountProject, Source: opts.Project, Target: target},
 			{Kind: workspace.MountProtect, Source: filepath.Join(opts.Project, ".git", "hooks"), Target: target + "/.git/hooks", ReadOnly: true},
 		},
-		Masked:    f.masked,
-		ReadWrite: []string{target},
-		Labels:    map[string]string{},
-	}
-	return plan, nil
+		Masked: f.masked, ReadWrite: []string{target}, Labels: map[string]string{},
+	}, nil
 }
 
 func (f *fakeWorkspace) ScanSecrets(_ context.Context, opts workspace.MountOptions) ([]workspace.MaskedPath, error) {
@@ -192,9 +249,6 @@ func (f *fakeWorkspace) Undo(ctx context.Context, opts workspace.UndoOptions) (*
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.undoErr != nil {
-		return nil, f.undoErr
-	}
 	f.undone = append(f.undone, opts.Name)
 	f.lastUndo = opts
 	if rec, ok := f.snapshots[opts.Name]; ok && !opts.Preview {
@@ -209,7 +263,6 @@ func (f *fakeWorkspace) Undo(ctx context.Context, opts workspace.UndoOptions) (*
 func (f *fakeWorkspace) Review(_ context.Context, opts workspace.ReviewOptions) (*workspace.ReviewReport, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.reviewed = append(f.reviewed, opts.Name)
 	if f.clean {
 		return &workspace.ReviewReport{Name: opts.Name}, nil
 	}
@@ -221,21 +274,15 @@ func (f *fakeWorkspace) ReviewDiff(context.Context, string, string) ([]byte, err
 	return []byte("diff --git a/README.md b/README.md\n"), nil
 }
 
-func (f *fakeWorkspace) DeleteCopy(_, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.deletedCopy = append(f.deletedCopy, name)
-	return nil
-}
+func (f *fakeWorkspace) DeleteCopy(string, string) error { return nil }
 
 // fakeImporter imports profiles into the fake gateway through the SDK.
 type fakeImporter struct {
-	c        openshell.Client
-	mu       sync.Mutex
-	imported []string
-	updated  []string
-	err      error
-	calls    int
+	c                 openshell.Client
+	mu                sync.Mutex
+	imported, updated []string
+	err               error
+	calls             int
 	// before runs ahead of each import or update, without the lock (another
 	// daemon changing the gateway under this one).
 	before func(p profiles.Profile, resourceVersion uint64)
@@ -268,13 +315,16 @@ func (f *fakeImporter) Import(ctx context.Context, _ string, p profiles.Profile,
 	return err
 }
 
-// memTelemetry keeps every sandbox record the production recorder
-// accepts. Each record first goes through a real audit.SandboxRecorder,
-// whose runtime builds the generated family record: one the audit schema
-// refuses (a reason that is not a stable token, a target that is not a
-// bounded reference) is not kept and is reported by the environment's
-// cleanup, instead of vanishing as it does in production, where the manager
-// drops the recorder's error.
+func (f *fakeImporter) counts() (imported, updated int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.imported), len(f.updated)
+}
+
+// memTelemetry keeps every sandbox record the production recorder accepts.
+// Each record first goes through a real audit.SandboxRecorder, whose runtime
+// builds the generated family record: one the audit schema refuses is not
+// kept and fails the test at cleanup (production drops the error).
 type memTelemetry struct {
 	mu        sync.Mutex
 	check     *audit.SandboxRecorder
@@ -294,90 +344,64 @@ func newMemTelemetry() *memTelemetry {
 	return &memTelemetry{check: audit.NewSandboxRecorder(logger)}
 }
 
-// accepted runs the production recorder on a record and notes a refusal.
-// Callers hold t.mu, which also serializes the recorder's tracked phases.
-func (t *memTelemetry) accepted(kind string, err error) error {
-	if err != nil {
-		t.refused = append(t.refused, kind+": "+err.Error())
-	}
-	return err
-}
-
-// refusedRecords lists the records the production recorder refused.
-func (t *memTelemetry) refusedRecords() []string {
+// keep runs the production recorder on e under t.mu (which also serializes
+// its tracked phases) and appends e to list unless it was refused.
+func keep[T any](t *memTelemetry, kind string, list *[]T, e T, record func() error) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]string(nil), t.refused...)
+	if err := record(); err != nil {
+		t.refused = append(t.refused, kind+": "+err.Error())
+		return err
+	}
+	*list = append(*list, e)
+	return nil
 }
 
 func (t *memTelemetry) RecordSandboxLifecycle(ctx context.Context, e audit.SandboxLifecycleEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("lifecycle", t.check.RecordSandboxLifecycle(ctx, e)); err != nil {
-		return err
-	}
-	t.lifecycle = append(t.lifecycle, e)
-	return nil
+	return keep(t, "lifecycle", &t.lifecycle, e, func() error { return t.check.RecordSandboxLifecycle(ctx, e) })
 }
 
 func (t *memTelemetry) RecordSandboxEgress(ctx context.Context, e audit.SandboxEgressEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("egress", t.check.RecordSandboxEgress(ctx, e)); err != nil {
-		return err
-	}
-	t.egress = append(t.egress, e)
-	return nil
+	return keep(t, "egress", &t.egress, e, func() error { return t.check.RecordSandboxEgress(ctx, e) })
 }
 
 func (t *memTelemetry) RecordSandboxApproval(ctx context.Context, e audit.SandboxApprovalEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("approval", t.check.RecordSandboxApproval(ctx, e)); err != nil {
-		return err
-	}
-	t.approvals = append(t.approvals, e)
-	return nil
+	return keep(t, "approval", &t.approvals, e, func() error { return t.check.RecordSandboxApproval(ctx, e) })
 }
 
 func (t *memTelemetry) RecordSandboxPolicy(ctx context.Context, e audit.SandboxPolicyEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("policy "+string(e.Operation)+" "+e.Target+" "+e.Reason, t.check.RecordSandboxPolicy(ctx, e)); err != nil {
-		return err
-	}
-	t.policy = append(t.policy, e)
-	return nil
+	return keep(t, "policy "+string(e.Operation)+" "+e.Target+" "+e.Reason, &t.policy, e, func() error { return t.check.RecordSandboxPolicy(ctx, e) })
 }
 
 func (t *memTelemetry) RecordSandboxHealth(ctx context.Context, e audit.SandboxHealthEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("health", t.check.RecordSandboxHealth(ctx, e)); err != nil {
-		return err
-	}
-	t.health = append(t.health, e)
-	return nil
+	return keep(t, "health", &t.health, e, func() error { return t.check.RecordSandboxHealth(ctx, e) })
 }
 
 func (t *memTelemetry) RecordSandboxFinding(ctx context.Context, e audit.SandboxFindingEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("finding", t.check.RecordSandboxFinding(ctx, e)); err != nil {
-		return err
-	}
-	t.findings = append(t.findings, e)
-	return nil
+	return keep(t, "finding", &t.findings, e, func() error { return t.check.RecordSandboxFinding(ctx, e) })
 }
 
 func (t *memTelemetry) RecordSandboxWorkspace(ctx context.Context, e audit.SandboxWorkspaceEvent) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if err := t.accepted("workspace", t.check.RecordSandboxWorkspace(ctx, e)); err != nil {
-		return err
+	return keep(t, "workspace", &t.workspace, e, func() error { return t.check.RecordSandboxWorkspace(ctx, e) })
+}
+
+func (t *memTelemetry) phases(name string) []audit.SandboxPhase {
+	var out []audit.SandboxPhase
+	for _, e := range where(&t.mu, &t.lifecycle, func(e audit.SandboxLifecycleEvent) bool { return e.Sandbox.Name == name }) {
+		out = append(out, e.Sandbox.Phase)
 	}
-	t.workspace = append(t.workspace, e)
-	return nil
+	return out
+}
+
+// removed reports a rule_remove record of target with reason.
+func (t *memTelemetry) removed(target, reason string) bool {
+	return len(where(&t.mu, &t.policy, func(p audit.SandboxPolicyEvent) bool {
+		return p.Operation == audit.SandboxPolicyRuleRemove && p.Target == target && p.Reason == reason
+	})) > 0
+}
+
+func (t *memTelemetry) findingsOf(kind audit.SandboxFindingKind) []audit.SandboxFindingEvent {
+	return where(&t.mu, &t.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == kind })
 }
 
 // buildingRuntime admits every sandbox record and builds its generated
@@ -405,52 +429,34 @@ func (buildingRuntime) RecordRuntimeV8GeneratedMetricBatch(_ context.Context, me
 	return nil
 }
 
-func (t *memTelemetry) phases(name string) []audit.SandboxPhase {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	var out []audit.SandboxPhase
-	for _, e := range t.lifecycle {
-		if e.Sandbox.Name == name {
-			out = append(out, e.Sandbox.Phase)
-		}
-	}
-	return out
-}
-
-// fakePersister records always decisions.
+// fakePersister records always decisions and, like the daemon's persister,
+// writes them into the configuration (config.yaml, then a synchronous reload).
 type fakePersister struct {
 	mu           sync.Mutex
 	allow, block []string
-	err          error
-	// save, when set, writes a decision into the configuration, as the
-	// daemon's persister does (config.yaml, then a synchronous reload).
-	save func(block bool, host string)
+	save         func(block bool, host string)
 }
 
 func (p *fakePersister) AllowAlways(_ context.Context, host string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.err != nil {
-		return p.err
-	}
 	p.allow = append(p.allow, host)
-	if p.save != nil {
-		p.save(false, host)
-	}
+	p.save(false, host)
 	return nil
 }
 
 func (p *fakePersister) BlockAlways(_ context.Context, host string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.err != nil {
-		return p.err
-	}
 	p.block = append(p.block, host)
-	if p.save != nil {
-		p.save(true, host)
-	}
+	p.save(true, host)
 	return nil
+}
+
+func (p *fakePersister) allowed() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.allow)
 }
 
 // fakeWatch lets tests push stream events to a sandbox's watcher.
@@ -459,15 +465,10 @@ type fakeWatch struct {
 	handlers map[string]func(stream.Event)
 	ends     map[string]chan error
 	started  chan string
-	// gateways are the connections the watches ran on, in order.
-	gateways []*Gateway
-	// settle waits for what an event handed off (the draft poll of a
-	// draft or connected event), so push returns once it is done.
+	gateways []*Gateway // the connections the watches ran on, in order
+	// settle waits for what an event handed off (the draft poll of a draft
+	// or connected event), so push returns once it is done.
 	settle func(sandbox string)
-}
-
-func newFakeWatch() *fakeWatch {
-	return &fakeWatch{handlers: map[string]func(stream.Event){}, ends: map[string]chan error{}, started: make(chan string, 64)}
 }
 
 func (w *fakeWatch) watch(ctx context.Context, gw *Gateway, sandbox, _ string, _ func(string) error, handle func(stream.Event)) error {
@@ -486,7 +487,6 @@ func (w *fakeWatch) watch(ctx context.Context, gw *Gateway, sandbox, _ string, _
 	}
 }
 
-// handler is the sandbox's current event handler.
 func (w *fakeWatch) handler(t *testing.T, sandbox string) func(stream.Event) {
 	t.Helper()
 	w.mu.Lock()
@@ -500,10 +500,9 @@ func (w *fakeWatch) handler(t *testing.T, sandbox string) func(stream.Event) {
 
 func (w *fakeWatch) push(t *testing.T, sandbox string, ev stream.Event) {
 	t.Helper()
-	h := w.handler(t, sandbox)
 	ev.Sandbox = sandbox
-	h(ev)
-	if w.settle != nil && (ev.Kind == stream.KindDraft || ev.Kind == stream.KindConnected) {
+	w.handler(t, sandbox)(ev)
+	if ev.Kind == stream.KindDraft || ev.Kind == stream.KindConnected {
 		w.settle(sandbox)
 	}
 }
@@ -537,47 +536,15 @@ func (w *fakeWatch) waitStarted(t *testing.T, sandbox string) {
 type fakeDNS struct {
 	mu      sync.Mutex
 	answers map[string][]string
-	// rebinds switch a name's answers once it was looked up so often.
-	rebinds map[string]rebind
+	rebinds map[string]rebind // switch a name's answers after n lookups
 	calls   map[string]int
-	// hang makes lookups of a name wait for their context.
-	hang map[string]bool
-	// errs makes lookups of a name fail with the error.
-	errs map[string]error
-}
-
-// setErr makes lookups of host fail with err (nil: answer again).
-func (d *fakeDNS) setErr(host string, err error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.errs == nil {
-		d.errs = map[string]error{}
-	}
-	if err == nil {
-		delete(d.errs, host+".")
-		return
-	}
-	d.errs[host+"."] = err
-}
-
-// setHang makes lookups of host wait until their context ends (on) or
-// answer again (off).
-func (d *fakeDNS) setHang(host string, on bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.hang == nil {
-		d.hang = map[string]bool{}
-	}
-	d.hang[host+"."] = on
+	hang    map[string]bool  // lookups wait for their context
+	errs    map[string]error // lookups fail with the error
 }
 
 type rebind struct {
 	after int
 	addrs []string
-}
-
-func newFakeDNS() *fakeDNS {
-	return &fakeDNS{answers: map[string][]string{}, rebinds: map[string]rebind{}, calls: map[string]int{}}
 }
 
 // set makes host resolve to addrs; none makes it fail to resolve.
@@ -594,6 +561,19 @@ func (d *fakeDNS) rebindAfter(host string, n int, addrs ...string) {
 	d.rebinds[host+"."] = rebind{after: n, addrs: addrs}
 }
 
+// setErr makes lookups of host fail with err (nil: answer again).
+func (d *fakeDNS) setErr(host string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.errs[host+"."] = err
+}
+
+func (d *fakeDNS) setHang(host string, on bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.hang[host+"."] = on
+}
+
 func (d *fakeDNS) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, error) {
 	d.mu.Lock()
 	hang := d.hang[name]
@@ -604,18 +584,17 @@ func (d *fakeDNS) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, 
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.calls[name]++
 	if err := d.errs[name]; err != nil {
-		d.calls[name]++
 		return nil, err
 	}
 	addrs, ok := d.answers[name]
 	if !ok {
 		addrs = []string{"93.184.216.34"}
 	}
-	if r, ok := d.rebinds[name]; ok && d.calls[name] >= r.after {
+	if r, ok := d.rebinds[name]; ok && d.calls[name] > r.after {
 		addrs = r.addrs
 	}
-	d.calls[name]++
 	if len(addrs) == 0 {
 		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
 	}
@@ -624,6 +603,76 @@ func (d *fakeDNS) LookupIPAddr(ctx context.Context, name string) ([]net.IPAddr, 
 		out = append(out, net.IPAddr{IP: net.ParseIP(a)})
 	}
 	return out, nil
+}
+
+// fakeGuard records guard runs; a running guard can be made to detect.
+type fakeGuard struct {
+	mu      sync.Mutex
+	running map[string]nestguard.Options
+	runs    []nestguard.Options
+}
+
+func (g *fakeGuard) run(ctx context.Context, opts nestguard.Options) error {
+	g.mu.Lock()
+	g.runs = append(g.runs, opts)
+	if opts.Once { // the final pass: one sweep, no watch
+		g.mu.Unlock()
+		return nil
+	}
+	g.running[opts.Root] = opts
+	g.mu.Unlock()
+	<-ctx.Done()
+	g.mu.Lock()
+	delete(g.running, opts.Root)
+	g.mu.Unlock()
+	return nil
+}
+
+// finals are the final passes that ran over root.
+func (g *fakeGuard) finals(root string) []nestguard.Options {
+	return where(&g.mu, &g.runs, func(o nestguard.Options) bool { return o.Once && o.Root == root })
+}
+
+func (g *fakeGuard) active(root string) (nestguard.Options, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	o, ok := g.running[root]
+	return o, ok
+}
+
+func (g *fakeGuard) waitActive(t *testing.T, root string, want bool) nestguard.Options {
+	t.Helper()
+	var o nestguard.Options
+	eventually(t, fmt.Sprintf("guard active for %s = %t", root, want), func() bool {
+		var ok bool
+		o, ok = g.active(root)
+		return ok == want
+	})
+	return o
+}
+
+// fakeProxy is a ProxyControl that records decider swaps and rechecks.
+type fakeProxy struct {
+	mu      sync.Mutex
+	decider *egress.Decider
+	sets    int
+	counter *egress.Counter
+}
+
+func (p *fakeProxy) SetDecider(d *egress.Decider) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.decider, p.sets = d, p.sets+1
+	return nil
+}
+
+func (p *fakeProxy) Recheck(string) int       { return 0 }
+func (p *fakeProxy) Counter() *egress.Counter { return p.counter }
+
+func (p *fakeProxy) swaps() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sets
 }
 
 // harnessEnv is a fixture tying a manager to the fake gateway.
@@ -656,12 +705,10 @@ type harnessEnv struct {
 }
 
 // daemonOptions place a harnessEnv's manager on a gateway, as one
-// DefenseClaw daemon (data dir) of several.
+// DefenseClaw daemon (data dir) of several. Zero values take a new gateway,
+// testOwner, testIngressPort, testEgressPort and 18970.
 type daemonOptions struct {
-	// fake is the OpenShell gateway (default: a new one).
-	fake *openshelltest.Fake
-	// owner and the ports default to testOwner, testIngressPort,
-	// testEgressPort and 18970.
+	fake                             *openshelltest.Fake
 	owner                            string
 	ingressPort, egressPort, apiPort int
 }
@@ -686,30 +733,10 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	if d.fake == nil {
 		d.fake = openshelltest.New()
 	}
-	e := &harnessEnv{t: t, fake: d.fake, dataDir: t.TempDir(),
-		owner: d.owner, ingressPort: d.ingressPort, egressPort: d.egressPort, apiPort: d.apiPort}
-	if e.owner == "" {
-		e.owner = testOwner
-	}
-	if e.ingressPort == 0 {
-		e.ingressPort = testIngressPort
-	}
-	if e.egressPort == 0 {
-		e.egressPort = testEgressPort
-	}
-	if e.apiPort == 0 {
-		e.apiPort = 18970
-	}
+	e := &harnessEnv{t: t, fake: d.fake, dataDir: t.TempDir(), owner: orDefault(d.owner, testOwner),
+		ingressPort: orDefault(d.ingressPort, testIngressPort), egressPort: orDefault(d.egressPort, testEgressPort), apiPort: orDefault(d.apiPort, 18970)}
 	e.client = e.fake.Client(openshell.ClientOptions{PollInterval: time.Millisecond, ReadyTimeout: 5 * time.Second})
-	project := filepath.Join(t.TempDir(), "myapp")
-	if err := os.MkdirAll(project, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	real, err := filepath.EvalSymlinks(project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.project = real
+	e.project = e.otherProject("myapp")
 	cfg := &config.Config{DataDir: e.dataDir}
 	cfg.Gateway.APIPort = e.apiPort
 	cfg.Guardrail.Port = 4000
@@ -720,20 +747,18 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	}
 	e.cfg = cfg
 	store, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(e.dataDir), sandboxauth.WithRefreshInterval(0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	e.store = store
 	e.images = &fakeImages{rec: image.Record{
 		Tag: "defenseclaw/sandbox-claudecode:test", ImageID: "sha256:" + strings.Repeat("a", 64),
 		HarnessVersion: "2.1.156", HookContract: claudeContract(t), HookFireVerified: true,
 		NetworkBinaries: []image.Binary{{Name: "claude", Realpath: testClaudeBin}},
 	}}
-	e.ws = newFakeWorkspace()
+	e.ws = &fakeWorkspace{snapshots: map[string]*workspace.SnapshotRecord{}}
 	e.importer = &fakeImporter{c: e.client}
 	e.tel = newMemTelemetry()
 	t.Cleanup(func() {
-		if refused := e.tel.refusedRecords(); len(refused) > 0 {
+		if refused := where(&e.tel.mu, &e.tel.refused, nil); len(refused) > 0 {
 			t.Errorf("the audit recorder refused %d sandbox record(s):\n%s", len(refused), strings.Join(refused, "\n"))
 		}
 	})
@@ -746,13 +771,21 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 			}
 		})
 	}}
-	e.watch = newFakeWatch()
-	e.watch.settle = e.waitTriage
-	e.dns = newFakeDNS()
-	e.guard = newFakeGuard()
+	e.watch = &fakeWatch{handlers: map[string]func(stream.Event){}, ends: map[string]chan error{}, started: make(chan string, 64), settle: e.waitTriage}
+	e.dns = &fakeDNS{answers: map[string][]string{}, rebinds: map[string]rebind{}, calls: map[string]int{}, hang: map[string]bool{}, errs: map[string]error{}}
+	e.guard = &fakeGuard{running: map[string]nestguard.Options{}}
 	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1"}
 	e.m = e.newManager()
 	return e
+}
+
+// orDefault returns v, or def when v is its zero value.
+func orDefault[T comparable](v, def T) T {
+	var zero T
+	if v == zero {
+		return def
+	}
+	return v
 }
 
 // waitTriage waits until no draft poll of the sandbox runs (triageNow).
@@ -813,13 +846,7 @@ func (e *harnessEnv) run() {
 	m := e.m
 	go func() { _ = m.Run(ctx); close(e.done) }()
 	e.t.Cleanup(e.stop)
-	deadline := time.Now().Add(5 * time.Second)
-	for m.running() == nil {
-		if time.Now().After(deadline) {
-			e.t.Fatal("manager did not start")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	eventually(e.t, "the manager to start", func() bool { return m.running() != nil })
 }
 
 func (e *harnessEnv) stop() {
@@ -830,42 +857,130 @@ func (e *harnessEnv) stop() {
 	}
 }
 
+// restartDaemon replaces the manager with a new daemon process over the same
+// data dir and gateway, and waits for its startup reconcile.
+func (e *harnessEnv) restartDaemon() {
+	e.t.Helper()
+	e.stop()
+	e.m = e.newManager()
+	e.run()
+	eventually(e.t, "startup reconcile", func() bool {
+		st, _ := e.m.Status(context.Background())
+		return !st.LastReconcile.IsZero()
+	})
+}
+
+// fakeClock makes the manager's clock start and returns how to move it.
+func (e *harnessEnv) fakeClock(start time.Time) (now func() time.Time, advance func(time.Duration)) {
+	var mu sync.Mutex
+	now = func() time.Time { mu.Lock(); defer mu.Unlock(); return start }
+	e.m.opts.Now, e.m.now = now, now
+	return now, func(d time.Duration) { mu.Lock(); start = start.Add(d); mu.Unlock() }
+}
+
+// tryCreate is Create with the harness and project filled in.
+func (e *harnessEnv) tryCreate(req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
+	req.Harness = orDefault(req.Harness, "claudecode")
+	req.Project = orDefault(req.Project, e.project)
+	return e.m.Create(context.Background(), req)
+}
+
 func (e *harnessEnv) create(req sandboxapi.CreateRequest) *sandboxapi.Sandbox {
 	e.t.Helper()
-	if req.Harness == "" {
-		req.Harness = "claudecode"
-	}
-	if req.Project == "" {
-		req.Project = e.project
-	}
-	sb, err := e.m.Create(context.Background(), req)
+	sb, err := e.tryCreate(req)
 	if err != nil {
 		e.t.Fatalf("Create: %v", err)
 	}
 	return sb
 }
 
-// otherProject makes another project folder, for a second live-mounted
-// sandbox (two sandboxes never mount one folder).
+// otherProject makes another project folder (two sandboxes never mount one
+// folder live).
 func (e *harnessEnv) otherProject(name string) string {
 	e.t.Helper()
 	dir := filepath.Join(e.t.TempDir(), name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		e.t.Fatal(err)
-	}
+	must(e.t, os.MkdirAll(dir, 0o755))
 	real, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		e.t.Fatal(err)
-	}
+	must(e.t, err)
 	return real
+}
+
+// live creates a sandbox on the running manager and waits for its watcher.
+func (e *harnessEnv) live(req sandboxapi.CreateRequest) *sandboxapi.Sandbox {
+	e.t.Helper()
+	if e.cancel == nil {
+		e.run()
+	}
+	sb := e.create(req)
+	e.watch.waitStarted(e.t, sb.Name)
+	return sb
+}
+
+// liveEnv is a running manager with one watched sandbox of the name.
+func liveEnv(t *testing.T, name string, edit func(*config.Config)) *harnessEnv {
+	t.Helper()
+	e := newEnv(t, edit)
+	e.live(sandboxapi.CreateRequest{Name: name})
+	return e
+}
+
+func (e *harnessEnv) stopBox(name string) {
+	e.t.Helper()
+	if _, err := e.m.Stop(context.Background(), name); err != nil {
+		e.t.Fatalf("Stop %s: %v", name, err)
+	}
+}
+
+func (e *harnessEnv) startBox(name string, req sandboxapi.StartRequest) {
+	e.t.Helper()
+	if _, err := e.m.Start(context.Background(), name, req); err != nil {
+		e.t.Fatalf("Start %s: %v", name, err)
+	}
+}
+
+func (e *harnessEnv) deleteBox(name string, req sandboxapi.DeleteRequest) {
+	e.t.Helper()
+	if _, err := e.m.Delete(context.Background(), name, req); err != nil {
+		e.t.Fatalf("Delete %s: %v", name, err)
+	}
+}
+
+func (e *harnessEnv) get(name string) *sandboxapi.Sandbox {
+	e.t.Helper()
+	sb, err := e.m.Get(context.Background(), name)
+	if err != nil {
+		e.t.Fatalf("Get %s: %v", name, err)
+	}
+	return sb
+}
+
+// boxOf is the manager's box of the sandbox.
+func (e *harnessEnv) boxOf(name string) *box {
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	return e.m.boxes[name]
+}
+
+func (e *harnessEnv) binding(name string) sandboxauth.Binding {
+	e.t.Helper()
+	b, err := e.store.Lookup(name)
+	must(e.t, err)
+	return b
+}
+
+// ingressToken is the binding token the sandbox's ingress provider carries.
+func (e *harnessEnv) ingressToken(name string) string {
+	p, _ := e.client.GetProvider(context.Background(), name+"-ingress")
+	if p == nil {
+		return ""
+	}
+	return p.Spec.Credentials[openshell.EnvSandboxToken]
 }
 
 func (e *harnessEnv) providers() []string {
 	e.t.Helper()
 	list, err := e.client.ListProviders(context.Background())
-	if err != nil {
-		e.t.Fatal(err)
-	}
+	must(e.t, err)
 	var out []string
 	for _, p := range list {
 		out = append(out, p.Name)
@@ -873,22 +988,242 @@ func (e *harnessEnv) providers() []string {
 	return out
 }
 
-func wantCode(t *testing.T, err error, code string) *sandboxapi.Error {
-	t.Helper()
-	var e *sandboxapi.Error
-	if !errors.As(err, &e) || e.Code != code {
-		t.Fatalf("error = %v, want code %s", err, code)
+// events are the sandbox's feed events of kind with reason ("" matches any).
+func (e *harnessEnv) events(sandbox, kind, reason string) []sandboxapi.ActivityEvent {
+	var out []sandboxapi.ActivityEvent
+	for _, ev := range e.m.ActivitySince(0, sandbox) {
+		if (kind == "" || ev.Kind == kind) && (reason == "" || ev.Reason == reason) {
+			out = append(out, ev)
+		}
 	}
-	return e
+	return out
 }
 
-func eventually(t *testing.T, what string, cond func() bool) {
+// ocsf hands the sandbox one OpenShell shorthand line recorded at.
+func (e *harnessEnv) ocsf(sandbox, line string, at time.Time) {
+	e.t.Helper()
+	e.m.ocsfEvent(context.Background(), e.boxOf(sandbox), *parseOCSF(e.t, line), at)
+}
+
+func parseOCSF(t *testing.T, line string) *ocsf.Record {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(2 * time.Millisecond)
+	rec, err := ocsf.Parse(line)
+	if err != nil {
+		t.Fatalf("parse %q: %v", line, err)
 	}
+	return &rec
+}
+
+// approvedRules is a copy of the sandbox's recorded rule approvers.
+func (e *harnessEnv) approvedRules(sandbox string) map[string]string {
+	e.m.mu.Lock()
+	defer e.m.mu.Unlock()
+	return maps.Clone(e.m.boxes[sandbox].rec.ApprovedRules)
+}
+
+// draft notifies the sandbox's watcher of new draft chunks.
+func (e *harnessEnv) draft(sandbox string) {
+	e.watch.push(e.t, sandbox, stream.Event{Kind: stream.KindDraft})
+}
+
+// chunk is a draft chunk in the shape OpenShell 0.1.1 drafts for a denied
+// direct connection (allow_<host>_<port>, no protocol, advisor provenance).
+func chunk(rule, host string, port uint32) types.PolicyChunk {
+	return types.PolicyChunk{
+		RuleName: rule, ReviewToken: "rt-" + rule, Binary: "/usr/bin/curl",
+		ProposedRule: &types.NetworkPolicyRule{
+			Name:      rule,
+			Endpoints: []types.PolicyNetworkEndpoint{{Host: host, Port: port, Ports: []uint32{port}, AdvisorProposed: true}},
+			Binaries:  []types.PolicyNetworkBinary{{Path: "/usr/bin/curl"}},
+		},
+	}
+}
+
+// ruleFor is the rule OpenShell drafts for host:443.
+func ruleFor(host string) string {
+	return "allow_" + strings.NewReplacer(".", "_", "-", "_").Replace(host) + "_443"
+}
+
+// propose adds a draft chunk for host:443 and returns its id.
+func (e *harnessEnv) propose(sandbox, host string) string {
+	return e.addChunk(sandbox, chunk(ruleFor(host), host, 443))
+}
+
+func (e *harnessEnv) addChunk(sandbox string, c types.PolicyChunk) string {
+	return e.fake.AddDraftChunk(openshell.DefaultWorkspace, sandbox, c)
+}
+
+func (e *harnessEnv) chunkStatus(sandbox, id string) string {
+	c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sandbox, id)
+	return c.Status
+}
+
+func (e *harnessEnv) waitChunk(sandbox, id, status string) {
+	e.t.Helper()
+	eventually(e.t, "chunk "+id+" "+status, func() bool { return e.chunkStatus(sandbox, id) == status })
+}
+
+// approveRule has triage approve a rule to host:443 in the running sandbox.
+func (e *harnessEnv) approveRule(sandbox, host string) string {
+	e.t.Helper()
+	id := e.propose(sandbox, host)
+	e.draft(sandbox)
+	e.waitChunk(sandbox, id, "approved")
+	return ruleFor(host)
+}
+
+func (e *harnessEnv) waitAsks(sandbox string, n int) []sandboxapi.Approval {
+	e.t.Helper()
+	var asks []sandboxapi.Approval
+	eventually(e.t, fmt.Sprintf("%d asks", n), func() bool {
+		asks, _ = e.m.Approvals(context.Background(), sandbox)
+		return len(asks) == n
+	})
+	return asks
+}
+
+func (e *harnessEnv) decide(id string, d sandboxapi.ApprovalDecision) error {
+	_, err := e.m.DecideApproval(context.Background(), id, d)
+	return err
+}
+
+func (e *harnessEnv) hasRule(sandbox, rule string) bool {
+	pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sandbox)
+	_, ok := pol.NetworkPolicies[rule]
+	return ok
+}
+
+// decideEgress is the proxy's verdict for the sandbox's current principal,
+// which carries the sandbox's own decider.
+func (e *harnessEnv) decideEgress(name, host string) egress.Decision {
+	e.t.Helper()
+	p, ok := e.m.creds.Lookup(e.binding(name).ID)
+	if !ok || p.Decider == nil {
+		e.t.Fatalf("no principal with a decider for %s", name)
+	}
+	return p.Decider.Decide(p, host, 443)
+}
+
+// liveProxy is a real egress proxy serving the manager's sandbox
+// credentials. Every allowed dial goes to a local listener that holds the
+// connection.
+type liveProxy struct {
+	addr string
+	e    *harnessEnv
+}
+
+func startLiveProxy(t *testing.T, e *harnessEnv) *liveProxy {
+	t.Helper()
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	must(t, err)
+	t.Cleanup(func() { _ = upstream.Close() })
+	go func() {
+		for {
+			c, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, c); _ = c.Close() }()
+		}
+	}()
+	d, err := e.m.Decider()
+	must(t, err)
+	var dialer net.Dialer
+	p, err := egress.New(egress.Options{
+		Auth: e.m.EgressAuthenticator(), Decider: d, Resolver: e.dns,
+		Dialer: dialerFunc(func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp", upstream.Addr().String())
+		}),
+	})
+	must(t, err)
+	e.m.AttachProxy(p)
+	ln, err := egress.Listen("127.0.0.1:0")
+	must(t, err)
+	go func() { _ = p.Serve(ln) }()
+	t.Cleanup(func() { _ = p.Close() })
+	return &liveProxy{addr: ln.Addr().String(), e: e}
+}
+
+type dialerFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+func (f dialerFunc) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	return f(ctx, network, address)
+}
+
+// send sends a CONNECT for sandbox's credential and returns the connection
+// (closed at cleanup), its reader and the response head.
+func (lp *liveProxy) send(t *testing.T, sandbox, target string) (net.Conn, *bufio.Reader, *http.Response) {
+	t.Helper()
+	cred := lp.e.boxOf(sandbox).cred
+	conn, err := net.DialTimeout("tcp", lp.addr, 5*time.Second)
+	must(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	auth := base64.StdEncoding.EncodeToString([]byte(cred.Username + ":" + cred.Password))
+	_, err = io.WriteString(conn, "CONNECT "+target+" HTTP/1.1\r\nHost: "+target+"\r\nProxy-Authorization: Basic "+auth+"\r\n\r\n")
+	must(t, err)
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("CONNECT %s: %v", target, err)
+	}
+	return conn, br, resp
+}
+
+// open establishes a CONNECT tunnel for sandbox's credential.
+func (lp *liveProxy) open(t *testing.T, sandbox, target string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, br, resp := lp.send(t, sandbox, target)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s CONNECT %s = %d", sandbox, target, resp.StatusCode)
+	}
+	return conn, br
+}
+
+// tunnelOpen reports whether the proxy still holds a tunnel open: a read
+// waits for bytes instead of ending.
+func tunnelOpen(conn net.Conn, br *bufio.Reader) bool {
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	_, err := br.ReadByte()
+	return errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// connect sends a CONNECT for sandbox's credential and returns the status
+// and, for a refusal, the block body.
+func (lp *liveProxy) connect(t *testing.T, sandbox, target string) (int, egress.BlockResponse) {
+	t.Helper()
+	conn, _, resp := lp.send(t, sandbox, target)
+	defer conn.Close()
+	defer resp.Body.Close()
+	var body egress.BlockResponse
+	if resp.StatusCode == http.StatusForbidden {
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("CONNECT %s: block body: %v", target, err)
+		}
+	}
+	return resp.StatusCode, body
+}
+
+// teamPack is a custom pack with its own block and allow lists and an extra
+// port.
+const teamPack = `version: 1
+name: team
+network: {mode: open}
+approvals: {mode: auto}
+egress:
+  block: ["*.paste.example"]
+  allow: [webhook.site]
+  ports: [443, 8443]
+workspace: {mode: mount}
+harness: {yolo: true}
+mcp: {import: true, host_ports: false}
+hooks: {fail_mode: closed}
+`
+
+// writeTeamPack writes teamPack into a new pack directory.
+func writeTeamPack(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "team", "pack.yaml"), teamPack)
+	return dir
 }

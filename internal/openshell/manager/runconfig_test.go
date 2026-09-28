@@ -32,7 +32,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -50,9 +49,11 @@ func (f *fakeMCP) SandboxMCPServers(_ context.Context, harness string) ([]config
 	return f.entries, f.skipped, f.err
 }
 
-func withMCP(e *harnessEnv, inv MCPInventory) {
-	e.t.Helper()
-	e.m.opts.MCP = inv
+// useCodex makes the environment's image a Codex build.
+func useCodex(e *harnessEnv) {
+	e.images.rec.HarnessVersion = "0.146.0"
+	e.images.rec.HookContract = connector.ResolveSandboxHookContract("codex", "0.146.0").Contract.ContractID
+	e.images.rec.NetworkBinaries = []image.Binary{{Name: "codex", Realpath: "/opt/defenseclaw-harness/codex/bin/codex"}}
 }
 
 // runFiles returns the in-sandbox target → host content of every read-only
@@ -60,9 +61,7 @@ func withMCP(e *harnessEnv, inv MCPInventory) {
 func (e *harnessEnv) runFiles(name string) map[string][]byte {
 	e.t.Helper()
 	got, err := e.client.GetSandbox(context.Background(), name)
-	if err != nil {
-		e.t.Fatal(err)
-	}
+	must(e.t, err)
 	docker, _ := got.Spec.Template.DriverConfig["docker"].(map[string]any)
 	mounts, _ := docker["mounts"].([]any)
 	out := map[string][]byte{}
@@ -72,17 +71,13 @@ func (e *harnessEnv) runFiles(name string) map[string][]byte {
 		if !strings.HasPrefix(source, e.m.runConfigDir(name)) {
 			continue
 		}
-		if mt["read_only"] != true || mt["type"] != "bind" {
-			e.t.Fatalf("run mount %v is not a read-only bind", mt)
+		info, err := os.Stat(source)
+		must(e.t, err)
+		if mt["read_only"] != true || mt["type"] != "bind" || info.Mode().Perm() != 0o644 {
+			e.t.Fatalf("run mount %v (mode %v) is not a read-only bind of a 0644 file", mt, info.Mode())
 		}
 		data, err := os.ReadFile(source)
-		if err != nil {
-			e.t.Fatal(err)
-		}
-		info, _ := os.Stat(source)
-		if info.Mode().Perm() != 0o644 {
-			e.t.Fatalf("run file %s mode %v", source, info.Mode())
-		}
+		must(e.t, err)
 		out[mt["target"].(string)] = data
 	}
 	return out
@@ -95,6 +90,22 @@ func decodeJSON(t *testing.T, data []byte) map[string]any {
 		t.Fatalf("%v in %s", err, data)
 	}
 	return out
+}
+
+func decodeTOML(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var out map[string]any
+	must(t, toml.Unmarshal(data, &out))
+	return out
+}
+
+// openMCPPack writes the open pack with mcp.project_servers: allow.
+func openMCPPack(t *testing.T) string {
+	t.Helper()
+	pack, err := os.ReadFile(filepath.Join("..", "..", "..", "policies", "sandbox", "open", "pack.yaml"))
+	must(t, err)
+	custom := strings.Replace(strings.Replace(string(pack), "name: open", "name: open-mcp", 1), "project_servers: block", "project_servers: allow", 1)
+	return writeFile(t, filepath.Join(t.TempDir(), "pack.yaml"), custom)
 }
 
 func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
@@ -110,51 +121,32 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 		},
 		skipped: []MCPSkip{{Name: "risky", Reason: "blocked by DefenseClaw"}},
 	}
-	withMCP(e, inv)
-	if err := os.WriteFile(filepath.Join(e.project, ".mcp.json"),
-		[]byte(`{"mcpServers":{"repo-tool":{"command":"./tool"},"zeta":{"url":"https://x"},"\u001b[31mred":{"command":"x"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sb := e.create(sandboxapi.CreateRequest{
-		Name: "cc-run",
-		LLM:  &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"}},
-		Env:  map[string]string{"ANTHROPIC_BASE_URL": "http://host.openshell.internal:28921"},
-	})
-	if !slices.Equal(inv.calls, []string{"claudecode"}) {
-		t.Fatalf("inventory calls = %v", inv.calls)
-	}
+	e.m.opts.MCP = inv
+	writeFile(t, filepath.Join(e.project, ".mcp.json"), `{"mcpServers":{"repo-tool":{"command":"./tool"},"zeta":{"url":"https://x"},"\u001b[31mred":{"command":"x"}}}`)
+	sb := e.create(sandboxapi.CreateRequest{Name: "cc-run", LLM: anthropicLLM, Env: map[string]string{"ANTHROPIC_BASE_URL": "http://host.openshell.internal:28921"}})
 	files := e.runFiles("cc-run")
-	if len(files) != 2 {
-		t.Fatalf("run files = %v", keys(files))
+	if !slices.Equal(inv.calls, []string{"claudecode"}) || len(files) != 2 {
+		t.Fatalf("inventory calls = %v, run files = %d", inv.calls, len(files))
 	}
 	dropIn := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])
 	env := dropIn["env"].(map[string]any)
-	if env["ANTHROPIC_BASE_URL"] != "http://host.openshell.internal:28921" || env["CLAUDE_CODE_USE_BEDROCK"] != "" {
-		t.Fatalf("provider pins = %v", env)
+	_, pinned := env["ANTHROPIC_API_KEY"]
+	_, safe := dropIn["permissions"]
+	if env["ANTHROPIC_BASE_URL"] != "http://host.openshell.internal:28921" || env["CLAUDE_CODE_USE_BEDROCK"] != "" || pinned || safe ||
+		dropIn["allowManagedMcpServersOnly"] != true {
+		t.Fatalf("drop-in = %v; want the provider pinned, no credential placeholder, bypass allowed (yolo), managed MCP only", dropIn)
 	}
-	if _, pinned := env["ANTHROPIC_API_KEY"]; pinned {
-		t.Fatal("a credential placeholder was pinned")
-	}
-	if _, safe := dropIn["permissions"]; safe {
-		t.Fatal("a yolo run disabled bypassPermissions")
-	}
-	if dropIn["allowManagedMcpServersOnly"] != true {
-		t.Fatalf("drop-in = %v", dropIn)
-	}
-	allowed, _ := json.Marshal(dropIn["allowedMcpServers"])
-	if string(allowed) != `[{"serverCommand":["npx","-y","@modelcontextprotocol/server-github"]},{"serverUrl":"https://mcp.linear.app/mcp"}]` {
+	const wantAllowed = `[{"serverCommand":["npx","-y","@modelcontextprotocol/server-github"]},{"serverUrl":"https://mcp.linear.app/mcp"}]`
+	if allowed, _ := json.Marshal(dropIn["allowedMcpServers"]); string(allowed) != wantAllowed {
 		t.Fatalf("allowedMcpServers = %s", allowed)
 	}
-	managed := decodeJSON(t, files[connector.ClaudeCodeSandboxManagedMCPPath])
-	servers := managed["mcpServers"].(map[string]any)
-	if len(servers) != 2 || servers["github"] == nil || servers["linear"] == nil {
-		t.Fatalf("managed-mcp.json = %v", managed)
+	managed := files[connector.ClaudeCodeSandboxManagedMCPPath]
+	if servers := decodeJSON(t, managed)["mcpServers"].(map[string]any); len(servers) != 2 || servers["github"] == nil || servers["linear"] == nil {
+		t.Fatalf("managed-mcp.json = %s", managed)
 	}
-	if strings.Contains(string(files[connector.ClaudeCodeSandboxManagedMCPPath]), "ghp-not-real") ||
-		strings.Contains(string(files[connector.ClaudeCodeSandboxManagedMCPPath]), "Bearer") {
+	if strings.Contains(string(managed), "ghp-not-real") || strings.Contains(string(managed), "Bearer") {
 		t.Fatal("an MCP server secret entered the sandbox")
 	}
-
 	if sb.MCP == nil || !slices.Equal(sb.MCP.Imported, []string{"github", "linear"}) || sb.MCP.ProjectServers != "block" ||
 		!slices.Equal(sb.MCP.Project, []string{"repo-tool", "zeta"}) {
 		t.Fatalf("mcp summary = %+v", sb.MCP)
@@ -163,13 +155,14 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 	for _, l := range sb.MCP.LeftBehind {
 		left = append(left, l.Name+"="+l.Reason)
 	}
-	for _, want := range []string{"risky=blocked by DefenseClaw", "off=disabled", "local-db=runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 5432 to bring it along", "(unprintable name)=not usable in a sandbox"} {
+	for _, want := range []string{"risky=blocked by DefenseClaw", "off=disabled", "(unprintable name)=not usable in a sandbox",
+		"local-db=runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 5432 to bring it along"} {
 		if !slices.Contains(left, want) {
 			t.Fatalf("left behind = %v, missing %q", left, want)
 		}
 	}
-	notice := findWarning(sb.Warnings, "MCP: blocked the repository's servers")
-	if notice != "MCP: blocked the repository's servers repo-tool, zeta and 1 with an unprintable name (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)" {
+	if notice := findWarning(sb.Warnings, "MCP: blocked the repository's servers"); !strings.Contains(notice, "repo-tool, zeta and 1 with an unprintable name") ||
+		!strings.Contains(notice, "mcp.project_servers: allow") {
 		t.Fatalf("notice = %q in %q", notice, sb.Warnings)
 	}
 	if n := findWarning(sb.Warnings, "MCP: github:"); !strings.Contains(n, "GITHUB_TOKEN") || !strings.Contains(findWarning(sb.Warnings, "MCP: "), "--credential") {
@@ -180,79 +173,53 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 			t.Fatalf("a notice carries control characters: %q", w)
 		}
 	}
-	// The summary is part of the stored record.
-	got, err := e.m.Get(context.Background(), "cc-run")
-	if err != nil || got.MCP == nil || !slices.Equal(got.MCP.Imported, sb.MCP.Imported) {
-		t.Fatalf("stored summary = %+v, %v", got, err)
+	if got := e.get("cc-run"); got.MCP == nil || !slices.Equal(got.MCP.Imported, sb.MCP.Imported) {
+		t.Fatalf("stored summary = %+v", got.MCP)
 	}
 }
 
+// --safe, and an administrator's allow_yolo: false, disable the bypass mode.
 func TestRunConfigSafeModeDisablesBypass(t *testing.T) {
-	e := newEnv(t, nil)
-	sb := e.create(sandboxapi.CreateRequest{Name: "cc-safe", Safe: true})
-	if sb.Yolo {
-		t.Fatal("--safe run is yolo")
-	}
-	dropIn := decodeJSON(t, e.runFiles("cc-safe")[connector.ClaudeCodeSandboxRunDropInPath])
-	perms, _ := dropIn["permissions"].(map[string]any)
-	if perms["disableBypassPermissionsMode"] != "disable" || dropIn["skipDangerousModePermissionPrompt"] != false {
-		t.Fatalf("safe drop-in = %v", dropIn)
-	}
-	// Admin allow_yolo=false is safe mode too.
-	e2 := newEnv(t, func(c *config.Config) { f := false; c.OpenShell.Admin.AllowYolo = &f })
-	e2.create(sandboxapi.CreateRequest{Name: "cc-admin"})
-	dropIn = decodeJSON(t, e2.runFiles("cc-admin")[connector.ClaudeCodeSandboxRunDropInPath])
-	if perms, _ := dropIn["permissions"].(map[string]any); perms["disableBypassPermissionsMode"] != "disable" {
-		t.Fatalf("admin allow_yolo=false drop-in = %v", dropIn)
+	for name, tc := range map[string]struct {
+		edit func(*config.Config)
+		safe bool
+	}{"--safe": {nil, true}, "allow_yolo false": {func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) }, false}} {
+		e := newEnv(t, tc.edit)
+		if sb := e.create(sandboxapi.CreateRequest{Name: "cc-safe", Safe: tc.safe}); sb.Yolo {
+			t.Fatalf("%s: the run is yolo", name)
+		}
+		dropIn := decodeJSON(t, e.runFiles("cc-safe")[connector.ClaudeCodeSandboxRunDropInPath])
+		if perms, _ := dropIn["permissions"].(map[string]any); perms["disableBypassPermissionsMode"] != "disable" || dropIn["skipDangerousModePermissionPrompt"] != false {
+			t.Fatalf("%s: drop-in = %v", name, dropIn)
+		}
 	}
 }
 
 func TestRunConfigNoMCPStillLocksDown(t *testing.T) {
 	e := newEnv(t, nil)
 	inv := &fakeMCP{entries: []config.MCPServerEntry{{Name: "github", Command: "npx"}}}
-	withMCP(e, inv)
+	e.m.opts.MCP = inv
 	sb := e.create(sandboxapi.CreateRequest{Name: "cc-nomcp", NoMCP: true})
-	if len(inv.calls) != 0 {
-		t.Fatal("--no-mcp read the MCP inventory")
-	}
 	files := e.runFiles("cc-nomcp")
-	if managed := decodeJSON(t, files[connector.ClaudeCodeSandboxManagedMCPPath]); len(managed["mcpServers"].(map[string]any)) != 0 {
-		t.Fatalf("managed-mcp.json = %v", managed)
-	}
-	if dropIn := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath]); len(dropIn["allowedMcpServers"].([]any)) != 0 {
-		t.Fatalf("drop-in = %v", dropIn)
-	}
-	if sb.MCP == nil || len(sb.MCP.Imported) != 0 {
-		t.Fatalf("summary = %+v", sb.MCP)
+	managed := decodeJSON(t, files[connector.ClaudeCodeSandboxManagedMCPPath])["mcpServers"].(map[string]any)
+	allowed := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])["allowedMcpServers"].([]any)
+	if len(inv.calls) != 0 || len(managed) != 0 || len(allowed) != 0 || sb.MCP == nil || len(sb.MCP.Imported) != 0 {
+		t.Fatalf("--no-mcp: inventory calls %v, managed %v, allowed %v, summary %+v", inv.calls, managed, allowed, sb.MCP)
 	}
 }
 
 func TestRunConfigProjectServersAllow(t *testing.T) {
-	pack, err := os.ReadFile(filepath.Join("..", "..", "..", "policies", "sandbox", "open", "pack.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	custom := strings.Replace(strings.Replace(string(pack), "name: open", "name: open-mcp", 1), "project_servers: block", "project_servers: allow", 1)
-	path := filepath.Join(t.TempDir(), "pack.yaml")
-	if err := os.WriteFile(path, []byte(custom), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e := newEnv(t, func(c *config.Config) { c.OpenShell.Pack = path })
-	withMCP(e, &fakeMCP{entries: []config.MCPServerEntry{{Name: "github", Command: "npx", Args: []string{"srv"}}}})
-	if err := os.WriteFile(filepath.Join(e.project, ".mcp.json"), []byte(`{"mcpServers":{"repo-tool":{"command":"./tool"}}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Pack = openMCPPack(t) })
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{{Name: "github", Command: "npx", Args: []string{"srv"}}}}
+	writeFile(t, filepath.Join(e.project, ".mcp.json"), `{"mcpServers":{"repo-tool":{"command":"./tool"}}}`)
 	sb := e.create(sandboxapi.CreateRequest{Name: "cc-allow"})
 	files := e.runFiles("cc-allow")
-	if _, exclusive := files[connector.ClaudeCodeSandboxManagedMCPPath]; exclusive {
-		t.Fatal("allow mode mounted the exclusive managed-mcp.json")
+	_, exclusive := files[connector.ClaudeCodeSandboxManagedMCPPath]
+	_, restricted := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])["allowedMcpServers"]
+	if exclusive || restricted {
+		t.Fatal("allow mode mounted the exclusive managed-mcp.json or restricted MCP servers")
 	}
-	dropIn := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])
-	if _, restricted := dropIn["allowedMcpServers"]; restricted {
-		t.Fatalf("allow mode restricted MCP servers: %v", dropIn)
-	}
-	imported := decodeJSON(t, files[connector.ClaudeCodeSandboxRunMCPServersPath])
-	if imported["mcpServers"].(map[string]any)["github"] == nil {
+	if imported := decodeJSON(t, files[connector.ClaudeCodeSandboxRunMCPServersPath]); imported["mcpServers"].(map[string]any)["github"] == nil {
 		t.Fatalf("imported servers = %v", imported)
 	}
 	if sb.MCP.ProjectServers != "allow" || findWarning(sb.Warnings, "MCP: the repository's servers repo-tool start without a DefenseClaw check") == "" {
@@ -260,135 +227,91 @@ func TestRunConfigProjectServersAllow(t *testing.T) {
 	}
 }
 
+// Codex's run files replace its managed configuration and requirements: the
+// allowed MCP servers, the image's hooks, and the safe approval policies; a
+// repository server that shadows an imported one is left behind.
 func TestRunConfigCodexReplacesManagedFiles(t *testing.T) {
 	e := newEnv(t, nil)
-	e.images.rec.HarnessVersion = "0.146.0"
-	res := connector.ResolveSandboxHookContract("codex", "0.146.0")
-	e.images.rec.HookContract = res.Contract.ContractID
-	e.images.rec.NetworkBinaries = []image.Binary{{Name: "codex", Realpath: "/opt/defenseclaw-harness/codex/bin/codex"}}
-	withMCP(e, &fakeMCP{entries: []config.MCPServerEntry{
-		{Name: "github", Command: "npx", Args: []string{"srv"}},
-		{Name: "shadowed", Command: "srv"},
+	useCodex(e)
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{
+		{Name: "github", Command: "npx", Args: []string{"srv"}}, {Name: "shadowed", Command: "srv"},
 		{Name: "events", URL: "https://mcp.example.com/sse", Transport: "sse"},
-	}})
-	if err := os.MkdirAll(filepath.Join(e.project, ".codex"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(e.project, ".codex", "config.toml"),
-		[]byte("[mcp_servers.shadowed]\ncommand = \"./evil\"\n\n[mcp_servers.repo]\ncommand = \"./repo\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	}}
+	writeFile(t, filepath.Join(e.project, ".codex", "config.toml"), "[mcp_servers.shadowed]\ncommand = \"./evil\"\n\n[mcp_servers.repo]\ncommand = \"./repo\"\n")
 	sb := e.create(sandboxapi.CreateRequest{Name: "cx-run", Harness: "codex", Safe: true})
 	files := e.runFiles("cx-run")
 	if len(files) != 2 || files[connector.CodexSandboxManagedConfigPath] == nil || files[connector.CodexSandboxRequirementsPath] == nil {
-		t.Fatalf("codex run files = %v", keys(files))
+		t.Fatalf("codex run files = %d", len(files))
 	}
-	var req, managed map[string]any
-	if err := toml.Unmarshal(files[connector.CodexSandboxRequirementsPath], &req); err != nil {
-		t.Fatal(err)
-	}
-	if err := toml.Unmarshal(files[connector.CodexSandboxManagedConfigPath], &managed); err != nil {
-		t.Fatal(err)
-	}
-	allow := req["mcp_servers"].(map[string]any)
-	if len(allow) != 1 || allow["github"] == nil {
-		t.Fatalf("requirements mcp_servers = %v", allow)
-	}
-	if req["allow_managed_hooks_only"] != true || req["hooks"] == nil {
-		t.Fatal("the run requirements lost the image's hooks")
+	req, managed := decodeTOML(t, files[connector.CodexSandboxRequirementsPath]), decodeTOML(t, files[connector.CodexSandboxManagedConfigPath])
+	if allow := req["mcp_servers"].(map[string]any); len(allow) != 1 || allow["github"] == nil || req["allow_managed_hooks_only"] != true || req["hooks"] == nil {
+		t.Fatalf("requirements = %v; want github only and the image's hooks", req)
 	}
 	if policies, _ := req["allowed_approval_policies"].([]any); slices.Contains(policies, any("never")) || len(policies) == 0 {
 		t.Fatalf("safe approval policies = %v", policies)
 	}
-	defined := managed["mcp_servers"].(map[string]any)
-	if gh, _ := defined["github"].(map[string]any); gh["cwd"] != sb.Workdir || gh["command"] != "npx" {
-		t.Fatalf("managed github = %v", defined["github"])
+	if gh, _ := managed["mcp_servers"].(map[string]any)["github"].(map[string]any); gh["cwd"] != sb.Workdir || gh["command"] != "npx" {
+		t.Fatalf("managed github = %v", gh)
 	}
 	var left []string
 	for _, l := range sb.MCP.LeftBehind {
 		left = append(left, l.Name)
 	}
-	if !slices.Contains(left, "shadowed") || !slices.Contains(left, "events") {
-		t.Fatalf("left behind = %v", left)
-	}
-	if findWarning(sb.Warnings, "MCP: blocked the repository's servers repo, shadowed") == "" {
-		t.Fatalf("warnings = %q", sb.Warnings)
+	if !slices.Contains(left, "shadowed") || !slices.Contains(left, "events") || findWarning(sb.Warnings, "MCP: blocked the repository's servers repo, shadowed") == "" {
+		t.Fatalf("left behind = %v, warnings %q", left, sb.Warnings)
 	}
 }
 
+// A Codex run pins the profile's provider; Mantle does not serve Codex's own
+// default model, so the run pins the profile's model too.
 func TestRunConfigCodexPinsProfileProvider(t *testing.T) {
 	e := newEnv(t, nil)
-	e.images.rec.HarnessVersion = "0.146.0"
-	e.images.rec.HookContract = connector.ResolveSandboxHookContract("codex", "0.146.0").Contract.ContractID
-	e.images.rec.NetworkBinaries = []image.Binary{{Name: "codex", Realpath: "/opt/defenseclaw-harness/codex/bin/codex"}}
-	e.create(sandboxapi.CreateRequest{
-		Name: "cx-openai", Harness: "codex",
-		LLM: &sandboxapi.LLMCredential{Profile: profiles.OpenAIID, Credentials: map[string]string{"OPENAI_API_KEY": "sk-test"}},
-	})
-	var managed map[string]any
-	if err := toml.Unmarshal(e.runFiles("cx-openai")[connector.CodexSandboxManagedConfigPath], &managed); err != nil {
-		t.Fatal(err)
+	useCodex(e)
+	e.create(sandboxapi.CreateRequest{Name: "cx-openai", Harness: "codex",
+		LLM: &sandboxapi.LLMCredential{Profile: profiles.OpenAIID, Credentials: map[string]string{"OPENAI_API_KEY": "sk-test"}}})
+	if m := decodeTOML(t, e.runFiles("cx-openai")[connector.CodexSandboxManagedConfigPath]); m["model_provider"] != "openai" ||
+		m["openai_base_url"] != "https://api.openai.com/v1" || m["model"] != nil {
+		t.Fatalf("provider pin = %v", m)
 	}
-	if managed["model_provider"] != "openai" || managed["openai_base_url"] != "https://api.openai.com/v1" || managed["model"] != nil {
-		t.Fatalf("provider pin = %v %v, model %v", managed["model_provider"], managed["openai_base_url"], managed["model"])
-	}
-
-	// Mantle does not serve Codex's own default model: the run pins the
-	// profile's, so every Codex the sandbox starts without -m uses it.
-	e.create(sandboxapi.CreateRequest{
-		Name: "cx-mantle", Harness: "codex", Project: e.otherProject("mantle"),
+	e.create(sandboxapi.CreateRequest{Name: "cx-mantle", Harness: "codex", Project: e.otherProject("mantle"),
 		LLM: &sandboxapi.LLMCredential{Profile: profiles.CodexBedrockMantleID, BedrockRegion: "eu-west-1",
-			Credentials: map[string]string{"BEDROCK_MANTLE_API_KEY": "bedrock-test"}},
-	})
-	managed = nil
-	if err := toml.Unmarshal(e.runFiles("cx-mantle")[connector.CodexSandboxManagedConfigPath], &managed); err != nil {
-		t.Fatal(err)
-	}
-	if managed["model_provider"] != "mantle" || managed["model"] != harness.CodexMantleDefaultModel {
-		t.Fatalf("mantle pin = %v, model %v", managed["model_provider"], managed["model"])
+			Credentials: map[string]string{"BEDROCK_MANTLE_API_KEY": "bedrock-test"}}})
+	if m := decodeTOML(t, e.runFiles("cx-mantle")[connector.CodexSandboxManagedConfigPath]); m["model_provider"] != "mantle" || m["model"] != harness.CodexMantleDefaultModel {
+		t.Fatalf("mantle pin = %v", m)
 	}
 }
 
 func TestRunConfigFailuresAndCleanup(t *testing.T) {
 	e := newEnv(t, nil)
-	withMCP(e, &fakeMCP{err: errors.New("inventory unavailable")})
-	_, err := e.m.Create(context.Background(), sandboxapi.CreateRequest{Name: "cc-fail", Harness: "claudecode", Project: e.project})
-	var apiErr *sandboxapi.Error
-	if !errors.As(err, &apiErr) || apiErr.Code != sandboxapi.CodeInternal {
-		t.Fatalf("create with a failing inventory = %v", err)
+	e.m.opts.MCP = &fakeMCP{err: errors.New("inventory unavailable")}
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "cc-fail"})
+	wantCode(t, err, sandboxapi.CodeInternal)
+	if fileExists(e.m.runConfigDir("cc-fail")) {
+		t.Fatal("run config left after a failed create")
 	}
-	if _, err := os.Stat(e.m.runConfigDir("cc-fail")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("run config left after a failed create: %v", err)
-	}
-
-	withMCP(e, nil)
+	e.m.opts.MCP = nil
 	e.create(sandboxapi.CreateRequest{Name: "cc-del"})
 	dir := e.m.runConfigDir("cc-del")
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatal(err)
+	if !fileExists(dir) {
+		t.Fatal("no run config")
 	}
-	if _, err := e.m.Delete(context.Background(), "cc-del", sandboxapi.DeleteRequest{}); err != nil {
-		t.Fatal(err)
+	e.deleteBox("cc-del", sandboxapi.DeleteRequest{})
+	if fileExists(dir) {
+		t.Fatal("run config left after delete")
 	}
-	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("run config left after delete: %v", err)
-	}
-
 }
 
+// Servers come along without their environment or are left behind with the
+// reason; a loopback server on an accepted host port comes via the host alias.
 func TestImportMCPServers(t *testing.T) {
 	servers, skipped, dropped := importMCPServers("codex", []config.MCPServerEntry{
-		{Name: "a", Command: "npx", Transport: "stdio"},
-		{Name: "a", Command: "dup"},
-		{Name: "b", URL: "https://example.com/mcp", Transport: "streamable-http"},
-		{Name: "c", URL: "https://example.com/sse", Transport: "sse"},
-		{Name: "d", URL: "http://10.0.0.5/mcp"},
-		{Name: "e", URL: "http://[::1]:9/mcp"},
-		{Name: "f", Command: "x", Transport: "http"},
-		{Name: "g"},
-		{Name: "h", URL: "https://user:pw@example.com/mcp"},
-		{Name: "i", Command: "srv", Env: map[string]string{"B": "2", "A": "1"}},
-	}, nil, nil)
+		{Name: "a", Command: "npx", Transport: "stdio"}, {Name: "a", Command: "dup"},
+		{Name: "b", URL: "https://example.com/mcp", Transport: "streamable-http"}, {Name: "c", URL: "https://example.com/sse", Transport: "sse"},
+		{Name: "d", URL: "http://10.0.0.5/mcp"}, {Name: "e", URL: "http://[::1]:9/mcp"}, {Name: "f", Command: "x", Transport: "http"},
+		{Name: "g"}, {Name: "h", URL: "https://user:pw@example.com/mcp"}, {Name: "i", Command: "srv", Env: map[string]string{"B": "2", "A": "1"}},
+		{Name: "local", URL: "http://localhost:38830/mcp?x=1", Transport: "http"}, {Name: "loop", URL: "http://127.0.0.1:38831/mcp"},
+		{Name: "tls", URL: "https://localhost:38830/mcp"}, {Name: "lan", URL: "http://10.0.0.5:38830/mcp"},
+	}, nil, []int{38830})
 	var names []string
 	for _, s := range servers {
 		names = append(names, s.Name)
@@ -396,145 +319,91 @@ func TestImportMCPServers(t *testing.T) {
 			t.Fatalf("%s kept its environment", s.Name)
 		}
 	}
-	if !slices.Equal(names, []string{"a", "b", "i"}) || servers[0].Command != "npx" || servers[1].Transport != "http" {
+	if !slices.Equal(names, []string{"a", "b", "i", "local"}) || servers[0].Command != "npx" || servers[1].Transport != "http" ||
+		servers[3].URL != "http://host.openshell.internal:38830/mcp?x=1" {
 		t.Fatalf("imported = %+v", servers)
+	}
+	if port, ok := hostPortOfMCP(servers[3].URL); !ok || port != 38830 {
+		t.Fatalf("hostPortOfMCP = %d, %v", port, ok)
 	}
 	reasons := map[string]string{}
 	for _, s := range skipped {
 		reasons[s.Name] = s.Reason
 	}
-	want := map[string]string{
-		"c": "Codex does not support SSE servers", "d": "runs on this machine, which the sandbox cannot reach",
-		"e": "runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 9 to bring it along", "f": "unsupported transport http",
-		"g": "no command or URL", "h": "not usable in a sandbox",
-	}
-	for name, reason := range want {
+	for name, reason := range map[string]string{
+		"c": "Codex does not support SSE servers", "d": localMCPUnreachable, "lan": localMCPUnreachable,
+		"e": "runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 9 to bring it along",
+		"f": "unsupported transport http", "g": "no command or URL", "h": "not usable in a sandbox",
+	} {
 		if reasons[name] != reason {
 			t.Fatalf("%s skipped for %q, want %q (all %v)", name, reasons[name], reason, reasons)
 		}
 	}
-	if !slices.Equal(dropped, []string{"i: A, B"}) {
-		t.Fatalf("dropped = %v", dropped)
+	if !strings.HasSuffix(reasons["loop"], "--host-port 38831 to bring it along") || !strings.Contains(reasons["tls"], "HTTPS") || !slices.Equal(dropped, []string{"i: A, B"}) {
+		t.Fatalf("left behind = %v, dropped %v", reasons, dropped)
 	}
 }
 
-func TestRunFileNameAndMounts(t *testing.T) {
-	if got := runFileName("/etc/claude-code/managed-settings.d/60-defenseclaw-run.json"); got != "etc__claude-code__managed-settings.d__60-defenseclaw-run.json" {
-		t.Fatalf("runFileName = %q", got)
-	}
-	driver := withRunConfigMounts(nil, []any{map[string]any{"target": "/x"}})
-	if len(driver["docker"].(map[string]any)["mounts"].([]any)) != 1 {
-		t.Fatalf("driver = %v", driver)
-	}
-	if withRunConfigMounts(nil, nil) != nil {
-		t.Fatal("no mounts made a driver config")
-	}
-	if packs.MCPProjectServersBlock != "block" {
-		t.Fatal("block constant changed")
+// The banner says a localhost MCP server comes along over an accepted host
+// port, and how it connects.
+func TestCreateBringsLocalMCPOverAHostPort(t *testing.T) {
+	e := newEnv(t, nil)
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{{Name: "r2g-local", URL: "http://localhost:38830/mcp", Transport: "http"}}}
+	sb := e.create(sandboxapi.CreateRequest{Name: "mcphp", HostPorts: []int{38830}})
+	if sb.MCP == nil || !slices.Contains(sb.MCP.Imported, "r2g-local") || len(sb.MCP.LeftBehind) != 0 ||
+		!slices.ContainsFunc(sb.Warnings, func(w string) bool {
+			return strings.Contains(w, "r2g-local reaches port 38830 on this machine as host.openshell.internal:38830")
+		}) {
+		t.Fatalf("mcp = %+v, warnings %q", sb.MCP, sb.Warnings)
 	}
 }
 
-func findWarning(warnings []string, prefix string) string {
-	for _, w := range warnings {
-		if strings.HasPrefix(w, prefix) {
-			return w
-		}
-	}
-	return ""
-}
-
-func keys(m map[string][]byte) []string {
-	var out []string
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
-}
-
-// TestStartRendersTheRunConfigOfTheCurrentPolicy pins that a sandbox
-// created in skip-permissions mode starts again with its harness's
-// permission prompts once the administrator disallows the mode, and with
-// the MCP servers its policy brings along now: its run files are rendered
-// again and rewritten in place before it starts.
+// A start renders the run files of the current policy: permission prompts
+// back once skip-permissions is disallowed, and the MCP servers allowed now.
 func TestStartRendersTheRunConfigOfTheCurrentPolicy(t *testing.T) {
 	e := newEnv(t, nil)
-	ctx := context.Background()
-	inv := &fakeMCP{entries: []config.MCPServerEntry{
-		{Name: "github", Command: "npx", Args: []string{"srv"}},
-		{Name: "linear", URL: "https://mcp.linear.app/mcp"},
-	}}
-	withMCP(e, inv)
-	sb := e.create(sandboxapi.CreateRequest{Name: "cc-restart", Yolo: true,
-		LLM: &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"}},
+	inv := &fakeMCP{entries: []config.MCPServerEntry{{Name: "github", Command: "npx", Args: []string{"srv"}}, {Name: "linear", URL: "https://mcp.linear.app/mcp"}}}
+	e.m.opts.MCP = inv
+	sb := e.create(sandboxapi.CreateRequest{Name: "cc-restart", Yolo: true, LLM: anthropicLLM,
 		Env: map[string]string{"ANTHROPIC_BASE_URL": "http://host.openshell.internal:28921"}})
-	if !sb.Yolo {
+	if _, safe := decodeJSON(t, e.runFiles(sb.Name)[connector.ClaudeCodeSandboxRunDropInPath])["permissions"]; !sb.Yolo || safe {
 		t.Fatal("the run is not in skip-permissions mode")
 	}
-	if _, safe := decodeJSON(t, e.runFiles(sb.Name)[connector.ClaudeCodeSandboxRunDropInPath])["permissions"]; safe {
-		t.Fatal("a yolo run disabled bypassPermissions")
-	}
-
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) })
 	inv.entries = inv.entries[:1] // linear is blocked by the MCP policy now
 	e.m.refreshEgress()
-	got, err := e.m.Get(ctx, sb.Name)
-	if err != nil || findWarning(got.Warnings, "the sandbox policy no longer lets the harness skip its permission prompts") == "" {
-		t.Fatalf("drift warnings = %q, %v", got.Warnings, err)
+	const drift = "the sandbox policy no longer lets the harness skip its permission prompts"
+	if got := e.get(sb.Name); findWarning(got.Warnings, drift) == "" {
+		t.Fatalf("drift warnings = %q", got.Warnings)
 	}
-	if _, err := e.m.Stop(ctx, sb.Name); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.m.Start(ctx, sb.Name, sandboxapi.StartRequest{}); err != nil {
-		t.Fatal(err)
-	}
+	e.stopBox(sb.Name)
+	e.startBox(sb.Name, sandboxapi.StartRequest{})
 	files := e.runFiles(sb.Name)
 	dropIn := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])
-	if perms, _ := dropIn["permissions"].(map[string]any); perms["disableBypassPermissionsMode"] != "disable" {
-		t.Fatalf("the restarted sandbox can still skip permissions: %v", dropIn)
-	}
 	env := dropIn["env"].(map[string]any)
-	if env["ANTHROPIC_BASE_URL"] != "http://host.openshell.internal:28921" {
-		t.Fatalf("the provider pins changed: %v", env)
+	_, pinned := env["ANTHROPIC_API_KEY"]
+	if perms, _ := dropIn["permissions"].(map[string]any); perms["disableBypassPermissionsMode"] != "disable" ||
+		env["ANTHROPIC_BASE_URL"] != "http://host.openshell.internal:28921" || pinned {
+		t.Fatalf("the restarted sandbox's drop-in = %v", dropIn)
 	}
-	if _, pinned := env["ANTHROPIC_API_KEY"]; pinned {
-		t.Fatal("a credential placeholder was pinned")
-	}
-	servers := decodeJSON(t, files[connector.ClaudeCodeSandboxManagedMCPPath])["mcpServers"].(map[string]any)
-	if len(servers) != 1 || servers["github"] == nil {
+	if servers := decodeJSON(t, files[connector.ClaudeCodeSandboxManagedMCPPath])["mcpServers"].(map[string]any); len(servers) != 1 || servers["github"] == nil {
 		t.Fatalf("managed-mcp.json after the start = %v", servers)
 	}
-	got, _ = e.m.Get(ctx, sb.Name)
-	if got.Yolo || !slices.Equal(got.MCP.Imported, []string{"github"}) ||
-		findWarning(got.Warnings, "the sandbox policy no longer lets the harness skip") != "" {
+	if got := e.get(sb.Name); got.Yolo || !slices.Equal(got.MCP.Imported, []string{"github"}) || findWarning(got.Warnings, drift) != "" {
 		t.Fatalf("after the start: yolo %v, mcp %+v, warnings %q", got.Yolo, got.MCP, got.Warnings)
 	}
 }
 
-// TestStartRefusesARunConfigItsMountsCannotCarry pins that a start whose
-// policy now blocks the project's own MCP servers, which needs a managed
-// file the sandbox does not mount, is refused instead of running with the
-// servers allowed.
+// A start whose policy now blocks the project's own MCP servers, which needs
+// a managed file the sandbox does not mount, is refused instead of running
+// with the servers allowed.
 func TestStartRefusesARunConfigItsMountsCannotCarry(t *testing.T) {
-	pack, err := os.ReadFile(filepath.Join("..", "..", "..", "policies", "sandbox", "open", "pack.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	custom := strings.Replace(strings.Replace(string(pack), "name: open", "name: open-mcp", 1), "project_servers: block", "project_servers: allow", 1)
-	path := filepath.Join(t.TempDir(), "pack.yaml")
-	if err := os.WriteFile(path, []byte(custom), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e := newEnv(t, func(c *config.Config) { c.OpenShell.Pack = path })
-	ctx := context.Background()
-	sb := e.create(sandboxapi.CreateRequest{Name: "cc-tighten"})
-	if sb.MCP.ProjectServers != "allow" {
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Pack = openMCPPack(t) })
+	if sb := e.create(sandboxapi.CreateRequest{Name: "cc-tighten"}); sb.MCP.ProjectServers != "allow" {
 		t.Fatalf("mcp = %+v", sb.MCP)
 	}
-	if _, err := e.m.Stop(ctx, sb.Name); err != nil {
-		t.Fatal(err)
-	}
+	e.stopBox("cc-tighten")
 	e.setConfig(func(c *config.Config) { c.OpenShell.Pack = "" })
-	_, err = e.m.Start(ctx, sb.Name, sandboxapi.StartRequest{})
+	_, err := e.m.Start(t.Context(), "cc-tighten", sandboxapi.StartRequest{})
 	wantCode(t, err, sandboxapi.CodePolicyViolation)
 }

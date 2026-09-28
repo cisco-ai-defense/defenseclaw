@@ -17,9 +17,10 @@
 package manager
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -29,433 +30,222 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
-func boolPtr(v bool) *bool { return &v }
+var (
+	approve       = sandboxapi.ApprovalDecision{Decision: "approve"}
+	approveAlways = sandboxapi.ApprovalDecision{Decision: "approve", Always: true}
+)
 
-// chunk is a draft chunk in the shape OpenShell 0.1.1 drafts for a denied
-// direct connection (measured on the host: allow_<host>_<port>, no
-// protocol, advisor provenance).
-func chunk(rule, host string, port uint32) types.PolicyChunk {
-	return types.PolicyChunk{
-		RuleName: rule, ReviewToken: "rt-" + rule, Binary: "/usr/bin/curl",
-		ProposedRule: &types.NetworkPolicyRule{
-			Name:      rule,
-			Endpoints: []types.PolicyNetworkEndpoint{{Host: host, Port: port, Ports: []uint32{port}, AdvisorProposed: true}},
-			Binaries:  []types.PolicyNetworkBinary{{Path: "/usr/bin/curl"}},
-		},
-	}
-}
-
-func chunkStatus(e *harnessEnv, sandbox, id string) string {
-	c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sandbox, id)
-	return c.Status
+// fastTriage shortens the delay before a denied connection's draft poll.
+func fastTriage(t *testing.T) {
+	saved := triageDelay
+	triageDelay = 10 * time.Millisecond
+	t.Cleanup(func() { triageDelay = saved })
 }
 
 func TestTriageDecidesProposals(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "tribox"})
-	e.watch.waitStarted(t, sb.Name)
-	ok := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_registry", "registry.example.org", 443))
-	bad := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_webhook", "webhook.site", 443))
-	door := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg", "host.openshell.internal", 5432))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 3}})
-
-	eventually(t, "automatic approval", func() bool { return chunkStatus(e, sb.Name, ok) == "approved" })
-	if s := chunkStatus(e, sb.Name, bad); s != "rejected" {
-		t.Fatalf("blocklisted proposal = %s", s)
+	e := liveEnv(t, "tribox", nil)
+	ok := e.propose("tribox", "registry.example.org")
+	bad := e.propose("tribox", "webhook.site")
+	door := e.addChunk("tribox", chunk("allow_pg", "host.openshell.internal", 5432))
+	e.watch.push(t, "tribox", stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 3}})
+	e.waitChunk("tribox", ok, "approved")
+	if s, d := e.chunkStatus("tribox", bad), e.chunkStatus("tribox", door); s != "rejected" || d != "pending" {
+		t.Fatalf("blocklisted proposal = %s, host-port proposal = %s", s, d)
 	}
-	if s := chunkStatus(e, sb.Name, door); s != "pending" {
-		t.Fatalf("host-port proposal = %s", s)
+	asks := e.waitAsks("tribox", 1)
+	if asks[0].Kind != sandboxapi.ApprovalKindHostPort || asks[0].Port != 5432 || !asks[0].Risky || e.get("tribox").PendingApprovals != 1 {
+		t.Fatalf("asks = %+v", asks)
 	}
-	asks, err := e.m.Approvals(context.Background(), "")
-	if err != nil || len(asks) != 1 || asks[0].Kind != sandboxapi.ApprovalKindHostPort || asks[0].Port != 5432 || !asks[0].Risky {
-		t.Fatalf("asks = %+v, %v", asks, err)
-	}
-	got, _ := e.m.Get(context.Background(), sb.Name)
-	if got.PendingApprovals != 1 {
-		t.Fatalf("pending approvals = %d", got.PendingApprovals)
-	}
-
-	// A repeated notification does not decide the same chunks twice.
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-
-	// The operator approves the host port once.
-	res, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"})
+	e.draft("tribox") // a repeated notification does not decide the same chunks twice
+	res, err := e.m.DecideApproval(t.Context(), asks[0].ID, approve)
 	if err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)
 	}
-	eventually(t, "operator approval", func() bool { return chunkStatus(e, sb.Name, door) == "approved" })
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
+	e.waitChunk("tribox", door, "approved")
+	if err := e.decide(asks[0].ID, approve); !sandboxapi.IsCode(err, sandboxapi.CodeConflict) {
 		t.Fatalf("second decision: %v", err)
 	}
-
-	// Telemetry: requested for all three, resolved approved (automatic and
-	// operator) and denied (policy), plus rule_add policy records.
+	// Resolved approved (automatic and operator) and denied (policy), plus rule_add records.
 	eventually(t, "approval telemetry", func() bool {
-		e.tel.mu.Lock()
-		defer e.tel.mu.Unlock()
 		var auto, op, denied bool
-		for _, a := range e.tel.approvals {
-			if a.Stage != audit.SandboxApprovalResolved {
-				continue
-			}
+		for _, a := range where(&e.tel.mu, &e.tel.approvals, func(a audit.SandboxApprovalEvent) bool { return a.Stage == audit.SandboxApprovalResolved }) {
 			auto = auto || (a.Result == audit.SandboxApprovalApproved && a.ActorType == audit.SandboxApprovalByAutomatic)
 			op = op || (a.Result == audit.SandboxApprovalApproved && a.ActorType == audit.SandboxApprovalByOperator)
 			denied = denied || (a.Result == audit.SandboxApprovalDenied && a.ActorType == audit.SandboxApprovalByPolicy)
 		}
-		var rules int
-		for _, p := range e.tel.policy {
-			if p.Operation == audit.SandboxPolicyRuleAdd {
-				rules++
-			}
-		}
-		return auto && op && denied && rules == 2
+		return auto && op && denied && len(where(&e.tel.mu, &e.tel.policy, func(p audit.SandboxPolicyEvent) bool {
+			return p.Operation == audit.SandboxPolicyRuleAdd
+		})) == 2
 	})
-
-	// The feed shows the block and the ask.
-	var kinds []string
-	for _, ev := range e.m.ActivitySince(0, sb.Name) {
-		kinds = append(kinds, ev.Kind)
-	}
 	for _, want := range []string{sandboxapi.ActivityEgressBlocked, sandboxapi.ActivityApprovalRequested, sandboxapi.ActivityApprovalResolved} {
-		if !slices.Contains(kinds, want) {
-			t.Fatalf("feed kinds = %v, missing %s", kinds, want)
+		if len(e.events("tribox", want, "")) == 0 {
+			t.Fatalf("feed misses %s", want)
 		}
 	}
 }
 
-// TestTriageRejectsHarnessFetches pins that a Codex sandbox's own startup
-// tip download, which Codex makes around the proxy, is rejected with the
-// reason on the feed instead of approved on the open network (the direct
-// rule and the policy reload that closes the session's connections), while
-// the same destination from the agent's curl is still approved.
+// Codex's startup tip download around the proxy is rejected with the reason
+// on the feed, and is no blocked site and no harness work; the agent's curl
+// to the same destination is.
 func TestTriageRejectsHarnessFetches(t *testing.T) {
 	e := newEnv(t, nil)
-	e.images.rec.HarnessVersion = "0.146.0"
-	e.images.rec.HookContract = connector.ResolveSandboxHookContract("codex", "0.146.0").Contract.ContractID
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "fetchbox", Harness: "codex"})
-	e.watch.waitStarted(t, sb.Name)
+	useCodex(e)
+	e.live(sandboxapi.CreateRequest{Name: "fetchbox", Harness: "codex"})
 	codex := harness.Codex.InstallRoot() + "/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex"
-	// OpenShell's two denials of the download (the lines 0.1.1 printed): the
-	// DNS refusal names no binary, the connection names Codex's. Neither
-	// counts as a blocked site or shows on the feed; a curl's does.
-	for _, line := range []string{
-		"NET:REFUSE [MED] DENIED raw.githubusercontent.com [reason:policy_dns_ineligible]",
-		"NET:OPEN [MED] DENIED " + codex + "(0) -> raw.githubusercontent.com:443 [reason:transparent_tcp_policy_denied]",
-	} {
-		rec, err := ocsf.Parse(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
+	firstWork := func() time.Time {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		return e.m.boxes["fetchbox"].reach.firstWork
 	}
-	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 0 {
-		t.Fatalf("the tip download counted as %d blocked sites", got.Egress.Blocked)
+	// OpenShell 0.1.1's two denials of the download: the DNS refusal names no binary.
+	e.ocsf("fetchbox", "NET:REFUSE [MED] DENIED raw.githubusercontent.com [reason:policy_dns_ineligible]", time.Now())
+	e.ocsf("fetchbox", "NET:OPEN [MED] DENIED "+codex+"(0) -> raw.githubusercontent.com:443 [reason:transparent_tcp_policy_denied]", time.Now())
+	if e.get("fetchbox").Egress.Blocked != 0 || !firstWork().IsZero() || len(e.events("fetchbox", sandboxapi.ActivityEgressBlocked, "")) != 0 {
+		t.Fatal("the tip download counted as a blocked site, harness work or a feed line")
 	}
-	// Nor is it harness work: an idle Codex TUI makes it before any prompt,
-	// and work without hooks raises the hooks-unreachable alarm.
-	e.m.mu.Lock()
-	firstWork := e.m.boxes[sb.Name].reach.firstWork
-	e.m.mu.Unlock()
-	if !firstWork.IsZero() {
-		t.Fatal("the tip download counted as harness work")
+	tip := chunk(ruleFor("raw.githubusercontent.com"), "raw.githubusercontent.com", 443)
+	tip.Binary, tip.ProposedRule.Binaries = codex, []types.PolicyNetworkBinary{{Path: codex}}
+	fetch := e.addChunk("fetchbox", tip)
+	e.draft("fetchbox")
+	e.waitChunk("fetchbox", fetch, "rejected")
+	if got := e.events("fetchbox", sandboxapi.ActivityEgressBlocked, "harness_background_fetch"); len(got) != 1 ||
+		!strings.Contains(got[0].Message, "Codex's startup tip download") || !strings.Contains(got[0].Message, "opens no direct rule") {
+		t.Fatalf("feed = %+v", got)
 	}
-	for _, ev := range e.m.ActivitySince(0, sb.Name) {
-		if ev.Kind == sandboxapi.ActivityEgressBlocked {
-			t.Fatalf("the tip download's denial is on the feed: %+v", ev)
-		}
+	// A tool's denied connection counts, but is no model call of the harness either.
+	e.ocsf("fetchbox", "NET:OPEN [MED] DENIED /usr/bin/curl(9) -> raw.githubusercontent.com:443 [reason:transparent_tcp_policy_denied]", time.Now())
+	if e.get("fetchbox").Egress.Blocked != 1 || !firstWork().IsZero() {
+		t.Fatal("a curl's denial was not counted once, or counted as harness work")
 	}
-	tip := chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443)
-	tip.Binary = codex
-	tip.ProposedRule.Binaries = []types.PolicyNetworkBinary{{Path: codex}}
-	fetch := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, tip)
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
-	eventually(t, "the tip download's rejection", func() bool { return chunkStatus(e, sb.Name, fetch) == "rejected" })
-	var msg string
-	for _, ev := range e.m.ActivitySince(0, sb.Name) {
-		if ev.Kind == sandboxapi.ActivityEgressBlocked && ev.Reason == "harness_background_fetch" {
-			msg = ev.Message
-		}
-	}
-	if !strings.Contains(msg, "Codex's startup tip download") || !strings.Contains(msg, "opens no direct rule") {
-		t.Fatalf("feed message = %q", msg)
-	}
-
-	rec, err := ocsf.Parse("NET:OPEN [MED] DENIED /usr/bin/curl(9) -> raw.githubusercontent.com:443 [reason:transparent_tcp_policy_denied]")
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
-	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 1 {
-		t.Fatalf("a curl's denial counted as %d blocked sites, want 1", got.Egress.Blocked)
-	}
-	// A tool's denied connection is no model call of the harness either
-	// (reach.go): it starts no reachability window.
-	e.m.mu.Lock()
-	firstWork = e.m.boxes[sb.Name].reach.firstWork
-	e.m.mu.Unlock()
-	if !firstWork.IsZero() {
-		t.Fatal("a curl's denied connection counted as harness work")
-	}
-	curl := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
-	eventually(t, "the agent's approval", func() bool { return chunkStatus(e, sb.Name, curl) == "approved" })
+	curl := e.propose("fetchbox", "raw.githubusercontent.com")
+	e.draft("fetchbox")
+	e.waitChunk("fetchbox", curl, "approved")
 }
 
-// TestOpenShellDenialsCountConnections pins what of OpenShell's denials
-// counts as a blocked request and shows on the feed: the connection. A
-// refused name lookup (which OpenShell answers with a staged address before
-// it denies the connection that follows) and a connection to the sandbox's
-// own container host name (git looks it up to make up an address) are
-// audited but neither counted nor shown. A connection to a synthetic
-// address names the destination OpenShell mapped it to; a record from
-// before the daemon started is marked as replayed.
+// Of OpenShell's denials only the connection counts and shows on the feed: a
+// refused lookup and the container's own host name are audited only. A
+// synthetic address names its mapped destination (the host alias's, the
+// closed port, once), and a record from before the daemon started is marked
+// replayed.
 func TestOpenShellDenialsCountConnections(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "denialbox"})
-	e.watch.waitStarted(t, sb.Name)
-	feed := func() []sandboxapi.ActivityEvent {
-		var out []sandboxapi.ActivityEvent
-		for _, ev := range e.m.ActivitySince(0, sb.Name) {
-			if ev.Kind == sandboxapi.ActivityEgressBlocked {
-				out = append(out, ev)
-			}
-		}
-		return out
+	e := liveEnv(t, "denialbox", nil)
+	feed := func() []sandboxapi.ActivityEvent { return e.events("denialbox", sandboxapi.ActivityEgressBlocked, "") }
+	blocked := func() int { return e.get("denialbox").Egress.Blocked }
+	push := func(line string) { e.ocsf("denialbox", line, time.Now()) }
+	push("NET:REFUSE [MED] DENIED evil.example.net [reason:policy_dns_ineligible]")
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]")
+	if got := feed(); blocked() != 1 || len(got) != 1 || got[0].Host != "evil.example.net" || got[0].Replayed {
+		t.Fatalf("feed = %+v, blocked %d; want one line for the connection", got, blocked())
 	}
-	push := func(line string, at time.Time) {
-		t.Helper()
-		rec, err := ocsf.Parse(line)
-		if err != nil {
-			t.Fatal(err)
-		}
-		e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, at)
+	push("NET:REFUSE [MED] DENIED abf22769329d [reason:policy_dns_ineligible]")
+	push("NET:OPEN [MED] DENIED /usr/bin/python3(0) -> abf22769329d:80 [reason:transparent_tcp_policy_denied]")
+	audited := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool { return ev.Host == "abf22769329d" && ev.Blocked })
+	if blocked() != 1 || len(audited) != 2 {
+		t.Fatalf("the host name: %d blocked requests, %d audit records; want 1 and 2", blocked(), len(audited))
 	}
-	blocked := func() int {
-		got, _ := e.m.Get(context.Background(), sb.Name)
-		return got.Egress.Blocked
-	}
-	now := time.Now()
-	// One curl to an unknown destination: the lookup, then the connection.
-	push("NET:REFUSE [MED] DENIED evil.example.net [reason:policy_dns_ineligible]", now)
-	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]", now)
-	if n := blocked(); n != 1 {
-		t.Fatalf("one denied connection counted as %d blocked requests", n)
-	}
-	if got := feed(); len(got) != 1 || got[0].Host != "evil.example.net" || got[0].Replayed {
-		t.Fatalf("feed = %+v, want one line for the connection", got)
-	}
-	// The lookup of the container's own host name, and a connection to it.
-	push("NET:REFUSE [MED] DENIED abf22769329d [reason:policy_dns_ineligible]", now)
-	push("NET:OPEN [MED] DENIED /usr/bin/python3(0) -> abf22769329d:80 [reason:transparent_tcp_policy_denied]", now)
-	if n := blocked(); n != 1 {
-		t.Fatalf("the host name counted: %d blocked requests", n)
-	}
-	var audited int
-	e.tel.mu.Lock()
-	for _, ev := range e.tel.egress {
-		if ev.Host == "abf22769329d" && ev.Blocked {
-			audited++
-		}
-	}
-	e.tel.mu.Unlock()
-	if audited != 2 {
-		t.Fatalf("audited %d records of the host name, want 2", audited)
-	}
-	// A synthetic address OpenShell mapped names its destination.
-	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped api.example.org resolved=93.184.216.34 synthetic=198.18.0.7 ports=443 mapping_id=m1", now)
-	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.7:8443 [reason:transparent_tcp_mapping_denied]", now)
-	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.9:8443 [reason:transparent_tcp_mapping_denied]", now)
-	got := feed()
-	if len(got) != 3 || got[1].Host != "api.example.org" || got[1].Port != 8443 || got[2].Host != "198.18.0.9" {
+	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped api.example.org resolved=93.184.216.34 synthetic=198.18.0.7 ports=443 mapping_id=m1")
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.7:8443 [reason:transparent_tcp_mapping_denied]")
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.9:8443 [reason:transparent_tcp_mapping_denied]")
+	if got := feed(); len(got) != 3 || got[1].Host != "api.example.org" || got[1].Port != 8443 || got[2].Host != "198.18.0.9" {
 		t.Fatalf("feed = %+v, want the mapped name, then an unmapped address as recorded", got)
 	}
-	// The host alias's synthetic address is the host alias: a port on this
-	// machine the run did not declare, which the feed names as such (no
-	// synthetic address, the flag that opens it), once.
-	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998 mapping_id=m2", now)
-	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:29170 [reason:transparent_tcp_mapping_denied]", now)
-	if got := feed(); len(got) != 4 || blocked() != 4 || got[3].Host != "host.openshell.internal" || got[3].Port != 29170 ||
-		got[3].Reason != sandboxapi.ReasonHostPortClosed || !strings.Contains(got[3].Message, "--host-port 29170") {
-		t.Fatalf("feed = %+v, blocked %d; want the host alias's port named", got, blocked())
+	// A port on this machine the run did not declare: the feed names the flag, once, and nothing asks.
+	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998 mapping_id=m2")
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:29170 [reason:transparent_tcp_mapping_denied]")
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> host.openshell.internal:29170 [reason:transparent_tcp_mapping_denied]")
+	if got := feed(); len(got) != 4 || blocked() != 5 || got[3].Host != openshellHostAlias || got[3].Port != 29170 ||
+		got[3].Reason != sandboxapi.ReasonHostPortClosed || !strings.Contains(got[3].Message, "port 29170 on this machine is closed to the sandbox") ||
+		!strings.Contains(got[3].Message, "--host-port 29170") {
+		t.Fatalf("feed = %+v, blocked %d; want the host alias's port named once", got, blocked())
 	}
-	// Records from before the daemon started are replays.
-	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> old.example.org:443 [reason:transparent_tcp_policy_denied]", e.m.startedAt.Add(-time.Minute))
+	if asks, _ := e.m.Approvals(t.Context(), "denialbox"); len(asks) != 0 {
+		t.Fatalf("asks = %+v; an undeclared port does not ask", asks)
+	}
+	e.ocsf("denialbox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> old.example.org:443 [reason:transparent_tcp_policy_denied]", e.m.startedAt.Add(-time.Minute))
 	if got := feed(); len(got) != 5 || !got[4].Replayed {
 		t.Fatalf("feed = %+v, want the replayed record marked", got)
 	}
 }
 
-func TestApprovalRejectAlwaysPersists(t *testing.T) {
-	e := newEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "askbox"})
-	e.watch.waitStarted(t, sb.Name)
-	id1 := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_a", "a.example.org", 443))
-	id2 := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_b", "b.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	var asks []sandboxapi.Approval
-	eventually(t, "two asks", func() bool {
-		asks, _ = e.m.Approvals(context.Background(), sb.Name)
-		return len(asks) == 2
-	})
+// "Always" decisions persist a block or an allow; once the administrator
+// forbids unblocking, an "always" of an ask queued before is refused and
+// recorded as a no-change policy record (not degraded health), while
+// approving once still works.
+func TestApprovalAlwaysDecisions(t *testing.T) {
+	e := liveEnv(t, "askbox", func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	a, b := e.propose("askbox", "a.example.org"), e.propose("askbox", "b.example.org")
+	e.propose("askbox", "c.example.org")
+	e.draft("askbox")
 	byHost := map[string]string{}
-	for _, a := range asks {
-		byHost[a.Host] = a.ID
-		if !strings.Contains(a.Reason, "allowlist") {
-			t.Fatalf("ask reason = %q", a.Reason)
+	for _, ask := range e.waitAsks("askbox", 3) {
+		byHost[ask.Host] = ask.ID
+		if !strings.Contains(ask.Reason, "allowlist") {
+			t.Fatalf("ask reason = %q", ask.Reason)
 		}
 	}
-	if _, err := e.m.DecideApproval(context.Background(), byHost["a.example.org"], sandboxapi.ApprovalDecision{Decision: "reject", Always: true}); err != nil {
-		t.Fatal(err)
-	}
-	if s := chunkStatus(e, sb.Name, id1); s != "rejected" {
+	must(t, e.decide(byHost["a.example.org"], sandboxapi.ApprovalDecision{Decision: "reject", Always: true}))
+	if s := e.chunkStatus("askbox", a); s != "rejected" {
 		t.Fatalf("rejected chunk = %s", s)
 	}
-	res, err := e.m.DecideApproval(context.Background(), byHost["b.example.org"], sandboxapi.ApprovalDecision{Decision: "approve", Always: true})
-	if err != nil || !res.Persisted {
+	if res, err := e.m.DecideApproval(t.Context(), byHost["b.example.org"], approveAlways); err != nil || !res.Persisted {
 		t.Fatalf("approve always = %+v, %v", res, err)
 	}
-	eventually(t, "approval applied", func() bool { return chunkStatus(e, sb.Name, id2) == "approved" })
-	if !slices.Equal(e.persist.block, []string{"a.example.org"}) || !slices.Equal(e.persist.allow, []string{"b.example.org"}) {
+	e.waitChunk("askbox", b, "approved")
+	if !slices.Equal(e.persist.block, []string{"a.example.org"}) || !slices.Equal(e.persist.allowed(), []string{"b.example.org"}) {
 		t.Fatalf("persisted allow %v block %v", e.persist.allow, e.persist.block)
 	}
-	if _, err := e.m.DecideApproval(context.Background(), "ap_missing", sandboxapi.ApprovalDecision{Decision: "approve"}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+	if err := e.decide("ap_missing", approve); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		t.Fatalf("unknown id: %v", err)
 	}
-}
-
-func TestApprovalAdminDenials(t *testing.T) {
-	e := newEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "denybox"})
-	e.watch.waitStarted(t, sb.Name)
-	e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_a", "a.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	var asks []sandboxapi.Approval
-	eventually(t, "ask", func() bool {
-		asks, _ = e.m.Approvals(context.Background(), sb.Name)
-		return len(asks) == 1
-	})
-	// The administrator forbids unblocking after the ask was queued.
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
-	_, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true})
-	apiErr := wantCode(t, err, sandboxapi.CodeAdminViolation)
-	if !strings.Contains(apiErr.Message, sandboxapi.AdminMessage) {
+	if apiErr := wantCode(t, e.decide(byHost["c.example.org"], approveAlways), sandboxapi.CodeAdminViolation); !strings.Contains(apiErr.Message, sandboxapi.AdminMessage) {
 		t.Fatalf("message = %q", apiErr.Message)
 	}
-	if len(e.persist.allow) != 0 {
+	if len(e.persist.allowed()) != 1 {
 		t.Fatal("refused decision was persisted")
 	}
-	// Approving once is still allowed.
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatalf("approve once: %v", err)
+	must(t, e.decide(byHost["c.example.org"], approve))
+	if h := where(&e.tel.mu, &e.tel.health, func(h audit.SandboxHealthEvent) bool { return h.ErrorCode == "openshell_admin_violation" }); len(h) != 0 {
+		t.Fatalf("a refused request was recorded as degraded subsystem health: %+v", h)
 	}
-	// The refusal is a no-change policy record of the sandbox, not a
-	// degraded subsystem: a refused request degrades nothing.
-	e.tel.mu.Lock()
-	defer e.tel.mu.Unlock()
-	for _, h := range e.tel.health {
-		if h.ErrorCode == "openshell_admin_violation" {
-			t.Fatalf("a refused request was recorded as degraded subsystem health: %+v", h)
-		}
-	}
-	var refused bool
-	for _, p := range e.tel.policy {
-		refused = refused || (p.Operation == audit.SandboxPolicyRuleAdd && p.NoChange && p.Reason == policyReasonAdminRefused &&
-			p.Target == "a.example.org" && p.Sandbox.Name == sb.Name)
-	}
-	if !refused {
+	if len(where(&e.tel.mu, &e.tel.policy, func(p audit.SandboxPolicyEvent) bool {
+		return p.Operation == audit.SandboxPolicyRuleAdd && p.NoChange && p.Reason == policyReasonAdminRefused && p.Target == "c.example.org" && p.Sandbox.Name == "askbox"
+	})) == 0 {
 		t.Fatal("the admin refusal has no policy record")
 	}
 }
 
-func TestHostPortApproveAlwaysRefused(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "hpbox"})
-	e.watch.waitStarted(t, sb.Name)
-	e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg", "host.openshell.internal", 5432))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	var asks []sandboxapi.Approval
-	eventually(t, "ask", func() bool {
-		asks, _ = e.m.Approvals(context.Background(), sb.Name)
-		return len(asks) == 1
-	})
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
-		t.Fatalf("approve always host port: %v", err)
-	}
-}
-
-// TestPrivateNameApproveAlwaysRefused pins that "always" is refused for a
-// destination on the user's network, as named (an intranet name) or as
-// resolved (a name with a private answer): it would be saved to
-// openshell.egress.unblocked, which the proxy's guard never lets open a
-// private network, so every future sandbox would ask again. Approving it for
-// the sandbox still works.
+// "Always" is refused for a destination on the user's network, by name or
+// answer (openshell.egress.unblocked never opens one); approving it once works.
 func TestPrivateNameApproveAlwaysRefused(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	ctx := context.Background()
-	sb := e.create(sandboxapi.CreateRequest{Name: "lanalways"})
-	e.watch.waitStarted(t, sb.Name)
+	e := liveEnv(t, "lanalways", nil)
 	e.dns.set("db.lan.example.org", "10.0.0.5")
-	ids := map[string]string{
-		"wiki.corp":          addChunk(e, sb.Name, chunk("allow_wiki_corp_443", "wiki.corp", 443)),
-		"db.lan.example.org": addChunk(e, sb.Name, chunk("allow_db_lan_example_org_443", "db.lan.example.org", 443)),
-	}
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	for _, ask := range waitAsks(t, e, sb.Name, 2) {
-		_, err := e.m.DecideApproval(ctx, ask.ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true})
-		if !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || !strings.Contains(err.Error(), "openshell.egress.allow") {
+	ids := []string{e.propose("lanalways", "wiki.corp"), e.propose("lanalways", "db.lan.example.org")}
+	e.draft("lanalways")
+	for _, ask := range e.waitAsks("lanalways", 2) {
+		if err := e.decide(ask.ID, approveAlways); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) || !strings.Contains(err.Error(), "openshell.egress.allow") {
 			t.Fatalf("approve always %s: %v", ask.Host, err)
 		}
-		if _, err := e.m.DecideApproval(ctx, ask.ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-			t.Fatalf("approve %s for the sandbox: %v", ask.Host, err)
-		}
+		must(t, e.decide(ask.ID, approve))
 	}
-	for host, id := range ids {
-		eventually(t, host+" approved", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+	for _, id := range ids {
+		e.waitChunk("lanalways", id, "approved")
 	}
-	e.persist.mu.Lock()
-	defer e.persist.mu.Unlock()
-	if len(e.persist.allow) != 0 {
-		t.Fatalf("persisted %v for future sandboxes", e.persist.allow)
+	if len(e.persist.allowed()) != 0 {
+		t.Fatalf("persisted %v for future sandboxes", e.persist.allowed())
 	}
 }
 
-func TestDeleteDropsApprovals(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "dropbox"})
-	e.watch.waitStarted(t, sb.Name)
-	e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg", "host.openshell.internal", 5432))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "ask", func() bool {
-		asks, _ := e.m.Approvals(context.Background(), "")
-		return len(asks) == 1
-	})
-	if _, err := e.m.Delete(context.Background(), sb.Name, sandboxapi.DeleteRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	if asks, _ := e.m.Approvals(context.Background(), ""); len(asks) != 0 {
-		t.Fatalf("asks left: %v", asks)
-	}
-}
-
-// TestPruneKeepsUnresolvedApprovals pins that the hourly prune forgets only
-// old resolved asks. An ask an operator decision is being applied to has no
-// resolvedAt yet; pruning it would orphan the decision in flight.
+// The hourly prune forgets only old resolved asks: one a decision is being
+// applied to has no resolvedAt yet, and pruning it would orphan the decision.
 func TestPruneKeepsUnresolvedApprovals(t *testing.T) {
 	e := newEnv(t, nil)
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
@@ -466,12 +256,8 @@ func TestPruneKeepsUnresolvedApprovals(t *testing.T) {
 		resolved time.Time
 		kept     bool
 	}{
-		{sandboxapi.ApprovalPending, time.Time{}, true},
-		{approvalDeciding, time.Time{}, true},
-		{sandboxapi.ApprovalQueued, time.Time{}, true},
-		{sandboxapi.ApprovalRejected, recent, true},
-		{sandboxapi.ApprovalRejected, old, false},
-		{sandboxapi.ApprovalApproved, old, false},
+		{sandboxapi.ApprovalPending, time.Time{}, true}, {approvalDeciding, time.Time{}, true}, {sandboxapi.ApprovalQueued, time.Time{}, true},
+		{sandboxapi.ApprovalRejected, recent, true}, {sandboxapi.ApprovalRejected, old, false}, {sandboxapi.ApprovalApproved, old, false},
 	} {
 		id := "ap_" + tc.status + "_" + tc.resolved.Format("1504")
 		e.m.mu.Lock()
@@ -487,621 +273,591 @@ func TestPruneKeepsUnresolvedApprovals(t *testing.T) {
 	}
 }
 
-// TestDeniedConnectionTriggersTriage pins that a proposal is decided after
-// OpenShell denies a direct connection even when no draft notification
-// arrives on the stream.
-func TestDeniedConnectionTriggersTriage(t *testing.T) {
-	saved := triageDelay
-	triageDelay = 10 * time.Millisecond
-	t.Cleanup(func() { triageDelay = saved })
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "denybox2"})
-	e.watch.waitStarted(t, sb.Name)
-	id := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_example", "www.example.com", 443))
+// A proposal is decided after OpenShell denies a direct connection even when
+// no draft notification arrives, and by the periodic sweep.
+func TestTriageRunsWithoutADraftEvent(t *testing.T) {
+	fastTriage(t)
+	e := liveEnv(t, "denybox2", nil)
+	id := e.propose("denybox2", "www.example.com")
 	line := "NET:OPEN [MED] DENIED /usr/bin/curl(3) -> www.example.com:443 [reason:transparent_tcp_policy_denied]"
-	rec, err := ocsf.Parse(line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindLog, Log: &stream.Log{Message: line, OCSF: &rec}})
-	eventually(t, "triaged without a draft event", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
-}
+	e.watch.push(t, "denybox2", stream.Event{Kind: stream.KindLog, Log: &stream.Log{Message: line, OCSF: parseOCSF(t, line)}})
+	e.waitChunk("denybox2", id, "approved")
 
-func TestTriageSweep(t *testing.T) {
-	e := newEnv(t, nil)
+	e = newEnv(t, nil)
 	e.m.opts.TriageInterval = 20 * time.Millisecond
 	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "sweepbox"})
-	id := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_example", "www.example.com", 443))
-	eventually(t, "sweep", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+	e.create(sandboxapi.CreateRequest{Name: "sweepbox"})
+	e.waitChunk("sweepbox", e.propose("sweepbox", "www.example.com"), "approved")
 }
 
-func TestProposalFloodsCollapse(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "floodbox"})
-	e.watch.waitStarted(t, sb.Name)
-	first := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg", "host.openshell.internal", 5432))
-	e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_hook", "webhook.site", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "first ask", func() bool {
-		asks, _ := e.m.Approvals(context.Background(), sb.Name)
-		return len(asks) == 1
-	})
-	// OpenShell drafts the same rule again (a retried connection).
-	second := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_pg", "host.openshell.internal", 5432))
-	again := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_hook", "webhook.site", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "collapsed", func() bool { return chunkStatus(e, sb.Name, again) == "rejected" })
-	asks, _ := e.m.Approvals(context.Background(), sb.Name)
-	if len(asks) != 1 || asks[0].ChunkID != second {
-		t.Fatalf("asks = %+v", asks)
+// A retried proposal collapses into its destination's ask (on the newest
+// chunk); one with other content (an extra port) gets its own ask instead of
+// replacing the one the user is reading.
+func TestReproposalsCollapseOnlyWhenUnchanged(t *testing.T) {
+	e := liveEnv(t, "floodbox", nil)
+	first := e.addChunk("floodbox", chunk("allow_pg", "host.openshell.internal", 5432))
+	e.addChunk("floodbox", chunk("allow_hook", "webhook.site", 443))
+	e.draft("floodbox")
+	e.waitAsks("floodbox", 1)
+	second := e.addChunk("floodbox", chunk("allow_pg", "host.openshell.internal", 5432))
+	again := e.addChunk("floodbox", chunk("allow_hook", "webhook.site", 443))
+	e.draft("floodbox")
+	e.waitChunk("floodbox", again, "rejected")
+	asks, _ := e.m.Approvals(t.Context(), "floodbox")
+	if len(asks) != 1 || asks[0].ChunkID != second || e.chunkStatus("floodbox", first) != "rejected" {
+		t.Fatalf("asks = %+v, superseded chunk %s", asks, e.chunkStatus("floodbox", first))
 	}
-	if s := chunkStatus(e, sb.Name, first); s != "rejected" {
-		t.Fatalf("superseded chunk = %s", s)
+	if n := len(where(&e.tel.mu, &e.tel.approvals, func(a audit.SandboxApprovalEvent) bool { return a.Stage == audit.SandboxApprovalRequested })); n != 2 {
+		t.Fatalf("requested records = %d, want one per destination", n)
 	}
-	requested := 0
-	e.tel.mu.Lock()
-	for _, a := range e.tel.approvals {
-		if a.Stage == audit.SandboxApprovalRequested {
-			requested++
-		}
-	}
-	e.tel.mu.Unlock()
-	if requested != 2 {
-		t.Fatalf("requested records = %d, want one per destination", requested)
-	}
-	// Approving the collapsed ask approves the newest chunk.
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "newest chunk approved", func() bool { return chunkStatus(e, sb.Name, second) == "approved" })
-}
+	must(t, e.decide(asks[0].ID, approve))
+	e.waitChunk("floodbox", second, "approved")
 
-func addChunk(e *harnessEnv, sandbox string, c types.PolicyChunk) string {
-	return e.fake.AddDraftChunk(openshell.DefaultWorkspace, sandbox, c)
-}
-
-func waitAsks(t *testing.T, e *harnessEnv, sandbox string, n int) []sandboxapi.Approval {
-	t.Helper()
-	var asks []sandboxapi.Approval
-	eventually(t, fmt.Sprintf("%d asks", n), func() bool {
-		asks, _ = e.m.Approvals(context.Background(), sandbox)
-		return len(asks) == n
-	})
-	return asks
-}
-
-// TestApprovalsUseLiveReviewTokens pins that approvals decided before
-// another policy change still land: OpenShell's review token changes with
-// the policy, so the manager reads a fresh one when it applies.
-func TestApprovalsUseLiveReviewTokens(t *testing.T) {
-	e := newEnv(t, func(c *config.Config) { c.OpenShell.Approvals.DebounceMs = 150 })
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "tokbox"})
-	e.watch.waitStarted(t, sb.Name)
-
-	// An ask waits for the user while an automatic approval lands.
-	door := addChunk(e, sb.Name, chunk("allow_host_openshell_internal_5432", "host.openshell.internal", 5432))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, 1)
-	auto := addChunk(e, sb.Name, chunk("allow_registry_example_org_443", "registry.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	// While the automatic approval is debounced, another client changes
-	// the policy, so the token triage read is stale by the time it applies.
-	other := addChunk(e, sb.Name, chunk("allow_other_example_org_443", "other.example.org", 443))
-	eventually(t, "automatic approval queued", func() bool { return e.m.batcher.Pending(sb.Name) == 1 })
-	live, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sb.Name, other)
-	if _, err := e.client.ApproveDraftChunk(context.Background(), sb.Name, other, live.ReviewToken); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "automatic approval applied", func() bool { return chunkStatus(e, sb.Name, auto) == "approved" })
-
-	// The ask's token is stale twice over; the operator's approval lands.
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "operator approval applied", func() bool { return chunkStatus(e, sb.Name, door) == "approved" })
-	eventually(t, "both approvals recorded as approved", func() bool {
-		e.m.mu.Lock()
-		defer e.m.mu.Unlock()
-		for _, a := range e.m.approvals {
-			if a.status != sandboxapi.ApprovalApproved {
-				return false
-			}
-		}
-		return len(e.m.approvals) == 2
-	})
-	eventually(t, "rule_add records for both", func() bool {
-		var rules []string
-		e.tel.mu.Lock()
-		for _, p := range e.tel.policy {
-			if p.Operation == audit.SandboxPolicyRuleAdd {
-				rules = append(rules, p.Target)
-			}
-		}
-		e.tel.mu.Unlock()
-		return slices.Contains(rules, "registry.example.org") && slices.Contains(rules, "host.openshell.internal")
-	})
-}
-
-// TestApprovalShowsAndChecksTheWholeProposal pins that an ask names every
-// endpoint, allowed IP and binary, and that the decision re-checks all of
-// them against the current policy.
-func TestApprovalShowsAndChecksTheWholeProposal(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "wholebox"})
-	e.watch.waitStarted(t, sb.Name)
-	// A proposal naming a second host is rejected: the ask would show the
-	// user one destination while approving opens both.
-	two := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
-	two.ProposedRule.Endpoints = append(two.ProposedRule.Endpoints, types.PolicyNetworkEndpoint{Host: "10.1.2.3", Port: 443})
-	twoID := addChunk(e, sb.Name, two)
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "the two-host proposal rejected", func() bool { return chunkStatus(e, sb.Name, twoID) == "rejected" })
-
-	c := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
-	c.ProposedRule.Endpoints[0].Ports = []uint32{3000, 22}
-	id := addChunk(e, sb.Name, c)
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, 1)
-	got := asks[0]
-	want := []sandboxapi.ApprovalEndpoint{{Host: "host.openshell.internal", Port: 3000}, {Host: "host.openshell.internal", Port: 22}}
-	if !slices.Equal(got.Endpoints, want) || got.RuleName != "allow_host_openshell_internal_3000" || !slices.Equal(got.Binaries, []string{"/usr/bin/curl"}) {
-		t.Fatalf("ask = %+v", got)
-	}
-	// The ask names every port approving opens.
-	if !strings.Contains(got.Reason, "3000, 22") {
-		t.Fatalf("ask reason = %q, want both ports", got.Reason)
-	}
-	// The whole proposal is judged again at the decision.
-	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = boolPtr(false) })
-	_, err := e.m.DecideApproval(context.Background(), got.ID, sandboxapi.ApprovalDecision{Decision: "approve"})
-	wantCode(t, err, sandboxapi.CodeAdminViolation)
-	if s := chunkStatus(e, sb.Name, id); s != "pending" {
-		t.Fatalf("refused proposal = %s", s)
-	}
-	// Always is refused for proposals that reach this machine.
-	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = nil })
-	if _, err := e.m.DecideApproval(context.Background(), got.ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
-		t.Fatalf("approve always: %v", err)
-	}
-}
-
-// TestPrivateAllowedIPsAsk pins that allowed_ips reaching the user's network
-// ask instead of being approved automatically, and that the decision checks
-// them against openshell.admin.allow_unblock.
-func TestPrivateAllowedIPsAsk(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "ipbox"})
-	e.watch.waitStarted(t, sb.Name)
-	c := chunk("allow_my_cdn_attacker_example_443", "my-cdn.attacker.example", 443)
-	c.ProposedRule.Endpoints[0].AllowedIPs = []string{"10.0.0.0/8"}
-	id := addChunk(e, sb.Name, c)
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, 1)
-	if s := chunkStatus(e, sb.Name, id); s != "pending" {
-		t.Fatalf("private allowed_ips proposal = %s, want an ask", s)
-	}
-	if !asks[0].Risky || !slices.Equal(asks[0].AllowedIPs, []string{"10.0.0.0/8"}) || !strings.Contains(asks[0].Reason, "10.0.0.0/8") {
-		t.Fatalf("ask = %+v", asks[0])
-	}
-	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
-	_, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"})
-	wantCode(t, err, sandboxapi.CodeAdminViolation)
-}
-
-// TestChangedProposalDoesNotJoinAnAsk pins that a newer proposal with
-// different content (an extra port) gets its own ask instead of replacing
-// the one the user is reading.
-func TestChangedProposalDoesNotJoinAnAsk(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "swapbox"})
-	e.watch.waitStarted(t, sb.Name)
-	first := addChunk(e, sb.Name, chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, 1)
-	read := asks[0]
+	read := e.addChunk("floodbox", chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000))
+	e.draft("floodbox")
+	ask := e.waitAsks("floodbox", 1)[0]
 	swapped := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
 	swapped.ProposedRule.Endpoints[0].Ports = []uint32{3000, 22}
-	second := addChunk(e, sb.Name, swapped)
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	waitAsks(t, e, sb.Name, 2)
-	if _, err := e.m.DecideApproval(context.Background(), read.ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
+	other := e.addChunk("floodbox", swapped)
+	e.draft("floodbox")
+	e.waitAsks("floodbox", 2)
+	must(t, e.decide(ask.ID, approve))
+	e.waitChunk("floodbox", read, "approved")
+	if e.chunkStatus("floodbox", other) != "pending" {
+		t.Fatalf("the swapped-in proposal = %s", e.chunkStatus("floodbox", other))
 	}
-	eventually(t, "the proposal the user read applied", func() bool { return chunkStatus(e, sb.Name, first) == "approved" })
-	if s := chunkStatus(e, sb.Name, second); s != "pending" {
-		t.Fatalf("the swapped-in proposal = %s", s)
-	}
-	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
-	for _, ep := range policy.NetworkPolicies["allow_host_openshell_internal_3000"].Endpoints {
+	pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, "floodbox")
+	for _, ep := range pol.NetworkPolicies["allow_host_openshell_internal_3000"].Endpoints {
 		if slices.Contains(ep.Ports, 22) || ep.Port == 22 {
 			t.Fatalf("port 22 was opened: %+v", ep)
 		}
 	}
 }
 
-// TestProposalFloodIsRateLimited pins the flood limits: automatic approvals
-// per window, then asks, and the seen-chunk set tracking only pending
-// chunks.
-func TestProposalFloodIsRateLimited(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "ratebox"})
-	e.watch.waitStarted(t, sb.Name)
-	total := autoApproveBurst + 5
-	for i := 0; i < total; i++ {
-		host := fmt.Sprintf("h%d.example.org", i)
-		addChunk(e, sb.Name, chunk(fmt.Sprintf("allow_h%d_example_org_443", i), host, 443))
+// Approvals decided before another policy change still land: OpenShell's
+// review token changes with the policy, so the manager reads a fresh one.
+func TestApprovalsUseLiveReviewTokens(t *testing.T) {
+	e := liveEnv(t, "tokbox", func(c *config.Config) { c.OpenShell.Approvals.DebounceMs = 150 })
+	door := e.addChunk("tokbox", chunk("allow_host_openshell_internal_5432", "host.openshell.internal", 5432))
+	e.draft("tokbox")
+	asks := e.waitAsks("tokbox", 1)
+	auto := e.propose("tokbox", "registry.example.org")
+	e.draft("tokbox")
+	// While the automatic approval is debounced, another client changes the policy.
+	other := e.propose("tokbox", "other.example.org")
+	eventually(t, "automatic approval queued", func() bool { return e.m.batcher.Pending("tokbox") == 1 })
+	live, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, "tokbox", other)
+	_, err := e.client.ApproveDraftChunk(t.Context(), "tokbox", other, live.ReviewToken)
+	must(t, err)
+	e.waitChunk("tokbox", auto, "approved")
+	// The ask's token is stale twice over; the operator's approval lands.
+	must(t, e.decide(asks[0].ID, approve))
+	e.waitChunk("tokbox", door, "approved")
+	eventually(t, "both approvals recorded as approved, with rule_add records", func() bool {
+		e.m.mu.Lock()
+		n := 0
+		for _, a := range e.m.approvals {
+			if a.status == sandboxapi.ApprovalApproved {
+				n++
+			}
+		}
+		e.m.mu.Unlock()
+		var rules []string
+		for _, p := range where(&e.tel.mu, &e.tel.policy, func(p audit.SandboxPolicyEvent) bool { return p.Operation == audit.SandboxPolicyRuleAdd }) {
+			rules = append(rules, p.Target)
+		}
+		return n == 2 && slices.Contains(rules, "registry.example.org") && slices.Contains(rules, "host.openshell.internal")
+	})
+}
+
+// An ask names every endpoint, allowed IP and binary, a proposal naming a
+// second host is rejected (the ask would show one destination while approving
+// opens both), and the decision re-checks the whole proposal.
+func TestApprovalShowsAndChecksTheWholeProposal(t *testing.T) {
+	e := liveEnv(t, "wholebox", nil)
+	two := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
+	two.ProposedRule.Endpoints = append(two.ProposedRule.Endpoints, types.PolicyNetworkEndpoint{Host: "10.1.2.3", Port: 443})
+	twoID := e.addChunk("wholebox", two)
+	e.draft("wholebox")
+	e.waitChunk("wholebox", twoID, "rejected")
+
+	c := chunk("allow_host_openshell_internal_3000", "host.openshell.internal", 3000)
+	c.ProposedRule.Endpoints[0].Ports = []uint32{3000, 22}
+	id := e.addChunk("wholebox", c)
+	e.draft("wholebox")
+	got := e.waitAsks("wholebox", 1)[0]
+	want := []sandboxapi.ApprovalEndpoint{{Host: "host.openshell.internal", Port: 3000}, {Host: "host.openshell.internal", Port: 22}}
+	if !slices.Equal(got.Endpoints, want) || got.RuleName != "allow_host_openshell_internal_3000" || !slices.Equal(got.Binaries, []string{"/usr/bin/curl"}) ||
+		!strings.Contains(got.Reason, "3000, 22") {
+		t.Fatalf("ask = %+v", got)
 	}
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, total-autoApproveBurst)
-	for _, a := range asks {
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = boolPtr(false) })
+	wantCode(t, e.decide(got.ID, approve), sandboxapi.CodeAdminViolation)
+	if s := e.chunkStatus("wholebox", id); s != "pending" {
+		t.Fatalf("refused proposal = %s", s)
+	}
+	// Always is refused for proposals that reach this machine.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = nil })
+	if err := e.decide(got.ID, approveAlways); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+		t.Fatalf("approve always: %v", err)
+	}
+}
+
+// allowed_ips reaching the user's network ask instead of being approved
+// automatically, the decision checks them against allow_unblock, and a delete
+// drops the sandbox's asks.
+func TestPrivateAllowedIPsAsk(t *testing.T) {
+	e := liveEnv(t, "ipbox", nil)
+	c := chunk(ruleFor("my-cdn.attacker.example"), "my-cdn.attacker.example", 443)
+	c.ProposedRule.Endpoints[0].AllowedIPs = []string{"10.0.0.0/8"}
+	id := e.addChunk("ipbox", c)
+	e.draft("ipbox")
+	ask := e.waitAsks("ipbox", 1)[0]
+	if e.chunkStatus("ipbox", id) != "pending" || !ask.Risky || !slices.Equal(ask.AllowedIPs, []string{"10.0.0.0/8"}) || !strings.Contains(ask.Reason, "10.0.0.0/8") {
+		t.Fatalf("ask = %+v", ask)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
+	wantCode(t, e.decide(ask.ID, approve), sandboxapi.CodeAdminViolation)
+	e.deleteBox("ipbox", sandboxapi.DeleteRequest{})
+	if asks, _ := e.m.Approvals(t.Context(), ""); len(asks) != 0 {
+		t.Fatalf("asks left: %v", asks)
+	}
+}
+
+// The flood limits: automatic approvals per window then asks, the seen-chunk
+// set tracking only pending chunks, a flood of rejections reported quietly
+// after the first ones, and the per-session rule ceiling a restart resets.
+func TestProposalFloodLimits(t *testing.T) {
+	e := liveEnv(t, "ratebox", nil)
+	total := autoApproveBurst + 5
+	for i := range total {
+		e.propose("ratebox", fmt.Sprintf("h%d.example.org", i))
+	}
+	e.draft("ratebox")
+	for _, a := range e.waitAsks("ratebox", total-autoApproveBurst) {
 		if !strings.Contains(a.Reason, "many new destinations") {
 			t.Fatalf("ask = %+v", a)
 		}
 	}
 	eventually(t, "automatic approvals applied", func() bool {
-		d, _ := e.client.GetDraft(context.Background(), sb.Name, "approved")
+		d, _ := e.client.GetDraft(t.Context(), "ratebox", "approved")
 		return d != nil && len(d.Chunks) == autoApproveBurst
 	})
-	// A later poll forgets the decided chunks.
-	e.m.triageSandbox(context.Background(), e.m.boxes[sb.Name])
+	e.m.triageSandbox(t.Context(), e.boxOf("ratebox"))
 	e.m.mu.Lock()
-	seen := len(e.m.boxes[sb.Name].seenChunks)
+	seen := len(e.m.boxes["ratebox"].seenChunks)
 	e.m.mu.Unlock()
 	if seen != total-autoApproveBurst {
 		t.Fatalf("seen chunks = %d, want the %d still pending", seen, total-autoApproveBurst)
 	}
-}
 
-// TestProposalFloodLimits pins the per-session rule ceiling and that a flood
-// of rejected proposals is rejected quietly after the first ones.
-func TestProposalFloodLimits(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "limitbox"})
-	e.watch.waitStarted(t, sb.Name)
-	total := rejectBurst + 5
+	e = liveEnv(t, "limitbox", nil)
 	var ids []string
-	for i := 0; i < total; i++ {
-		ids = append(ids, addChunk(e, sb.Name, chunk(fmt.Sprintf("allow_x%d_pastebin_com_443", i), fmt.Sprintf("x%d.pastebin.com", i), 443)))
+	for i := range rejectBurst + 5 {
+		ids = append(ids, e.propose("limitbox", fmt.Sprintf("x%d.pastebin.com", i)))
 	}
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "all rejected", func() bool {
-		for _, id := range ids {
-			if chunkStatus(e, sb.Name, id) != "rejected" {
-				return false
-			}
-		}
-		return true
-	})
-	var blocked, notices int
-	for _, ev := range e.m.ActivitySince(0, sb.Name) {
-		if ev.Kind == sandboxapi.ActivityEgressBlocked {
-			if ev.Reason == "rate_limited" {
-				notices++
-			} else {
-				blocked++
-			}
-		}
+	e.draft("limitbox")
+	for _, id := range ids {
+		e.waitChunk("limitbox", id, "rejected")
 	}
-	if blocked != rejectBurst || notices != 1 {
+	notices := len(e.events("limitbox", sandboxapi.ActivityEgressBlocked, "rate_limited"))
+	if blocked := len(e.events("limitbox", sandboxapi.ActivityEgressBlocked, "")) - notices; blocked != rejectBurst || notices != 1 {
 		t.Fatalf("feed: %d blocked, %d notices; want %d and one", blocked, notices, rejectBurst)
 	}
-
-	// The session's rule budget is spent: new proposals are rejected.
 	e.m.mu.Lock()
-	e.m.boxes[sb.Name].rulesAdded = maxRulesPerSession
+	e.m.boxes["limitbox"].rulesAdded = maxRulesPerSession
 	e.m.mu.Unlock()
-	id := addChunk(e, sb.Name, chunk("allow_more_example_org_443", "more.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "rule limit", func() bool { return chunkStatus(e, sb.Name, id) == "rejected" })
-	c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sb.Name, id)
-	if !strings.Contains(c.RejectionReason, "rules this session") {
+	id := e.propose("limitbox", "more.example.org")
+	e.draft("limitbox")
+	e.waitChunk("limitbox", id, "rejected")
+	if c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, "limitbox", id); !strings.Contains(c.RejectionReason, "rules this session") {
 		t.Fatalf("rejection = %q", c.RejectionReason)
 	}
-	// A restart starts a new budget.
-	if _, err := e.m.Stop(context.Background(), sb.Name); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.m.Start(context.Background(), sb.Name, sandboxapi.StartRequest{}); err != nil {
-		t.Fatal(err)
-	}
+	e.stopBox("limitbox")
+	e.startBox("limitbox", sandboxapi.StartRequest{})
 	e.m.mu.Lock()
-	spent := e.m.boxes[sb.Name].rulesAdded
+	spent := e.m.boxes["limitbox"].rulesAdded
 	e.m.mu.Unlock()
 	if spent != 0 {
 		t.Fatalf("rules after a restart = %d", spent)
 	}
 }
 
-// TestApprovalRecheckedAtApply pins that an approval is judged again, with
-// a fresh DNS answer, right before it is applied: a name that resolved to a
-// public address at triage time but to this machine by then is never
-// approved, whether triage or the operator approved it.
-func TestApprovalRecheckedAtApply(t *testing.T) {
-	saved := triageDelay
-	triageDelay = 10 * time.Millisecond
-	t.Cleanup(func() { triageDelay = saved })
+// At the pending-ask cap a new proposal of a rule already waiting collapses
+// into its ask (on the newest chunk) instead of being rejected and taking the
+// ask with it; a new rule at the cap is still rejected.
+func TestPendingCapKeepsAReproposedAsk(t *testing.T) {
 	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "rebindbox"})
-	e.watch.waitStarted(t, sb.Name)
+	e.create(sandboxapi.CreateRequest{Name: "capbox"})
+	gw, err := e.m.gateway(t.Context())
+	must(t, err)
+	b := e.boxOf("capbox")
+	ask := func(i int, chunkID string) {
+		host := fmt.Sprintf("h%d.example.org", i)
+		p := triage.Proposal{Sandbox: "capbox", ChunkID: chunkID, RuleName: ruleFor(host), RuleDigest: fmt.Sprintf("rule-%d", i),
+			Endpoints: []triage.Endpoint{{Host: host, Port: 443}}}
+		e.m.applyTriage(t.Context(), gw, b, b.rec.BindingID, p, triage.Decision{Verdict: triage.Ask, Reason: triage.ReasonManual,
+			Kind: triage.KindNetworkRule, Host: host, Port: 443, Message: "approvals are manual"})
+	}
+	for i := range maxPendingApprovals {
+		ask(i, fmt.Sprintf("chunk-%d", i))
+	}
+	ask(0, "chunk-0-again")
+	e.m.mu.Lock()
+	a := e.m.approvals[approvalID("capbox", "rule-0")]
+	status, chunkID := a.status, a.chunkID
+	e.m.mu.Unlock()
+	if status != sandboxapi.ApprovalPending || chunkID != "chunk-0-again" {
+		t.Fatalf("the re-proposed ask is %s on %s, want pending on the newest chunk", status, chunkID)
+	}
+	ask(maxPendingApprovals, "chunk-new")
+	if asks, _ := e.m.Approvals(t.Context(), "capbox"); len(asks) != maxPendingApprovals {
+		t.Fatalf("%d asks pending, want %d", len(asks), maxPendingApprovals)
+	}
+}
 
-	// Automatic approval: public at triage, loopback at apply.
+// An approval is judged again with a fresh DNS answer right before it is
+// applied: a name that rebinds to this machine is never approved, by triage
+// or by the operator.
+func TestApprovalRecheckedAtApply(t *testing.T) {
+	fastTriage(t)
+	e := liveEnv(t, "rebindbox", nil)
 	e.dns.rebindAfter("cdn.rebind.example.org", 1, "127.0.0.1")
-	auto := addChunk(e, sb.Name, chunk("allow_cdn_rebind_example_org_443", "cdn.rebind.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "the rebound proposal rejected", func() bool { return chunkStatus(e, sb.Name, auto) == "rejected" })
-	c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, sb.Name, auto)
-	if !strings.Contains(c.RejectionReason, "this machine") {
+	auto := e.propose("rebindbox", "cdn.rebind.example.org")
+	e.draft("rebindbox")
+	e.waitChunk("rebindbox", auto, "rejected")
+	if c, _ := e.fake.DraftChunk(openshell.DefaultWorkspace, "rebindbox", auto); !strings.Contains(c.RejectionReason, "this machine") {
 		t.Fatalf("rejection = %q", c.RejectionReason)
 	}
-
-	// Operator approval of a private-network ask: private at triage and at
-	// the decision, loopback at apply.
 	e.dns.set("db.rebind.example.org", "10.0.0.5")
 	e.dns.rebindAfter("db.rebind.example.org", 2, "127.0.0.1")
-	asked := addChunk(e, sb.Name, chunk("allow_db_rebind_example_org_443", "db.rebind.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, 1)
-	if asks[0].Host != "db.rebind.example.org" || !asks[0].Risky {
-		t.Fatalf("ask = %+v", asks[0])
+	asked := e.propose("rebindbox", "db.rebind.example.org")
+	e.draft("rebindbox")
+	ask := e.waitAsks("rebindbox", 1)[0]
+	if ask.Host != "db.rebind.example.org" || !ask.Risky {
+		t.Fatalf("ask = %+v", ask)
 	}
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "the operator approval refused at apply", func() bool { return chunkStatus(e, sb.Name, asked) == "rejected" })
-	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
-	for _, rule := range []string{"allow_cdn_rebind_example_org_443", "allow_db_rebind_example_org_443"} {
-		if _, ok := policy.NetworkPolicies[rule]; ok {
-			t.Fatalf("rule %s reached the policy", rule)
+	must(t, e.decide(ask.ID, approve))
+	e.waitChunk("rebindbox", asked, "rejected")
+	for _, host := range []string{"cdn.rebind.example.org", "db.rebind.example.org"} {
+		if e.hasRule("rebindbox", ruleFor(host)) {
+			t.Fatalf("rule to %s reached the policy", host)
 		}
 	}
-	var refused bool
-	for _, ev := range e.m.ActivitySince(0, sb.Name) {
-		refused = refused || (ev.Kind == sandboxapi.ActivityApprovalResolved && ev.Reason == "refused_at_apply")
-	}
-	if !refused {
+	if len(e.events("rebindbox", sandboxapi.ActivityApprovalResolved, "refused_at_apply")) == 0 {
 		t.Fatal("no refused_at_apply feed event")
 	}
 }
 
-// TestSlowDNSDefersTriage pins that a resolver slower than the triage
-// pass's budget leaves the proposal for the next poll instead of rejecting
-// it as unresolvable.
+// A resolver slower than the triage pass's budget leaves the proposal for
+// the next poll instead of rejecting it as unresolvable.
 func TestSlowDNSDefersTriage(t *testing.T) {
 	savedDelay, savedBudget := triageDelay, triagePassBudget
 	triageDelay, triagePassBudget = 20*time.Millisecond, 50*time.Millisecond
 	t.Cleanup(func() { triageDelay, triagePassBudget = savedDelay, savedBudget })
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "slowbox"})
-	e.watch.waitStarted(t, sb.Name)
+	e := liveEnv(t, "slowbox", nil)
 	e.dns.setHang("slow.example.org", true)
-	id := addChunk(e, sb.Name, chunk("allow_slow_example_org_443", "slow.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
+	id := e.propose("slowbox", "slow.example.org")
+	e.draft("slowbox")
 	time.Sleep(300 * time.Millisecond)
-	if s := chunkStatus(e, sb.Name, id); s != "pending" {
+	if s := e.chunkStatus("slowbox", id); s != "pending" {
 		t.Fatalf("proposal with a hanging lookup = %s, want it left pending", s)
 	}
 	e.dns.setHang("slow.example.org", false)
-	eventually(t, "the deferred proposal approved", func() bool { return chunkStatus(e, sb.Name, id) == "approved" })
+	e.waitChunk("slowbox", id, "approved")
 }
 
-// TestReconcileRemovesRulesThatResolveToThisMachine pins that an approved
-// rule whose name later resolves to this machine is removed on the next
-// enforcement pass.
-func TestReconcileRemovesRulesThatResolveToThisMachine(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "laterbox"})
-	e.watch.waitStarted(t, sb.Name)
-	keep := addChunk(e, sb.Name, chunk("allow_keep_example_org_443", "keep.example.org", 443))
-	later := addChunk(e, sb.Name, chunk("allow_later_example_org_443", "later.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "approvals applied", func() bool {
-		return chunkStatus(e, sb.Name, keep) == "approved" && chunkStatus(e, sb.Name, later) == "approved"
-	})
-	e.dns.set("later.example.org", "169.254.169.254")
-	e.m.enforceAll(context.Background())
-	policy, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, sb.Name)
-	if _, ok := policy.NetworkPolicies["allow_later_example_org_443"]; ok {
-		t.Fatal("a rule that resolves to metadata is still in the policy")
-	}
-	if _, ok := policy.NetworkPolicies["allow_keep_example_org_443"]; !ok {
-		t.Fatal("the public rule was removed")
-	}
-	var fed bool
-	for _, ev := range e.m.ActivitySince(0, sb.Name) {
-		fed = fed || (ev.Kind == sandboxapi.ActivityEgressBlocked && ev.Reason == "resolves_to_host")
-	}
-	if !fed {
-		t.Fatal("no feed event for the removed rule")
-	}
-}
-
-// TestPrivateAnswerRemovesAutomaticRules pins that a rule DefenseClaw
-// approved on its own goes once its name resolves to a private network,
-// which only the user approves (the agent asks again), while a rule the user
-// approved for a private answer stays.
-func TestPrivateAnswerRemovesAutomaticRules(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	ctx := context.Background()
-	auto := approvedRule(t, e, "lanbox", "cdn.rebind.example.org")
-	const own = "allow_db_lan_example_org_443"
-	e.dns.set("db.lan.example.org", "10.0.0.5")
-	id := addChunk(e, "lanbox", chunk(own, "db.lan.example.org", 443))
-	e.watch.push(t, "lanbox", stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, "lanbox", 1)
-	if asks[0].Host != "db.lan.example.org" {
-		t.Fatalf("ask = %+v", asks[0])
-	}
-	if _, err := e.m.DecideApproval(ctx, asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "the user's approval applied", func() bool { return chunkStatus(e, "lanbox", id) == "approved" })
-
-	// Unchanged answers keep both.
-	e.m.enforceAll(ctx)
-	if !hasRule(e, "lanbox", auto) || !hasRule(e, "lanbox", own) {
-		t.Fatal("a pass with unchanged DNS answers removed an approved rule")
-	}
-	e.dns.set("cdn.rebind.example.org", "192.168.1.20")
-	e.m.enforceAll(ctx)
-	if hasRule(e, "lanbox", auto) {
-		t.Fatal("the automatic rule whose name now resolves to a private network survived")
-	}
-	if !hasRule(e, "lanbox", own) {
-		t.Fatal("the rule the user approved for a private network was removed")
-	}
-	var recorded bool
-	e.tel.mu.Lock()
-	for _, p := range e.tel.policy {
-		recorded = recorded || (p.Operation == audit.SandboxPolicyRuleRemove && p.Target == auto && p.Reason == policyReasonApprovalRequired)
-	}
-	e.tel.mu.Unlock()
-	if !recorded {
-		t.Fatal("no rule_remove record for the automatic rule")
-	}
-}
-
-// TestRemovedRulesAreAudited pins the mandatory log.policy.updated records
-// of one enforcement pass that removes several approved rules, some the
-// administrator now blocks and some that resolve to this machine: one
-// record per rule, naming it, with a registered reason token. The
-// environment's telemetry runs the production recorder, which refuses an
-// upper-case reason or a comma-joined target.
-func TestRemovedRulesAreAudited(t *testing.T) {
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "auditbox"})
-	e.watch.waitStarted(t, sb.Name)
-	rules := map[string]string{
-		"allow_keep_example_org_443":   "keep.example.org",
-		"allow_org1_example_org_443":   "org1.example.org",
-		"allow_org2_example_org_443":   "org2.example.org",
-		"allow_later1_example_org_443": "later1.example.org",
-		"allow_later2_example_org_443": "later2.example.org",
-	}
-	var ids []string
-	for rule, host := range rules {
-		ids = append(ids, addChunk(e, sb.Name, chunk(rule, host, 443)))
-	}
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "approvals applied", func() bool {
-		for _, id := range ids {
-			if chunkStatus(e, sb.Name, id) != "approved" {
-				return false
-			}
-		}
-		return true
-	})
-	e.setConfig(func(c *config.Config) {
-		c.OpenShell.Admin.EgressBlock = []string{"org1.example.org", "org2.example.org"}
-	})
-	e.dns.set("later1.example.org", "127.0.0.1")
-	e.dns.set("later2.example.org", "169.254.169.254")
-	e.m.enforceAll(context.Background())
-
-	want := map[string]string{
-		"allow_org1_example_org_443":   "admin_policy",
-		"allow_org2_example_org_443":   "admin_policy",
-		"allow_later1_example_org_443": "rule_resolves_to_host",
-		"allow_later2_example_org_443": "rule_resolves_to_host",
-	}
-	got := map[string]string{}
-	e.tel.mu.Lock()
-	for _, p := range e.tel.policy {
-		if p.Operation == audit.SandboxPolicyRuleRemove {
-			if p.ChangeCount != 1 || p.PolicyHash == "" {
-				t.Errorf("rule_remove record %+v, want one change and the policy hash", p)
-			}
-			got[p.Target] = p.Reason
-		}
-	}
-	e.tel.mu.Unlock()
-	if len(got) != len(want) {
-		t.Fatalf("rule_remove records = %v, want %v", got, want)
-	}
-	for rule, reason := range want {
-		if got[rule] != reason {
-			t.Fatalf("rule_remove %s reason = %q, want %q (records %v)", rule, got[rule], reason, got)
-		}
-	}
-	if refused := e.tel.refusedRecords(); len(refused) > 0 {
-		t.Fatalf("the audit recorder refused records: %v", refused)
-	}
-}
-
-// TestFlakyDNSNeverRejects pins that a lookup that fails temporarily
-// (SERVFAIL, a timeout) leaves a proposal pending instead of rejecting it:
-// in triage the chunk waits for a later pass, and an approval the user gave
-// is retried and then handed back to the user, never rejected in OpenShell.
+// A lookup that fails temporarily (SERVFAIL, a timeout) never rejects: in
+// triage the chunk waits for a later pass, and an approval the user gave is
+// retried and then handed back to the user.
 func TestFlakyDNSNeverRejects(t *testing.T) {
 	savedDelay, savedRetry := triageDelay, applyRetryDelay
 	triageDelay, applyRetryDelay = 10*time.Millisecond, 10*time.Millisecond
 	t.Cleanup(func() { triageDelay, applyRetryDelay = savedDelay, savedRetry })
 	servfail := &net.DNSError{Err: "server misbehaving", Name: "flaky", IsTemporary: true}
-	e := newEnv(t, nil)
-	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "flakybox"})
-	e.watch.waitStarted(t, sb.Name)
-
-	// Triage: the proposal waits while the resolver fails.
+	e := liveEnv(t, "flakybox", nil)
 	e.dns.setErr("cdn.flaky.example.org", servfail)
-	auto := addChunk(e, sb.Name, chunk("allow_cdn_flaky_example_org_443", "cdn.flaky.example.org", 443))
-	e.m.mu.Lock()
-	b := e.m.boxes[sb.Name]
-	e.m.mu.Unlock()
-	e.m.triageSandbox(context.Background(), b)
+	auto := e.propose("flakybox", "cdn.flaky.example.org")
+	e.m.triageSandbox(t.Context(), e.boxOf("flakybox"))
 	e.dns.mu.Lock()
 	looked := e.dns.calls["cdn.flaky.example.org."]
 	e.dns.mu.Unlock()
-	if looked == 0 {
-		t.Fatal("the flaky name was not looked up")
-	}
-	_ = e.m.batcher.Drain(context.Background())
-	if s := chunkStatus(e, sb.Name, auto); s != "pending" {
-		t.Fatalf("proposal with a failing lookup = %s, want it left pending", s)
+	_ = e.m.batcher.Drain(t.Context())
+	if looked == 0 || e.chunkStatus("flakybox", auto) != "pending" {
+		t.Fatalf("proposal with a failing lookup (%d lookups) = %s, want it left pending", looked, e.chunkStatus("flakybox", auto))
 	}
 	e.dns.setErr("cdn.flaky.example.org", nil)
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	eventually(t, "the deferred proposal approved", func() bool { return chunkStatus(e, sb.Name, auto) == "approved" })
+	e.draft("flakybox")
+	e.waitChunk("flakybox", auto, "approved")
 
-	// Apply: the user approves a private-network ask while the resolver
-	// fails; the approval is retried, then comes back to the user.
 	e.dns.set("db.flaky.example.org", "10.0.0.5")
-	asked := addChunk(e, sb.Name, chunk("allow_db_flaky_example_org_443", "db.flaky.example.org", 443))
-	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft})
-	asks := waitAsks(t, e, sb.Name, 1)
+	asked := e.propose("flakybox", "db.flaky.example.org")
+	e.draft("flakybox")
+	ask := e.waitAsks("flakybox", 1)[0]
 	e.dns.setErr("db.flaky.example.org", servfail)
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
-	}
+	must(t, e.decide(ask.ID, approve))
 	eventually(t, "the approval handed back", func() bool {
-		var back bool
-		for _, ev := range e.m.ActivitySince(0, sb.Name) {
-			back = back || (ev.Kind == sandboxapi.ActivityApprovalRequested && ev.ApprovalID == asks[0].ID && ev.Reason == "lookup_failed")
-		}
-		return back
+		return slices.ContainsFunc(e.events("flakybox", sandboxapi.ActivityApprovalRequested, "lookup_failed"), func(ev sandboxapi.ActivityEvent) bool {
+			return ev.ApprovalID == ask.ID
+		})
 	})
-	if s := chunkStatus(e, sb.Name, asked); s != "pending" {
-		t.Fatalf("approved proposal with a failing lookup = %s, want it left pending", s)
-	}
-	if again := waitAsks(t, e, sb.Name, 1); again[0].ID != asks[0].ID {
-		t.Fatalf("asks = %+v, want the same ask back", again)
+	if s, again := e.chunkStatus("flakybox", asked), e.waitAsks("flakybox", 1); s != "pending" || again[0].ID != ask.ID {
+		t.Fatalf("approved proposal with a failing lookup = %s, asks %+v; want the same ask back", s, again)
 	}
 	e.dns.setErr("db.flaky.example.org", nil)
-	if _, err := e.m.DecideApproval(context.Background(), asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
-		t.Fatal(err)
+	must(t, e.decide(ask.ID, approve))
+	e.waitChunk("flakybox", asked, "approved")
+}
+
+// Enforcement removes the approved direct rules (which bypass the proxy)
+// that resolve to this machine, that the user or the administrator now
+// blocks, and all once no policy resolves, keeping DefenseClaw's own; each
+// removal is a log.policy.updated record with a registered reason token.
+func TestRemovedRulesAreAudited(t *testing.T) {
+	e := liveEnv(t, "auditbox", nil)
+	want := map[string]string{
+		"org1.example.org": policyReasonAdmin, "org2.example.org": policyReasonAdmin, "drop.example.org": policyReasonBlocklist,
+		"later1.example.org": policyReasonResolvesToHost, "later2.example.org": policyReasonResolvesToHost, "keep.example.org": "",
 	}
-	eventually(t, "the second approval applied", func() bool { return chunkStatus(e, sb.Name, asked) == "approved" })
+	var ids []string
+	for host := range want {
+		ids = append(ids, e.propose("auditbox", host))
+	}
+	e.draft("auditbox")
+	for _, id := range ids {
+		e.waitChunk("auditbox", id, "approved")
+	}
+	e.dns.set("later1.example.org", "127.0.0.1")
+	e.dns.set("later2.example.org", "169.254.169.254")
+	e.m.enforceAll(t.Context())
+	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"drop.example.org"} })
+	e.m.enforceAll(t.Context())
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.EgressBlock = []string{"org1.example.org", "org2.example.org"}
+	})
+	e.m.enforceAll(t.Context())
+	got := map[string]string{}
+	for _, p := range where(&e.tel.mu, &e.tel.policy, func(p audit.SandboxPolicyEvent) bool { return p.Operation == audit.SandboxPolicyRuleRemove }) {
+		if p.ChangeCount != 1 || p.PolicyHash == "" {
+			t.Errorf("rule_remove record %+v, want one change and the policy hash", p)
+		}
+		got[p.Target] = p.Reason
+	}
+	for host, reason := range want {
+		if got[ruleFor(host)] != reason || e.hasRule("auditbox", ruleFor(host)) != (reason == "") {
+			t.Fatalf("rule to %s: removed for %q, want %q (records %v)", host, got[ruleFor(host)], reason, got)
+		}
+	}
+	if len(got) != 5 || len(e.events("auditbox", sandboxapi.ActivityEgressBlocked, "resolves_to_host")) == 0 {
+		t.Fatalf("rule_remove records = %v, or no feed event for a rule that resolves to this machine", got)
+	}
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.RequiredPack = filepath.Join(t.TempDir(), "gone", "pack.yaml")
+	})
+	e.m.enforceAll(t.Context())
+	if e.hasRule("auditbox", ruleFor("keep.example.org")) || !e.hasRule("auditbox", "defenseclaw_egress") ||
+		!e.tel.removed(ruleFor("keep.example.org"), policyReasonUnresolved) {
+		t.Fatal("without a policy: want the direct rule removed (and recorded) and DefenseClaw's own kept")
+	}
+}
+
+// A rule DefenseClaw approved on its own goes once the policy would no longer
+// approve it (a private answer now, a required strict pack); the user's rule
+// stays, and the sandbox shows the posture it runs under now.
+func TestTighterPolicyRemovesAutomaticApprovals(t *testing.T) {
+	e := liveEnv(t, "stricter", nil)
+	rebound, auto, own := e.approveRule("stricter", "cdn.rebind.example.org"), e.approveRule("stricter", "auto.example.org"), ruleFor("db.lan.example.org")
+	e.dns.set("db.lan.example.org", "10.0.0.5")
+	id := e.propose("stricter", "db.lan.example.org")
+	e.draft("stricter")
+	must(t, e.decide(e.waitAsks("stricter", 1)[0].ID, approve))
+	e.waitChunk("stricter", id, "approved")
+	eventually(t, "the approvers recorded", func() bool {
+		a := e.approvedRules("stricter")
+		return a[auto] == actorAutomatic && a[own] == actorOperator
+	})
+	kept := func(rules ...string) bool {
+		for _, r := range []string{rebound, auto, own} {
+			if e.hasRule("stricter", r) != slices.Contains(rules, r) {
+				return false
+			}
+		}
+		return true
+	}
+	e.m.enforceAll(t.Context())
+	if !kept(rebound, auto, own) {
+		t.Fatal("a pass under an unchanged policy removed an approved rule")
+	}
+	e.dns.set("cdn.rebind.example.org", "192.168.1.20")
+	e.m.enforceAll(t.Context())
+	if !kept(auto, own) || !e.tel.removed(rebound, policyReasonApprovalRequired) {
+		t.Fatal("want the automatic rule that now resolves privately removed (and recorded), the others kept")
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.RequiredPack = "strict" })
+	e.m.refreshEgress()
+	e.m.enforceAll(t.Context())
+	if !kept(own) || !e.tel.removed(auto, policyReasonApprovalRequired) {
+		t.Fatal("want the automatic rule removed (and recorded) under the required strict pack, the user's kept")
+	}
+	if a := e.approvedRules("stricter"); len(a) != 1 || a[own] != actorOperator {
+		t.Fatalf("recorded approvers after the removals = %v", a)
+	}
+	if saved, errs := newRecordStore(e.dataDir).loadAll(); len(errs) > 0 || len(saved) != 1 || len(saved[0].ApprovedRules) != 1 {
+		t.Fatalf("saved record = %+v, %v", saved, errs)
+	}
+	sb := e.get("stricter")
+	if sb.Pack != "strict" || sb.Profile != "strict" || sb.NetworkMode != "deny" || sb.Approvals != "manual" {
+		t.Fatalf("posture = pack %s profile %s network %s approvals %s, want the strict pack's", sb.Pack, sb.Profile, sb.NetworkMode, sb.Approvals)
+	}
+	joined := strings.Join(sb.Warnings, "\n")
+	if !strings.Contains(joined, "the sandbox policy changed since this sandbox was created (pack open") ||
+		!strings.Contains(joined, "works on a copy of this project, but this sandbox mounts it live") {
+		t.Fatalf("warnings = %q, want the posture change and the live mount", sb.Warnings)
+	}
+}
+
+// An automatic approval merged into a rule the user approved leaves the rule
+// automatic, so its endpoints do not keep the user's approval once the
+// policy tightens.
+func TestAutomaticMergeTakesUserAuthority(t *testing.T) {
+	e := liveEnv(t, "merged", nil)
+	rule := ruleFor("wiki.corp")
+	own := e.propose("merged", "wiki.corp")
+	e.draft("merged")
+	must(t, e.decide(e.waitAsks("merged", 1)[0].ID, approve))
+	e.waitChunk("merged", own, "approved")
+	approver := func() string { return e.approvedRules("merged")[rule] }
+	eventually(t, "the user recorded as the approver", func() bool { return approver() == actorOperator })
+	// The agent names the user's rule for a public destination, which the open pack approves on its own.
+	auto := e.addChunk("merged", chunk(rule, "auto.example.org", 443))
+	e.draft("merged")
+	e.waitChunk("merged", auto, "approved")
+	eventually(t, "the merged rule recorded and saved as automatic", func() bool {
+		saved, errs := newRecordStore(e.dataDir).loadAll()
+		return approver() == actorAutomatic && len(errs) == 0 && len(saved) == 1 && saved[0].ApprovedRules[rule] == actorAutomatic
+	})
+	e.m.mu.Lock()
+	changed := noteApprovedRule(e.m.boxes["merged"], rule, actorOperator)
+	e.m.mu.Unlock()
+	if changed {
+		t.Fatal("a user approval merged into an automatic rule made it the user's")
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.RequiredPack = "strict" })
+	e.m.refreshEgress()
+	e.m.enforceAll(t.Context())
+	if e.hasRule("merged", rule) {
+		t.Fatal("the rule holding an automatic approval survived the required strict pack")
+	}
+}
+
+// An administrator's tightening reaches approved rules even when a create or
+// delete rebuilt the egress deciders from the new configuration before the
+// config loop saw it.
+func TestConfigChangeIsEnforcedAfterAnEgressRefresh(t *testing.T) {
+	e := liveEnv(t, "cfgbox", nil)
+	rule := e.approveRule("cfgbox", "gone.example.org")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"gone.example.org"} })
+	e.m.refreshEgress()
+	deadline := time.Now().Add(6 * time.Second)
+	for e.hasRule("cfgbox", rule) {
+		if time.Now().After(deadline) {
+			t.Fatal("the admin-blocked rule survived the configuration change")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The first denied connection to a declared --host-port becomes an ask
+// (OpenShell drafts none for the host alias) whose approval opens the port;
+// one the organization closes gets the refusal on the feed, and no ask.
+func TestDeclaredHostPortAsks(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "hpbox", HostPorts: []int{38830}})
+	push := func(line string) { e.ocsf("hpbox", line, time.Now()) }
+	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18971,18972 mapping_id=m1")
+	denied := "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:38830 [reason:transparent_tcp_mapping_denied]"
+	push(denied)
+	push(denied)
+	asks, _ := e.m.Approvals(t.Context(), "hpbox")
+	if len(asks) != 1 || asks[0].Kind != sandboxapi.ApprovalKindHostPort || asks[0].Host != openshellHostAlias || asks[0].Port != 38830 ||
+		!asks[0].Risky || asks[0].ChunkID != "" || !strings.Contains(asks[0].Reason, "port 38830 on your machine") {
+		t.Fatalf("asks = %+v; want one for the declared port", asks)
+	}
+	ask := asks[0]
+	requested := slices.DeleteFunc(e.events("hpbox", sandboxapi.ActivityApprovalRequested, ""), func(ev sandboxapi.ActivityEvent) bool { return ev.ApprovalID != ask.ID })
+	if len(requested) != 1 || e.get("hpbox").Egress.Blocked != 2 {
+		t.Fatalf("%d approval.requested events, %d blocked; want 1 and both denials", len(requested), e.get("hpbox").Egress.Blocked)
+	}
+	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
+		t.Fatalf("approve = %+v, %v", res, err)
+	}
+	rule := hostPortRule(38830)
+	eventually(t, "the host port rule and the resolved approval", func() bool {
+		pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, "hpbox")
+		r, ok := pol.NetworkPolicies[rule]
+		return ok && len(r.Endpoints) == 1 && r.Endpoints[0].Host == openshellHostAlias && r.Endpoints[0].Port == 38830 &&
+			slices.ContainsFunc(e.events("hpbox", sandboxapi.ActivityApprovalResolved, ""), func(ev sandboxapi.ActivityEvent) bool {
+				return ev.ApprovalID == ask.ID && strings.Contains(ev.Message, "approved port 38830")
+			})
+	})
+	if e.approvedRules("hpbox")[rule] != actorOperator {
+		t.Fatal("the operator is not the recorded approver")
+	}
+	if len(where(&e.tel.mu, &e.tel.approvals, func(a audit.SandboxApprovalEvent) bool {
+		return a.ApprovalID == ask.ID && a.Stage == audit.SandboxApprovalResolved && a.Result == audit.SandboxApprovalApproved
+	})) == 0 {
+		t.Fatal("no resolved approval record")
+	}
+	e.m.enforceAll(t.Context())
+	if !e.hasRule("hpbox", rule) {
+		t.Fatal("enforcement removed the approved host port")
+	}
+	push(denied)
+	if asks, _ := e.m.Approvals(t.Context(), "hpbox"); len(asks) != 0 {
+		t.Fatalf("the next denial asked again: %+v", asks)
+	}
+
+	e.create(sandboxapi.CreateRequest{Name: "hpadmin", HostPorts: []int{38830}, Project: e.otherProject("admin")})
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowHostPorts = boolPtr(false) })
+	e.m.refreshEgress()
+	e.ocsf("hpadmin", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> host.openshell.internal:38830 [reason:transparent_tcp_mapping_denied]", time.Now())
+	got := e.events("hpadmin", sandboxapi.ActivityEgressBlocked, sandboxapi.ReasonHostPortClosed)
+	if len(got) != 1 || !strings.Contains(got[0].Message, "does not open port 38830") {
+		t.Fatalf("feed = %+v", got)
+	}
+	if asks, _ := e.m.Approvals(t.Context(), "hpadmin"); len(asks) != 0 {
+		t.Fatalf("asks = %+v", asks)
+	}
+}
+
+// esc is an inert terminal control marker, which a terminal must never
+// receive from sandbox text.
+const esc = "\x1b[0mDCMARK\x07"
+
+// Text a sandbox controls (a directory it creates, a hook's tool name, a
+// proposal's binary and notes) reaches the feed and the API without terminal
+// control characters.
+func TestSandboxTextIsSafeToPrint(t *testing.T) {
+	e := liveEnv(t, "textbox", nil)
+	opts := e.guard.waitActive(t, e.project, true)
+	opts.OnDetect(nestguard.Detection{Kind: nestguard.KindRepository, Dir: "src/" + esc, Quarantined: "src/" + esc + "/.git.q", At: time.Now()})
+	e.m.ObserveHookDecision(HookDecision{BindingID: e.binding("textbox").ID, SandboxName: "textbox", Event: "PreToolUse", Tool: "Bash" + esc,
+		Action: "block", Reason: "blocked " + esc})
+	c := chunk("allow_host_openshell_internal_5432", "host.openshell.internal", 5432)
+	c.Binary, c.SecurityNotes, c.Rationale = "/usr/bin/"+esc, "notes "+esc, "why "+esc
+	e.addChunk("textbox", c)
+	e.draft("textbox")
+	asks := e.waitAsks("textbox", 1)
+	got := e.get("textbox")
+	if len(got.NestedRepos) != 1 || !strings.Contains(got.NestedRepos[0].Path, "DCMARK") {
+		t.Fatalf("nested repos = %+v", got.NestedRepos)
+	}
+	for what, v := range map[string]any{"the activity feed": e.m.ActivitySince(0, "textbox"), "the approvals": asks, "the sandbox view": got} {
+		data, err := json.Marshal(v)
+		must(t, err)
+		// JSON escapes control characters; their escapes must not appear.
+		if s := string(data); strings.Contains(s, `\u001b`) || strings.Contains(s, `\u0007`) {
+			t.Fatalf("%s carries control characters: %s", what, s)
+		}
+	}
 }
