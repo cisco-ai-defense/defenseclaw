@@ -277,6 +277,22 @@ func TestSetupNeedsConsentToInstall(t *testing.T) {
 	}
 }
 
+// TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo
+// on Linux and installs a Homebrew formula on macOS, and the install
+// question says which (manual test M5).
+func TestSetupInstallQuestionSaysHowItInstalls(t *testing.T) {
+	for goos, want := range map[string]string{"linux": "(sudo; sha256 verified) [y/N]", "darwin": "(Homebrew; sha256 verified) [y/N]"} {
+		ta := setupApp(t, "n\n", "", false)
+		ta.GOOS = goos
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+			r.CLIVersion = ""
+			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+		})
+		wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
+		has(t, ta.output(), "Install OpenShell 0.1.1 with NVIDIA's installer? "+want)
+	}
+}
+
 func TestSetupStopsOnHostFailure(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	before, _ := os.ReadFile(ta.ConfigPath)

@@ -120,8 +120,13 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		failed(rep, openshell.CheckIDGatewayVersion) || failed(rep, openshell.CheckIDGatewayService) {
 		install := o.InstallOpenShell
 		if !install && !o.NonInteractive {
+			// On macOS the installer installs a Homebrew formula, without sudo.
+			how := "sudo"
+			if a.GOOS == "darwin" {
+				how = "Homebrew"
+			}
 			var err error
-			install, err = a.ask("Install OpenShell "+openshell.SupportedMin+" with NVIDIA's installer? (sudo; sha256 verified)", false, o.Yes)
+			install, err = a.ask("Install OpenShell "+openshell.SupportedMin+" with NVIDIA's installer? ("+how+"; sha256 verified)", false, o.Yes)
 			if err != nil {
 				return err
 			}
