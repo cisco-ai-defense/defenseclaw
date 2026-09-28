@@ -1848,6 +1848,8 @@ function Invoke-BuildArtifacts {
             'defenseclaw/_data/plugin/extension-runtime-fingerprint.json',
             'defenseclaw/_data/skills/codeguard/SKILL.md',
             'defenseclaw/_data/llm/model_catalog.json',
+            'defenseclaw/_data/policies/guardrail/tool-chains.json',
+            'defenseclaw/_data/policies/guardrail-use-cases/database-destruction-protection/rules/database-destruction.yaml',
             'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',
             'defenseclaw/_data/config/v8/observability.yaml',
             'defenseclaw/_data/config/v8/observability.md',
