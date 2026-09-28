@@ -3563,6 +3563,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		AgentExecutable:  agentExecutable,
 		HookContractID:   contractResolution.Contract.ContractID,
 		HybridProxyMode:  strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+		RoutingEnabled:   s.currentConfig().Routing.Enabled,
 	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
 	if guardianManagedLifecycle {
@@ -4109,6 +4110,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// base opts carrying just the fields Teardown needs.
 	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr,
 		HybridProxyMode: strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+		RoutingEnabled:  s.currentConfig().Routing.Enabled,
 	}
 	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	var failedRemoved []string
@@ -5246,6 +5248,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentExecutable:      agentExecutable,
 		HookContractID:       contractResolution.Contract.ContractID,
 		HybridProxyMode:      strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid"),
+		RoutingEnabled:       s.currentConfig().Routing.Enabled,
 	}, nil
 }
 

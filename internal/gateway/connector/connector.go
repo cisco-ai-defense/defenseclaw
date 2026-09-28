@@ -175,6 +175,11 @@ type SetupOpts struct {
 
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
+
+	// RoutingEnabled is true when routing.enabled=true in config.yaml.
+	// Hook-only connectors use this to redirect LLM traffic through the
+	// proxy for model routing, even when HybridProxyMode is false.
+	RoutingEnabled bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

@@ -773,8 +773,12 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		telemetryEndpoint = profile.NativeOTLP.Endpoint
 	}
 
+	llmMode := LLMTrafficModeForConnector(c.Name())
+	if opts.HybridProxyMode {
+		llmMode = LLMTrafficModeHybrid
+	}
 	return ConnectorCapabilities{
-		LLMTrafficMode: LLMTrafficModeForConnector(c.Name()),
+		LLMTrafficMode: llmMode,
 		ACP:            ACPAgentCapabilityForConnector(c.Name()),
 		Hooks:          c.HookCapabilities(opts),
 		MCP: SurfaceCapability{
@@ -1494,19 +1498,17 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			}
 		}
 
-		// Heal legacy installs that injected a DefenseClaw LLM-proxy
-		// redirect at the top-level `openai_base_url`. The proxy listener
-		// no longer binds (the value points at a closed loopback port), so
-		// leaving the key in place causes every Codex turn to fail with
-		// "stream disconnected before completion" against the dead
-		// 127.0.0.1:<port>/c/codex endpoint.
-		//
-		// The strip is intentionally narrow: it only deletes values whose
-		// URL shape matches the loopback /c/codex pattern DefenseClaw
-		// itself wrote. An operator's enterprise gateway URL (e.g.
-		// https://gateway.corp.example/openai) is preserved and continues
-		// to be covered by TestCodex_Setup_DefaultObservability_NoProxyRewrite.
-		if v, ok := cfg["openai_base_url"].(string); ok && isDefenseClawCodexProxyRedirect(v) {
+		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+			// Route Codex LLM traffic through the DefenseClaw proxy for
+			// semantic routing, model selection, and/or full inspection.
+			cfg["openai_base_url"] = "http://" + opts.ProxyAddr + "/c/codex/v1"
+		} else if v, ok := cfg["openai_base_url"].(string); ok && isDefenseClawCodexProxyRedirect(v) {
+			// Heal legacy installs that injected a DefenseClaw LLM-proxy
+			// redirect at the top-level `openai_base_url`. The proxy listener
+			// no longer binds (the value points at a closed loopback port), so
+			// leaving the key in place causes every Codex turn to fail with
+			// "stream disconnected before completion" against the dead
+			// 127.0.0.1:<port>/c/codex endpoint.
 			delete(cfg, "openai_base_url")
 		}
 
