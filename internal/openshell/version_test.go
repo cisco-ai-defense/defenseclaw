@@ -30,12 +30,8 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 		"0.1.1-1":               "0.1.1",
 		"openshell 0.1.2-pre.3": "0.1.2",
 	} {
-		v, err := ParseVersion(in)
-		if err != nil {
-			t.Fatalf("ParseVersion(%q): %v", in, err)
-		}
-		if v.String() != want {
-			t.Fatalf("ParseVersion(%q) = %s, want %s", in, v, want)
+		if v, err := ParseVersion(in); err != nil || v.String() != want {
+			t.Fatalf("ParseVersion(%q) = %s, %v; want %s", in, v, err, want)
 		}
 	}
 	for _, bad := range []string{"", "openshell", "0.1", "a.b.c", "0.1.-1"} {
@@ -43,37 +39,41 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 			t.Fatalf("ParseVersion(%q) succeeded", bad)
 		}
 	}
+	// `openshell --version` output.
+	for in, want := range map[string]string{"openshell 0.1.2 (4ce767fc)": "0.1.2", "openshell v0.0.16": "0.0.16", "openshell dev": ""} {
+		if v, err := VersionFromOutput(in); (want == "") != (err != nil) || (err == nil && v.String() != want) {
+			t.Errorf("VersionFromOutput(%q) = %v, %v; want %q", in, v, err, want)
+		}
+	}
 }
 
 func TestCheckSupportedWindow(t *testing.T) {
-	ok := []string{"0.1.1", "0.1.9"}
-	for _, s := range ok {
-		if err := CheckSupported(mustParse(s)); err != nil {
-			t.Fatalf("%s rejected: %v", s, err)
-		}
-	}
-	for _, s := range []string{"0.0.16", "0.1.0", "0.2.0", "1.0.0"} {
-		err := CheckSupported(mustParse(s))
-		var unsupported *ErrUnsupportedVersion
-		if !errors.As(err, &unsupported) {
-			t.Fatalf("%s accepted", s)
-		}
-	}
 	// The advice matches what Installer does: clean up before 0.0.37,
 	// upgrade in place from 0.0.37 on.
 	for v, want := range map[string]string{
+		"0.1.1":  "",
+		"0.1.9":  "",
 		"0.0.16": "predates 0.0.37",
 		"0.0.36": "openshell sandbox delete --all && openshell gateway destroy",
 		"0.0.37": "upgrade it in place",
 		"0.0.40": "upgrade it in place",
 		"0.1.0":  "upgrade it in place",
 		"0.2.0":  "not supported",
+		"1.0.0":  "not supported",
 	} {
-		if msg := CheckSupported(mustParse(v)).Error(); !strings.Contains(msg, want) {
-			t.Errorf("%s message = %q, want %q", v, msg, want)
+		err := CheckSupported(mustParse(v))
+		var unsupported *ErrUnsupportedVersion
+		if want == "" {
+			if err != nil {
+				t.Errorf("%s rejected: %v", v, err)
+			}
+			continue
 		}
-	}
-	if msg := CheckSupported(mustParse("0.0.40")).Error(); strings.Contains(msg, "remove") || strings.Contains(msg, "destroy") {
-		t.Errorf("0.0.40 message asks for a cleanup the installer does not need: %q", msg)
+		if !errors.As(err, &unsupported) || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s = %v, want an ErrUnsupportedVersion saying %q", v, err, want)
+		}
+		if strings.HasPrefix(want, "upgrade") && (strings.Contains(err.Error(), "remove") || strings.Contains(err.Error(), "destroy")) {
+			t.Errorf("%s message asks for a cleanup the installer does not need: %q", v, err)
+		}
 	}
 }

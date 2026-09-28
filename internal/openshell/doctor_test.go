@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,9 @@ enable_bind_mounts = true
 enabled = false
 `
 
+// disabledTOML is a gateway.toml without bind mounts.
+const disabledTOML = "[openshell]\nversion = 2\n"
+
 type doctorFixture struct {
 	t        *testing.T
 	dir      string
@@ -57,6 +61,10 @@ type doctorFixture struct {
 	busy     map[string]bool
 	started  time.Time
 	verified int
+	// diskFree answers DiskFree; diskProbed is the path it was asked about.
+	diskFree   uint64
+	diskErr    error
+	diskProbed string
 	// probe answers ProbeClientAuth; probes counts the calls.
 	probe  error
 	probes int
@@ -83,21 +91,17 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	t.Helper()
 	skipOnWindows(t)
 	f := &doctorFixture{
-		t:       t,
-		dir:     filepath.Join(t.TempDir(), "openshell"),
-		home:    t.TempDir(),
-		runner:  &openshelltest.Runner{},
-		fake:    openshelltest.New(),
-		found:   map[string]bool{"docker": true, "openshell": true},
-		busy:    map[string]bool{},
-		started: time.Now().Add(-time.Hour).Truncate(time.Second),
+		t:        t,
+		dir:      filepath.Join(t.TempDir(), "openshell"),
+		home:     t.TempDir(),
+		runner:   &openshelltest.Runner{},
+		fake:     openshelltest.New(),
+		found:    map[string]bool{"docker": true, "openshell": true},
+		busy:     map[string]bool{},
+		started:  time.Now().Add(-time.Hour).Truncate(time.Second),
+		diskFree: 40 << 30,
 	}
-	f.regDir = writeRegistration(t, f.dir, "openshell", nil, nil)
-	for file, mode := range map[string]os.FileMode{"mtls": 0o700, "mtls/ca.crt": 0o644, "mtls/tls.crt": 0o644} {
-		if err := os.Chmod(filepath.Join(f.regDir, file), mode); err != nil {
-			t.Fatal(err)
-		}
-	}
+	f.regDir = f.addRegistration("openshell", nil)
 	f.writeTOML(enabledTOML, f.started.Add(-time.Minute))
 
 	f.runner.On("docker info", dockerInfoJSON("29.4.0", "Ubuntu 24.04.4 LTS", nil), nil)
@@ -130,7 +134,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe }},
 		Ports:         []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
 		LandlockABI:   func() (int, error) { return 6, nil },
-		DiskFree:      func(string) (uint64, error) { return 40 << 30, nil },
+		DiskFree:      func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
 		Listen:        f.listen,
 		Geteuid:       func() int { return 1000 },
 		Username:      func() (string, error) { return "dev", nil },
@@ -139,6 +143,16 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		DockerGroup:   func() (bool, bool, error) { return true, true, nil },
 	}
 	return f
+}
+
+// addRegistration writes a registration with the credential modes doctor
+// accepts.
+func (f *doctorFixture) addRegistration(name string, meta map[string]any) string {
+	dir := writeRegistration(f.t, f.dir, name, meta, nil)
+	for file, mode := range map[string]os.FileMode{"mtls": 0o700, "mtls/ca.crt": 0o644, "mtls/tls.crt": 0o644} {
+		chmod(f.t, filepath.Join(dir, file), mode)
+	}
+	return dir
 }
 
 func (f *doctorFixture) listen(network, addr string) (net.Listener, error) {
@@ -151,12 +165,17 @@ func (f *doctorFixture) listen(network, addr string) (net.Listener, error) {
 func (f *doctorFixture) writeTOML(content string, mtime time.Time) {
 	f.t.Helper()
 	path := filepath.Join(f.dir, "gateway.toml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		f.t.Fatal(err)
-	}
+	writeFile(f.t, path, content, 0o600)
 	if err := os.Chtimes(path, mtime, mtime); err != nil {
 		f.t.Fatal(err)
 	}
+}
+
+// onBrew makes the host macOS with a running Homebrew service.
+func (f *doctorFixture) onBrew() {
+	f.doctor.GOOS, f.doctor.Gateway.GOOS = "darwin", "darwin"
+	f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
+	f.runner.On("brew services restart nvidia/openshell/openshell", "", nil)
 }
 
 func (f *doctorFixture) run() *openshell.DoctorReport {
@@ -176,13 +195,36 @@ func expectCheck(t *testing.T, r *openshell.DoctorReport, id string, status open
 	return c
 }
 
+// applyFixes applies the automatic fixes of the given checks (all when
+// none are named) and fails unless each one applied.
+func applyFixes(t *testing.T, r *openshell.DoctorReport, ids ...string) {
+	t.Helper()
+	outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) {
+		return len(ids) == 0 || slices.Contains(ids, c.ID), nil
+	})
+	if err != nil || len(outcomes) == 0 {
+		t.Fatalf("ApplyFixes = %+v, %v", outcomes, err)
+	}
+	for _, o := range outcomes {
+		if !o.Applied {
+			t.Fatalf("fix not applied: %+v", o)
+		}
+	}
+}
+
+func expectMode(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != mode {
+		t.Fatalf("%s: mode %v, %v; want %v", path, info.Mode().Perm(), err, mode)
+	}
+}
+
 func TestDoctorHealthyHost(t *testing.T) {
 	f := newDoctorFixture(t)
 	r := f.run()
-	if !r.OK() {
-		t.Fatalf("healthy host failed:\n%s", r)
-	}
+	var got []string
 	for _, c := range r.Checks {
+		got = append(got, c.ID)
 		if c.Status != openshell.StatusPass && c.Status != openshell.StatusSkip {
 			t.Errorf("%s = %s: %s", c.ID, c.Status, c.Detail)
 		}
@@ -190,25 +232,28 @@ func TestDoctorHealthyHost(t *testing.T) {
 	want := []string{"platform", "user", "landlock", "docker", "docker-host-network", "docker-file-sharing", "disk", "linger",
 		"gateway-service", "openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-driver",
 		"global-policy", "bind-mounts", "telemetry", "port-ingress", "port-egress"}
-	var got []string
-	for _, c := range r.Checks {
-		got = append(got, c.ID)
-	}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("checks = %v\nwant     %v", got, want)
+	if !r.OK() || strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("checks = %v\nwant     %v\n%s", got, want, r)
 	}
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
 	expectCheck(t, r, openshell.CheckIDDisk, openshell.StatusPass, "40.0 GiB free under /data/docker")
-	if r.DockerVersion != "29.4.0" || r.CLIVersion != "0.1.1" || r.GatewayVersion != "0.1.1" || r.Registration.Name != "openshell" {
-		t.Fatalf("facts = %+v", r)
+	if f.diskProbed != "/data/docker" || r.DockerVersion != "29.4.0" || r.CLIVersion != "0.1.1" || r.GatewayVersion != "0.1.1" || r.Registration.Name != "openshell" {
+		t.Fatalf("facts = %+v (disk probed at %q)", r, f.diskProbed)
 	}
 	if _, err := json.Marshal(r); err != nil {
 		t.Fatalf("report does not marshal: %v", err)
 	}
+	f.runner.On("loginctl show-user dev", "no\n", nil)
+	out := f.run().String()
+	for _, want := range []string{"PASS  Platform", "WARN  systemd linger", "fix linger:", "sudo loginctl enable-linger dev"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report lacks %q:\n%s", want, out)
+		}
+	}
 }
 
 func TestDoctorPlatforms(t *testing.T) {
-	cases := []struct {
+	for _, tc := range []struct {
 		goos, goarch string
 		status       openshell.CheckStatus
 		early        bool
@@ -218,12 +263,10 @@ func TestDoctorPlatforms(t *testing.T) {
 		{"linux", "386", openshell.StatusFail, false},
 		{"darwin", "amd64", openshell.StatusFail, false},
 		{"darwin", "arm64", openshell.StatusWarn, false},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.goos+"/"+tc.goarch, func(t *testing.T) {
 			f := newDoctorFixture(t)
-			f.doctor.GOOS, f.doctor.GOARCH = tc.goos, tc.goarch
-			f.doctor.Gateway.GOOS = tc.goos
+			f.doctor.GOOS, f.doctor.GOARCH, f.doctor.Gateway.GOOS = tc.goos, tc.goarch, tc.goos
 			r := f.run()
 			expectCheck(t, r, openshell.CheckIDPlatform, tc.status, tc.goos)
 			if tc.early != (len(r.Checks) == 1) {
@@ -231,527 +274,393 @@ func TestDoctorPlatforms(t *testing.T) {
 			}
 		})
 	}
-	t.Run("macOS skips Linux-only checks", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.doctor.GOOS, f.doctor.Gateway.GOOS = "darwin", "darwin"
-		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
-		r := f.run()
-		expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusSkip, "Docker Desktop")
-		expectCheck(t, r, openshell.CheckIDLinger, openshell.StatusSkip, "")
-		expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusPass, "nvidia/openshell/openshell")
-		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip, "")
-	})
 }
 
-func TestDoctorUser(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.doctor.Geteuid = func() int { return 0 }
-	expectCheck(t, f.run(), openshell.CheckIDUser, openshell.StatusFail, "running as root")
-
-	f = newDoctorFixture(t)
-	uid := 998
-	f.doctor.DaemonUID = &uid
-	expectCheck(t, f.run(), openshell.CheckIDUser, openshell.StatusFail, "daemon runs as uid 998")
+type checkWant struct {
+	id     string
+	status openshell.CheckStatus
+	detail string
 }
 
-func TestDoctorLandlock(t *testing.T) {
-	cases := []struct {
-		abi    int
-		err    error
-		detail string
-	}{
-		{2, nil, "ABI 2; OpenShell needs ABI 3"},
-		{0, openshell.ErrLandlockDisabled, "not enabled"},
-		{0, openshell.ErrLandlockMissing, "no Landlock support"},
+// fixWant describes the fix of a case's first check.
+type fixWant struct {
+	command string // the exact command, when set
+	text    string // in the summary or the command, when set
+	auto    bool   // an automatic fix
+	manual  bool   // the operator must act: no Apply
+	sudo    bool
+}
+
+// TestDoctorChecks runs each check against one broken host fact and, where
+// the case says so, applies the fix it offers.
+func TestDoctorChecks(t *testing.T) {
+	const (
+		pass, warn, fail, skip = openshell.StatusPass, openshell.StatusWarn, openshell.StatusFail, openshell.StatusSkip
+		restart                = "systemctl --user restart openshell-gateway"
+		start                  = "systemctl --user enable --now openshell-gateway"
+		install                = "defenseclaw sandbox setup --install-openshell"
+	)
+	docker := func(out string, err error) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.runner.On("docker info", out, err) }
 	}
-	for _, tc := range cases {
-		f := newDoctorFixture(t)
-		f.doctor.LandlockABI = func() (int, error) { return tc.abi, tc.err }
-		c := expectCheck(t, f.run(), openshell.CheckIDLandlock, openshell.StatusFail, tc.detail)
-		if c.Fix == nil || !c.Fix.Sudo || c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
+	desktop := func(hostNetworking bool, shared func(f *doctorFixture) []string) func(*doctorFixture) {
+		return func(f *doctorFixture) {
+			f.runner.On("docker info", dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil)
+			f.doctor.DockerDesktop = func() (*openshell.DockerDesktop, error) {
+				return &openshell.DockerDesktop{HostNetworking: &hostNetworking, FileSharing: shared(f)}, nil
+			}
 		}
 	}
-}
-
-func TestDoctorDocker(t *testing.T) {
-	type result struct {
-		id     string
-		status openshell.CheckStatus
-		detail string
+	service := func(show string, err error) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.runner.On("systemctl --user show openshell-gateway", show, err) }
 	}
+	unit := func(active, fileState string) func(*doctorFixture) {
+		return func(f *doctorFixture) {
+			f.runner.On("systemctl --user show openshell-gateway", f.unit(active, fileState), nil)
+		}
+	}
+	cliVersion := func(out string) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.runner.On("/usr/bin/openshell --version", out, nil) }
+	}
+	health := func(err error) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.fake.FailNext(openshelltest.MethodHealth, err) }
+	}
+	landlock := func(abi int, err error) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.doctor.LandlockABI = func() (int, error) { return abi, err } }
+	}
+	disk := func(free uint64, err error) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.diskFree, f.diskErr = free, err }
+	}
+	mode := func(path func(f *doctorFixture) string, m os.FileMode) func(*doctorFixture) {
+		return func(f *doctorFixture) { chmod(f.t, path(f), m) }
+	}
+	key := func(f *doctorFixture) string { return filepath.Join(f.regDir, "mtls", "tls.key") }
+	metadata := func(f *doctorFixture) string { return filepath.Join(f.regDir, "metadata.json") }
+	gatewayEnv := func(content string) func(*doctorFixture) {
+		return func(f *doctorFixture) { writeFile(f.t, filepath.Join(f.dir, "gateway.env"), content, 0o600) }
+	}
+	probe := func(err error) func(*doctorFixture) {
+		return func(f *doctorFixture) { f.probe = err }
+	}
+	noMounts := func(then func(*doctorFixture)) func(*doctorFixture) {
+		return func(f *doctorFixture) {
+			f.writeTOML(disabledTOML, f.started.Add(-time.Minute))
+			if then != nil {
+				then(f)
+			}
+		}
+	}
+	credsRefused := "openshell gateway remove openshell && openshell gateway add 'https://127.0.0.1:17670' --local --name openshell"
+	exposed := "others can reach the gateway and mount any host path"
+	noCertNeeded := fmt.Errorf("%w: accepted a TLS session", openshell.ErrGatewayExposed)
+
 	cases := []struct {
 		name  string
 		setup func(f *doctorFixture)
-		want  []result
-		fix   string
+		want  []checkWant
+		fix   *fixWant
+		// then runs after the checks, for fixes and other effects.
+		then func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport)
 	}{
-		{
-			name:  "not installed",
-			setup: func(f *doctorFixture) { f.found["docker"] = false },
-			want: []result{{"docker", openshell.StatusFail, "not installed"}, {"docker-host-network", openshell.StatusSkip, ""},
-				{"docker-file-sharing", openshell.StatusSkip, ""}, {"disk", openshell.StatusSkip, ""}},
-			fix: "install Docker Engine 28",
-		},
-		{
-			name: "permission denied, not in the group",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", "permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock", errors.New("exit status 1"))
-				f.doctor.DockerGroup = func() (bool, bool, error) { return false, false, nil }
-			},
-			want: []result{{"docker", openshell.StatusFail, "permission denied"}},
-			fix:  "sudo usermod -aG docker dev",
-		},
-		{
-			name: "permission denied, stale session",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", `{"ServerErrors":["permission denied while trying to connect to the Docker daemon socket"]}`, errors.New("exit status 1"))
-				f.doctor.DockerGroup = func() (bool, bool, error) { return true, false, nil }
-			},
-			want: []result{{"docker", openshell.StatusFail, "permission denied"}},
-			fix:  "newgrp docker",
-		},
-		{
-			name: "daemon down",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", errors.New("exit status 1"))
-			},
-			want: []result{{"docker", openshell.StatusFail, "Is the docker daemon running"}},
-			fix:  "sudo systemctl enable --now docker",
-		},
-		{
-			name:  "too old",
-			setup: func(f *doctorFixture) { f.runner.On("docker info", dockerInfoJSON("27.5.1", "Ubuntu", nil), nil) },
-			want:  []result{{"docker", openshell.StatusFail, "older than 28"}},
-		},
-		{
-			name: "rootless",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", dockerInfoJSON("29.4.0", "Ubuntu", map[string]any{"SecurityOptions": []string{"name=seccomp,profile=builtin", "name=rootless"}}), nil)
-			},
-			want: []result{{"docker", openshell.StatusFail, "rootless"}},
-		},
-		{
-			name: "desktop with host networking and sharing",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil)
-				on := true
-				f.doctor.DockerDesktop = func() (*openshell.DockerDesktop, error) {
-					return &openshell.DockerDesktop{HostNetworking: &on, FileSharing: []string{filepath.Dir(f.home)}}, nil
+		{name: "root user", setup: func(f *doctorFixture) { f.doctor.Geteuid = func() int { return 0 } },
+			want: []checkWant{{"user", fail, "running as root"}}},
+		{name: "daemon runs as another user", setup: func(f *doctorFixture) { uid := 998; f.doctor.DaemonUID = &uid },
+			want: []checkWant{{"user", fail, "daemon runs as uid 998"}}},
+		{name: "landlock ABI too old", setup: landlock(2, nil),
+			want: []checkWant{{"landlock", fail, "ABI 2; OpenShell needs ABI 3"}}, fix: &fixWant{sudo: true, manual: true}},
+		{name: "landlock disabled", setup: landlock(0, openshell.ErrLandlockDisabled),
+			want: []checkWant{{"landlock", fail, "not enabled"}}, fix: &fixWant{sudo: true, manual: true}},
+		{name: "landlock missing", setup: landlock(0, openshell.ErrLandlockMissing),
+			want: []checkWant{{"landlock", fail, "no Landlock support"}}, fix: &fixWant{sudo: true, manual: true}},
+
+		{name: "docker not installed", setup: func(f *doctorFixture) { f.found["docker"] = false },
+			want: []checkWant{{"docker", fail, "not installed"}, {"docker-host-network", skip, ""}, {"docker-file-sharing", skip, ""}, {"disk", skip, ""}},
+			fix:  &fixWant{text: "install Docker Engine 28"}},
+		{name: "docker permission denied, not in the group", setup: func(f *doctorFixture) {
+			docker("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock", errors.New("exit status 1"))(f)
+			f.doctor.DockerGroup = func() (bool, bool, error) { return false, false, nil }
+		}, want: []checkWant{{"docker", fail, "permission denied"}}, fix: &fixWant{text: "sudo usermod -aG docker dev"}},
+		{name: "docker permission denied, stale session", setup: func(f *doctorFixture) {
+			docker(`{"ServerErrors":["permission denied while trying to connect to the Docker daemon socket"]}`, errors.New("exit status 1"))(f)
+			f.doctor.DockerGroup = func() (bool, bool, error) { return true, false, nil }
+		}, want: []checkWant{{"docker", fail, "permission denied"}}, fix: &fixWant{text: "newgrp docker"}},
+		{name: "docker daemon down", setup: docker("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", errors.New("exit status 1")),
+			want: []checkWant{{"docker", fail, "Is the docker daemon running"}}, fix: &fixWant{text: "sudo systemctl enable --now docker"}},
+		{name: "docker too old", setup: docker(dockerInfoJSON("27.5.1", "Ubuntu", nil), nil), want: []checkWant{{"docker", fail, "older than 28"}}},
+		{name: "docker rootless", setup: docker(dockerInfoJSON("29.4.0", "Ubuntu", map[string]any{"SecurityOptions": []string{"name=seccomp,profile=builtin", "name=rootless"}}), nil),
+			want: []checkWant{{"docker", fail, "rootless"}}},
+		{name: "docker desktop with host networking and sharing", setup: desktop(true, func(f *doctorFixture) []string { return []string{filepath.Dir(f.home)} }),
+			want: []checkWant{{"docker", pass, "Docker Desktop"}, {"docker-host-network", pass, "enabled"}, {"docker-file-sharing", pass, "is shared"}, {"disk", skip, "VM"}}},
+		{name: "docker desktop without host networking or sharing", setup: desktop(false, func(*doctorFixture) []string { return []string{"/Volumes"} }),
+			want: []checkWant{{"docker-host-network", fail, "host networking is off"}, {"docker-file-sharing", fail, "not shared"}}},
+		{name: "docker desktop settings store on disk", setup: func(f *doctorFixture) {
+			docker(dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil)(f)
+			f.doctor.DockerDesktop = nil
+			store := filepath.Join(f.home, ".docker", "desktop", "settings-store.json")
+			if err := os.MkdirAll(filepath.Dir(store), 0o700); err != nil {
+				f.t.Fatal(err)
+			}
+			writeFile(f.t, store, fmt.Sprintf(`{"HostNetworkingEnabled": false, "filesharingDirectories": [%q]}`, f.home), 0o600)
+		}, want: []checkWant{{"docker-host-network", fail, "host networking is off"}, {"docker-file-sharing", pass, "is shared"}}},
+		{name: "docker desktop settings unreadable", setup: docker(dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil),
+			want: []checkWant{{"docker-host-network", warn, "could not read"}, {"docker-file-sharing", warn, "could not read"}}},
+
+		// Low space names DefenseClaw's own prune, and warns about the
+		// machine-wide one instead of suggesting it.
+		{name: "disk too full", setup: disk(3<<30, nil), want: []checkWant{{"disk", fail, "at least 5.0 GiB"}},
+			fix: &fixWant{command: "defenseclaw sandbox image prune", text: "rather than `docker system prune`, which also removes"}},
+		{name: "disk low", setup: disk(7<<30, nil), want: []checkWant{{"disk", warn, "10.0 GiB or more"}},
+			fix: &fixWant{command: "defenseclaw sandbox image prune", text: "rather than `docker system prune`, which also removes"}},
+		{name: "disk unmeasured", setup: disk(0, errors.New("no such file")), want: []checkWant{{"disk", warn, "could not measure"}}},
+
+		{name: "linger off", setup: func(f *doctorFixture) { f.runner.On("loginctl show-user dev", "no\n", nil) },
+			want: []checkWant{{"linger", warn, "stop when you log out"}}, fix: &fixWant{command: "sudo loginctl enable-linger dev", sudo: true}},
+		{name: "service failed", setup: service("LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\n", nil),
+			want: []checkWant{{"gateway-service", fail, "failed (failed)"}}, fix: &fixWant{auto: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDGatewayService)
+				if !f.runner.Called(start) || f.verified != 1 {
+					t.Fatalf("fix did not start and verify the gateway (verified %d)", f.verified)
 				}
-			},
-			want: []result{{"docker", openshell.StatusPass, "Docker Desktop"}, {"docker-host-network", openshell.StatusPass, "enabled"},
-				{"docker-file-sharing", openshell.StatusPass, "is shared"}, {"disk", openshell.StatusSkip, "VM"}},
-		},
-		{
-			name: "desktop without host networking or sharing",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil)
-				off := false
-				f.doctor.DockerDesktop = func() (*openshell.DockerDesktop, error) {
-					return &openshell.DockerDesktop{HostNetworking: &off, FileSharing: []string{"/Volumes"}}, nil
+			}},
+		{name: "service not installed", setup: service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil),
+			want: []checkWant{{"gateway-service", fail, "not installed"}}, fix: &fixWant{command: install}},
+		{name: "service not enabled", setup: service("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\n", nil),
+			want: []checkWant{{"gateway-service", warn, "does not start at login"}}},
+		// `systemctl --user link` without enable: nothing starts it at login.
+		{name: "service only linked", setup: unit("active", "linked"),
+			want: []checkWant{{"gateway-service", warn, "does not start at login"}}, fix: &fixWant{command: start, auto: true}},
+		{name: "no user bus", setup: service("Failed to connect to bus: No medium found", errors.New("exit status 1")),
+			want: []checkWant{{"gateway-service", fail, "Failed to connect to bus"}}},
+		{name: "macOS skips Linux-only checks", setup: func(f *doctorFixture) { f.onBrew() },
+			want: []checkWant{{"landlock", skip, "Docker Desktop"}, {"linger", skip, ""}, {"gateway-service", pass, "nvidia/openshell/openshell"}, {"telemetry", skip, ""}}},
+
+		{name: "cli missing", setup: func(f *doctorFixture) { f.found["openshell"] = false }, want: []checkWant{{"openshell-cli", fail, "not on PATH"}}},
+		{name: "cli 0.0.x", setup: cliVersion("openshell 0.0.16\n"), want: []checkWant{{"openshell-cli", fail, "predates 0.0.37"}}},
+		{name: "cli 0.0.x that upgrades in place", setup: cliVersion("openshell 0.0.40\n"),
+			want: []checkWant{{"openshell-cli", fail, "upgrade it in place"}}, fix: &fixWant{command: install}},
+		{name: "cli and gateway differ", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.1.2") },
+			want: []checkWant{{"gateway-version", warn, "gateway 0.1.2 but CLI 0.1.1"}}},
+		{name: "gateway outside the window", setup: func(f *doctorFixture) { f.fake.SetHealth(true, "0.2.0") },
+			want: []checkWant{{"gateway-version", fail, "not supported"}}},
+		{name: "gateway unhealthy", setup: func(f *doctorFixture) { f.fake.SetHealth(false, "0.1.1") },
+			want: []checkWant{{"gateway-version", fail, "unhealthy"}, {"gateway-driver", skip, ""}, {"global-policy", skip, ""}}},
+		{name: "gateway unreachable", setup: health(errors.New("connection refused")),
+			want: []checkWant{{"gateway-version", fail, "connection refused"}}},
+		// A running gateway that does not answer is restarted, since
+		// starting it again does nothing; a stopped one is started.
+		{name: "gateway running but hung", setup: health(&types.StatusError{Code: types.ErrorDeadlineExceeded, Message: "context deadline exceeded"}),
+			want: []checkWant{{"gateway-version", fail, "not answering"}}, fix: &fixWant{command: restart, auto: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDGatewayVersion)
+				if !f.runner.Called(restart) || f.runner.Called("systemctl --user enable") || f.verified != 1 {
+					t.Fatalf("fix did not restart and verify the gateway (verified %d): %v", f.verified, f.runner.Calls())
 				}
-			},
-			want: []result{{"docker-host-network", openshell.StatusFail, "host networking is off"}, {"docker-file-sharing", openshell.StatusFail, "not shared"}},
-		},
-		{
-			name: "desktop settings store on disk",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil)
-				f.doctor.DockerDesktop = nil
-				store := filepath.Join(f.home, ".docker", "desktop", "settings-store.json")
-				if err := os.MkdirAll(filepath.Dir(store), 0o700); err != nil {
-					f.t.Fatal(err)
+			}},
+		{name: "gateway stopped", setup: func(f *doctorFixture) { unit("inactive", "enabled")(f); f.fake.SetHealth(false, "0.1.1") },
+			want: []checkWant{{"gateway-version", fail, "unhealthy"}}, fix: &fixWant{command: start, auto: true}},
+		// A gateway that refuses DefenseClaw's credentials is registered
+		// again instead.
+		{name: "credentials refused", setup: health(&types.StatusError{Code: types.ErrorUnauthenticated, Message: "client certificate not trusted"}),
+			want: []checkWant{{"gateway-version", fail, "refused DefenseClaw's TLS credentials"}}, fix: &fixWant{command: credsRefused, manual: true}},
+		{name: "certificate from an unknown authority", setup: health(&types.StatusError{Code: types.ErrorUnavailable,
+			Message: `connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority"`}),
+			want: []checkWant{{"gateway-version", fail, "refused DefenseClaw's TLS credentials"}}, fix: &fixWant{command: credsRefused, manual: true}},
+		{name: "wrong compute driver", setup: func(f *doctorFixture) {
+			f.fake = openshelltest.New(openshelltest.WithGatewayInfo(types.GatewayInfo{Version: "0.1.1",
+				ComputeDrivers: []types.ComputeDriverInfo{{Name: "podman", DriverName: "podman"}}}))
+		}, want: []checkWant{{"gateway-driver", fail, "runs podman"}}},
+		{name: "global policy", setup: func(f *doctorFixture) { f.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
+			want: []checkWant{{"global-policy", warn, "approvals are disabled"}}},
+
+		{name: "no registration", setup: func(f *doctorFixture) {
+			if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+				f.t.Fatal(err)
+			}
+		}, want: []checkWant{{"gateway-registration", fail, "no gateway registration"}, {"mtls-permissions", skip, ""}, {"gateway-version", skip, ""}}},
+		{name: "remote gateway", setup: func(f *doctorFixture) {
+			writeRegistration(f.t, f.dir, "openshell", map[string]any{"gateway_endpoint": "https://gw.example.com:443", "auth_mode": "mtls", "is_remote": true}, nil)
+		}, want: []checkWant{{"gateway-registration", fail, "remote gateways are not supported"}}},
+		{name: "readable key is fixed", setup: mode(key, 0o644),
+			want: []checkWant{{"mtls-permissions", fail, "private key is accessible to other users"}, {"gateway-version", skip, ""}},
+			fix:  &fixWant{text: "chmod 600 ", auto: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r)
+				expectMode(t, key(f), 0o600)
+				if again := f.run(); !again.OK() {
+					t.Fatalf("still failing after the fix:\n%s", again)
 				}
-				data := fmt.Sprintf(`{"HostNetworkingEnabled": false, "filesharingDirectories": [%q]}`, f.home)
-				if err := os.WriteFile(store, []byte(data), 0o600); err != nil {
-					f.t.Fatal(err)
+			}},
+		{name: "bind mounts already on a plaintext gateway", setup: func(f *doctorFixture) {
+			writeRegistration(f.t, f.dir, "openshell", map[string]any{"gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "none"}, nil)
+		}, want: []checkWant{{"bind-mounts", fail, "any local user can mount host paths"}}},
+		{name: "stock registration files inside private directories", setup: func(f *doctorFixture) {
+			writeFile(f.t, filepath.Join(f.dir, "active_gateway"), "openshell\n", 0o664)
+		}, want: []checkWant{{"gateway-registration", pass, "openshell at"}}},
+		{name: "group-writable registration is fixed", setup: func(f *doctorFixture) {
+			chmod(f.t, metadata(f), 0o664)
+			for _, d := range []string{f.dir, filepath.Join(f.dir, "gateways"), f.regDir} {
+				chmod(f.t, d, 0o750)
+			}
+		}, want: []checkWant{{"gateway-registration", warn, "metadata.json is group-writable"}, {"mtls-permissions", pass, "owner-only"}},
+			fix: &fixWant{text: "chmod go-w ", auto: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDRegistration)
+				expectMode(t, metadata(f), 0o644)
+				// The first run closed the fake gateway client; only the
+				// registration matters here.
+				if again := f.run(); again.Get(openshell.CheckIDRegistration).Status != pass {
+					t.Fatalf("still warning after the fix:\n%s", again)
 				}
-			},
-			want: []result{{"docker-host-network", openshell.StatusFail, "host networking is off"}, {"docker-file-sharing", openshell.StatusPass, "is shared"}},
-		},
-		{
-			name: "desktop settings unreadable",
-			setup: func(f *doctorFixture) {
-				f.runner.On("docker info", dockerInfoJSON("28.3.2", "Docker Desktop", nil), nil)
-			},
-			want: []result{{"docker-host-network", openshell.StatusWarn, "could not read"}, {"docker-file-sharing", openshell.StatusWarn, "could not read"}},
-		},
+			}},
+		{name: "world-writable registration is fixed", setup: mode(func(f *doctorFixture) string { return f.regDir }, 0o777),
+			want: []checkWant{{"gateway-registration", fail, "is writable by every user"}, {"mtls-permissions", skip, ""}, {"gateway-version", skip, ""}, {"bind-mounts", pass, ""}},
+			fix:  &fixWant{auto: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r)
+				expectMode(t, f.regDir, 0o755)
+				if again := f.run(); !again.OK() {
+					t.Fatalf("still failing after the fix:\n%s", again)
+				}
+			}},
+		{name: "group-writable certificates are fixed", setup: mode(func(f *doctorFixture) string { return filepath.Join(f.regDir, "mtls", "ca.crt") }, 0o664),
+			want: []checkWant{{"mtls-permissions", warn, "group-writable"}},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDMTLS)
+				expectMode(t, filepath.Join(f.regDir, "mtls", "ca.crt"), 0o644)
+			}},
+
+		{name: "bind mounts disabled are fixable", setup: noMounts(nil),
+			want: []checkWant{{"bind-mounts", fail, "only --copy sandboxes work"}}, fix: &fixWant{auto: true},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDBindMounts)
+				if st, _ := f.doctor.Gateway.Read(); !st.BindMounts.Enabled() || !f.runner.Called(restart) {
+					t.Fatalf("fix did not enable mounts and restart: %+v", st.BindMounts)
+				}
+			}},
+		{name: "copy-only mode", setup: noMounts(func(f *doctorFixture) { f.doctor.BindMountsOptional = true }),
+			want: []checkWant{{"bind-mounts", warn, "disabled"}}},
+		{name: "restart pending", setup: func(f *doctorFixture) { f.writeTOML(enabledTOML, f.started.Add(time.Minute)) },
+			want: []checkWant{{"bind-mounts", warn, "has not been restarted"}}, fix: &fixWant{command: restart, auto: true}},
+		{name: "telemetry differs from config", setup: func(f *doctorFixture) { off := false; f.doctor.WantTelemetry = &off },
+			want: []checkWant{{"telemetry", warn, "telemetry is on but openshell.upstream_telemetry is false"}},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				applyFixes(t, r, openshell.CheckIDTelemetry)
+				if st, _ := f.doctor.Gateway.Read(); st.TelemetryEnabled() {
+					t.Fatal("telemetry still on after the fix")
+				}
+			}},
+		// Doctor, and its bind-mount fix, follow a config directory a
+		// dotfile manager links elsewhere, with active_gateway choosing
+		// between two registrations.
+		{name: "symlinked config directory", setup: noMounts(func(f *doctorFixture) {
+			f.addRegistration("dev", nil)
+			writeFile(f.t, filepath.Join(f.dir, "active_gateway"), "dev\n", 0o644)
+			link := filepath.Join(f.t.TempDir(), "openshell")
+			if err := os.Symlink(f.dir, link); err != nil {
+				f.t.Fatal(err)
+			}
+			f.doctor.Discover.ConfigDir, f.doctor.Gateway.Dir = link, link
+		}), want: []checkWant{{"bind-mounts", fail, "only --copy sandboxes work"}},
+			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
+				if r.Registration == nil || r.Registration.Name != "dev" {
+					t.Fatalf("registration = %+v", r.Registration)
+				}
+				applyFixes(t, r, openshell.CheckIDBindMounts)
+				if st, err := f.doctor.Gateway.Read(); err != nil || !st.BindMounts.Enabled() {
+					t.Fatalf("state = %+v, %v", st, err)
+				}
+			}},
+
+		// Bind mounts are judged by the gateway the service runs, not only
+		// by the CLI's registration files.
+		{name: "enabled: TLS disabled in gateway.env", setup: gatewayEnv("OPENSHELL_DISABLE_TLS=true\n"),
+			want: []checkWant{{"bind-mounts", fail, exposed}}, fix: &fixWant{manual: true}},
+		{name: "enabled: mTLS auth off", setup: gatewayEnv("OPENSHELL_ENABLE_MTLS_AUTH=false\nOPENSHELL_BIND_ADDRESS=0.0.0.0\n"),
+			want: []checkWant{{"bind-mounts", fail, exposed}}, fix: &fixWant{manual: true}},
+		{name: "enabled: probe gets in without a certificate", setup: probe(noCertNeeded),
+			want: []checkWant{{"bind-mounts", fail, exposed}}, fix: &fixWant{manual: true}},
+		{name: "disabled: TLS disabled in gateway.env", setup: noMounts(gatewayEnv("OPENSHELL_DISABLE_TLS=true\n")),
+			want: []checkWant{{"bind-mounts", fail, "disabled"}}, fix: &fixWant{manual: true, text: "reachable by you alone"}},
+		{name: "disabled: mTLS auth off", setup: noMounts(gatewayEnv("OPENSHELL_ENABLE_MTLS_AUTH=false\n")),
+			want: []checkWant{{"bind-mounts", fail, "disabled"}}, fix: &fixWant{manual: true, text: "reachable by you alone"}},
+		{name: "disabled: probe gets in without a certificate", setup: noMounts(probe(noCertNeeded)),
+			want: []checkWant{{"bind-mounts", fail, "disabled"}}, fix: &fixWant{manual: true, text: "reachable by you alone"}},
+		{name: "registration reaches another gateway", setup: func(f *doctorFixture) {
+			f.addRegistration("dev", map[string]any{"gateway_endpoint": "https://127.0.0.1:18080", "auth_mode": "mtls"})
+			writeFile(f.t, filepath.Join(f.dir, "active_gateway"), "dev\n", 0o600)
+		}, want: []checkWant{{"bind-mounts", fail, "reaches https://127.0.0.1:18080, but the openshell-gateway service listens on port 17670"}}},
+		{name: "service reads another configuration", setup: func(f *doctorFixture) { f.runner.On("systemctl --user show-environment", "HOME=/home/dev\n", nil) },
+			want: []checkWant{{"bind-mounts", fail, "home/dev/.config/openshell/gateway.toml, not"}, {"telemetry", warn, "does not match"}}},
+		{name: "probe inconclusive", setup: probe(errors.New("could not confirm that the gateway requires a client certificate: i/o timeout")),
+			want: []checkWant{{"bind-mounts", warn, "could not confirm"}}},
+		{name: "gateway not answering is not probed", setup: health(errors.New("connection refused")),
+			want: []checkWant{{"bind-mounts", pass, "enabled"}},
+			then: func(t *testing.T, f *doctorFixture, _ *openshell.DoctorReport) {
+				if f.probes != 0 {
+					t.Fatalf("probed a gateway that is not answering %d times", f.probes)
+				}
+			}},
+
+		{name: "ports", setup: func(f *doctorFixture) {
+			f.busy["127.0.0.1:18971"], f.busy["127.0.0.1:18972"] = true, true
+			f.doctor.Ports = []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972, ServedByDaemon: true},
+				{Name: "extra", Port: 17670}, {Name: "bad", Port: 0}}
+		}, want: []checkWant{{"port-ingress", fail, "in use by another process"}, {"port-egress", pass, "served by the DefenseClaw daemon"},
+			{"port-extra", fail, "OpenShell gateway's port"}, {"port-bad", fail, "invalid port"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDoctorFixture(t)
 			tc.setup(f)
 			r := f.run()
-			for _, w := range tc.want {
-				c := expectCheck(t, r, w.id, w.status, w.detail)
-				if w.id == "docker" && tc.fix != "" && (c.Fix == nil || !strings.Contains(c.Fix.Summary+" "+c.Fix.Command, tc.fix)) {
-					t.Fatalf("docker fix = %+v, want %q", c.Fix, tc.fix)
+			var first *openshell.Check
+			for i, w := range tc.want {
+				if c := expectCheck(t, r, w.id, w.status, w.detail); i == 0 {
+					first = c
 				}
+			}
+			if w := tc.fix; w != nil {
+				c := first.Fix
+				if c == nil || (w.command != "" && c.Command != w.command) || !strings.Contains(c.Summary+" "+c.Command, w.text) ||
+					(w.auto && (!c.Automatic || c.Apply == nil)) || (w.manual && (c.Automatic || c.Apply != nil)) || (w.sudo && !c.Sudo) {
+					t.Fatalf("%s fix = %+v, want %+v", first.ID, c, *w)
+				}
+			}
+			if tc.then != nil {
+				tc.then(t, f, r)
 			}
 		})
 	}
 }
 
-func TestDoctorDisk(t *testing.T) {
-	for _, tc := range []struct {
-		free   uint64
-		err    error
-		status openshell.CheckStatus
-		detail string
-	}{
-		{3 << 30, nil, openshell.StatusFail, "at least 5.0 GiB"},
-		{7 << 30, nil, openshell.StatusWarn, "10.0 GiB or more"},
-		{0, errors.New("no such file"), openshell.StatusWarn, "could not measure"},
-	} {
-		f := newDoctorFixture(t)
-		var probed string
-		f.doctor.DiskFree = func(p string) (uint64, error) { probed = p; return tc.free, tc.err }
-		c := expectCheck(t, f.run(), openshell.CheckIDDisk, tc.status, tc.detail)
-		if probed != "/data/docker" {
-			t.Fatalf("probed %q, want the Docker root", probed)
-		}
-		// Low space names DefenseClaw's own prune, and warns about the
-		// machine-wide one instead of suggesting it.
-		if tc.err == nil {
-			if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox image prune" ||
-				!strings.Contains(c.Fix.Summary, "rather than `docker system prune`, which also removes") {
-				t.Fatalf("disk fix = %+v", c.Fix)
-			}
-		}
+// TestDoctorPlaintextGateway covers a registration that lets any local
+// user in: doctor never dials it, and never offers to enable bind mounts
+// on it.
+func TestDoctorPlaintextGateway(t *testing.T) {
+	f := newDoctorFixture(t)
+	writeRegistration(t, f.dir, "openshell", map[string]any{"gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "plaintext"}, nil)
+	f.writeTOML(disabledTOML, f.started.Add(-time.Minute))
+	dialed := false
+	f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
+		dialed = true
+		return f.fake.Client(openshell.ClientOptions{}), nil
+	}
+	r := f.run()
+	if c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusFail, "accepts unauthenticated calls"); c.Fix == nil || c.Fix.Automatic || !strings.Contains(c.Fix.Summary, "mTLS") {
+		t.Fatalf("registration fix = %+v", c.Fix)
+	}
+	expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusSkip, "")
+	expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
+	if mounts := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled"); mounts.Fix == nil || mounts.Fix.Automatic || mounts.Fix.Apply != nil {
+		t.Fatalf("bind mounts offered an automatic fix on a plaintext gateway: %+v", mounts.Fix)
+	}
+	if dialed {
+		t.Fatal("doctor dialed a plaintext gateway")
 	}
 }
 
-func TestDoctorLingerAndService(t *testing.T) {
-	t.Run("linger off", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("loginctl show-user dev", "no\n", nil)
-		c := expectCheck(t, f.run(), openshell.CheckIDLinger, openshell.StatusWarn, "stop when you log out")
-		if c.Fix.Command != "sudo loginctl enable-linger dev" || !c.Fix.Sudo {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-	})
-	t.Run("service stopped is fixable", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show openshell-gateway", "LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\n", nil)
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "failed (failed)")
-		if !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-		outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDGatewayService, nil })
-		if err != nil || len(outcomes) != 1 || !outcomes[0].Applied {
-			t.Fatalf("outcomes = %+v, %v", outcomes, err)
-		}
-		if !f.runner.Called("systemctl --user enable --now openshell-gateway") || f.verified != 1 {
-			t.Fatalf("fix did not start and verify the gateway (verified %d)", f.verified)
-		}
-	})
-	t.Run("service not installed", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show openshell-gateway", "LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)
-		c := expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusFail, "not installed")
-		if c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-	})
-	t.Run("service not enabled", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show openshell-gateway", "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\n", nil)
-		expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusWarn, "does not start at login")
-	})
-	t.Run("service only linked", func(t *testing.T) {
-		// `systemctl --user link` without enable: nothing starts it at login.
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show openshell-gateway", f.unit("active", "linked"), nil)
-		c := expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusWarn, "does not start at login")
-		if c.Fix.Command != "systemctl --user enable --now openshell-gateway" || !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-	})
-	t.Run("no user bus", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show openshell-gateway", "Failed to connect to bus: No medium found", errors.New("exit status 1"))
-		expectCheck(t, f.run(), openshell.CheckIDGatewayService, openshell.StatusFail, "Failed to connect to bus")
-	})
-}
-
-func TestDoctorVersions(t *testing.T) {
-	t.Run("cli missing", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.found["openshell"] = false
-		expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusFail, "not on PATH")
-	})
-	t.Run("cli 0.0.x", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("/usr/bin/openshell --version", "openshell 0.0.16\n", nil)
-		expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusFail, "predates 0.0.37")
-	})
-	t.Run("cli 0.0.x that upgrades in place", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("/usr/bin/openshell --version", "openshell 0.0.40\n", nil)
-		c := expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusFail, "upgrade it in place")
-		if c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-	})
-	t.Run("cli and gateway differ", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.SetHealth(true, "0.1.2")
-		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusWarn, "gateway 0.1.2 but CLI 0.1.1")
-	})
-	t.Run("gateway outside the window", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.SetHealth(true, "0.2.0")
-		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "not supported")
-	})
-	t.Run("gateway unhealthy", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.SetHealth(false, "0.1.1")
-		r := f.run()
-		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "unhealthy")
-		expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusSkip, "")
-		expectCheck(t, r, openshell.CheckIDGlobalPolicy, openshell.StatusSkip, "")
-	})
-	t.Run("gateway unreachable", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
-		expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "connection refused")
-	})
-}
-
-// TestDoctorGatewayRecovery covers the fix for a gateway that does not
-// answer: a running (hung) gateway is restarted, since starting it again
-// does nothing, a stopped one is started, and one that refuses
-// DefenseClaw's credentials is registered again instead.
-func TestDoctorGatewayRecovery(t *testing.T) {
-	t.Run("running but hung is restarted", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.FailNext(openshelltest.MethodHealth, &types.StatusError{Code: types.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "not answering")
-		if c.Fix.Command != "systemctl --user restart openshell-gateway" || !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDGatewayVersion, nil }); err != nil {
-			t.Fatal(err)
-		}
-		if !f.runner.Called("systemctl --user restart openshell-gateway") || f.runner.Called("systemctl --user enable") || f.verified != 1 {
-			t.Fatalf("fix did not restart and verify the gateway (verified %d): %v", f.verified, f.runner.Calls())
-		}
-	})
-	t.Run("stopped is started", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
-		f.fake.SetHealth(false, "0.1.1")
-		c := expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "unhealthy")
-		if c.Fix.Command != "systemctl --user enable --now openshell-gateway" || !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-	})
-	t.Run("credentials refused", func(t *testing.T) {
-		for _, err := range []error{
-			&types.StatusError{Code: types.ErrorUnauthenticated, Message: "client certificate not trusted"},
-			&types.StatusError{Code: types.ErrorUnavailable, Message: "connection error: desc = \"transport: authentication handshake failed: tls: failed to verify certificate: x509: certificate signed by unknown authority\""},
-		} {
-			f := newDoctorFixture(t)
-			f.fake.FailNext(openshelltest.MethodHealth, err)
-			c := expectCheck(t, f.run(), openshell.CheckIDGatewayVersion, openshell.StatusFail, "refused DefenseClaw's TLS credentials")
-			if c.Fix.Automatic || c.Fix.Command != "openshell gateway remove openshell && openshell gateway add 'https://127.0.0.1:17670' --local --name openshell" {
-				t.Fatalf("fix = %+v", c.Fix)
-			}
-		}
-	})
-}
-
-func TestDoctorGatewayFeatures(t *testing.T) {
-	t.Run("wrong compute driver", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake = openshelltest.New(openshelltest.WithGatewayInfo(types.GatewayInfo{Version: "0.1.1",
-			ComputeDrivers: []types.ComputeDriverInfo{{Name: "podman", DriverName: "podman"}}}))
-		expectCheck(t, f.run(), openshell.CheckIDGatewayDriver, openshell.StatusFail, "runs podman")
-	})
-	t.Run("global policy", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1})
-		expectCheck(t, f.run(), openshell.CheckIDGlobalPolicy, openshell.StatusWarn, "approvals are disabled")
-	})
-}
-
-func TestDoctorRegistrationAndMTLS(t *testing.T) {
-	t.Run("no registration", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
-			t.Fatal(err)
-		}
-		r := f.run()
-		expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusFail, "no gateway registration")
-		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusSkip, "")
-		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
-	})
-	t.Run("remote gateway", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "https://gw.example.com:443", "auth_mode": "mtls", "is_remote": true}, nil)
-		expectCheck(t, f.run(), openshell.CheckIDRegistration, openshell.StatusFail, "remote gateways are not supported")
-	})
-	t.Run("readable key is fixed", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		key := filepath.Join(f.regDir, "mtls", "tls.key")
-		if err := os.Chmod(key, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusFail, "private key is accessible to other users")
-		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
-		if !c.Fix.Automatic || !strings.HasPrefix(c.Fix.Command, "chmod 600 ") {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-		if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil }); err != nil {
-			t.Fatal(err)
-		}
-		if info, _ := os.Stat(key); info.Mode().Perm() != 0o600 {
-			t.Fatalf("key mode %v after fix", info.Mode())
-		}
-		if again := f.run(); !again.OK() {
-			t.Fatalf("still failing after the fix:\n%s", again)
-		}
-	})
-	t.Run("plaintext gateway fails and gets no bind mounts", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "plaintext"}, nil)
-		f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
-		dialed := false
-		f.doctor.Dial = func(*openshell.Registration) (openshell.Client, error) {
-			dialed = true
-			return f.fake.Client(openshell.ClientOptions{}), nil
-		}
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusFail, "accepts unauthenticated calls")
-		if c.Fix == nil || c.Fix.Automatic || !strings.Contains(c.Fix.Summary, "mTLS") {
-			t.Fatalf("registration fix = %+v", c.Fix)
-		}
-		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusSkip, "")
-		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
-		mounts := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled")
-		if mounts.Fix == nil || mounts.Fix.Automatic || mounts.Fix.Apply != nil {
-			t.Fatalf("bind mounts offered an automatic fix on a plaintext gateway: %+v", mounts.Fix)
-		}
-		if dialed {
-			t.Fatal("doctor dialed a plaintext gateway")
-		}
-		// The bind-mount edit itself refuses too.
-		if _, err := f.doctor.Gateway.Plan(context.Background(), openshell.GatewayChanges{EnableBindMounts: true}); !errors.Is(err, openshell.ErrBindMountsRefused) || !errors.Is(err, openshell.ErrUnauthenticatedGateway) {
-			t.Fatalf("Plan = %v", err)
-		}
-	})
-	t.Run("bind mounts already on a plaintext gateway fail", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		writeRegistration(t, f.dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "none"}, nil)
-		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "any local user can mount host paths")
-	})
-	t.Run("stock registration files inside private directories pass", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		writeFile(t, filepath.Join(f.dir, "active_gateway"), "openshell\n", 0o664)
-		expectCheck(t, f.run(), openshell.CheckIDRegistration, openshell.StatusPass, "openshell at")
-	})
-	t.Run("group-writable registration warns and is fixed", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		meta := filepath.Join(f.regDir, "metadata.json")
-		chmod(t, meta, 0o664)
-		for _, d := range []string{f.dir, filepath.Join(f.dir, "gateways"), f.regDir} {
-			chmod(t, d, 0o750)
-		}
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusWarn, "metadata.json is group-writable")
-		if !c.Fix.Automatic || !strings.HasPrefix(c.Fix.Command, "chmod go-w ") {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusPass, "owner-only")
-		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDRegistration, nil }); err != nil {
-			t.Fatal(err)
-		}
-		if info, _ := os.Stat(meta); info.Mode().Perm() != 0o644 {
-			t.Fatalf("metadata mode %v after fix", info.Mode())
-		}
-		// The first run closed the fake gateway client; only the
-		// registration matters here.
-		if again := f.run(); again.Get(openshell.CheckIDRegistration).Status != openshell.StatusPass {
-			t.Fatalf("still warning after the fix:\n%s", again)
-		}
-	})
-	t.Run("world-writable registration fails and is fixed", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		chmod(t, f.regDir, 0o777)
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusFail, "is writable by every user")
-		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusSkip, "")
-		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusSkip, "")
-		if c.Fix == nil || !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-		if mounts := r.Get(openshell.CheckIDBindMounts); mounts.Status != openshell.StatusPass {
-			t.Fatalf("bind mounts = %+v", mounts)
-		}
-		if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil }); err != nil {
-			t.Fatal(err)
-		}
-		if info, _ := os.Stat(f.regDir); info.Mode().Perm() != 0o755 {
-			t.Fatalf("registration mode %v after fix", info.Mode())
-		}
-		if again := f.run(); !again.OK() {
-			t.Fatalf("still failing after the fix:\n%s", again)
-		}
-	})
-	t.Run("group-writable certificates warn and are fixed", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		ca := filepath.Join(f.regDir, "mtls", "ca.crt")
-		if err := os.Chmod(ca, 0o664); err != nil {
-			t.Fatal(err)
-		}
-		r := f.run()
-		expectCheck(t, r, openshell.CheckIDMTLS, openshell.StatusWarn, "group-writable")
-		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDMTLS, nil }); err != nil {
-			t.Fatal(err)
-		}
-		if info, _ := os.Stat(ca); info.Mode().Perm() != 0o644 {
-			t.Fatalf("ca mode %v after fix", info.Mode())
-		}
-	})
-}
-
-func TestDoctorGatewayConfig(t *testing.T) {
-	t.Run("bind mounts disabled are fixable", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "only --copy sandboxes work")
-		if !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-		outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDBindMounts, nil })
-		if err != nil || len(outcomes) != 1 || !outcomes[0].Applied {
-			t.Fatalf("outcomes = %+v, %v", outcomes, err)
-		}
-		st, _ := f.doctor.Gateway.Read()
-		if !st.BindMounts.Enabled() || !f.runner.Called("systemctl --user restart openshell-gateway") {
-			t.Fatalf("fix did not enable mounts and restart: %+v", st.BindMounts)
-		}
-	})
-	t.Run("copy-only mode warns", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
-		f.doctor.BindMountsOptional = true
-		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "disabled")
-	})
-	t.Run("restart pending", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.writeTOML(enabledTOML, f.started.Add(time.Minute))
-		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
-		if c.Fix.Command != "systemctl --user restart openshell-gateway" || !c.Fix.Automatic {
-			t.Fatalf("fix = %+v", c.Fix)
-		}
-	})
+func TestDoctorPendingRestart(t *testing.T) {
 	t.Run("written earlier in the second the gateway started", func(t *testing.T) {
 		// systemd reports the start to the microsecond, so a file written
 		// 600ms before the start is not mistaken for a later change.
@@ -774,18 +683,13 @@ func TestDoctorGatewayConfig(t *testing.T) {
 		// Homebrew reports no start time; the mark DefenseClaw left
 		// before a restart that never happened still shows.
 		f := newDoctorFixture(t)
-		f.doctor.GOOS, f.doctor.Gateway.GOOS = "darwin", "darwin"
-		f.runner.On("brew services info nvidia/openshell/openshell --json", `[{"running":true,"loaded":true,"status":"started","file":"/x.plist"}]`, nil)
-		f.runner.On("brew services restart nvidia/openshell/openshell", "", nil)
+		f.onBrew()
 		mark(f, f.started.Add(-time.Minute))
 		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
-		if c.Fix.Command != "brew services restart nvidia/openshell/openshell" {
+		if c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted"); c.Fix.Command != "brew services restart nvidia/openshell/openshell" {
 			t.Fatalf("fix = %+v", c.Fix)
 		}
-		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDBindMounts, nil }); err != nil {
-			t.Fatal(err)
-		}
+		applyFixes(t, r, openshell.CheckIDBindMounts)
 		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
 
 		// On systemd a mark from before the last start is stale.
@@ -795,140 +699,11 @@ func TestDoctorGatewayConfig(t *testing.T) {
 		mark(f, f.started.Add(time.Second))
 		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted")
 	})
-	t.Run("telemetry differs from config", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		off := false
-		f.doctor.WantTelemetry = &off
-		r := f.run()
-		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusWarn, "telemetry is on but openshell.upstream_telemetry is false")
-		if _, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDTelemetry, nil }); err != nil {
-			t.Fatal(err)
-		}
-		st, _ := f.doctor.Gateway.Read()
-		if st.TelemetryEnabled() {
-			t.Fatal("telemetry still on after the fix")
-		}
-	})
-}
-
-// TestDoctorBindMountsNeedAPrivateGateway covers bind mounts judged by
-// the gateway the service runs, not only by the CLI's registration files.
-func TestDoctorBindMountsNeedAPrivateGateway(t *testing.T) {
-	exposedCases := []struct {
-		name  string
-		setup func(f *doctorFixture)
-	}{
-		{"TLS disabled in gateway.env", func(f *doctorFixture) {
-			writeFile(t, filepath.Join(f.dir, "gateway.env"), "OPENSHELL_DISABLE_TLS=true\n", 0o600)
-		}},
-		{"mTLS auth off", func(f *doctorFixture) {
-			writeFile(t, filepath.Join(f.dir, "gateway.env"), "OPENSHELL_ENABLE_MTLS_AUTH=false\nOPENSHELL_BIND_ADDRESS=0.0.0.0\n", 0o600)
-		}},
-		{"probe gets in without a certificate", func(f *doctorFixture) {
-			f.probe = fmt.Errorf("%w: accepted a TLS session", openshell.ErrGatewayExposed)
-		}},
-	}
-	for _, tc := range exposedCases {
-		t.Run("enabled: "+tc.name, func(t *testing.T) {
-			f := newDoctorFixture(t)
-			tc.setup(f)
-			c := expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "others can reach the gateway and mount any host path")
-			if c.Fix == nil || c.Fix.Automatic {
-				t.Fatalf("fix = %+v", c.Fix)
-			}
-		})
-		t.Run("disabled: "+tc.name, func(t *testing.T) {
-			f := newDoctorFixture(t)
-			f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
-			tc.setup(f)
-			c := expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "disabled")
-			if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || !strings.Contains(c.Fix.Summary, "reachable by you alone") {
-				t.Fatalf("bind mounts offered an automatic fix on an exposed gateway: %+v", c.Fix)
-			}
-		})
-	}
-	t.Run("registration reaches another gateway", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		dev := writeRegistration(t, f.dir, "dev", map[string]any{"gateway_endpoint": "https://127.0.0.1:18080", "auth_mode": "mtls"}, nil)
-		for file, mode := range map[string]os.FileMode{"mtls": 0o700, "mtls/ca.crt": 0o644, "mtls/tls.crt": 0o644} {
-			chmod(t, filepath.Join(dev, file), mode)
-		}
-		writeFile(t, filepath.Join(f.dir, "active_gateway"), "dev\n", 0o600)
-		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusFail, "reaches https://127.0.0.1:18080, but the openshell-gateway service listens on port 17670")
-	})
-	t.Run("service reads another configuration", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.runner.On("systemctl --user show-environment", "HOME=/home/dev\n", nil)
-		r := f.run()
-		expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "home/dev/.config/openshell/gateway.toml, not")
-		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusWarn, "does not match")
-	})
-	t.Run("probe inconclusive", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.probe = errors.New("could not confirm that the gateway requires a client certificate: i/o timeout")
-		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusWarn, "could not confirm")
-	})
-	t.Run("gateway not answering is not probed", func(t *testing.T) {
-		f := newDoctorFixture(t)
-		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
-		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
-		if f.probes != 0 {
-			t.Fatalf("probed a gateway that is not answering %d times", f.probes)
-		}
-	})
-}
-
-// TestDoctorFollowsSymlinkedConfigDir runs doctor, and its bind-mount
-// fix, on a config directory a dotfile manager links elsewhere, with
-// active_gateway choosing between two registrations.
-func TestDoctorFollowsSymlinkedConfigDir(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
-	dev := writeRegistration(t, f.dir, "dev", nil, nil)
-	for file, mode := range map[string]os.FileMode{"mtls": 0o700, "mtls/ca.crt": 0o644, "mtls/tls.crt": 0o644} {
-		chmod(t, filepath.Join(dev, file), mode)
-	}
-	writeFile(t, filepath.Join(f.dir, "active_gateway"), "dev\n", 0o644)
-	link := filepath.Join(t.TempDir(), "openshell")
-	if err := os.Symlink(f.dir, link); err != nil {
-		t.Fatal(err)
-	}
-	f.doctor.Discover.ConfigDir = link
-	f.doctor.Gateway.Dir = link
-	r := f.run()
-	if r.Registration == nil || r.Registration.Name != "dev" {
-		t.Fatalf("registration = %+v\n%s", r.Registration, r)
-	}
-	expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "only --copy sandboxes work")
-	outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return c.ID == openshell.CheckIDBindMounts, nil })
-	if err != nil || len(outcomes) != 1 || !outcomes[0].Applied {
-		t.Fatalf("outcomes = %+v, %v", outcomes, err)
-	}
-	if st, err := f.doctor.Gateway.Read(); err != nil || !st.BindMounts.Enabled() {
-		t.Fatalf("state = %+v, %v", st, err)
-	}
-}
-
-func TestDoctorPorts(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.busy["127.0.0.1:18971"] = true
-	f.busy["127.0.0.1:18972"] = true
-	f.doctor.Ports = []openshell.PortRequirement{
-		{Name: "ingress", Port: 18971},
-		{Name: "egress", Port: 18972, ServedByDaemon: true},
-		{Name: "extra", Port: 17670},
-		{Name: "bad", Port: 0},
-	}
-	r := f.run()
-	expectCheck(t, r, "port-ingress", openshell.StatusFail, "in use by another process")
-	expectCheck(t, r, "port-egress", openshell.StatusPass, "served by the DefenseClaw daemon")
-	expectCheck(t, r, "port-extra", openshell.StatusFail, "OpenShell gateway's port")
-	expectCheck(t, r, "port-bad", openshell.StatusFail, "invalid port")
 }
 
 func TestDoctorApplyFixesConsent(t *testing.T) {
 	f := newDoctorFixture(t)
-	f.writeTOML("[openshell]\nversion = 2\n", f.started.Add(-time.Minute))
+	f.writeTOML(disabledTOML, f.started.Add(-time.Minute))
 	f.runner.On("systemctl --user show openshell-gateway", f.unit("inactive", "enabled"), nil)
 	f.runner.On("systemctl --user enable --now openshell-gateway", "Job failed", errors.New("exit status 1"))
 	r := f.run()
@@ -937,11 +712,8 @@ func TestDoctorApplyFixesConsent(t *testing.T) {
 		asked = append(asked, c.ID)
 		return c.ID == openshell.CheckIDGatewayService, nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(asked, ",") != "gateway-service,bind-mounts" {
-		t.Fatalf("asked about %v", asked)
+	if err != nil || strings.Join(asked, ",") != "gateway-service,bind-mounts" {
+		t.Fatalf("asked about %v, %v", asked, err)
 	}
 	if len(outcomes) != 1 || outcomes[0].Applied || !strings.Contains(outcomes[0].Error, "Job failed") {
 		t.Fatalf("outcomes = %+v", outcomes)
@@ -952,16 +724,5 @@ func TestDoctorApplyFixesConsent(t *testing.T) {
 	stop := errors.New("stop")
 	if _, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return false, stop }); !errors.Is(err, stop) {
 		t.Fatalf("consent error = %v", err)
-	}
-}
-
-func TestDoctorReportString(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.runner.On("loginctl show-user dev", "no\n", nil)
-	out := f.run().String()
-	for _, want := range []string{"PASS  Platform", "WARN  systemd linger", "fix linger:", "sudo loginctl enable-linger dev"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("report lacks %q:\n%s", want, out)
-		}
 	}
 }

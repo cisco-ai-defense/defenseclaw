@@ -22,35 +22,37 @@ import (
 	"testing"
 )
 
+// bindMountTables are the tables editTOML appends to a document that has
+// none of them.
+const bindMountTables = `
+[openshell.drivers.docker]
+allow_driver_config = true
+enable_bind_mounts = true
+
+[openshell.drivers.docker.resource_admission]
+enabled = false
+`
+
 func TestEditTOMLPreservesDocument(t *testing.T) {
+	const stringsAndArrays = `[openshell]
+version = 2
+banner = """
+[openshell.drivers.docker]
+enable_bind_mounts = false
+"""
+paths = [
+  "[openshell.drivers.docker]", # not a header
+  'enable_bind_mounts = false',
+]
+motd = '''
+allow_driver_config = false'''
+`
 	cases := []struct {
 		name string
 		in   string
-		want string
+		want string // empty: in, unchanged
 	}{
-		{
-			name: "already configured (the spike host)",
-			in: `[openshell]
-version = 2
-
-[openshell.drivers.docker]
-allow_driver_config = true
-enable_bind_mounts = true
-
-[openshell.drivers.docker.resource_admission]
-enabled = false
-`,
-			want: `[openshell]
-version = 2
-
-[openshell.drivers.docker]
-allow_driver_config = true
-enable_bind_mounts = true
-
-[openshell.drivers.docker.resource_admission]
-enabled = false
-`,
-		},
+		{name: "already configured (the spike host)", in: "[openshell]\nversion = 2\n" + bindMountTables},
 		{
 			name: "replace in place, append missing key and table",
 			in: `# Operator notes stay.
@@ -84,99 +86,21 @@ enabled = false
 socket = "/run/podman.sock"
 `,
 		},
-		{
-			name: "only the schema version",
-			in:   "[openshell]\nversion = 2\n",
-			want: `[openshell]
-version = 2
-
-[openshell.drivers.docker]
-allow_driver_config = true
-enable_bind_mounts = true
-
-[openshell.drivers.docker.resource_admission]
-enabled = false
-`,
-		},
-		{
-			name: "string and array content is not structure",
-			in: `[openshell]
-version = 2
-banner = """
-[openshell.drivers.docker]
-enable_bind_mounts = false
-"""
-paths = [
-  "[openshell.drivers.docker]", # not a header
-  'enable_bind_mounts = false',
-]
-motd = '''
-allow_driver_config = false'''
-`,
-			want: `[openshell]
-version = 2
-banner = """
-[openshell.drivers.docker]
-enable_bind_mounts = false
-"""
-paths = [
-  "[openshell.drivers.docker]", # not a header
-  'enable_bind_mounts = false',
-]
-motd = '''
-allow_driver_config = false'''
-
-[openshell.drivers.docker]
-allow_driver_config = true
-enable_bind_mounts = true
-
-[openshell.drivers.docker.resource_admission]
-enabled = false
-`,
-		},
+		{name: "only the schema version", in: "[openshell]\nversion = 2\n", want: "[openshell]\nversion = 2\n" + bindMountTables},
+		{name: "string and array content is not structure", in: stringsAndArrays, want: stringsAndArrays + bindMountTables},
 		{
 			name: "sub-table defined before its parent",
-			in: `[openshell]
-version = 2
-
-[openshell.drivers.docker.resource_admission]
-enabled = true
-max_cpu = 4
-`,
-			want: `[openshell]
-version = 2
-
-[openshell.drivers.docker.resource_admission]
-enabled = false
-max_cpu = 4
-
-[openshell.drivers.docker]
-allow_driver_config = true
-enable_bind_mounts = true
-`,
+			in:   "[openshell]\nversion = 2\n\n[openshell.drivers.docker.resource_admission]\nenabled = true\nmax_cpu = 4\n",
+			want: "[openshell]\nversion = 2\n\n[openshell.drivers.docker.resource_admission]\nenabled = false\nmax_cpu = 4\n" +
+				"\n[openshell.drivers.docker]\nallow_driver_config = true\nenable_bind_mounts = true\n",
 		},
 		{
 			name: "spaced and quoted header keys",
-			in: `[openshell]
-version = 2
-[ openshell . drivers . "docker" ]
-"enable_bind_mounts" = false
-`,
-			want: `[openshell]
-version = 2
-[ openshell . drivers . "docker" ]
-"enable_bind_mounts" = true
-allow_driver_config = true
-
-[openshell.drivers.docker.resource_admission]
-enabled = false
-`,
+			in:   "[openshell]\nversion = 2\n[ openshell . drivers . \"docker\" ]\n\"enable_bind_mounts\" = false\n",
+			want: "[openshell]\nversion = 2\n[ openshell . drivers . \"docker\" ]\n\"enable_bind_mounts\" = true\nallow_driver_config = true\n" +
+				"\n[openshell.drivers.docker.resource_admission]\nenabled = false\n",
 		},
-		{
-			name: "no trailing newline",
-			in:   "[openshell]\nversion = 2",
-			want: "[openshell]\nversion = 2\n\n[openshell.drivers.docker]\nallow_driver_config = true\nenable_bind_mounts = true\n\n[openshell.drivers.docker.resource_admission]\nenabled = false\n",
-		},
+		{name: "no trailing newline", in: "[openshell]\nversion = 2", want: "[openshell]\nversion = 2\n" + bindMountTables},
 		{
 			name: "crlf line endings",
 			in:   "[openshell]\r\nversion = 2\r\n[openshell.drivers.docker]\r\nenable_bind_mounts = false\r\n",
@@ -185,15 +109,14 @@ enabled = false
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.want == "" {
+				tc.want = tc.in
+			}
 			got, err := editTOML([]byte(tc.in), bindMountSettings)
-			if err != nil {
-				t.Fatalf("editTOML: %v", err)
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("editTOML = %v, got:\n%s\nwant:\n%s", err, got, tc.want)
 			}
-			if string(got) != tc.want {
-				t.Fatalf("got:\n%s\nwant:\n%s", got, tc.want)
-			}
-			again, err := editTOML(got, bindMountSettings)
-			if err != nil || string(again) != string(got) {
+			if again, err := editTOML(got, bindMountSettings); err != nil || string(again) != string(got) {
 				t.Fatalf("editing twice changed the document: %v\n%s", err, again)
 			}
 		})
@@ -243,12 +166,8 @@ func TestEditEnvFile(t *testing.T) {
 	if strings.Join(summary, ",") != `OPENSHELL_NOTE="two words",OPENSHELL_TELEMETRY_ENABLED=false,unset OPENSHELL_LOG_LEVEL` {
 		t.Fatalf("summary = %q", summary)
 	}
-	env := parseEnvFile(out)
-	if env["OPENSHELL_NOTE"] != "two words" || env["OPENSHELL_DB_URL"] != "postgres://u:p@h/db" || env["OPENSHELL_TELEMETRY_ENABLED"] != "false" {
+	if env := parseEnvFile(out); len(env) != 3 || env["OPENSHELL_NOTE"] != "two words" || env["OPENSHELL_DB_URL"] != "postgres://u:p@h/db" || env["OPENSHELL_TELEMETRY_ENABLED"] != "false" {
 		t.Fatalf("parsed = %v", env)
-	}
-	if _, ok := env["OPENSHELL_LOG_LEVEL"]; ok {
-		t.Fatal("unset key survived")
 	}
 
 	same, summary, err := editEnvFile(out, map[string]string{"OPENSHELL_TELEMETRY_ENABLED": "false"}, nil)

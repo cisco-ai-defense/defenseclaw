@@ -125,21 +125,9 @@ func TestProbeClientAuth(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := probeRegistration(t, tc.endpoint, pki)
-			err := openshell.ProbeClientAuth(context.Background(), reg)
-			switch {
-			case tc.ok:
-				if err != nil {
-					t.Fatalf("ProbeClientAuth = %v, want nil", err)
-				}
-			case tc.exposed:
-				if !errors.Is(err, openshell.ErrGatewayExposed) {
-					t.Fatalf("ProbeClientAuth = %v, want ErrGatewayExposed", err)
-				}
-			default:
-				if err == nil || errors.Is(err, openshell.ErrGatewayExposed) {
-					t.Fatalf("ProbeClientAuth = %v, want an inconclusive error", err)
-				}
+			err := openshell.ProbeClientAuth(context.Background(), probeRegistration(t, tc.endpoint, pki))
+			if tc.ok != (err == nil) || tc.exposed != errors.Is(err, openshell.ErrGatewayExposed) {
+				t.Fatalf("ProbeClientAuth = %v, want ok=%v exposed=%v", err, tc.ok, tc.exposed)
 			}
 		})
 	}

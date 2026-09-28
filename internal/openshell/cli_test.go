@@ -32,97 +32,44 @@ import (
 
 func TestCLIArgv(t *testing.T) {
 	cli := openshell.CLI{Gateway: "openshell"}
-	g := []string{"-g", "openshell", "--workspace", "default"}
-	join := func(parts ...[]string) string {
-		var all []string
-		for _, p := range parts {
-			all = append(all, p...)
-		}
-		return strings.Join(all, " ")
-	}
-	abs := func(p string) string {
-		a, _ := filepath.Abs(p)
-		return a
-	}
+	// cmd is the argv of an openshell subcommand on the default gateway.
+	cmd := func(sub, rest string) string { return "openshell " + sub + " -g openshell --workspace default " + rest }
+	stage, _ := filepath.Abs("stage")
 	cases := []struct {
 		name        string
 		inv         func() (openshell.Invocation, error)
 		want        string
 		interactive bool
+		detaches    bool
 		timeout     time.Duration
 	}{
-		{
-			name: "exec automation",
-			inv: func() (openshell.Invocation, error) {
-				return cli.Exec("dc-claude-app-7f3a", []string{"git", "-C", "/work/app", "status"}, openshell.CLIExecOptions{
-					WorkDir: "/work/app/", Timeout: 1500 * time.Millisecond, Env: map[string]string{"LANG": "C", "A": "b c"}})
-			},
-			want: join([]string{"openshell", "sandbox", "exec"}, g, []string{"--color", "never", "--name", "dc-claude-app-7f3a",
-				"--workdir", "/work/app", "--timeout", "2", "--no-tty", "--no-login-shell", "--env", "A=b c", "--env", "LANG=C",
-				"--", "git", "-C", "/work/app", "status"}),
-			timeout: 12 * time.Second,
-		},
-		{
-			name: "exec tty",
-			inv: func() (openshell.Invocation, error) {
-				return cli.Exec("box", []string{"claude", "--dangerously-skip-permissions"}, openshell.CLIExecOptions{TTY: true, LoginShell: true})
-			},
-			want:        join([]string{"openshell", "sandbox", "exec"}, g, []string{"--name", "box", "--tty", "--", "claude", "--dangerously-skip-permissions"}),
-			interactive: true,
-		},
-		{
-			name:        "connect",
-			inv:         func() (openshell.Invocation, error) { return cli.Connect("box") },
-			want:        join([]string{"openshell", "sandbox", "connect"}, g, []string{"--", "box"}),
-			interactive: true,
-		},
-		{
-			name: "upload staged tree",
-			inv: func() (openshell.Invocation, error) {
-				return cli.Upload("box", "stage", "/sandbox/work/../work", false)
-			},
-			want: join([]string{"openshell", "sandbox", "upload"}, g, []string{"--color", "never", "--no-git-ignore", "--", "box",
-				abs("stage"), "/sandbox/work"}),
-			timeout: openshell.DefaultTransferTimeout,
-		},
-		{
-			name:    "upload honouring gitignore",
-			inv:     func() (openshell.Invocation, error) { return cli.Upload("box", "/tmp/x", "/sandbox", true) },
-			want:    join([]string{"openshell", "sandbox", "upload"}, g, []string{"--color", "never", "--", "box", "/tmp/x", "/sandbox"}),
-			timeout: openshell.DefaultTransferTimeout,
-		},
-		{
-			name:    "download",
-			inv:     func() (openshell.Invocation, error) { return cli.Download("box", "/sandbox/result.bundle", "/tmp/out") },
-			want:    join([]string{"openshell", "sandbox", "download"}, g, []string{"--color", "never", "--", "box", "/sandbox/result.bundle", "/tmp/out"}),
-			timeout: openshell.DefaultTransferTimeout,
-		},
-		{
-			name:    "forward start",
-			inv:     func() (openshell.Invocation, error) { return cli.ForwardStart("box", 18789, "") },
-			want:    join([]string{"openshell", "forward", "start"}, g, []string{"--color", "never", "--background", "--", "127.0.0.1:18789", "box"}),
-			timeout: openshell.DefaultForwardTimeout,
-		},
-		{
-			name:    "forward start ipv6 loopback",
-			inv:     func() (openshell.Invocation, error) { return cli.ForwardStart("box", 8080, "::1") },
-			want:    join([]string{"openshell", "forward", "start"}, g, []string{"--color", "never", "--background", "--", "[::1]:8080", "box"}),
-			timeout: openshell.DefaultForwardTimeout,
-		},
-		{
-			name:    "forward stop",
-			inv:     func() (openshell.Invocation, error) { return cli.ForwardStop("box", 18789) },
-			want:    join([]string{"openshell", "forward", "stop"}, g, []string{"--color", "never", "--", "18789", "box"}),
-			timeout: openshell.DefaultForwardTimeout,
-		},
-		{
-			name: "custom binary and workspace",
-			inv: func() (openshell.Invocation, error) {
-				return openshell.CLI{Binary: "/usr/bin/openshell", Gateway: "work", Workspace: "team_a"}.Connect("box")
-			},
-			want:        "/usr/bin/openshell sandbox connect -g work --workspace team_a -- box",
-			interactive: true,
-		},
+		{name: "exec automation", inv: func() (openshell.Invocation, error) {
+			return cli.Exec("dc-claude-app-7f3a", []string{"git", "-C", "/work/app", "status"}, openshell.CLIExecOptions{
+				WorkDir: "/work/app/", Timeout: 1500 * time.Millisecond, Env: map[string]string{"LANG": "C", "A": "b c"}})
+		}, want: cmd("sandbox exec", "--color never --name dc-claude-app-7f3a --workdir /work/app --timeout 2 --no-tty --no-login-shell --env A=b c --env LANG=C -- git -C /work/app status"),
+			timeout: 12 * time.Second},
+		{name: "exec tty", inv: func() (openshell.Invocation, error) {
+			return cli.Exec("box", []string{"claude", "--dangerously-skip-permissions"}, openshell.CLIExecOptions{TTY: true, LoginShell: true})
+		}, want: cmd("sandbox exec", "--name box --tty -- claude --dangerously-skip-permissions"), interactive: true},
+		{name: "connect", inv: func() (openshell.Invocation, error) { return cli.Connect("box") }, want: cmd("sandbox connect", "-- box"), interactive: true},
+		{name: "upload staged tree", inv: func() (openshell.Invocation, error) {
+			return cli.Upload("box", "stage", "/sandbox/work/../work", false)
+		}, want: cmd("sandbox upload", "--color never --no-git-ignore -- box "+stage+" /sandbox/work"), timeout: openshell.DefaultTransferTimeout},
+		{name: "upload honouring gitignore", inv: func() (openshell.Invocation, error) { return cli.Upload("box", "/tmp/x", "/sandbox", true) },
+			want: cmd("sandbox upload", "--color never -- box /tmp/x /sandbox"), timeout: openshell.DefaultTransferTimeout},
+		{name: "download", inv: func() (openshell.Invocation, error) { return cli.Download("box", "/sandbox/result.bundle", "/tmp/out") },
+			want: cmd("sandbox download", "--color never -- box /sandbox/result.bundle /tmp/out"), timeout: openshell.DefaultTransferTimeout},
+		// Only the background forward leaves a process behind.
+		{name: "forward start", inv: func() (openshell.Invocation, error) { return cli.ForwardStart("box", 18789, "") },
+			want: cmd("forward start", "--color never --background -- 127.0.0.1:18789 box"), detaches: true, timeout: openshell.DefaultForwardTimeout},
+		{name: "forward start ipv6 loopback", inv: func() (openshell.Invocation, error) { return cli.ForwardStart("box", 8080, "::1") },
+			want: cmd("forward start", "--color never --background -- [::1]:8080 box"), detaches: true, timeout: openshell.DefaultForwardTimeout},
+		{name: "forward stop", inv: func() (openshell.Invocation, error) { return cli.ForwardStop("box", 18789) },
+			want: cmd("forward stop", "--color never -- 18789 box"), timeout: openshell.DefaultForwardTimeout},
+		{name: "custom binary and workspace", inv: func() (openshell.Invocation, error) {
+			return openshell.CLI{Binary: "/usr/bin/openshell", Gateway: "work", Workspace: "team_a"}.Connect("box")
+		}, want: "/usr/bin/openshell sandbox connect -g work --workspace team_a -- box", interactive: true},
+		{name: "version", inv: func() (openshell.Invocation, error) { return cli.Version(), nil }, want: "openshell --version", timeout: 30 * time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,47 +80,27 @@ func TestCLIArgv(t *testing.T) {
 			if got := strings.Join(inv.Argv, " "); got != tc.want {
 				t.Fatalf("argv\n got %s\nwant %s", got, tc.want)
 			}
-			if inv.Interactive != tc.interactive || inv.Timeout != tc.timeout {
-				t.Fatalf("interactive=%v timeout=%s", inv.Interactive, inv.Timeout)
+			if inv.Interactive != tc.interactive || inv.Detaches != tc.detaches || inv.Timeout != tc.timeout {
+				t.Fatalf("interactive=%v detaches=%v timeout=%s", inv.Interactive, inv.Detaches, inv.Timeout)
 			}
 		})
-	}
-	if v := cli.Version(); strings.Join(v.Argv, " ") != "openshell --version" || v.Interactive {
-		t.Fatalf("version = %+v", v)
-	}
-	// Only the background forward leaves a process behind.
-	for name, inv := range map[string]func() (openshell.Invocation, error){
-		"forward start": func() (openshell.Invocation, error) { return cli.ForwardStart("box", 18789, "") },
-		"forward stop":  func() (openshell.Invocation, error) { return cli.ForwardStop("box", 18789) },
-		"download":      func() (openshell.Invocation, error) { return cli.Download("box", "/sandbox/x", "/tmp/x") },
-	} {
-		got, err := inv()
-		if err != nil || got.Detaches != (name == "forward start") {
-			t.Fatalf("%s: detaches = %v, %v", name, got.Detaches, err)
-		}
 	}
 }
 
 func TestCLIRefusesUnsafeArguments(t *testing.T) {
 	cli := openshell.CLI{Gateway: "openshell"}
+	exec := func(argv []string, o openshell.CLIExecOptions) func() error {
+		return func() error { _, err := cli.Exec("box", argv, o); return err }
+	}
 	for name, fn := range map[string]func() error{
-		"no gateway":        func() error { _, err := openshell.CLI{}.Connect("box"); return err },
-		"gateway flag":      func() error { _, err := openshell.CLI{Gateway: "--gateway-insecure"}.Connect("box"); return err },
-		"bad workspace":     func() error { _, err := openshell.CLI{Gateway: "g", Workspace: "a b"}.Connect("box"); return err },
-		"option as sandbox": func() error { _, err := cli.Connect("--editor=vscode"); return err },
-		"empty command":     func() error { _, err := cli.Exec("box", nil, openshell.CLIExecOptions{}); return err },
-		"relative workdir": func() error {
-			_, err := cli.Exec("box", []string{"ls"}, openshell.CLIExecOptions{WorkDir: "work"})
-			return err
-		},
-		"env name": func() error {
-			_, err := cli.Exec("box", []string{"ls"}, openshell.CLIExecOptions{Env: map[string]string{"A=B": "c"}})
-			return err
-		},
-		"env newline": func() error {
-			_, err := cli.Exec("box", []string{"ls"}, openshell.CLIExecOptions{Env: map[string]string{"A": "b\nc"}})
-			return err
-		},
+		"no gateway":         func() error { _, err := openshell.CLI{}.Connect("box"); return err },
+		"gateway flag":       func() error { _, err := openshell.CLI{Gateway: "--gateway-insecure"}.Connect("box"); return err },
+		"bad workspace":      func() error { _, err := openshell.CLI{Gateway: "g", Workspace: "a b"}.Connect("box"); return err },
+		"option as sandbox":  func() error { _, err := cli.Connect("--editor=vscode"); return err },
+		"empty command":      exec(nil, openshell.CLIExecOptions{}),
+		"relative workdir":   exec([]string{"ls"}, openshell.CLIExecOptions{WorkDir: "work"}),
+		"env name":           exec([]string{"ls"}, openshell.CLIExecOptions{Env: map[string]string{"A=B": "c"}}),
+		"env newline":        exec([]string{"ls"}, openshell.CLIExecOptions{Env: map[string]string{"A": "b\nc"}}),
 		"relative dest":      func() error { _, err := cli.Upload("box", "/tmp/x", "sandbox", true); return err },
 		"option-like remote": func() error { _, err := cli.Download("box", "-rf", "/tmp/x"); return err },
 		"public bind":        func() error { _, err := cli.ForwardStart("box", 80, "0.0.0.0"); return err },
@@ -223,14 +150,10 @@ func TestInvocationCommandNonInteractive(t *testing.T) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	start := time.Now()
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
+	if err := cmd.Run(); err != nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("Run = %v after %s; stdin must be the null device", err, time.Since(start))
 	}
-	if time.Since(start) > 5*time.Second {
-		t.Fatal("stdin was not the null device")
-	}
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if lines[0] != "gw= insecure=" {
+	if lines := strings.Split(strings.TrimSpace(out.String()), "\n"); lines[0] != "gw= insecure=" {
 		t.Fatalf("environment leaked: %q", lines[0])
 	}
 	if !strings.Contains(out.String(), "[/sandbox/a b]") || !strings.Contains(out.String(), "[-g]\n[openshell]") {
@@ -240,18 +163,14 @@ func TestInvocationCommandNonInteractive(t *testing.T) {
 
 func TestInvocationCommandTimeout(t *testing.T) {
 	bin := fakeCLI(t, "exec sleep 30\n")
-	inv := openshell.Invocation{Argv: []string{bin}, Timeout: 200 * time.Millisecond}
-	cmd, cancel, err := inv.Command(context.Background())
+	cmd, cancel, err := openshell.Invocation{Argv: []string{bin}, Timeout: 200 * time.Millisecond}.Command(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cancel()
 	start := time.Now()
-	if err := cmd.Run(); err == nil {
-		t.Fatal("hung command was not killed")
-	}
-	if time.Since(start) > 10*time.Second {
-		t.Fatalf("timeout took %s", time.Since(start))
+	if err := cmd.Run(); err == nil || time.Since(start) > 10*time.Second {
+		t.Fatalf("hung command: Run = %v after %s", err, time.Since(start))
 	}
 	if _, _, err := (openshell.Invocation{}).Command(context.Background()); err == nil {
 		t.Fatal("empty invocation accepted")
@@ -261,11 +180,8 @@ func TestInvocationCommandTimeout(t *testing.T) {
 func TestInvocationOutput(t *testing.T) {
 	bin := fakeCLI(t, "echo out; echo err >&2; exit 3\n")
 	out, err := openshell.Invocation{Argv: []string{bin, "sandbox", "upload"}, Timeout: 10 * time.Second}.Output(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "exit status 3") || !strings.Contains(err.Error(), "sandbox upload") {
-		t.Fatalf("Output error = %v", err)
-	}
-	if string(out) != "out\nerr\n" {
-		t.Fatalf("Output = %q", out)
+	if err == nil || !strings.Contains(err.Error(), "exit status 3") || !strings.Contains(err.Error(), "sandbox upload") || string(out) != "out\nerr\n" {
+		t.Fatalf("Output = %q, %v", out, err)
 	}
 	if _, err := (openshell.Invocation{Argv: []string{bin}, Interactive: true}).Output(context.Background()); err == nil {
 		t.Fatal("interactive invocation captured")
@@ -274,69 +190,40 @@ func TestInvocationOutput(t *testing.T) {
 
 // daemonCLI writes a stand-in for `openshell forward start --background`:
 // it leaves a process holding the inherited stderr, as ssh -f does, and
-// that process writes to it after the command exits. The daemon's PID is
-// written to pidFile and it is killed when the test ends.
-func daemonCLI(t *testing.T) (bin, pidFile string) {
+// that process writes to it after the command exits. It returns a function
+// that waits for the daemon's PID; the daemon is killed when the test ends.
+func daemonCLI(t *testing.T) (bin string, daemon func() *os.Process) {
 	t.Helper()
-	pidFile = filepath.Join(t.TempDir(), "daemon.pid")
+	pidFile := filepath.Join(t.TempDir(), "daemon.pid")
 	bin = fakeCLI(t, `sh -c 'echo $$ > "$1.tmp" && mv "$1.tmp" "$1"; sleep 0.3; echo late >&2; exec sleep 30' daemon "`+pidFile+`" </dev/null >/dev/null &
 echo "Forwarding port 18789 to sandbox box in the background" >&2
 `)
+	daemon = func() *os.Process {
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if data, err := os.ReadFile(pidFile); err == nil {
+				pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+				if err != nil {
+					t.Fatalf("pid file %q", data)
+				}
+				p, _ := os.FindProcess(pid)
+				return p
+			}
+		}
+		return nil
+	}
 	t.Cleanup(func() {
-		if p := daemonPID(t, pidFile); p != nil {
+		if p := daemon(); p != nil {
 			_ = p.Kill()
 		}
 	})
-	return bin, pidFile
+	return bin, daemon
 }
 
-func daemonPID(t *testing.T, pidFile string) *os.Process {
-	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil {
-			t.Fatalf("pid file %q", data)
-		}
-		p, _ := os.FindProcess(pid)
-		return p
-	}
-	return nil
-}
-
-func TestInvocationOutputDetached(t *testing.T) {
-	bin, pidFile := daemonCLI(t)
-	inv := openshell.Invocation{Argv: []string{bin}, Detaches: true, Timeout: 20 * time.Second}
-	start := time.Now()
-	out, err := inv.Output(context.Background())
-	if err != nil {
-		t.Fatalf("Output = %v (%q)", err, out)
-	}
-	// A pipe would have held Wait until WaitDelay (5s) and then failed
-	// with exec.ErrWaitDelay.
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatalf("Output waited %s for the background process", elapsed)
-	}
-	if !strings.Contains(string(out), "Forwarding port 18789") {
-		t.Fatalf("Output = %q", out)
-	}
-	daemon := daemonPID(t, pidFile)
-	if daemon == nil {
-		t.Fatal("the background process did not start")
-	}
-	// The background process writes again after the command has exited
-	// and is still running afterwards: its stderr was never closed under
-	// it.
-	time.Sleep(600 * time.Millisecond)
-	if err := daemon.Signal(syscall.Signal(0)); err != nil {
-		t.Fatalf("background process died after its late write: %v", err)
-	}
-}
-
-func TestInvocationCommandDetached(t *testing.T) {
+// TestInvocationDetached covers a background forward: neither Command nor
+// Output waits on the pipes its daemon keeps, and the daemon survives its
+// late writes. A pipe would have held Wait until WaitDelay (5s) and then
+// failed with exec.ErrWaitDelay.
+func TestInvocationDetached(t *testing.T) {
 	bin, _ := daemonCLI(t)
 	cmd, cancel, err := openshell.Invocation{Argv: []string{bin}, Detaches: true, Timeout: 20 * time.Second}.Command(context.Background())
 	if err != nil {
@@ -349,5 +236,23 @@ func TestInvocationCommandDetached(t *testing.T) {
 	start := time.Now()
 	if err := cmd.Run(); err != nil || time.Since(start) > 3*time.Second {
 		t.Fatalf("Run = %v after %s", err, time.Since(start))
+	}
+
+	bin, daemon := daemonCLI(t)
+	start = time.Now()
+	out, err := openshell.Invocation{Argv: []string{bin}, Detaches: true, Timeout: 20 * time.Second}.Output(context.Background())
+	if err != nil || time.Since(start) > 3*time.Second || !strings.Contains(string(out), "Forwarding port 18789") {
+		t.Fatalf("Output = %q, %v after %s", out, err, time.Since(start))
+	}
+	p := daemon()
+	if p == nil {
+		t.Fatal("the background process did not start")
+	}
+	// The background process writes again after the command has exited
+	// and is still running afterwards: its stderr was never closed under
+	// it.
+	time.Sleep(600 * time.Millisecond)
+	if err := p.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("background process died after its late write: %v", err)
 	}
 }

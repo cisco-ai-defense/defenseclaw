@@ -37,14 +37,13 @@ import (
 	"time"
 
 	pb "github.com/NVIDIA/OpenShell/sdk/go/proto/openshellv1"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // writeRegistration lays out gateways/<name>/{metadata.json,mtls/*} the way
-// the openshell 0.1.1 CLI does and returns the registration directory.
+// the openshell 0.1.1 CLI does, with its 0664 metadata and certificates,
+// and returns the registration directory.
 func writeRegistration(t *testing.T, configDir, name string, meta map[string]any, pki *testPKI) string {
 	t.Helper()
 	dir := filepath.Join(configDir, "gateways", name)
@@ -55,30 +54,43 @@ func writeRegistration(t *testing.T, configDir, name string, meta map[string]any
 		meta = map[string]any{"name": name, "gateway_endpoint": "https://127.0.0.1:17670", "is_remote": false, "gateway_port": 0, "auth_mode": "mtls"}
 	}
 	data, _ := json.Marshal(meta)
-	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), data, 0o664); err != nil {
-		t.Fatal(err)
-	}
-	// Like the certificates below, the CLI writes metadata.json 0664.
-	if err := os.Chmod(filepath.Join(dir, "metadata.json"), 0o664); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(dir, "metadata.json"), string(data), 0o664)
 	ca, cert, key := []byte("ca"), []byte("cert"), []byte("key")
 	if pki != nil {
 		ca, cert, key = pki.caPEM, pki.clientPEM, pki.clientKeyPEM
 	}
-	for file, content := range map[string][]byte{"ca.crt": ca, "tls.crt": cert} {
-		if err := os.WriteFile(filepath.Join(dir, "mtls", file), content, 0o664); err != nil {
-			t.Fatal(err)
-		}
-		// The CLI writes certificates 0664; make that survive the umask.
-		if err := os.Chmod(filepath.Join(dir, "mtls", file), 0o664); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "mtls", "tls.key"), key, 0o600); err != nil {
+	writeFile(t, filepath.Join(dir, "mtls", "ca.crt"), string(ca), 0o664)
+	writeFile(t, filepath.Join(dir, "mtls", "tls.crt"), string(cert), 0o664)
+	writeFile(t, filepath.Join(dir, "mtls", "tls.key"), string(key), 0o600)
+	return dir
+}
+
+// writeFile writes content with exactly mode, whatever the umask.
+func writeFile(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		t.Fatal(err)
 	}
-	return dir
+	chmod(t, path, mode)
+}
+
+func chmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// moveBehindLink moves path elsewhere and leaves a symbolic link to it.
+func moveBehindLink(t *testing.T, path string) {
+	t.Helper()
+	moved := filepath.Join(t.TempDir(), filepath.Base(path))
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, path); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // realTempDir is t.TempDir with its symbolic links resolved (macOS links
@@ -99,89 +111,60 @@ func skipOnWindows(t *testing.T) {
 	}
 }
 
+func skipAsRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission semantics differ for root")
+	}
+}
+
 func TestDiscoverSelection(t *testing.T) {
 	skipOnWindows(t)
 	cases := []struct {
-		name    string
-		setup   func(t *testing.T, dir string)
-		pin     string
-		want    string
-		wantErr error
+		name         string
+		regs, system []string
+		active, pin  string
+		want         string
+		source       openshell.RegistrationSource
+		wantErr      error
 	}{
-		{
-			name: "active gateway wins",
-			setup: func(t *testing.T, dir string) {
-				writeRegistration(t, dir, "openshell", nil, nil)
-				writeRegistration(t, dir, "work", nil, nil)
-				_ = os.WriteFile(filepath.Join(dir, "active_gateway"), []byte("work\n"), 0o664)
-			},
-			want: "work",
-		},
-		{
-			name: "pinned name overrides active",
-			setup: func(t *testing.T, dir string) {
-				writeRegistration(t, dir, "openshell", nil, nil)
-				writeRegistration(t, dir, "work", nil, nil)
-				_ = os.WriteFile(filepath.Join(dir, "active_gateway"), []byte("work"), 0o664)
-			},
-			pin:  "openshell",
-			want: "openshell",
-		},
-		{
-			name: "package default without active file",
-			setup: func(t *testing.T, dir string) {
-				writeRegistration(t, dir, "alpha", nil, nil)
-				writeRegistration(t, dir, "openshell", nil, nil)
-			},
-			want: "openshell",
-		},
-		{
-			name:  "single registration",
-			setup: func(t *testing.T, dir string) { writeRegistration(t, dir, "solo", nil, nil) },
-			want:  "solo",
-		},
-		{
-			name: "ambiguous registrations",
-			setup: func(t *testing.T, dir string) {
-				writeRegistration(t, dir, "a", nil, nil)
-				writeRegistration(t, dir, "b", nil, nil)
-			},
-			wantErr: openshell.ErrNoGateway,
-		},
-		{
-			name:    "nothing installed",
-			setup:   func(*testing.T, string) {},
-			wantErr: openshell.ErrNoGateway,
-		},
-		{
-			name:    "pinned registration missing",
-			setup:   func(t *testing.T, dir string) { writeRegistration(t, dir, "openshell", nil, nil) },
-			pin:     "gone",
-			wantErr: openshell.ErrGatewayNotFound,
-		},
+		{name: "active gateway wins", regs: []string{"openshell", "work"}, active: "work\n", want: "work"},
+		{name: "pinned name overrides active", regs: []string{"openshell", "work"}, active: "work", pin: "openshell", want: "openshell"},
+		{name: "package default without active file", regs: []string{"alpha", "openshell"}, want: "openshell"},
+		{name: "single registration", regs: []string{"solo"}, want: "solo"},
+		{name: "system registration", system: []string{"fleet"}, want: "fleet", source: openshell.SourceSystem},
+		{name: "ambiguous registrations", regs: []string{"a", "b"}, wantErr: openshell.ErrNoGateway},
+		{name: "nothing installed", wantErr: openshell.ErrNoGateway},
+		{name: "pinned registration missing", regs: []string{"openshell"}, pin: "gone", wantErr: openshell.ErrGatewayNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := realTempDir(t)
-			tc.setup(t, dir)
-			reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir, SystemDir: t.TempDir(), Gateway: tc.pin})
-			if tc.wantErr != nil {
+			dir, system := realTempDir(t), realTempDir(t)
+			for _, name := range tc.regs {
+				writeRegistration(t, dir, name, nil, nil)
+			}
+			for _, name := range tc.system {
+				writeRegistration(t, system, name, nil, nil)
+			}
+			if tc.active != "" {
+				writeFile(t, filepath.Join(dir, "active_gateway"), tc.active, 0o664)
+			}
+			reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir, SystemDir: system, Gateway: tc.pin})
+			if tc.wantErr != nil || err != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("Discover = %v, want %v", err, tc.wantErr)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatal(err)
+			if tc.source == "" {
+				tc.source = openshell.SourceUser
+			} else {
+				dir = system
 			}
-			if reg.Name != tc.want || reg.Source != openshell.SourceUser || reg.Endpoint != "https://127.0.0.1:17670" || !reg.Local() {
+			if reg.Name != tc.want || reg.Source != tc.source || reg.Endpoint != "https://127.0.0.1:17670" || !reg.Local() || reg.Target() != "127.0.0.1:17670" {
 				t.Fatalf("registration = %+v", reg)
 			}
 			if reg.TLS == nil || reg.TLS.Key != filepath.Join(dir, "gateways", tc.want, "mtls", "tls.key") {
 				t.Fatalf("tls files = %+v", reg.TLS)
-			}
-			if reg.Target() != "127.0.0.1:17670" {
-				t.Fatalf("target = %q", reg.Target())
 			}
 		})
 	}
@@ -196,62 +179,42 @@ func TestDiscoverRejectsInvalidNames(t *testing.T) {
 			t.Fatalf("pinned %q accepted", name)
 		}
 	}
-	_ = os.WriteFile(filepath.Join(dir, "active_gateway"), []byte("../../evil"), 0o600)
+	writeFile(t, filepath.Join(dir, "active_gateway"), "../../evil", 0o600)
 	if _, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir}); err == nil || !strings.Contains(err.Error(), "invalid gateway") {
 		t.Fatalf("hostile active_gateway = %v", err)
 	}
 }
 
-func TestDiscoverSystemRegistration(t *testing.T) {
-	skipOnWindows(t)
-	user, system := t.TempDir(), t.TempDir()
-	writeRegistration(t, system, "fleet", nil, nil)
-	reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: user, SystemDir: system})
-	if err != nil || reg.Source != openshell.SourceSystem || reg.Name != "fleet" {
-		t.Fatalf("system registration = %+v, %v", reg, err)
-	}
-}
-
 func TestDiscoverRefusesRemoteAndUnsupportedModes(t *testing.T) {
 	skipOnWindows(t)
-	cases := []struct {
-		name     string
-		meta     map[string]any
-		wantErr  error
-		warnings int
+	for _, tc := range []struct {
+		name    string
+		meta    map[string]any
+		wantErr error
 	}{
-		{name: "is_remote", meta: map[string]any{"gateway_endpoint": "https://127.0.0.1:17670", "is_remote": true, "auth_mode": "mtls"}, wantErr: openshell.ErrRemoteGateway},
-		{name: "remote host", meta: map[string]any{"gateway_endpoint": "https://gw.example.com:443", "auth_mode": "mtls"}, wantErr: openshell.ErrRemoteGateway},
-		{name: "oidc", meta: map[string]any{"gateway_endpoint": "https://127.0.0.1:17670", "auth_mode": "oidc"}, wantErr: openshell.ErrUnsupportedAuthMode},
-		{name: "cloudflare", meta: map[string]any{"gateway_endpoint": "https://localhost:17670", "auth_mode": "cloudflare_jwt"}, wantErr: openshell.ErrUnsupportedAuthMode},
-		{name: "mtls over http", meta: map[string]any{"gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "mtls"}, wantErr: openshell.ErrUnsupportedAuthMode},
-		{name: "plaintext over https", meta: map[string]any{"gateway_endpoint": "https://127.0.0.1:17670", "auth_mode": "plaintext"}, wantErr: openshell.ErrUnauthenticatedGateway},
-		{name: "loopback plaintext", meta: map[string]any{"gateway_endpoint": "http://[::1]:17670", "auth_mode": "plaintext"}, wantErr: openshell.ErrUnauthenticatedGateway},
-		{name: "no auth", meta: map[string]any{"gateway_endpoint": "http://127.0.0.1:17670"}, wantErr: openshell.ErrUnauthenticatedGateway},
-		{name: "missing endpoint", meta: map[string]any{"auth_mode": "mtls"}, wantErr: errors.New("no gateway_endpoint")},
-	}
-	for _, tc := range cases {
+		{"is_remote", map[string]any{"gateway_endpoint": "https://127.0.0.1:17670", "is_remote": true, "auth_mode": "mtls"}, openshell.ErrRemoteGateway},
+		{"remote host", map[string]any{"gateway_endpoint": "https://gw.example.com:443", "auth_mode": "mtls"}, openshell.ErrRemoteGateway},
+		{"oidc", map[string]any{"gateway_endpoint": "https://127.0.0.1:17670", "auth_mode": "oidc"}, openshell.ErrUnsupportedAuthMode},
+		{"cloudflare", map[string]any{"gateway_endpoint": "https://localhost:17670", "auth_mode": "cloudflare_jwt"}, openshell.ErrUnsupportedAuthMode},
+		{"mtls over http", map[string]any{"gateway_endpoint": "http://127.0.0.1:17670", "auth_mode": "mtls"}, openshell.ErrUnsupportedAuthMode},
+		{"plaintext over https", map[string]any{"gateway_endpoint": "https://127.0.0.1:17670", "auth_mode": "plaintext"}, openshell.ErrUnauthenticatedGateway},
+		{"loopback plaintext", map[string]any{"gateway_endpoint": "http://[::1]:17670", "auth_mode": "plaintext"}, openshell.ErrUnauthenticatedGateway},
+		{"no auth", map[string]any{"gateway_endpoint": "http://127.0.0.1:17670"}, openshell.ErrUnauthenticatedGateway},
+		{"missing endpoint", map[string]any{"auth_mode": "mtls"}, nil},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeRegistration(t, dir, "openshell", tc.meta, nil)
 			reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir})
-			switch {
-			case tc.wantErr == nil:
-				if err != nil || len(reg.Warnings) != tc.warnings {
-					t.Fatalf("Discover = %+v, %v", reg, err)
+			if tc.wantErr == nil {
+				if err == nil || !strings.Contains(err.Error(), "no gateway_endpoint") {
+					t.Fatalf("Discover = %v", err)
 				}
-			case errors.Is(tc.wantErr, openshell.ErrRemoteGateway) || errors.Is(tc.wantErr, openshell.ErrUnsupportedAuthMode) ||
-				errors.Is(tc.wantErr, openshell.ErrUnauthenticatedGateway):
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("Discover = %v, want %v", err, tc.wantErr)
-				}
-				if reg == nil {
-					t.Fatal("registration not returned alongside the refusal")
-				}
-			default:
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr.Error()) {
-					t.Fatalf("Discover = %v, want %v", err, tc.wantErr)
-				}
+				return
+			}
+			// The registration comes back alongside the refusal.
+			if !errors.Is(err, tc.wantErr) || reg == nil {
+				t.Fatalf("Discover = %+v, %v; want %v", reg, err, tc.wantErr)
 			}
 		})
 	}
@@ -259,10 +222,11 @@ func TestDiscoverRefusesRemoteAndUnsupportedModes(t *testing.T) {
 
 func TestDiscoverChecksCredentialPermissions(t *testing.T) {
 	skipOnWindows(t)
-	if os.Geteuid() == 0 {
-		t.Skip("permission semantics differ for root")
+	skipAsRoot(t)
+	at := func(file string, mode os.FileMode) func(t *testing.T, mtls string) {
+		return func(t *testing.T, m string) { chmod(t, filepath.Join(m, file), mode) }
 	}
-	cases := []struct {
+	for _, tc := range []struct {
 		name     string
 		mutate   func(t *testing.T, mtls string)
 		wantErr  bool
@@ -270,27 +234,14 @@ func TestDiscoverChecksCredentialPermissions(t *testing.T) {
 		warnings int
 	}{
 		{name: "cli defaults warn on group-writable certs", mutate: func(*testing.T, string) {}, warnings: 2},
-		{name: "tightened certs", mutate: func(t *testing.T, m string) {
-			chmod(t, filepath.Join(m, "ca.crt"), 0o644)
-			chmod(t, filepath.Join(m, "tls.crt"), 0o600)
-		}},
-		{name: "group-readable key", mutate: func(t *testing.T, m string) { chmod(t, filepath.Join(m, "tls.key"), 0o640) }, wantErr: true, wantFix: "chmod 600 "},
-		{name: "world-readable key", mutate: func(t *testing.T, m string) { chmod(t, filepath.Join(m, "tls.key"), 0o604) }, wantErr: true, wantFix: "chmod 600 "},
-		{name: "world-writable ca", mutate: func(t *testing.T, m string) { chmod(t, filepath.Join(m, "ca.crt"), 0o666) }, wantErr: true, wantFix: "chmod 644 "},
-		{name: "key symlink", mutate: func(t *testing.T, m string) {
-			key := filepath.Join(m, "tls.key")
-			real := filepath.Join(t.TempDir(), "real.key")
-			if err := os.Rename(key, real); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(real, key); err != nil {
-				t.Fatal(err)
-			}
-		}, wantErr: true},
-		{name: "world-writable mtls dir", mutate: func(t *testing.T, m string) { chmod(t, m, 0o777) }, wantErr: true, wantFix: "chmod 700 "},
+		{name: "tightened certs", mutate: func(t *testing.T, m string) { at("ca.crt", 0o644)(t, m); at("tls.crt", 0o600)(t, m) }},
+		{name: "group-readable key", mutate: at("tls.key", 0o640), wantErr: true, wantFix: "chmod 600 "},
+		{name: "world-readable key", mutate: at("tls.key", 0o604), wantErr: true, wantFix: "chmod 600 "},
+		{name: "world-writable ca", mutate: at("ca.crt", 0o666), wantErr: true, wantFix: "chmod 644 "},
+		{name: "key symlink", mutate: func(t *testing.T, m string) { moveBehindLink(t, filepath.Join(m, "tls.key")) }, wantErr: true},
+		{name: "world-writable mtls dir", mutate: at("", 0o777), wantErr: true, wantFix: "chmod 700 "},
 		{name: "missing key", mutate: func(t *testing.T, m string) { _ = os.Remove(filepath.Join(m, "tls.key")) }, wantErr: true},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// A private config directory, as the CLI creates it; t.TempDir
 			// itself follows the umask.
@@ -304,30 +255,11 @@ func TestDiscoverChecksCredentialPermissions(t *testing.T) {
 				}
 				return
 			}
-			if err == nil {
-				t.Fatal("insecure credentials accepted")
-			}
 			var perm *openshell.PermissionError
-			if tc.wantFix != "" {
-				if !errors.As(err, &perm) || !strings.HasPrefix(perm.Fix, tc.wantFix) || !errors.Is(err, openshell.ErrInsecureCredentials) {
-					t.Fatalf("Discover = %v (fix %q)", err, fixOf(perm))
-				}
+			if err == nil || (tc.wantFix != "" && (!errors.As(err, &perm) || !strings.HasPrefix(perm.Fix, tc.wantFix) || !errors.Is(err, openshell.ErrInsecureCredentials))) {
+				t.Fatalf("Discover = %v (%+v), want an insecure-credentials refusal fixed by %q", err, perm, tc.wantFix)
 			}
 		})
-	}
-}
-
-func fixOf(p *openshell.PermissionError) string {
-	if p == nil {
-		return ""
-	}
-	return p.Fix
-}
-
-func chmod(t *testing.T, path string, mode os.FileMode) {
-	t.Helper()
-	if err := os.Chmod(path, mode); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -407,45 +339,17 @@ func (healthServer) Health(context.Context, *pb.HealthRequest) (*pb.HealthRespon
 	return &pb.HealthResponse{Status: pb.ServiceStatus_SERVICE_STATUS_HEALTHY, Version: "0.1.1"}, nil
 }
 
-// startMTLSGateway serves Health over mTLS on loopback, requiring a client
-// certificate from the test CA.
-func startMTLSGateway(t *testing.T, pki *testPKI) string {
-	t.Helper()
-	cert, err := tls.X509KeyPair(pki.serverPEM, pki.serverKeyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{cert}, ClientCAs: pki.pool, ClientAuth: tls.RequireAndVerifyClientCert, MinVersion: tls.VersionTLS12,
-	})))
-	pb.RegisterOpenShellServer(srv, healthServer{})
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	return "https://" + lis.Addr().String()
-}
-
 func TestDialOverMTLS(t *testing.T) {
 	skipOnWindows(t)
 	pki := newPKI(t)
-	endpoint := startMTLSGateway(t, pki)
-	dir := t.TempDir()
-	writeRegistration(t, dir, "openshell", map[string]any{"name": "openshell", "gateway_endpoint": endpoint, "is_remote": false, "auth_mode": "mtls"}, pki)
-
-	reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir})
-	if err != nil {
-		t.Fatal(err)
-	}
+	endpoint := startGateway(t, pki, tls.RequireAndVerifyClientCert, 0, false)
+	reg := probeRegistration(t, endpoint, pki)
 	c, err := openshell.Dial(reg, openshell.ClientOptions{RPCTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	h, err := c.Health(context.Background())
-	if err != nil || !h.Healthy || h.CheckVersion() != nil {
+	if h, err := c.Health(context.Background()); err != nil || !h.Healthy || h.CheckVersion() != nil {
 		t.Fatalf("health over mTLS = %+v, %v", h, err)
 	}
 
@@ -463,15 +367,8 @@ func TestDialOverMTLS(t *testing.T) {
 
 	// A client certificate from another CA is refused by the gateway.
 	other := newPKI(t)
-	dir2 := t.TempDir()
-	writeRegistration(t, dir2, "openshell", map[string]any{"gateway_endpoint": endpoint, "auth_mode": "mtls"}, &testPKI{
-		caPEM: pki.caPEM, clientPEM: other.clientPEM, clientKeyPEM: other.clientKeyPEM,
-	})
-	reg2, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c2, err := openshell.Dial(reg2, openshell.ClientOptions{RPCTimeout: 2 * time.Second})
+	c2, err := openshell.Dial(probeRegistration(t, endpoint, &testPKI{caPEM: pki.caPEM, clientPEM: other.clientPEM, clientKeyPEM: other.clientKeyPEM}),
+		openshell.ClientOptions{RPCTimeout: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,11 +390,8 @@ func TestDialRefusesUnusableRegistrations(t *testing.T) {
 		{Endpoint: "http://127.0.0.1:1", AuthMode: openshell.AuthModeNone},
 	} {
 		_, err := openshell.Dial(reg, openshell.ClientOptions{})
-		if err == nil {
-			t.Fatalf("Dial(%+v) succeeded", reg)
-		}
 		unauthenticated := reg != nil && (reg.AuthMode == openshell.AuthModePlaintext || reg.AuthMode == openshell.AuthModeNone)
-		if unauthenticated != errors.Is(err, openshell.ErrUnauthenticatedGateway) {
+		if err == nil || unauthenticated != errors.Is(err, openshell.ErrUnauthenticatedGateway) {
 			t.Fatalf("Dial(%+v) = %v", reg, err)
 		}
 		if reg != nil {
@@ -510,141 +404,65 @@ func TestDialRefusesUnusableRegistrations(t *testing.T) {
 
 func TestDiscoverChecksRegistrationFiles(t *testing.T) {
 	skipOnWindows(t)
-	if os.Geteuid() == 0 {
-		t.Skip("permission semantics differ for root")
+	skipAsRoot(t)
+	active := func(content string, mode os.FileMode) func(t *testing.T, base, reg string) {
+		return func(t *testing.T, base, _ string) { writeFile(t, filepath.Join(base, "active_gateway"), content, mode) }
 	}
-	cases := []struct {
+	in := func(path string, mode os.FileMode) func(t *testing.T, base, reg string) {
+		return func(t *testing.T, base, _ string) { chmod(t, filepath.Join(base, path), mode) }
+	}
+	inReg := func(path string, mode os.FileMode) func(t *testing.T, base, reg string) {
+		return func(t *testing.T, _, reg string) { chmod(t, filepath.Join(reg, path), mode) }
+	}
+	for _, tc := range []struct {
 		name    string
-		mutate  func(t *testing.T, base, reg string)
+		mutate  []func(t *testing.T, base, reg string)
 		pin     string
 		wantErr string
 		wantFix os.FileMode
 		warn    []string
 	}{
-		{
-			name: "cli defaults inside private directories",
-			mutate: func(t *testing.T, base, _ string) {
-				writeFile(t, filepath.Join(base, "active_gateway"), "openshell\n", 0o664)
-			},
-		},
-		{
-			name: "group-searchable directories expose group-writable files",
-			mutate: func(t *testing.T, base, reg string) {
-				writeFile(t, filepath.Join(base, "active_gateway"), "openshell\n", 0o664)
-				for _, d := range []string{base, filepath.Join(base, "gateways"), reg} {
-					chmod(t, d, 0o750)
-				}
-			},
-			warn: []string{"metadata.json is group-writable (mode 0664); run chmod go-w ", "active_gateway is group-writable"},
-		},
-		{
-			name: "one private directory shields what lies below it",
-			mutate: func(t *testing.T, base, reg string) {
-				writeFile(t, filepath.Join(base, "active_gateway"), "openshell\n", 0o664)
-				chmod(t, base, 0o750)
-				chmod(t, reg, 0o770)
-			},
-			warn: []string{"active_gateway is group-writable"},
-		},
-		{
-			name:   "group-writable directory",
-			mutate: func(t *testing.T, base, _ string) { chmod(t, base, 0o770) },
-			warn:   []string{"openshell is group-writable (mode 0770)"},
-		},
-		{
-			name:    "world-writable metadata",
-			mutate:  func(t *testing.T, _, reg string) { chmod(t, filepath.Join(reg, "metadata.json"), 0o666) },
-			wantErr: "metadata.json: is writable by every user",
-			wantFix: 0o644,
-		},
-		{
-			name:    "world-writable registration directory",
-			mutate:  func(t *testing.T, _, reg string) { chmod(t, reg, 0o777) },
-			wantErr: "is writable by every user",
-			wantFix: 0o755,
-		},
-		{
-			name:    "world-writable gateways directory",
-			mutate:  func(t *testing.T, base, _ string) { chmod(t, filepath.Join(base, "gateways"), 0o757) },
-			wantErr: "gateways: is writable by every user",
-			wantFix: 0o755,
-		},
-		{
-			name:    "world-writable config directory",
-			mutate:  func(t *testing.T, base, _ string) { chmod(t, base, 0o777) },
-			wantErr: "is writable by every user",
-			wantFix: 0o755,
-		},
-		{
-			name: "world-writable active_gateway that selected the gateway",
-			mutate: func(t *testing.T, base, _ string) {
-				writeFile(t, filepath.Join(base, "active_gateway"), "openshell", 0o666)
-			},
-			wantErr: "active_gateway: is writable by every user",
-			wantFix: 0o644,
-		},
-		{
-			name: "unused active_gateway is not consulted",
-			mutate: func(t *testing.T, base, _ string) {
-				writeFile(t, filepath.Join(base, "active_gateway"), "openshell", 0o666)
-			},
-			pin: "openshell",
-		},
-		{
-			name: "symlinked registration directory",
-			mutate: func(t *testing.T, _, reg string) {
-				moved := filepath.Join(t.TempDir(), "elsewhere")
-				if err := os.Rename(reg, moved); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(moved, reg); err != nil {
-					t.Fatal(err)
-				}
-			},
-			// Unpinned, the link is not even listed as a registration;
-			// pinned, reading through it is refused.
-			pin:     "openshell",
-			wantErr: "symlink",
-		},
-		{
-			name: "symlinked metadata",
-			mutate: func(t *testing.T, _, reg string) {
-				meta := filepath.Join(reg, "metadata.json")
-				moved := filepath.Join(t.TempDir(), "metadata.json")
-				if err := os.Rename(meta, moved); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(moved, meta); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantErr: "metadata.json",
-		},
-	}
-	for _, tc := range cases {
+		{name: "cli defaults inside private directories", mutate: []func(*testing.T, string, string){active("openshell\n", 0o664)}},
+		{name: "group-searchable directories expose group-writable files",
+			mutate: []func(*testing.T, string, string){active("openshell\n", 0o664), in("", 0o750), in("gateways", 0o750), inReg("", 0o750)},
+			warn:   []string{"metadata.json is group-writable (mode 0664); run chmod go-w ", "active_gateway is group-writable"}},
+		{name: "one private directory shields what lies below it",
+			mutate: []func(*testing.T, string, string){active("openshell\n", 0o664), in("", 0o750), inReg("", 0o770)},
+			warn:   []string{"active_gateway is group-writable"}},
+		{name: "group-writable directory", mutate: []func(*testing.T, string, string){in("", 0o770)}, warn: []string{"openshell is group-writable (mode 0770)"}},
+		{name: "world-writable metadata", mutate: []func(*testing.T, string, string){inReg("metadata.json", 0o666)}, wantErr: "metadata.json: is writable by every user", wantFix: 0o644},
+		{name: "world-writable registration directory", mutate: []func(*testing.T, string, string){inReg("", 0o777)}, wantErr: "is writable by every user", wantFix: 0o755},
+		{name: "world-writable gateways directory", mutate: []func(*testing.T, string, string){in("gateways", 0o757)}, wantErr: "gateways: is writable by every user", wantFix: 0o755},
+		{name: "world-writable config directory", mutate: []func(*testing.T, string, string){in("", 0o777)}, wantErr: "is writable by every user", wantFix: 0o755},
+		{name: "world-writable active_gateway that selected the gateway", mutate: []func(*testing.T, string, string){active("openshell", 0o666)},
+			wantErr: "active_gateway: is writable by every user", wantFix: 0o644},
+		{name: "unused active_gateway is not consulted", mutate: []func(*testing.T, string, string){active("openshell", 0o666)}, pin: "openshell"},
+		// Unpinned, the link is not even listed as a registration; pinned,
+		// reading through it is refused.
+		{name: "symlinked registration directory", mutate: []func(*testing.T, string, string){func(t *testing.T, _, reg string) { moveBehindLink(t, reg) }},
+			pin: "openshell", wantErr: "symlink"},
+		{name: "symlinked metadata", mutate: []func(*testing.T, string, string){func(t *testing.T, _, reg string) { moveBehindLink(t, filepath.Join(reg, "metadata.json")) }},
+			wantErr: "metadata.json"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := filepath.Join(t.TempDir(), "openshell")
 			reg := writeRegistration(t, base, "openshell", nil, nil)
 			chmod(t, filepath.Join(reg, "mtls", "ca.crt"), 0o644)
 			chmod(t, filepath.Join(reg, "mtls", "tls.crt"), 0o644)
-			tc.mutate(t, base, reg)
+			for _, m := range tc.mutate {
+				m(t, base, reg)
+			}
 			got, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: base, SystemDir: t.TempDir(), Gateway: tc.pin})
 			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("Discover = %v, want %q", err, tc.wantErr)
-				}
 				var perm *openshell.PermissionError
-				if tc.wantFix != 0 && (!errors.As(err, &perm) || perm.FixMode != tc.wantFix || !strings.HasPrefix(perm.Fix, "chmod go-w ") ||
-					!errors.Is(err, openshell.ErrInsecureRegistration) || errors.Is(err, openshell.ErrInsecureCredentials)) {
-					t.Fatalf("Discover = %v (fix %q, mode %o)", err, fixOf(perm), modeOf(perm))
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || (tc.wantFix != 0 && (!errors.As(err, &perm) || perm.FixMode != tc.wantFix ||
+					!strings.HasPrefix(perm.Fix, "chmod go-w ") || !errors.Is(err, openshell.ErrInsecureRegistration) || errors.Is(err, openshell.ErrInsecureCredentials))) {
+					t.Fatalf("Discover = %v (%+v), want %q fixed to %o", err, perm, tc.wantErr, tc.wantFix)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("Discover = %v", err)
-			}
-			if len(got.Warnings) != len(tc.warn) {
-				t.Fatalf("warnings = %q, want %q", got.Warnings, tc.warn)
+			if err != nil || len(got.Warnings) != len(tc.warn) {
+				t.Fatalf("Discover = %+v, %v; want warnings %q", got, err, tc.warn)
 			}
 			for i, w := range tc.warn {
 				if !strings.Contains(got.Warnings[i], w) {
@@ -680,15 +498,12 @@ func TestDiscoverChecksRegistrationFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: link, SystemDir: t.TempDir()})
-		if err != nil {
-			t.Fatalf("Discover = %v", err)
-		}
 		// The CLI's active_gateway wins through the link as it does
 		// without one, and every path names the real directory.
 		regDir := filepath.Join(real, "gateways", "dev")
-		if reg.Name != "dev" || reg.Dir != regDir || reg.ActiveGatewayFile != filepath.Join(real, "active_gateway") ||
+		if err != nil || reg.Name != "dev" || reg.Dir != regDir || reg.ActiveGatewayFile != filepath.Join(real, "active_gateway") ||
 			reg.TLS == nil || reg.TLS.Key != filepath.Join(regDir, "mtls", "tls.key") {
-			t.Fatalf("registration = %+v", reg)
+			t.Fatalf("Discover = %+v, %v", reg, err)
 		}
 	})
 }
@@ -698,7 +513,7 @@ func TestDiscoverChecksRegistrationFiles(t *testing.T) {
 // gateway than the operator's CLI.
 func TestDiscoverReportsActiveGatewayProblems(t *testing.T) {
 	skipOnWindows(t)
-	cases := []struct {
+	for _, tc := range []struct {
 		name    string
 		setup   func(t *testing.T, active string)
 		pin     string
@@ -706,59 +521,27 @@ func TestDiscoverReportsActiveGatewayProblems(t *testing.T) {
 		wantIs  error
 		wantErr string
 	}{
-		{
-			name: "symlinked active_gateway",
-			setup: func(t *testing.T, active string) {
-				target := filepath.Join(t.TempDir(), "active_gateway")
-				writeFile(t, target, "dev\n", 0o644)
-				if err := os.Symlink(target, active); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantIs:  openshell.ErrInsecureRegistration,
-			wantErr: "active_gateway: is a symbolic link",
-		},
-		{
-			name:    "oversized active_gateway",
-			setup:   func(t *testing.T, active string) { writeFile(t, active, strings.Repeat("d", 5000), 0o644) },
-			wantErr: "read limit",
-		},
-		{
-			name: "active_gateway is a directory",
-			setup: func(t *testing.T, active string) {
-				if err := os.Mkdir(active, 0o700); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantErr: "not a regular file",
-		},
-		{
-			name: "unreadable active_gateway",
-			setup: func(t *testing.T, active string) {
-				if os.Geteuid() == 0 {
-					t.Skip("root reads any file")
-				}
-				writeFile(t, active, "dev\n", 0o200)
-			},
-			wantErr: "permission denied",
-		},
-		{
-			name:  "empty active_gateway falls back to the package default",
-			setup: func(t *testing.T, active string) { writeFile(t, active, "\n", 0o644) },
-			want:  "openshell",
-		},
-		{
-			name: "a pinned gateway does not read active_gateway",
-			setup: func(t *testing.T, active string) {
-				if err := os.Symlink("/nonexistent", active); err != nil {
-					t.Fatal(err)
-				}
-			},
-			pin:  "dev",
-			want: "dev",
-		},
-	}
-	for _, tc := range cases {
+		{name: "symlinked active_gateway", setup: func(t *testing.T, active string) {
+			writeFile(t, active, "dev\n", 0o644)
+			moveBehindLink(t, active)
+		}, wantIs: openshell.ErrInsecureRegistration, wantErr: "active_gateway: is a symbolic link"},
+		{name: "oversized active_gateway", setup: func(t *testing.T, active string) { writeFile(t, active, strings.Repeat("d", 5000), 0o644) }, wantErr: "read limit"},
+		{name: "active_gateway is a directory", setup: func(t *testing.T, active string) {
+			if err := os.Mkdir(active, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, wantErr: "not a regular file"},
+		{name: "unreadable active_gateway", setup: func(t *testing.T, active string) {
+			skipAsRoot(t)
+			writeFile(t, active, "dev\n", 0o200)
+		}, wantErr: "permission denied"},
+		{name: "empty active_gateway falls back to the package default", setup: func(t *testing.T, active string) { writeFile(t, active, "\n", 0o644) }, want: "openshell"},
+		{name: "a pinned gateway does not read active_gateway", setup: func(t *testing.T, active string) {
+			if err := os.Symlink("/nonexistent", active); err != nil {
+				t.Fatal(err)
+			}
+		}, pin: "dev", want: "dev"},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(realTempDir(t), "openshell")
 			writeRegistration(t, dir, "openshell", nil, nil)
@@ -766,11 +549,8 @@ func TestDiscoverReportsActiveGatewayProblems(t *testing.T) {
 			tc.setup(t, filepath.Join(dir, "active_gateway"))
 			reg, err := openshell.Discover(openshell.DiscoverOptions{ConfigDir: dir, SystemDir: t.TempDir(), Gateway: tc.pin})
 			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || errors.Is(err, openshell.ErrNoGateway) {
-					t.Fatalf("Discover = %+v, %v; want %q", reg, err, tc.wantErr)
-				}
-				if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
-					t.Fatalf("Discover = %v, want %v", err, tc.wantIs)
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || errors.Is(err, openshell.ErrNoGateway) || (tc.wantIs != nil && !errors.Is(err, tc.wantIs)) {
+					t.Fatalf("Discover = %+v, %v; want %q (%v)", reg, err, tc.wantErr, tc.wantIs)
 				}
 				return
 			}
@@ -779,19 +559,4 @@ func TestDiscoverReportsActiveGatewayProblems(t *testing.T) {
 			}
 		})
 	}
-}
-
-func writeFile(t *testing.T, path, content string, mode os.FileMode) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
-		t.Fatal(err)
-	}
-	chmod(t, path, mode)
-}
-
-func modeOf(p *openshell.PermissionError) os.FileMode {
-	if p == nil {
-		return 0
-	}
-	return p.FixMode
 }

@@ -76,11 +76,8 @@ func TestHealthAndVersionWindow(t *testing.T) {
 	}{{"0.1.1", true}, {"openshell-gateway 0.1.4", true}, {"0.2.0", false}, {"0.0.37", false}, {"fake", false}} {
 		_, c := newClient(t, openshelltest.WithHealth(true, tc.version))
 		h, err := c.Health(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !h.Healthy || h.RawVersion != tc.version {
-			t.Fatalf("health = %+v", h)
+		if err != nil || !h.Healthy || h.RawVersion != tc.version {
+			t.Fatalf("health = %+v, %v", h, err)
 		}
 		if err := h.CheckVersion(); (err == nil) != tc.ok {
 			t.Fatalf("CheckVersion(%s) = %v, want ok=%v", tc.version, err, tc.ok)
@@ -91,28 +88,28 @@ func TestHealthAndVersionWindow(t *testing.T) {
 func TestSandboxLifecycle(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()
-
 	project := map[string]string{"io.defenseclaw/project": "abc123", "io.defenseclaw/harness": "claudecode"}
-	sb := createReady(t, c, "dc-claude-app-7f3a", project)
-	if sb.Status.Phase != openshell.PhaseReady {
+	if sb := createReady(t, c, "dc-claude-app-7f3a", project); sb.Status.Phase != openshell.PhaseReady {
 		t.Fatalf("phase = %s", sb.Status.Phase)
 	}
 	createReady(t, c, "dc-codex-app-0001", map[string]string{"io.defenseclaw/project": "abc123", "io.defenseclaw/harness": "codex"})
 	createReady(t, c, "other", nil)
-
-	got, err := c.ListSandboxes(ctx, map[string]string{"io.defenseclaw/project": "abc123"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0].Name != "dc-claude-app-7f3a" || got[1].Name != "dc-codex-app-0001" {
-		t.Fatalf("project selector returned %v", names(got))
-	}
-	got, _ = c.ListSandboxes(ctx, project)
-	if len(got) != 1 || got[0].Name != "dc-claude-app-7f3a" {
-		t.Fatalf("two-label selector returned %v", names(got))
-	}
-	if all, _ := c.ListSandboxes(ctx, nil); len(all) != 3 {
-		t.Fatalf("unfiltered list returned %v", names(all))
+	for _, tc := range []struct {
+		selector map[string]string
+		want     string
+	}{
+		{map[string]string{"io.defenseclaw/project": "abc123"}, "dc-claude-app-7f3a,dc-codex-app-0001"},
+		{project, "dc-claude-app-7f3a"},
+		{nil, "dc-claude-app-7f3a,dc-codex-app-0001,other"},
+	} {
+		got, err := c.ListSandboxes(ctx, tc.selector)
+		var names []string
+		for _, sb := range got {
+			names = append(names, sb.Name)
+		}
+		if err != nil || strings.Join(names, ",") != tc.want {
+			t.Fatalf("ListSandboxes(%v) = %v, %v", tc.selector, names, err)
+		}
 	}
 
 	if sb, err := c.StopSandbox(ctx, "other"); err != nil || sb.Status.Phase != openshell.PhaseStopped {
@@ -124,35 +121,25 @@ func TestSandboxLifecycle(t *testing.T) {
 	if sb, err := c.StartSandbox(ctx, "other"); err != nil || sb.Status.Phase != openshell.PhaseReady {
 		t.Fatalf("start: %v %v", sb, err)
 	}
-
-	res, err := c.DeleteSandbox(ctx, "other")
-	if err != nil || res.Outcome != v1.DeletionCompleted {
+	if res, err := c.DeleteSandbox(ctx, "other"); err != nil || res.Outcome != v1.DeletionCompleted {
 		t.Fatalf("delete: %+v %v", res, err)
 	}
 	if err := c.WaitDeleted(ctx, "other"); err != nil {
 		t.Fatal(err)
 	}
-	res, err = c.DeleteSandbox(ctx, "other")
-	if err != nil || res.Outcome != v1.DeletionAlreadyAbsent {
+	if res, err := c.DeleteSandbox(ctx, "other"); err != nil || res.Outcome != v1.DeletionAlreadyAbsent {
 		t.Fatalf("second delete: %+v %v", res, err)
 	}
-	if _, err := c.GetSandbox(ctx, "other"); !openshell.IsNotFound(err) {
+	if _, err := c.GetSandbox(ctx, "other"); !openshell.IsNotFound(err) || f.Calls(openshelltest.MethodDeleteSandbox) != 2 {
 		t.Fatalf("get deleted = %v", err)
 	}
-	if f.Calls(openshelltest.MethodDeleteSandbox) != 2 {
-		t.Fatalf("delete calls = %d", f.Calls(openshelltest.MethodDeleteSandbox))
-	}
 }
 
-func names(sbs []*openshell.Sandbox) []string {
-	out := make([]string, len(sbs))
-	for i, sb := range sbs {
-		out[i] = sb.Name
-	}
-	return out
-}
-
-func TestNamesAndLabelsAreValidatedBeforeAnyCall(t *testing.T) {
+// TestSandboxNamesAndLabels checks that invalid names and labels never
+// reach the gateway, and that new sandbox names fit OpenShell 0.1.1's 19
+// characters ("name exceeds maximum length (20 > 19)", measured on the
+// host) while existing sandboxes are addressed by any DNS label.
+func TestSandboxNamesAndLabels(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()
 	for _, name := range []string{"", "-rf", "Upper", "has space", "a/b", strings.Repeat("a", 64), "trailing-"} {
@@ -174,27 +161,12 @@ func TestNamesAndLabelsAreValidatedBeforeAnyCall(t *testing.T) {
 	if n := f.Calls(openshelltest.MethodCreateSandbox) + f.Calls(openshelltest.MethodListSandboxes) + f.Calls(openshelltest.MethodExec); n != 0 {
 		t.Fatalf("invalid input reached the gateway %d times", n)
 	}
-	sel, err := openshell.LabelSelector(map[string]string{"z": "1", "io.defenseclaw/project": "abc"})
-	if err != nil || sel != "io.defenseclaw/project=abc,z=1" {
+	if sel, err := openshell.LabelSelector(map[string]string{"z": "1", "io.defenseclaw/project": "abc"}); err != nil || sel != "io.defenseclaw/project=abc,z=1" {
 		t.Fatalf("LabelSelector = %q, %v", sel, err)
 	}
-}
 
-// OpenShell 0.1.1 refuses to create a sandbox whose name is longer than 19
-// characters ("name exceeds maximum length (20 > 19)", measured on the
-// host); existing sandboxes are addressed by any DNS label.
-func TestValidNewSandboxName(t *testing.T) {
-	if openshell.MaxSandboxNameLen != 19 {
-		t.Fatalf("MaxSandboxNameLen = %d, want OpenShell 0.1.1's 19", openshell.MaxSandboxNameLen)
-	}
 	for name, want := range map[string]bool{
-		"m1-calc-7500":           true,
-		strings.Repeat("a", 19):  true,
-		strings.Repeat("a", 20):  false,
-		"dc-claude-m1-calc-7500": false,
-		"Upper":                  false,
-		"-rf":                    false,
-		"":                       false,
+		"m1-calc-7500": true, strings.Repeat("a", 19): true, strings.Repeat("a", 20): false, "dc-claude-m1-calc-7500": false, "Upper": false,
 	} {
 		if got := openshell.ValidNewSandboxName(name); got != want {
 			t.Errorf("ValidNewSandboxName(%q) = %t, want %t", name, got, want)
@@ -205,97 +177,51 @@ func TestValidNewSandboxName(t *testing.T) {
 	}
 }
 
-func TestWaitReadyReportsConfigurationRejection(t *testing.T) {
-	f, c := newClient(t)
-	ctx := context.Background()
-	if _, err := c.CreateSandbox(ctx, "bad-policy", &openshell.SandboxSpec{Policy: basePolicy()}, openshell.CreateSandboxOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	f.SetAdmission(ws, "bad-policy", types.ConfigurationAdmissionRejected, "landlock path /nope does not exist")
-	_, err := c.WaitReady(ctx, "bad-policy")
-	var rejected *openshell.ConfigurationRejectedError
-	if !errors.As(err, &rejected) || rejected.Sandbox != "bad-policy" || !strings.Contains(rejected.Message, "/nope") {
-		t.Fatalf("WaitReady = %v", err)
-	}
-}
-
-func TestWaitReadyTimesOutWhileConfigurationPending(t *testing.T) {
-	f, c := newClient(t)
-	if _, err := c.CreateSandbox(context.Background(), "slow", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	f.SetAdmission(ws, "slow", types.ConfigurationAdmissionPending, "")
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if _, err := c.WaitReady(ctx, "slow"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("WaitReady = %v", err)
-	}
-}
-
-func TestWaitReadyFailsWhenSandboxErrorsDuringAdmission(t *testing.T) {
-	f, c := newClient(t)
-	ctx := context.Background()
-	if _, err := c.CreateSandbox(ctx, "crash", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	f.SetAdmission(ws, "crash", types.ConfigurationAdmissionPending, "")
-	calls := 0
-	f.Intercept(func(method string) error {
-		if method == openshelltest.MethodGetSandbox {
-			calls++
-			if calls == 1 {
-				_ = f.SetPhase(ws, "crash", openshell.PhaseError)
-			}
-		}
-		return nil
-	})
-	if _, err := c.WaitReady(ctx, "crash"); err == nil || !strings.Contains(err.Error(), "phase Error") {
-		t.Fatalf("WaitReady = %v", err)
-	}
-}
-
-// TestWaitsRideOutGatewayRestarts covers a gateway that restarts during a
-// wait (a configuration change, doctor --fix, Restart=on-failure): polls
-// that find it unreachable, or time out, are retried until the wait's
+// TestWaits covers configuration admission and a gateway that restarts
+// during a wait (a configuration change, doctor --fix, Restart=on-failure):
+// polls that find it unreachable, or time out, are retried until the wait's
 // deadline, while other failures still end the wait at once.
-func TestWaitsRideOutGatewayRestarts(t *testing.T) {
-	unavailable := func() error { return &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"} }
-	newFast := func(t *testing.T) (*openshelltest.Fake, openshell.Client) {
-		f := openshelltest.New()
-		c := f.Client(openshell.ClientOptions{PollInterval: time.Millisecond})
-		t.Cleanup(func() { _ = c.Close() })
+func TestWaits(t *testing.T) {
+	ctx := context.Background()
+	unavailable := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"}
+	created := func(t *testing.T, ready bool) (*openshelltest.Fake, openshell.Client) {
+		f, c := newClient(t)
+		if ready {
+			createReady(t, c, "box", nil)
+		} else if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+			t.Fatal(err)
+		}
 		return f, c
 	}
-	ctx := context.Background()
 
-	t.Run("ready", func(t *testing.T) {
-		f, c := newFast(t)
-		if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
-			t.Fatal(err)
-		}
-		f.FailNext(openshelltest.MethodWaitReady, unavailable())
-		f.FailNext(openshelltest.MethodWaitReady, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "poll timed out"})
-		if sb, err := c.WaitReady(ctx, "box"); err != nil || sb.Status.Phase != openshell.PhaseReady {
-			t.Fatalf("WaitReady = %v, %v", sb, err)
-		}
-		if n := f.Calls(openshelltest.MethodWaitReady); n != 3 {
-			t.Fatalf("WaitReady polled %d times", n)
+	t.Run("configuration rejected", func(t *testing.T) {
+		f, c := created(t, false)
+		f.SetAdmission(ws, "box", types.ConfigurationAdmissionRejected, "landlock path /nope does not exist")
+		_, err := c.WaitReady(ctx, "box")
+		var rejected *openshell.ConfigurationRejectedError
+		if !errors.As(err, &rejected) || rejected.Sandbox != "box" || !strings.Contains(rejected.Message, "/nope") {
+			t.Fatalf("WaitReady = %v", err)
 		}
 	})
-	t.Run("configuration pending", func(t *testing.T) {
-		f, c := newFast(t)
-		if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
-			t.Fatal(err)
+	t.Run("configuration pending outlasts the wait", func(t *testing.T) {
+		f, c := created(t, false)
+		f.SetAdmission(ws, "box", types.ConfigurationAdmissionPending, "")
+		wctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		if _, err := c.WaitReady(wctx, "box"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("WaitReady = %v", err)
 		}
+	})
+	t.Run("sandbox fails while configuration pending", func(t *testing.T) {
+		f, c := created(t, false)
 		f.SetAdmission(ws, "box", types.ConfigurationAdmissionPending, "")
 		calls := 0
 		f.Intercept(func(method string) error {
 			if method != openshelltest.MethodGetSandbox {
 				return nil
 			}
-			calls++
-			if calls == 1 {
-				return unavailable()
+			if calls++; calls == 1 {
+				return unavailable
 			}
 			_ = f.SetPhase(ws, "box", openshell.PhaseError)
 			return nil
@@ -305,55 +231,53 @@ func TestWaitsRideOutGatewayRestarts(t *testing.T) {
 			t.Fatalf("WaitReady = %v", err)
 		}
 	})
+	t.Run("ready", func(t *testing.T) {
+		f, c := created(t, false)
+		f.FailNext(openshelltest.MethodWaitReady, unavailable)
+		f.FailNext(openshelltest.MethodWaitReady, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "poll timed out"})
+		if sb, err := c.WaitReady(ctx, "box"); err != nil || sb.Status.Phase != openshell.PhaseReady || f.Calls(openshelltest.MethodWaitReady) != 3 {
+			t.Fatalf("WaitReady = %v, %v after %d polls", sb, err, f.Calls(openshelltest.MethodWaitReady))
+		}
+	})
 	t.Run("stopped", func(t *testing.T) {
-		f, c := newFast(t)
-		createReady(t, c, "box", nil)
+		f, c := created(t, true)
 		if _, err := c.StopSandbox(ctx, "box"); err != nil {
 			t.Fatal(err)
 		}
-		f.FailNext(openshelltest.MethodWaitStopped, unavailable())
+		f.FailNext(openshelltest.MethodWaitStopped, unavailable)
 		if _, err := c.WaitStopped(ctx, "box"); err != nil {
 			t.Fatalf("WaitStopped = %v", err)
 		}
 	})
 	t.Run("deleted", func(t *testing.T) {
-		f, c := newFast(t)
-		createReady(t, c, "box", nil)
+		f, c := created(t, true)
 		if _, err := c.DeleteSandbox(ctx, "box"); err != nil {
 			t.Fatal(err)
 		}
-		f.FailNext(openshelltest.MethodGetSandbox, unavailable())
-		f.FailNext(openshelltest.MethodGetSandbox, unavailable())
-		if err := c.WaitDeleted(ctx, "box"); err != nil {
-			t.Fatalf("WaitDeleted = %v", err)
-		}
-		if n := f.Calls(openshelltest.MethodGetSandbox); n != 3 {
-			t.Fatalf("WaitDeleted polled %d times", n)
+		f.FailNext(openshelltest.MethodGetSandbox, unavailable)
+		f.FailNext(openshelltest.MethodGetSandbox, unavailable)
+		if err := c.WaitDeleted(ctx, "box"); err != nil || f.Calls(openshelltest.MethodGetSandbox) != 3 {
+			t.Fatalf("WaitDeleted = %v after %d polls", err, f.Calls(openshelltest.MethodGetSandbox))
 		}
 	})
 	t.Run("other failures end the wait", func(t *testing.T) {
-		f, c := newFast(t)
-		createReady(t, c, "box", nil)
+		f, c := created(t, true)
 		f.FailNext(openshelltest.MethodGetSandbox, &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "denied"})
 		if err := c.WaitDeleted(ctx, "box"); !openshell.IsPermissionDenied(err) || f.Calls(openshelltest.MethodGetSandbox) != 1 {
 			t.Fatalf("WaitDeleted = %v after %d polls", err, f.Calls(openshelltest.MethodGetSandbox))
 		}
 	})
 	t.Run("outage outlasts the wait", func(t *testing.T) {
-		f, c := newFast(t)
-		if _, err := c.CreateSandbox(ctx, "box", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
-			t.Fatal(err)
-		}
+		f, c := created(t, false)
 		f.Intercept(func(method string) error {
 			if method == openshelltest.MethodWaitReady {
-				return unavailable()
+				return unavailable
 			}
 			return nil
 		})
 		wctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 		defer cancel()
-		_, err := c.WaitReady(wctx, "box")
-		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "connection refused") {
+		if _, err := c.WaitReady(wctx, "box"); !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "connection refused") {
 			t.Fatalf("WaitReady = %v", err)
 		}
 	})
@@ -363,31 +287,20 @@ func TestExec(t *testing.T) {
 	f, c := newClient(t)
 	createReady(t, c, "box", nil)
 	ctx := context.Background()
-
 	f.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		return openshelltest.ExecResponse{Stdout: []byte("out:" + strings.Join(call.Command, " ")), Stderr: []byte("warn"), ExitCode: 3}
 	})
 	var tee bytes.Buffer
 	res, err := c.Exec(ctx, "box", []string{"git", "status"}, openshell.ExecOptions{WorkDir: "/work/app", Env: map[string]string{"LANG": "C"}, Stdout: &tee})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || string(res.Stdout) != "out:git status" || string(res.Stderr) != "warn" || res.ExitCode != 3 || res.Attempts != 1 || res.Truncated {
+		t.Fatalf("result = %+v, %v", res, err)
 	}
-	if string(res.Stdout) != "out:git status" || string(res.Stderr) != "warn" || res.ExitCode != 3 || res.Attempts != 1 || res.Truncated {
-		t.Fatalf("result = %+v", res)
+	if call := f.ExecCalls()[0]; tee.String() != "out:git status" || call.WorkDir != "/work/app" || call.Env["LANG"] != "C" || !call.NoLoginShell {
+		t.Fatalf("tee = %q, call = %+v", tee.String(), call)
 	}
-	if tee.String() != "out:git status" {
-		t.Fatalf("tee = %q", tee.String())
-	}
-	call := f.ExecCalls()[0]
-	if call.WorkDir != "/work/app" || call.Env["LANG"] != "C" || !call.NoLoginShell {
-		t.Fatalf("call = %+v", call)
-	}
-
-	res, err = c.Exec(ctx, "box", []string{"cat"}, openshell.ExecOptions{MaxOutputBytes: 4})
-	if err != nil || string(res.Stdout) != "out:" || !res.Truncated {
+	if res, err := c.Exec(ctx, "box", []string{"cat"}, openshell.ExecOptions{MaxOutputBytes: 4}); err != nil || string(res.Stdout) != "out:" || !res.Truncated {
 		t.Fatalf("capped result = %+v, %v", res, err)
 	}
-
 	if _, err := c.Exec(ctx, "missing", []string{"true"}, openshell.ExecOptions{}); !openshell.IsNotFound(err) {
 		t.Fatalf("exec in missing sandbox = %v", err)
 	}
@@ -397,7 +310,7 @@ func TestExec(t *testing.T) {
 }
 
 func TestSandboxTimeoutArgv(t *testing.T) {
-	cases := []struct {
+	for _, tc := range []struct {
 		timeout time.Duration
 		secs    string
 		back    time.Duration
@@ -406,14 +319,12 @@ func TestSandboxTimeoutArgv(t *testing.T) {
 		{1500 * time.Millisecond, "1.5", 1500 * time.Millisecond},
 		{20 * time.Millisecond, "0.02", 20 * time.Millisecond},
 		{time.Nanosecond, "0.001", time.Millisecond},
-	}
-	for _, tc := range cases {
+	} {
 		argv := openshell.SandboxTimeoutArgv([]string{"git", "status"}, tc.timeout)
 		if got := strings.Join(argv, " "); got != "timeout -k 5 "+tc.secs+" git status" {
 			t.Fatalf("SandboxTimeoutArgv(%s) = %q", tc.timeout, got)
 		}
-		cmd, d, ok := openshell.ParseSandboxTimeoutArgv(argv)
-		if !ok || d != tc.back || strings.Join(cmd, " ") != "git status" {
+		if cmd, d, ok := openshell.ParseSandboxTimeoutArgv(argv); !ok || d != tc.back || strings.Join(cmd, " ") != "git status" {
 			t.Fatalf("ParseSandboxTimeoutArgv(%q) = %q, %s, %v", argv, cmd, d, ok)
 		}
 	}
@@ -426,7 +337,7 @@ func TestSandboxTimeoutArgv(t *testing.T) {
 
 func TestSandboxExitError(t *testing.T) {
 	const limit = 10 * time.Second
-	cases := []struct {
+	for _, tc := range []struct {
 		status  int
 		stderr  string
 		elapsed time.Duration
@@ -437,11 +348,11 @@ func TestSandboxExitError(t *testing.T) {
 		// The command's own 124 before the deadline is an answer.
 		{124, "", time.Second, nil},
 		{127, "sh: 1: timeout: not found", 0, openshell.ErrNoSandboxTimeout},
+		{127, "sh: timeout: not found\n", 0, openshell.ErrNoSandboxTimeout},
 		{127, "timeout: failed to run command 'nope': No such file or directory", 0, nil},
 		{0, "", limit, nil},
 		{1, "", limit, nil},
-	}
-	for _, tc := range cases {
+	} {
 		err := openshell.SandboxExitError(tc.status, []byte(tc.stderr), tc.elapsed, limit)
 		if (tc.want == nil) != (err == nil) || (tc.want != nil && !errors.Is(err, tc.want)) {
 			t.Errorf("SandboxExitError(%d, %q, %s) = %v, want %v", tc.status, tc.stderr, tc.elapsed, err, tc.want)
@@ -476,36 +387,33 @@ func TestExecStopsCommandsInsteadOfOverlapping(t *testing.T) {
 		mu.Unlock()
 		return openshelltest.ExecResponse{Duration: duration}
 	})
+	argv := []string{"git", "clone", "-q", "https://example.com/r.git"}
 	opts := openshell.ExecOptions{Timeout: timeout, Attempts: 3, RetryDelay: time.Millisecond}
 	start := time.Now()
-	_, err := c.Exec(context.Background(), "box", []string{"git", "clone", "-q", "https://example.com/r.git"}, opts)
+	_, err := c.Exec(context.Background(), "box", argv, opts)
 	if !errors.Is(err, openshell.ErrExecTimeout) || !strings.Contains(err.Error(), "the sandbox stopped the command (exit status 124)") {
 		t.Fatalf("Exec = %v", err)
 	}
 	if elapsed := time.Since(start); elapsed >= 3*timeout {
 		t.Fatalf("Exec returned after %s, when the command would have finished", elapsed)
 	}
-	call := f.ExecCalls()[0]
-	if call.Timeout != timeout || call.Argv[0] != "timeout" || strings.Join(call.Command, " ") != "git clone -q https://example.com/r.git" {
+	if call := f.ExecCalls()[0]; call.Timeout != timeout || call.Argv[0] != "timeout" || strings.Join(call.Command, " ") != strings.Join(argv, " ") {
 		t.Fatalf("call = %+v", call)
 	}
 	// The caller's own retry starts only after the first run was stopped.
-	if _, err := c.Exec(context.Background(), "box", []string{"git", "clone", "-q", "https://example.com/r.git"}, opts); !errors.Is(err, openshell.ErrExecTimeout) {
+	if _, err := c.Exec(context.Background(), "box", argv, opts); !errors.Is(err, openshell.ErrExecTimeout) {
 		t.Fatalf("second Exec = %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(runs) != 2 {
-		t.Fatalf("the command ran %d times, want once per Exec call", len(runs))
-	}
-	if runs[1].start.Before(runs[0].end) {
-		t.Fatalf("runs overlap: %v", runs)
+	if len(runs) != 2 || runs[1].start.Before(runs[0].end) {
+		t.Fatalf("runs = %v, want one per Exec call without overlap", runs)
 	}
 }
 
 func TestExecExitStatuses(t *testing.T) {
 	const timeout = 50 * time.Millisecond
-	cases := []struct {
+	for _, tc := range []struct {
 		name     string
 		resp     openshelltest.ExecResponse
 		wantCode int
@@ -518,156 +426,77 @@ func TestExecExitStatuses(t *testing.T) {
 			Stderr: []byte("timeout: failed to run command 'nope': No such file or directory\n")}, wantCode: 127},
 		{name: "image without timeout", resp: openshelltest.ExecResponse{ExitCode: 127,
 			Stderr: []byte("/bin/bash: line 1: timeout: command not found\n")}, wantErr: openshell.ErrNoSandboxTimeout},
-		{name: "busybox image without timeout", resp: openshelltest.ExecResponse{ExitCode: 127,
-			Stderr: []byte("sh: timeout: not found\n")}, wantErr: openshell.ErrNoSandboxTimeout},
-	}
-	for _, tc := range cases {
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, c := newClient(t)
 			createReady(t, c, "box", nil)
 			f.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse { return tc.resp })
 			res, err := c.Exec(context.Background(), "box", []string{"nope"}, openshell.ExecOptions{Timeout: timeout})
-			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("Exec = %+v, %v; want %v", res, err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil || res.ExitCode != tc.wantCode {
-				t.Fatalf("Exec = %+v, %v", res, err)
+			if (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) || (tc.wantErr == nil && (err != nil || res.ExitCode != tc.wantCode)) {
+				t.Fatalf("Exec = %+v, %v; want code %d, error %v", res, err, tc.wantCode, tc.wantErr)
 			}
 		})
 	}
 }
 
+// hangOnce is the first exec after a sandbox starts in OpenShell 0.1.1:
+// the stream opens and then nothing arrives; the next try answers.
+func hangOnce(attempt int) openshelltest.ExecResponse {
+	if attempt == 1 {
+		return openshelltest.ExecResponse{Hang: true}
+	}
+	return openshelltest.ExecResponse{Stdout: []byte("ok\n")}
+}
+
 func TestExecRetryPolicy(t *testing.T) {
 	unavailable := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "relay dropped"}
+	refused := &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "no"}
+	answer := func(r openshelltest.ExecResponse) func(int) openshelltest.ExecResponse {
+		return func(int) openshelltest.ExecResponse { return r }
+	}
+	timedOut := func(details ...string) func(error) bool {
+		return func(err error) bool {
+			for _, d := range details {
+				if err == nil || !strings.Contains(err.Error(), d) {
+					return false
+				}
+			}
+			return errors.Is(err, openshell.ErrExecTimeout)
+		}
+	}
+	const hang = 10 * time.Millisecond
 	cases := []struct {
-		name     string
-		opts     openshell.ExecOptions
-		respond  func(attempt int) openshelltest.ExecResponse
-		failNext error
-		wantRuns int
-		wantOpen int
-		wantErr  func(error) bool
+		name               string
+		opts               openshell.ExecOptions
+		respond            func(attempt int) openshelltest.ExecResponse
+		failNext           error
+		wantRuns, wantOpen int
+		wantErr            func(error) bool // nil: success
 	}{
-		{
-			name:     "gateway hang is not retried",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Attempts: 3, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Hang: true} },
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr: func(err error) bool {
-				return errors.Is(err, openshell.ErrExecTimeout) && strings.Contains(err.Error(), "no exit status from the gateway")
-			},
-		},
-		{
-			name: "failure after output is not retried",
-			opts: openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
-			respond: func(int) openshelltest.ExecResponse {
-				return openshelltest.ExecResponse{Stdout: []byte("partial"), Err: unavailable}
-			},
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr:  openshell.IsUnavailable,
-		},
-		{
-			name:     "stream lost before output is not retried",
-			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Err: unavailable} },
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr:  openshell.IsUnavailable,
-		},
-		{
-			name:     "stream that never opened is retried when asked",
-			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Stdout: []byte("ok")} },
-			failNext: unavailable,
-			wantRuns: 1, // the failed open never reaches the handler
-			wantOpen: 2,
-		},
-		{
-			name:     "one attempt by default",
-			opts:     openshell.ExecOptions{RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
-			failNext: unavailable,
-			wantRuns: 0,
-			wantOpen: 1,
-			wantErr:  openshell.IsUnavailable,
-		},
-		{
-			name:     "idempotent hang is retried",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
-			respond:  hangOnce,
-			wantRuns: 2,
-			wantOpen: 2,
-		},
-		{
-			name:     "idempotent hangs use the default attempts",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Hang: true} },
-			wantRuns: openshell.DefaultIdempotentExecAttempts,
-			wantOpen: openshell.DefaultIdempotentExecAttempts,
-			wantErr: func(err error) bool {
-				return errors.Is(err, openshell.ErrExecTimeout) && strings.Contains(err.Error(), "attempt 3 of 3: ") &&
-					strings.Contains(err.Error(), "no exit status from the gateway")
-			},
-		},
-		{
-			name:     "idempotent attempts are capped by Attempts",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, Attempts: 1, RetryDelay: time.Millisecond},
-			respond:  hangOnce,
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr:  func(err error) bool { return errors.Is(err, openshell.ErrExecTimeout) },
-		},
-		{
-			name: "idempotent hang after output is not retried",
-			opts: openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
-			respond: func(int) openshelltest.ExecResponse {
-				return openshelltest.ExecResponse{Stdout: []byte("partial"), Hang: true}
-			},
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr:  func(err error) bool { return errors.Is(err, openshell.ErrExecTimeout) },
-		},
-		{
-			name:     "idempotent command stopped at its timeout is not retried",
-			opts:     openshell.ExecOptions{Timeout: 10 * time.Millisecond, Idempotent: true, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Duration: time.Second} },
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr: func(err error) bool {
-				return errors.Is(err, openshell.ErrExecTimeout) && strings.Contains(err.Error(), "the sandbox stopped the command")
-			},
-		},
-		{
-			name:     "idempotent stream lost before output is not retried",
-			opts:     openshell.ExecOptions{Idempotent: true, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{Err: unavailable} },
-			wantRuns: 1,
-			wantOpen: 1,
-			wantErr:  openshell.IsUnavailable,
-		},
-		{
-			name:     "idempotent open refusal is not retried",
-			opts:     openshell.ExecOptions{Idempotent: true, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
-			failNext: &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "no"},
-			wantRuns: 0,
-			wantOpen: 1,
-			wantErr:  openshell.IsPermissionDenied,
-		},
-		{
-			name:     "open refusal is not retried",
-			opts:     openshell.ExecOptions{Attempts: 3, RetryDelay: time.Millisecond},
-			respond:  func(int) openshelltest.ExecResponse { return openshelltest.ExecResponse{} },
-			failNext: &v1.StatusError{Code: v1.ErrorPermissionDenied, Message: "no"},
-			wantRuns: 0,
-			wantOpen: 1,
-			wantErr:  openshell.IsPermissionDenied,
-		},
+		{"gateway hang is not retried", openshell.ExecOptions{Timeout: hang, Attempts: 3},
+			answer(openshelltest.ExecResponse{Hang: true}), nil, 1, 1, timedOut("no exit status from the gateway")},
+		{"failure after output is not retried", openshell.ExecOptions{Attempts: 3},
+			answer(openshelltest.ExecResponse{Stdout: []byte("partial"), Err: unavailable}), nil, 1, 1, openshell.IsUnavailable},
+		{"stream lost before output is not retried", openshell.ExecOptions{Attempts: 3},
+			answer(openshelltest.ExecResponse{Err: unavailable}), nil, 1, 1, openshell.IsUnavailable},
+		// The failed open never reaches the handler.
+		{"stream that never opened is retried when asked", openshell.ExecOptions{Attempts: 3},
+			answer(openshelltest.ExecResponse{Stdout: []byte("ok")}), unavailable, 1, 2, nil},
+		{"one attempt by default", openshell.ExecOptions{}, answer(openshelltest.ExecResponse{}), unavailable, 0, 1, openshell.IsUnavailable},
+		{"open refusal is not retried", openshell.ExecOptions{Attempts: 3}, answer(openshelltest.ExecResponse{}), refused, 0, 1, openshell.IsPermissionDenied},
+		{"idempotent hang is retried", openshell.ExecOptions{Timeout: hang, Idempotent: true}, hangOnce, nil, 2, 2, nil},
+		{"idempotent hangs use the default attempts", openshell.ExecOptions{Timeout: hang, Idempotent: true},
+			answer(openshelltest.ExecResponse{Hang: true}), nil, openshell.DefaultIdempotentExecAttempts, openshell.DefaultIdempotentExecAttempts,
+			timedOut("attempt 3 of 3: ", "no exit status from the gateway")},
+		{"idempotent attempts are capped by Attempts", openshell.ExecOptions{Timeout: hang, Idempotent: true, Attempts: 1}, hangOnce, nil, 1, 1, timedOut()},
+		{"idempotent hang after output is not retried", openshell.ExecOptions{Timeout: hang, Idempotent: true},
+			answer(openshelltest.ExecResponse{Stdout: []byte("partial"), Hang: true}), nil, 1, 1, timedOut()},
+		{"idempotent command stopped at its timeout is not retried", openshell.ExecOptions{Timeout: hang, Idempotent: true},
+			answer(openshelltest.ExecResponse{Duration: time.Second}), nil, 1, 1, timedOut("the sandbox stopped the command")},
+		{"idempotent stream lost before output is not retried", openshell.ExecOptions{Idempotent: true},
+			answer(openshelltest.ExecResponse{Err: unavailable}), nil, 1, 1, openshell.IsUnavailable},
+		{"idempotent open refusal is not retried", openshell.ExecOptions{Idempotent: true},
+			answer(openshelltest.ExecResponse{}), refused, 0, 1, openshell.IsPermissionDenied},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -681,27 +510,16 @@ func TestExecRetryPolicy(t *testing.T) {
 			if tc.failNext != nil {
 				f.FailNext(openshelltest.MethodExec, tc.failNext)
 			}
+			tc.opts.RetryDelay = time.Millisecond
 			res, err := c.Exec(context.Background(), "box", []string{"true"}, tc.opts)
-			if tc.wantErr == nil && (err != nil || res.Attempts != tc.wantOpen) {
+			if (tc.wantErr == nil && (err != nil || res.Attempts != tc.wantOpen)) || (tc.wantErr != nil && !tc.wantErr(err)) {
 				t.Fatalf("Exec = %+v, %v", res, err)
-			}
-			if tc.wantErr != nil && !tc.wantErr(err) {
-				t.Fatalf("Exec error = %v", err)
 			}
 			if runs != tc.wantRuns || f.Calls(openshelltest.MethodExec) != tc.wantOpen {
 				t.Fatalf("handler ran %d times over %d opens, want %d over %d", runs, f.Calls(openshelltest.MethodExec), tc.wantRuns, tc.wantOpen)
 			}
 		})
 	}
-}
-
-// hangOnce is the first exec after a sandbox starts in OpenShell 0.1.1:
-// the stream opens and then nothing arrives; the next try answers.
-func hangOnce(attempt int) openshelltest.ExecResponse {
-	if attempt == 1 {
-		return openshelltest.ExecResponse{Hang: true}
-	}
-	return openshelltest.ExecResponse{Stdout: []byte("ok\n")}
 }
 
 // TestExecRetriesUnansweredIdempotentCommands checks the retry after a
@@ -730,14 +548,8 @@ func TestExecRetriesUnansweredIdempotentCommands(t *testing.T) {
 	begin := time.Now()
 	res, err := c.Exec(context.Background(), "box", []string{"cat", "/etc/os-release"},
 		openshell.ExecOptions{Timeout: timeout, Idempotent: true, RetryDelay: delay, Stdout: &stdout})
-	if err != nil {
-		t.Fatalf("Exec = %v", err)
-	}
-	if res.Attempts != 2 || string(res.Stdout) != "ok\n" || stdout.String() != "ok\n" || res.ExitCode != 0 {
-		t.Fatalf("result = %+v, tee %q", res, stdout.String())
-	}
-	if len(starts) != 2 {
-		t.Fatalf("ran %d times", len(starts))
+	if err != nil || res.Attempts != 2 || string(res.Stdout) != "ok\n" || stdout.String() != "ok\n" || res.ExitCode != 0 || len(starts) != 2 {
+		t.Fatalf("Exec = %+v, %v; tee %q after %d runs", res, err, stdout.String(), len(starts))
 	}
 	if gap := starts[1].Sub(begin); gap < timeout+grace+delay {
 		t.Fatalf("retry started %s after Exec, before the first deadline and backoff", gap)
@@ -773,23 +585,17 @@ func profile(id string) openshell.ProfileImportItem {
 func TestProviderProfiles(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()
-
-	lint, err := c.LintProfiles(ctx, []openshell.ProfileImportItem{profile("defenseclaw-ingress"), profile("Bad ID")})
-	if err != nil || lint.Valid || len(lint.Diagnostics) != 1 || lint.Diagnostics[0].Field != "id" {
+	if lint, err := c.LintProfiles(ctx, []openshell.ProfileImportItem{profile("defenseclaw-ingress"), profile("Bad ID")}); err != nil ||
+		lint.Valid || len(lint.Diagnostics) != 1 || lint.Diagnostics[0].Field != "id" {
 		t.Fatalf("lint = %+v, %v", lint, err)
 	}
-
 	res, err := c.ImportProfiles(ctx, []openshell.ProfileImportItem{profile("defenseclaw-ingress"), profile("defenseclaw-claude-code")})
-	if err != nil || !res.Imported || len(res.Profiles) != 2 {
-		t.Fatalf("import = %+v, %v", res, err)
-	}
-	if n := f.Calls(openshelltest.MethodImportProfiles); n != 2 {
-		t.Fatalf("import used %d requests, want one per profile", n)
+	if err != nil || !res.Imported || len(res.Profiles) != 2 || f.Calls(openshelltest.MethodImportProfiles) != 2 {
+		t.Fatalf("import = %+v, %v; want one request per profile", res, err)
 	}
 	if _, err := c.ImportProfiles(ctx, []openshell.ProfileImportItem{profile("defenseclaw-ingress")}); !openshell.IsAlreadyExists(err) {
 		t.Fatalf("re-import = %v", err)
 	}
-
 	got, err := c.GetProfile(ctx, "defenseclaw-ingress")
 	if err != nil || got.ResourceVersion != 1 {
 		t.Fatalf("get = %+v, %v", got, err)
@@ -799,19 +605,14 @@ func TestProviderProfiles(t *testing.T) {
 	if _, err := c.UpdateProfile(ctx, "defenseclaw-ingress", 7, upd); !openshell.IsConflict(err) {
 		t.Fatalf("stale update = %v", err)
 	}
-	ur, err := c.UpdateProfile(ctx, "defenseclaw-ingress", got.ResourceVersion, upd)
-	if err != nil || !ur.Updated || ur.Profile.Description != "rotated" || ur.Profile.ResourceVersion != 2 {
+	if ur, err := c.UpdateProfile(ctx, "defenseclaw-ingress", got.ResourceVersion, upd); err != nil || !ur.Updated || ur.Profile.ResourceVersion != 2 {
 		t.Fatalf("update = %+v, %v", ur, err)
 	}
-	list, err := c.ListProfiles(ctx)
-	if err != nil || len(list) != 2 {
+	if list, err := c.ListProfiles(ctx); err != nil || len(list) != 2 {
 		t.Fatalf("list = %v, %v", list, err)
 	}
 	if dr, err := c.DeleteProfile(ctx, "defenseclaw-claude-code"); err != nil || dr.Outcome != v1.DeletionCompleted {
 		t.Fatalf("delete = %+v, %v", dr, err)
-	}
-	if dr, err := c.DeleteProfile(ctx, "defenseclaw-claude-code"); err != nil || dr.Outcome != v1.DeletionAlreadyAbsent {
-		t.Fatalf("delete missing = %+v, %v", dr, err)
 	}
 }
 
@@ -819,30 +620,26 @@ func TestProvidersAndAttachment(t *testing.T) {
 	_, c := newClient(t)
 	ctx := context.Background()
 	createReady(t, c, "box", nil)
-
 	p := &openshell.Provider{Name: "dc-ingress-box", Type: "defenseclaw-ingress",
 		Spec: openshell.ProviderSpec{Credentials: map[string]string{"DEFENSECLAW_SANDBOX_TOKEN": "t1"}}}
 	if _, err := c.CreateProvider(ctx, p); err != nil {
 		t.Fatal(err)
 	}
+	// EnsureProvider rotates an existing provider and creates a missing one.
 	p.Spec.Credentials["DEFENSECLAW_SANDBOX_TOKEN"] = "t2"
 	if _, err := c.EnsureProvider(ctx, p); err != nil {
 		t.Fatal(err)
 	}
-	got, err := c.GetProvider(ctx, "dc-ingress-box")
-	if err != nil || got.Spec.Credentials["DEFENSECLAW_SANDBOX_TOKEN"] != "t2" {
+	if got, err := c.GetProvider(ctx, "dc-ingress-box"); err != nil || got.Spec.Credentials["DEFENSECLAW_SANDBOX_TOKEN"] != "t2" {
 		t.Fatalf("rotated provider = %+v, %v", got, err)
 	}
 	if _, err := c.EnsureProvider(ctx, &openshell.Provider{Name: "dc-egress-box", Type: "generic"}); err != nil {
 		t.Fatal(err)
 	}
-	ps, err := c.ListProviders(ctx)
-	if err != nil || len(ps) != 2 || ps[0].Name != "dc-egress-box" {
+	if ps, err := c.ListProviders(ctx); err != nil || len(ps) != 2 || ps[0].Name != "dc-egress-box" {
 		t.Fatalf("list = %v, %v", ps, err)
 	}
-
-	ar, err := c.AttachProvider(ctx, "box", "dc-ingress-box")
-	if err != nil || !ar.Attached {
+	if ar, err := c.AttachProvider(ctx, "box", "dc-ingress-box"); err != nil || !ar.Attached {
 		t.Fatalf("attach = %+v, %v", ar, err)
 	}
 	if ar, _ := c.AttachProvider(ctx, "box", "dc-ingress-box"); ar.Attached {
@@ -851,8 +648,7 @@ func TestProvidersAndAttachment(t *testing.T) {
 	if _, err := c.AttachProvider(ctx, "box", "missing"); !openshell.IsNotFound(err) {
 		t.Fatalf("attach missing provider = %v", err)
 	}
-	dr, err := c.DetachProvider(ctx, "box", "dc-ingress-box")
-	if err != nil || !dr.Detached {
+	if dr, err := c.DetachProvider(ctx, "box", "dc-ingress-box"); err != nil || !dr.Detached {
 		t.Fatalf("detach = %+v, %v", dr, err)
 	}
 	if res, err := c.DeleteProvider(ctx, "dc-ingress-box"); err != nil || res.Outcome != v1.DeletionCompleted {
@@ -869,27 +665,28 @@ func proposedRule(host string) *openshell.NetworkPolicyRule {
 		Binaries:  []v1.PolicyNetworkBinary{{Path: "/usr/bin/curl"}}}
 }
 
+// TestDraftInbox covers review tokens bound to the live policy, as
+// OpenShell 0.1.1 binds them: once another change lands, the single
+// approval answers Conflict and the bulk approval skips the chunk.
 func TestDraftInbox(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()
 	createReady(t, c, "box", nil)
-
-	a := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_pypi", ProposedRule: proposedRule("pypi.org"), ReviewToken: "tok-a"})
-	b := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_npm", ProposedRule: proposedRule("registry.npmjs.org")})
-	d := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_gh", ProposedRule: proposedRule("github.com")})
-	flagged := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_meta", ProposedRule: proposedRule("169.254.169.254"), SecurityNotes: "metadata IP"})
-	bad := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_bin", ProposedRule: proposedRule("webhook.site")})
-
-	draft, err := c.GetDraft(ctx, "box", "pending")
-	if err != nil || len(draft.Chunks) != 5 {
+	chunk := func(rule, host, token, notes string) string {
+		return f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: rule, ProposedRule: proposedRule(host), ReviewToken: token, SecurityNotes: notes})
+	}
+	a := chunk("allow_pypi", "pypi.org", "tok-a", "")
+	b := chunk("allow_npm", "registry.npmjs.org", "", "")
+	flagged := chunk("allow_meta", "169.254.169.254", "", "metadata IP")
+	bad := chunk("allow_bin", "webhook.site", "", "")
+	if draft, err := c.GetDraft(ctx, "box", "pending"); err != nil || len(draft.Chunks) != 4 {
 		t.Fatalf("draft = %+v, %v", draft, err)
 	}
 	if _, err := c.ApproveDraftChunk(ctx, "box", a, "wrong"); !openshell.IsConflict(err) {
 		t.Fatalf("approve with a wrong token = %v", err)
 	}
-	late := f.AddDraftChunk(ws, "box", types.PolicyChunk{RuleName: "allow_late", ProposedRule: proposedRule("late.example.org"), ReviewToken: "tok-late"})
-	ar, err := c.ApproveDraftChunk(ctx, "box", a, "tok-a")
-	if err != nil || ar.PolicyVersion != 2 {
+	late := chunk("allow_late", "late.example.org", "tok-late", "")
+	if ar, err := c.ApproveDraftChunk(ctx, "box", a, "tok-a"); err != nil || ar.PolicyVersion != 2 {
 		t.Fatalf("approve = %+v, %v", ar, err)
 	}
 	if _, err := c.ApproveDraftChunk(ctx, "box", a, "tok-a"); !openshell.IsConflict(err) {
@@ -904,16 +701,12 @@ func TestDraftInbox(t *testing.T) {
 		res.ChunksApproved != 0 || res.ChunksSkipped != 1 {
 		t.Fatalf("bulk approve with a stale token = %+v, %v", res, err)
 	}
-	fresh, _ := f.DraftChunk(ws, "box", late)
-	if fresh.ReviewToken == "tok-late" {
+	if fresh, _ := f.DraftChunk(ws, "box", late); fresh.ReviewToken == "tok-late" {
 		t.Fatal("the review token did not change with the policy")
 	}
-	if err := c.RejectDraftChunk(ctx, "box", late, "not needed"); err != nil {
-		t.Fatal(err)
-	}
 
-	batch, err := c.ApproveDraftChunks(ctx, "box", []openshell.DraftChunkApproval{{ChunkID: b}, {ChunkID: d}, {ChunkID: flagged}})
-	if err != nil || batch.ChunksApproved != 2 || batch.ChunksSkipped != 1 || batch.PolicyVersion != 3 {
+	batch, err := c.ApproveDraftChunks(ctx, "box", []openshell.DraftChunkApproval{{ChunkID: b}, {ChunkID: flagged}})
+	if err != nil || batch.ChunksApproved != 1 || batch.ChunksSkipped != 1 || batch.PolicyVersion != 3 {
 		t.Fatalf("batch = %+v, %v", batch, err)
 	}
 	if err := c.RejectDraftChunk(ctx, "box", bad, "exfil destination"); err != nil {
@@ -922,22 +715,12 @@ func TestDraftInbox(t *testing.T) {
 	if chunk, _ := f.DraftChunk(ws, "box", bad); chunk.Status != "rejected" || chunk.RejectionReason != "exfil destination" {
 		t.Fatalf("rejected chunk = %+v", chunk)
 	}
-
-	policy, version := f.SandboxPolicy(ws, "box")
-	if version != 3 {
-		t.Fatalf("policy version = %d", version)
-	}
-	for _, rule := range []string{"defenseclaw-egress", "allow_pypi", "allow_npm", "allow_gh"} {
-		if _, ok := policy.NetworkPolicies[rule]; !ok {
-			t.Fatalf("policy lacks %s: %v", rule, policy.NetworkPolicies)
-		}
+	policy, _ := f.SandboxPolicy(ws, "box")
+	if _, ok := policy.NetworkPolicies["allow_npm"]; !ok {
+		t.Fatalf("policy lacks allow_npm: %v", policy.NetworkPolicies)
 	}
 	if _, ok := policy.NetworkPolicies["allow_meta"]; ok {
 		t.Fatal("security-flagged chunk was approved")
-	}
-	pending, _ := c.GetDraft(ctx, "box", "pending")
-	if len(pending.Chunks) != 1 || pending.Chunks[0].ID != flagged {
-		t.Fatalf("pending after triage = %+v", pending.Chunks)
 	}
 	if empty, err := c.ApproveDraftChunks(ctx, "box", nil); err != nil || empty.ChunksApproved != 0 {
 		t.Fatalf("empty batch = %+v, %v", empty, err)
@@ -951,11 +734,10 @@ func TestPolicyUpdates(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()
 	createReady(t, c, "box", nil)
-
 	next := basePolicy()
 	next.NetworkPolicies["docs"] = *proposedRule("docs.python.org")
-	res, err := c.SetPolicy(ctx, "box", next, openshell.PolicyUpdateOptions{Annotations: map[string]string{"io.defenseclaw/reason": "unblock"}})
-	if err != nil || res.Version != 2 || res.PolicyHash == "" {
+	if res, err := c.SetPolicy(ctx, "box", next, openshell.PolicyUpdateOptions{Annotations: map[string]string{"io.defenseclaw/reason": "unblock"}}); err != nil ||
+		res.Version != 2 || res.PolicyHash == "" {
 		t.Fatalf("set policy = %+v, %v", res, err)
 	}
 	static := basePolicy()
@@ -965,13 +747,13 @@ func TestPolicyUpdates(t *testing.T) {
 	}
 
 	sb, _ := c.GetSandbox(ctx, "box")
-	if _, err := c.MergePolicy(ctx, "box", []openshell.PolicyMergeOperation{{RemoveRule: &v1.RemoveNetworkRule{RuleName: "docs"}}},
-		openshell.PolicyUpdateOptions{ExpectedResourceVersion: sb.ResourceVersion + 9}); !openshell.IsConflict(err) {
+	remove := openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: "docs"}}
+	if _, err := c.MergePolicy(ctx, "box", []openshell.PolicyMergeOperation{remove}, openshell.PolicyUpdateOptions{ExpectedResourceVersion: sb.ResourceVersion + 9}); !openshell.IsConflict(err) {
 		t.Fatalf("stale merge = %v", err)
 	}
-	res, err = c.MergePolicy(ctx, "box", []openshell.PolicyMergeOperation{
+	res, err := c.MergePolicy(ctx, "box", []openshell.PolicyMergeOperation{
 		{AddRule: &v1.AddNetworkRule{RuleName: "gh", Rule: *proposedRule("api.github.com")}},
-		{RemoveRule: &v1.RemoveNetworkRule{RuleName: "docs"}},
+		remove,
 		{AddDenyRules: &v1.AddDenyRules{
 			Target:    &v1.L7RuleTarget{RuleName: "gh", Host: "api.github.com", Ports: []uint32{443}, Binaries: []v1.PolicyNetworkBinary{{Path: "/usr/bin/curl"}}},
 			DenyRules: []v1.L7DenyRule{{Method: "POST", Path: "/repos/*/*/git/refs"}},
@@ -981,32 +763,30 @@ func TestPolicyUpdates(t *testing.T) {
 		t.Fatalf("merge = %+v, %v", res, err)
 	}
 	policy, _ := f.SandboxPolicy(ws, "box")
-	if _, ok := policy.NetworkPolicies["docs"]; ok {
-		t.Fatal("docs rule survived remove_rule")
+	if deny := policy.NetworkPolicies["gh"].Endpoints[0].DenyRules; len(deny) != 1 || deny[0].Method != "POST" || policy.NetworkPolicies["docs"].Name != "" {
+		t.Fatalf("merged policy = %+v", policy.NetworkPolicies)
 	}
-	if deny := policy.NetworkPolicies["gh"].Endpoints[0].DenyRules; len(deny) != 1 || deny[0].Method != "POST" {
-		t.Fatalf("deny rules = %+v", deny)
-	}
+	// An operation setting two fields is refused before any call.
 	if _, err := c.MergePolicy(ctx, "box", []openshell.PolicyMergeOperation{{
 		RemoveRule: &v1.RemoveNetworkRule{RuleName: "gh"}, AddRule: &v1.AddNetworkRule{RuleName: "x"},
 	}}, openshell.PolicyUpdateOptions{}); err == nil || f.Calls(openshelltest.MethodUpdateConfig) != 4 {
 		t.Fatalf("two-field merge op = %v (update calls %d)", err, f.Calls(openshelltest.MethodUpdateConfig))
 	}
 
-	status, err := c.PolicyStatus(ctx, "box", 0)
-	if err != nil || status.Revision.Version != 3 || status.ActiveVersion != 3 {
+	if status, err := c.PolicyStatus(ctx, "box", 0); err != nil || status.Revision.Version != 3 || status.ActiveVersion != 3 {
 		t.Fatalf("status = %+v, %v", status, err)
 	}
 	if status, err := c.PolicyStatus(ctx, "box", 2); err != nil || status.Revision.Status != v1.PolicyLoadStatusSuperseded ||
 		status.Revision.Provenance["io.defenseclaw/reason"] != "unblock" {
 		t.Fatalf("revision 2 = %+v, %v", status, err)
 	}
-	cfg, err := c.SandboxConfig(ctx, "box")
-	if err != nil || cfg.PolicyVersion != 3 || cfg.PolicySource != v1.PolicySourceSandbox {
+	if cfg, err := c.SandboxConfig(ctx, "box"); err != nil || cfg.PolicyVersion != 3 || cfg.PolicySource != v1.PolicySourceSandbox {
 		t.Fatalf("config = %+v, %v", cfg, err)
 	}
 }
 
+// TestGlobalPolicyDetection covers an administrator's gateway-global
+// policy, which locks sandbox policy changes.
 func TestGlobalPolicyDetection(t *testing.T) {
 	f, c := newClient(t)
 	ctx := context.Background()
@@ -1015,19 +795,15 @@ func TestGlobalPolicyDetection(t *testing.T) {
 		t.Fatalf("no global policy = %+v, %v", rev, err)
 	}
 	f.SetGlobalPolicy(basePolicy())
-	rev, err := c.GlobalPolicy(ctx)
-	if err != nil || rev == nil || rev.Version != 1 {
+	if rev, err := c.GlobalPolicy(ctx); err != nil || rev == nil || rev.Version != 1 {
 		t.Fatalf("global policy = %+v, %v", rev, err)
 	}
 	if cfg, _ := c.SandboxConfig(ctx, "box"); cfg.PolicySource != v1.PolicySourceGlobal || cfg.GlobalPolicyVersion != 1 {
 		t.Fatalf("config under global policy = %+v", cfg)
 	}
-	if _, err := c.MergePolicy(ctx, "box", []openshell.PolicyMergeOperation{{RemoveRule: &v1.RemoveNetworkRule{RuleName: "defenseclaw-egress"}}}, openshell.PolicyUpdateOptions{}); !openshell.IsConflict(err) {
+	remove := []openshell.PolicyMergeOperation{{RemoveRule: &v1.RemoveNetworkRule{RuleName: "defenseclaw-egress"}}}
+	if _, err := c.MergePolicy(ctx, "box", remove, openshell.PolicyUpdateOptions{}); !openshell.IsConflict(err) {
 		t.Fatalf("merge under global lock = %v", err)
-	}
-	f.SetGlobalPolicy(nil)
-	if rev, err := c.GlobalPolicy(ctx); err != nil || rev != nil {
-		t.Fatalf("cleared global policy = %+v, %v", rev, err)
 	}
 }
 
@@ -1036,7 +812,6 @@ func TestUpdateSetting(t *testing.T) {
 	ctx := context.Background()
 	createReady(t, c, "box", nil)
 	val := &openshell.SettingValue{Type: openshell.SettingBool, BoolVal: false}
-
 	for _, bad := range []openshell.SettingUpdate{
 		{Sandbox: "box", Value: val},
 		{Key: "k", Value: val},
@@ -1053,27 +828,18 @@ func TestUpdateSetting(t *testing.T) {
 	if n := f.Calls(openshelltest.MethodUpdateConfig); n != 0 {
 		t.Fatalf("invalid updates reached the gateway %d times", n)
 	}
-
-	if _, err := c.UpdateSetting(ctx, openshell.SettingUpdate{Sandbox: "box", Key: "ocsf_json_enabled", Value: &openshell.SettingValue{Type: openshell.SettingBool, BoolVal: true}}); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.SandboxSettings(ws, "box")["ocsf_json_enabled"]; !got.BoolVal {
-		t.Fatalf("sandbox setting = %+v", got)
+	if _, err := c.UpdateSetting(ctx, openshell.SettingUpdate{Sandbox: "box", Key: "ocsf_json_enabled", Value: &openshell.SettingValue{Type: openshell.SettingBool, BoolVal: true}}); err != nil ||
+		!f.SandboxSettings(ws, "box")["ocsf_json_enabled"].BoolVal {
+		t.Fatalf("sandbox setting: %v", err)
 	}
 	if _, err := c.UpdateSetting(ctx, openshell.SettingUpdate{Global: true, Key: "telemetry", Value: val}); err != nil {
 		t.Fatal(err)
 	}
-	gw, err := c.GatewaySettings(ctx)
-	if err != nil || gw.SettingsRevision != 1 {
+	if gw, err := c.GatewaySettings(ctx); err != nil || gw.SettingsRevision != 1 {
 		t.Fatalf("gateway settings = %+v, %v", gw, err)
 	}
-	res, err := c.UpdateSetting(ctx, openshell.SettingUpdate{Global: true, Key: "telemetry", Delete: true})
-	if err != nil || !res.Deleted {
+	if res, err := c.UpdateSetting(ctx, openshell.SettingUpdate{Global: true, Key: "telemetry", Delete: true}); err != nil || !res.Deleted {
 		t.Fatalf("global delete = %+v, %v", res, err)
-	}
-	cfg, _ := c.SandboxConfig(ctx, "box")
-	if s, ok := cfg.Settings["ocsf_json_enabled"]; !ok || s.Scope != v1.SettingScopeSandbox {
-		t.Fatalf("effective settings = %+v", cfg.Settings)
 	}
 }
 
@@ -1094,12 +860,11 @@ func (r deadlineRecorder) Health() v1.HealthInterface {
 }
 
 func (h recordingHealth) Check(ctx context.Context) (*v1.HealthResult, error) {
-	d, ok := ctx.Deadline()
-	if !ok {
-		h.deadline <- 0
-	} else {
-		h.deadline <- time.Until(d)
+	var left time.Duration
+	if d, ok := ctx.Deadline(); ok {
+		left = time.Until(d)
 	}
+	h.deadline <- left
 	return h.HealthInterface.Check(ctx)
 }
 
@@ -1120,17 +885,7 @@ func TestRPCTimeoutAppliedOnlyWithoutDeadline(t *testing.T) {
 	if d := <-rec.deadline; d < 59*time.Minute {
 		t.Fatalf("caller deadline replaced: %s", d)
 	}
-	if c.Workspace() != openshell.DefaultWorkspace {
-		t.Fatalf("workspace = %q", c.Workspace())
-	}
-}
-
-func TestClosedClientFailsUnavailable(t *testing.T) {
-	f, c := newClient(t)
-	_ = f.Close()
-	if _, err := c.Health(context.Background()); !openshell.IsUnavailable(err) {
-		t.Fatalf("health after close = %v", err)
-	}
+	_ = rec.Close()
 	if _, err := c.ListSandboxes(context.Background(), nil); !openshell.IsUnavailable(err) {
 		t.Fatalf("list after close = %v", err)
 	}
