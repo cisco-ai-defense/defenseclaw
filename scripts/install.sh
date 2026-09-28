@@ -2033,7 +2033,7 @@ load_release_policy
 if [[ "${INSTALL_SANDBOX}" == true ]]; then
     # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
     # accepted so existing automation keeps working, and does nothing.
-    warn "--sandbox is deprecated and ignored: the legacy openshell-sandbox installer was removed. OpenShell 0.1 sandbox support is being rebuilt; to remove an old standalone sandbox run 'defenseclaw sandbox legacy-cleanup --dry-run'."
+    warn "--sandbox is deprecated and ignored: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
 fi
 if [[ "${MODERN_RELEASE}" == true ]]; then
     # Bind both roots before publishing payloads or rollback-token hardlinks.

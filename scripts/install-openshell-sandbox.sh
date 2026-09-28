@@ -12,9 +12,9 @@ set -euo pipefail
 main() {
     cat >&2 <<'EOF'
 DefenseClaw: the legacy openshell-sandbox (0.0.x) installer has been removed.
-  Nothing was installed. NVIDIA OpenShell 0.1 sandbox support is being rebuilt
-  and will be configured with `defenseclaw sandbox setup` once available.
-  To remove an old standalone sandbox install, run:
+  Nothing was installed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run:
+    defenseclaw sandbox setup
+  To remove an old standalone sandbox install first, run:
     defenseclaw sandbox legacy-cleanup --dry-run
 EOF
     return 0

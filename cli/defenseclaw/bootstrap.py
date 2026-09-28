@@ -118,9 +118,8 @@ class StepResult:
 # legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
 SANDBOX_FLAG_DEPRECATION = (
     "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
-    "NVIDIA OpenShell 0.1 sandbox support is being rebuilt (it will be set up with "
-    "'defenseclaw sandbox setup' once available); hosts with an old standalone install should run "
-    "'defenseclaw sandbox legacy-cleanup'."
+    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
+    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
 )
 
 
