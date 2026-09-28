@@ -886,7 +886,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	if status != sandboxapi.ApprovalPending {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "approval %s is already %s", id, status)
 	}
-	decided := false
+	decided, replied := false, false
 	defer func() {
 		if !decided {
 			m.mu.Lock()
@@ -948,9 +948,14 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		}
 		m.mu.Lock()
 		a.status, a.actor, a.always = sandboxapi.ApprovalQueued, actorOperator, d.Always
+		queued := a.wire()
 		m.mu.Unlock()
 		decided = true
 		if local {
+			// The reply reports the decision as queued, like its message:
+			// applyHostPortAsk may open the port (and resolve the approval)
+			// before this returns when the hooks are already quiet.
+			replied, res.Approval = true, queued
 			go m.applyHostPortAsk(a, bindingID)
 			res.Message = "approved; DefenseClaw opens the port once the sandbox's hooks are quiet"
 			break
@@ -987,9 +992,11 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 	default:
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "decision must be approve or reject")
 	}
-	m.mu.Lock()
-	res.Approval = a.wire()
-	m.mu.Unlock()
+	if !replied {
+		m.mu.Lock()
+		res.Approval = a.wire()
+		m.mu.Unlock()
+	}
 	return res, nil
 }
 
