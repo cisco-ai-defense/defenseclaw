@@ -522,7 +522,7 @@ func (a *App) credentialText(s *harness.Spec) string {
 	}
 	next := "you log in inside the sandbox on the first run"
 	if hint := llmHint(s.Name, LLMAuto); hint != llmHint("", LLMAuto) {
-		next = hint + " before the first run, or log in inside the sandbox"
+		next = "before the first run, " + hint + "; or log in inside the sandbox"
 	}
 	return "model credential " + a.style("none found", ansiYellow) + ": " + next
 }

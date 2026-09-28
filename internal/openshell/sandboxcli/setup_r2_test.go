@@ -146,7 +146,7 @@ func TestSetupHarnessLines(t *testing.T) {
 	for _, want := range []string{
 		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n" +
 			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n" +
-			"    Codex (codex)         model credential none found: set OPENAI_API_KEY or log in with `codex login --with-api-key` before the first run, or log in inside the sandbox\n" +
+			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY or log in with `codex login --with-api-key`; or log in inside the sandbox\n" +
 			"  Other harnesses: agy, amp (not verified yet), copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands\n",
 		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
 		"Build the Codex image now?",
