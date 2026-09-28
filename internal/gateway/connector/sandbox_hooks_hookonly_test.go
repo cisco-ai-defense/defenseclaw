@@ -368,7 +368,7 @@ func TestSandboxArtifactsSupported(t *testing.T) {
 			t.Errorf("%s: sandbox artifacts not reported as supported", conn.Name())
 		}
 	}
-	for _, conn := range []Connector{NewWindsurfConnector(), NewGeminiCLIConnector()} {
+	for _, conn := range []Connector{&hookOnlyConnector{name: "nosandbox"}, NewOpenClawConnector()} {
 		if SandboxArtifactsSupported(conn) {
 			t.Errorf("%s: reported as supported without a sandbox variant", conn.Name())
 		}

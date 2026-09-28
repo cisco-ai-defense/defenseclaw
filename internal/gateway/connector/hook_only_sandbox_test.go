@@ -52,9 +52,8 @@ func sandboxFile(t *testing.T, artifacts SandboxArtifacts, path string) SandboxF
 }
 
 func TestHookOnlySandboxArtifactsRefuseConnectorsWithoutVariant(t *testing.T) {
-	// Gemini CLI is out of scope for sandboxes and Windsurf has no Linux
-	// agent CLI; neither ever registers a sandbox renderer.
-	for _, conn := range []*hookOnlyConnector{NewGeminiCLIConnector(), NewWindsurfConnector()} {
+	// A hook-only connector that never registered a sandbox renderer.
+	for _, conn := range []*hookOnlyConnector{{name: "nosandbox"}} {
 		_, err := conn.SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "1.0.0"})
 		if err == nil || !strings.Contains(err.Error(), "no OpenShell sandbox variant") {
 			t.Fatalf("%s: err = %v", conn.Name(), err)
