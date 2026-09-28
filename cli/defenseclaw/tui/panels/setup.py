@@ -232,28 +232,28 @@ NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
 )
 
 WIZARD_DESCRIPTIONS: tuple[str, ...] = (
-    "Run first-class setup for any connector.",
-    "List, check, fill, or set env-backed credentials.",
-    "Configure the unified LLM block non-interactively.",
-    "Inspect and manage the bundled local observability stack.",
-    "Transactionally rotate the gateway and connector-scoped hook credentials.",
-    "Manage the custom provider overlay.",
-    "Configure skill scanner analyzers and policy.",
-    "Configure MCP scanner analyzers and scan targets.",
-    "Configure gateway host, ports, TLS, and auth.",
-    "Configure the LLM guardrail proxy and judge.",
-    "Configure Splunk HEC or local Splunk integration.",
-    "Add and manage canonical v8 observability destinations.",
-    "Add chat or incident notifier webhooks.",
-    "Run coding agents in OpenShell sandboxes: harnesses, folder mounts, telemetry, wrappers.",
-    "Register an external skill or MCP catalog source.",
-    "Toggle notification categories and event sources.",
-    "Enable or tune the sidecar AI Discovery service.",
-    "Apply or destroy Splunk O11y dashboards.",
-    "Manage trusted connector-binary discovery prefixes.",
-    "Run connector-scoped guardrail status and policy quick actions.",
-    "Inspect or change canonical v8 bucket, profile, destination, and route redaction.",
-    "Configure a guarded ACP agent for Zed or JetBrains.",
+    "Add, switch or remove the agents DefenseClaw protects.",
+    "See which API keys are missing and set them.",
+    "Pick the model and API key the scanners and judge use.",
+    "Start, stop or reset the bundled local dashboards (Docker).",
+    "Replace the gateway and hook tokens in one step.",
+    "Add or remove LLM providers the guardrail should recognize.",
+    "Choose how skills are scanned and which analyzers run.",
+    "Choose how MCP servers are scanned and what gets checked.",
+    "Set the gateway host, ports, TLS and token.",
+    "Turn on the LLM guardrail and choose observe or block.",
+    "Send events to Splunk HEC or a local Splunk.",
+    "Send logs, traces and metrics to an observability vendor.",
+    "Post alerts to Slack, PagerDuty, Webex or any URL.",
+    "Run coding agents in OpenShell sandboxes.",
+    "Add a skill or MCP catalog you trust.",
+    "Choose which events send you notifications.",
+    "Find the AI tools in use on this machine.",
+    "Create or remove the Splunk Observability dashboards.",
+    "List the folders where agent binaries are trusted.",
+    "Turn the guardrail on or off, set fail mode and approvals.",
+    "Choose what is hidden from logs and exports.",
+    "Protect an ACP agent in Zed or JetBrains.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -416,6 +416,9 @@ class SetupPanelAction:
     # current value.
     open_field_editor: str = ""
     field_editor_value: str | None = None
+    # Setup navigation pickers: "detail" (readiness + task detail),
+    # "sections" (grouped config sections) or "fields" (config field finder).
+    open_picker: str = ""
 
 
 @dataclass(frozen=True)
