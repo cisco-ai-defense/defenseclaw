@@ -35,6 +35,9 @@ func claudeOSAdminSettings(t *testing.T, exportOpts SetupOpts, extra map[string]
 		t.Fatal(err)
 	}
 	settings := map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"]}
+	if lock, present := exported["allowManagedHooksOnly"]; present {
+		settings["allowManagedHooksOnly"] = lock
+	}
 	for key, value := range extra {
 		settings[key] = value
 	}
@@ -312,19 +315,29 @@ func TestClaudeOSAdminPolicyHoldsTheCarriedHooksToTheRenderedTimeouts(t *testing
 // handler on an event outside the target's contract made the guardian audit
 // report the hooks missing forever while Setup kept succeeding.
 func TestClaudeOSAdminPolicyRefusesDefenseClawHooksOutsideTheTargetContract(t *testing.T) {
-	target := claudeOSAdminTestOpts(t, "2.1.154")
-	newer := target
-	newer.AgentVersion = "2.1.250"
+	target := claudeOSAdminTestOpts(t, "2.1.152")
 	for name, extra := range map[string]map[string]interface{}{
 		"carried": nil,
 		"merged":  {"managedSourcesBehavior": "merge"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			err := ClaudeCodeOSAdminPolicyAdmitsManagedHooks(claudeOSAdminSettings(t, newer, extra), claudeOSAdminLabel, target)
+			var policy map[string]interface{}
+			if err := json.Unmarshal([]byte(claudeOSAdminSettings(t, target, extra)), &policy); err != nil {
+				t.Fatal(err)
+			}
+			// 0.8.6 has only the v1 contract. Inject a DefenseClaw handler
+			// on a later event to prove the HKLM gate rejects it.
+			hooks := policy["hooks"].(map[string]interface{})
+			hooks["DirectoryAdded"] = hooks["PreToolUse"]
+			body, err := json.Marshal(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = ClaudeCodeOSAdminPolicyAdmitsManagedHooks(string(body), claudeOSAdminLabel, target)
 			if err == nil {
 				t.Fatal("a policy with a DefenseClaw hook outside the target contract was admitted")
 			}
-			for _, want := range []string{"DirectoryAdded", ClaudeCodeManagedPolicyExportCommand + " --agent-version 2.1.154"} {
+			for _, want := range []string{"DirectoryAdded", ClaudeCodeManagedPolicyExportCommand + " --agent-version 2.1.152"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("refusal %q does not mention %q", err, want)
 				}

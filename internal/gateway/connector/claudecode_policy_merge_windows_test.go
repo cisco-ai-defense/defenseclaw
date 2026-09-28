@@ -133,7 +133,7 @@ func TestClaudeHKLMCarryingTheMatrixIsEffectiveOnWindows(t *testing.T) {
 	if err := json.Unmarshal(document, &exported); err != nil {
 		t.Fatal(err)
 	}
-	claudeHKLMFixture(t, map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"]})
+	claudeHKLMFixture(t, map[string]interface{}{"model": "managed-by-mdm", "hooks": exported["hooks"], "allowManagedHooksOnly": exported["allowManagedHooksOnly"]})
 	if _, err := NewClaudeCodeConnector().ManagedHookPolicy(opts); err != nil {
 		t.Fatalf("HKLM carrying the exported matrix was refused: %v", err)
 	}

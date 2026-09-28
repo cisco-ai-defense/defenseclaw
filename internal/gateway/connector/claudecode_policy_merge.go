@@ -94,6 +94,9 @@ func claudeCodeOSAdminAdmitsManagedHooks(source *claudeCodeSettingsSource, opts 
 	if err != nil {
 		return err
 	}
+	if err := claudeCodeOSAdminKeepsManagedHooksOnly(source, opts, carries); err != nil {
+		return err
+	}
 	if carries {
 		return nil
 	}

@@ -1391,9 +1391,9 @@ exported one.
 Claude loads only an HKLM policy that carries the
 matrix, so that policy must also set the printed `allowManagedHooksOnly: true`,
 and while the lock is enforced no HKLM policy may set it to `false`; setting
-`claude_code.allow_unmanaged_hooks: true` waives both. See [Claude Code on
-Windows](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/reference/CLAUDE-CODE-WINDOWS.md)
-for the status fields. Remotely delivered policy is an external management
+`claude_code.allow_unmanaged_hooks: true` waives both. Status reports
+`claude_policy_shadowed_by_hklm`, `claude_minimum_client_version`, and
+`claude_policy_hklm_merge_pending_targets` for this case. Remotely delivered policy is an external management
 boundary and must likewise include the hook matrix at its authoritative source.
 
 Claude managed-source precedence is server-managed, then HKLM/MDM, then the
