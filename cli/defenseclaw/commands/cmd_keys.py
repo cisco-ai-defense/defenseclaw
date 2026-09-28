@@ -163,22 +163,32 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
 
     _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
     if app.logger:
-        app.logger.log_activity(
-            actor="cli:operator",
-            action=ACTION_CONFIG_UPDATE,
-            target_type="config",
-            target_id=f"dotenv:{env_name}",
-            before={"env": env_name, "had_value": had},
-            after={"env": env_name, "had_value": True},
-            diff=[
-                {
-                    "path": f"/.env/{env_name}",
-                    "op": "replace",
-                    "before": "set" if had else "unset",
-                    "after": "set",
-                },
-            ],
-        )
+        from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+        try:
+            app.logger.log_activity(
+                actor="cli:operator",
+                action=ACTION_CONFIG_UPDATE,
+                target_type="config",
+                target_id=f"dotenv:{env_name}",
+                before={"env": env_name, "had_value": had},
+                after={"env": env_name, "had_value": True},
+                diff=[
+                    {
+                        "path": f"/.env/{env_name}",
+                        "op": "replace",
+                        "before": "set" if had else "unset",
+                        "after": "set",
+                    },
+                ],
+            )
+        except CanonicalObservabilityUnavailableError:
+            # Same offline rule as policy activate: the key is saved, only the
+            # audit event can't be admitted while the gateway is down.
+            click.echo(
+                "  ⚠ Key saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+                err=True,
+            )
     ux.ok(f"Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
 

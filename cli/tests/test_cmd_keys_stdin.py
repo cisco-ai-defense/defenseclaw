@@ -60,3 +60,19 @@ def test_value_and_value_stdin_are_mutually_exclusive(tmp_path):
     )
     assert result.exit_code == 2
     assert "DEFENSECLAW_TEST_KEY" not in _dotenv(tmp_path)
+
+
+def test_saves_and_exits_0_when_the_gateway_cannot_record_the_audit_event(tmp_path):
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    class _OfflineLogger:
+        def log_activity(self, **_kwargs):
+            raise CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+
+    app = _make_app_context(str(tmp_path))
+    app.logger = _OfflineLogger()
+    result = CliRunner().invoke(keys_cmd, ["set", "DEFENSECLAW_TEST_KEY", "--value-stdin"], obj=app, input=f"{SECRET}\n")
+
+    assert result.exit_code == 0, result.output
+    assert SECRET not in result.output
+    assert "DEFENSECLAW_TEST_KEY" in _dotenv(tmp_path)
