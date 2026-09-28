@@ -98,7 +98,11 @@ func TestAntigravityTrustedShellArgs(t *testing.T) {
 		cwdArg, wantCwd = `"C:\\work\\app"`, `C:\work\app`
 	}
 	project := func(tool string, args json.RawMessage) (json.RawMessage, bool) {
-		out, cwd, ok := AntigravityTrustedShellArgs(tool, json.RawMessage(strings.ReplaceAll(string(args), `"/work/app"`, cwdArg)))
+		sent := json.RawMessage(strings.ReplaceAll(string(args), `"/work/app"`, cwdArg))
+		out, cwd, ok := AntigravityTrustedShellArgs(tool, sent)
+		if !ok && string(out) == string(sent) {
+			out = args // refused unchanged: compare with the case as written
+		}
 		// A refused projection, and text sent to a running command, name no
 		// directory.
 		want := ""
