@@ -226,8 +226,9 @@ struct SandboxSnapshot: Sendable {
     static let notifyWindow: TimeInterval = 60
     /// The Asks card with nothing waiting, as the TUI says it (NO_ASKS_TEXT):
     /// what asks depends on each sandbox's pack.
-    static let noAsksText = "No asks are waiting. Doors into your machine or network (localhost ports, private IPs) ask; "
-        + "so do hosts off the allowlist with the balanced pack, and every new destination with strict."
+    static let noAsksText = "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
+        + "to a private-network address with any pack, to a host off the allowlist with balanced, "
+        + "and to every new destination with strict. Ports on this machine never ask; run with --host-port PORT."
 
     var status = SandboxStatus()
     var sandboxes: [SandboxRow] = []

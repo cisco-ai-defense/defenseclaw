@@ -332,13 +332,14 @@ struct SandboxModelTests {
         expect(!SandboxFormat.hostMatches("*.example.com", "example.com"), "wildcard is subdomains only")
     }
 
-    /// Doors into the machine ask in every pack; balanced also asks for hosts
-    /// off its allowlist and strict for every destination. The TUI's Asks view
-    /// says the same (sandbox_state.NO_ASKS_TEXT).
+    /// A private-network address asks in every pack; balanced also asks for
+    /// hosts off its allowlist and strict for every destination, and a port on
+    /// this machine never asks (--host-port opens it). The TUI's Asks view says
+    /// the same (sandbox_state.NO_ASKS_TEXT).
     private static func noAsksTextHoldsForEveryPackAndMatchesTheTUI() {
         let text = SandboxSnapshot.noAsksText
-        expect(!text.contains("Only") && text.contains("localhost ports") && text.contains("balanced")
-               && text.contains("strict"), "no-asks text covers every pack: \(text)")
+        expect(!text.contains("Only") && text.contains("private-network") && text.contains("balanced")
+               && text.contains("strict") && text.contains("--host-port"), "no-asks text covers every pack: \(text)")
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let python = (try? String(
             contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/services/sandbox_state.py"),
