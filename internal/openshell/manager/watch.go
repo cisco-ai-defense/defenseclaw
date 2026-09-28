@@ -220,6 +220,14 @@ func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
 		return
 	}
 	m.mu.Lock()
+	if b.rec.ID != "" && st.ID != "" && st.ID != b.rec.ID {
+		// The stream follows a name: this is another sandbox that took it,
+		// whose phase is not this one's.
+		name := b.rec.Name
+		m.mu.Unlock()
+		go m.reconcileOne(context.WithoutCancel(ctx), name)
+		return
+	}
 	if b.sb != nil {
 		b.sb.Status.Phase = st.Phase
 		b.sb.Status.CurrentPolicyVersion = st.PolicyVersion

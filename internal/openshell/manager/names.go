@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -76,6 +77,43 @@ func (m *Manager) ownsLabels(labels map[string]string) bool {
 // managedBy reports labels of an object DefenseClaw created for owner.
 func managedBy(labels map[string]string, owner string) bool {
 	return owner != "" && labels[LabelManaged] == "true" && labels[LabelOwner] == owner
+}
+
+// ownerOf is the owner a recorded sandbox's objects are labelled with: the
+// one it was created under, this data dir's for older records.
+func (m *Manager) ownerOf(rec record) string {
+	if rec.Owner != "" {
+		return rec.Owner
+	}
+	return m.opts.Owner
+}
+
+// sameSandboxLocked reports whether sb, what OpenShell holds under b's
+// name, is b's sandbox: labelled for b's owner, and the one b recorded
+// when b knows its ID. A sandbox deleted outside DefenseClaw can be
+// followed by another of the same name (another daemon's, or anyone's),
+// which operations on b must never act on. Callers hold Manager.mu.
+func (m *Manager) sameSandboxLocked(b *box, sb *openshell.Sandbox) bool {
+	if sb == nil || !managedBy(sb.Labels, m.ownerOf(b.rec)) {
+		return false
+	}
+	return b.rec.ID == "" || sb.ID == "" || sb.ID == b.rec.ID
+}
+
+// sameSandbox is sameSandboxLocked for callers that do not hold
+// Manager.mu.
+func (m *Manager) sameSandbox(b *box, sb *openshell.Sandbox) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.sameSandboxLocked(b, sb)
+}
+
+// errReplaced is the refusal of an operation on a sandbox whose name
+// OpenShell now gives another sandbox.
+func errReplaced(name string) error {
+	return sandboxapi.Errorf(sandboxapi.CodeConflict,
+		"the OpenShell sandbox named %s is not the one DefenseClaw created (that one is gone and another took its name); "+
+			"DefenseClaw leaves it alone: `defenseclaw sandbox delete %s` releases what DefenseClaw held for its own", name, name)
 }
 
 var dnsUnsafe = regexp.MustCompile(`[^a-z0-9-]+`)

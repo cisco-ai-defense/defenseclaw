@@ -122,7 +122,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 		if sbs, err := gw.Client.ListSandboxes(ctx, m.managedSelector()); err == nil {
 			m.mu.Lock()
 			for _, sb := range sbs {
-				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained {
+				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
 					b.sb, b.missing = sb, false
 				}
 			}
@@ -162,9 +162,10 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
 		switch {
-		case err == nil && !b.creating:
+		case err == nil && !b.creating && m.sameSandboxLocked(b, sb):
 			b.sb, b.missing = sb, false
-		case openshell.IsNotFound(err) && !b.creating:
+		case (err == nil || openshell.IsNotFound(err)) && !b.creating:
+			// Gone, or another sandbox took the name.
 			b.missing = true
 		}
 		m.mu.Unlock()
@@ -214,7 +215,12 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
+	m.mu.Lock()
 	name := b.rec.Name
+	m.mu.Unlock()
+	if err := m.checkSandbox(ctx, gw, b); err != nil {
+		return err
+	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
@@ -238,22 +244,55 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 // follow ready sandboxes only) resume for one still running, and lets the
 // next hook tamper of its session schedule another stop.
 func (m *Manager) stopFailed(ctx context.Context, gw *Gateway, b *box) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
-	defer cancel()
 	m.mu.Lock()
-	name := b.rec.Name
 	b.tamperStop = false
 	m.mu.Unlock()
+	m.restorePhase(ctx, gw, b, audit.SandboxTriggerStop, audit.SandboxPhaseStopping)
+}
+
+// restorePhase records the phase OpenShell reports for a sandbox after an
+// operation on it failed, unless OpenShell still reports the operation's
+// own transitional phase (pending): the phase recorded before the call
+// (starting, stopping, deleting) would otherwise stay, and everything that
+// follows ready or stopped sandboxes only would misjudge it.
+func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger audit.SandboxLifecycleTrigger, pending audit.SandboxPhase) {
+	ctx, cancel := detached(ctx, rollbackTimeout)
+	defer cancel()
+	gw = m.liveGateway(ctx, gw)
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
 	sb, err := gw.Client.GetSandbox(ctx, name)
-	if err != nil {
+	if err != nil || !m.sameSandbox(b, sb) {
 		return
 	}
 	m.mu.Lock()
 	b.sb = sb
 	m.mu.Unlock()
-	if phase := auditPhase(sb.Status.Phase); phase != audit.SandboxPhaseStopping && phase != audit.SandboxPhaseUnknown {
-		m.lifecycle(ctx, b, phase, audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
+	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
+		m.lifecycle(ctx, b, phase, trigger, false, nil, sb.Status.ExitCode)
 	}
+}
+
+// checkSandbox refuses an operation on b when the OpenShell sandbox under
+// its name is not b's (sameSandbox), marking b missing.
+func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
+	m.mu.Lock()
+	name := b.rec.Name
+	m.mu.Unlock()
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	if err != nil {
+		m.dropGateway(gw, err)
+		return upstream("look up sandbox "+name, err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.sameSandboxLocked(b, sb) {
+		b.missing = true
+		return errReplaced(name)
+	}
+	b.sb, b.missing = sb, false
+	return nil
 }
 
 // Start starts a stopped sandbox. The ingress token is rotated first, so a
@@ -297,13 +336,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// token rotation, the pre-session snapshot, the tool-call ledger and
 	// the guard baseline) would otherwise be reset under a running agent,
 	// wiping what this session's undo and tamper detection rely on.
-	sb, err := gw.Client.GetSandbox(ctx, rec.Name)
-	if err != nil {
-		m.dropGateway(gw, err)
-		return upstream("look up sandbox "+rec.Name, err)
+	if err := m.checkSandbox(ctx, gw, b); err != nil {
+		return err
 	}
 	m.mu.Lock()
-	b.sb = sb
+	sb := b.sb
 	m.mu.Unlock()
 	if !stoppedPhase(sb.Status.Phase) {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
@@ -338,6 +375,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		p, err := gw.Client.GetProvider(ctx, pname)
 		if err != nil {
 			return upstream("get provider "+pname, err)
+		}
+		if !managedBy(p.Labels, m.ownerOf(rec)) || p.Labels[LabelSandbox] != rec.Name {
+			// Provider names are gateway-global: the new token must never
+			// go into a provider another sandbox took the name of.
+			return sandboxapi.Errorf(sandboxapi.CodeConflict,
+				"the OpenShell provider %s is not the one DefenseClaw created for sandbox %s; delete the sandbox and run a new one", pname, rec.Name)
 		}
 		if p.Spec.Credentials == nil {
 			p.Spec.Credentials = map[string]string{}
@@ -385,10 +428,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
+		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
 		return upstream("start sandbox "+rec.Name, err)
 	}
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
+		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
 		return upstream("wait for sandbox "+rec.Name, err)
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
@@ -497,21 +542,40 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	if err != nil {
 		return nil, err
 	}
-	// The watcher keeps running until the sandbox is gone: a delete that
-	// fails leaves it running, still watched and triaged.
-	m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
-	if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil {
+	// A sandbox OpenShell no longer has (deleted outside DefenseClaw), or
+	// whose name another sandbox took, is only released here: the other
+	// sandbox is left alone.
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	gone := openshell.IsNotFound(err)
+	switch {
+	case err != nil && !gone:
 		m.dropGateway(gw, err)
-		m.deleteFailed(ctx, gw, b)
-		return nil, upstream("delete sandbox "+name, err)
+		return nil, upstream("look up sandbox "+name, err)
+	case err == nil && !m.sameSandbox(b, sb):
+		gone = true
 	}
-	if err := gw.Client.WaitDeleted(ctx, name); err != nil {
-		m.deleteFailed(ctx, gw, b)
-		return nil, upstream("wait for sandbox "+name+" deletion", err)
+	var warnings []string
+	if gone {
+		warnings = append(warnings, "OpenShell no longer had sandbox "+name+" (or another sandbox took its name); DefenseClaw released what it held for it")
+	} else {
+		// The watcher keeps running until the sandbox is gone: a delete that
+		// fails leaves it running, still watched and triaged.
+		m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
+		if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil && !openshell.IsNotFound(err) {
+			m.dropGateway(gw, err)
+			m.deleteFailed(ctx, gw, b)
+			return nil, upstream("delete sandbox "+name, err)
+		}
+		if err := gw.Client.WaitDeleted(ctx, name); err != nil {
+			m.deleteFailed(ctx, gw, b)
+			return nil, upstream("wait for sandbox "+name+" deletion", err)
+		}
 	}
 	m.stopWatch(b)
-	resp := &sandboxapi.DeleteResponse{Name: name, Deleted: true}
-	resp.Providers, resp.Warnings, retained = m.cleanup(ctx, gw, b, req.KeepSnapshot)
+	resp := &sandboxapi.DeleteResponse{Name: name, Deleted: true, Warnings: warnings}
+	var cleanupWarnings []string
+	resp.Providers, cleanupWarnings, retained = m.cleanup(ctx, gw, b, req.KeepSnapshot)
+	resp.Warnings = append(resp.Warnings, cleanupWarnings...)
 	m.lifecycle(ctx, b, audit.SandboxPhaseDeleted, audit.SandboxTriggerDelete, false, nil, nil)
 	if retained {
 		// The kept snapshot stays reachable: undo, review and delete find
@@ -548,18 +612,7 @@ func (m *Manager) deleteRetained(ctx context.Context, b *box, req sandboxapi.Del
 // deleteFailed puts a sandbox whose delete failed back into the phase
 // OpenShell reports and makes sure it is watched.
 func (m *Manager) deleteFailed(ctx context.Context, gw *Gateway, b *box) {
-	ctx = context.WithoutCancel(ctx)
-	m.mu.Lock()
-	name := b.rec.Name
-	m.mu.Unlock()
-	if sb, err := gw.Client.GetSandbox(ctx, name); err == nil {
-		m.mu.Lock()
-		b.sb = sb
-		m.mu.Unlock()
-		if phase := auditPhase(sb.Status.Phase); phase != audit.SandboxPhaseDeleting {
-			m.lifecycle(ctx, b, phase, audit.SandboxTriggerDelete, false, nil, sb.Status.ExitCode)
-		}
-	}
+	m.restorePhase(ctx, gw, b, audit.SandboxTriggerDelete, audit.SandboxPhaseDeleting)
 	m.startWatch(b)
 }
 
@@ -621,7 +674,9 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 
 // sandboxProviders lists the providers DefenseClaw created for a sandbox:
 // those recorded plus any labelled for it, with the provider profile each
-// was created from (when the gateway lists it).
+// was created from (when the gateway lists it). Provider names are
+// gateway-global, so a recorded name the gateway lists with another
+// sandbox's or owner's labels (the name was taken since) is left out.
 func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record) ([]string, map[string]string) {
 	set := map[string]bool{}
 	for _, p := range rec.Providers {
@@ -629,9 +684,15 @@ func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record)
 	}
 	profileOf := map[string]string{}
 	if list, err := gw.Client.ListProviders(ctx); err == nil {
+		owner := m.ownerOf(rec)
 		for _, p := range list {
-			if p.Labels[LabelManaged] == "true" && p.Labels[LabelOwner] == m.opts.Owner && p.Labels[LabelSandbox] == rec.Name {
+			ours := managedBy(p.Labels, owner) && p.Labels[LabelSandbox] == rec.Name
+			switch {
+			case ours:
 				set[p.Name] = true
+			case set[p.Name]:
+				delete(set, p.Name)
+				m.logf("sandbox %s: provider %s now belongs to another sandbox; it is left alone", rec.Name, p.Name)
 			}
 			if set[p.Name] {
 				profileOf[p.Name] = p.Type
@@ -767,11 +828,16 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		case err == nil:
 			sb, err := gw.Client.GetSandbox(ctx, name)
 			switch {
-			case err == nil:
+			case err == nil && m.sameSandbox(b, sb):
 				m.mu.Lock()
 				b.sb = sb
 				m.mu.Unlock()
 				running = !stoppedPhase(sb.Status.Phase)
+			case err == nil:
+				// Another sandbox took the name: this one's agent is gone.
+				m.mu.Lock()
+				b.missing = true
+				m.mu.Unlock()
 			case !openshell.IsNotFound(err):
 				if !req.Preview {
 					return nil, upstream("look up sandbox "+name, err)
