@@ -84,7 +84,7 @@ from defenseclaw.tui.panels.overview import (
     string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
-from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_posture_text
+from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_keymap_rows, policy_posture_text
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
@@ -1625,15 +1625,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         ("sandboxes-refresh", "Refresh", "Re-read the sandboxes now"),
                     ):
                         yield Button(label, id=button_id, compact=True, tooltip=tip)
+                # Actions only: the views are switched from the navigation
+                # list (or the one-line switcher and 1-7 on narrow screens).
                 with Horizontal(id="policies-controls", classes="panel-controls hidden"):
                     for button_id, label, tip in (
-                        ("policies-view-policies", "Policies", "Named security policies (1)"),
-                        ("policies-view-packs", "Packs", "Guardrail rule pack per connector (2)"),
-                        ("policies-view-sandbox", "Sandbox", "Sandbox policy packs, read-only (3)"),
+                        ("policies-mode", "Mode", "Switch the scope between observe and action (m)"),
+                        ("policies-block", "Block at", "Pick the active policy's block level (b)"),
+                        ("policies-alert", "Alert at", "Pick the active policy's alert level (a)"),
+                        ("policies-approval", "Approval", "Pick when the scope asks a human first (h)"),
+                        ("policies-rule-pack", "Rule pack", "Switch the scope's rule pack (p)"),
+                        ("policies-toggle", "Turn on", "Turn the opt-in pack on or off for the scope (Space)"),
+                        ("policies-scope", "Next scope", "Show the next scope: global, then each connector (s)"),
                         ("policies-activate", "Activate", "Pick a policy, preview what changes, activate it (Enter)"),
                         ("policies-change-pack", "Change pack", "Switch the rule pack for all connectors or one (Enter)"),
                         ("policies-details", "Details", "Show the highlighted row (i)"),
-                        ("policies-refresh", "Refresh", "Re-read policies and packs (r)"),
+                        ("policies-refresh", "Refresh", "Re-read policies, packs and postures (r)"),
                     ):
                         yield Button(label, id=button_id, compact=True, tooltip=tip)
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
@@ -3869,7 +3875,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._sync_sandbox_controls()
         elif self.active_panel == "policies":
             self.policy_model.cursor = event.cursor_row
-            self._update_body_only()
+            if self.policy_model.cursor != event.cursor_row:
+                # A chain group header: the model moved on to a chain row,
+                # so put the table cursor there too.
+                self._render_chrome()
+            else:
+                self._update_body_only()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
@@ -4534,12 +4545,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
             ],
             "policies": [
-                ("1 / 2 / 3", "Policies / rule packs / sandbox packs"),
-                ("j/k or Up/Down", "Navigate the selected view"),
-                ("Enter", "Policies: pick and activate a policy (preview, confirm)"),
-                ("Enter", "Rule packs: switch the pack for all connectors or one"),
-                ("i", "Details of the highlighted row"),
-                ("r", "Refresh"),
+                *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
+                ("A", "Activity panel (a is alert level on Posture)"),
                 ("p (Overview)", "Opens this panel; Runtime keeps p for its planes"),
             ],
             "setup": setup_keys.help_rows(self._setup_view(), setup_keys.setup_conditions(self.setup_model)),
@@ -10438,11 +10445,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "alerts":
             return self.alerts_model.detail_text()
         if self.active_panel == "policies":
-            detail = self.policy_model.detail_text()
-            if not detail:
-                return ""
-            title, _, rest = detail.partition("\n")
-            return f"[bold #A78BFA]{rich_escape(title)}[/]\n{rich_escape(rest)}"
+            return self._policy_detail_markup()
         if self.active_panel == "registries" and self.registries_model.detail_open:
             detail = self.registries_model.selected_detail_info()
             if detail is None:
@@ -11918,7 +11921,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         elif command == "doctor":
             self._load_doctor_cache()
         elif command == "policy" or (
-            command == "guardrail" and len(args) > 1 and args[1] in {"use-pack", "enable", "disable"}
+            command == "guardrail"
+            and len(args) > 1
+            and args[1] in {"use-pack", "enable", "disable", "mode", "hilt", "protection"}
         ):
             if command == "guardrail":
                 self._refresh_cached_config()
@@ -12134,6 +12139,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)
         self.policy_model.set_config(new_cfg)
+        if self.policy_model.loaded:
+            # Scope postures (mode, approval, packs) come from config.yaml.
+            self._schedule_policy_load()
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
         if (

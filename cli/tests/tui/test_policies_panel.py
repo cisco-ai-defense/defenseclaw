@@ -8,13 +8,15 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Policies panel journeys at 80x24: activate a policy, switch a connector's rule pack."""
+"""Policies panel journeys at 80x24 (activate a policy, switch a rule pack, turn an
+opt-in pack on, switch a connector's mode) and one render check at 160x45."""
 
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,8 +26,9 @@ from defenseclaw.policy_catalog import ConnectorPack, RulePack  # noqa: E402
 from defenseclaw.tui import app as app_module  # noqa: E402
 from defenseclaw.tui import policy_panel  # noqa: E402
 from defenseclaw.tui.executor import CommandEvent  # noqa: E402
-from fixtures import snapshot_app  # noqa: E402
+from fixtures import screen_text, snapshot_app  # noqa: E402
 from test_policy_state import DEFAULT, PERMISSIVE, STRICT  # noqa: E402
+from test_protection_center import CHAINS, FAMILIES, PACKS, Posture  # noqa: E402
 
 _VALID = json.dumps(
     {
@@ -36,8 +39,14 @@ _VALID = json.dumps(
     }
 )
 
+POSTURES = (
+    Posture("global"),
+    Posture("codex", mode="action", mode_source="override"),
+    Posture("claudecode"),
+)
 
-def policies_app(tmp_path, monkeypatch):
+
+def policies_app(tmp_path, monkeypatch, *, multi_connector: bool = False):
     """snapshot_app with a fake catalog, a fake validator and a recording executor."""
     reads: list[object] = []
 
@@ -52,6 +61,10 @@ def policies_app(tmp_path, monkeypatch):
                 RulePack("strict", "/p/guardrail/strict", "preset", ()),
                 RulePack("permissive", "/p/guardrail/permissive", "preset", ()),
             ],
+            postures=list(POSTURES),
+            protection=list(PACKS),
+            families={path: list(rows) for path, rows in FAMILIES.items()},
+            chains=list(CHAINS),
         )
 
     captured: list[tuple[str, tuple[str, ...]]] = []
@@ -66,6 +79,9 @@ def policies_app(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "_communicate_captured", fake_captured)
 
     app = snapshot_app(tmp_path)
+    if multi_connector:
+        # ``guardrail.connectors`` makes ``--connector`` valid for mode and approval.
+        app.config.guardrail.connectors = {"codex": SimpleNamespace(), "claudecode": SimpleNamespace()}
     runs: list[tuple[str, tuple[str, ...]]] = []
 
     async def fake_run(binary, args, **_kwargs):
@@ -88,7 +104,7 @@ async def until(pilot, condition, *, tries: int = 100) -> None:
 
 
 @pytest.mark.asyncio
-async def test_activate_strict_from_the_policies_panel(tmp_path, monkeypatch) -> None:
+async def test_activate_strict_from_the_policies_view(tmp_path, monkeypatch) -> None:
     app, reads, _captured, runs = policies_app(tmp_path, monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await until(pilot, lambda: app.policy_model.loaded)
@@ -96,7 +112,7 @@ async def test_activate_strict_from_the_policies_panel(tmp_path, monkeypatch) ->
         assert app.overview_model.active_policy is DEFAULT
         await pilot.press("P")
         assert app.active_panel == "policies"
-        await pilot.press("down", "down", "enter")  # strict → picker
+        await pilot.press("5", "down", "down", "enter")  # strict → picker
         await pilot.press("enter")  # choose strict
         await pilot.press("enter")  # consequence: activate
         await until(pilot, lambda: bool(runs))
@@ -109,7 +125,7 @@ async def test_switch_one_connectors_rule_pack_to_strict(tmp_path, monkeypatch) 
     app, _reads, captured, runs = policies_app(tmp_path, monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await until(pilot, lambda: app.policy_model.loaded)
-        await pilot.press("P", "2", "down", "enter")  # the codex row → scope preselected
+        await pilot.press("P", "6", "down", "enter")  # the codex row → scope preselected
         await pilot.press("enter")  # keep codex
         await pilot.press("2", "enter")  # strict → validate
         await until(pilot, lambda: bool(captured))
@@ -117,3 +133,50 @@ async def test_switch_one_connectors_rule_pack_to_strict(tmp_path, monkeypatch) 
         await until(pilot, lambda: bool(runs))
     assert captured == [("defenseclaw", ("guardrail", "validate-pack", "/p/guardrail/strict", "--json"))]
     assert runs == [("defenseclaw", ("guardrail", "use-pack", "strict", "--connector", "codex"))]
+
+
+@pytest.mark.asyncio
+async def test_turn_on_an_optin_pack_for_one_connector(tmp_path, monkeypatch) -> None:
+    app, reads, _captured, runs = policies_app(tmp_path, monkeypatch)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await until(pilot, lambda: app.policy_model.loaded)
+        await pilot.press("P", "2", "s", "s")  # opt-in packs, scope claudecode
+        assert app.policy_model.scope_name() == "claudecode"
+        assert "Kubernetes production" in screen_text(app)  # the pack rows are on screen at 80x24
+        await pilot.press("down", "space")  # Kubernetes production → consequence
+        await pilot.press("enter")  # turn on
+        await until(pilot, lambda: bool(runs))
+        await until(pilot, lambda: len(reads) >= 2)  # the panel re-reads after success
+    assert runs == [
+        (
+            "defenseclaw",
+            ("guardrail", "protection", "enable", "kubernetes-production-protection", "--connector", "claudecode"),
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_m_on_a_connector_switches_it_to_observe_after_a_second_confirm(tmp_path, monkeypatch) -> None:
+    app, _reads, _captured, runs = policies_app(tmp_path, monkeypatch, multi_connector=True)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await until(pilot, lambda: app.policy_model.loaded)
+        await pilot.press("P", "down", "m")  # codex is in action mode → observe weakens
+        await pilot.press("enter")  # arms the red confirm
+        await pilot.pause()
+        assert runs == []  # one press never runs a weakening change
+        await pilot.press("enter")
+        await until(pilot, lambda: bool(runs))
+    assert runs == [("defenseclaw", ("guardrail", "mode", "observe", "--connector", "codex"))]
+
+
+@pytest.mark.asyncio
+async def test_protection_center_renders_every_scope_at_160x45(tmp_path, monkeypatch) -> None:
+    app, _reads, _captured, _runs = policies_app(tmp_path, monkeypatch)
+    async with app.run_test(size=(160, 45)) as pilot:
+        await until(pilot, lambda: app.policy_model.loaded)
+        await pilot.press("P")
+        await pilot.pause()
+        text = screen_text(app)
+    for scope in ("global", "codex", "claudecode"):
+        assert scope in text
+    assert "Blocks at" in text  # the wide table's columns
