@@ -714,7 +714,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     #panel-aside {
-        width: 40%;
+        width: 38%;
         height: auto;
         max-height: 100%;
         margin: 0 0 0 1;
@@ -726,11 +726,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         color: TOKEN_TEXT_PRIMARY;
     }
 
-    /* With a nav list the table gets a box titled with the active item. */
+    /* With a nav list the table gets a box titled with the active item,
+       sized to its rows (it scrolls past the split's height, or past 60%
+       when the aside sits below it). */
     #panel-split.with-nav #panel-table {
+        height: auto;
+        max-height: 100%;
         border: round TOKEN_BORDER_MUTED;
         border-title-color: TOKEN_ACCENT_CYAN;
         border-title-style: bold;
+    }
+
+    #panel-split.with-nav.aside-below #panel-table {
+        max-height: 60%;
     }
 
     #panel-split.with-nav #panel-table:focus {
@@ -803,6 +811,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         max-height: 7;
         margin-top: 0;
         padding: 0 2;
+    }
+
+    /* An aside moved below the table keeps the table's first rows on a
+       short terminal; it scrolls. */
+    #detail-panel.compact.aside-below {
+        max-height: 5;
     }
 
     #detail-panel-body {
@@ -3247,6 +3261,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         self.detail_text = detail
         panel.border_title = None
+        panel.remove_class("aside-below")
         if not detail:
             panel.add_class("hidden")
             self._last_detail_signature = None
@@ -10309,6 +10324,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         width = int(getattr(self.size, "width", 0) or 0)
         layout = split_layout(width, has_nav=bool(items), has_aside=aside is not None)
         split.set_class(layout.nav, "with-nav")
+        split.set_class(layout.aside_below, "aside-below")
         nav.set_class(not layout.nav, "hidden")
         table_title = ""
         if layout.nav:
@@ -10348,13 +10364,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         split.set_class(panel == "overview" or self.help_open, "hidden")
-        split.remove_class("with-nav")
+        split.remove_class("with-nav", "aside-below")
         nav.add_class("hidden")
         nav.clear_items()
         aside_widget.add_class("hidden")
         aside_widget.border_title = None
         table.border_title = None
         detail.border_title = None
+        detail.remove_class("aside-below")
 
     def _render_detail_panel(self) -> None:
         panel = self.query_one("#detail-panel", VerticalScroll)
@@ -10364,6 +10381,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # A panel's own detail wins; otherwise a narrow terminal shows the
         # aside here (see _render_panel_split).
         below = None if detail else self._panel_aside_below
+        panel.set_class(below is not None, "aside-below")
         if not detail and below is None:
             if not panel.has_class("hidden"):
                 panel.add_class("hidden")

@@ -13,7 +13,7 @@
 Every panel renders into one shared surface. ``DefenseClawTUI.compose`` wraps
 the shared table area in ``Horizontal(#panel-split)``:
 
-    #panel-nav (PanelNav, ~24 cols) | #panel-main (#panel-table, #detail-panel) | #panel-aside (~40%)
+    #panel-nav (PanelNav, 24 cols) | #panel-main (#panel-table, #detail-panel) | #panel-aside (38%)
 
 A panel opts in through three app hooks (if-chains like the rest of app.py):
 
@@ -51,8 +51,10 @@ from defenseclaw.tui.theme import DEFAULT_TOKENS
 TOKENS = DEFAULT_TOKENS
 
 # Terminal columns from which the nav list / right-hand aside are shown.
+# Below 140 columns a nav, a two-column table and a 38% aside leave the table
+# too narrow, so the aside sits below the table there.
 NAV_MIN_WIDTH = 100
-ASIDE_MIN_WIDTH = 120
+ASIDE_MIN_WIDTH = 140
 # #panel-nav is 24 columns wide: a round border and one column of padding
 # each side leave 20 for the items (keep in sync with the app CSS).
 NAV_WIDTH = 24

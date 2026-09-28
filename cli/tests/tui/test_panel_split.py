@@ -45,8 +45,8 @@ ITEMS = (
         (0, False, False, True),
         (99, False, False, True),
         (100, True, False, True),
-        (119, True, False, True),
-        (120, True, True, False),
+        (139, True, False, True),
+        (140, True, True, False),
         (200, True, True, False),
     ],
 )
