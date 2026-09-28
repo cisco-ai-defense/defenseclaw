@@ -277,6 +277,15 @@ func (a *APIServer) applySandboxVerdictReason(
 	action := strings.ToLower(strings.TrimSpace(resp.Action))
 	raw := strings.ToLower(strings.TrimSpace(resp.RawAction))
 	if (action == "" || action == "allow") && (raw == "" || raw == "allow") {
+		// An allowed verdict that carries a finding (a profile that
+		// answers a HIGH rule with allow) is flagged: the activity feed
+		// and last reason read the plain text, while the harness output
+		// stays that of an allow.
+		if severityRank[strings.ToUpper(strings.TrimSpace(resp.Severity))] >= severityRank["LOW"] &&
+			(len(resp.RuleIDs) > 0 || len(findings) > 0) {
+			resp.SourceReason = hookSourceReason(resp)
+			resp.Reason = sandboxVerdictReason(connectorName, "alert", resp.RuleIDs, findings)
+		}
 		return resp
 	}
 	// The verb follows what the harness does: a block DefenseClaw cannot
