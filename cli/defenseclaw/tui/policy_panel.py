@@ -453,6 +453,9 @@ class PolicyPanelMixin:
             return
         if str(button.label) != label:
             button.label = label
+            # A longer label ("Turn on" -> "Turn off") keeps the old width
+            # unless the bar lays out again, and then shows only "Turn".
+            button.refresh(layout=True)
 
     def _handle_policy_control(self, button_id: str) -> None:
         key = POLICY_BUTTON_KEYS.get(button_id)

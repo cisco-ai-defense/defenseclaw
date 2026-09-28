@@ -502,3 +502,26 @@ def test_a_composed_pack_shows_its_base_and_why_its_levels_changed() -> None:
     assert model.data_table_rows(74)[1][5] == "strict+1"
     assert model.data_table_rows(74)[1][2] == "CRITICAL"  # the folder name reads as default levels
     assert any(line.startswith("Rule pack: protected-codex = strict + 1") for line in model.aside()[1])
+
+
+async def test_the_toggle_button_grows_to_fit_a_longer_label() -> None:
+    from defenseclaw.tui.policy_panel import PolicyPanelMixin
+    from textual.app import App
+    from textual.containers import Horizontal
+    from textual.widgets import Button
+
+    class Harness(App[None]):
+        CSS = "Button { height: 1; min-width: 8; border: none; }"
+
+        def compose(self):  # type: ignore[no-untyped-def]
+            with Horizontal():
+                yield Button("Turn on", id="toggle")
+                yield Button("Refresh", id="refresh")
+
+    app = Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        PolicyPanelMixin._set_button_label(app, "#toggle", "Turn off")  # type: ignore[arg-type]
+        await pilot.pause()
+        # A button is its label plus one pad cell each side.
+        assert app.query_one("#toggle", Button).size.width >= len("Turn off") + 2
