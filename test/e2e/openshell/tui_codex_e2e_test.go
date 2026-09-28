@@ -407,6 +407,15 @@ func (x *tuiCodex) tamper() {
 func (x *tuiCodex) ctrlZ() {
 	m := x.find("yolo")
 	m.keys("C-z")
+	// Codex may redraw its screen after the key; text typed during the
+	// redraw is lost (live: the composer came back empty), so the prompt
+	// waits until the composer is back and the screen stops changing.
+	last := ""
+	m.waitFor(30*time.Second, "the composer to settle after Ctrl-Z", func(s string) bool {
+		settled := s == last && strings.Contains(lastLines(s, 8), "› ")
+		last = s
+		return settled
+	})
 	x.prompt(m, x.yolo, "Say hello.", "DCE2E-TURN-DONE default", 2*time.Minute)
 	m.save("ctrl-z")
 }
@@ -538,6 +547,9 @@ func (x *tuiCodex) dialogs() {
 
 func (x *tuiCodex) safeRun() {
 	t := x.t
+	// Only one sandbox mounts a folder live: the skip-permissions one's
+	// steps are over.
+	x.dropSandbox(x.yolo)
 	m := x.term("safe", nil)
 	m.line(shellJoin(x.runArgs(x.safe, "--safe")...))
 	screen := m.waitFor(20*time.Minute, "the --safe Codex TUI", func(s string) bool {
@@ -650,6 +662,9 @@ func (x *tuiCodex) bedrockTUI() {
 	if key == "" {
 		t.Skip("AWS_BEARER_TOKEN_BEDROCK is not set")
 	}
+	// The --safe sandbox's steps are over, and only one sandbox mounts
+	// the folder live.
+	x.dropSandbox(x.safe)
 	// A terminal server of its own carries the key in its environment,
 	// never on a command line.
 	m := x.term("bedrock", []string{"AWS_BEARER_TOKEN_BEDROCK=" + key})
@@ -730,9 +745,10 @@ func (x *tuiCodex) matrix() {
 func (x *tuiCodex) deleteAll() {
 	t := x.t
 	for _, name := range []string{x.yolo, x.safe} {
-		if res, err := x.api.Delete(x.ctx(5*time.Minute), name, sandboxapi.DeleteRequest{}); err != nil || !res.Deleted {
-			t.Fatalf("delete %s = %+v, %v", name, res, err)
+		if _, err := x.api.Get(x.ctx(time.Minute), name); sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			continue // deleted when its steps were over
 		}
+		x.dropSandbox(name)
 	}
 	waitFor(t, 3*time.Minute, "OpenShell to forget the sandboxes", func() error {
 		for _, name := range []string{x.yolo, x.safe} {
@@ -745,6 +761,14 @@ func (x *tuiCodex) deleteAll() {
 }
 
 // ---- helpers ---------------------------------------------------------------------
+
+// dropSandbox deletes a sandbox of the test through the daemon.
+func (x *tuiCodex) dropSandbox(name string) {
+	x.t.Helper()
+	if res, err := x.api.Delete(x.ctx(5*time.Minute), name, sandboxapi.DeleteRequest{}); err != nil || !res.Deleted {
+		x.t.Fatalf("delete %s = %+v, %v", name, res, err)
+	}
+}
 
 // start starts a stopped sandbox and waits until it answers.
 func (x *tuiCodex) start(name string) *sandboxapi.Sandbox {
