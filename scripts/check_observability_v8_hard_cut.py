@@ -32,12 +32,12 @@ ADDITIONAL_RUNTIME_SOURCES = (
 REMOVED_RUNTIME_PATHS = (
     # The legacy openshell-sandbox (0.0.x) standalone integration. Only the
     # consented legacy cleanup (cli/defenseclaw/sandbox_legacy.py) and the
-    # bind shim (internal/config/legacy_openshell.go) remain.
+    # bind shim (internal/config/legacy_openshell.go) remain. The OpenShell
+    # 0.1 integration's command lives in internal/cli/sandbox.go again.
     "cli/defenseclaw/commands/cmd_init_sandbox.py",
     "cli/defenseclaw/commands/cmd_setup_sandbox.py",
     "internal/audit/openshell_metrics_v8.go",
     "internal/cli/policy_diff.go",
-    "internal/cli/sandbox.go",
     "internal/enforce/mcp_enforcer.go",
     "internal/enforce/sandbox.go",
     "internal/sandbox",
@@ -80,17 +80,29 @@ LEGACY_CONFIG_BOUNDARIES = (
     "cli/defenseclaw/observability/v8_migration.py",
 )
 
+# The v8 compiler keeps a route that still selects a retired event or action
+# and warns, naming it (retired_selector_value); these are the only places the
+# retired names may appear.
+REMOVED_SELECTOR_REJECTION = (
+    "internal/config/observability_v8_compile.go",
+    "internal/config/observability_v8_compile_test.go",
+)
+
 RULES = (
     Rule(
         "openshell-exit-metric",
         re.compile(r"\bRecordOpenShellExitMetric\b|\bopenShellExit\b|\bdefenseclaw\.openshell\.exit\b"),
         "the metric.defenseclaw.openshell.exit family and its legacy counter were retired with the "
         "openshell-sandbox (0.0.x) integration",
+        # The v8 compiler names it only to warn about a route that selects it.
+        allowed_prefixes=REMOVED_SELECTOR_REJECTION,
     ),
     Rule(
         "init-sandbox-audit-action",
         re.compile(r"[\"']init-sandbox[\"']|\bActionInitSandbox\b|\bACTION_INIT_SANDBOX\b"),
         "the init-sandbox audit action was retired with the openshell-sandbox (0.0.x) integration",
+        # The v8 compiler names it only to warn about a route that selects it.
+        allowed_prefixes=REMOVED_SELECTOR_REJECTION,
     ),
     Rule(
         "legacy-openshell-sandbox-runtime",
