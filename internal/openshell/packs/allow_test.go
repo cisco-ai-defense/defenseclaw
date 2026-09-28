@@ -608,6 +608,56 @@ func TestClassifyAllowedIP(t *testing.T) {
 	}
 }
 
+// TestCuratedAllowlistOpensNoPrivateNetwork pins that DefenseClaw's curated
+// allowlist admits its names without opening the private addresses they
+// might resolve to, which only an operator's own allow entry for the name
+// does: nobody wrote an entry for registry.npmjs.org, so a private answer for
+// it is refused at dial time (and a direct rule for it asks).
+func TestCuratedAllowlistOpensNoPrivateNetwork(t *testing.T) {
+	withInterfaceAddrs(t)
+	private := []netip.Addr{netip.MustParseAddr("10.0.0.9")}
+	public := []netip.Addr{netip.MustParseAddr("104.16.0.1")}
+	for _, tc := range []struct {
+		name        string
+		edit        func(*config.OpenShellConfig)
+		flags       Flags
+		host        string
+		opens       bool
+		wantAllowed bool
+	}{
+		{"balanced pack", nil, Flags{Pack: "balanced"}, "registry.npmjs.org", false, true},
+		{"balanced profile over the open pack", nil, Flags{Profile: "balanced"}, "pypi.org", false, true},
+		{"administrator's balanced floor", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" }, Flags{}, "github.com", false, true},
+		{"required balanced pack", func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "balanced" }, Flags{}, "crates.io", false, true},
+		{"the user's own entry for a curated name", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"registry.npmjs.org"} },
+			Flags{Pack: "balanced"}, "registry.npmjs.org", true, true},
+		{"the user's own entry", func(o *config.OpenShellConfig) { o.Egress.Allow = []string{"db.corp-tools.example"} },
+			Flags{Pack: "balanced"}, "db.corp-tools.example", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eff, _ := mustResolve(t, testConfig(tc.edit), tc.flags)
+			d, err := eff.EgressDecider(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dec := d.Decide(policyProbe, tc.host, 443)
+			if dec.Allowed != tc.wantAllowed {
+				t.Fatalf("Decide(%s) = %+v", tc.host, dec)
+			}
+			if got := d.CheckAddrs(policyProbe, dec, public); !got.Allowed {
+				t.Fatalf("a public answer for %s = %+v", tc.host, got)
+			}
+			got := d.CheckAddrs(policyProbe, dec, private)
+			if got.Allowed != tc.opens || (!tc.opens && got.Category != egress.CategoryPrivateNetwork) {
+				t.Fatalf("a private answer for %s = %+v, want opened %v", tc.host, got, tc.opens)
+			}
+			if !strings.Contains(listValue(eff.Egress.Allow), tc.host) {
+				t.Fatalf("egress.allow = %v, want it to show %s", eff.Egress.Allow, tc.host)
+			}
+		})
+	}
+}
+
 // TestNeverOpenPrefixesAreGuarded pins that what triage never approves in
 // allowed_ips is what the egress proxy's guard refuses outright: the first
 // and last address of every never-open range resolve to a host-internal

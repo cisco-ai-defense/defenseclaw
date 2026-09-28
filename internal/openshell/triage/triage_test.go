@@ -604,6 +604,7 @@ func TestClassifyResolvesNames(t *testing.T) {
 		set("lan.example.org", "10.0.0.5").
 		set("db.corp-tools.example", "10.0.0.6").
 		set("feedaddr.example.org", "93.184.216.35").
+		set("registry.npmjs.org", "10.0.0.9").
 		set("gone.example.org")
 	open := effective(t, nil, packs.Flags{})
 	noUnblock := effective(t, func(o *config.OpenShellConfig) { o.Admin.AllowUnblock = boolPtr(false) }, packs.Flags{})
@@ -626,6 +627,8 @@ func TestClassifyResolvesNames(t *testing.T) {
 		{"private answer when unblock is off", noUnblock, "lan.example.org", Reject, ReasonAdmin},
 		{"private answer an exact allow entry opens", allowed, "db.corp-tools.example", Approve, ReasonAllowed},
 		{"not-allowlisted name with a loopback answer", balanced, "rebind.example.org", Reject, ReasonResolvesToHost},
+		// The curated allowlist admits the name, not its private answers.
+		{"curated name with a private answer asks", balanced, "registry.npmjs.org", Ask, ReasonPrivateNetwork},
 		{"blocked address answer", blockedAddr, "feedaddr.example.org", Reject, ReasonBlocklisted},
 		{"admin-blocked address answer", adminAddr, "feedaddr.example.org", Reject, ReasonAdmin},
 		{"no answer", open, "gone.example.org", Reject, ReasonUnresolved},
@@ -669,6 +672,7 @@ func TestClassifyResolvesNames(t *testing.T) {
 		{noUnblock, "lan.example.org", ReasonAdmin},
 		{allowed, "db.corp-tools.example", ""},
 		{balanced, "rebind.example.org", ReasonResolvesToHost},
+		{balanced, "registry.npmjs.org", ReasonPrivateNetwork},
 		{blockedAddr, "feedaddr.example.org", ReasonBlocklisted},
 		{adminAddr, "feedaddr.example.org", ReasonAdmin},
 		{open, "gone.example.org", ""},

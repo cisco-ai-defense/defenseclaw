@@ -296,6 +296,10 @@ type Effective struct {
 	// hostNames are this machine's own names, which reach the host.
 	hostNames []string
 	settings  map[string]Setting
+	// curatedAllow are the Egress.Allow entries only DefenseClaw's curated
+	// allowlist put there (resolveAllow). They reach the decider as its
+	// allowlist feed, not as operator allow entries (EgressOptions).
+	curatedAllow []string
 	// decider is the egress decider without unblocks (EgressDecider(nil))
 	// that DecideEgress and the unblock and approval checks ask.
 	decider *egress.Decider
@@ -1021,6 +1025,11 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 // apply. Entries of a custom pack the user picked and the user's own entries
 // are lifted refusals, so openshell.admin.allow_unblock: false drops them.
 // Entries that cover every host or a whole public suffix are never used.
+//
+// The curated entries are DefenseClaw's list of public developer services,
+// not the operator's word for a destination: they admit the names but open
+// no private network their DNS answers lead to, so the ones no operator
+// entry repeats are kept apart (curatedAllow) for EgressOptions.
 func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool) error {
 	pack := r.eff.Pack
 	eg := &r.eff.Egress
@@ -1028,16 +1037,21 @@ func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool)
 
 	eg.Allow = []string{}
 	from := r.packLayer
-	var refused []string
-	if pack.Builtin || r.required {
-		eg.Allow = mergeLists(pack.Egress.Allow)
+	var refused, curated, operator []string
+	switch {
+	case pack.Builtin:
+		curated = mergeLists(pack.Egress.Allow)
+	case r.required:
+		operator = mergeLists(pack.Egress.Allow)
 	}
+	eg.Allow = mergeLists(curated, operator)
 	if r.eff.NetworkMode == NetworkAllowlist && pack.Network.Mode != NetworkAllowlist {
-		curated, err := Builtin(config.OpenShellProfileBalanced)
+		balanced, err := Builtin(config.OpenShellProfileBalanced)
 		if err != nil {
 			return fmt.Errorf("sandbox policy: curated allowlist: %w", err)
 		}
-		eg.Allow = mergeLists(eg.Allow, curated.Egress.Allow)
+		curated = mergeLists(curated, balanced.Egress.Allow)
+		eg.Allow = mergeLists(eg.Allow, balanced.Egress.Allow)
 		from = layer{from.source, from.origin + " + the curated allowlist of pack balanced"}
 	}
 	if !pack.Builtin && !r.required && len(pack.Egress.Allow) > 0 {
@@ -1050,6 +1064,7 @@ func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool)
 			})
 		} else {
 			eg.Allow = mergeLists(pack.Egress.Allow, eg.Allow)
+			operator = mergeLists(operator, pack.Egress.Allow)
 		}
 	}
 
@@ -1078,7 +1093,14 @@ func (r *resolver) resolveAllow(o config.OpenShellConfig, unblockForbidden bool)
 		})
 	case len(userAllow) > 0:
 		eg.Allow = mergeLists(eg.Allow, userAllow)
+		operator = mergeLists(operator, userAllow)
 		from = mergedLayer(from, true, "openshell.egress.allow")
+	}
+	r.eff.curatedAllow = nil
+	for _, glob := range curated {
+		if !containsString(operator, glob) {
+			r.eff.curatedAllow = append(r.eff.curatedAllow, glob)
+		}
 	}
 	if len(refused) > 0 {
 		r.setClamped(key, listValue(eg.Allow), listValue(mergeLists(eg.Allow, refused)), "openshell.admin.allow_unblock")

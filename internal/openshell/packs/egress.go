@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 )
 
@@ -72,16 +73,27 @@ func (e *Effective) EgressOptions(unblocks egress.Unblocks) (egress.DeciderOptio
 		Mode:       egress.ModeOpen,
 		Ports:      slices.Clone(eg.Ports),
 		Blocklists: []*egress.Feed{},
-		// The allow list already holds the curated allowlist when the
-		// profile needs it (resolveAllow); the proxy's own allowlist feed
-		// would add hosts the policy does not list.
+		// The allow list holds the curated allowlist when the profile needs
+		// it (resolveAllow), and only then does the proxy's allowlist feed
+		// apply (curatedFeed): it would add hosts the policy does not list.
 		Allowlists: []*egress.Feed{},
 		AdminBlock: deciderPatterns(eg.AdminBlock),
 		AllowOnly:  deciderPatterns(eg.AllowOnly),
 		Block:      deciderPatterns(eg.Block),
-		Allow:      deciderPatterns(eg.Allow),
+		Allow:      deciderPatterns(withoutEntries(eg.Allow, e.curatedAllow)),
 		NoUnblock:  isFalse(e.admin.AllowUnblock),
 		Unblocks:   unblocks,
+	}
+	if len(e.curatedAllow) > 0 {
+		// DefenseClaw's curated entries admit their names as the allowlist
+		// feed does, which opens no private network: an operator allow
+		// entry for a name also opens every private address it resolves
+		// to, and nobody wrote one for registry.npmjs.org.
+		feed, err := curatedFeed(e.curatedAllow)
+		if err != nil {
+			return egress.DeciderOptions{}, err
+		}
+		opts.Allowlists = []*egress.Feed{feed}
 	}
 	if e.NetworkMode != NetworkOpen || len(eg.AllowOnly) > 0 {
 		opts.Mode = egress.ModeAllowlist
@@ -125,6 +137,44 @@ func (e *Effective) policyDecider() (*egress.Decider, error) {
 		return e.decider, nil
 	}
 	return e.EgressDecider(nil)
+}
+
+// curatedFeed is the egress proxy's built-in allowlist feed, which carries
+// the curated entries: it is the balanced pack's egress.allow, host for host
+// (a test keeps the two identical), and every curated entry comes from that
+// list. An entry the feed lacks fails the policy rather than being dropped
+// or opening private networks as an operator entry.
+func curatedFeed(curated []string) (*egress.Feed, error) {
+	feed, err := egress.BuiltinAllowlist()
+	if err != nil {
+		return nil, fmt.Errorf("sandbox policy: %w", err)
+	}
+	var hosts []string
+	for _, entry := range feed.Entries {
+		for _, host := range entry.Hosts {
+			hosts = append(hosts, config.NormalizeOpenShellEgressPattern(host))
+		}
+	}
+	for _, glob := range curated {
+		if !slices.Contains(hosts, config.NormalizeOpenShellEgressPattern(glob)) {
+			return nil, fmt.Errorf("sandbox policy: curated allow entry %q is not on the built-in allowlist feed", glob)
+		}
+	}
+	return feed, nil
+}
+
+// withoutEntries returns list without the entries of drop.
+func withoutEntries(list, drop []string) []string {
+	if len(drop) == 0 {
+		return list
+	}
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		if !slices.Contains(drop, item) {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // deciderPatterns drops "*", which has no decider form: validated lists

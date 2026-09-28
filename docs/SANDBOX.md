@@ -538,7 +538,10 @@ that decides wins:
      (`private_network`). These are RFC 1918, carrier-grade NAT and IPv6
      unique local addresses, the other hosts on this machine's subnets, and
      intranet names. The allow entry can come from `openshell.egress.allow`,
-     the pack's `egress.allow` or `openshell.admin.egress_allow_only`.
+     a custom pack's `egress.allow` or `openshell.admin.egress_allow_only`.
+     DefenseClaw's curated allowlist (the balanced pack's `egress.allow`)
+     admits its names but opens none of the private addresses they resolve
+     to; an entry of your own for the same name does.
    - The port must be on the port list (80 and 443 by default).
    - Guard blocks can't be unblocked.
 2. **The administrator's lists.** `openshell.admin.egress_block` refuses
@@ -584,10 +587,11 @@ exact host or `*.` for every subdomain (not the apex).
   from an unattended agent is moving data to a place anyone can read or past
   network controls. Categories: `paste_site`, `file_drop`, `webhook_catcher`,
   `tunnel`, `anonymizer`.
-- `allowlist.yaml` (`defenseclaw-allowlist`) is the allowlist-mode feed of a
-  decider built without a policy. A sandbox's decider uses the balanced
-  pack's `egress.allow` instead, as part of the allow list. A test keeps the
-  two lists identical. Categories: `package_registry`, `source_hosting`,
+- `allowlist.yaml` (`defenseclaw-allowlist`) is the allowlist-mode feed. It
+  is the balanced pack's `egress.allow`, host for host (a test keeps the two
+  lists identical), and a sandbox's decider applies it for the curated
+  entries its policy has (`packs.Effective.EgressOptions`), so they never
+  open a private network the way an operator allow entry does. Categories: `package_registry`, `source_hosting`,
   `toolchain`, `documentation`. CONNECT tunnels are opaque, so the proxy cannot tell a
   download from an upload: every listed host with a write API (GitHub, GitLab,
   the registries' publish endpoints) can receive data too. The balanced
