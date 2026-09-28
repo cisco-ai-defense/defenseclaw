@@ -1188,6 +1188,7 @@ _bundle-data: _checkout-write-preflight
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
+	cp policies/guardrail/tool-chains.json cli/defenseclaw/_data/policies/guardrail/
 	@# Use the canonical generator without repairing tracked docs before CI checks.
 	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/

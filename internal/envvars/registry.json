@@ -5174,7 +5174,7 @@
     {
       "name": "DEFENSECLAW_UPDATE_GOLDEN",
       "category": "test_fixture",
-      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files instead of comparing against them.",
+      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, and the bounded chain catalog, instead of comparing against them.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -5198,6 +5198,10 @@
         {
           "location": "internal/openshell/profiles/profiles_test.go",
           "description": "Rewrites the provider profile goldens"
+        },
+        {
+          "location": "internal/guardrail/tool_chain_catalog_json_test.go",
+          "description": "Rewrites policies/guardrail/tool-chains.json from the chain catalog"
         }
       ],
       "since": "0.9.0"

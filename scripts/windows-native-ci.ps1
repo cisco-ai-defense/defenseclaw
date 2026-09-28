@@ -1611,6 +1611,7 @@ function Stage-PackageData(
     foreach ($name in @('default', 'strict', 'permissive')) {
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
     }
+    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\guardrail\tool-chains.json') -Destination (Join-Path $data 'policies\guardrail') -Force
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
     $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
     $targetRegistry = Join-Path $data 'envvars\registry.json'

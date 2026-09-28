@@ -1,0 +1,389 @@
+{
+  "version": 1,
+  "chains": [
+    {
+      "id": "chain.guardrails_off_then_egress",
+      "title": "Guardrails disabled before external egress",
+      "severity": "HIGH",
+      "domain": "security-controls",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.permission_denied_then_runtime_bypass",
+      "title": "Permission denial followed by runtime bypass",
+      "severity": "HIGH",
+      "domain": "security-controls",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 300,
+      "requires": [
+        "same session"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.privilege_discovery_then_elevation",
+      "title": "Privilege discovery followed by elevation",
+      "severity": "HIGH",
+      "domain": "host",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 900,
+      "requires": [
+        "same session"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.secret_manager_read_then_egress",
+      "title": "Secret-manager read followed by external egress",
+      "severity": "HIGH",
+      "domain": "data-egress",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.secret_read_then_egress",
+      "title": "Secret read followed by external egress",
+      "severity": "CRITICAL",
+      "domain": "data-egress",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "matching identity when known",
+        "artifact unchanged"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.workload_identity_then_lateral_execution",
+      "title": "Workload identity access followed by lateral execution",
+      "severity": "HIGH",
+      "domain": "kubernetes",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 900,
+      "requires": [
+        "same session"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.download_decode_execute_same_artifact",
+      "title": "Remote artifact downloaded, decoded, and executed",
+      "severity": "CRITICAL",
+      "domain": "host",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "matching identity when known",
+        "artifact unchanged"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.download_then_execute_same_artifact",
+      "title": "Remote artifact downloaded and later executed",
+      "severity": "HIGH",
+      "domain": "host",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "artifact unchanged"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.sensitive_egress_artifact_then_execute",
+      "title": "Sensitive-egress artifact created and later executed",
+      "severity": "HIGH",
+      "domain": "data-egress",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "artifact unchanged"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.firewall_trust_expansion_then_destination_use",
+      "title": "Firewall trust expansion followed by exact destination use",
+      "severity": "HIGH",
+      "domain": "network",
+      "can_block": false,
+      "event_window": 8,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "artifact unchanged"
+      ],
+      "note": "Alert-only until protected-firewall/approved-destination policy exists"
+    },
+    {
+      "id": "chain.sqlserver_xp_cmdshell_enable_then_invoke",
+      "title": "SQL Server xp_cmdshell enabled and invoked on the same connection",
+      "severity": "HIGH",
+      "domain": "sql",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded",
+        "joined object unchanged"
+      ],
+      "note": "Alert-only until protected-database policy exists"
+    },
+    {
+      "id": "chain.kubernetes_privileged_host_root_write_apply_exec",
+      "title": "Privileged Kubernetes host-root manifest applied and entered",
+      "severity": "HIGH",
+      "domain": "kubernetes",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded",
+        "joined object unchanged"
+      ],
+      "note": "Alert-only until protected-cluster policy exists"
+    },
+    {
+      "id": "chain.wireless_capture_then_deauth_same_bssid",
+      "title": "Targeted wireless capture followed by deauthentication of the same BSSID",
+      "severity": "HIGH",
+      "domain": "network",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded"
+      ],
+      "note": "Alert-only because authorization is deployment-specific"
+    },
+    {
+      "id": "chain.secretsdump_then_psexec_same_target_principal",
+      "title": "Credential extraction followed by remote execution against the same target and principal",
+      "severity": "HIGH",
+      "domain": "credentials",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded"
+      ],
+      "note": "Alert-only until protected-target policy exists"
+    },
+    {
+      "id": "chain.cloud_iam_principal_create_then_admin_attach_same_principal",
+      "title": "Cloud IAM principal created and granted AdministratorAccess",
+      "severity": "HIGH",
+      "domain": "cloud",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded"
+      ],
+      "note": "Alert-only until protected-account policy exists"
+    },
+    {
+      "id": "chain.kubernetes_privileged_cronjob_patch_then_create_job",
+      "title": "Privileged Kubernetes CronJob patched and instantiated",
+      "severity": "HIGH",
+      "domain": "kubernetes",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded",
+        "joined object unchanged"
+      ],
+      "note": "Alert-only until protected-cluster policy exists"
+    },
+    {
+      "id": "chain.sql_command_udf_create_then_invoke_same_function",
+      "title": "Command-executing SQL UDF created and invoked",
+      "severity": "HIGH",
+      "domain": "sql",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded",
+        "joined object unchanged"
+      ],
+      "note": "Alert-only until protected-database policy exists"
+    },
+    {
+      "id": "chain.reverse_shell_payload_write_then_persistence_install_same_artifact",
+      "title": "Reverse-shell payload written and installed for persistence",
+      "severity": "CRITICAL",
+      "domain": "host",
+      "can_block": true,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded",
+        "joined object unchanged"
+      ],
+      "note": "Can block when the profile maps its severity to block and the connector is block-capable"
+    },
+    {
+      "id": "chain.endpoint_security_control_request_then_completed_same_process",
+      "title": "Endpoint security-control mutation requested and observed for the same process",
+      "severity": "HIGH",
+      "domain": "security-controls",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.sensitive_read_value_then_external_literal_transmit",
+      "title": "Sensitive read value transmitted literally to an external destination",
+      "severity": "CRITICAL",
+      "domain": "data-egress",
+      "can_block": false,
+      "event_window": 5,
+      "time_window_seconds": 600,
+      "requires": [
+        "same session",
+        "exact value join"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.sensitive_sql_value_then_cross_resource_literal_persistence",
+      "title": "Sensitive SQL value persisted literally to a distinct MCP resource",
+      "severity": "HIGH",
+      "domain": "sql",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact value join",
+        "distinct destination resource",
+        "terminal step succeeded"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.compromised_credential_then_successful_authentication",
+      "title": "Recorded compromised credential used for successful authentication",
+      "severity": "HIGH",
+      "domain": "credentials",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "exact value join",
+        "terminal step succeeded",
+        "joined object unchanged"
+      ],
+      "note": "Alert-only"
+    },
+    {
+      "id": "chain.adcs_certificate_request_then_pfx_authentication",
+      "title": "AD CS impersonation certificate requested and used for PFX authentication",
+      "severity": "HIGH",
+      "domain": "credentials",
+      "can_block": true,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join"
+      ],
+      "note": "Can block when the profile maps its severity to block and the connector is block-capable"
+    },
+    {
+      "id": "chain.s4u_ticket_then_kerberos_secretsdump_same_cache",
+      "title": "Result-backed S4U ticket used for Kerberos-only secretsdump",
+      "severity": "HIGH",
+      "domain": "credentials",
+      "can_block": true,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join"
+      ],
+      "note": "Can block when the profile maps its severity to block and the connector is block-capable"
+    },
+    {
+      "id": "chain.sensitive_sql_read_then_unbounded_delete_same_table",
+      "title": "Sensitive SQLite rowset read followed by unbounded delete of the same table",
+      "severity": "CRITICAL",
+      "domain": "sql",
+      "can_block": true,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join"
+      ],
+      "note": "Can block only with the strict rule pack or the database-destruction-protection pack, when the profile maps its severity to block and the connector is block-capable"
+    },
+    {
+      "id": "chain.file_read_then_email_same_artifact",
+      "title": "File read followed by email transfer of the same artifact",
+      "severity": "HIGH",
+      "domain": "data-egress",
+      "can_block": false,
+      "event_window": 9,
+      "time_window_seconds": 1800,
+      "requires": [
+        "same session",
+        "exact identity join",
+        "terminal step succeeded"
+      ],
+      "note": "Alert-only"
+    }
+  ]
+}
