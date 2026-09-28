@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/nestguard"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -44,14 +45,32 @@ func newFakeGuard() *fakeGuard { return &fakeGuard{running: map[string]nestguard
 
 func (g *fakeGuard) run(ctx context.Context, opts nestguard.Options) error {
 	g.mu.Lock()
-	g.running[opts.Root] = opts
 	g.runs = append(g.runs, opts)
+	if opts.Once {
+		// The final pass: one sweep, no watch.
+		g.mu.Unlock()
+		return nil
+	}
+	g.running[opts.Root] = opts
 	g.mu.Unlock()
 	<-ctx.Done()
 	g.mu.Lock()
 	delete(g.running, opts.Root)
 	g.mu.Unlock()
 	return nil
+}
+
+// finals are the final passes that ran over root.
+func (g *fakeGuard) finals(root string) []nestguard.Options {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []nestguard.Options
+	for _, o := range g.runs {
+		if o.Once && o.Root == root {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 func (g *fakeGuard) active(root string) (nestguard.Options, bool) {
@@ -238,5 +257,95 @@ func TestGuardDetectionLeavesRecordCopiesAlone(t *testing.T) {
 	}
 	if len(got.NestedRepos) != 33 || got.NestedRepos[32].Path != "nested/32/.git" {
 		t.Fatalf("nested repos = %+v", got.NestedRepos)
+	}
+}
+
+// TestGuardWatchesTheStopAndSweepsAfterIt pins that the guard keeps
+// watching while OpenShell stops the sandbox (its workload runs through the
+// grace period) and makes one final pass with the session's baseline once
+// it stopped, before a new session's baseline could take in what the
+// workload left.
+func TestGuardWatchesTheStopAndSweepsAfterIt(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "graceful"})
+	e.guard.waitActive(t, e.project, true)
+	var during *bool
+	e.fake.Intercept(func(method string) error {
+		if method == openshelltest.MethodStopSandbox && during == nil {
+			_, ok := e.guard.active(e.project)
+			during = &ok
+		}
+		return nil
+	})
+	if _, err := e.m.Stop(context.Background(), sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	if during == nil || !*during {
+		t.Fatal("the guard was off while OpenShell stopped the sandbox")
+	}
+	e.guard.waitActive(t, e.project, false)
+	eventually(t, "the final pass", func() bool { return len(e.guard.finals(e.project)) == 1 })
+	b, err := e.m.box(sb.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.m.waitGuard(b)
+	e.m.mu.Lock()
+	unswept := b.rec.Guard.Unswept
+	e.m.mu.Unlock()
+	if unswept {
+		t.Fatal("the session is still marked without its final pass")
+	}
+	// The next start does not sweep again.
+	if _, err := e.m.Start(context.Background(), sb.Name, sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(e.guard.finals(e.project)); n != 1 {
+		t.Fatalf("%d final passes, want 1", n)
+	}
+}
+
+// TestGuardSweepsASessionThatEndedWhileTheDaemonWasDown pins that a session
+// whose sandbox stopped while the daemon was down gets its final pass,
+// with its own baseline, before the next session's baseline is taken.
+func TestGuardSweepsASessionThatEndedWhileTheDaemonWasDown(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "downstop"})
+	e.guard.waitActive(t, e.project, true)
+	e.stop()
+	if _, err := e.client.StopSandbox(context.Background(), sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.WaitStopped(context.Background(), sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	// The workload planted a repository before it stopped.
+	if err := os.MkdirAll(filepath.Join(e.project, "planted", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.m = e.newManager()
+	if _, err := e.m.Start(context.Background(), sb.Name, sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	finals := e.guard.finals(e.project)
+	if len(finals) != 1 || slices.Contains(finals[0].Baseline.Repos, "planted") {
+		t.Fatalf("final passes = %+v, want one with the old session's baseline", finals)
+	}
+}
+
+// TestGuardFinalPassOnDelete pins that a delete makes the final pass over
+// the project the workload leaves behind.
+func TestGuardFinalPassOnDelete(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "delsweep"})
+	e.guard.waitActive(t, e.project, true)
+	if _, err := e.m.Delete(context.Background(), sb.Name, sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(e.guard.finals(e.project)); n != 1 {
+		t.Fatalf("%d final passes on delete, want 1", n)
 	}
 }

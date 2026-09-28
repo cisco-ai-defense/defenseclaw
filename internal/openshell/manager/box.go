@@ -74,9 +74,11 @@ type box struct {
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
-	// guardCancel stops the nested-repository guard (see guard.go).
-	guardCancel context.CancelFunc
-	guardDone   chan struct{}
+	// guard is the running nested-repository guard (see guard.go);
+	// guardEnding closes once the last one ended, its final pass
+	// included.
+	guard       *guardRun
+	guardEnding chan struct{}
 
 	hooks       hookStats
 	activeAt    time.Time

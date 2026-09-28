@@ -561,6 +561,42 @@ func TestGitlinks(t *testing.T) {
 	}
 }
 
+// TestRunOnceSweepsAndReturns pins the final pass: Run with Once
+// quarantines what appeared since the baseline, reports new gitlinks and
+// returns without watching.
+func TestRunOnceSweepsAndReturns(t *testing.T) {
+	root := realTemp(t)
+	mkdir(t, filepath.Join(root, ".git"))
+	baseline, err := TakeBaseline(context.Background(), root, 0, noLinks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkdir(t, filepath.Join(root, "late", ".git"))
+	links := func(context.Context, string) ([]string, error) { return []string{"late/sub"}, nil }
+	var c collector
+	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: links, Once: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- g.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run with Once kept watching")
+	}
+	got := c.list()
+	if len(got) != 2 || got[0].Kind != KindRepository || got[0].Dir != "late" || got[1].Kind != KindGitlink {
+		t.Fatalf("detections = %+v", got)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "late", ".git")); !os.IsNotExist(err) {
+		t.Fatal("the late repository was not quarantined")
+	}
+}
+
 func TestParseGitlinks(t *testing.T) {
 	out := "100644 0123456789012345678901234567890123456789 0\tREADME.md\x00" +
 		"160000 abcdefabcdefabcdefabcdefabcdefabcdefabcd 0\tvendor/sub\x00" +

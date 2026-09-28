@@ -144,6 +144,10 @@ type Options struct {
 	// Logf receives operational messages (fallback to polling, scan
 	// errors); nil discards them.
 	Logf func(format string, args ...any)
+	// Once makes Run sweep the project a single time (its .git entries and
+	// the index's gitlinks) and return: the final pass after the workload
+	// stopped, which catches what it left since the last event or poll.
+	Once bool
 }
 
 // Guard watches one project.
@@ -228,6 +232,11 @@ func (g *Guard) Run(ctx context.Context) error {
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("nestguard: %s is not a directory", g.opts.Root)
+	}
+	if g.opts.Once {
+		g.sweep(".")
+		g.checkGitlinks(ctx)
+		return nil
 	}
 	mode := g.opts.Mode
 	if mode == "" {

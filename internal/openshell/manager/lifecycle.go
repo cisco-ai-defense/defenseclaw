@@ -415,6 +415,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.tamperStop = false
 	m.mu.Unlock()
 	if guarded(rec) {
+		// The last session's guard has ended with its final pass (which it
+		// lacks when the sandbox stopped while the daemon was down), so the
+		// new baseline never takes in a repository the workload left.
+		m.finishGuard(ctx, b)
 		// A new session: the guard starts over from what the project
 		// holds now, before the sandbox runs again.
 		m.takeGuardBaseline(ctx, &rec)
@@ -579,6 +583,9 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 			return nil, upstream("wait for sandbox "+name+" deletion", err)
 		}
 	}
+	// The workload is gone: what it left in the project stays on this
+	// machine, so the guard makes its final pass before it is released.
+	m.finishGuard(ctx, b)
 	m.stopWatch(b)
 	resp := &sandboxapi.DeleteResponse{Name: name, Deleted: true, Warnings: warnings}
 	var cleanupWarnings []string

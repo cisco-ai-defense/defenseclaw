@@ -319,6 +319,7 @@ func (m *Manager) gc(ctx context.Context, gw *Gateway, b *box) {
 	name := b.rec.Name
 	m.mu.Unlock()
 	m.logf("sandbox %s is gone from OpenShell; releasing its binding, providers and mounts", name)
+	m.finishGuard(ctx, b)
 	m.stopWatch(b)
 	m.mu.Lock()
 	b.missing = true

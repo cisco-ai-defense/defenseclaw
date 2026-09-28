@@ -53,9 +53,26 @@ type guardRecord struct {
 	Baseline   nestguard.Baseline    `json:"baseline"`
 	TakenAt    time.Time             `json:"taken_at"`
 	Detections []nestguard.Detection `json:"detections,omitempty"`
+	// Unswept marks a session whose final pass (finalSweep) has not run
+	// yet: the workload may have left a repository after the guard's last
+	// event or poll, and the next session's baseline would take it in.
+	Unswept bool `json:"unswept,omitempty"`
 }
 
-// GuardFunc runs the nested-repository guard of one project until ctx ends.
+// guardRun is one running guard of a box.
+type guardRun struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	// final, guarded by Manager.mu, asks for the final pass once the guard
+	// ended (the workload stopped).
+	final bool
+}
+
+// guardFinalTimeout bounds the final pass of a session's guard.
+const guardFinalTimeout = 2 * time.Minute
+
+// GuardFunc runs the nested-repository guard of one project until ctx ends,
+// or once with opts.Once (the final pass).
 type GuardFunc func(ctx context.Context, opts nestguard.Options) error
 
 // runNestGuard is the default GuardFunc.
@@ -90,7 +107,7 @@ func (m *Manager) takeGuardBaseline(ctx context.Context, rec *record) {
 	if b.Truncated {
 		m.logf("nested-repository guard for %s: the project is too large to list every existing repository", rec.Name)
 	}
-	rec.Guard = &guardRecord{Baseline: b, TakenAt: m.now().UTC()}
+	rec.Guard = &guardRecord{Baseline: b, TakenAt: m.now().UTC(), Unswept: true}
 }
 
 // boundBaseline keeps the repositories and gitlinks of b that fit in limit
@@ -130,19 +147,45 @@ func boundBaseline(b nestguard.Baseline, limit int) nestguard.Baseline {
 	return b
 }
 
-// syncGuard runs the guard while a mounted sandbox is ready and stops it
-// otherwise. Callers must not hold Manager.mu.
+// syncGuard runs the guard while a mounted sandbox's workload may run
+// (starting, ready, stopping or deleting: the grace period of a stop or a
+// delete still runs it) and ends it once the workload stopped, with a
+// final pass over the project that catches what the workload left after
+// the guard's last event or poll. A session that ended without a final
+// pass (it stopped while the daemon was down) gets it when the daemon sees
+// it stopped. A delete runs the final pass itself (finishGuard). Callers
+// must not hold Manager.mu.
 func (m *Manager) syncGuard(b *box, phase audit.SandboxPhase) {
 	m.mu.Lock()
-	want := guarded(b.rec) && !b.deleted && phase == audit.SandboxPhaseReady && m.opts.Guard != nil
-	running := b.guardCancel != nil
+	guardable := guarded(b.rec) && !b.deleted && m.opts.Guard != nil
+	want := guardable && workloadPhase(phase)
+	running := b.guard != nil
+	final := guardable && stoppedWorkload(phase) && b.rec.Guard != nil && b.rec.Guard.Unswept
 	m.mu.Unlock()
 	switch {
 	case want && !running:
 		m.startGuard(b)
-	case !want && running:
-		m.stopGuard(b)
+	case !want && (running || final):
+		m.endGuard(b, final)
 	}
+}
+
+// workloadPhase reports a phase in which the sandbox's workload may run.
+func workloadPhase(p audit.SandboxPhase) bool {
+	switch p {
+	case audit.SandboxPhaseStarting, audit.SandboxPhaseReady, audit.SandboxPhaseStopping, audit.SandboxPhaseDeleting:
+		return true
+	}
+	return false
+}
+
+// stoppedWorkload reports a phase in which the workload has stopped.
+func stoppedWorkload(p audit.SandboxPhase) bool {
+	switch p {
+	case audit.SandboxPhaseStopped, audit.SandboxPhaseCompleted, audit.SandboxPhaseError:
+		return true
+	}
+	return false
 }
 
 func (m *Manager) startGuard(b *box) {
@@ -151,29 +194,157 @@ func (m *Manager) startGuard(b *box) {
 		return
 	}
 	m.mu.Lock()
-	if b.guardCancel != nil || b.deleted {
+	if b.guard != nil || b.deleted {
 		m.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(runCtx)
-	done := make(chan struct{})
-	b.guardCancel, b.guardDone = cancel, done
+	run := &guardRun{cancel: cancel, done: make(chan struct{})}
+	b.guard = run
+	ending := b.guardEnding
+	b.guardEnding = run.done
 	m.mu.Unlock()
 	go func() {
-		defer close(done)
+		defer close(run.done)
 		defer cancel()
+		if ending != nil {
+			// The previous session's final pass first.
+			<-ending
+		}
 		m.guardLoop(ctx, b)
+		m.mu.Lock()
+		final := run.final
+		m.mu.Unlock()
+		if final {
+			m.finalSweep(runCtx, b)
+		}
 	}()
 }
 
+// endGuard ends the running guard without waiting for it; with final, a
+// final pass follows (on the guard's goroutine, or on one of its own when
+// no guard runs). waitGuard waits for both.
+func (m *Manager) endGuard(b *box, final bool) {
+	m.mu.Lock()
+	run := b.guard
+	b.guard = nil
+	if run != nil {
+		run.final = final
+		m.mu.Unlock()
+		run.cancel()
+		return
+	}
+	runCtx := m.running()
+	if !final || runCtx == nil {
+		m.mu.Unlock()
+		return
+	}
+	ending := b.guardEnding
+	done := make(chan struct{})
+	b.guardEnding = done
+	m.mu.Unlock()
+	go func() {
+		defer close(done)
+		if ending != nil {
+			<-ending
+		}
+		m.finalSweep(runCtx, b)
+	}()
+}
+
+// waitGuard waits until the box's last guard ended, its final pass
+// included. Callers must not hold Manager.mu.
+func (m *Manager) waitGuard(b *box) {
+	m.mu.Lock()
+	ending := b.guardEnding
+	m.mu.Unlock()
+	if ending != nil {
+		<-ending
+	}
+}
+
+// finishGuard ends the session's guard once its workload is gone (a start
+// of a stopped sandbox, before the new baseline; a delete) and runs the
+// final pass the session still lacks, waiting for both.
+func (m *Manager) finishGuard(ctx context.Context, b *box) {
+	m.mu.Lock()
+	run := b.guard
+	b.guard = nil
+	if run != nil {
+		run.final = true
+	}
+	m.mu.Unlock()
+	if run != nil {
+		run.cancel()
+	}
+	m.waitGuard(b)
+	m.finalSweep(ctx, b)
+}
+
+// stopGuard stops the guard for good (the daemon stops, the sandbox is
+// released) and waits for it; no final pass runs.
 func (m *Manager) stopGuard(b *box) {
 	m.mu.Lock()
-	cancel, done := b.guardCancel, b.guardDone
-	b.guardCancel, b.guardDone = nil, nil
+	run := b.guard
+	b.guard = nil
+	if run != nil {
+		run.final = false
+	}
 	m.mu.Unlock()
-	if cancel != nil {
-		cancel()
-		<-done
+	if run != nil {
+		run.cancel()
+	}
+	m.waitGuard(b)
+}
+
+// finalSweep runs the guard's final pass over a session whose workload
+// stopped (guardRecord.Unswept): once, with the session's baseline, so
+// the next session's baseline never takes in a repository the workload
+// left at the end. It is recorded as done unless it failed (a later
+// start runs it again).
+func (m *Manager) finalSweep(ctx context.Context, b *box) {
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	if !guarded(rec) || rec.Guard == nil || !rec.Guard.Unswept || m.opts.Guard == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, guardFinalTimeout)
+	defer cancel()
+	opts := m.guardOptions(ctx, b, rec)
+	opts.Once = true
+	if err := m.opts.Guard(ctx, opts); err != nil && !errors.Is(err, nestguard.ErrUnsupported) {
+		m.logf("sandbox %s: nested-repository guard: the final pass failed: %v", rec.Name, err)
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	m.mu.Lock()
+	if g := b.rec.Guard; g != nil && g.Unswept && g.TakenAt.Equal(rec.Guard.TakenAt) {
+		next := *g
+		next.Unswept = false
+		b.rec.Guard = &next
+	}
+	m.mu.Unlock()
+	if err := m.saveRecord(b); err != nil {
+		m.logf("sandbox %s: save the nested-repository guard state: %v", rec.Name, err)
+	}
+}
+
+// guardOptions are the guard options of rec's session.
+func (m *Manager) guardOptions(ctx context.Context, b *box, rec record) nestguard.Options {
+	baseline := rec.Guard.Baseline
+	if baseline.At.IsZero() {
+		// A baseline recorded before it carried its own time.
+		baseline.At = rec.Guard.TakenAt
+	}
+	return nestguard.Options{
+		Root: rec.Project, Baseline: baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
+		OnDetect: func(d nestguard.Detection) { m.nestedRepo(ctx, b, d) },
+		Logf: func(format string, args ...any) {
+			m.logf("sandbox %s: "+format, append([]any{rec.Name}, args...)...)
+		},
 	}
 }
 
@@ -191,18 +362,7 @@ func (m *Manager) guardLoop(ctx context.Context, b *box) {
 			m.mu.Unlock()
 			_ = m.saveRecord(b)
 		}
-		baseline := rec.Guard.Baseline
-		if baseline.At.IsZero() {
-			// A baseline recorded before it carried its own time.
-			baseline.At = rec.Guard.TakenAt
-		}
-		err := m.opts.Guard(ctx, nestguard.Options{
-			Root: rec.Project, Baseline: baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
-			OnDetect: func(d nestguard.Detection) { m.nestedRepo(ctx, b, d) },
-			Logf: func(format string, args ...any) {
-				m.logf("sandbox %s: "+format, append([]any{rec.Name}, args...)...)
-			},
-		})
+		err := m.opts.Guard(ctx, m.guardOptions(ctx, b, rec))
 		if ctx.Err() != nil {
 			return
 		}
