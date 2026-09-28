@@ -113,7 +113,15 @@ type Baseline struct {
 	Gitlinks []string `json:"gitlinks,omitempty"`
 	// Truncated reports that the baseline scan stopped at the entry limit.
 	Truncated bool `json:"truncated,omitempty"`
+	// At is when the baseline scan started. With a truncated baseline, a
+	// .git entry the scan did not reach whose status last changed before
+	// then existed before the session and is left alone.
+	At time.Time `json:"at,omitempty"`
 }
+
+// ctimeSlack allows for filesystems that keep change times at a coarser
+// grain than the clock the baseline time comes from.
+const ctimeSlack = 2 * time.Second
 
 // Options configure a guard.
 type Options struct {
@@ -142,8 +150,13 @@ type Options struct {
 type Guard struct {
 	opts Options
 
-	mu       sync.Mutex
-	known    map[string]bool // dirs whose .git is baseline or already handled
+	mu sync.Mutex
+	// known are the dirs whose .git existed before the session.
+	known map[string]bool
+	// failed holds, per dir, the error of its last failed quarantine: a
+	// quarantine is retried on every sweep or event, and reported again
+	// only when it fails differently.
+	failed   map[string]string
 	gitlinks map[string]bool
 	handled  []Detection
 	mode     Mode
@@ -178,7 +191,7 @@ func New(opts Options) (*Guard, error) {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	g := &Guard{opts: opts, known: map[string]bool{}, gitlinks: map[string]bool{}}
+	g := &Guard{opts: opts, known: map[string]bool{}, failed: map[string]string{}, gitlinks: map[string]bool{}}
 	for _, r := range opts.Baseline.Repos {
 		g.known[cleanRel(r)] = true
 	}
@@ -274,9 +287,36 @@ func (g *Guard) sweep(rel string) {
 	if truncated {
 		g.opts.Logf("nested-repository guard: %s has more than %d entries; only part of it is checked each pass", rel, g.opts.MaxEntries)
 	}
+	if err == nil && !truncated {
+		// A .git whose quarantine failed and that is gone now is a new
+		// repository if it comes back.
+		seen := make(map[string]bool, len(found))
+		for _, dir := range found {
+			seen[dir] = true
+		}
+		g.mu.Lock()
+		for dir := range g.failed {
+			if within(dir, cleanRel(rel)) && !seen[dir] {
+				delete(g.failed, dir)
+			}
+		}
+		g.mu.Unlock()
+	}
 	for _, dir := range found {
 		g.handle(dir)
 	}
+}
+
+// forgetFailure drops the failed quarantine of dir, whose .git went away.
+func (g *Guard) forgetFailure(dir string) {
+	g.mu.Lock()
+	delete(g.failed, cleanRel(dir))
+	g.mu.Unlock()
+}
+
+// within reports whether the project-relative dir is rel or below it.
+func within(dir, rel string) bool {
+	return rel == "." || dir == rel || strings.HasPrefix(dir, rel+"/")
 }
 
 // skipDir reports directories the walk must not descend into: .git
@@ -286,39 +326,60 @@ func (g *Guard) skipDir(name string) bool {
 	return name == GitEntry || strings.HasPrefix(name, QuarantinePrefix)
 }
 
-// handle quarantines the .git entry in dir unless it is known.
+// handle quarantines the .git entry in dir unless it existed before the
+// session. A dir whose .git was quarantined is watched like any other: a
+// .git created there again is quarantined again.
 func (g *Guard) handle(dir string) {
 	dir = cleanRel(dir)
 	g.mu.Lock()
-	if g.known[dir] {
-		g.mu.Unlock()
+	known := g.known[dir]
+	g.mu.Unlock()
+	if known {
 		return
 	}
-	g.known[dir] = true
-	g.mu.Unlock()
-
+	// A baseline cut short at the entry limit does not list every
+	// repository that existed: one the guard reaches later is left alone
+	// when its entry is older than the session.
+	var keepBefore time.Time
+	if b := g.opts.Baseline; b.Truncated && !b.At.IsZero() {
+		keepBefore = b.At.Add(-ctimeSlack)
+	}
 	now := g.opts.Now()
 	d := Detection{Kind: KindRepository, Dir: dir, At: now}
-	newName, err := quarantine(g.opts.Root, dir, QuarantinePrefix+now.UTC().Format("20060102T150405Z"))
+	newName, err := quarantine(g.opts.Root, dir, QuarantinePrefix+now.UTC().Format("20060102T150405Z"), keepBefore)
+	g.mu.Lock()
+	lastErr, failedBefore := g.failed[dir]
+	delete(g.failed, dir)
 	switch {
+	case errors.Is(err, errPreexisting):
+		g.known[dir] = true
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		g.failed[dir] = err.Error()
+	}
+	g.mu.Unlock()
+	switch {
+	case errors.Is(err, errPreexisting):
+		g.opts.Logf("nested-repository guard: %s is older than the session; left in place (the baseline did not list every repository)", d.Label())
+		return
 	case errors.Is(err, fs.ErrNotExist):
 		// Gone before the guard got to it (git init rolled back, the dir
 		// was removed): nothing is left to quarantine.
-		g.mu.Lock()
-		delete(g.known, dir)
-		g.mu.Unlock()
 		return
 	case err != nil:
+		if failedBefore && lastErr == err.Error() {
+			// Retried and failed the same way: already reported.
+			return
+		}
 		d.Error = err.Error()
-		// Retry on the next sweep or event.
-		g.mu.Lock()
-		delete(g.known, dir)
-		g.mu.Unlock()
 	default:
 		d.Quarantined = path.Join(dir, newName)
 	}
 	g.record(d)
 }
+
+// errPreexisting is quarantine's answer for an entry older than the
+// session.
+var errPreexisting = errors.New("nestguard: the entry existed before the session")
 
 func (g *Guard) record(d Detection) {
 	g.mu.Lock()
@@ -363,12 +424,13 @@ func TakeBaseline(ctx context.Context, root string, maxEntries int, gitlinks fun
 	if maxEntries <= 0 {
 		maxEntries = DefaultMaxEntries
 	}
+	at := time.Now().UTC()
 	skip := func(name string) bool { return name == GitEntry || strings.HasPrefix(name, QuarantinePrefix) }
 	repos, truncated, err := scan(root, ".", maxEntries, skip)
 	if err != nil {
 		return Baseline{}, err
 	}
-	b := Baseline{Repos: repos, Truncated: truncated}
+	b := Baseline{Repos: repos, Truncated: truncated, At: at}
 	if containsString(repos, ".") {
 		if gitlinks == nil {
 			gitlinks = GitGitlinks
@@ -383,7 +445,8 @@ func TakeBaseline(ctx context.Context, root string, maxEntries int, gitlinks fun
 }
 
 // scan walks root/rel without following symlinks and returns the
-// directories that hold a .git entry (of any type).
+// directories that hold a .git entry (of any type, in any spelling git
+// finds it by: see isGitEntry).
 func scan(root, rel string, maxEntries int, skip func(string) bool) ([]string, bool, error) {
 	start := filepath.Join(root, filepath.FromSlash(rel))
 	info, err := os.Lstat(start)
@@ -415,7 +478,7 @@ func scan(root, rel string, maxEntries int, skip func(string) bool) ([]string, b
 			return nil
 		}
 		name := d.Name()
-		if name == GitEntry {
+		if isGitEntry(p, name) {
 			r, err := filepath.Rel(root, filepath.Dir(p))
 			if err == nil {
 				found = append(found, cleanRel(filepath.ToSlash(r)))
@@ -433,6 +496,25 @@ func scan(root, rel string, maxEntries int, skip func(string) bool) ([]string, b
 	})
 	sort.Strings(found)
 	return found, truncated, err
+}
+
+// isGitEntry reports whether the entry at p, named name, is what git finds
+// as its directory's .git: that name, or on a case-insensitive filesystem
+// (macOS's default) any other spelling of it (.GIT, .Git), which git's
+// lookup of .git resolves to.
+func isGitEntry(p, name string) bool {
+	if name == GitEntry {
+		return true
+	}
+	if !strings.EqualFold(name, GitEntry) {
+		return false
+	}
+	entry, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	lookup, err := os.Lstat(filepath.Join(filepath.Dir(p), GitEntry))
+	return err == nil && os.SameFile(entry, lookup)
 }
 
 func cleanRel(rel string) string {

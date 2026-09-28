@@ -191,8 +191,13 @@ func (m *Manager) guardLoop(ctx context.Context, b *box) {
 			m.mu.Unlock()
 			_ = m.saveRecord(b)
 		}
+		baseline := rec.Guard.Baseline
+		if baseline.At.IsZero() {
+			// A baseline recorded before it carried its own time.
+			baseline.At = rec.Guard.TakenAt
+		}
 		err := m.opts.Guard(ctx, nestguard.Options{
-			Root: rec.Project, Baseline: rec.Guard.Baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
+			Root: rec.Project, Baseline: baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
 			OnDetect: func(d nestguard.Detection) { m.nestedRepo(ctx, b, d) },
 			Logf: func(format string, args ...any) {
 				m.logf("sandbox %s: "+format, append([]any{rec.Name}, args...)...)

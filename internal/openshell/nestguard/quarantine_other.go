@@ -18,6 +18,8 @@
 
 package nestguard
 
+import "time"
+
 func supported() bool { return false }
 
-func quarantine(string, string, string) (string, error) { return "", ErrUnsupported }
+func quarantine(string, string, string, time.Time) (string, error) { return "", ErrUnsupported }

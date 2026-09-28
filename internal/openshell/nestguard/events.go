@@ -147,7 +147,7 @@ func (g *Guard) runEvents(ctx context.Context) error {
 			if !ok {
 				return errFallback
 			}
-			if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Rename) && !ev.Has(fsnotify.Write) {
+			if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Rename) && !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Remove) {
 				continue
 			}
 			rel, err := filepath.Rel(g.opts.Root, ev.Name)
@@ -171,11 +171,16 @@ func (g *Guard) runEvents(ctx context.Context) error {
 				}
 				continue
 			}
+			base := filepath.Base(ev.Name)
+			if (ev.Has(fsnotify.Remove) || ev.Has(fsnotify.Rename)) && strings.EqualFold(base, GitEntry) {
+				// A .git whose quarantine failed went away: one that comes
+				// back is a new repository.
+				g.forgetFailure(filepath.ToSlash(filepath.Dir(rel)))
+			}
 			if !ev.Has(fsnotify.Create) {
 				continue
 			}
-			base := filepath.Base(ev.Name)
-			if base == GitEntry {
+			if isGitEntry(ev.Name, base) {
 				g.handle(filepath.ToSlash(filepath.Dir(rel)))
 				continue
 			}
