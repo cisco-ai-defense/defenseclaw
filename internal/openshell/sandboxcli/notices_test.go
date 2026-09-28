@@ -245,7 +245,7 @@ func TestHarnessThatFailedBeforeItsHooksIsNamed(t *testing.T) {
 	wantExit(t, ta.Run(context.Background(), RunOptions{Harness: "claude"}), 1)
 	out := ta.output()
 	if strings.Contains(out, "hooks are not reaching") ||
-		!strings.Contains(out, "✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)") {
+		!strings.Contains(out, "✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)") || strings.Contains(out, "continue this conversation") {
 		t.Fatalf("summary:\n%s", out)
 	}
 }

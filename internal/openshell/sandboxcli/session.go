@@ -779,7 +779,10 @@ var ownResumeHint = map[string]string{
 // the sandbox (a plain connect starts a new one), and what the harness's
 // own resume hint does.
 func (s *session) continueHint() {
-	if s.headless || s.shell || s.spec == nil {
+	if s.headless || s.shell || s.spec == nil || !s.sawHooks.Load() {
+		// No conversation to continue: no hook of the session reached
+		// DefenseClaw (a harness that failed to start, one nobody
+		// prompted).
 		return
 	}
 	args, ok := continueArgs[s.spec.Name]
