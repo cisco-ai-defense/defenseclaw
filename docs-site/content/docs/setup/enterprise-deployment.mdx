@@ -1332,7 +1332,7 @@ administrator-managed hooks on the endpoint and the tool input DefenseClaw
 inspects is the input that runs. User, project, local, and plugin hooks do not
 load. An administrator who must keep them can set
 `claude_code.allow_unmanaged_hooks: true` in the protected DefenseClaw config.
-`defenseclaw enterprise hooks status` and `verify` then print a warning, and
+`defenseclaw-gateway enterprise hooks status` and `verify` then print a warning, and
 verify results report `claude_managed_hooks_only: disabled_by_admin`. While the
 lock is enforced, another managed-settings file that sets
 `allowManagedHooksOnly: false` (for example a later-sorting drop-in) is reported
