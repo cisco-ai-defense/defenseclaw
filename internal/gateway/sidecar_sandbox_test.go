@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -346,7 +347,7 @@ func TestContainListenerLossStopsRunningSandboxes(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		containListenerLoss(ctx, fleet, feed.publish, "ingress", 5*time.Millisecond)
+		containListenerLoss(ctx, fleet, feed.publish, "ingress", 5*time.Millisecond, nil)
 	}()
 	defer func() {
 		cancel()
@@ -395,7 +396,7 @@ func TestContainListenerLossEndsWithItsContext(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		containListenerLoss(ctx, fleet, nil, "egress", time.Hour)
+		containListenerLoss(ctx, fleet, nil, "egress", time.Hour, nil)
 	}()
 	cancel()
 	select {
@@ -406,6 +407,35 @@ func TestContainListenerLossEndsWithItsContext(t *testing.T) {
 	if got := fleet.stops(); len(got) != 0 {
 		t.Fatalf("stopped = %v", got)
 	}
+}
+
+// TestContainListenerLossWaitsForItsAPI pins that nothing is stopped while
+// this process does not serve its API: a second daemon started by mistake
+// finds the running daemon's ports taken and must leave that daemon's
+// sandboxes alone. Once the API serves, the sandboxes are stopped.
+func TestContainListenerLossWaitsForItsAPI(t *testing.T) {
+	fleet := &fakeSandboxFleet{phases: map[string]string{"dc-ready": "ready"}}
+	var serving atomic.Bool
+	var passes atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		containListenerLoss(ctx, fleet, nil, "ingress", 5*time.Millisecond, func() bool {
+			passes.Add(1)
+			return serving.Load()
+		})
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	eventuallyTrue(t, func() bool { return passes.Load() >= 3 })
+	if got := fleet.stops(); len(got) != 0 {
+		t.Fatalf("stopped while another daemon may serve: %v", got)
+	}
+	serving.Store(true)
+	eventuallyTrue(t, func() bool { return slices.Equal(fleet.stops(), []string{"dc-ready"}) })
 }
 
 // TestSandboxRuntimeStopsSandboxesWhenAListenerIsLost pins that when
@@ -447,7 +477,13 @@ func TestSandboxRuntimeStopsSandboxesWhenAListenerIsLost(t *testing.T) {
 	rt.listenBudget, rt.recheck = 50*time.Millisecond, 10*time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- rt.run(ctx, func(ctx context.Context) error { <-ctx.Done(); return nil }) }()
+	// The API this runtime serves with, as api.Run reports it once bound.
+	serveAPI := func(ctx context.Context) error {
+		sc.health.SetAPI(StateRunning, "", nil)
+		<-ctx.Done()
+		return nil
+	}
+	go func() { done <- rt.run(ctx, serveAPI) }()
 	defer func() {
 		cancel()
 		<-done

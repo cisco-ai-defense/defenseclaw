@@ -345,7 +345,8 @@ func (rt *sandboxRuntime) listenerLost(ctx context.Context, part string, cause e
 	if every <= 0 {
 		every = sandboxListenerRecheck
 	}
-	containListenerLoss(ctx, rt.fleet, rt.publish, part, every)
+	serving := func() bool { return rt.health == nil || rt.health.Snapshot().API.State == StateRunning }
+	containListenerLoss(ctx, rt.fleet, rt.publish, part, every, serving)
 }
 
 // containListenerLoss stops every sandbox that may be running, and does so
@@ -361,13 +362,21 @@ func (rt *sandboxRuntime) listenerLost(ctx context.Context, part string, cause e
 // later is caught by the next pass, and starting one again rotates its
 // ingress token, so a token the other program saw is useless. The runtime
 // binds its listeners again when it restarts with the API.
-func containListenerLoss(ctx context.Context, fleet sandboxFleet, publish func(sandboxapi.ActivityEvent), part string, every time.Duration) {
+//
+// A pass runs only while serving reports that this process serves its
+// API: a second DefenseClaw daemon started by mistake finds every port
+// taken, the running daemon's listeners among them, and must not stop the
+// sandboxes that daemon serves.
+func containListenerLoss(ctx context.Context, fleet sandboxFleet, publish func(sandboxapi.ActivityEvent),
+	part string, every time.Duration, serving func() bool) {
 	if publish == nil {
 		publish = func(sandboxapi.ActivityEvent) {}
 	}
 	unstoppable := map[string]bool{}
 	for {
-		stopSandboxesWithoutListener(ctx, fleet, publish, part, unstoppable)
+		if serving == nil || serving() {
+			stopSandboxesWithoutListener(ctx, fleet, publish, part, unstoppable)
+		}
 		select {
 		case <-ctx.Done():
 			return
