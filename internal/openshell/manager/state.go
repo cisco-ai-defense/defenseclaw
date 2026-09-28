@@ -142,10 +142,13 @@ type record struct {
 	// never changed in place.
 	ApprovedRules map[string]string `json:"approved_rules,omitempty"`
 
-	Workspace  *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
-	MCP        *sandboxapi.MCPSummary       `json:"mcp,omitempty"`
-	Violations []sandboxapi.Violation       `json:"violations,omitempty"`
-	Warnings   []string                     `json:"warnings,omitempty"`
+	Workspace *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
+	MCP       *sandboxapi.MCPSummary       `json:"mcp,omitempty"`
+	// RunConfig renders the per-run harness files again on start (nil for
+	// a harness without them, and in records from before it existed).
+	RunConfig  *runConfigRecord       `json:"run_config,omitempty"`
+	Violations []sandboxapi.Violation `json:"violations,omitempty"`
+	Warnings   []string               `json:"warnings,omitempty"`
 
 	// Guard is the nested-repository guard state of the current session
 	// (mount mode). Copies of a record share it, so it is replaced, never

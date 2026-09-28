@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -43,7 +44,11 @@ import (
 // bind-mounts each file read-only, in mount and copy mode alike, so the
 // harness reads it with managed precedence and the workload cannot change
 // it. The files live under <data_dir>/sandboxes/<name>/run-config until the
-// sandbox is deleted; a stopped sandbox starts again with the same files.
+// sandbox is deleted. Every start renders them again from the re-resolved
+// policy (refreshRunConfig) and rewrites them in place before the sandbox
+// runs, so an administrator's change (allow_yolo, a required pack's MCP
+// posture) reaches a stopped sandbox's next session; one the mounts cannot
+// carry refuses the start.
 
 // runConfigDirName is the per-sandbox directory of run files.
 const runConfigDirName = "run-config"
@@ -74,14 +79,32 @@ type runConfig struct {
 
 // runConfigInput is what the per-run configuration depends on.
 type runConfigInput struct {
-	spec        *harness.Spec
-	target      connector.SandboxRenderTarget
-	eff         *packs.Effective
+	spec   *harness.Spec
+	target connector.SandboxRenderTarget
+	eff    *packs.Effective
+	// yolo lets the harness skip its permission prompts (not safe mode).
+	yolo        bool
 	env         map[string]string
 	credentials []string
 	provider    *connector.SandboxModelProvider
 	workdir     string
 	project     string
+}
+
+// runConfigRecord is what a start needs to render a sandbox's run files
+// again (refreshRunConfig) beyond its record and its OpenShell spec: none
+// of it is secret.
+type runConfigRecord struct {
+	// Files are the in-sandbox paths of the files the sandbox mounts; its
+	// mounts are fixed at create, so a render needing another set cannot
+	// take effect.
+	Files []string `json:"files"`
+	// Credentials name the provider placeholder variables the run gets.
+	Credentials []string `json:"credentials,omitempty"`
+	// ModelProvider is the model provider the run pins.
+	ModelProvider *connector.SandboxModelProvider `json:"model_provider,omitempty"`
+	// Safe reports the files keep the harness's permission prompts.
+	Safe bool `json:"safe"`
 }
 
 // planRunConfig renders the per-run files, or returns nil for a harness
@@ -126,7 +149,7 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 	}
 	run := connector.SandboxRunConfig{
 		Env: in.env, Credentials: in.credentials, ModelProvider: in.provider, Workdir: in.workdir,
-		Safe: !in.eff.Yolo, MCPServers: servers, AllowProjectMCPServers: allowProject,
+		Safe: !in.yolo, MCPServers: servers, AllowProjectMCPServers: allowProject,
 	}
 	files, err := provider.SandboxRunFiles(in.target, run)
 	if err != nil {
@@ -348,6 +371,113 @@ func sanitizeNames(names []string) []string {
 // runConfigDir is where a sandbox's run files live on the host.
 func (m *Manager) runConfigDir(name string) string {
 	return filepath.Join(m.opts.DataDir, "sandboxes", name, runConfigDirName)
+}
+
+// paths lists the in-sandbox paths of the run files, sorted.
+func (rc *runConfig) paths() []string {
+	if rc == nil {
+		return nil
+	}
+	out := make([]string, 0, len(rc.files))
+	for _, f := range rc.files {
+		out = append(out, f.Path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// refreshRunConfig renders a stopped sandbox's run files again from its
+// re-resolved policy eff before it starts, and rewrites them in place (the
+// bind mounts bind their host paths, which the container resolves when it
+// starts): safe mode follows the policy (launchYolo), and so do the MCP
+// servers the run brings along and whether the project's own may start.
+// env is the sandbox's creation environment (its OpenShell spec). A render
+// that needs files the sandbox does not mount cannot take effect: when it
+// is stricter than what the sandbox has, the start is refused (delete the
+// sandbox and run it again); a looser one keeps the stricter files. It
+// returns the MCP summary the files now carry.
+func (m *Manager) refreshRunConfig(ctx context.Context, rec record, eff *packs.Effective, env map[string]string) (*sandboxapi.MCPSummary, *runConfigRecord, error) {
+	spec, ok := harness.Get(rec.Harness)
+	if !ok {
+		return rec.MCP, rec.RunConfig, nil
+	}
+	if _, ok := spec.Provider.(connector.SandboxRunConfigProvider); !ok {
+		return rec.MCP, rec.RunConfig, nil
+	}
+	yolo := rec.Yolo && eff.Yolo
+	rr := rec.RunConfig
+	if rr == nil {
+		// A record from before run files were rendered again: they cannot
+		// be rebuilt, so only a policy that wants them stricter matters.
+		want := &sandboxapi.MCPSummary{ProjectServers: eff.MCP.ProjectServers}
+		if rec.MCP != nil && eff.MCP.Import {
+			want.Imported = rec.MCP.Imported
+		}
+		if runConfigTightened(!rec.Yolo, rec.MCP, !yolo, want) {
+			return nil, nil, errRunConfigStricter(rec.Name)
+		}
+		return rec.MCP, rr, nil
+	}
+	target := connector.SandboxRenderTarget{
+		IngressPort: m.opts.IngressPort, AgentVersion: rec.HarnessVersion, HookContractID: rec.HookContract,
+	}
+	rc, err := m.planRunConfig(ctx, runConfigInput{
+		spec: spec, target: target, eff: eff, yolo: yolo, env: env, credentials: rr.Credentials,
+		provider: rr.ModelProvider, workdir: rec.Workdir, project: rec.Project,
+	})
+	if err != nil || rc == nil {
+		return rec.MCP, rr, err
+	}
+	if !slices.Equal(rc.paths(), sortedCopy(rr.Files)) {
+		if runConfigTightened(rr.Safe, rec.MCP, !yolo, rc.mcp) {
+			return nil, nil, errRunConfigStricter(rec.Name)
+		}
+		m.logf("sandbox %s: keeps its harness run configuration, which is stricter than its policy now asks", rec.Name)
+		return rec.MCP, rr, nil
+	}
+	if _, err := m.writeRunConfig(rec.Name, rc); err != nil {
+		return nil, nil, err
+	}
+	next := *rr
+	next.Safe = !yolo
+	return rc.mcp, &next, nil
+}
+
+// runConfigTightened reports a run posture (safe mode, MCP summary) that is
+// stricter than the one the sandbox's files carry in some respect: safe
+// mode now, the project's servers blocked now, or an imported server left
+// behind now.
+func runConfigTightened(haveSafe bool, have *sandboxapi.MCPSummary, wantSafe bool, want *sandboxapi.MCPSummary) bool {
+	if wantSafe && !haveSafe {
+		return true
+	}
+	if have == nil || want == nil {
+		return false
+	}
+	if have.ProjectServers == packs.MCPProjectServersAllow && want.ProjectServers != packs.MCPProjectServersAllow {
+		return true
+	}
+	for _, name := range have.Imported {
+		if !slices.Contains(want.Imported, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// errRunConfigStricter refuses a start whose policy wants harness settings
+// the sandbox's mounted run files cannot take.
+func errRunConfigStricter(name string) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
+		Message: "the sandbox policy now runs the harness under stricter settings (safe mode or MCP servers) than sandbox " + name +
+			" was created with, and its configuration cannot change after create; delete it and run it again",
+		Detail: "`defenseclaw sandbox delete " + name + "`, then `defenseclaw sandbox run` with the same project"}
+}
+
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }
 
 // writeRunConfig writes the run files and returns their read-only bind

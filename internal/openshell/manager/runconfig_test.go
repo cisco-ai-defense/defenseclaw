@@ -451,3 +451,90 @@ func keys(m map[string][]byte) []string {
 	slices.Sort(out)
 	return out
 }
+
+// TestStartRendersTheRunConfigOfTheCurrentPolicy pins that a sandbox
+// created in skip-permissions mode starts again with its harness's
+// permission prompts once the administrator disallows the mode, and with
+// the MCP servers its policy brings along now: its run files are rendered
+// again and rewritten in place before it starts.
+func TestStartRendersTheRunConfigOfTheCurrentPolicy(t *testing.T) {
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	inv := &fakeMCP{entries: []config.MCPServerEntry{
+		{Name: "github", Command: "npx", Args: []string{"srv"}},
+		{Name: "linear", URL: "https://mcp.linear.app/mcp"},
+	}}
+	withMCP(e, inv)
+	sb := e.create(sandboxapi.CreateRequest{Name: "cc-restart", Yolo: true,
+		LLM: &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"}},
+		Env: map[string]string{"ANTHROPIC_BASE_URL": "http://host.openshell.internal:28921"}})
+	if !sb.Yolo {
+		t.Fatal("the run is not in skip-permissions mode")
+	}
+	if _, safe := decodeJSON(t, e.runFiles(sb.Name)[connector.ClaudeCodeSandboxRunDropInPath])["permissions"]; safe {
+		t.Fatal("a yolo run disabled bypassPermissions")
+	}
+
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) })
+	inv.entries = inv.entries[:1] // linear is blocked by the MCP policy now
+	e.m.refreshEgress()
+	got, err := e.m.Get(ctx, sb.Name)
+	if err != nil || findWarning(got.Warnings, "the sandbox policy no longer lets the harness skip its permission prompts") == "" {
+		t.Fatalf("drift warnings = %q, %v", got.Warnings, err)
+	}
+	if _, err := e.m.Stop(ctx, sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.m.Start(ctx, sb.Name, sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	files := e.runFiles(sb.Name)
+	dropIn := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])
+	if perms, _ := dropIn["permissions"].(map[string]any); perms["disableBypassPermissionsMode"] != "disable" {
+		t.Fatalf("the restarted sandbox can still skip permissions: %v", dropIn)
+	}
+	env := dropIn["env"].(map[string]any)
+	if env["ANTHROPIC_BASE_URL"] != "http://host.openshell.internal:28921" {
+		t.Fatalf("the provider pins changed: %v", env)
+	}
+	if _, pinned := env["ANTHROPIC_API_KEY"]; pinned {
+		t.Fatal("a credential placeholder was pinned")
+	}
+	servers := decodeJSON(t, files[connector.ClaudeCodeSandboxManagedMCPPath])["mcpServers"].(map[string]any)
+	if len(servers) != 1 || servers["github"] == nil {
+		t.Fatalf("managed-mcp.json after the start = %v", servers)
+	}
+	got, _ = e.m.Get(ctx, sb.Name)
+	if got.Yolo || !slices.Equal(got.MCP.Imported, []string{"github"}) ||
+		findWarning(got.Warnings, "the sandbox policy no longer lets the harness skip") != "" {
+		t.Fatalf("after the start: yolo %v, mcp %+v, warnings %q", got.Yolo, got.MCP, got.Warnings)
+	}
+}
+
+// TestStartRefusesARunConfigItsMountsCannotCarry pins that a start whose
+// policy now blocks the project's own MCP servers, which needs a managed
+// file the sandbox does not mount, is refused instead of running with the
+// servers allowed.
+func TestStartRefusesARunConfigItsMountsCannotCarry(t *testing.T) {
+	pack, err := os.ReadFile(filepath.Join("..", "..", "..", "policies", "sandbox", "open", "pack.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom := strings.Replace(strings.Replace(string(pack), "name: open", "name: open-mcp", 1), "project_servers: block", "project_servers: allow", 1)
+	path := filepath.Join(t.TempDir(), "pack.yaml")
+	if err := os.WriteFile(path, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Pack = path })
+	ctx := context.Background()
+	sb := e.create(sandboxapi.CreateRequest{Name: "cc-tighten"})
+	if sb.MCP.ProjectServers != "allow" {
+		t.Fatalf("mcp = %+v", sb.MCP)
+	}
+	if _, err := e.m.Stop(ctx, sb.Name); err != nil {
+		t.Fatal(err)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Pack = "" })
+	_, err = e.m.Start(ctx, sb.Name, sandboxapi.StartRequest{})
+	wantCode(t, err, sandboxapi.CodePolicyViolation)
+}

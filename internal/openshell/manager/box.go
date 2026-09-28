@@ -331,6 +331,18 @@ func postureDrift(rec record, eff *packs.Effective) []string {
 			firstNonEmpty(rec.Pack, "-"), firstNonEmpty(rec.Profile, "-"), firstNonEmpty(rec.NetworkMode, "-"), firstNonEmpty(rec.Approvals, "-"),
 			firstNonEmpty(pack, "-"), eff.Profile, eff.NetworkMode, eff.Approvals))
 	}
+	// The harness run files follow the policy from the next start on
+	// (refreshRunConfig); the running session keeps what it started with.
+	if rec.RunConfig != nil && !rec.RunConfig.Safe && !(rec.Yolo && eff.Yolo) {
+		out = append(out, "the sandbox policy no longer lets the harness skip its permission prompts; "+
+			"this session keeps skip-permissions mode until the sandbox stops, and its next start keeps the prompts")
+	}
+	if rec.MCP != nil && rec.MCP.ProjectServers == packs.MCPProjectServersAllow && eff.MCP.ProjectServers != packs.MCPProjectServersAllow {
+		out = append(out, "the sandbox policy now blocks the project's own MCP servers; this session may still start them until the sandbox stops")
+	}
+	if rec.MCP != nil && len(rec.MCP.Imported) > 0 && !eff.MCP.Import {
+		out = append(out, "the sandbox policy no longer brings your MCP servers into sandboxes; this session keeps them until the sandbox stops")
+	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && eff.Workspace.Mode != config.OpenShellWorkdirMount {
 		out = append(out, "the sandbox policy now works on a copy of this project, but this sandbox mounts it live; "+
 			"the mount stays until the sandbox stops, and it cannot start again: delete it and run it again")

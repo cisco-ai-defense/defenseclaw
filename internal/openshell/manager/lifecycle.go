@@ -353,6 +353,15 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := m.checkStart(ctx, rec, eff, violations); err != nil {
 		return err
 	}
+	// The harness run files follow the re-resolved policy (safe mode, MCP
+	// servers) before the sandbox runs again.
+	mcp, runConfig, err := m.refreshRunConfig(ctx, rec, eff, sb.Spec.Environment)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	b.rec.MCP, b.rec.RunConfig = mcp, runConfig
+	m.mu.Unlock()
 	binding, err := m.opts.Bindings.Get(rec.BindingID)
 	if err != nil {
 		return sandboxapi.Errorf(sandboxapi.CodeInternal, "look up the sandbox binding: %v", err)

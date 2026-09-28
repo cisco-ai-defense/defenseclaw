@@ -396,8 +396,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if llm != nil {
 		modelProvider = llm.cp.ModelProvider
 	}
+	credNames := credentialNames(llm, creds)
 	rc, err := m.planRunConfig(ctx, runConfigInput{
-		spec: spec, target: target, eff: eff, env: envOut, credentials: credentialNames(llm, creds),
+		spec: spec, target: target, eff: eff, yolo: eff.Yolo, env: envOut, credentials: credNames,
 		provider: modelProvider, workdir: rec.Workdir, project: in.project,
 	})
 	if err != nil {
@@ -411,6 +412,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if rc != nil {
 		rec.MCP = rc.mcp
 		rec.Warnings = append(rec.Warnings, rc.notices...)
+		rec.RunConfig = &runConfigRecord{Files: rc.paths(), Credentials: credNames, ModelProvider: modelProvider, Safe: !eff.Yolo}
 	}
 
 	// Policy: the workload runs as the identity the image was built for.
