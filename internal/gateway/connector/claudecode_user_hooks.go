@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 )
 
 // A user who ran per-user DefenseClaw setup for Claude Code on Windows before
@@ -312,7 +313,7 @@ func removeClaudeCodeHookRegistrations(data []byte, owned claudeCodePerUserHookM
 	for event := range editedEvents {
 		hooks[event] = owned.withoutOwnedHandlers(hooks[event])
 	}
-	if !cursorJSONValuesSameText(original, updated) {
+	if !reflect.DeepEqual(original, updated) {
 		return nil, nil, errors.New("Claude Code settings JSON: removing DefenseClaw handlers would change other content")
 	}
 	return out, removed, nil

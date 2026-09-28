@@ -78,14 +78,12 @@ func (f claudeCodeUserHooksFixture) handler(t *testing.T) string {
 }
 
 // perUserHooks returns the hooks object per-user Claude Code setup on
-// Windows writes for launcher: the matrix of appendClaudeCodeHookMatrixForSetup
+// Windows writes for launcher: the matrix of appendClaudeCodeHookMatrix
 // with the arguments of claudeCodeHookInvocation.
 func perUserClaudeCodeHooks(t *testing.T, launcher string) map[string]interface{} {
 	t.Helper()
 	hooks := map[string]interface{}{}
-	if err := appendClaudeCodeHookMatrixForSetup(hooks, launcher, claudeCodePerUserHookArgs[:], SetupOpts{}); err != nil {
-		t.Fatal(err)
-	}
+	appendClaudeCodeHookMatrix(hooks, launcher, claudeCodePerUserHookArgs[:])
 	return hooks
 }
 
@@ -129,12 +127,8 @@ func TestManagedCursorCheckAllowsOnceThePerUserClaudeCodeRegistrationsAreRemoved
 	if err != nil {
 		t.Fatal(err)
 	}
-	groups, err := claudeCodeHookGroupsForSetup(SetupOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(removed) != len(groups) {
-		t.Fatalf("removed %d registrations, want one per group (%d): %#v", len(removed), len(groups), removed)
+	if len(removed) != len(hookGroups) {
+		t.Fatalf("removed %d registrations, want one per group (%d): %#v", len(removed), len(hookGroups), removed)
 	}
 	for _, removal := range removed {
 		if removal.Command != f.launcher {
