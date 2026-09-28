@@ -363,7 +363,8 @@ async def test_opening_the_wizard_checks_the_machine_once(monkeypatch) -> None:
         return sandbox_machine_check(NO_OPENSHELL)
 
     monkeypatch.setattr(sandbox_panel, "probe_sandbox_machine", probe)
-    app = DefenseClawTUI(config=None)
+    # Pin Linux: on Windows the wizard does not open, so there is no probe.
+    app = DefenseClawTUI(config=None, setup_model=SetupPanelModel(None, os_name="linux"))
     async with app.run_test(size=(120, 40)) as pilot:
         app.setup_model.open_goal_menu(SetupWizard.SANDBOX)
         app._apply_setup_action(SetupPanelAction(True))  # noqa: SLF001
