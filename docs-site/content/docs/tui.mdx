@@ -121,9 +121,8 @@ change lists connectors that keep their own pack.
 Every change shows what it does first. The confirm step turns red and asks
 twice when protection gets weaker (for example action → observe, a higher block
 level, approval off, or an opt-in pack off). Mode, level, pack and opt-in
-changes for one connector restart a running gateway so they take effect; a
-global mode or level change applies live, and a stopped gateway is never
-started.
+changes restart a running gateway so they take effect (hook decisions read the
+configuration the gateway started with); a stopped gateway is never started.
 
 In the **Policies** view, `b` and `a` edit the highlighted named policy's own
 block and alert thresholds, which apply to LLM traffic through the guardrail
