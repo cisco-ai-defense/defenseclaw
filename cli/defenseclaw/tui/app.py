@@ -168,6 +168,7 @@ from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
+from defenseclaw.tui.widgets.panel_split import NavItem, NavSwitcher, PanelNav, nav_switcher, split_aside, split_layout
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.tab_fit import fit_tab_labels
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
@@ -687,6 +688,55 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         display: none;
     }
 
+    /* Shared split layout (widgets/panel_split.py). #panel-split fills the
+       body under the header and button bar; the nav list and the aside size
+       to their content, up to its height. It is hidden on the Overview and
+       the help sheet, whose #body fills the panel instead. #panel-nav is
+       NAV_WIDTH columns wide. */
+    #panel-split {
+        height: 1fr;
+    }
+
+    #panel-main {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #panel-nav {
+        width: 24;
+        height: auto;
+        max-height: 100%;
+        margin: 0 1 0 0;
+        padding: 0 1;
+        border: round TOKEN_BORDER_MUTED;
+        background: TOKEN_SURFACE_BASE;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #panel-aside {
+        width: 40%;
+        height: auto;
+        max-height: 100%;
+        margin: 0 0 0 1;
+        padding: 0 1;
+        border: round TOKEN_BORDER_ACTIVE;
+        border-title-color: TOKEN_ACCENT_VIOLET;
+        border-title-style: bold;
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    /* With a nav list the table gets a box titled with the active item. */
+    #panel-split.with-nav #panel-table {
+        border: round TOKEN_BORDER_MUTED;
+        border-title-color: TOKEN_ACCENT_CYAN;
+        border-title-style: bold;
+    }
+
+    #panel-split.with-nav #panel-table:focus {
+        border: round TOKEN_BORDER_ACTIVE;
+    }
+
     #ai-model-table-label,
     #ai-product-table-label {
         height: 1;
@@ -735,6 +785,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         margin-top: 1;
         padding: 1 2;
         border: round TOKEN_BORDER_ACTIVE;
+        border-title-color: TOKEN_ACCENT_VIOLET;
+        border-title-style: bold;
         background: TOKEN_SURFACE_RAISED;
         color: TOKEN_TEXT_PRIMARY;
         overflow-y: auto;
@@ -929,7 +981,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         "TOKEN_ACCENT_BLUE", TOKENS.accent_blue
     ).replace(
         "TOKEN_ACCENT_AMBER", TOKENS.accent_amber
-    )
+    ).replace("TOKEN_ACCENT_VIOLET", TOKENS.accent_violet)
 
     # Textual >=8.2.0: enable cross-container drag-selection with
     # auto-scroll. Operators routinely want to copy log lines, activity
@@ -1050,6 +1102,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # :meth:`_connector_chip_text` and consumed by
         # :meth:`_handle_body_chip_click`; empty when no chip is shown.
         self._chip_click_segments: list[tuple[int, int, str]] = []
+        # Shared split layout: the body's one-line nav switcher (panel, body
+        # line, click targets), the aside shown below the table on a narrow
+        # terminal, and the last aside drawn on the right.
+        self._nav_switcher_hit: tuple[str, int, NavSwitcher] | None = None
+        self._panel_aside_below: RenderableType | None = None
+        self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
         self.hint_text = ""
@@ -1753,33 +1811,41 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         compact=True,
                         tooltip="Open the per-row action menu (o)",
                     )
-                yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
-                yield MeasuredDataTable(
-                    id="ai-model-table",
-                    classes="hidden",
-                    show_row_labels=False,
-                    show_cursor=True,
-                    cursor_type="row",
-                    zebra_stripes=True,
-                )
-                yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
-                yield MeasuredDataTable(
-                    id="panel-table",
-                    classes="hidden",
-                    show_row_labels=False,
-                    show_cursor=True,
-                    cursor_type="row",
-                    zebra_stripes=True,
-                )
-                # Scroll container so long alert / audit / log details
-                # are fully reachable. A bare ``Static`` is not
-                # scrollable in Textual (``is_scrollable`` needs a
-                # layout or child nodes), so its ``max-height`` silently
-                # clipped any detail past ~10 lines — the rich gateway
-                # finding + history blocks never showed. The inner
-                # ``Static`` carries the renderable; the wrapper scrolls.
-                with VerticalScroll(id="detail-panel", classes="hidden"):
-                    yield Static("", id="detail-panel-body")
+                # Shared table area (widgets/panel_split.py): an optional
+                # navigation list, the table + detail, and an optional aside.
+                # Panels opt in through _panel_nav / _panel_aside; with
+                # neither, #panel-main lays out exactly as before.
+                with Horizontal(id="panel-split"):
+                    yield PanelNav(id="panel-nav", classes="hidden")
+                    with Vertical(id="panel-main"):
+                        yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
+                        yield MeasuredDataTable(
+                            id="ai-model-table",
+                            classes="hidden",
+                            show_row_labels=False,
+                            show_cursor=True,
+                            cursor_type="row",
+                            zebra_stripes=True,
+                        )
+                        yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
+                        yield MeasuredDataTable(
+                            id="panel-table",
+                            classes="hidden",
+                            show_row_labels=False,
+                            show_cursor=True,
+                            cursor_type="row",
+                            zebra_stripes=True,
+                        )
+                        # Scroll container so long alert / audit / log details
+                        # are fully reachable. A bare ``Static`` is not
+                        # scrollable in Textual (``is_scrollable`` needs a
+                        # layout or child nodes), so its ``max-height`` silently
+                        # clipped any detail past ~10 lines — the rich gateway
+                        # finding + history blocks never showed. The inner
+                        # ``Static`` carries the renderable; the wrapper scrolls.
+                        with VerticalScroll(id="detail-panel", classes="hidden"):
+                            yield Static("", id="detail-panel-body")
+                    yield Static("", id="panel-aside", classes="hidden")
             yield Input(
                 placeholder="Type defenseclaw version, doctor, or a TUI alias",
                 id="command-input",
@@ -2418,6 +2484,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_tab_labels()
+        # The nav list and aside appear and disappear at width thresholds.
+        if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
+            panel = self.active_panel
+            if self._panel_nav(panel) or self._panel_aside(panel) is not None:
+                self.call_after_refresh(self._render_chrome)
 
     def action_switch_panel(self, panel: str) -> None:
         if panel not in PANEL_NAMES:
@@ -2622,6 +2693,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         else:
             table.add_class("hidden")
         detail.add_class("hidden")
+        self._hide_panel_split_parts(panel)
 
         if not overview_visible:
             self._set_overview_metrics_visible(False)
@@ -3174,6 +3246,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         self.detail_text = detail
+        panel.border_title = None
         if not detail:
             panel.add_class("hidden")
             self._last_detail_signature = None
@@ -4217,6 +4290,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._render_native_widgets()
         self._render_panel_controls()
         self._render_panel_table()
+        self._render_panel_split()
         self._render_detail_panel()
         # The strip's visibility depends on active_panel (it stays hidden
         # on Activity since the live stream is right there), so any panel
@@ -4514,6 +4588,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # E1: clear last render's chip click-map; panels that draw the chip
         # repopulate it via :meth:`_connector_chip_text`.
         self._chip_click_segments = []
+        # Same for a one-line nav switcher (_body_nav_switcher).
+        self._nav_switcher_hit = None
         if self.help_open:
             self.body_text = self._render_help_body()
             return self.body_text
@@ -7293,6 +7369,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         segment (the trailing hint) opens the filter picker as a fallback.
         """
 
+        if self._handle_nav_switcher_click(x, y):
+            return True
         if self._handle_setup_section_nav_click(x, y):
             return True
         segments = self._chip_click_segments
@@ -10136,18 +10214,174 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._append_panel_table_row(table, row)
         return True
 
+    # --- shared split layout (widgets/panel_split.py) ------------------------
+    #
+    # Three hooks, if-chains like the rest of the panel touchpoints. They run
+    # on every render (the 2 s refresh too), so they must be pure and cheap.
+
+    def _panel_nav(self, panel: str) -> tuple[NavItem, ...]:
+        """The navigation list for ``panel``; empty when it has none.
+
+        Shown left of the table from ``NAV_MIN_WIDTH`` columns. Narrower
+        terminals rely on the panel's own one-line switcher in ``#body``
+        (``_body_nav_switcher`` draws one from the same items).
+        """
+
+        if panel == "setup":
+            return self._setup_panel_nav()
+        return ()
+
+    def _panel_aside(self, panel: str) -> RenderableType | None:
+        """Detail for the selected row of ``panel``; None when it has none.
+
+        Shown right of the table from ``ASIDE_MIN_WIDTH`` columns, otherwise
+        in ``#detail-panel`` below the table when ``_detail_text()`` is
+        empty. Return ``Aside(title, body)`` to title the pane.
+        """
+
+        if panel == "setup":
+            return self._setup_panel_aside()
+        return None
+
+    def _select_panel_nav(self, panel: str, key: str) -> bool:
+        """Choose the nav item whose ``NavItem.key`` is ``key``.
+
+        Called for a click on the nav list or the body switcher; panels call
+        it from their own keys too. Return True when something changed (the
+        caller re-renders).
+        """
+
+        if panel == "setup":
+            return self._select_setup_nav(key)
+        return False
+
+    def _body_nav_switcher(self, items: tuple[NavItem, ...], line: int) -> str:
+        """One-line switcher markup for body line ``line``; clicks select items."""
+
+        switcher = nav_switcher(items, max(20, self._body_width()))
+        self._nav_switcher_hit = (self.active_panel, line, switcher)
+        return switcher.markup
+
+    def _body_width(self) -> int:
+        # #body-panel has a 1-column margin and 2 columns of padding per side.
+        width = int(getattr(self.size, "width", 0) or 0)
+        return (width if width > 0 else 80) - 6
+
+    def _handle_nav_switcher_click(self, x: int, y: int) -> bool:
+        hit = self._nav_switcher_hit
+        if hit is None or self.help_open:
+            return False
+        panel, line, switcher = hit
+        if panel != self.active_panel or y != line:
+            return False
+        key = switcher.key_at(x)
+        if key is None:
+            return False
+        if self._select_panel_nav(panel, key):
+            self._render_chrome()
+        return True
+
+    @on(PanelNav.Selected)
+    def _on_panel_nav_selected(self, event: PanelNav.Selected) -> None:
+        event.stop()
+        if len(self.screen_stack) > 1 or self.help_open:
+            return
+        if self._select_panel_nav(self.active_panel, event.key):
+            self._render_chrome()
+
+    def _render_panel_split(self) -> None:
+        """Show the active panel's nav list and aside where the width allows."""
+
+        self._panel_aside_below = None
+        try:
+            split = self.query_one("#panel-split", Horizontal)
+            nav = self.query_one("#panel-nav", PanelNav)
+            aside_widget = self.query_one("#panel-aside", Static)
+            table = self.query_one("#panel-table", DataTable)
+        except NoMatches:
+            return
+        panel = self.active_panel
+        # The Overview and the help sheet fill the panel with #body instead.
+        idle = self.help_open or panel == "overview"
+        split.set_class(idle, "hidden")
+        items = () if idle else tuple(self._panel_nav(panel))
+        aside = None if idle else self._panel_aside(panel)
+        width = int(getattr(self.size, "width", 0) or 0)
+        layout = split_layout(width, has_nav=bool(items), has_aside=aside is not None)
+        split.set_class(layout.nav, "with-nav")
+        nav.set_class(not layout.nav, "hidden")
+        table_title = ""
+        if layout.nav:
+            nav.show_items(items)
+            current = next((item for item in items if item.active), None)
+            table_title = rich_escape(current.label) if current is not None else ""
+        else:
+            nav.clear_items()
+        if (table.border_title or "") != table_title:
+            table.border_title = table_title or None
+        aside_widget.set_class(not layout.aside, "hidden")
+        if layout.aside and aside is not None:
+            title, body = split_aside(aside)
+            signature = (panel, title, body)
+            if signature != self._last_aside_signature:
+                aside_widget.border_title = rich_escape(title) if title else None
+                aside_widget.update(self._safe_body_renderable(body) if isinstance(body, str) else body)
+                self._last_aside_signature = signature
+        elif self._last_aside_signature is not None:
+            aside_widget.border_title = None
+            aside_widget.update("")
+            self._last_aside_signature = None
+        if layout.aside_below:
+            self._panel_aside_below = aside
+
+    def _hide_panel_split_parts(self, panel: str) -> None:
+        """Panel switch: drop the previous panel's nav, aside and titles."""
+
+        self._panel_aside_below = None
+        self._last_aside_signature = None
+        try:
+            split = self.query_one("#panel-split", Horizontal)
+            nav = self.query_one("#panel-nav", PanelNav)
+            aside_widget = self.query_one("#panel-aside", Static)
+            table = self.query_one("#panel-table", DataTable)
+            detail = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return
+        split.set_class(panel == "overview" or self.help_open, "hidden")
+        split.remove_class("with-nav")
+        nav.add_class("hidden")
+        nav.clear_items()
+        aside_widget.add_class("hidden")
+        aside_widget.border_title = None
+        table.border_title = None
+        detail.border_title = None
+
     def _render_detail_panel(self) -> None:
         panel = self.query_one("#detail-panel", VerticalScroll)
         body = self.query_one("#detail-panel-body", Static)
         detail = self._detail_text()
         self.detail_text = detail
-        if not detail:
+        # A panel's own detail wins; otherwise a narrow terminal shows the
+        # aside here (see _render_panel_split).
+        below = None if detail else self._panel_aside_below
+        if not detail and below is None:
             if not panel.has_class("hidden"):
                 panel.add_class("hidden")
                 body.update("")
+            panel.border_title = None
             self._last_detail_signature = None
             return
         panel.remove_class("hidden")
+        if below is not None:
+            title, content = split_aside(below)
+            signature = (self.active_panel, "aside", title, content)
+            if signature != self._last_detail_signature:
+                panel.border_title = rich_escape(title) if title else None
+                body.update(self._safe_body_renderable(content) if isinstance(content, str) else content)
+                panel.scroll_home(animate=False)
+                self._last_detail_signature = signature
+            return
+        panel.border_title = None
         # Same idempotence guard as the body widget. Detail panes are
         # rendered identically every tick when nothing changed (e.g.
         # an alert row is selected and Activity is streaming); the
@@ -10242,6 +10476,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 body_widget.update(self._safe_body_renderable(text))
                 self._last_body_signature = body_signature
         self._render_panel_controls()
+        self._render_panel_split()
         self._render_detail_panel()
 
     def _active_table_cursor(self) -> int:
@@ -10876,6 +11111,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     cells.append(info.description)
             rows.append(tuple(cells))
         return tuple(columns), tuple(rows)
+
+    def _setup_panel_nav(self) -> tuple[NavItem, ...]:
+        """Setup's side of ``_panel_nav``."""
+
+        return ()
+
+    def _setup_panel_aside(self) -> RenderableType | None:
+        """Setup's side of ``_panel_aside``."""
+
+        return None
+
+    def _select_setup_nav(self, key: str) -> bool:
+        """Setup's side of ``_select_panel_nav``."""
+
+        return False
 
     def _setup_width(self) -> int:
         width = int(getattr(self.size, "width", 0) or 0)
