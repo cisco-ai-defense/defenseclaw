@@ -72,12 +72,12 @@ async def test_service_details_read_as_words_at_80_columns(tmp_path) -> None:
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).parent))
-    from fixtures import screen_text, snapshot_app
+    from fixtures import screen_text, settle_panel, snapshot_app
 
     app = snapshot_app(tmp_path)
     # Tall enough that the Services card is on screen without scrolling.
     async with app.run_test(size=(80, 70)) as pilot:
-        await pilot.pause()
+        await settle_panel(app, pilot)  # the Overview body renders after the first frame
         text = screen_text(app)
     # The Telemetry detail used to fold four letters a line ("cano", "nica").
     assert "plan loading" in text
