@@ -846,8 +846,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		before = &sandboxapi.Sandbox{}
 	}
 	hooksBefore, egressBefore := before.Hooks, before.Egress
+	restarted := false
 	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
-		hooksBefore = sandboxapi.HookCoverage{}
+		hooksBefore, restarted = sandboxapi.HookCoverage{}, true
 	}
 	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked {
 		egressBefore = sandboxapi.EgressStats{}
@@ -856,6 +857,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
 	parts := []string{"Session ended"}
 	tools := plural(max(calls, 0), "tool call", "tool calls")
+	if restarted {
+		tools += " since the daemon restarted"
+	}
 	if blocked > 0 {
 		tools += fmt.Sprintf(" (%d blocked", blocked)
 		if after.Hooks.LastBlocked != "" {

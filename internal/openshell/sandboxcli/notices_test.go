@@ -198,7 +198,7 @@ func TestHooksAfterADaemonRestartStillCount(t *testing.T) {
 		t.Fatalf("Connect = %v\n%s", err, ta.output())
 	}
 	out := ta.output()
-	if strings.Contains(out, "hooks are not reaching") || !strings.Contains(out, "Session ended · 1 tool call · 2 new sites contacted") {
+	if strings.Contains(out, "hooks are not reaching") || !strings.Contains(out, "Session ended · 1 tool call since the daemon restarted · 2 new sites contacted") {
 		t.Fatalf("summary:\n%s", out)
 	}
 }
