@@ -47,6 +47,28 @@ func windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir string, ta
 	return err == nil && ok
 }
 
+// WindowsAccountCreatedDataDir reports whether home's %USERPROFILE%\.defenseclaw
+// is a data directory the account (sid) created itself before enrollment
+// (windowsAccountCreatedDataDir), which the guardian adopts when the account
+// next signs in and Upgrade/Repair leave alone. Status names such accounts.
+func WindowsAccountCreatedDataDir(home, sid string) bool {
+	target, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	dataDir := filepath.Join(filepath.Clean(home), ".defenseclaw")
+	extended, err := winpath.Extended(dataDir)
+	if err != nil {
+		return false
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	ok, err := windowsAccountCreatedDataDir(dataDir, descriptor, target)
+	return err == nil && ok
+}
+
 func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget) error {
 	if !target.IsEnabled() || !target.IsDeferred() {
 		return errors.New("enterprise hooks: pending proof requires an enabled deferred manifest target")

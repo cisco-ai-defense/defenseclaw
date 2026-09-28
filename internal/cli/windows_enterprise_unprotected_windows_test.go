@@ -74,3 +74,48 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 		t.Fatalf("broken record: %+v", broken)
 	}
 }
+
+// Status names why an installed gateway is not running, from the last error
+// it logged, and reports the rows DefenseClaw keeps for a deleted account
+// whose profile folder is still there.
+func TestWindowsStandaloneStatusNamesGatewayStartFailureAndDeletedAccount(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	previousFailure, previousAccounts, previousDeleted, previousFolder := windowsEnterpriseGatewayStartFailure, windowsEnterpriseManifestAccounts, windowsEnterpriseAccountDeleted, windowsEnterpriseAccountCreatedDataDir
+	t.Cleanup(func() {
+		windowsEnterpriseGatewayStartFailure, windowsEnterpriseManifestAccounts, windowsEnterpriseAccountDeleted, windowsEnterpriseAccountCreatedDataDir = previousFailure, previousAccounts, previousDeleted, previousFolder
+	})
+	windowsEnterpriseAccountCreatedDataDir = func(string, string) bool { return false }
+	windowsEnterpriseGatewayStartFailure = func() (string, string) {
+		return `failed to load config: observability.local.path: cannot inspect configured path C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db: Access is denied.`,
+			`C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log`
+	}
+	home := t.TempDir()
+	windowsEnterpriseManifestAccounts = func() ([]windowsEnterpriseManifestAccount, error) {
+		return []windowsEnterpriseManifestAccount{
+			{User: "alice", SID: "S-1-5-21-1-2-3-1001", Home: home, Rows: 2},
+			{User: "bob", SID: "S-1-5-21-1-2-3-1002", Home: home, Rows: 1},
+		}, nil
+	}
+	windowsEnterpriseAccountDeleted = func(sid string) bool { return sid == "S-1-5-21-1-2-3-1001" }
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(status, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Installed: true, GatewayService: "DefenseClawGateway", GatewayServiceState: "stopped",
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1})
+	if len(status.Errors) != 1 || status.Errors[0].Code != "gateway_start_failed" ||
+		!strings.Contains(status.Errors[0].Message, "cannot inspect configured path") ||
+		!strings.Contains(status.Errors[0].Message, "enterprise windows repair") {
+		t.Fatalf("errors = %+v, want the gateway's start failure named", status.Errors)
+	}
+	deleted := 0
+	for _, warning := range status.Warnings {
+		if warning.Code == "deleted_account_rows" {
+			deleted++
+			if !strings.Contains(warning.Message, "alice (S-1-5-21-1-2-3-1001)") || !strings.Contains(warning.Message, "2 enrollment row(s)") {
+				t.Fatalf("deleted account warning %q", warning.Message)
+			}
+		}
+	}
+	if deleted != 1 {
+		t.Fatalf("warnings = %+v, want one deleted-account warning", status.Warnings)
+	}
+}
