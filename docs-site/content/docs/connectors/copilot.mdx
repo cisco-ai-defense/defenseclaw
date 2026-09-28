@@ -286,10 +286,24 @@ replaces that list, so name every harness you want:
   and Codex sandboxes only.
 - **Ctrl-Z.** Copilot CLI suspends itself by signalling its process group,
   which the OpenShell sandbox refuses, and no shell in the sandbox could
-  resume a stopped job either. DefenseClaw resumes Copilot at once and prints
-  `defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox`,
-  also at a `sandbox connect --shell` prompt; Copilot itself still reports
-  `kill EPERM` and its own "has been suspended" line.
+  resume a stopped job either. DefenseClaw resumes Copilot at once, also at a
+  `sandbox connect --shell` prompt: Copilot shows its own `✗ Error: kill
+  EPERM` and keeps working, and once it exits the terminal shows its "has
+  been suspended" line followed by `defenseclaw: Ctrl-Z cannot suspend a
+  harness in an OpenShell sandbox`.
+- **Interactive hook latency.** In the interactive TUI every hook takes
+  Copilot's full hook timeout (30 seconds) although DefenseClaw answers in
+  milliseconds, so one tool call can take a minute and a half. This is a
+  limit of OpenShell 0.1.1 and Copilot CLI 1.0.88, not of the hooks: the
+  sandbox refuses `pidfd_open` (ENOSYS), so Copilot's native runtime falls
+  back to watching `SIGCHLD` for its hook processes, and in the TUI Copilot's
+  own Node.js subprocess handling resets that signal to its default. The
+  finished hook stays a zombie until the timeout kills it; its verdict is
+  still applied. Headless runs are not affected: pass the prompt with
+  `defenseclaw sandbox run copilot --prompt "PROMPT"`, or
+  `defenseclaw sandbox connect NAME --prompt "PROMPT"`. DefenseClaw does not
+  shorten the timeout, because Copilot allows a tool call whose hook timed
+  out.
 - **Image and verification.** The image installs Copilot CLI 1.0.88,
   replacing the base image's 1.0.16, which no hook contract covers. Verified
   end to end: against a mock model
