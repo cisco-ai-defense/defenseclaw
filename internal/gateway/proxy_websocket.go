@@ -230,21 +230,14 @@ func (p *GuardrailProxy) classifyWebSocketMessage(
 	for _, m := range messages {
 		roles = append(roles, m.Role)
 	}
-	for _, m := range messages {
-		contentLen := len(m.Content)
-		rawLen := len(m.RawContent)
-		preview := extractTextFromContentParts(m.RawContent)
-		if len(preview) > 80 {
-			preview = preview[:80]
-		}
-		fmt.Fprintf(os.Stderr, "[guardrail] websocket routing:   item role=%s type=%s content=%d raw=%d text=%q\n",
-			m.Role, "", contentLen, rawLen, preview)
-	}
 	fmt.Fprintf(os.Stderr, "[guardrail] websocket routing: %d input items, roles=%v\n", len(messages), roles)
 
-	// Extract classifiable text. Try user-role first, then developer-role.
-	// Codex Responses API WS first frame only has developer items — the
-	// user query is embedded in the last developer message's content parts.
+	// Only classify on user-role content. Developer messages contain
+	// the Codex system prompt which always matches planning keywords
+	// ("collaborate", "design", "plan") and would misroute every request.
+	// If the first WS frame has no user-role content, skip classification
+	// and use the default upstream. The user query arrives in a later
+	// frame; routing for WS relies on the HTTP fallback path.
 	userText := ""
 	for i := len(messages) - 1; i >= 0; i-- {
 		if strings.EqualFold(messages[i].Role, "user") {
@@ -253,26 +246,6 @@ func (p *GuardrailProxy) classifyWebSocketMessage(
 				userText = extractTextFromContentParts(messages[i].RawContent)
 			}
 			if userText != "" {
-				break
-			}
-		}
-	}
-	// Fall back to extracting from the last developer message.
-	// Codex embeds the user's actual prompt near the end of the
-	// developer instructions. Extract the last input_text part
-	// which typically contains the user query.
-	if userText == "" {
-		for i := len(messages) - 1; i >= 0; i-- {
-			text := extractTextFromContentParts(messages[i].RawContent)
-			if text != "" {
-				// The developer system prompt is very long; the actual
-				// user query is the last line after "user\n".
-				if idx := strings.LastIndex(text, "\n"); idx > 0 && len(text)-idx < 500 {
-					userText = strings.TrimSpace(text[idx+1:])
-				}
-				if userText == "" {
-					userText = text
-				}
 				break
 			}
 		}
@@ -438,14 +411,10 @@ func stripUnsupportedInputItems(msg []byte) []byte {
 			}
 		}
 	}
-	var allTypes []string
-	for _, item := range items {
-		var t struct{ Type, Role string }
-		json.Unmarshal(item, &t)
-		allTypes = append(allTypes, fmt.Sprintf("%s(role=%s)", t.Type, t.Role))
+	if len(droppedTypes) > 0 {
+		fmt.Fprintf(os.Stderr, "[guardrail] websocket: stripped %d unsupported input items (%v)\n",
+			len(droppedTypes), droppedTypes)
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] stripInput: %d items, kept=%d, dropped=%v, types=%v\n",
-		len(items), len(kept), droppedTypes, allTypes)
 	if len(kept) == len(items) {
 		return nil // nothing stripped
 	}
