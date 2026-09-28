@@ -10986,7 +10986,8 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         CLI's "trust this directory?" prompt — it surfaces the same decision in
         the panel rather than firing ``click.confirm`` under a full-screen TUI.
         """
-        parent = untrusted_connector_dir(connector, getattr(self.config, "data_dir", None))
+        # Discovery runs every agent binary; keep it off the UI thread.
+        parent = await asyncio.to_thread(untrusted_connector_dir, connector, getattr(self.config, "data_dir", None))
         if not parent:
             return True
         rows = trusted_paths_rows_from_config(self.config)

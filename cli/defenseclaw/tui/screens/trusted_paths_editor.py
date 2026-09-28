@@ -20,6 +20,7 @@ exact command (and therefore the security implication) before it runs.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 TOKENS = DEFAULT_TOKENS
 _LOGGER = logging.getLogger(__name__)
+CHECKING_BINARIES_MESSAGE = "Checking agent binaries…"
 
 
 @dataclass(frozen=True)
@@ -176,12 +178,20 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
             self._set_status(self._context_text)
         else:
             # Browsed directly: proactively highlight any connector whose
-            # binary currently resolves into an untrusted directory.
-            summary = self._untrusted_summary()
-            if summary:
-                self._set_status(summary)
+            # binary currently resolves into an untrusted directory. That is
+            # a full agent-discovery scan (it runs each binary), so it runs
+            # off the UI thread while the editor is already usable.
+            self._set_status(CHECKING_BINARIES_MESSAGE)
+            self.run_worker(self._check_untrusted_binaries(), exclusive=True, thread=False)
         # Focus the input so the operator can immediately add (or edit) a path.
         add_input.focus()
+
+    async def _check_untrusted_binaries(self) -> None:
+        summary = await asyncio.to_thread(self._untrusted_summary)
+        if not self.is_attached or self._status_message != CHECKING_BINARIES_MESSAGE:
+            # Closed, or an action already put its own message there.
+            return
+        self._set_status(summary or self._status_text())
 
     def _untrusted_summary(self) -> str:
         """One-line summary of connectors whose binary is in an untrusted dir."""

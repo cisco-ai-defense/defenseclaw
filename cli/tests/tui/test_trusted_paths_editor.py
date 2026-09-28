@@ -230,3 +230,36 @@ def test_untrusted_dir_reflects_newly_trusted_prefix(tmp_path, monkeypatch) -> N
             encoding="utf-8",
         )
         assert untrusted_connector_dir("codex", str(tmp_path)) is None
+
+
+# ---- the untrusted-binary scan never blocks the editor's first paint -------
+
+
+async def test_untrusted_scan_runs_off_the_ui_thread() -> None:
+    import threading
+
+    from textual.app import App
+
+    release = threading.Event()
+    pairs = [("codex", "/home/u/.local/bin")]
+
+    def slow_scan(_data_dir=None):
+        release.wait(10)
+        return pairs
+
+    class Harness(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(TrustedPathsEditorScreen((_DEFAULT_ROW,)))
+
+    app = Harness()
+    with patch.object(tpe, "untrusted_connector_dirs", slow_scan):
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, TrustedPathsEditorScreen)
+            # Mounted and responsive while the scan is still blocked.
+            assert screen._status_message == tpe.CHECKING_BINARIES_MESSAGE
+            release.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert "codex" in screen._status_message
