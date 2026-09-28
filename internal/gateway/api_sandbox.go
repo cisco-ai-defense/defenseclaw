@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -219,6 +220,7 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 			st.Enabled = cfg.OpenShell.Enabled
 		}
 		st.IngressAddr = a.SandboxIngressAddr()
+		st.DaemonUID = daemonUID()
 		a.writeJSON(w, http.StatusOK, st)
 		return
 	}
@@ -227,7 +229,18 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 		writeSandboxError(w, err)
 		return
 	}
+	st.DaemonUID = daemonUID()
 	a.writeJSON(w, http.StatusOK, st)
+}
+
+// daemonUID is the uid this process runs as, for the sandbox doctor's
+// same-user check; nil where there is none (Windows).
+func daemonUID() *int {
+	uid := os.Getuid()
+	if uid < 0 {
+		return nil
+	}
+	return &uid
 }
 
 // handleSandboxActivity serves the activity feed: buffered events as JSON,

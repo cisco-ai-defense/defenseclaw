@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -306,6 +307,29 @@ func TestSandboxAPIRoutes(t *testing.T) {
 	}
 }
 
+// The status names the uid the daemon runs as, for the doctor's same-user
+// check, whether or not the sandbox subsystem runs.
+func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
+	_, h := sandboxTestAPI(t, &fakeSandboxController{}, true)
+	w := serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathStatus, ""))
+	var st sandboxapi.Status
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || w.Code != 200 {
+		t.Fatalf("status = %d %s", w.Code, w.Body.String())
+	}
+	checkDaemonUID(t, st)
+}
+
+func checkDaemonUID(t *testing.T, st sandboxapi.Status) {
+	t.Helper()
+	want := os.Getuid()
+	switch {
+	case want < 0 && st.DaemonUID != nil:
+		t.Fatalf("daemon uid = %d on a system without uids", *st.DaemonUID)
+	case want >= 0 && (st.DaemonUID == nil || *st.DaemonUID != want):
+		t.Fatalf("daemon uid = %v, want %d", st.DaemonUID, want)
+	}
+}
+
 func TestSandboxAPIStrictBodies(t *testing.T) {
 	ctl := &fakeSandboxController{}
 	_, h := sandboxTestAPI(t, ctl, true)
@@ -350,6 +374,7 @@ func TestSandboxAPIDisabled(t *testing.T) {
 		if w.Code != 200 || st.Enabled != enabled || st.Available {
 			t.Fatalf("status (enabled=%v) = %d %+v", enabled, w.Code, st)
 		}
+		checkDaemonUID(t, st)
 		w = serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
 		want := sandboxapi.CodeDisabled
 		if enabled {

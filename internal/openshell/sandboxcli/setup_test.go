@@ -345,6 +345,37 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	}
 }
 
+// The doctor's same-user check compares this user with the uid the daemon
+// reports, never with this process's own (which could not fail); a daemon
+// that reports none leaves the check nothing to compare.
+func TestDoctorComparesTheDaemonsOwnUID(t *testing.T) {
+	other := os.Getuid() + 1
+	for _, tc := range []struct {
+		name string
+		uid  *int
+	}{{"reported", &other}, {"not reported", nil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.DaemonUID = tc.uid
+			var got *int
+			ran := false
+			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+				got, ran = d.DaemonUID, true
+				return hostReport(nil)(ctx, d)
+			}
+			_ = ta.RunDoctor(context.Background(), DoctorOptions{})
+			switch {
+			case !ran:
+				t.Fatal("the host checks did not run")
+			case tc.uid == nil && got != nil:
+				t.Fatalf("daemon uid = %d, want none", *got)
+			case tc.uid != nil && (got == nil || *got != *tc.uid):
+				t.Fatalf("daemon uid = %v, want %d", got, *tc.uid)
+			}
+		})
+	}
+}
+
 // TestDoctorVerdict pins the doctor's last line: not "ready" while
 // sandboxes are turned off, and no image to build for a harness the
 // organization forbids.

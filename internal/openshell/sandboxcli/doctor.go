@@ -76,10 +76,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			// The running daemon holds its own listeners.
 			d.Ports[i].ServedByDaemon = st.listening
 		}
-		if st.listening {
-			uid := os.Getuid()
-			d.DaemonUID = &uid
-		}
+		// The uid the daemon reports (an older one reports none, and the
+		// check then has nothing to compare).
+		d.DaemonUID = st.daemonUID
 	}
 	rep := a.HostDoctor(ctx, d)
 	if st != nil {
@@ -98,6 +97,8 @@ type statusProbe struct {
 	// hook ingress address.
 	available bool
 	ingress   string
+	// daemonUID is the uid the answering daemon runs as, when it says.
+	daemonUID *int
 	check     openshell.Check
 }
 
@@ -144,6 +145,9 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 	api, err := a.api()
 	if err == nil {
 		st, serr := api.Status(ctx)
+		if serr == nil {
+			p.daemonUID = st.DaemonUID
+		}
 		switch {
 		case serr != nil:
 			c.Status, c.Detail = openshell.StatusFail, apiError(serr).Error()

@@ -63,6 +63,10 @@ type Status struct {
 	Running          int       `json:"running"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	// DaemonUID is the uid the daemon runs as (unset where there is none):
+	// it drives the user's OpenShell gateway and mounts the user's files, so
+	// the doctor checks it is the user's own.
+	DaemonUID *int `json:"daemon_uid,omitempty"`
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
