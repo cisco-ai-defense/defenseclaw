@@ -95,6 +95,9 @@ type fakeWorkspace struct {
 	lastMount    workspace.MountOptions
 	// clean makes Review report a folder without changes.
 	clean bool
+	// onUndo and onDeleteSnapshot run first in Undo and DeleteSnapshot,
+	// with their context (a caller going away mid-step, say).
+	onUndo, onDeleteSnapshot func(ctx context.Context)
 }
 
 func newFakeWorkspace() *fakeWorkspace {
@@ -153,7 +156,10 @@ func (f *fakeWorkspace) LoadSnapshot(_, name string) (*workspace.SnapshotRecord,
 	return nil, workspace.ErrSnapshotNotFound
 }
 
-func (f *fakeWorkspace) DeleteSnapshot(_ context.Context, _, name string) error {
+func (f *fakeWorkspace) DeleteSnapshot(ctx context.Context, _, name string) error {
+	if f.onDeleteSnapshot != nil {
+		f.onDeleteSnapshot(ctx)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted = append(f.deleted, name)
@@ -161,7 +167,10 @@ func (f *fakeWorkspace) DeleteSnapshot(_ context.Context, _, name string) error 
 	return nil
 }
 
-func (f *fakeWorkspace) Undo(_ context.Context, opts workspace.UndoOptions) (*workspace.UndoResult, error) {
+func (f *fakeWorkspace) Undo(ctx context.Context, opts workspace.UndoOptions) (*workspace.UndoResult, error) {
+	if f.onUndo != nil {
+		f.onUndo(ctx)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.undoErr != nil {

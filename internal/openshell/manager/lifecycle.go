@@ -485,6 +485,11 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	m.mu.Lock()
 	retained := b.retained
 	m.mu.Unlock()
+	// A delete runs to its end once it started, even when the caller goes
+	// away: one cut short would leave the providers, the binding, the mount
+	// pins or the snapshot half released.
+	ctx, cancel := detached(ctx, defaultOpTimeout)
+	defer cancel()
 	if retained {
 		return m.deleteRetained(ctx, b, req)
 	}
@@ -492,8 +497,6 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
-	defer cancel()
 	// The watcher keeps running until the sandbox is gone: a delete that
 	// fails leaves it running, still watched and triaged.
 	m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
@@ -747,6 +750,12 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
 				"sandbox %s also mounts %s and may be running; stop it before undoing, because undo restores the whole folder", other, rec.Project)
 		}
+		// The restore is a sequence of git steps on the user's folder: once
+		// it started it runs to its end even when the caller goes away,
+		// and so do the stop before it and the restart after it.
+		var cancel context.CancelFunc
+		ctx, cancel = detached(ctx, undoTimeout)
+		defer cancel()
 	}
 	// Ask OpenShell whether the agent can still write to the folder. A
 	// retained box has no sandbox left (a live one under its name is

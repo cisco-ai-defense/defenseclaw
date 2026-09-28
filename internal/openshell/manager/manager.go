@@ -66,7 +66,17 @@ const (
 	// defaultCreateTimeout bounds a create, which may build an image.
 	defaultCreateTimeout = 45 * time.Minute
 	rollbackTimeout      = 2 * time.Minute
+	// undoTimeout bounds an undo: the stop, the restore and the restart.
+	undoTimeout = 3 * defaultOpTimeout
 )
+
+// detached is ctx without its cancellation, bounded by timeout: for work
+// that must run to its end once started (a delete's cleanup, an undo's
+// restore), which a caller going away would otherwise cut short. It keeps
+// ctx's values.
+func detached(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
 
 // HostUser is the account the sandbox runs as in mount mode.
 type HostUser struct {
