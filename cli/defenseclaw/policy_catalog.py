@@ -817,6 +817,15 @@ def protection_packs(root: str | os.PathLike[str] | None = None) -> list[Protect
     return out
 
 
+def protected_pack_dir(cfg: Any, scope: str) -> str:
+    """Where ``guardrail protection`` composes *scope*'s pack.
+
+    ``<policy_dir>/guardrail/protected-<scope>`` ("" without a policy dir).
+    """
+    root = _policy_root(cfg)
+    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}") if root else ""
+
+
 def protection_pack_dir(name: str, root: str | os.PathLike[str] | None = None) -> str:
     """Directory of the named use-case pack ("" when unknown or unsafe)."""
     if not isinstance(name, str) or not _safe_policy_name(name):
@@ -1227,6 +1236,7 @@ __all__ = [
     "packs_layered_in",
     "policy_file",
     "preset_pack_dir",
+    "protected_pack_dir",
     "protection_pack_dir",
     "protection_packs",
     "protection_packs_dir",
