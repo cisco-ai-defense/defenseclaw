@@ -70,6 +70,20 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
     return app
 
 
+# Status draws a table or per-connector blocks by the terminal width, which
+# other tests in the same process (a pytest worker, a CI shard) can leave
+# narrowed. These tests assume 120 columns unless one patches it itself.
+_TERMINAL_WIDTH = patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=120)
+
+
+def setUpModule():
+    _TERMINAL_WIDTH.start()
+
+
+def tearDownModule():
+    _TERMINAL_WIDTH.stop()
+
+
 class ResolveActiveConnectorTests(unittest.TestCase):
     def test_uses_active_connector_method(self):
         cfg = SimpleNamespace()
