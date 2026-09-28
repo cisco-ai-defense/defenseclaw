@@ -148,6 +148,25 @@ SANDBOX_HARNESS_SPECS: tuple[tuple[str, str, str], ...] = (
 DEFAULT_SANDBOX_HARNESSES: tuple[str, ...] = ("claudecode", "codex")
 # Harness command names (what the user types; sandboxcli.ResolveHarness takes them).
 _HARNESS_COMMANDS = {name: command for name, _label, command in SANDBOX_HARNESS_SPECS}
+# The same table by connector name: name → (command, display name).
+HARNESSES: dict[str, tuple[str, str]] = {name: (command, label) for name, label, command in SANDBOX_HARNESS_SPECS}
+
+
+def resolve_harness(name: str) -> str:
+    """The harness ``name`` means, as sandboxcli.ResolveHarness reads it, or "".
+
+    A harness name (``claude-code`` normalized), its command or its display
+    name, in any case.
+    """
+    text = name.strip().lower()
+    canonical = {"claude-code": "claudecode", "claude_code": "claudecode"}.get(text, text)
+    canonical = {"open-hands": "openhands", "open_hands": "openhands"}.get(canonical, canonical)
+    if canonical in HARNESSES:
+        return canonical
+    for harness, (command, display) in HARNESSES.items():
+        if text in {command, display.lower(), display.lower().replace(" ", "")}:
+            return harness
+    return ""
 
 
 def harness_command(name: str) -> str:
@@ -1337,7 +1356,7 @@ class SandboxesPanelModel:
                 (
                     row.name,
                     row.phase or "-",
-                    _HARNESS_COMMANDS.get(row.harness, row.harness_label),
+                    harness_command(row.harness) if row.harness in HARNESSES else row.harness_label,
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),

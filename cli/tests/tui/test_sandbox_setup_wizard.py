@@ -575,7 +575,12 @@ def test_edits_are_written_with_the_go_types() -> None:
         ("openshell.resources.memory", "string", "4Gi", True),
         ("openshell.resources.memory", "string", "4 gigs", False),
         ("openshell.harnesses", "string", "claudecode,codex", True),
-        ("openshell.harnesses", "string", "openclaw", False),
+        # Every Go harness, by name or command, as `sandbox setup --harness` writes them.
+        ("openshell.harnesses", "string", "devin,antigravity,agy,cursor-agent,kiro,claude-code", True),
+        # The gateway loads a well-formed unknown name; the sandbox commands refuse it (a warning).
+        ("openshell.harnesses", "string", "notaharness-example", True),
+        ("openshell.harnesses", "string", "not a name", False),
+        ("openshell.harnesses", "string", "-leading", False),
         ("openshell.workdir.git_depth", "int", "-1", False),
     ],
 )
@@ -584,6 +589,41 @@ def test_openshell_validation(key: str, kind: str, value: str, ok: bool) -> None
 
     result = validate_config_field(ConfigField(label=key, key=key, kind=kind, value=value, original=""))
     assert (result.severity != "error") is ok, result
+
+
+def test_openshell_harnesses_other_than_the_launch_dialogs_never_block_a_save() -> None:
+    from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, validation_errors
+
+    key = "openshell.harnesses"
+
+    def field(value: str) -> ConfigField:
+        return ConfigField(label=key, key=key, kind="string", value=value, original="")
+
+    assert validate_config_field(field("devin,hermes,openhands")).severity == "ok"
+    unknown = validate_config_field(field("claudecode,notaharness-example"))
+    assert unknown.severity == "warning" and "notaharness-example" in unknown.message
+    # validation_errors checks every field, so a bad one here would block any save.
+    assert validation_errors([ConfigSection("OpenShell", (field("devin,omnigent,notaharness-example"),), "")]) == ()
+
+
+def test_the_harness_table_matches_the_go_registry() -> None:
+    """HARNESSES mirrors internal/openshell/harness: every registered Spec's name, command and display name."""
+    import re
+
+    from defenseclaw.tui.services.sandbox_state import HARNESSES, resolve_harness
+
+    root = Path(__file__).resolve().parents[3]
+    specs: dict[str, tuple[str, str]] = {}
+    for path in sorted((root / "internal" / "openshell" / "harness").glob("*.go")):
+        if path.name.endswith("_test.go"):
+            continue
+        for block in re.findall(r"= register\(&Spec\{\n(.*?)\n\}\)", path.read_text(encoding="utf-8"), re.S):
+            fields = dict(re.findall(r'^\t(Name|Command|DisplayName):\s*"([^"]*)"', block, re.M))
+            specs[fields["Name"]] = (fields["Command"], fields["DisplayName"])
+    assert specs == HARNESSES
+    for name, (command, display) in HARNESSES.items():
+        assert resolve_harness(name) == resolve_harness(command) == resolve_harness(display.upper()) == name
+    assert resolve_harness("Claude-Code") == "claudecode" and resolve_harness("openclaw") == ""
 
 
 @pytest.mark.parametrize(

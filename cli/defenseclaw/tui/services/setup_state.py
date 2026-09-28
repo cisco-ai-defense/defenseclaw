@@ -22,6 +22,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
+from defenseclaw.tui.services.sandbox_state import HARNESSES, resolve_harness
 
 ReadinessStatus = Literal["pass", "warn", "fail"]
 ValidationSeverity = Literal["ok", "warning", "error"]
@@ -990,6 +991,8 @@ _OPENSHELL_STRING_LIST_KEYS = frozenset(
 _OPENSHELL_READ_ONLY_KEYS = frozenset({"openshell.wrappers", "openshell.admin", "openshell.mode"})
 _OPENSHELL_CPU = re.compile(r"^(\d+(\.\d+)?|\d+m)$")
 _OPENSHELL_MEMORY = re.compile(r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T|k)?$")
+# config.openShellNamePattern.
+_OPENSHELL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
@@ -1021,10 +1024,30 @@ def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
     if key == "openshell.resources.memory" and value and not _OPENSHELL_MEMORY.match(value):
         return ValidationResult("error", "memory is bytes with an optional suffix, for example 512Mi or 4Gi")
     if key == "openshell.harnesses":
-        unknown = [name for name in split_csv(value) if name not in {"claudecode", "codex"}]
-        if unknown:
-            return ValidationResult("error", "supported harnesses: claudecode, codex")
+        return _validate_openshell_harnesses(value)
     return None
+
+
+def _validate_openshell_harnesses(value: str) -> ValidationResult:
+    """openshell.harnesses as the gateway loads it and the sandbox commands read it.
+
+    The gateway refuses only a malformed name (config.validateOpenShellNames,
+    the v8 schema's connectorName). ``sandbox setup``, ``doctor`` and
+    ``image`` resolve each entry to a harness (its name, command or display
+    name) and stop at one they do not know: a warning, so it never blocks an
+    unrelated save. The launch dialog offering Claude Code and Codex is its
+    own limit.
+    """
+    names = split_csv(value)
+    for name in names:
+        if not _OPENSHELL_NAME.match(name):
+            return ValidationResult("error", f"{name!r} is not a valid name (letters, digits, '.', '_' and '-')")
+    unknown = [name for name in names if not resolve_harness(name)]
+    if unknown:
+        return ValidationResult(
+            "warning", f"unknown harness {', '.join(unknown)}; sandboxes run: {', '.join(HARNESSES)}"
+        )
+    return ValidationResult()
 
 
 def _apply_openshell_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
