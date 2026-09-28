@@ -720,6 +720,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         display: none;
     }
 
+    #activity.compact {
+        height: 6;
+    }
+
     #command-input {
         display: none;
         margin: 0 1;
@@ -1931,10 +1935,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # spin up CLI processes for screens the operator doesn't care
         # about.
         self.set_interval(60.0, self._schedule_slow_refresh)
-        self._write_activity(
-            "[bold #22D3EE]Textual backend[/] ready. "
-            "Go backend remains available with --backend go."
-        )
+        # (This used to say "Go backend remains available with --backend go",
+        # an option `defenseclaw tui` doesn't have.)
+        self._write_activity("[#94A3B8]Command output streams here. Press : or Ctrl+K to run a command.[/]")
         if self.first_run_model.active:
             self._write_activity("[#FBBF24]First-run setup[/] config is missing; embedded init flow is active.")
         self.run_worker(self._check_for_update(), exclusive=False, thread=False)
@@ -4034,6 +4037,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         activity.set_class(self.active_panel != "activity", "hidden")
+        # On short terminals the 11-row output log left the Activity history
+        # (the 1/2 tabs, command list and gateway activity) no rows at all.
+        activity.set_class(0 < self.size.height < 30, "compact")
         self._render_overview_scope_indicator()
         # The Overview body can exceed the viewport (metric tiles + notices +
         # SERVICES/CONFIG/ENFORCEMENT/SCANNERS + the CONNECTORS roster), so let
