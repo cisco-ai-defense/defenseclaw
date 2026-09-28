@@ -1595,6 +1595,51 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	return []byte(rendered), nil
 }
 
+// managedPluginArtifactDrift returns the managed plugin path when the
+// installed plugin is missing or differs in any byte from the plugin Setup
+// renders for opts, and "" when it matches or c installs no plugin.
+func (c *hookOnlyConnector) managedPluginArtifactDrift(opts SetupOpts) (string, error) {
+	if c == nil || !c.pluginArtifact {
+		return "", nil
+	}
+	path := c.configPath(opts)
+	expected, err := c.renderPluginArtifact(opts)
+	if err != nil {
+		return path, err
+	}
+	const maxManagedPluginBytes = 4 << 20
+	installed, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	if err != nil {
+		return path, err
+	}
+	if !bytes.Equal(installed, expected) {
+		return path, nil
+	}
+	return "", nil
+}
+
+// ManagedPluginArtifactDrift compares conn's managed in-agent plugin (Amp,
+// OpenCode) with the bytes Setup renders for opts, and returns the plugin
+// path when the installed file is missing or differs. The standalone Unix
+// guardian relies on it rather than on the ownership markers or the
+// recorded digests (the contract lock and the custody receipt): the user
+// can edit the plugin and those digests together, and the agent runs every
+// line of the plugin. It returns "" for a connector without a managed
+// plugin. The file is read with the caller's credentials, bounded and
+// without following a link.
+func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) {
+	plugin, ok := conn.(interface {
+		managedPluginArtifactDrift(SetupOpts) (string, error)
+	})
+	if !ok {
+		return "", nil
+	}
+	return plugin.managedPluginArtifactDrift(opts)
+}
+
 // setupPluginArtifact writes the rendered bridge plugin to the host agent's
 // auto-load directory at 0o600. Its scoped token stays in an owner-only
 // sidecar. The managed-file backup lets Teardown restore a prior file only
