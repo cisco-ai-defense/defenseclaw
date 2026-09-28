@@ -328,6 +328,47 @@ func TestSetupInstallQuestionSaysHowItInstalls(t *testing.T) {
 	}
 }
 
+// TestSetupNamesTheHomebrewGatewayItNeeds: on a Mac with OpenShell
+// installed from the release binaries (gateway healthy and registered),
+// setup showed "✓ OpenShell 0.1.1", asked to install it again, and on "n"
+// said "OpenShell 0.1.1 is needed" (manual test M9). The installer would
+// find that CLI and change nothing; what is missing is the Homebrew
+// formula whose service DefenseClaw restarts the gateway through.
+func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
+	notBrew := hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayService)
+		c.Status, c.Detail = openshell.StatusFail, openshell.GatewayFormula+" is not installed"
+		r.Service = &openshell.ServiceState{Manager: "brew", Unit: openshell.GatewayFormula}
+	})
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = notBrew
+	inst := &fakeInstaller{}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "on macOS OpenShell must come from the nvidia/openshell/openshell Homebrew formula")
+	has(t, ta.output(), "✓ OpenShell 0.1.1\n",
+		"✗ Gateway service: the nvidia/openshell/openshell Homebrew formula is not installed\n",
+		"→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell 0.1.1 found here "+
+			"was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway and remove that OpenShell, "+
+			"then run `defenseclaw sandbox setup --install-openshell`")
+	lacks(t, ta.output(), "Install OpenShell", "is needed")
+	if inst.ran {
+		t.Fatal("the installer ran")
+	}
+	// On Linux the systemd unit is what the package installs: setup offers it.
+	ta = setupApp(t, "n\n", "", false)
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayService)
+		c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is not installed"
+		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService}
+	})
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
+	has(t, ta.output(), "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+}
+
 func TestSetupStopsOnHostFailure(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	before, _ := os.ReadFile(ta.ConfigPath)

@@ -128,6 +128,8 @@ type DoctorReport struct {
 	GatewayVersion string        `json:"gateway_version,omitempty"`
 	DockerVersion  string        `json:"docker_version,omitempty"`
 	DockerRootDir  string        `json:"docker_root_dir,omitempty"`
+	// Service is the gateway service as its manager reports it.
+	Service *ServiceState `json:"service,omitempty"`
 }
 
 // OK reports whether no check failed.
@@ -678,7 +680,7 @@ func (r *doctorRun) checkService(ctx context.Context) {
 		}
 		return
 	}
-	r.service = st
+	r.service, r.report.Service = st, st
 	start := r.startCommand()
 	switch {
 	case !st.Installed:

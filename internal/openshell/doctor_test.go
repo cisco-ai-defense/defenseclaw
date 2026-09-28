@@ -250,7 +250,8 @@ func TestDoctorHealthyHost(t *testing.T) {
 		t.Fatalf("a Linux host asked a Docker VM for Landlock %d times", f.vmProbes)
 	}
 	expectCheck(t, r, openshell.CheckIDDisk, openshell.StatusPass, "40.0 GiB free under /data/docker")
-	if f.diskProbed != "/data/docker" || r.DockerVersion != "29.4.0" || r.CLIVersion != "0.1.1" || r.GatewayVersion != "0.1.1" || r.Registration.Name != "openshell" {
+	if f.diskProbed != "/data/docker" || r.DockerVersion != "29.4.0" || r.CLIVersion != "0.1.1" || r.GatewayVersion != "0.1.1" || r.Registration.Name != "openshell" ||
+		r.Service == nil || r.Service.Manager != "systemd" || !r.Service.Installed {
 		t.Fatalf("facts = %+v (disk probed at %q)", r, f.diskProbed)
 	}
 	if _, err := json.Marshal(r); err != nil {
