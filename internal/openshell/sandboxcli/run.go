@@ -87,7 +87,7 @@ const (
 )
 
 // Run is `sandbox run <harness>`.
-func (a *App) Run(ctx context.Context, o RunOptions) error {
+func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	a.defaults()
 	spec, err := ResolveHarness(o.Harness)
 	if err != nil {
@@ -107,6 +107,13 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}
+	// An interrupt from here on ends the run through its cleanup
+	// (interrupt.go).
+	ctx, done := a.interruptible(ctx)
+	defer func() {
+		err = a.interruptedExit(err)
+		done()
+	}()
 	if o.Detach && o.Rm {
 		return errors.New("--rm cannot be combined with --detach: nothing is left to delete the sandbox when the run ends")
 	}

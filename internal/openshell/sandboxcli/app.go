@@ -159,6 +159,8 @@ type App struct {
 	// pager shows text longer than the terminal one screen at a time and
 	// reports whether it did (default: $PAGER or less on a terminal).
 	pager func(text string) bool
+	// intr is the interrupt state of the running command (interrupt.go).
+	intr *interruption
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run

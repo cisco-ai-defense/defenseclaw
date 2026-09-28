@@ -1087,14 +1087,14 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			s.interrupted = true
 			a.warn("interrupted: nothing was brought back")
 		case err != nil:
-			return err
+			// No answer (an interrupt, the end of input): the changes stay
+			// in the sandbox, which ends as a skip does.
+			return errors.Join(err, s.keepInSandbox(ctx, after))
 		}
 		mode = map[string]string{"a": "apply", "b": "branch", "p": "patch"}[ans]
 	}
 	if mode == "" {
-		a.note("changes are kept in the sandbox: `" + CommandName + " pull " + after.Name + " --apply|--branch|--patch-out FILE`")
-		s.rm = false
-		return s.finish(ctx, false)
+		return s.keepInSandbox(ctx, after)
 	}
 	// The same gate as `pull --apply`: changes that can run code on this
 	// machine, or a critical secret the agent wrote (which no risk line
@@ -1119,7 +1119,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		}
 		yes, err := a.ask(question, false, false)
 		if err != nil {
-			return err
+			return errors.Join(err, s.keepInSandbox(ctx, after))
 		}
 		opts.AcceptSensitive = yes
 		if !yes {
@@ -1131,6 +1131,15 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.warn(err.Error())
 		s.rm = false
 	}
+	return s.finish(ctx, false)
+}
+
+// keepInSandbox ends a copy-mode session whose changes stay in the sandbox
+// for `pull`: the sandbox is stopped (a session that started it) and kept,
+// --rm or not.
+func (s *session) keepInSandbox(ctx context.Context, after *sandboxapi.Sandbox) error {
+	s.app.note("changes are kept in the sandbox: `" + CommandName + " pull " + after.Name + " --apply|--branch|--patch-out FILE`")
+	s.rm = false
 	return s.finish(ctx, false)
 }
 

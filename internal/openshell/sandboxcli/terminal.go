@@ -62,6 +62,10 @@ func (ForegroundTerminal) Run(ctx context.Context, inv openshell.Invocation) (in
 	sig := make(chan os.Signal, 16)
 	signal.Notify(sig, append(append([]os.Signal(nil), terminalSignals...), forwardedSignals...)...)
 	defer signal.Stop(sig)
+	// The harness decides what the signals mean, not the command's
+	// interruptible context (released before sig stops receiving them).
+	release := holdSignals()
+	defer release()
 	if err := cmd.Start(); err != nil {
 		return exitStatus(err)
 	}
@@ -75,6 +79,7 @@ func (ForegroundTerminal) Run(ctx context.Context, inv openshell.Invocation) (in
 		}
 	}()
 	err = cmd.Wait()
+	release()
 	signal.Stop(sig)
 	close(sig)
 	<-drained
@@ -109,6 +114,8 @@ func sessionContext(ctx context.Context) (run context.Context, interrupted func(
 	run, cancel := context.WithCancel(ctx)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, sessionSignals...)
+	// The signal ends the harness, not the command (interruptible).
+	release := holdSignals()
 	var got atomic.Bool
 	done := make(chan struct{})
 	go func() {
@@ -120,6 +127,7 @@ func sessionContext(ctx context.Context) (run context.Context, interrupted func(
 		}
 	}()
 	return run, got.Load, func() {
+		release()
 		signal.Stop(sig)
 		close(done)
 		cancel()

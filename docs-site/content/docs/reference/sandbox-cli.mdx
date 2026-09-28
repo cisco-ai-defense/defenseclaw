@@ -331,6 +331,13 @@ Without a terminal (`--prompt`), they are lines on standard error. A
 harness that sends its first hook only with your first prompt is not
 warned about while it waits for one.
 
+Before the harness runs (while the image, the sandbox and a copy are set
+up), Ctrl-C, a closed terminal window or a `kill` of the CLI end the run and
+delete the sandbox it created. At a question at the end of the session they
+leave the changes where they are (kept in the folder, or in a copy-mode
+sandbox for `pull`) and the session still ends as below; a second Ctrl-C
+ends the CLI at once. `run` then exits with status 130.
+
 When the harness exits (Ctrl-C, a closed terminal window or a `kill` of the
 CLI end the harness, not the session), the sandbox the session started is
 stopped first, so nothing it left running changes the folder after the

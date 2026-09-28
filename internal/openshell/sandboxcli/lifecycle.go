@@ -304,8 +304,14 @@ type ConnectOptions struct {
 // Connect resumes a sandbox: it starts it when stopped and attaches the
 // harness (or, with Shell, a login shell) to the terminal, or runs one
 // prompt headless (Prompt, or the harness's own print flag in Args).
-func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
+func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	a.defaults()
+	// An interrupt ends the session through its cleanup (interrupt.go).
+	ctx, done := a.interruptible(ctx)
+	defer func() {
+		err = a.interruptedExit(err)
+		done()
+	}()
 	if o.Shell && (o.Prompt != "" || len(o.Args) > 0) {
 		return errors.New("--shell opens a shell; it takes no --prompt or harness arguments")
 	}

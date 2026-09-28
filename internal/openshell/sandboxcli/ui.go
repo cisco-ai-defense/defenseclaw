@@ -17,6 +17,7 @@
 package sandboxcli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -295,6 +296,10 @@ type lineRead struct {
 func (a *App) readAnswer() (string, error) {
 	sig, stop := a.interruptSource()
 	defer stop()
+	// This prompt decides what Ctrl-C means here, not the command's
+	// interruptible context (released before sig stops receiving them).
+	release := holdSignals()
+	defer release()
 	ch := a.pending
 	a.pending = nil
 	if ch == nil {
@@ -368,14 +373,34 @@ func (a *App) terminalPager(text string) bool {
 }
 
 // readLine reads one answer (the one an interrupted prompt was waiting
-// for first).
+// for first). In an interruptible command (interrupt.go) an interrupt ends
+// the wait with context.Canceled, so the command's cleanup runs; the read
+// stays pending for a later prompt.
 func (a *App) readLine() (string, error) {
-	if ch := a.pending; ch != nil {
-		a.pending = nil
-		r := <-ch
-		return r.s, r.err
+	if a.pending == nil {
+		if a.intr == nil {
+			return a.readLineNow()
+		}
+		ch := make(chan lineRead, 1)
+		a.pending = ch
+		go func() {
+			s, err := a.readLineNow()
+			ch <- lineRead{s, err}
+		}()
 	}
-	return a.readLineNow()
+	var done <-chan struct{}
+	if a.intr != nil {
+		done = a.intr.ctx.Done()
+	}
+	select {
+	case r := <-a.pending:
+		a.pending = nil
+		return r.s, r.err
+	case <-done:
+		// The prompt's line ends here; what follows is the cleanup.
+		fmt.Fprintln(a.IO.Out)
+		return "", context.Canceled
+	}
 }
 
 func (a *App) readLineNow() (string, error) {
