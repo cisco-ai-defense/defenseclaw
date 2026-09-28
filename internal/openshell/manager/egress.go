@@ -343,6 +343,8 @@ type egressSink struct {
 	mu       sync.Mutex
 	recent   map[refusalKey]*refusal
 	overflow []egress.Event
+	// heldAt is when flush last reported what the pacing held back.
+	heldAt time.Time
 }
 
 // sinkItem is one queued proxy event; repeats counts the refusals like it
@@ -494,6 +496,17 @@ func (s *egressSink) flush(ctx context.Context) {
 	for _, it := range folded {
 		// The last of the repeats stands for them all.
 		s.m.egressEvent(ctx, it.ev, it.repeats-1)
+	}
+	// The counts of what the pacing held back go out less often: a
+	// sandbox that floods for hours must not fill the feed with them.
+	s.mu.Lock()
+	report := now.Sub(s.heldAt) >= heldBackInterval
+	if report {
+		s.heldAt = now
+	}
+	s.mu.Unlock()
+	if !report {
+		return
 	}
 	for _, h := range s.blocked.drain(now) {
 		s.m.logf("sandbox %s: %d refused egress requests to further destinations were not recorded one by one (more than %d a second)",

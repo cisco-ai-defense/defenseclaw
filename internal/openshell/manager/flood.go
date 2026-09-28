@@ -31,9 +31,11 @@ var (
 	// destination, port, category and rule) into the first one's record
 	// and a count.
 	blockCoalesceWindow = 10 * time.Second
-	// sinkFlushInterval is how often the counts of folded and paced events
-	// are reported.
+	// sinkFlushInterval is how often folded refusals are recorded.
 	sinkFlushInterval = 2 * time.Second
+	// heldBackInterval is how often the counts of the events a sandbox's
+	// pacing held back are reported.
+	heldBackInterval = 30 * time.Second
 )
 
 // Pacing of one sandbox's distinct refusals into the telemetry queue, and

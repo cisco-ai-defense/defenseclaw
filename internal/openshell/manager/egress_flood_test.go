@@ -30,9 +30,9 @@ import (
 // fastFlush shortens the refusal fold and the flush for a test.
 func fastFlush(t *testing.T) {
 	t.Helper()
-	window, interval := blockCoalesceWindow, sinkFlushInterval
-	blockCoalesceWindow, sinkFlushInterval = 100*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() { blockCoalesceWindow, sinkFlushInterval = window, interval })
+	window, interval, held := blockCoalesceWindow, sinkFlushInterval, heldBackInterval
+	blockCoalesceWindow, sinkFlushInterval, heldBackInterval = 100*time.Millisecond, 20*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { blockCoalesceWindow, sinkFlushInterval, heldBackInterval = window, interval, held })
 }
 
 func egressRecords(e *harnessEnv, sandbox string, match func(audit.SandboxEgressEvent) bool) int {
