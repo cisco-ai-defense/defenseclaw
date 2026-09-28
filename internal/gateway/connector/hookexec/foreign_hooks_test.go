@@ -845,6 +845,55 @@ func TestCursorForeignHookGuardIgnoresPluginLinksToFiles(t *testing.T) {
 	}
 }
 
+// The plugin-folder walk ignores a link to a file with an ordinary name. A
+// hooks file a manifest declares, and a plugin manifest, are still read, and
+// the read denies a link.
+func TestCursorForeignHookGuardDeniesLinkedFilesItReads(t *testing.T) {
+	for name, prepare := range map[string]func(t *testing.T, plugins string) string{
+		"hooks path declared by a plugin manifest": func(t *testing.T, plugins string) string {
+			plugin := filepath.Join(plugins, "local", "p")
+			writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p", "hooks": "./custom.json"})
+			writeForeignHookJSON(t, filepath.Join(plugin, "real-custom.json"), rewritingCursorHooks("./rewrite.sh"))
+			link := filepath.Join(plugin, "custom.json")
+			symlinkForTest(t, "real-custom.json", link)
+			return link
+		},
+		"hooks path declared by a marketplace entry": func(t *testing.T, plugins string) string {
+			marketplace := filepath.Join(plugins, "marketplaces", "acme")
+			writeForeignHookJSON(t, filepath.Join(marketplace, ".cursor-plugin", "marketplace.json"), map[string]interface{}{
+				"name": "acme",
+				"plugins": []interface{}{map[string]interface{}{
+					"name": "foo", "source": "plugins/foo", "hooks": "./config/hooks.json",
+				}},
+			})
+			plugin := filepath.Join(marketplace, "plugins", "foo")
+			writeForeignHookJSON(t, filepath.Join(plugin, "real-hooks.json"), rewritingCursorHooks("./rewrite.sh"))
+			link := filepath.Join(plugin, "config", "hooks.json")
+			symlinkForTest(t, filepath.Join("..", "real-hooks.json"), link)
+			return link
+		},
+		"plugin manifest": func(t *testing.T, plugins string) string {
+			plugin := filepath.Join(plugins, "local", "p")
+			writeForeignHookJSON(t, filepath.Join(plugin, "manifest.json"), map[string]interface{}{
+				"name": "p", "hooks": rewritingCursorHooks("./rewrite.sh"),
+			})
+			link := filepath.Join(plugin, ".cursor-plugin", "plugin.json")
+			symlinkForTest(t, filepath.Join("..", "manifest.json"), link)
+			return link
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newForeignHookFixture(t)
+			link := prepare(t, filepath.Join(fixture.profile, ".cursor", "plugins"))
+			result := fixture.run(t, "preToolUse", nil)
+			assertForeignHookDenied(t, result, link)
+			if !strings.Contains(result.stdout, "cannot be verified") || !strings.Contains(result.stdout, "link or not a regular file") {
+				t.Fatalf("linked file message = %s", result.stdout)
+			}
+		})
+	}
+}
+
 // A file loaded from two scopes needs an approval in each: a plugin manifest
 // that points at the user's hooks file registers the handler as a plugin hook
 // too.
