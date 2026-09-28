@@ -3510,8 +3510,10 @@
         "opaque DefenseClaw binding id",
         "unset"
       ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "security_note": "Sandbox bypass: while set, sandbox run and the shell wrappers run the harness natively on the host, as DEFENSECLAW_NO_SANDBOX does, without a notice. DefenseClaw sets it only inside the sandboxes it launches and refuses it from .env files, so a value on the host was planted or leaked.",
+      "replacement_hint": "Unset it outside a DefenseClaw sandbox.",
       "consumers": [
         {
           "location": "internal/openshell/sandbox_env.go",
@@ -3524,6 +3526,10 @@
         {
           "location": "cli/defenseclaw/main.py",
           "description": "Lets a nested `defenseclaw sandbox run` reach the gateway stub without a config, as in Go"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_doctor.py",
+          "description": "Doctor reports a set value as a security override (any non-empty value is active)"
         }
       ],
       "since": "0.9.0"

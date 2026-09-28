@@ -376,6 +376,18 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         restricted = [e.name for e in active_security_overrides(env, include_low_impact=False)]
         self.assertNotIn("DEFENSECLAW_DEV", restricted)
 
+    def test_sandbox_binding_id_surfaces_as_a_sandbox_bypass(self) -> None:
+        # Any value turns `sandbox run` and the shell wrappers native, so
+        # the opaque id is active whenever it is set (Go: activeWhenNonEmpty).
+        entry = load_registry().get("DEFENSECLAW_SANDBOX_ID")
+        assert entry is not None
+        self.assertEqual((entry.security_impact, entry.surface_in_doctor), ("medium", True))
+        self.assertFalse(entry.is_active({"DEFENSECLAW_SANDBOX_ID": " "}))
+        env = {"DEFENSECLAW_SANDBOX_ID": "dcmarker-binding"}
+        self.assertTrue(entry.is_active(env))
+        names = [e.name for e in active_security_overrides(env, include_low_impact=False)]
+        self.assertEqual(names, ["DEFENSECLAW_SANDBOX_ID"])
+
     def test_strict_availability_does_not_surface(self) -> None:
         # DEFENSECLAW_STRICT_AVAILABILITY is opt-IN to stricter
         # behavior, not a bypass. It must NOT appear in active
