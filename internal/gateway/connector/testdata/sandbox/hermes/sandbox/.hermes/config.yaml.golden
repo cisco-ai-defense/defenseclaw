@@ -1,4 +1,0 @@
-# DefenseClaw sandbox first-run defaults. Yours to edit: DefenseClaw's hooks
-# live in the managed layer (/etc/hermes/config.yaml), which wins over this file.
-model:
-  provider: auto

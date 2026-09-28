@@ -23,15 +23,26 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
+// sandboxGoldenDir holds one manifest per harness: the create-time env, the
+// required binaries and the mode, owner, size and SHA-256 of every overlay
+// file. The rendered bytes are not checked in; set sandboxRenderDirEnv to
+// write them out for review.
 const sandboxGoldenDir = "testdata/sandbox"
+
+// sandboxRenderDirEnv names a directory TestSandboxArtifactsGolden writes each
+// harness's rendered overlay under (<dir>/<connector>/<in-image path>), so a
+// drift can be read by diffing the trees two revisions render.
+const sandboxRenderDirEnv = "DEFENSECLAW_SANDBOX_RENDER_DIR"
 
 var sandboxGoldenTargets = []struct {
 	connector string
@@ -57,14 +68,96 @@ type sandboxGoldenManifest struct {
 	HookContract string                         `json:"hook_contract"`
 	TamperTier   string                         `json:"tamper_tier"`
 	Env          map[string]string              `json:"env"`
-	Binaries     []SandboxBinary                `json:"binaries"`
+	Binaries     []string                       `json:"binaries"`
 	Files        map[string]sandboxGoldenFileID `json:"files"`
 }
 
 type sandboxGoldenFileID struct {
 	Mode   string `json:"mode"`
 	Owner  string `json:"owner"`
+	Size   int    `json:"size"`
 	SHA256 string `json:"sha256"`
+}
+
+// sandboxGoldenBinary mirrors SandboxBinary: the conversion in
+// sandboxManifestOf stops compiling when SandboxBinary gains a field the
+// manifest's "name (role)" entries would not record.
+type sandboxGoldenBinary struct {
+	Name string
+	Role SandboxBinaryRole
+}
+
+func sandboxManifestOf(artifacts SandboxArtifacts) sandboxGoldenManifest {
+	manifest := sandboxGoldenManifest{
+		Connector:    artifacts.Connector,
+		HookContract: artifacts.HookContract,
+		TamperTier:   artifacts.TamperTier,
+		Env:          artifacts.Env,
+		Binaries:     []string{},
+		Files:        map[string]sandboxGoldenFileID{},
+	}
+	for _, binary := range artifacts.Binaries {
+		b := sandboxGoldenBinary(binary)
+		manifest.Binaries = append(manifest.Binaries, b.Name+" ("+string(b.Role)+")")
+	}
+	for _, file := range artifacts.Files {
+		sum := sha256.Sum256(file.Data)
+		manifest.Files[file.Path] = sandboxGoldenFileID{
+			Mode:   file.Mode.String(),
+			Owner:  string(file.Owner),
+			Size:   len(file.Data),
+			SHA256: hex.EncodeToString(sum[:]),
+		}
+	}
+	return manifest
+}
+
+// entries flattens a manifest to one value per named entry, so a drift report
+// can name each file, env key and binary that moved.
+func (m sandboxGoldenManifest) entries() map[string]string {
+	out := map[string]string{"connector": m.Connector, "hook_contract": m.HookContract, "tamper_tier": m.TamperTier}
+	for key, value := range m.Env {
+		out["env "+key] = value
+	}
+	for _, binary := range m.Binaries {
+		out["binary "+binary] = "required"
+	}
+	for path, f := range m.Files {
+		out[path] = fmt.Sprintf("%s %s %d bytes sha256:%s", f.Mode, f.Owner, f.Size, f.SHA256)
+	}
+	return out
+}
+
+func diffSandboxManifests(want, got sandboxGoldenManifest) []string {
+	before, after := want.entries(), got.entries()
+	var diffs []string
+	for key, value := range after {
+		if old, ok := before[key]; !ok {
+			diffs = append(diffs, fmt.Sprintf("%s: new, %q", key, value))
+		} else if old != value {
+			diffs = append(diffs, fmt.Sprintf("%s: %q -> %q", key, old, value))
+		}
+	}
+	for key, old := range before {
+		if _, ok := after[key]; !ok {
+			diffs = append(diffs, fmt.Sprintf("%s: gone, was %q", key, old))
+		}
+	}
+	sort.Strings(diffs)
+	return diffs
+}
+
+func writeSandboxRendering(t *testing.T, dir, connector string, files []SandboxFile) {
+	t.Helper()
+	for _, file := range files {
+		path := filepath.Join(dir, connector, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func renderSandboxGolden(t *testing.T, provider SandboxArtifactProvider, version string) SandboxArtifacts {
@@ -76,52 +169,19 @@ func renderSandboxGolden(t *testing.T, provider SandboxArtifactProvider, version
 	return artifacts
 }
 
-// TestSandboxArtifactsGolden pins every byte, mode and owner of the overlay
-// artifacts, plus the create-time env and required binaries. Regenerate
-// deliberately with DEFENSECLAW_UPDATE_GOLDEN=1.
+// TestSandboxArtifactsGolden pins the SHA-256, size, mode and owner of every
+// overlay artifact, plus the create-time env and required binaries.
+// Regenerate deliberately with DEFENSECLAW_UPDATE_GOLDEN=1.
 func TestSandboxArtifactsGolden(t *testing.T) {
 	update := os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1"
+	renderDir := os.Getenv(sandboxRenderDirEnv)
 	for _, tc := range sandboxGoldenTargets {
 		t.Run(tc.connector, func(t *testing.T) {
 			artifacts := renderSandboxGolden(t, tc.provider, tc.version)
-			manifest := sandboxGoldenManifest{
-				Connector:    artifacts.Connector,
-				HookContract: artifacts.HookContract,
-				TamperTier:   artifacts.TamperTier,
-				Env:          artifacts.Env,
-				Binaries:     artifacts.Binaries,
-				Files:        map[string]sandboxGoldenFileID{},
+			if renderDir != "" {
+				writeSandboxRendering(t, renderDir, tc.connector, artifacts.Files)
 			}
-			root := filepath.Join(sandboxGoldenDir, tc.connector)
-			for _, file := range artifacts.Files {
-				sum := sha256.Sum256(file.Data)
-				manifest.Files[file.Path] = sandboxGoldenFileID{
-					Mode:   file.Mode.String(),
-					Owner:  string(file.Owner),
-					SHA256: hex.EncodeToString(sum[:]),
-				}
-				if filepath.Base(file.Path) == "_hardening.sh" {
-					// Derived from the host helper; asserted separately.
-					continue
-				}
-				goldenPath := filepath.Join(root, filepath.FromSlash(file.Path)) + ".golden"
-				if update {
-					if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(goldenPath, file.Data, 0o644); err != nil {
-						t.Fatal(err)
-					}
-					continue
-				}
-				want, err := os.ReadFile(goldenPath)
-				if err != nil {
-					t.Fatalf("read golden %s (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", goldenPath, err)
-				}
-				if !bytes.Equal(want, file.Data) {
-					t.Errorf("%s drifted from %s", file.Path, goldenPath)
-				}
-			}
+			manifest := sandboxManifestOf(artifacts)
 			encoded, err := json.MarshalIndent(manifest, "", "  ")
 			if err != nil {
 				t.Fatal(err)
@@ -136,11 +196,24 @@ func TestSandboxArtifactsGolden(t *testing.T) {
 			}
 			want, err := os.ReadFile(manifestPath)
 			if err != nil {
-				t.Fatalf("read golden manifest: %v", err)
+				t.Fatalf("read golden manifest (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", err)
 			}
-			if !bytes.Equal(want, encoded) {
-				t.Errorf("manifest drifted from %s:\n%s", manifestPath, encoded)
+			if bytes.Equal(want, encoded) {
+				return
 			}
+			var wantManifest sandboxGoldenManifest
+			if err := json.Unmarshal(want, &wantManifest); err != nil {
+				t.Fatalf("parse %s: %v", manifestPath, err)
+			}
+			diffs := diffSandboxManifests(wantManifest, manifest)
+			if len(diffs) == 0 {
+				diffs = []string{"no entry changed: the binaries' order or count, or the manifest encoding, did"}
+			}
+			t.Errorf("%s rendering drifted from %s:\n  %s\n"+
+				"The rendered bytes are not checked in: review the template change with git diff, or "+
+				"write both revisions' renderings out with %s=<dir> and diff -ru the two trees. "+
+				"Then regenerate with DEFENSECLAW_UPDATE_GOLDEN=1.",
+				tc.connector, manifestPath, strings.Join(diffs, "\n  "), sandboxRenderDirEnv)
 		})
 	}
 }

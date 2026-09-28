@@ -6,124 +6,83 @@
     "COPILOT_AUTO_UPDATE": "false"
   },
   "binaries": [
-    {
-      "Name": "bash",
-      "Role": "runtime"
-    },
-    {
-      "Name": "chmod",
-      "Role": "runtime"
-    },
-    {
-      "Name": "copilot",
-      "Role": "harness"
-    },
-    {
-      "Name": "curl",
-      "Role": "runtime"
-    },
-    {
-      "Name": "date",
-      "Role": "runtime"
-    },
-    {
-      "Name": "find",
-      "Role": "runtime"
-    },
-    {
-      "Name": "head",
-      "Role": "runtime"
-    },
-    {
-      "Name": "id",
-      "Role": "runtime"
-    },
-    {
-      "Name": "jq",
-      "Role": "runtime"
-    },
-    {
-      "Name": "mkdir",
-      "Role": "runtime"
-    },
-    {
-      "Name": "mktemp",
-      "Role": "runtime"
-    },
-    {
-      "Name": "od",
-      "Role": "runtime"
-    },
-    {
-      "Name": "readlink",
-      "Role": "runtime"
-    },
-    {
-      "Name": "rm",
-      "Role": "runtime"
-    },
-    {
-      "Name": "sed",
-      "Role": "runtime"
-    },
-    {
-      "Name": "tail",
-      "Role": "runtime"
-    },
-    {
-      "Name": "tr",
-      "Role": "runtime"
-    }
+    "bash (runtime)",
+    "chmod (runtime)",
+    "copilot (harness)",
+    "curl (runtime)",
+    "date (runtime)",
+    "find (runtime)",
+    "head (runtime)",
+    "id (runtime)",
+    "jq (runtime)",
+    "mkdir (runtime)",
+    "mktemp (runtime)",
+    "od (runtime)",
+    "readlink (runtime)",
+    "rm (runtime)",
+    "sed (runtime)",
+    "tail (runtime)",
+    "tr (runtime)"
   ],
   "files": {
     "/etc/github-copilot/managed-settings.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 36,
       "sha256": "ba71aec70543a3b17a248d0a73deefb471cd99dbdb5053c1e3ccff12d5983b41"
     },
     "/etc/github-copilot/policy.d/50-defenseclaw.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 2734,
       "sha256": "b1941674801f6d2b50d4dcd05bb9e7102e680899cb90f5381c145ea87afe756c"
     },
     "/sandbox/.copilot/config.json": {
       "mode": "-rw-------",
       "owner": "user",
+      "size": 132,
       "sha256": "23003435d2bcb71722549558155a5b0c28c19143af014b04122cff191a559e8d"
     },
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 45111,
       "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 8119,
       "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
     },
     "/usr/local/lib/defenseclaw/hooks/copilot-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 7653,
       "sha256": "a79e992d14851fe53cbbbc672df78baa2dc1d8f0c911a45e39cd3d2f6734e10a"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 6078,
       "sha256": "a929e5a48788d71c71c2b6f489234bcc3d9dae6f60bfb673c33794181872d717"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 5346,
       "sha256": "11c3bf359802dfec9ff5ba23700e90e3ba83efc67d2b1f56f55182b55553cc57"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 5596,
       "sha256": "39bfa0ab2c8b08690b8c71ae6dd2764d0f2c856aab38554c69afda43f845af5a"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 6035,
       "sha256": "8a40f5f484c2aac9d7483fe99f4720443c67277d9b513635e66ec59d678ca163"
     }
   }

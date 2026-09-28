@@ -4,124 +4,83 @@
   "tamper_tier": "user",
   "env": {},
   "binaries": [
-    {
-      "Name": "bash",
-      "Role": "runtime"
-    },
-    {
-      "Name": "chmod",
-      "Role": "runtime"
-    },
-    {
-      "Name": "curl",
-      "Role": "runtime"
-    },
-    {
-      "Name": "date",
-      "Role": "runtime"
-    },
-    {
-      "Name": "find",
-      "Role": "runtime"
-    },
-    {
-      "Name": "head",
-      "Role": "runtime"
-    },
-    {
-      "Name": "hermes",
-      "Role": "harness"
-    },
-    {
-      "Name": "id",
-      "Role": "runtime"
-    },
-    {
-      "Name": "jq",
-      "Role": "runtime"
-    },
-    {
-      "Name": "mkdir",
-      "Role": "runtime"
-    },
-    {
-      "Name": "mktemp",
-      "Role": "runtime"
-    },
-    {
-      "Name": "od",
-      "Role": "runtime"
-    },
-    {
-      "Name": "readlink",
-      "Role": "runtime"
-    },
-    {
-      "Name": "rm",
-      "Role": "runtime"
-    },
-    {
-      "Name": "sed",
-      "Role": "runtime"
-    },
-    {
-      "Name": "tail",
-      "Role": "runtime"
-    },
-    {
-      "Name": "tr",
-      "Role": "runtime"
-    }
+    "bash (runtime)",
+    "chmod (runtime)",
+    "curl (runtime)",
+    "date (runtime)",
+    "find (runtime)",
+    "head (runtime)",
+    "hermes (harness)",
+    "id (runtime)",
+    "jq (runtime)",
+    "mkdir (runtime)",
+    "mktemp (runtime)",
+    "od (runtime)",
+    "readlink (runtime)",
+    "rm (runtime)",
+    "sed (runtime)",
+    "tail (runtime)",
+    "tr (runtime)"
   ],
   "files": {
     "/etc/hermes/.env": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 276,
       "sha256": "533b47ee6519eead8f5287b391949590b0d35bb088c198a10d66479b37825857"
     },
     "/etc/hermes/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 3253,
       "sha256": "065167eba8baf1958b9e74d27efbfadc668b95c8b8e3d2c47ca13fde8a366979"
     },
     "/sandbox/.hermes/config.yaml": {
       "mode": "-rw-------",
       "owner": "user",
+      "size": 183,
       "sha256": "25c2c2108684defc7b4d0129e8f62f5e76f6b040423cc57d14baa8e0eaaf8f44"
     },
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 45111,
       "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 8119,
       "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
     },
     "/usr/local/lib/defenseclaw/hooks/hermes-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 7306,
       "sha256": "937f7298b406f94d23484e9796ded99de1cc321ebc4c6cd18c76a487749ff36f"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 6077,
       "sha256": "3282e3d627bad3f85f86d3870191a88b5720b3f06077c9ce6b3f299cfed4b94b"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 5345,
       "sha256": "522ed03a3fd1d7cc09f0b59b5b9ee8e3bcc5d950facf15c2995c69699ea02d91"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 5595,
       "sha256": "ab2b8d9555e532a88122d77f4825489b7c7b3c9acba1edc7a09beb6be0183975"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 6034,
       "sha256": "618c217b5a8fb7b18766de4197ec61fd257ee0788ca88ef83ad83d4ecff40cfa"
     }
   }

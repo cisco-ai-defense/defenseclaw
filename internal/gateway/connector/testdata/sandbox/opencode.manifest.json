@@ -6,20 +6,19 @@
     "OPENCODE_DISABLE_AUTOUPDATE": "1"
   },
   "binaries": [
-    {
-      "Name": "opencode",
-      "Role": "harness"
-    }
+    "opencode (harness)"
   ],
   "files": {
     "/etc/opencode/opencode.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 180,
       "sha256": "cd7c1a2412b8f2bfe3604fcca4dcd66bab69d1d151566de7c1ce6cab3eeefc14"
     },
     "/usr/local/lib/defenseclaw/opencode/defenseclaw.js": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 23196,
       "sha256": "7898991531c70c8681ec9a9e2219cc8f7236d74c0f2ead55145caded19bf6076"
     }
   }

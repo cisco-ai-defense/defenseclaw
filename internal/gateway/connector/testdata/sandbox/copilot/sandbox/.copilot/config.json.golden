@@ -1,9 +1,0 @@
-{
-  "autoUpdate": false,
-  "banner": "never",
-  "showTipsOnStartup": false,
-  "trustedFolders": [
-    "/work",
-    "/sandbox"
-  ]
-}

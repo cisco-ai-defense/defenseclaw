@@ -6,15 +6,13 @@
     "AMP_SKIP_UPDATE_CHECK": "1"
   },
   "binaries": [
-    {
-      "Name": "amp",
-      "Role": "harness"
-    }
+    "amp (harness)"
   ],
   "files": {
     "/sandbox/.config/amp/plugins/defenseclaw.ts": {
       "mode": "-rw-------",
       "owner": "user",
+      "size": 21468,
       "sha256": "fcab9b1e395b8f0140aaf3c9154523d154e99d094da28869c8f298217a7a1105"
     }
   }

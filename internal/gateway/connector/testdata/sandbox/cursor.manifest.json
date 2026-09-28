@@ -4,114 +4,71 @@
   "tamper_tier": "managed",
   "env": {},
   "binaries": [
-    {
-      "Name": "bash",
-      "Role": "runtime"
-    },
-    {
-      "Name": "chmod",
-      "Role": "runtime"
-    },
-    {
-      "Name": "curl",
-      "Role": "runtime"
-    },
-    {
-      "Name": "cursor-agent",
-      "Role": "harness"
-    },
-    {
-      "Name": "date",
-      "Role": "runtime"
-    },
-    {
-      "Name": "find",
-      "Role": "runtime"
-    },
-    {
-      "Name": "head",
-      "Role": "runtime"
-    },
-    {
-      "Name": "id",
-      "Role": "runtime"
-    },
-    {
-      "Name": "jq",
-      "Role": "runtime"
-    },
-    {
-      "Name": "mkdir",
-      "Role": "runtime"
-    },
-    {
-      "Name": "mktemp",
-      "Role": "runtime"
-    },
-    {
-      "Name": "od",
-      "Role": "runtime"
-    },
-    {
-      "Name": "readlink",
-      "Role": "runtime"
-    },
-    {
-      "Name": "rm",
-      "Role": "runtime"
-    },
-    {
-      "Name": "sed",
-      "Role": "runtime"
-    },
-    {
-      "Name": "tail",
-      "Role": "runtime"
-    },
-    {
-      "Name": "tr",
-      "Role": "runtime"
-    }
+    "bash (runtime)",
+    "chmod (runtime)",
+    "curl (runtime)",
+    "cursor-agent (harness)",
+    "date (runtime)",
+    "find (runtime)",
+    "head (runtime)",
+    "id (runtime)",
+    "jq (runtime)",
+    "mkdir (runtime)",
+    "mktemp (runtime)",
+    "od (runtime)",
+    "readlink (runtime)",
+    "rm (runtime)",
+    "sed (runtime)",
+    "tail (runtime)",
+    "tr (runtime)"
   ],
   "files": {
     "/etc/cursor/hooks.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 4158,
       "sha256": "9fa6e95aafc2d33451cfe4f548e10b0ebbdbecf65dab13cf6aec948f9f74e1e5"
     },
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 45111,
       "sha256": "a3260c860b2c775b767c1dc143c6b166116183a54c3f4ab933f01535889d7dbc"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
+      "size": 8119,
       "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
     },
     "/usr/local/lib/defenseclaw/hooks/cursor-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 8970,
       "sha256": "309b8060d9ae723cb59f84e1354956bfd591646346568a27d20017f3710a2dca"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 6077,
       "sha256": "52b9ece5f88618241a56a68a1a4f15fb10361bb3c3e1e46788f2333011632ea8"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 5345,
       "sha256": "5cb30e9d5402897eb2ffab4196b2833604ec37711c37f2b2ed09d3345f5f692a"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 5595,
       "sha256": "2e839a415dd3592ecbcbbcaffeca05cfe0dba2e5255fd9d5194471d6e776ac2e"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
+      "size": 6034,
       "sha256": "a19748faeeb580d19f563f67053973b960eb2af79baaa7856884383ae110d9e4"
     }
   }
