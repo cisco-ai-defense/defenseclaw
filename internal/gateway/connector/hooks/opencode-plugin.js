@@ -368,9 +368,9 @@ function defenseclawForeignCheckFailure(event, why) {
 // DefenseClaw blocked the call under policy and that the call did not run.
 // The foreign-plugin guard's reason code is left out; the audit keeps it.
 function defenseclawBlockError(reason) {
-  const text = String(reason || "").trim().replace(/^enterprise_foreign_hook_blocked:\s*/, "");
+  const text = String(reason || "").trim();
   if (/^DefenseClaw\b/.test(text)) return new Error(text);
-  return new Error("DefenseClaw blocked this tool call under policy, so it did not run: " + (text || "no reason was given"));
+  return new Error("DefenseClaw blocked this tool call under policy, so it did not run: " + (text.replace(/^enterprise_foreign_hook_blocked:\s*/, "") || "no reason was given"));
 }
 
 // defenseclawBlock returns the error a blocked tool call fails with, after

@@ -156,6 +156,12 @@ for (const [stdout, exit, pattern] of [
   assert.ok(check && check.args.includes("--foreign-hook-check"), "a denied call runs the guard check");
   assert.equal(JSON.parse(check.stdin).hook_event_name, "tool.execute.before");
 }
+// A guard reason that starts with DefenseClaw after its code still gets the
+// sentence that the call did not run.
+{
+  const hooks = await load({ guard: JSON.stringify({ deny: true, reason: "enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record." }) });
+  await assert.rejects(before(hooks), /so it did not run: DefenseClaw cannot verify/);
+}
 {
   const hooks = await load({ guard: "garbage" });
   await assert.rejects(before(hooks), /unapproved plugin/);
