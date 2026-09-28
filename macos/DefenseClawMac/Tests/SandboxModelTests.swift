@@ -33,6 +33,7 @@ struct SandboxModelTests {
         adminLocksMirrorThePythonEditor()
         decodingToleratesOmittedFields()
         unreachableHooksAreAnAlertAndANotification()
+        failedHookCallsAreAnAlert()
         unblockedDestinationsAreNoLongerOffered()
         askTextIsTheDaemonsSentence()
         notificationUnblockNeedsAnUnlockedMac()
@@ -229,6 +230,22 @@ struct SandboxModelTests {
         ]]), notify: true)
         expect(notes.count == 1 && notes[0].title == "x: hooks are not reaching DefenseClaw", "unreachable note")
         expect(notes.first?.body.hasPrefix(sandboxHooksUnreachableWarning) == true, "note body without the glyph")
+    }
+
+    private static func failedHookCallsAreAnAlert() {
+        var hooks = running
+        hooks["hooks"] = ["hook_failed": 3, "last_hook_failure": "HTTP 429 Too Many Requests"]
+        let row = SandboxDecoding.sandbox(hooks)
+        let expected = "3 hook calls failed, so the harness's actions were blocked (hooks fail closed); "
+            + "DefenseClaw last answered HTTP 429 Too Many Requests"
+        expect(row?.alerts.contains(expected) == true, "hook failure alert (the TUI's wording): \(row?.alerts ?? [])")
+        hooks["hooks"] = ["hook_failed": 1]
+        expect(SandboxDecoding.sandbox(hooks)?.alerts
+            .contains("1 hook call failed, so the harness's action was blocked (hooks fail closed)") == true,
+            "one failed hook call")
+        expect(SandboxDecoding.sandbox(running)?.hookFailed == 0, "no failures by default")
+        let event = SandboxDecoding.event(["seq": 1, "kind": "hook.failed", "message": "✗ a hook call failed (HTTP 429)"])
+        expect(event?.glyph == "✗" && event?.summary == "a hook call failed (HTTP 429)", "hook.failed event line")
     }
 
     private static func unblockedDestinationsAreNoLongerOffered() {

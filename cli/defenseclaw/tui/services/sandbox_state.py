@@ -299,6 +299,10 @@ class SandboxRow:
     hooks_unreachable: bool = False
     unreachable_reason: str = ""
     ingress_refused: int = 0
+    # Hook posts DefenseClaw answered with an error (a refused route, the
+    # rate limit): each failed closed, so the harness did not do it.
+    hook_failed: int = 0
+    last_hook_failure: str = ""
     orphaned: bool = False
     undo_available: bool = False
     nested_repos: tuple[NestedRepoRow, ...] = ()
@@ -327,8 +331,21 @@ class SandboxRow:
         return format_duration(self.uptime_seconds)
 
     @property
+    def hook_failure_alert(self) -> str:
+        """The failed hook calls, as the daemon's hook.failed event words them."""
+        if not self.hook_failed:
+            return ""
+        if self.hook_failed == 1:
+            line = "1 hook call failed, so the harness's action was blocked (hooks fail closed)"
+            answered = "DefenseClaw answered"
+        else:
+            line = f"{self.hook_failed} hook calls failed, so the harness's actions were blocked (hooks fail closed)"
+            answered = "DefenseClaw last answered"
+        return line + (f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else "")
+
+    @property
     def alerts(self) -> tuple[str, ...]:
-        """Plain alert lines: hook tamper, planted repositories, silent hooks."""
+        """Plain alert lines: hook tamper, planted repositories, failing or silent hooks."""
         out: list[str] = []
         if self.tampered:
             out.append(f"hook tamper: {self.tampered} tool call(s) ran without a DefenseClaw verdict")
@@ -338,6 +355,8 @@ class SandboxRow:
             out.append(f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor")
         elif self.ingress_refused:
             out.append(f"OpenShell refused {self.ingress_refused} hook request(s) to DefenseClaw")
+        if self.hook_failed:
+            out.append(self.hook_failure_alert)
         if self.hooks_silent:
             out.append("hooks are silent: the harness is active but no DefenseClaw hook has been heard")
         if self.orphaned:
@@ -353,6 +372,8 @@ class SandboxRow:
             parts.append("nested repo")
         if self.hooks_unreachable:
             parts.append("hooks unreachable")
+        if self.hook_failed:
+            parts.append("hook errors")
         if self.hooks_silent:
             parts.append("silent")
         if self.orphaned:
@@ -410,6 +431,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         hooks_unreachable=bool(hooks.get("unreachable")),
         unreachable_reason=_text(hooks.get("unreachable_reason")),
         ingress_refused=_int(hooks.get("ingress_refused")),
+        hook_failed=_int(hooks.get("hook_failed")),
+        last_hook_failure=_text(hooks.get("last_hook_failure")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
         nested_repos=nested,

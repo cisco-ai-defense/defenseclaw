@@ -61,6 +61,10 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var hooksUnreachable = false
     var unreachableReason = ""
     var ingressRefused = 0
+    /// Hook posts DefenseClaw answered with an error (a refused route, the
+    /// rate limit): each failed closed, so the harness did not do it.
+    var hookFailed = 0
+    var lastHookFailure = ""
     var orphaned = false
     var undoAvailable = false
     var nestedRepos: [String] = []
@@ -76,7 +80,18 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
 
     var uptimeText: String { running ? SandboxFormat.duration(uptimeSeconds) : "—" }
 
-    /// Plain alert lines: hook tamper, planted repositories, silent hooks.
+    /// The failed hook calls, as the daemon's hook.failed event words them
+    /// (the TUI's SandboxRow.hook_failure_alert).
+    var hookFailureAlert: String {
+        guard hookFailed > 0 else { return "" }
+        let line = hookFailed == 1
+            ? "1 hook call failed, so the harness's action was blocked (hooks fail closed)"
+            : "\(hookFailed) hook calls failed, so the harness's actions were blocked (hooks fail closed)"
+        guard !lastHookFailure.isEmpty else { return line }
+        return line + "; DefenseClaw \(hookFailed == 1 ? "answered" : "last answered") \(lastHookFailure)"
+    }
+
+    /// Plain alert lines: hook tamper, planted repositories, failing or silent hooks.
     var alerts: [String] {
         var out: [String] = []
         if tampered > 0 {
@@ -88,6 +103,9 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
             out.append("\(sandboxHooksUnreachableWarning)\(why). Run: defenseclaw sandbox doctor")
         } else if ingressRefused > 0 {
             out.append("OpenShell refused \(ingressRefused) hook request(s) to DefenseClaw")
+        }
+        if hookFailed > 0 {
+            out.append(hookFailureAlert)
         }
         if hooksSilent {
             out.append("hooks are silent: the harness is active but no DefenseClaw hook has been heard")
@@ -144,7 +162,7 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
     var glyph: String {
         switch kind {
         case "egress.allowed": "✓"
-        case "egress.blocked", "tool.blocked": "✗"
+        case "egress.blocked", "tool.blocked", "hook.failed": "✗"
         case "egress.unblocked": "↺"
         case "egress.large_upload", "finding": "⚠"
         case "approval.requested": "?"
@@ -460,6 +478,8 @@ enum SandboxDecoding {
         row.hooksUnreachable = (hooks["unreachable"] as? Bool) ?? false
         row.unreachableReason = str(hooks["unreachable_reason"])
         row.ingressRefused = int(hooks["ingress_refused"])
+        row.hookFailed = int(hooks["hook_failed"])
+        row.lastHookFailure = str(hooks["last_hook_failure"])
         row.orphaned = (d["orphaned"] as? Bool) ?? false
         // undone_at is omitted until undo ran (Go omitzero).
         row.undoAvailable = !snapshot.isEmpty && DCDates.parse(snapshot["undone_at"]) == nil

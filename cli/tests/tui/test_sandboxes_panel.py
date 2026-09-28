@@ -1246,6 +1246,22 @@ def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
     assert notices[0].message.startswith("x: DefenseClaw hooks are not reaching the daemon")
 
 
+def test_failed_hook_calls_are_an_alert() -> None:
+    from defenseclaw.tui.panels.sandboxes import decode_activity
+
+    row = decode_sandbox({**RUNNING, "hooks": {"hook_failed": 3, "last_hook_failure": "HTTP 429 Too Many Requests"}})
+    assert (
+        "3 hook calls failed, so the harness's actions were blocked (hooks fail closed); "
+        "DefenseClaw last answered HTTP 429 Too Many Requests"
+    ) in row.alerts
+    assert "hook errors" in row.alert_badge
+    one = decode_sandbox({**RUNNING, "hooks": {"hook_failed": 1}})
+    assert "1 hook call failed, so the harness's action was blocked (hooks fail closed)" in one.alerts
+    assert decode_sandbox(RUNNING).hook_failed == 0
+    event = decode_activity({"seq": 1, "kind": "hook.failed", "message": "✗ a hook call failed (HTTP 429)"})
+    assert event.glyph == "✗" and event.summary == "a hook call failed (HTTP 429)"
+
+
 # --- review fixes: unblock state, scope and policy ------------------------------
 
 
