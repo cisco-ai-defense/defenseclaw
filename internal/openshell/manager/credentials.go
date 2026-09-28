@@ -159,17 +159,8 @@ func planCredentials(eff *packs.Effective, list []sandboxapi.CredentialBinding, 
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
 				"credential %s: name the host as %s to bind it to a port on this machine", c.Name, packs.OpenShellHostAlias)
 		}
-		if err := triage.CheckApproval(eff, c.Host, c.Port, false); err != nil {
+		if err := credentialRefusal(eff, c.Name, c.Host, c.Port); err != nil {
 			return nil, err
-		}
-		if !triage.IsHostLocal(c.Host) {
-			if dec := eff.DecideEgress(c.Host, 0); !dec.Allowed {
-				switch dec.Rule {
-				case packs.RuleAdminBlock, packs.RuleAdminAllowOnly, packs.RuleBlock, packs.RuleFeed:
-					return nil, sandboxapi.Errorf(sandboxapi.CodePolicyViolation,
-						"credential %s cannot be bound to %s: it is on the egress blocklist", c.Name, c.Host)
-				}
-			}
 		}
 		p, err := renderCredentialProfile(c)
 		if err != nil {
@@ -178,6 +169,95 @@ func planCredentials(eff *packs.Effective, list []sandboxapi.CredentialBinding, 
 		out = append(out, credentialPlan{binding: c, profile: p})
 	}
 	return out, nil
+}
+
+// credentialRefusal is why the policy refuses a --credential binding of
+// name to host:port (nil when it does not): its provider rule opens the
+// endpoint to every binary directly, around the egress proxy, so it is
+// held to what the sandbox could be approved to reach directly and to the
+// block lists and the blocklist feed.
+func credentialRefusal(eff *packs.Effective, name, host string, port int) error {
+	if err := triage.CheckApproval(eff, host, port, false); err != nil {
+		return err
+	}
+	if !triage.IsHostLocal(host) {
+		if dec := eff.DecideEgress(host, 0); !dec.Allowed {
+			switch dec.Rule {
+			case packs.RuleAdminBlock, packs.RuleAdminAllowOnly:
+				return adminEndpointRefusal("credential", host, dec.Rule)
+			case packs.RuleBlock, packs.RuleFeed:
+				return sandboxapi.Errorf(sandboxapi.CodePolicyViolation,
+					"credential %s cannot be bound to %s: it is on the egress blocklist", name, host)
+			}
+		}
+	}
+	return nil
+}
+
+// modelEndpointRefusal is why the organization's egress lists refuse the
+// endpoint of the --llm credential's provider (nil when they do not). Its
+// provider rule opens the endpoint to the harness's network binaries
+// directly, around the egress proxy, so openshell.admin.egress_block and
+// egress_allow_only must cover it too; the user's own lists do not bind
+// the model provider the user chose.
+func modelEndpointRefusal(eff *packs.Effective, host string) error {
+	if triage.IsHostLocal(host) {
+		return nil
+	}
+	if dec := eff.DecideEgress(host, 0); !dec.Allowed && (dec.Rule == packs.RuleAdminBlock || dec.Rule == packs.RuleAdminAllowOnly) {
+		return adminEndpointRefusal("llm", host, dec.Rule)
+	}
+	return nil
+}
+
+// adminEndpointRefusal is the admin violation of a provider endpoint the
+// organization's egress lists refuse.
+func adminEndpointRefusal(key, host string, rule packs.EgressRule) *packs.Violation {
+	constraint, detail := "openshell.admin.egress_allow_only", host+" is not on your organization's list of allowed destinations"
+	if rule == packs.RuleAdminBlock {
+		constraint, detail = "openshell.admin.egress_block", host+" is on your organization's blocklist"
+	}
+	return &packs.Violation{Key: key, Source: packs.SourceFlag, Attempted: host, Constraint: constraint, Fatal: true, Detail: detail}
+}
+
+// providerEndpoint is a destination one of a sandbox's providers opens
+// directly (its OpenShell provider rule), around the egress proxy: an
+// endpoint of the --llm credential's provider profile, or the endpoint of
+// a --credential binding. The record keeps them, so every later policy
+// resolution judges them again (endpointRefusal).
+type providerEndpoint struct {
+	// Provider is the OpenShell provider that opens it.
+	Provider string `json:"provider"`
+	// Role is roleLLM or roleCredential.
+	Role string `json:"role"`
+	// Name is the --credential variable (credential role).
+	Name string `json:"name,omitempty"`
+	Host string `json:"host"`
+	Port int    `json:"port,omitempty"`
+}
+
+// endpointRefusal is why the current policy refuses a provider endpoint.
+func endpointRefusal(eff *packs.Effective, ep providerEndpoint) error {
+	if ep.Role == roleCredential {
+		return credentialRefusal(eff, ep.Name, ep.Host, ep.Port)
+	}
+	return modelEndpointRefusal(eff, ep.Host)
+}
+
+// providerEndpoints lists the direct endpoints of a sandbox's providers.
+func providerEndpoints(sandbox string, llm *llmPlan, creds []credentialPlan) []providerEndpoint {
+	var out []providerEndpoint
+	if llm != nil {
+		for _, ep := range llm.profile.Spec.Endpoints {
+			out = append(out, providerEndpoint{Provider: providerName(sandbox, roleLLM, 0), Role: roleLLM,
+				Host: triage.NormalizeHost(ep.Host), Port: int(ep.Port)})
+		}
+	}
+	for i, c := range creds {
+		out = append(out, providerEndpoint{Provider: providerName(sandbox, roleCredential, i), Role: roleCredential,
+			Name: c.binding.Name, Host: c.binding.Host, Port: c.binding.Port})
+	}
+	return out
 }
 
 func renderCredentialProfile(c sandboxapi.CredentialBinding) (profiles.Profile, error) {

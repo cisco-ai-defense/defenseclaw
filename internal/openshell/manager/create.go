@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -235,6 +236,13 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err != nil {
 		return nil, err
 	}
+	if llm != nil {
+		for _, ep := range llm.profile.Spec.Endpoints {
+			if err := modelEndpointRefusal(eff, triage.NormalizeHost(ep.Host)); err != nil {
+				return nil, m.violationError(ctx, err, name)
+			}
+		}
+	}
 	pinned := map[string]string{}
 	for k, v := range arts.Env {
 		pinned[k] = v
@@ -274,6 +282,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
 	resources := eff.Resources
 	rec.Resources = &resources
+	rec.ProviderEndpoints = providerEndpoints(name, llm, creds)
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
 	}

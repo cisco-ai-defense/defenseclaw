@@ -119,6 +119,13 @@ type record struct {
 	CredentialProfile string   `json:"credential_profile,omitempty"`
 	BedrockRegion     string   `json:"bedrock_region,omitempty"`
 	Providers         []string `json:"providers,omitempty"`
+	// ProviderEndpoints are what the sandbox's --llm and --credential
+	// providers open directly, around the egress proxy; every later policy
+	// resolution judges them again. DetachedProviders are the providers
+	// detached from the sandbox because the policy now refuses their
+	// endpoints (enforceProviderEndpoints).
+	ProviderEndpoints []providerEndpoint `json:"provider_endpoints,omitempty"`
+	DetachedProviders []string           `json:"detached_providers,omitempty"`
 	// EgressUser is the proxy credential's username (the password is in
 	// the sandbox environment only).
 	EgressUser string `json:"egress_user,omitempty"`

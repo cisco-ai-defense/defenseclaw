@@ -245,6 +245,17 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 	if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
 		return m.violationError(ctx, v, rec.Name)
 	}
+	// What the --llm and --credential providers open around the egress
+	// proxy is judged by the policy as it is now, as at create.
+	for _, ep := range rec.ProviderEndpoints {
+		if err := endpointRefusal(eff, ep); err != nil {
+			var v *packs.Violation
+			if errors.As(err, &v) {
+				return m.violationError(ctx, v, rec.Name)
+			}
+			return err
+		}
+	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && eff.Workspace.Mode != config.OpenShellWorkdirMount {
 		// The mount is part of the sandbox; it cannot become a copy.
 		for i := range violations {
@@ -457,6 +468,67 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: policyUnresolvedReason, Message: fmt.Sprintf(
 				"removed %d approved rule(s): neither the sandbox's nor your organization's policy can be resolved", len(unbound))})
+	}
+}
+
+// enforceProviderEndpoints detaches from a ready sandbox the --llm and
+// --credential providers whose direct endpoints the current policy refuses
+// (endpointRefusal): an administrator's egress_block or egress_allow_only,
+// a block list or the blocklist feed. Their provider rules open the
+// endpoint around the egress proxy, so a tightening must reach them as it
+// reaches approved rules. Each detach is logged (OPENSHELL_ADMIN_VIOLATION
+// for the administrator's lists), recorded as a policy record and published
+// to the feed; one that fails is retried on the next pass, and checkStart
+// refuses the next start either way.
+func (m *Manager) enforceProviderEndpoints(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
+	m.mu.Lock()
+	rec, ready := b.rec, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
+	m.mu.Unlock()
+	if !ready || eff == nil {
+		return
+	}
+	refused := map[string]error{}
+	var order []string
+	for _, ep := range rec.ProviderEndpoints {
+		if _, seen := refused[ep.Provider]; seen || slices.Contains(rec.DetachedProviders, ep.Provider) {
+			continue
+		}
+		if err := endpointRefusal(eff, ep); err != nil {
+			refused[ep.Provider] = err
+			order = append(order, ep.Provider)
+		}
+	}
+	for _, provider := range order {
+		err := refused[provider]
+		var v *packs.Violation
+		admin := errors.As(err, &v) && v.Admin()
+		code, reason := "SANDBOX_RULE_BLOCKLISTED", policyReasonBlocklist
+		if admin {
+			code, reason = string(gatewaylog.ErrCodeOpenShellAdminViolation), policyReasonAdmin
+		}
+		if _, derr := gw.Client.DetachProvider(ctx, rec.Name, provider); derr != nil && !openshell.IsNotFound(derr) {
+			m.logf("%s: sandbox %s: detach provider %s, whose endpoint the policy now refuses (%v): %v", code, rec.Name, provider, err, derr)
+			m.dropGateway(gw, derr)
+			continue
+		}
+		m.logf("%s: sandbox %s: detached provider %s: %v", code, rec.Name, provider, err)
+		m.mu.Lock()
+		b.rec.DetachedProviders = append(slices.Clip(b.rec.DetachedProviders), provider)
+		id := b.identity()
+		m.mu.Unlock()
+		if serr := m.saveRecord(b); serr != nil {
+			m.logf("record the detached provider of %s: %v", rec.Name, serr)
+		}
+		if terr := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
+			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()}); terr != nil {
+			m.logf("policy telemetry for %s of %s: %v", provider, rec.Name, terr)
+		}
+		msg := "detached provider " + provider + ": its direct endpoint is on the egress block list now"
+		if admin {
+			msg = "detached provider " + provider + " " + sandboxapi.AdminMessage
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: rec.Name, Source: sandboxapi.SourceOpenShell,
+			Reason: reason, Message: msg})
 	}
 }
 

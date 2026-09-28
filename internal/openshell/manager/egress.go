@@ -198,6 +198,7 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 			}
 		}
 		m.enforceApprovedRules(ctx, gw, b, eff)
+		m.enforceProviderEndpoints(ctx, gw, b, eff)
 	}
 	return true
 }
