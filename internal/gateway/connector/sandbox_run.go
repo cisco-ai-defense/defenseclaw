@@ -82,6 +82,13 @@ type SandboxModelProvider struct {
 	// in the managed config, above user config and -c overrides; a -m at
 	// launch still picks another.
 	DefaultModel string
+	// FunctionToolsOnly marks a provider that rejects every tool but
+	// function tools (Bedrock Mantle's OpenAI-compatible models refuse the
+	// namespace tool of Codex's multi-agent feature and its web search).
+	// Codex pins features.multi_agent = false and web_search = "disabled" in
+	// the managed config, so every Codex the sandbox starts leaves them out,
+	// a `sandbox connect --shell` or the in-sandbox shim included.
+	FunctionToolsOnly bool
 }
 
 // sandboxModelNamePattern is a model id a run may pin.

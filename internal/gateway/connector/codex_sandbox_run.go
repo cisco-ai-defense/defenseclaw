@@ -38,10 +38,13 @@ var codexSandboxSafeApprovalPolicies = []string{"untrusted", "on-request", "on-f
 var codexSandboxSafeSandboxModes = []string{"read-only", "danger-full-access"}
 
 // codexSandboxRunManagedKeys and codexSandboxRunRequirementKeys are the keys
-// the run adds; the image files must not already set them.
+// the run adds, and codexSandboxRunFeatures the features.* keys it may pin
+// (SandboxModelProvider.FunctionToolsOnly); the image files must not
+// already set them.
 var (
-	codexSandboxRunManagedKeys     = []string{"mcp_servers", "model", "model_provider", "model_providers", "openai_base_url"}
+	codexSandboxRunManagedKeys     = []string{"mcp_servers", "model", "model_provider", "model_providers", "openai_base_url", "web_search"}
 	codexSandboxRunRequirementKeys = []string{"allowed_approval_policies", "allowed_sandbox_modes", "mcp_servers"}
+	codexSandboxRunFeatures        = []string{"multi_agent"}
 )
 
 // SandboxRunFiles renders the per-run Codex files for the image target
@@ -108,6 +111,12 @@ func (c *CodexConnector) SandboxRunFiles(target SandboxRenderTarget, run Sandbox
 			return nil, fmt.Errorf("codex run config: the image managed config already sets %s", key)
 		}
 	}
+	features, _ := managed["features"].(map[string]interface{})
+	for _, key := range codexSandboxRunFeatures {
+		if _, clash := features[key]; clash {
+			return nil, fmt.Errorf("codex run config: the image managed config already sets features.%s", key)
+		}
+	}
 	for _, key := range codexSandboxRunRequirementKeys {
 		if _, clash := requirements[key]; clash {
 			return nil, fmt.Errorf("codex run config: the image requirements already set %s", key)
@@ -154,6 +163,15 @@ func addCodexSandboxRunManaged(managed map[string]interface{}, run SandboxRunCon
 			managed["model_providers"] = map[string]interface{}{p.ID: map[string]interface{}{
 				"name": p.Name, "base_url": p.BaseURL, "env_key": p.EnvKey, "wire_api": p.WireAPI,
 			}}
+		}
+		if p.FunctionToolsOnly {
+			features, _ := managed["features"].(map[string]interface{})
+			if features == nil {
+				features = map[string]interface{}{}
+			}
+			features["multi_agent"] = false
+			managed["features"] = features
+			managed["web_search"] = "disabled"
 		}
 	}
 	servers := sortedSandboxMCPServers(run.MCPServers)
@@ -269,6 +287,17 @@ func verifyCodexSandboxRunPolicy(requirementsBody, managedBody []byte, run Sandb
 	}
 	if restricted && len(allow) != len(run.MCPServers) {
 		return fmt.Errorf("verify Codex run requirements: the MCP allowlist has %d servers, want %d", len(allow), len(run.MCPServers))
+	}
+	features, _ := managed["features"].(map[string]interface{})
+	multiAgent, multiAgentSet := features["multi_agent"]
+	webSearch, webSearchSet := managed["web_search"]
+	if p := run.ModelProvider; p != nil && p.FunctionToolsOnly {
+		if multiAgent != false || webSearch != "disabled" {
+			return fmt.Errorf("verify Codex run managed config: features.multi_agent = %#v, web_search = %#v for a function-tools-only provider",
+				multiAgent, webSearch)
+		}
+	} else if multiAgentSet || webSearchSet {
+		return fmt.Errorf("verify Codex run managed config: features.multi_agent or web_search is pinned without a function-tools-only provider")
 	}
 	if p := run.ModelProvider; p != nil {
 		if managed["model_provider"] != p.ID {

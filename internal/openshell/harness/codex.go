@@ -155,6 +155,12 @@ const CodexLauncherPath = LauncherDir + "/codex-launch"
 var codexMantleProvider = connector.SandboxModelProvider{
 	ID: "mantle", Name: "mantle", BaseURL: "https://" + bedrockHostToken + "/v1",
 	EnvKey: "BEDROCK_MANTLE_API_KEY", WireAPI: "responses",
+	// Mantle rejects the multi-agent namespace tool and web search
+	// ("Invalid tools: unknown variant namespace"): the run's managed config
+	// turns both off for every Codex the sandbox starts, including one typed
+	// in `sandbox connect --shell` or started by the in-sandbox shim, which
+	// the launch arguments above never reach.
+	FunctionToolsOnly: true,
 }
 
 // codexProviderArgs selects a custom provider with session -c flags.

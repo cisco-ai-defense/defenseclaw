@@ -267,7 +267,7 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 	stdio := SandboxMCPServer{Name: "github", Command: "npx", Args: []string{"-y", "srv"}, Env: map[string]string{"LOG": "1"}}
 	remote := SandboxMCPServer{Name: "linear", URL: "https://mcp.linear.app/mcp"}
 	mantle := &SandboxModelProvider{ID: "mantle", Name: "mantle", BaseURL: "https://bedrock-mantle.us-east-1.api.aws/v1", EnvKey: "BEDROCK_MANTLE_API_KEY", WireAPI: "responses",
-		DefaultModel: "openai.gpt-oss-20b"}
+		DefaultModel: "openai.gpt-oss-20b", FunctionToolsOnly: true}
 	for _, tc := range []struct {
 		name string
 		run  SandboxRunConfig
@@ -354,6 +354,17 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 				if managed["model"] != p.DefaultModel {
 					t.Fatalf("model pin = %v, want %q", managed["model"], p.DefaultModel)
 				}
+			}
+			features, _ := managed["features"].(map[string]interface{})
+			// A provider that serves only function tools keeps every Codex in
+			// the sandbox off the tools it rejects; the image's own disabled
+			// features stay.
+			functionOnly := tc.run.ModelProvider != nil && tc.run.ModelProvider.FunctionToolsOnly
+			if multi, set := features["multi_agent"]; functionOnly != (set && multi == false) || functionOnly != (managed["web_search"] == "disabled") {
+				t.Fatalf("function-tools pins = features.multi_agent %v, web_search %v (function tools only: %t)", features["multi_agent"], managed["web_search"], functionOnly)
+			}
+			if features["plugins"] != false {
+				t.Fatalf("the image's disabled features were lost: %v", features)
 			}
 		})
 	}

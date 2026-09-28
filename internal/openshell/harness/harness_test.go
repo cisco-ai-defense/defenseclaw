@@ -1118,6 +1118,12 @@ func TestCodexProfilesPinTheirProvider(t *testing.T) {
 			t.Fatalf("mantle launch args %q lack %s", joined, want)
 		}
 	}
+	// Mantle serves only function tools: the managed pin turns Codex's
+	// multi-agent and web search off for every Codex the sandbox starts, not
+	// only the launches that carry the session flags.
+	if !mantle.ModelProvider.FunctionToolsOnly || openai.ModelProvider.FunctionToolsOnly {
+		t.Fatalf("function tools only: mantle %t, openai %t", mantle.ModelProvider.FunctionToolsOnly, openai.ModelProvider.FunctionToolsOnly)
+	}
 	// The base profile table is not mutated by region resolution.
 	if again, _ := Codex.CredentialProfile(profiles.CodexBedrockMantleID, "us-west-2"); again.ModelProvider.BaseURL != "https://bedrock-mantle.us-west-2.api.aws/v1" {
 		t.Fatalf("mantle base URL = %s", again.ModelProvider.BaseURL)

@@ -1311,6 +1311,12 @@ shows:
   model (its requests fail with `validation_error: Invalid 'input'`). The
   banner's Model line names the model; `-- -m MODEL` picks another (a
   `-c model=` override does not, because the managed config wins over it).
+  Mantle serves only function tools (`Invalid tools: unknown variant
+  namespace` otherwise), so the managed config also pins
+  `features.multi_agent = false` and `web_search = "disabled"`
+  (`SandboxModelProvider.FunctionToolsOnly`): a Codex typed in `sandbox
+  connect --shell` or started by the in-sandbox shim gets them too, not only
+  the launches that carry the session flags.
   Mantle's Responses route rejects every turn after the first of a Codex
   conversation: Codex replays its earlier replies as assistant `message`
   items with `output_text` content, Mantle drops their `id` and `status`
