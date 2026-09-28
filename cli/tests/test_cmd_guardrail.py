@@ -230,7 +230,7 @@ class StatusCommandTests(unittest.TestCase):
             result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("- Codex", result.output)
-        self.assertIn("key:       codex", result.output)
+        self.assertRegex(result.output, r"key:\s+codex")
         self.assertNotIn("connector: codex", result.output)
         self.assertIn("rule-pack:", result.output)
         self.assertIn("scan:", result.output)
@@ -720,12 +720,16 @@ class PerConnectorToggleTests(unittest.TestCase):
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
+        app.cfg.guardrail.block_at = "HIGH"
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Rule pack", result.output)
         self.assertIn("strict", result.output)    # codex's own pack
         self.assertIn("default", result.output)   # claudecode inherits
         self.assertIn("on@LOW", result.output)    # codex's own HILT
+        # Tool-call levels: the global block_at over each connector's pack.
+        self.assertIn("HIGH+/LOW+", result.output)     # codex: strict alerts LOW+
+        self.assertIn("HIGH+/MEDIUM+", result.output)  # claudecode: default alerts MEDIUM+
 
     def test_status_global_disable_overrides_per_connector_enabled(self):
         # Regression: when the GLOBAL guardrail kill switch is off, no

@@ -458,6 +458,7 @@ def _render_connector_table(rows: list[dict[str, tuple[str, str]]]) -> None:
         ("mode", "Mode"),
         ("fail", "Fail"),
         ("rule_pack", "Rule pack"),
+        ("levels", "Block/alert"),
         ("hilt", "HILT"),
         ("scan", "Scan"),
         ("judge", "Judge"),
@@ -496,6 +497,7 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
         ("mode", "mode"),
         ("fail", "fail"),
         ("rule_pack", "rule-pack"),
+        ("levels", "block/alert"),
         ("hilt", "hilt"),
         ("scan", "scan"),
         ("judge", "judge"),
@@ -539,6 +541,8 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
     connector is set up, status renders an explicit "none configured" state
     rather than a phantom ``openclaw``.
     """
+    from defenseclaw import policy_catalog
+
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
@@ -675,6 +679,11 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             hilt_str = ux.dim(hilt_raw)
         scan_raw = _scan_value(gc, name)
         judge_raw = _connector_judge_value(gc, name)
+        # Tool-call block / alert levels (guardrail.block_at / alert_at, else
+        # the rule pack's), highlighted when a setting replaces the pack's.
+        levels = policy_catalog.scope_levels(app.cfg, name)
+        levels_raw = f"{levels.block_at}/{levels.alert_at}"
+        levels_str = ux.dim(levels_raw) if levels.source == "pack" else ux.accent(levels_raw)
         rows.append(
             {
                 "label": (_connector_label(name), _connector_label(name)),
@@ -683,6 +692,7 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
                 "mode": (cmode or "observe", _style_mode(cmode or "observe")),
                 "fail": (fail_raw, cfm_display),
                 "rule_pack": (rule_pack_raw, rule_pack),
+                "levels": (levels_raw, levels_str),
                 "hilt": (hilt_raw, hilt_str),
                 "scan": (scan_raw, _style_scan_value(scan_raw)),
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
