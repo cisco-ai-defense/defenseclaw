@@ -17,6 +17,7 @@
 package packs
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -155,46 +156,40 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 	root := t.TempDir()
 	teamDir := writePack(t, root, "team", customPack("team"))
 	file := filepath.Join(teamDir, PackFileName)
-
-	if err := os.Chmod(file, 0o666); err != nil {
-		t.Fatal(err)
+	chmod := func(path string, mode fs.FileMode) {
+		t.Helper()
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
 	}
-	_, err := LoadFile(teamDir)
-	wantPackError(t, err, "world_writable", "")
 	// Group members are other local users too.
-	if err := os.Chmod(file, 0o664); err != nil {
-		t.Fatal(err)
-	}
-	_, err = LoadFile(teamDir)
-	wantPackError(t, err, "group_writable", "")
-	if err := os.Chmod(file, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.Chmod(teamDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	_, err = LoadFile(teamDir)
-	wantPackError(t, err, "world_writable", "")
-	if err := os.Chmod(teamDir, 0o775); err != nil {
-		t.Fatal(err)
-	}
-	_, err = LoadFile(teamDir)
-	wantPackError(t, err, "group_writable", "")
-	if _, err := Load("team", root); err == nil {
-		t.Fatal("a named pack in a group-writable directory loaded")
+	for _, tc := range []struct {
+		path       string
+		mode, safe fs.FileMode
+		code       string
+	}{
+		{file, 0o666, 0o644, "world_writable"},
+		{file, 0o664, 0o644, "group_writable"},
+		{teamDir, 0o777, 0o755, "world_writable"},
+		{teamDir, 0o775, 0o755, "group_writable"},
+	} {
+		chmod(tc.path, tc.mode)
+		_, err := LoadFile(teamDir)
+		wantPackError(t, err, tc.code, "")
+		if _, err := Load("team", root); err == nil {
+			t.Fatalf("a named pack loaded with %s at %o", tc.path, tc.mode)
+		}
+		chmod(tc.path, tc.safe)
 	}
 
 	// A sticky world-writable directory (like /tmp) is not the user's to
 	// vouch for: only a root-owned pack loads from it.
-	if err := os.Chmod(teamDir, 0o777|fs.ModeSticky); err != nil {
-		t.Fatal(err)
-	}
+	chmod(teamDir, 0o777|fs.ModeSticky)
 	if info, err := os.Stat(teamDir); err != nil || info.Mode()&fs.ModeSticky == 0 {
 		t.Skip("sticky bit unsupported here")
 	}
 	fakeOwners(t, func(fs.FileInfo) int { return testUID })
-	_, err = LoadFile(teamDir)
+	_, err := LoadFile(teamDir)
 	if e := wantPackError(t, err, "world_writable", ""); !strings.Contains(e.Reason, "other users can write to") {
 		t.Fatalf("sticky directory: %v", e)
 	}
@@ -208,9 +203,7 @@ func TestLoadRefusesWritableByOthers(t *testing.T) {
 		t.Fatalf("root-owned pack in a sticky directory: %v", err)
 	}
 	// Without the sticky bit any user could replace even a root-owned file.
-	if err := os.Chmod(teamDir, 0o777); err != nil {
-		t.Fatal(err)
-	}
+	chmod(teamDir, 0o777)
 	_, err = LoadFile(teamDir)
 	wantPackError(t, err, "world_writable", "")
 }
@@ -313,43 +306,26 @@ func TestListPacks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	type row struct {
-		name    string
-		builtin bool
-		errCode string
-	}
-	var got []row
+	// Each row: name, then "builtin", the refusal code, or "custom".
+	var got []string
 	for _, entry := range entries {
-		r := row{name: entry.Name, builtin: entry.Builtin}
-		if entry.Err != nil {
-			var packErr *Error
-			if e, ok := entry.Err.(*Error); ok {
-				packErr = e
-			}
-			if packErr == nil {
-				t.Fatalf("entry %s error %T", entry.Name, entry.Err)
-			}
-			r.errCode = packErr.Code
-		} else if entry.Digest == "" || entry.Profile == "" || entry.Source == "" {
+		row := entry.Name + " custom"
+		var packErr *Error
+		switch {
+		case errors.As(entry.Err, &packErr):
+			row = entry.Name + " " + packErr.Code
+		case entry.Err != nil:
+			t.Fatalf("entry %s error %T", entry.Name, entry.Err)
+		case entry.Digest == "" || entry.Profile == "" || entry.Source == "":
 			t.Fatalf("entry %+v lacks metadata", entry)
+		case entry.Builtin:
+			row = entry.Name + " builtin"
 		}
-		got = append(got, r)
+		got = append(got, row)
 	}
-	want := []row{
-		{"open", true, ""}, {"balanced", true, ""}, {"strict", true, ""},
-		{"Upper", false, "invalid_name"},
-		{"alpha", false, ""},
-		{"broken", false, "missing_field"},
-		{"linked", false, "symlink"},
-		{"strict", false, "reserved_name"},
-		{"zeta", false, ""},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("List rows = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("row %d = %+v, want %+v (all %+v)", i, got[i], want[i], got)
-		}
+	want := "open builtin, balanced builtin, strict builtin, Upper invalid_name, alpha custom, broken missing_field, " +
+		"linked symlink, strict reserved_name, zeta custom"
+	if strings.Join(got, ", ") != want {
+		t.Fatalf("List rows = %s\nwant %s", strings.Join(got, ", "), want)
 	}
 }

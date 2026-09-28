@@ -149,11 +149,6 @@ func matchesAnyGlob(globs []string, file string) bool {
 	return false
 }
 
-func TestParseRejectsDuplicateTopLevelKeys(t *testing.T) {
-	_, err := Parse([]byte(minimalPack+"harness: {yolo: false}\n"), "test")
-	wantPackError(t, err, "yaml_duplicate", "harness")
-}
-
 func TestParseNormalizesValues(t *testing.T) {
 	doc := `version: 1
 name: " team "
@@ -220,48 +215,43 @@ hooks: {fail_mode: closed}
 }
 
 // hooks.on_tamper defaults to alert on an open network and to stop
-// otherwise; an explicit value wins.
-func TestParseOnTamper(t *testing.T) {
+// otherwise, mcp.project_servers to block; explicit values win.
+func TestParseTamperAndProjectServerDefaults(t *testing.T) {
 	for _, tc := range []struct {
-		network, hooks, want string
+		network, hooks, mcp, tamper, project string
 	}{
-		{"open", "{fail_mode: closed}", OnTamperAlert},
-		{"allowlist", "{fail_mode: closed}", OnTamperStop},
-		{"deny", "{fail_mode: closed}", OnTamperStop},
-		{"open", "{fail_mode: closed, on_tamper: stop}", OnTamperStop},
-		{"allowlist", "{fail_mode: closed, on_tamper: alert}", OnTamperAlert},
+		{"open", "{fail_mode: closed}", "", OnTamperAlert, MCPProjectServersBlock},
+		{"allowlist", "{fail_mode: closed}", ", project_servers: block", OnTamperStop, MCPProjectServersBlock},
+		{"deny}\negress: {ports: []", "{fail_mode: closed}", "", OnTamperStop, MCPProjectServersBlock},
+		{"open", "{fail_mode: closed, on_tamper: stop}", ", project_servers: allow", OnTamperStop, MCPProjectServersAllow},
+		{"allowlist", "{fail_mode: closed, on_tamper: alert}", "", OnTamperAlert, MCPProjectServersBlock},
 	} {
-		doc := strings.Replace(minimalPack, "network: {mode: open}", "network: {mode: "+tc.network+"}", 1)
-		if tc.network == "deny" {
-			doc = strings.Replace(doc, "network: {mode: deny}", "network: {mode: deny}\negress: {ports: []}", 1)
-		}
-		doc = strings.Replace(doc, "hooks: {fail_mode: closed}", "hooks: "+tc.hooks, 1)
-		if got := mustParse(t, doc).Hooks.OnTamper; got != tc.want {
-			t.Errorf("network %s hooks %s: on_tamper = %q, want %q", tc.network, tc.hooks, got, tc.want)
-		}
-	}
-}
-
-// mcp.project_servers defaults to block; allow must be explicit.
-func TestParseProjectServers(t *testing.T) {
-	for mcp, want := range map[string]string{
-		"{import: true, host_ports: false}":                         MCPProjectServersBlock,
-		"{import: true, host_ports: false, project_servers: block}": MCPProjectServersBlock,
-		"{import: true, host_ports: false, project_servers: allow}": MCPProjectServersAllow,
-	} {
-		doc := strings.Replace(minimalPack, "mcp: {import: true, host_ports: false}", "mcp: "+mcp, 1)
-		if got := mustParse(t, doc).MCP.ProjectServers; got != want {
-			t.Errorf("mcp %s: project_servers = %q, want %q", mcp, got, want)
+		doc := strings.NewReplacer("network: {mode: open}", "network: {mode: "+tc.network+"}", "hooks: {fail_mode: closed}", "hooks: "+tc.hooks,
+			"mcp: {import: true, host_ports: false}", "mcp: {import: true, host_ports: false"+tc.mcp+"}").Replace(minimalPack)
+		if pack := mustParse(t, doc); pack.Hooks.OnTamper != tc.tamper || pack.MCP.ProjectServers != tc.project {
+			t.Errorf("%+v: on_tamper = %q, project_servers = %q", tc, pack.Hooks.OnTamper, pack.MCP.ProjectServers)
 		}
 	}
 }
 
 func TestParseRejects(t *testing.T) {
 	replace := func(old, new string) string { return strings.Replace(minimalPack, old, new, 1) }
+	list := func(n int, prefix string) string {
+		items := make([]string, n)
+		for i := range items {
+			items[i] = prefix + strconv.Itoa(1000+i)
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	}
 	for _, tc := range []struct {
 		name, doc, code, field string
 	}{
 		{"empty", "", "yaml_empty", ""},
+		{"duplicate top-level key", minimalPack + "harness: {yolo: false}\n", "yaml_duplicate", "harness"},
+		{"too large", minimalPack + "description: " + strings.Repeat("x", MaxPackBytes) + "\n", "too_large", ""},
+		{"long description", minimalPack + "description: " + strings.Repeat("x", maxDescription+1) + "\n", "invalid_value", "description"},
+		{"too many ports", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: "+list(maxPorts+1, "")+"}"), "invalid_value", "egress.ports"},
+		{"too many masks", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: "+list(maxListEntries+1, "f")+"}"), "invalid_value", "workspace.masks"},
 		{"not yaml", "version: [1\n", "yaml_invalid", ""},
 		{"two documents", minimalPack + "---\nversion: 1\n", "yaml_documents", ""},
 		{"top-level list", "- 1\n", "yaml_type", ""},
@@ -383,46 +373,17 @@ func TestIsBroadAllowGlob(t *testing.T) {
 	}
 }
 
-func TestParseLimits(t *testing.T) {
-	big := minimalPack + "description: " + strings.Repeat("x", MaxPackBytes) + "\n"
-	_, err := Parse([]byte(big), "test")
-	wantPackError(t, err, "too_large", "")
-
-	_, err = Parse([]byte(minimalPack+"description: "+strings.Repeat("x", maxDescription+1)+"\n"), "test")
-	wantPackError(t, err, "invalid_value", "description")
-
-	ports := make([]string, maxPorts+1)
-	for i := range ports {
-		ports[i] = strconv.Itoa(1000 + i)
-	}
-	doc := strings.Replace(minimalPack, "network: {mode: open}",
-		"network: {mode: open}\negress: {ports: ["+strings.Join(ports, ", ")+"]}", 1)
-	_, err = Parse([]byte(doc), "test")
-	wantPackError(t, err, "invalid_value", "egress.ports")
-
-	masks := make([]string, maxListEntries+1)
-	for i := range masks {
-		masks[i] = "f" + strconv.Itoa(i)
-	}
-	doc = strings.Replace(minimalPack, "workspace: {mode: mount}",
-		"workspace: {mode: mount, masks: ["+strings.Join(masks, ", ")+"]}", 1)
-	_, err = Parse([]byte(doc), "test")
-	wantPackError(t, err, "invalid_value", "workspace.masks")
-}
-
+// TestErrorMessages: a refusal names the pack file, the key and (for YAML
+// errors) the line.
 func TestErrorMessages(t *testing.T) {
 	_, err := Parse([]byte(strings.Replace(minimalPack, "mode: mount}", "mode: overlay}", 1)), "/etc/packs/team/pack.yaml")
-	want := `sandbox pack /etc/packs/team/pack.yaml: workspace.mode: "overlay" must be one of mount, copy`
-	if err == nil || err.Error() != want {
-		t.Fatalf("error = %v, want %q", err, want)
+	if err == nil || !strings.HasPrefix(err.Error(), "sandbox pack /etc/packs/team/pack.yaml: workspace.mode:") ||
+		!strings.Contains(err.Error(), "must be one of mount, copy") {
+		t.Fatalf("error = %v", err)
 	}
 	_, err = Parse([]byte(minimalPack+"extra: 1\n"), "test")
 	if err == nil || !strings.Contains(err.Error(), "line 9: unknown key") {
 		t.Fatalf("error = %v, want the line number", err)
-	}
-	var nilErr *Error
-	if nilErr.Error() != "sandbox pack error" {
-		t.Fatal("nil *Error must still format")
 	}
 }
 

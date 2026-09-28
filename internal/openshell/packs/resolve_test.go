@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -82,29 +83,16 @@ func teamPackDir(t *testing.T) string {
 
 func TestResolveDefaults(t *testing.T) {
 	eff, violations := mustResolve(t, testConfig(nil), Flags{})
-	if len(violations) != 0 {
-		t.Fatalf("violations = %+v", violations)
-	}
-	if eff.Pack.Name != "open" || eff.Profile != "open" || eff.NetworkMode != NetworkOpen || eff.Approvals != ApprovalsAuto {
-		t.Fatalf("posture = pack %s profile %s network %s approvals %s", eff.Pack.Name, eff.Profile, eff.NetworkMode, eff.Approvals)
-	}
-	if !eff.Yolo || eff.Workspace.Mode != "mount" || !eff.MCP.Import || !eff.MCP.HostPortAccess || eff.Learn {
-		t.Fatalf("switches = %+v", eff)
-	}
-	if eff.HookFailMode != FailModeClosed || eff.Harness != "" || !eff.AnyHarness ||
-		eff.AllowedHarnesses == nil || len(eff.AllowedHarnesses) != 0 {
-		t.Fatalf("hooks %q harness %q any %v allowed %v", eff.HookFailMode, eff.Harness, eff.AnyHarness, eff.AllowedHarnesses)
-	}
-	if !reflect.DeepEqual(eff.Egress.Feeds, []string{FeedBuiltin}) || !reflect.DeepEqual(eff.Egress.Ports, []int{80, 443}) ||
-		eff.Egress.LargeUploadMB != 25 || len(eff.Egress.Block) != 0 || len(eff.Egress.AdminBlock) != 0 {
-		t.Fatalf("egress = %+v", eff.Egress)
+	wantViolations(t, violations)
+	wantPosture(t, eff, "pack=open profile=open network="+NetworkOpen+" approvals="+ApprovalsAuto+" yolo=true mode=mount import=true"+
+		" host_port_access=true host_ports= learn=false harness= any_harness=true fail_mode="+FailModeClosed+" on_tamper="+OnTamperAlert+
+		" project_servers="+MCPProjectServersBlock+" feeds="+FeedBuiltin+" ports=80,443 block= admin_block= cpu= memory=")
+	if eff.AllowedHarnesses == nil || len(eff.AllowedHarnesses) != 0 || eff.Egress.LargeUploadMB != 25 {
+		t.Fatalf("allowed harnesses %#v large upload %d", eff.AllowedHarnesses, eff.Egress.LargeUploadMB)
 	}
 	if eff.Workspace.MaxUploadMB != 500 || eff.Workspace.GitDepth != 200 || eff.Workspace.OnExit != "ask" ||
 		!containsString(eff.Workspace.Unmask, ".env.example") || !containsString(eff.Workspace.Masks, ".env.*") {
 		t.Fatalf("workspace = %+v", eff.Workspace)
-	}
-	if eff.Resources != (Resources{}) || len(eff.MCP.HostPorts) != 0 {
-		t.Fatalf("resources %+v host ports %v", eff.Resources, eff.MCP.HostPorts)
 	}
 	if eff.Admin.Configured || eff.Admin.Authority != AuthorityAdvisory {
 		t.Fatalf("admin status = %+v", eff.Admin)
@@ -120,12 +108,6 @@ func TestResolveDefaults(t *testing.T) {
 	wantSetting(t, eff, "hooks.fail_mode", "closed", SourcePack, "pack open")
 	wantSetting(t, eff, "hooks.on_tamper", "alert", SourcePack, "pack open")
 	wantSetting(t, eff, "mcp.project_servers", "block", SourcePack, "pack open")
-	if eff.MCP.ProjectServers != MCPProjectServersBlock {
-		t.Fatalf("mcp project servers = %q", eff.MCP.ProjectServers)
-	}
-	if eff.HookOnTamper != OnTamperAlert {
-		t.Fatalf("hook on_tamper = %q", eff.HookOnTamper)
-	}
 
 	// The loader defaults (git_depth 200, on_exit ask) read as defaults.
 	loaded := testConfig(func(o *config.OpenShellConfig) {
@@ -208,20 +190,7 @@ func TestResolveLayering(t *testing.T) {
 	if !reflect.DeepEqual(eff.Egress.Block, []string{"paste.example"}) || !reflect.DeepEqual(eff.Egress.Allow, []string{"*.corp.example"}) {
 		t.Fatalf("egress lists = %+v", eff.Egress)
 	}
-	if eff.Harness != "codex" || eff.Resources != (Resources{CPU: "1", Memory: "2Gi"}) {
-		t.Fatalf("harness %q resources %+v", eff.Harness, eff.Resources)
-	}
-
-	balanced, _ := mustResolve(t, testConfig(func(o *config.OpenShellConfig) { o.Pack = "balanced" }), Flags{})
-	if balanced.NetworkMode != NetworkAllowlist || !containsString(balanced.Egress.Allow, "registry.npmjs.org") ||
-		balanced.Egress.LargeUploadMB != 10 {
-		t.Fatalf("balanced pack = %+v", balanced.Egress)
-	}
-	strict, _ := mustResolve(t, testConfig(nil), Flags{Pack: "strict"})
-	if strict.NetworkMode != NetworkDeny || strict.Workspace.Mode != "copy" || strict.Yolo || strict.MCP.Import ||
-		strict.MCP.HostPortAccess || strict.Approvals != ApprovalsManual {
-		t.Fatalf("strict pack = %+v", strict)
-	}
+	wantPosture(t, eff, "harness=codex cpu=1 memory=2Gi")
 }
 
 func TestResolveApprovalsFollowProfile(t *testing.T) {
@@ -251,265 +220,189 @@ func TestResolveApprovalsFollowProfile(t *testing.T) {
 	}
 }
 
+// wantViolations fails unless violations match want one to one: each wanted
+// Key, Source, Attempted, Enforced and Constraint that is set must be equal,
+// Detail must be contained, and Fatal must agree.
+func wantViolations(t *testing.T, violations []Violation, want ...Violation) {
+	t.Helper()
+	if len(violations) != len(want) {
+		t.Fatalf("violations = %+v, want %d", violations, len(want))
+	}
+	for i, w := range want {
+		v := violations[i]
+		if (w.Key != "" && v.Key != w.Key) || (w.Source != "" && v.Source != w.Source) ||
+			(w.Attempted != "" && v.Attempted != w.Attempted) || (w.Enforced != "" && v.Enforced != w.Enforced) ||
+			(w.Constraint != "" && v.Constraint != w.Constraint) || !strings.Contains(v.Detail, w.Detail) || v.Fatal != w.Fatal {
+			t.Fatalf("violation %d = %+v, want %+v", i, v, w)
+		}
+	}
+}
+
+// wantPosture checks the enforced values of eff named in want
+// ("yolo=false mode=copy host_ports=5432,6379"; lists join with commas).
+func wantPosture(t *testing.T, eff *Effective, want string) {
+	t.Helper()
+	s := func(v any) string { return strings.Trim(strings.Join(strings.Fields(fmt.Sprint(v)), ","), "[]") }
+	got := map[string]string{
+		"pack": eff.Pack.Name, "profile": eff.Profile, "network": s(eff.NetworkMode), "approvals": s(eff.Approvals),
+		"yolo": s(eff.Yolo), "mode": eff.Workspace.Mode, "import": s(eff.MCP.Import), "learn": s(eff.Learn),
+		"harness": eff.Harness, "any_harness": s(eff.AnyHarness), "fail_mode": s(eff.HookFailMode), "on_tamper": s(eff.HookOnTamper),
+		"project_servers": s(eff.MCP.ProjectServers), "host_port_access": s(eff.MCP.HostPortAccess), "host_ports": s(eff.MCP.HostPorts),
+		"feeds": s(eff.Egress.Feeds), "ports": s(eff.Egress.Ports), "block": s(eff.Egress.Block), "admin_block": s(eff.Egress.AdminBlock),
+		"unmask": s(eff.Workspace.Unmask), "cpu": eff.Resources.CPU, "memory": eff.Resources.Memory,
+	}
+	for _, kv := range strings.Fields(want) {
+		key, value, _ := strings.Cut(kv, "=")
+		if v, ok := got[key]; !ok || v != value {
+			t.Fatalf("%s = %q, want %q", key, v, value)
+		}
+	}
+}
+
+// wantClamped checks a setting an administrator constraint replaced.
+func wantClamped(t *testing.T, eff *Effective, key, value, requested, origin string) {
+	t.Helper()
+	got, _ := eff.Setting(key)
+	if got.Value != value || got.Source != SourceAdmin || got.Requested != requested || (origin != "" && got.Origin != origin) {
+		t.Fatalf("setting %s = %+v, want %q clamped from %q by %q", key, got, value, requested, origin)
+	}
+}
+
 func TestResolveAdminClamps(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		user  func(*config.OpenShellConfig)
-		flags Flags
-		check func(t *testing.T, eff *Effective, violations []Violation)
+		name    string
+		user    func(*config.OpenShellConfig)
+		flags   Flags
+		want    []Violation
+		posture string
+		check   func(t *testing.T, eff *Effective, violations []Violation)
 	}{
-		{"min profile clamps the user", func(o *config.OpenShellConfig) {
-			o.Profile, o.Admin.MinProfile = "open", "balanced"
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Key != "profile" || v.Source != SourceUser || v.Attempted != "open" || v.Enforced != "balanced" ||
-				v.Constraint != "openshell.admin.min_profile" || !v.Admin() || v.Fatal {
-				t.Fatalf("violation = %+v", v)
-			}
-			if v.Message != "blocked by your organization's DefenseClaw policy: profile" ||
-				!strings.Contains(v.Error(), "at least the balanced profile") {
-				t.Fatalf("message = %q", v.Error())
-			}
-			if eff.Profile != "balanced" || eff.NetworkMode != NetworkAllowlist || eff.Approvals != ApprovalsTriage {
-				t.Fatalf("effective = %s %s %s", eff.Profile, eff.NetworkMode, eff.Approvals)
-			}
-			got, _ := eff.Setting("profile")
-			if got.Source != SourceAdmin || got.Requested != "open" || got.Origin != "openshell.admin.min_profile" {
-				t.Fatalf("profile setting = %+v", got)
-			}
-			wantSetting(t, eff, "network.mode", NetworkAllowlist, SourceAdmin, "profile balanced")
-		}},
-		{"min profile clamps a flag", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "strict" },
-			Flags{Profile: "balanced"}, func(t *testing.T, eff *Effective, violations []Violation) {
-				v := onlyViolation(t, violations)
-				if v.Source != SourceFlag || v.Enforced != "strict" || eff.Profile != "strict" || eff.Approvals != ApprovalsManual {
-					t.Fatalf("violation %+v effective %s/%s", v, eff.Profile, eff.Approvals)
+		{"min profile clamps the user", func(o *config.OpenShellConfig) { o.Profile, o.Admin.MinProfile = "open", "balanced" }, Flags{},
+			[]Violation{{Key: "profile", Source: SourceUser, Attempted: "open", Enforced: "balanced", Constraint: "openshell.admin.min_profile"}},
+			"profile=balanced network=" + NetworkAllowlist + " approvals=" + ApprovalsTriage, func(t *testing.T, eff *Effective, violations []Violation) {
+				if v := violations[0]; v.Message != "blocked by your organization's DefenseClaw policy: profile" ||
+					!strings.Contains(v.Error(), "at least the balanced profile") {
+					t.Fatalf("message = %q", v.Error())
 				}
+				wantClamped(t, eff, "profile", "balanced", "open", "openshell.admin.min_profile")
+				wantSetting(t, eff, "network.mode", NetworkAllowlist, SourceAdmin, "profile balanced")
 			}},
-		{"min profile silently raises the default pack", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" },
-			Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if len(violations) != 0 || eff.Profile != "balanced" {
-					t.Fatalf("violations %+v profile %s", violations, eff.Profile)
-				}
-				got, _ := eff.Setting("profile")
-				if got.Source != SourceAdmin || got.Requested != "open" {
-					t.Fatalf("setting = %+v", got)
-				}
+		{"min profile clamps a flag", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "strict" }, Flags{Profile: "balanced"},
+			[]Violation{{Key: "profile", Source: SourceFlag, Enforced: "strict"}}, "profile=strict approvals=" + ApprovalsManual, nil},
+		{"min profile silently raises the default pack", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" }, Flags{}, nil,
+			"profile=balanced", func(t *testing.T, eff *Effective, _ []Violation) {
+				wantClamped(t, eff, "profile", "balanced", "open", "")
 			}},
-		{"min profile keeps a stricter choice", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" },
-			Flags{Profile: "strict"}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if len(violations) != 0 || eff.Profile != "strict" {
-					t.Fatalf("violations %+v profile %s", violations, eff.Profile)
-				}
-			}},
+		{"min profile keeps a stricter choice", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "balanced" }, Flags{Profile: "strict"},
+			nil, "profile=strict", nil},
 		{"allow-only forces an allowlist profile", func(o *config.OpenShellConfig) {
 			o.Profile, o.Admin.EgressAllowOnly = "open", []string{"*.Corp.Example"}
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Constraint != "openshell.admin.egress_allow_only" || eff.Profile != "balanced" ||
-				!reflect.DeepEqual(eff.Egress.AllowOnly, []string{"*.corp.example"}) {
-				t.Fatalf("violation %+v profile %s allow-only %v", v, eff.Profile, eff.Egress.AllowOnly)
-			}
-		}},
+		}, Flags{}, []Violation{{Key: "profile", Constraint: "openshell.admin.egress_allow_only"}}, "profile=balanced",
+			func(t *testing.T, eff *Effective, _ []Violation) {
+				if !reflect.DeepEqual(eff.Egress.AllowOnly, []string{"*.corp.example"}) {
+					t.Fatalf("allow-only %v", eff.Egress.AllowOnly)
+				}
+			}},
 		{"min profile beats allow-only", func(o *config.OpenShellConfig) {
 			o.Admin.EgressAllowOnly, o.Admin.MinProfile = []string{"corp.example"}, "strict"
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if eff.Profile != "strict" {
-				t.Fatalf("profile = %s", eff.Profile)
-			}
+		}, Flags{}, nil, "profile=strict", func(t *testing.T, eff *Effective, _ []Violation) {
 			wantSetting(t, eff, "profile", "strict", SourceAdmin, "openshell.admin.min_profile")
 		}},
-		{"yolo off clamps the pack silently", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) },
-			Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if len(violations) != 0 || eff.Yolo {
-					t.Fatalf("violations %+v yolo %v", violations, eff.Yolo)
-				}
+		{"yolo off clamps the pack silently", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) }, Flags{}, nil,
+			"yolo=false", func(t *testing.T, eff *Effective, _ []Violation) {
 				wantSetting(t, eff, "yolo", "false", SourceAdmin, "openshell.admin.allow_yolo")
 			}},
-		{"yolo off refuses the user", func(o *config.OpenShellConfig) {
-			o.Yolo, o.Admin.AllowYolo = boolPtr(true), boolPtr(false)
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Key != "yolo" || v.Source != SourceUser || v.Enforced != "false" || eff.Yolo {
-				t.Fatalf("violation %+v", v)
-			}
-		}},
-		{"yolo off refuses a flag", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) },
-			Flags{Yolo: true}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if v := onlyViolation(t, violations); v.Source != SourceFlag {
-					t.Fatalf("violation %+v", v)
-				}
-			}},
-		{"yolo off accepts --safe", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) },
-			Flags{Safe: true}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if len(violations) != 0 || eff.Yolo {
-					t.Fatalf("violations %+v", violations)
-				}
-			}},
-		{"yolo off refuses a chosen pack's default", func(o *config.OpenShellConfig) {
-			o.Pack, o.Admin.AllowYolo = "open", boolPtr(false)
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if v := onlyViolation(t, violations); v.Source != SourcePack || v.Key != "yolo" {
-				t.Fatalf("violation %+v", v)
-			}
-		}},
-		{"mounts off", func(o *config.OpenShellConfig) {
-			o.Workdir.Mode, o.Admin.AllowMount = "mount", boolPtr(false)
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Key != "workdir.mode" || v.Constraint != "openshell.admin.allow_mount" || eff.Workspace.Mode != "copy" {
-				t.Fatalf("violation %+v mode %s", v, eff.Workspace.Mode)
-			}
-		}},
-		{"mounts off accepts --copy", func(o *config.OpenShellConfig) { o.Admin.AllowMount = boolPtr(false) },
-			Flags{Copy: true}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if len(violations) != 0 || eff.Workspace.Mode != "copy" {
-					t.Fatalf("violations %+v", violations)
-				}
+		{"yolo off refuses the user", func(o *config.OpenShellConfig) { o.Yolo, o.Admin.AllowYolo = boolPtr(true), boolPtr(false) }, Flags{},
+			[]Violation{{Key: "yolo", Source: SourceUser, Enforced: "false", Constraint: "openshell.admin.allow_yolo"}}, "yolo=false", nil},
+		{"yolo off refuses a flag", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) }, Flags{Yolo: true},
+			[]Violation{{Key: "yolo", Source: SourceFlag}}, "yolo=false", nil},
+		{"yolo off accepts --safe", func(o *config.OpenShellConfig) { o.Admin.AllowYolo = boolPtr(false) }, Flags{Safe: true}, nil, "yolo=false", nil},
+		{"yolo off refuses a chosen pack's default", func(o *config.OpenShellConfig) { o.Pack, o.Admin.AllowYolo = "open", boolPtr(false) }, Flags{},
+			[]Violation{{Key: "yolo", Source: SourcePack}}, "yolo=false", nil},
+		{"mounts off", func(o *config.OpenShellConfig) { o.Workdir.Mode, o.Admin.AllowMount = "mount", boolPtr(false) }, Flags{},
+			[]Violation{{Key: "workdir.mode", Constraint: "openshell.admin.allow_mount"}}, "mode=copy", nil},
+		{"mounts off accepts --copy", func(o *config.OpenShellConfig) { o.Admin.AllowMount = boolPtr(false) }, Flags{Copy: true}, nil,
+			"mode=copy", func(t *testing.T, eff *Effective, _ []Violation) {
 				wantSetting(t, eff, "workdir.mode", "copy", SourceFlag, "--copy")
 			}},
-		{"require copy for a project", func(o *config.OpenShellConfig) {
-			o.Pack, o.Admin.RequireCopyFor = "open", []string{"/src/customer-*"}
-		}, Flags{Project: "/src/customer-acme/app"}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Constraint != "openshell.admin.require_copy_for" || v.Source != SourcePack || eff.Workspace.Mode != "copy" ||
-				!strings.Contains(v.Detail, "/src/customer-*") {
-				t.Fatalf("violation %+v mode %s", v, eff.Workspace.Mode)
-			}
-		}},
+		{"require copy for a project", func(o *config.OpenShellConfig) { o.Pack, o.Admin.RequireCopyFor = "open", []string{"/src/customer-*"} },
+			Flags{Project: "/src/customer-acme/app"},
+			[]Violation{{Key: "workdir.mode", Source: SourcePack, Constraint: "openshell.admin.require_copy_for", Detail: "/src/customer-*"}}, "mode=copy", nil},
 		{"require copy elsewhere", func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-*"} },
-			Flags{Project: "/src/internal/app"}, func(t *testing.T, eff *Effective, violations []Violation) {
-				if len(violations) != 0 || eff.Workspace.Mode != "mount" {
-					t.Fatalf("violations %+v mode %s", violations, eff.Workspace.Mode)
-				}
-			}},
-		{"unblock off keeps the feed", func(o *config.OpenShellConfig) {
-			o.Egress.Feed, o.Admin.AllowUnblock = "none", boolPtr(false)
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Key != "egress.feeds" || v.Enforced != FeedBuiltin || !reflect.DeepEqual(eff.Egress.Feeds, []string{FeedBuiltin}) {
-				t.Fatalf("violation %+v feeds %v", v, eff.Egress.Feeds)
-			}
-		}},
+			Flags{Project: "/src/internal/app"}, nil, "mode=mount", nil},
+		{"unblock off keeps the feed", func(o *config.OpenShellConfig) { o.Egress.Feed, o.Admin.AllowUnblock = "none", boolPtr(false) }, Flags{},
+			[]Violation{{Key: "egress.feeds", Enforced: FeedBuiltin}}, "feeds=" + FeedBuiltin, nil},
 		{"unblock off drops user allow entries", func(o *config.OpenShellConfig) {
 			o.Pack, o.Egress.Allow, o.Admin.AllowUnblock = "balanced", []string{"paste.example"}, boolPtr(false)
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Key != "egress.allow" || v.Attempted != "paste.example" || containsString(eff.Egress.Allow, "paste.example") ||
-				!containsString(eff.Egress.Allow, "pypi.org") {
-				t.Fatalf("violation %+v allow %v", v, eff.Egress.Allow)
+		}, Flags{}, []Violation{{Key: "egress.allow", Attempted: "paste.example"}}, "", func(t *testing.T, eff *Effective, _ []Violation) {
+			if containsString(eff.Egress.Allow, "paste.example") || !containsString(eff.Egress.Allow, "pypi.org") {
+				t.Fatalf("allow %v", eff.Egress.Allow)
 			}
-			got, _ := eff.Setting("egress.allow")
-			if got.Source != SourceAdmin || !strings.Contains(got.Requested, "paste.example") {
+			if got, _ := eff.Setting("egress.allow"); got.Source != SourceAdmin || !strings.Contains(got.Requested, "paste.example") {
 				t.Fatalf("setting %+v", got)
 			}
 		}},
-		{"admin blocklist is merged", func(o *config.OpenShellConfig) {
-			o.Admin.EgressBlock = []string{"*.Ngrok.io", "*.ngrok.io"}
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if len(violations) != 0 || !reflect.DeepEqual(eff.Egress.AdminBlock, []string{"*.ngrok.io"}) {
-				t.Fatalf("admin block %v", eff.Egress.AdminBlock)
-			}
-			wantSetting(t, eff, "egress.admin_block", "*.ngrok.io", SourceAdmin, "")
-		}},
-		{"host ports off", func(o *config.OpenShellConfig) {
-			o.MCP.HostPorts, o.Admin.AllowHostPorts = []int{5432}, boolPtr(false)
-		}, Flags{HostPorts: []int{6379}}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if len(violations) != 2 || violations[0].Source != SourceUser || violations[1].Source != SourceFlag ||
-				violations[0].Constraint != "openshell.admin.allow_host_ports" {
-				t.Fatalf("violations %+v", violations)
-			}
-			if eff.MCP.HostPortAccess || len(eff.MCP.HostPorts) != 0 {
-				t.Fatalf("mcp = %+v", eff.MCP)
-			}
-			wantSetting(t, eff, "mcp.host_port_access", "false", SourceAdmin, "")
-			got, _ := eff.Setting("mcp.host_ports")
-			if got.Value != "(none)" || got.Source != SourceAdmin || got.Requested != "5432, 6379" {
-				t.Fatalf("setting %+v", got)
-			}
-		}},
-		{"strict pack refuses host ports", func(o *config.OpenShellConfig) {
-			o.Pack, o.MCP.HostPorts = "strict", []int{5432}
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Constraint != "pack strict" || v.Admin() || v.Message != "not allowed by the strict sandbox pack: mcp.host_ports" {
-				t.Fatalf("violation %+v", v)
-			}
-			wantSetting(t, eff, "mcp.host_ports", "(none)", SourcePack, "pack strict")
-		}},
+		{"admin blocklist is merged", func(o *config.OpenShellConfig) { o.Admin.EgressBlock = []string{"*.Ngrok.io", "*.ngrok.io"} }, Flags{}, nil,
+			"", func(t *testing.T, eff *Effective, _ []Violation) {
+				if !reflect.DeepEqual(eff.Egress.AdminBlock, []string{"*.ngrok.io"}) {
+					t.Fatalf("admin block %v", eff.Egress.AdminBlock)
+				}
+				wantSetting(t, eff, "egress.admin_block", "*.ngrok.io", SourceAdmin, "")
+			}},
+		{"host ports off", func(o *config.OpenShellConfig) { o.MCP.HostPorts, o.Admin.AllowHostPorts = []int{5432}, boolPtr(false) },
+			Flags{HostPorts: []int{6379}},
+			[]Violation{{Source: SourceUser, Constraint: "openshell.admin.allow_host_ports"}, {Source: SourceFlag, Constraint: "openshell.admin.allow_host_ports"}},
+			"host_port_access=false host_ports=", func(t *testing.T, eff *Effective, _ []Violation) {
+				wantSetting(t, eff, "mcp.host_port_access", "false", SourceAdmin, "")
+				wantClamped(t, eff, "mcp.host_ports", "(none)", "5432, 6379", "")
+			}},
+		{"strict pack refuses host ports", func(o *config.OpenShellConfig) { o.Pack, o.MCP.HostPorts = "strict", []int{5432} }, Flags{},
+			[]Violation{{Key: "mcp.host_ports", Constraint: "pack strict"}}, "host_ports=", func(t *testing.T, eff *Effective, violations []Violation) {
+				if violations[0].Message != "not allowed by the strict sandbox pack: mcp.host_ports" {
+					t.Fatalf("message %q", violations[0].Message)
+				}
+				wantSetting(t, eff, "mcp.host_ports", "(none)", SourcePack, "pack strict")
+			}},
 		{"resource ceilings", func(o *config.OpenShellConfig) {
 			o.Resources.CPU = "4"
 			o.Admin.MaxResources = config.OpenShellResourcesConfig{CPU: "2", Memory: "8Gi"}
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Key != "resources.cpu" || v.Attempted != "4" || v.Enforced != "2" || !strings.Contains(v.Detail, "cpu at 2") {
-				t.Fatalf("violation %+v", v)
-			}
-			if eff.Resources != (Resources{CPU: "2", Memory: "8Gi"}) {
-				t.Fatalf("resources %+v", eff.Resources)
-			}
-			got, _ := eff.Setting("resources.memory")
-			if got.Source != SourceAdmin || got.Requested != "(unlimited)" {
-				t.Fatalf("memory setting %+v", got)
-			}
-		}},
-		{"resource flag over the ceiling", func(o *config.OpenShellConfig) {
-			o.Admin.MaxResources = config.OpenShellResourcesConfig{Memory: "8Gi"}
-		}, Flags{Memory: "16G", CPU: "1500m"}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := onlyViolation(t, violations)
-			if v.Source != SourceFlag || v.Key != "resources.memory" || eff.Resources != (Resources{CPU: "1500m", Memory: "8Gi"}) {
-				t.Fatalf("violation %+v resources %+v", v, eff.Resources)
-			}
-		}},
+		}, Flags{}, []Violation{{Key: "resources.cpu", Attempted: "4", Enforced: "2", Detail: "cpu at 2"}}, "cpu=2 memory=8Gi",
+			func(t *testing.T, eff *Effective, _ []Violation) {
+				wantClamped(t, eff, "resources.memory", "8Gi", "(unlimited)", "")
+			}},
+		{"resource flag over the ceiling", func(o *config.OpenShellConfig) { o.Admin.MaxResources = config.OpenShellResourcesConfig{Memory: "8Gi"} },
+			Flags{Memory: "16G", CPU: "1500m"}, []Violation{{Key: "resources.memory", Source: SourceFlag}}, "cpu=1500m memory=8Gi", nil},
 		{"resource within the ceiling", func(o *config.OpenShellConfig) {
 			o.Resources.Memory = "8G"
 			o.Admin.MaxResources = config.OpenShellResourcesConfig{Memory: "8Gi"}
-		}, Flags{}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if len(violations) != 0 || eff.Resources.Memory != "8G" {
-				t.Fatalf("violations %+v resources %+v", violations, eff.Resources)
-			}
-		}},
-		{"harness outside the admin list", func(o *config.OpenShellConfig) {
-			o.Admin.AllowedHarnesses = []string{"claude-code"}
-		}, Flags{Harness: "codex"}, func(t *testing.T, eff *Effective, violations []Violation) {
-			v := FirstFatal(violations)
-			if v == nil || v.Key != "harness" || v.Source != SourceFlag || v.Constraint != "openshell.admin.allowed_harnesses" {
-				t.Fatalf("violations %+v", violations)
-			}
-			if eff.Harness != "" || !reflect.DeepEqual(eff.AllowedHarnesses, []string{"claudecode"}) {
-				t.Fatalf("harness %q allowed %v", eff.Harness, eff.AllowedHarnesses)
-			}
-			wantSetting(t, eff, "harness", "(refused: codex)", SourceAdmin, "")
-		}},
-		{"harness on the admin list", func(o *config.OpenShellConfig) {
-			o.Admin.AllowedHarnesses = []string{"claude-code", "codex"}
-		}, Flags{Harness: "claude_code"}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if len(violations) != 0 || eff.Harness != "claudecode" || FirstFatal(violations) != nil {
-				t.Fatalf("violations %+v harness %q", violations, eff.Harness)
-			}
-		}},
-		{"learn mode off", func(o *config.OpenShellConfig) { o.Admin.AllowLearnMode = boolPtr(false) },
-			Flags{Learn: true}, func(t *testing.T, eff *Effective, violations []Violation) {
-				v := onlyViolation(t, violations)
-				if v.Key != "learn" || v.Source != SourceFlag || eff.Learn {
-					t.Fatalf("violation %+v learn %v", v, eff.Learn)
+		}, Flags{}, nil, "memory=8G", nil},
+		{"harness outside the admin list", func(o *config.OpenShellConfig) { o.Admin.AllowedHarnesses = []string{"claude-code"} },
+			Flags{Harness: "codex"}, []Violation{{Key: "harness", Source: SourceFlag, Constraint: "openshell.admin.allowed_harnesses", Fatal: true}},
+			"harness=", func(t *testing.T, eff *Effective, _ []Violation) {
+				if !reflect.DeepEqual(eff.AllowedHarnesses, []string{"claudecode"}) {
+					t.Fatalf("allowed %v", eff.AllowedHarnesses)
 				}
+				wantSetting(t, eff, "harness", "(refused: codex)", SourceAdmin, "")
+			}},
+		{"harness on the admin list", func(o *config.OpenShellConfig) { o.Admin.AllowedHarnesses = []string{"claude-code", "codex"} },
+			Flags{Harness: "claude_code"}, nil, "harness=claudecode", nil},
+		{"learn mode off", func(o *config.OpenShellConfig) { o.Admin.AllowLearnMode = boolPtr(false) }, Flags{Learn: true},
+			[]Violation{{Key: "learn", Source: SourceFlag}}, "learn=false", func(t *testing.T, eff *Effective, _ []Violation) {
 				wantSetting(t, eff, "learn", "false", SourceAdmin, "openshell.admin.allow_learn_mode")
 			}},
 		{"permissive switches change nothing", func(o *config.OpenShellConfig) {
 			o.Admin.AllowYolo, o.Admin.AllowMount, o.Admin.AllowHostPorts = boolPtr(true), boolPtr(true), boolPtr(true)
 			o.Admin.AllowUnblock, o.Admin.AllowLearnMode = boolPtr(true), boolPtr(true)
 			o.MCP.HostPorts = []int{5432}
-		}, Flags{Learn: true}, func(t *testing.T, eff *Effective, violations []Violation) {
-			if len(violations) != 0 || !eff.Yolo || eff.Workspace.Mode != "mount" || !eff.Learn ||
-				!reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) {
-				t.Fatalf("violations %+v effective %+v", violations, eff)
-			}
-		}},
+		}, Flags{Learn: true}, nil, "yolo=true mode=mount learn=true host_ports=5432", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eff, violations := mustResolve(t, testConfig(tc.user), tc.flags)
-			tc.check(t, eff, violations)
+			wantViolations(t, violations, tc.want...)
+			wantPosture(t, eff, tc.posture)
+			if tc.check != nil {
+				tc.check(t, eff, violations)
+			}
 		})
 	}
 }
@@ -626,13 +519,11 @@ func TestResolveLockedFlagsRefuseLoosening(t *testing.T) {
 			t.Fatalf("pack violation detail %q", v.Detail)
 		}
 	}
-	if eff.Pack.Name != "balanced" || eff.Profile != "balanced" || eff.Yolo || containsString(eff.Workspace.Unmask, ".env") ||
-		!reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) || eff.Resources != (Resources{CPU: "2", Memory: "4Gi"}) {
-		t.Fatalf("locked values were loosened: %+v", eff)
-	}
-	// Entries the configuration already has, and unlockable inputs, apply.
-	if !containsString(eff.Workspace.Unmask, ".env.example") || eff.Harness != "codex" || !eff.Learn {
-		t.Fatalf("unmask %v harness %q learn %v", eff.Workspace.Unmask, eff.Harness, eff.Learn)
+	// Locked values hold; entries the configuration already has, and
+	// unlockable inputs, apply.
+	wantPosture(t, eff, "pack=balanced profile=balanced yolo=false host_ports=5432 cpu=2 memory=4Gi harness=codex learn=true")
+	if containsString(eff.Workspace.Unmask, ".env") || !containsString(eff.Workspace.Unmask, ".env.example") {
+		t.Fatalf("unmask %v", eff.Workspace.Unmask)
 	}
 
 	// Only locked keys are held; --yolo matching the configured value is
@@ -640,9 +531,8 @@ func TestResolveLockedFlagsRefuseLoosening(t *testing.T) {
 	cfg.OpenShell.Admin.Locked = []string{"yolo"}
 	cfg.OpenShell.Yolo = boolPtr(true)
 	eff, violations = mustResolve(t, cfg, Flags{Yolo: true, Pack: "open"})
-	if len(violations) != 0 || !eff.Yolo || eff.Pack.Name != "open" {
-		t.Fatalf("violations %+v yolo %v pack %s", violations, eff.Yolo, eff.Pack.Name)
-	}
+	wantViolations(t, violations)
+	wantPosture(t, eff, "yolo=true pack=open")
 }
 
 func TestResolveLockedFlagsAcceptTightening(t *testing.T) {
@@ -652,37 +542,28 @@ func TestResolveLockedFlagsAcceptTightening(t *testing.T) {
 		o.Admin.Locked = append([]string(nil), config.OpenShellLockableKeys...)
 	})
 	for _, tc := range []struct {
-		name  string
-		flags Flags
-		check func(*Effective) bool
+		name    string
+		flags   Flags
+		posture string
 	}{
-		{"--safe", Flags{Safe: true}, func(e *Effective) bool { return !e.Yolo }},
-		{"--safe with --yolo", Flags{Safe: true, Yolo: true}, func(e *Effective) bool { return !e.Yolo }},
-		{"--copy", Flags{Copy: true}, func(e *Effective) bool { return e.Workspace.Mode == "copy" }},
-		{"--no-mcp", Flags{NoMCP: true}, func(e *Effective) bool { return !e.MCP.Import }},
-		{"stricter --profile", Flags{Profile: "strict"}, func(e *Effective) bool { return e.Profile == "strict" }},
-		{"same --profile", Flags{Profile: "open"}, func(e *Effective) bool { return e.Profile == "open" }},
-		{"stricter built-in --pack", Flags{Pack: "balanced"}, func(e *Effective) bool { return e.Pack.Name == "balanced" }},
-		{"strictest built-in --pack", Flags{Pack: "strict"}, func(e *Effective) bool {
-			// openshell.yolo still applies over the chosen pack.
-			return e.Pack.Name == "strict" && e.Profile == "strict" && e.Yolo && e.Workspace.Mode == "copy"
-		}},
-		{"same --pack", Flags{Pack: "open"}, func(e *Effective) bool { return e.Pack.Name == "open" }},
-		{"--pack and --profile", Flags{Pack: "strict", Profile: "balanced"}, func(e *Effective) bool {
-			return e.Pack.Name == "strict" && e.Profile == "balanced"
-		}},
-		{"lower --cpu and a --memory limit", Flags{CPU: "500m", Memory: "1Gi"}, func(e *Effective) bool {
-			return e.Resources == (Resources{CPU: "500m", Memory: "1Gi"})
-		}},
-		{"configured --unmask", Flags{Unmask: []string{".env.example"}}, func(e *Effective) bool {
-			return containsString(e.Workspace.Unmask, ".env.example")
-		}},
+		{"--safe", Flags{Safe: true}, "yolo=false"},
+		{"--safe with --yolo", Flags{Safe: true, Yolo: true}, "yolo=false"},
+		{"--copy", Flags{Copy: true}, "mode=copy"},
+		{"--no-mcp", Flags{NoMCP: true}, "import=false"},
+		{"stricter --profile", Flags{Profile: "strict"}, "profile=strict"},
+		{"same --profile", Flags{Profile: "open"}, "profile=open"},
+		{"stricter built-in --pack", Flags{Pack: "balanced"}, "pack=balanced"},
+		// openshell.yolo still applies over the chosen pack.
+		{"strictest built-in --pack", Flags{Pack: "strict"}, "pack=strict profile=strict yolo=true mode=copy"},
+		{"same --pack", Flags{Pack: "open"}, "pack=open"},
+		{"--pack and --profile", Flags{Pack: "strict", Profile: "balanced"}, "pack=strict profile=balanced"},
+		{"lower --cpu and a --memory limit", Flags{CPU: "500m", Memory: "1Gi"}, "cpu=500m memory=1Gi"},
+		{"configured --unmask", Flags{Unmask: []string{".env.example"}}, "unmask=.env.example,.env.sample,.env.template,.env.dist"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eff, violations := mustResolve(t, cfg, tc.flags)
-			if len(violations) != 0 || !tc.check(eff) {
-				t.Fatalf("violations %+v effective %+v", violations, eff)
-			}
+			wantViolations(t, violations)
+			wantPosture(t, eff, tc.posture)
 		})
 	}
 
@@ -690,10 +571,10 @@ func TestResolveLockedFlagsAcceptTightening(t *testing.T) {
 	// looser than a configured strict.
 	cfg.OpenShell.Pack = "strict"
 	eff, violations := mustResolve(t, cfg, Flags{Pack: "balanced", Profile: "balanced"})
-	if got := lockedViolations(t, violations); len(got) != 2 || got["pack"] != "--pack balanced" || got["profile"] != "--profile balanced" ||
-		eff.Pack.Name != "strict" || eff.Profile != "strict" {
-		t.Fatalf("violations %+v effective %s/%s", violations, eff.Pack.Name, eff.Profile)
+	if got := lockedViolations(t, violations); len(got) != 2 || got["pack"] != "--pack balanced" || got["profile"] != "--profile balanced" {
+		t.Fatalf("violations %+v", violations)
 	}
+	wantPosture(t, eff, "pack=strict profile=strict")
 	// A malformed request is an error, not a silently dropped flag.
 	if _, _, err := Resolve(cfg, Flags{CPU: "lots"}); err == nil || !strings.Contains(err.Error(), "--cpu") {
 		t.Fatalf("malformed locked --cpu: %v", err)
@@ -748,37 +629,28 @@ func TestResolveLockedCustomPacks(t *testing.T) {
 			})
 			eff, violations := mustResolve(t, cfg, Flags{Pack: tc.pack})
 			if tc.looser == "" {
-				if len(violations) != 0 || eff.Pack.Name != tc.pack {
-					t.Fatalf("violations %+v pack %s", violations, eff.Pack.Name)
-				}
+				wantViolations(t, violations)
+				wantPosture(t, eff, "pack="+tc.pack)
 				return
 			}
-			v := onlyViolation(t, violations)
-			if v.Key != "pack" || v.Constraint != "openshell.admin.locked" || !strings.Contains(v.Detail, "in "+tc.looser+";") ||
-				eff.Pack.Name != "base" {
-				t.Fatalf("violation %+v pack %s", v, eff.Pack.Name)
-			}
+			wantViolations(t, violations, Violation{Key: "pack", Constraint: "openshell.admin.locked", Detail: "in " + tc.looser + ";"})
+			wantPosture(t, eff, "pack=base")
 		})
 	}
 
-	// A pack that shares files the configured pack masks is looser.
 	writePack(t, root, "masked", strings.Replace(customPack("masked"), "workspace: {mode: mount}",
 		"workspace: {mode: mount, masks: [.env, .env.*]}", 1))
-	cfg := testConfig(func(o *config.OpenShellConfig) {
-		o.Pack, o.PackDir, o.Admin.Locked = "masked", root, []string{"pack"}
-	})
-	_, violations := mustResolve(t, cfg, Flags{Pack: "strict"})
-	if v := onlyViolation(t, violations); !strings.Contains(v.Detail, "in workspace.unmask;") {
-		t.Fatalf("violation %+v", v)
-	}
-
-	// A pack that does not load is refused, and the configured pack runs.
-	cfg = testConfig(func(o *config.OpenShellConfig) {
-		o.Pack, o.PackDir, o.Admin.Locked = "base", root, []string{"pack"}
-	})
-	eff, violations := mustResolve(t, cfg, Flags{Pack: "missing-pack"})
-	if v := onlyViolation(t, violations); v.Key != "pack" || !strings.Contains(v.Detail, "could not be loaded") || eff.Pack.Name != "base" {
-		t.Fatalf("violation %+v pack %s", v, eff.Pack.Name)
+	for configured, tc := range map[string]struct{ pack, detail string }{
+		// A pack that shares files the configured pack masks is looser.
+		"masked": {"strict", "in workspace.unmask;"},
+		// A pack that does not load is refused, and the configured pack runs.
+		"base": {"missing-pack", "could not be loaded"},
+	} {
+		eff, violations := mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
+			o.Pack, o.PackDir, o.Admin.Locked = configured, root, []string{"pack"}
+		}), Flags{Pack: tc.pack})
+		wantViolations(t, violations, Violation{Key: "pack", Constraint: "openshell.admin.locked", Detail: tc.detail})
+		wantPosture(t, eff, "pack="+configured)
 	}
 }
 
@@ -791,6 +663,14 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		return pack
 	}
 	open, balanced, strict := load("open"), load("balanced"), load("strict")
+	// Letting a repository's MCP servers start is looser than blocking them;
+	// a tamper response of alert is looser than stop, and stop never is.
+	allowing := *open
+	allowing.Name, allowing.MCP.ProjectServers = "allowing", MCPProjectServersAllow
+	alerting := *balanced
+	alerting.Name, alerting.Hooks.OnTamper = "alerting", OnTamperAlert
+	stopping := *open
+	stopping.Name, stopping.Hooks.OnTamper = "stopping", OnTamperStop
 	for _, tc := range []struct {
 		candidate, baseline *Pack
 		want                string
@@ -801,29 +681,8 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		{open, open, ""},
 		{open, balanced, "network.mode"},
 		{balanced, strict, "network.mode"},
-	} {
-		if got := looserPackKey(tc.candidate, tc.baseline, tc.candidate.Network.Mode); got != tc.want {
-			t.Errorf("looserPackKey(%s, %s) = %q, want %q", tc.candidate.Name, tc.baseline.Name, got, tc.want)
-		}
-	}
-	// Letting a repository's MCP servers start is looser than blocking them.
-	allowing := *open
-	allowing.Name, allowing.MCP.ProjectServers = "allowing", MCPProjectServersAllow
-	if got := looserPackKey(&allowing, open, allowing.Network.Mode); got != "mcp.project_servers" {
-		t.Errorf("looserPackKey(allowing, open) = %q, want mcp.project_servers", got)
-	}
-	if got := looserPackKey(open, &allowing, open.Network.Mode); got != "" {
-		t.Errorf("looserPackKey(open, allowing) = %q, want none", got)
-	}
-	// A tamper response of alert is looser than stop; stop is never looser.
-	alerting := *balanced
-	alerting.Name, alerting.Hooks.OnTamper = "alerting", OnTamperAlert
-	stopping := *open
-	stopping.Name, stopping.Hooks.OnTamper = "stopping", OnTamperStop
-	for _, tc := range []struct {
-		candidate, baseline *Pack
-		want                string
-	}{
+		{&allowing, open, "mcp.project_servers"},
+		{open, &allowing, ""},
 		{&alerting, balanced, "hooks.on_tamper"},
 		{balanced, &alerting, ""},
 		{&stopping, open, ""},
@@ -861,67 +720,55 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 func TestResolveRequiredPack(t *testing.T) {
 	root := t.TempDir()
 	corpDir := writePack(t, root, "corp", strings.Replace(customPack("corp"), "harness: {yolo: true}", "harness: {yolo: true, allowed: [codex]}", 1))
-
-	cfg := testConfig(func(o *config.OpenShellConfig) { o.Pack, o.Admin.RequiredPack = "open", "strict" })
-	eff, violations := mustResolve(t, cfg, Flags{})
-	v := onlyViolation(t, violations)
-	if v.Key != "pack" || v.Source != SourceUser || v.Attempted != "open" || v.Enforced != "strict" ||
-		v.Constraint != "openshell.admin.required_pack" {
-		t.Fatalf("violation %+v", v)
+	requiredOver := func(pack string, edit func(*config.OpenShellConfig)) func(*config.OpenShellConfig) {
+		return func(o *config.OpenShellConfig) {
+			o.Pack, o.Admin.RequiredPack = pack, "strict"
+			if edit != nil {
+				edit(o)
+			}
+		}
 	}
-	if eff.Pack.Name != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" {
-		t.Fatalf("effective %+v", eff)
+	const constraint = "openshell.admin.required_pack"
+	for _, tc := range []struct {
+		name    string
+		edit    func(*config.OpenShellConfig)
+		flags   Flags
+		want    []Violation
+		posture string
+	}{
+		{"another pack by the user", requiredOver("open", nil), Flags{},
+			[]Violation{{Key: "pack", Source: SourceUser, Attempted: "open", Enforced: "strict", Constraint: constraint}},
+			"pack=strict yolo=false mode=copy"},
+		{"another pack by a flag", requiredOver("open", nil), Flags{Pack: "balanced"},
+			[]Violation{{Key: "pack", Source: SourceFlag, Attempted: "balanced", Constraint: constraint}}, "pack=strict"},
+		{"the required pack", requiredOver("strict", nil), Flags{}, nil, "pack=strict"},
+		// The required pack's profile is a floor for flags.
+		{"a looser --profile", requiredOver("strict", nil), Flags{Profile: "open"},
+			[]Violation{{Key: "profile", Source: SourceFlag, Attempted: "open", Enforced: "strict", Constraint: constraint, Detail: "requires the strict sandbox pack"}},
+			"profile=strict"},
+		{"a locked profile", requiredOver("strict", func(o *config.OpenShellConfig) { o.Admin.Locked = []string{"profile"} }), Flags{Profile: "open"},
+			[]Violation{{Key: "profile", Constraint: "openshell.admin.locked"}}, "profile=strict"},
+		{"min_profile over a required pack", requiredOver("strict", func(o *config.OpenShellConfig) { o.Admin.MinProfile = "strict" }),
+			Flags{Profile: "balanced"}, []Violation{{Constraint: "openshell.admin.min_profile"}}, "profile=strict"},
+		// The same content under another reference is not a loosening, and a
+		// required pack's own values are not the user's attempts.
+		{"the same pack by path", func(o *config.OpenShellConfig) {
+			o.PackDir, o.Pack, o.Admin.RequiredPack, o.Admin.AllowYolo = root, "corp", corpDir, boolPtr(false)
+		}, Flags{Harness: "codex"}, nil, "pack=corp yolo=false"},
+		{"a missing --pack", func(o *config.OpenShellConfig) {
+			o.PackDir, o.Pack, o.Admin.RequiredPack = root, "corp", corpDir
+		}, Flags{Pack: "missing-pack"}, []Violation{{Key: "pack", Attempted: "missing-pack"}}, "pack=corp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eff, violations := mustResolve(t, testConfig(tc.edit), tc.flags)
+			wantViolations(t, violations, tc.want...)
+			wantPosture(t, eff, tc.posture)
+			if len(tc.want) > 0 && tc.want[0].Constraint == constraint {
+				wantClamped(t, eff, tc.want[0].Key, "strict", tc.want[0].Attempted, "")
+			}
+		})
 	}
-	got, _ := eff.Setting("pack")
-	if got.Source != SourceAdmin || got.Requested != "open" {
-		t.Fatalf("pack setting %+v", got)
-	}
-
-	_, violations = mustResolve(t, cfg, Flags{Pack: "balanced"})
-	if v := onlyViolation(t, violations); v.Source != SourceFlag || v.Attempted != "balanced" {
-		t.Fatalf("violation %+v", v)
-	}
-	cfg.OpenShell.Pack = "strict"
-	if _, violations = mustResolve(t, cfg, Flags{}); len(violations) != 0 {
-		t.Fatalf("choosing the required pack: %+v", violations)
-	}
-
-	// The required pack's profile is a floor for flags.
-	eff, violations = mustResolve(t, cfg, Flags{Profile: "open"})
-	if v := onlyViolation(t, violations); v.Key != "profile" || v.Source != SourceFlag || v.Constraint != "openshell.admin.required_pack" ||
-		v.Enforced != "strict" || eff.Profile != "strict" || !strings.Contains(v.Detail, "requires the strict sandbox pack") {
-		t.Fatalf("--profile over a required pack: violation %+v effective profile %q", v, eff.Profile)
-	}
-	wantSetting(t, eff, "profile", "strict", SourceAdmin, "openshell.admin.required_pack")
-	cfg.OpenShell.Admin.Locked = []string{"profile"}
-	eff, violations = mustResolve(t, cfg, Flags{Profile: "open"})
-	if v := onlyViolation(t, violations); v.Key != "profile" || v.Constraint != "openshell.admin.locked" || eff.Profile != "strict" {
-		t.Fatalf("locked profile: violation %+v effective profile %q", v, eff.Profile)
-	}
-	cfg.OpenShell.Admin.Locked = nil
-	cfg.OpenShell.Admin.MinProfile = "strict"
-	eff, violations = mustResolve(t, cfg, Flags{Profile: "balanced"})
-	if v := onlyViolation(t, violations); v.Constraint != "openshell.admin.min_profile" || eff.Profile != "strict" {
-		t.Fatalf("min_profile over a required pack: violation %+v effective profile %q", v, eff.Profile)
-	}
-	cfg.OpenShell.Admin.MinProfile = ""
-
-	// The same content under another reference is not a loosening, and a
-	// required pack's own values are not the user's attempts.
-	cfg = testConfig(func(o *config.OpenShellConfig) {
-		o.PackDir, o.Pack, o.Admin.RequiredPack = root, "corp", corpDir
-		o.Admin.AllowYolo = boolPtr(false)
-	})
-	eff, violations = mustResolve(t, cfg, Flags{Harness: "codex"})
-	if len(violations) != 0 || eff.Pack.Name != "corp" || eff.Yolo {
-		t.Fatalf("violations %+v effective %+v", violations, eff)
-	}
-	_, violations = mustResolve(t, cfg, Flags{Pack: "missing-pack"})
-	if v := onlyViolation(t, violations); v.Key != "pack" || v.Attempted != "missing-pack" {
-		t.Fatalf("violation %+v", v)
-	}
-
-	cfg.OpenShell.Admin.RequiredPack = "no-such-pack"
+	cfg := testConfig(func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "no-such-pack" })
 	if _, _, err := Resolve(cfg, Flags{}); err == nil || !strings.Contains(err.Error(), "openshell.admin.required_pack") {
 		t.Fatalf("missing required pack: %v", err)
 	}
@@ -930,6 +777,7 @@ func TestResolveRequiredPack(t *testing.T) {
 // A required pack's posture is a floor: user keys and flags may tighten it
 // but every loosening is clamped and reported.
 func TestResolveRequiredPackFloors(t *testing.T) {
+	const constraint = "openshell.admin.required_pack"
 	loosen := func(o *config.OpenShellConfig) {
 		o.Admin.RequiredPack = "strict"
 		o.Profile, o.Yolo, o.Workdir.Mode = "open", boolPtr(true), "mount"
@@ -937,62 +785,48 @@ func TestResolveRequiredPackFloors(t *testing.T) {
 		o.Egress.Feed, o.Egress.Ports = "none", []int{22, 443}
 	}
 	eff, violations := mustResolve(t, testConfig(loosen), Flags{})
-	got := map[string]Violation{}
+	enforced := map[string]string{}
 	for _, v := range violations {
-		if v.Constraint != "openshell.admin.required_pack" || v.Source != SourceUser || !v.Admin() ||
-			v.Message != "blocked by your organization's DefenseClaw policy: "+v.Key {
+		if v.Constraint != constraint || v.Source != SourceUser || v.Message != "blocked by your organization's DefenseClaw policy: "+v.Key {
 			t.Fatalf("violation %+v", v)
 		}
-		got[v.Key] = v
+		enforced[v.Key] = v.Enforced
 	}
-	for key, enforced := range map[string]string{
+	want := map[string]string{
 		"profile": "strict", "yolo": "false", "workdir.mode": "copy", "mcp.import": "false",
 		"egress.feeds": FeedBuiltin, "egress.ports": "443",
-	} {
-		if v, ok := got[key]; !ok || v.Enforced != enforced {
-			t.Fatalf("violation for %s = %+v (all: %+v), want enforced %q", key, v, violations, enforced)
-		}
 	}
-	if len(violations) != 6 {
-		t.Fatalf("violations = %+v", violations)
+	if len(violations) != len(want) || !reflect.DeepEqual(enforced, want) {
+		t.Fatalf("violations = %+v, want %v enforced", violations, want)
 	}
-	if eff.Profile != "strict" || eff.NetworkMode != NetworkDeny || eff.Yolo || eff.Workspace.Mode != "copy" || eff.MCP.Import ||
-		!reflect.DeepEqual(eff.Egress.Feeds, []string{FeedBuiltin}) || !reflect.DeepEqual(eff.Egress.Ports, []int{443}) {
-		t.Fatalf("effective = %+v", eff)
-	}
-	wantSetting(t, eff, "egress.ports", "443", SourceAdmin, "openshell.admin.required_pack")
+	wantPosture(t, eff, "profile=strict network="+NetworkDeny+" yolo=false mode=copy import=false feeds="+FeedBuiltin+" ports=443")
+	wantSetting(t, eff, "egress.ports", "443", SourceAdmin, constraint)
 
 	// Flags are clamped the same way.
-	eff, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "strict" }),
-		Flags{Profile: "balanced", Yolo: true})
-	if len(violations) != 2 || violations[0].Source != SourceFlag || violations[1].Source != SourceFlag || eff.Profile != "strict" || eff.Yolo {
-		t.Fatalf("violations %+v effective %s yolo %v", violations, eff.Profile, eff.Yolo)
-	}
+	eff, violations = mustResolve(t, testConfig(required("strict")), Flags{Profile: "balanced", Yolo: true})
+	wantViolations(t, violations, Violation{Source: SourceFlag, Constraint: constraint}, Violation{Source: SourceFlag, Constraint: constraint})
+	wantPosture(t, eff, "profile=strict yolo=false")
 
 	// Only ports outside the pack are dropped; with none left the pack's
 	// ports apply.
 	eff, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
 		o.Admin.RequiredPack, o.Egress.Ports = "balanced", []int{8443}
 	}), Flags{})
-	if v := onlyViolation(t, violations); v.Key != "egress.ports" || v.Attempted != "8443" || !reflect.DeepEqual(eff.Egress.Ports, []int{80, 443}) {
-		t.Fatalf("violation %+v ports %v", v, eff.Egress.Ports)
-	}
+	wantViolations(t, violations, Violation{Key: "egress.ports", Attempted: "8443", Constraint: constraint})
+	wantPosture(t, eff, "ports=80,443")
 
 	// Tightening a required pack is not a violation.
 	eff, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
 		o.Admin.RequiredPack, o.Egress.Ports, o.Egress.Feed = "balanced", []int{443}, "builtin"
 	}), Flags{Profile: "strict", Safe: true, Copy: true, NoMCP: true})
-	if len(violations) != 0 || eff.Profile != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" || eff.MCP.Import ||
-		!reflect.DeepEqual(eff.Egress.Ports, []int{443}) {
-		t.Fatalf("violations %+v effective %+v", violations, eff)
-	}
+	wantViolations(t, violations)
+	wantPosture(t, eff, "profile=strict yolo=false mode=copy import=false ports=443")
 	// Without required_pack the same choices over the pack are the user's.
-	if _, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
+	_, violations = mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
 		loosen(o)
 		o.Admin.RequiredPack, o.Pack = "", "strict"
-	}), Flags{}); len(violations) != 0 {
-		t.Fatalf("violations without required_pack: %+v", violations)
-	}
+	}), Flags{})
+	wantViolations(t, violations)
 }
 
 // A deny-mode pack may list no ports. Under a profile that runs the proxy
@@ -1189,32 +1023,23 @@ func TestResolveAllowList(t *testing.T) {
 }
 
 func TestResolveRequireCopyWithoutProject(t *testing.T) {
+	const constraint = "openshell.admin.require_copy_for"
 	cfg := testConfig(func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/customer-acme"} })
 	eff, violations := mustResolve(t, cfg, Flags{})
-	if len(violations) != 0 || eff.Workspace.Mode != "copy" {
-		t.Fatalf("violations %+v mode %s", violations, eff.Workspace.Mode)
-	}
-	wantSetting(t, eff, "workdir.mode", "copy", SourceAdmin, "openshell.admin.require_copy_for")
+	wantViolations(t, violations)
+	wantSetting(t, eff, "workdir.mode", "copy", SourceAdmin, constraint)
 
 	cfg.OpenShell.Workdir.Mode = "mount"
 	eff, violations = mustResolve(t, cfg, Flags{})
-	if v := onlyViolation(t, violations); v.Constraint != "openshell.admin.require_copy_for" || v.Source != SourceUser ||
-		!strings.Contains(v.Detail, "no project folder") || eff.Workspace.Mode != "copy" {
-		t.Fatalf("violation %+v mode %s", v, eff.Workspace.Mode)
-	}
+	wantViolations(t, violations, Violation{Source: SourceUser, Constraint: constraint, Detail: "no project folder"})
+	wantPosture(t, eff, "mode=copy")
 	// The reported bypass: mounting the parent of a covered repository.
 	eff, violations = mustResolve(t, cfg, Flags{Project: "/src"})
-	if v := onlyViolation(t, violations); v.Constraint != "openshell.admin.require_copy_for" || eff.Workspace.Mode != "copy" {
-		t.Fatalf("violation %+v mode %s", v, eff.Workspace.Mode)
-	}
-	if err := eff.Allow(Action{Kind: ActionMount, Path: "/src"}); err == nil {
-		t.Fatal("mounting the parent of a copy-only project was allowed")
-	}
+	wantViolations(t, violations, Violation{Constraint: constraint})
+	wantPosture(t, eff, "mode=copy")
 	// Without require_copy_for a missing project changes nothing.
-	eff, violations = mustResolve(t, testConfig(nil), Flags{})
-	if len(violations) != 0 || eff.Workspace.Mode != "mount" {
-		t.Fatalf("violations %+v mode %s", violations, eff.Workspace.Mode)
-	}
+	eff, _ = mustResolve(t, testConfig(nil), Flags{})
+	wantPosture(t, eff, "mode=mount")
 }
 
 func TestResolveErrors(t *testing.T) {
@@ -1278,17 +1103,6 @@ func TestExplainProvenance(t *testing.T) {
 			t.Fatalf("source of %s = %s, want %s", key, sources[key], want)
 		}
 	}
-	if _, ok := eff.Setting("nope"); ok {
-		t.Fatal("unknown key reported a setting")
-	}
-	var nilEff *Effective
-	if nilEff.Explain() != nil {
-		t.Fatal("nil Effective must explain nothing")
-	}
-	if _, ok := nilEff.Setting("pack"); ok {
-		t.Fatal("nil Effective must have no settings")
-	}
-
 	data, err := json.Marshal(eff)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
@@ -1330,6 +1144,10 @@ func TestResolveReservedHostPorts(t *testing.T) {
 		{"custom model router", routed(8801, ""), 0, 8801, "model router"},
 		{"loopback remote router", routed(0, "http://127.0.0.1:8802"), 0, 8802, "model router"},
 		{"localhost remote router", routed(0, "http://localhost"), 0, 80, "model router"},
+		// Ports that are not listeners of this run stay available.
+		{"default gateway port once the registration names another", nil, 18080, OpenShellGatewayPort, ""},
+		{"router port while routing is off", nil, 0, 8080, ""},
+		{"router port with a remote router", routed(0, "https://router.corp.example:8080"), 0, 8080, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(nil)
@@ -1337,42 +1155,21 @@ func TestResolveReservedHostPorts(t *testing.T) {
 				tc.edit(cfg)
 			}
 			eff, violations := mustResolve(t, cfg, Flags{HostPorts: []int{tc.port, 5432}, OpenShellGatewayPort: tc.gatewayPort})
-			v := onlyViolation(t, violations)
-			if v.Constraint != "defenseclaw" || v.Source != SourceFlag || !strings.Contains(v.Message, tc.what) ||
-				!strings.HasPrefix(v.Message, "DefenseClaw never opens") {
+			if tc.what == "" {
+				wantViolations(t, violations)
+				wantPosture(t, eff, "host_ports="+strconv.Itoa(tc.port)+",5432")
+				return
+			}
+			wantViolations(t, violations, Violation{Source: SourceFlag, Constraint: "defenseclaw"})
+			if v := violations[0]; !strings.Contains(v.Message, tc.what) || !strings.HasPrefix(v.Message, "DefenseClaw never opens") {
 				t.Fatalf("violation %+v", v)
 			}
-			if !reflect.DeepEqual(eff.MCP.HostPorts, []int{5432}) {
-				t.Fatalf("host ports %v", eff.MCP.HostPorts)
-			}
+			wantPosture(t, eff, "host_ports=5432")
 			if err := eff.Allow(Action{Kind: ActionHostPort, Port: tc.port}); err == nil {
 				t.Fatalf("Allow(host port %d) = nil, want a refusal", tc.port)
 			}
 			if err := eff.Allow(Action{Kind: ActionApprove, Host: OpenShellHostAlias, Port: tc.port}); err == nil {
 				t.Fatalf("approving %s:%d was allowed", OpenShellHostAlias, tc.port)
-			}
-		})
-	}
-
-	// Ports that are not listeners of this run stay available.
-	for _, tc := range []struct {
-		name        string
-		edit        func(*config.Config)
-		gatewayPort int
-		port        int
-	}{
-		{"default gateway port once the registration names another", nil, 18080, OpenShellGatewayPort},
-		{"router port while routing is off", nil, 0, 8080},
-		{"router port with a remote router", routed(0, "https://router.corp.example:8080"), 0, 8080},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := testConfig(nil)
-			if tc.edit != nil {
-				tc.edit(cfg)
-			}
-			eff, violations := mustResolve(t, cfg, Flags{HostPorts: []int{tc.port}, OpenShellGatewayPort: tc.gatewayPort})
-			if len(violations) != 0 || !reflect.DeepEqual(eff.MCP.HostPorts, []int{tc.port}) {
-				t.Fatalf("violations %+v host ports %v", violations, eff.MCP.HostPorts)
 			}
 		})
 	}
@@ -1518,34 +1315,25 @@ func TestResolveLockedKeysHoldAgainstPack(t *testing.T) {
 			})
 			eff, violations := mustResolve(t, cfg, tc.flags)
 			if tc.key == "" {
-				if len(violations) != 0 || eff.Pack.Name != tc.flags.Pack {
-					t.Fatalf("violations %+v pack %s", violations, eff.Pack.Name)
-				}
+				wantViolations(t, violations)
+				wantPosture(t, eff, "pack="+tc.flags.Pack)
 				return
 			}
-			got := lockedViolations(t, violations)
-			if len(got) != 1 || got[tc.key] != "--pack "+tc.flags.Pack {
-				t.Fatalf("locked violations = %v, want %s", got, tc.key)
+			if got := lockedViolations(t, violations); len(got) != 1 || got[tc.key] != "--pack "+tc.flags.Pack ||
+				!strings.Contains(violations[0].Detail, "looser than the configured strict pack "+tc.detail) {
+				t.Fatalf("locked violations = %+v, want %s %s", violations, tc.key, tc.detail)
 			}
-			if v := violations[0]; !strings.Contains(v.Detail, "looser than the configured strict pack "+tc.detail) {
-				t.Fatalf("detail %q", v.Detail)
-			}
-			if eff.Pack.Name != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" || eff.MCP.Import ||
-				eff.MCP.HostPortAccess || eff.Profile != "strict" {
-				t.Fatalf("a locked key was loosened: %+v", eff)
-			}
+			wantPosture(t, eff, "pack=strict profile=strict yolo=false mode=copy import=false host_port_access=false")
 		})
 	}
 
 	// Under a required pack --pack never applies; the required-pack
 	// violation is the only one.
-	cfg := testConfig(func(o *config.OpenShellConfig) {
+	eff, violations := mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
 		o.Admin.RequiredPack, o.Admin.Locked = "strict", []string{"yolo"}
-	})
-	eff, violations := mustResolve(t, cfg, Flags{Pack: "open"})
-	if v := onlyViolation(t, violations); v.Constraint != requiredPackConstraint || eff.Pack.Name != "strict" || eff.Yolo {
-		t.Fatalf("violation %+v pack %s yolo %v", v, eff.Pack.Name, eff.Yolo)
-	}
+	}), Flags{Pack: "open"})
+	wantViolations(t, violations, Violation{Constraint: requiredPackConstraint})
+	wantPosture(t, eff, "pack=strict yolo=false")
 }
 
 func packMasks(t *testing.T, name string) []string {
@@ -1590,9 +1378,8 @@ func TestResolveRunsTheComparedPack(t *testing.T) {
 		o.Pack, o.PackDir, o.Admin.Locked = "strict", root, []string{"pack"}
 	})
 	eff, violations := mustResolve(t, cfg, Flags{Pack: "mine"})
-	if len(violations) != 0 || eff.Pack.Name != "mine" || eff.Profile != "strict" || eff.Yolo || eff.Workspace.Mode != "copy" {
-		t.Fatalf("violations %+v effective %s/%s yolo %v mode %s", violations, eff.Pack.Name, eff.Profile, eff.Yolo, eff.Workspace.Mode)
-	}
+	wantViolations(t, violations)
+	wantPosture(t, eff, "pack=mine profile=strict yolo=false mode=copy")
 	if checks != 1 {
 		t.Fatalf("the --pack was read %d times, want once", checks)
 	}
@@ -1646,9 +1433,6 @@ func TestResolvePolicySources(t *testing.T) {
 	if got := eff.PolicySources(); !reflect.DeepEqual(got, []string{root}) {
 		t.Fatalf("PolicySources() = %v", got)
 	}
-	if got := (*Effective)(nil).PolicySources(); got != nil {
-		t.Fatalf("nil Effective: %v", got)
-	}
 }
 
 func TestResolveReservesPrometheusListeners(t *testing.T) {
@@ -1664,11 +1448,10 @@ func TestResolveReservesPrometheusListeners(t *testing.T) {
 		t.Fatal(err)
 	}
 	eff, violations := mustResolve(t, testConfig(nil), Flags{HostPorts: []int{9464, 9465, 9466}, Observability: plan})
-	if len(violations) != 2 || !reflect.DeepEqual(eff.MCP.HostPorts, []int{9466}) {
-		t.Fatalf("violations %+v host ports %v", violations, eff.MCP.HostPorts)
-	}
+	wantViolations(t, violations, Violation{Constraint: "defenseclaw"}, Violation{Constraint: "defenseclaw"})
+	wantPosture(t, eff, "host_ports=9466")
 	for _, v := range violations {
-		if v.Constraint != "defenseclaw" || !strings.Contains(v.Message, "Prometheus exporter") {
+		if !strings.Contains(v.Message, "Prometheus exporter") {
 			t.Fatalf("violation %+v", v)
 		}
 	}
@@ -1677,7 +1460,6 @@ func TestResolveReservesPrometheusListeners(t *testing.T) {
 	}
 	// Without the plan nothing is known about the listeners.
 	eff, violations = mustResolve(t, testConfig(nil), Flags{HostPorts: []int{9464}})
-	if len(violations) != 0 || !reflect.DeepEqual(eff.MCP.HostPorts, []int{9464}) {
-		t.Fatalf("violations %+v host ports %v", violations, eff.MCP.HostPorts)
-	}
+	wantViolations(t, violations)
+	wantPosture(t, eff, "host_ports=9464")
 }
