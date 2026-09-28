@@ -371,7 +371,11 @@ def hilt_intent(level: str, connector: str = "") -> PolicyCommandIntent:
 def protection_intent(name: str, *, enable: bool, connector: str = "") -> PolicyCommandIntent:
     """``guardrail protection enable|disable NAME [--connector C]``."""
     verb = "enable" if enable else "disable"
-    args: tuple[str, ...] = ("guardrail", "protection", verb, name)
+    # Literal argv per verb, so scripts/gap_audit.py sees both commands.
+    if enable:
+        args: tuple[str, ...] = ("guardrail", "protection", "enable", name)
+    else:
+        args = ("guardrail", "protection", "disable", name)
     if connector:
         args = (*args, "--connector", connector)
     scope = f" for {connector}" if connector else ""
