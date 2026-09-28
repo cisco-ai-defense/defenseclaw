@@ -109,6 +109,27 @@ cases:
       openshell:
         admin: {egress_allow_only: ['*']}
 
+  - name: unblocked-patterns
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        egress: {unblocked: [webhook.site, '*.pastebin.example', 203.0.113.9, '2001:db8::/48', _dmarc.example]}
+
+  - name: unblocked-numeric-last-label-shorthand
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {unblocked: [webhook.site, '127.1']}
+
+  - name: bare-star-unblocked
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {unblocked: ['*']}
+
   - name: cidr-bits-out-of-range
     valid: false
     source: |

@@ -247,6 +247,7 @@ def openshell_error(document: Mapping[str, Any]) -> tuple[str, str] | None:
     for path, raw in (
         ("openshell.egress.block", egress.get("block")),
         ("openshell.egress.allow", egress.get("allow")),
+        ("openshell.egress.unblocked", egress.get("unblocked")),
         ("openshell.admin.egress_block", admin.get("egress_block")),
         ("openshell.admin.egress_allow_only", admin.get("egress_allow_only")),
     ):

@@ -277,6 +277,11 @@ class TestOpenShellValidation(unittest.TestCase):
             openshell_error({"openshell": {"workdir": {"masks": [".env"], "unmask": [".env.example", "../x"]}}})[0],
             "openshell.workdir.unmask[1]",
         )
+        # The daemon writes approve-always decisions here; Go checks the same grammar.
+        self.assertEqual(
+            openshell_error({"openshell": {"egress": {"unblocked": ["webhook.site", "127.1"]}}})[0],
+            "openshell.egress.unblocked[1]",
+        )
         self.assertEqual(
             openshell_error({"openshell": {"enabled": True, "ingress_port": 18972}})[0], "openshell.egress_port"
         )
@@ -368,6 +373,7 @@ class TestOpenShellSave(unittest.TestCase):
         edits = {
             "host glob with a port": lambda oc: setattr(oc.egress, "block", ["paste.example:443"]),
             "inner wildcard": lambda oc: setattr(oc.egress, "allow", ["a.*.example"]),
+            "shorthand IPv4 unblock": lambda oc: setattr(oc.egress, "unblocked", ["127.1"]),
             "zero cpu": lambda oc: setattr(oc.resources, "cpu", "0"),
             "equal explicit ports": lambda oc: (setattr(oc, "ingress_port", 19001), setattr(oc, "egress_port", 19001)),
             "derived port collision": lambda oc: (setattr(oc, "enabled", True), setattr(oc, "ingress_port", 18972)),
