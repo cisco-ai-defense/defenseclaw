@@ -163,6 +163,7 @@ from defenseclaw.tui.services.setup_state import validate_config_field
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
+from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from defenseclaw.tui.widgets.status_strip import render_status_strip
@@ -1730,7 +1731,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         tooltip="Open the per-row action menu (o)",
                     )
                 yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
-                yield DataTable(
+                yield MeasuredDataTable(
                     id="ai-model-table",
                     classes="hidden",
                     show_row_labels=False,
@@ -1739,7 +1740,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     zebra_stripes=True,
                 )
                 yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
-                yield DataTable(
+                yield MeasuredDataTable(
                     id="panel-table",
                     classes="hidden",
                     show_row_labels=False,
@@ -1761,7 +1762,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 id="command-input",
                 disabled=True,
             )
-            yield DataTable(
+            yield MeasuredDataTable(
                 id="command-palette",
                 classes="hidden",
                 show_row_labels=False,

@@ -12,8 +12,9 @@
 
 Two Pilot tests walk the Setup views (task list, goal menu, form, config
 editor) and the first-run form at 80x24 and check the first row of each
-view's table is on screen under a short body. The tab strip and status
-line checks are pure.
+view's table is on screen under a short body; a third checks a table
+painted before it sizes its columns. The tab strip and status line checks
+are pure.
 """
 
 from __future__ import annotations
@@ -127,6 +128,29 @@ async def test_first_run_shows_its_form_without_the_setup_bar_at_80x24(hermetic)
         _assert_on_screen(app, app.first_run_model.fields[0].label, max_body_lines=2)
         assert app.query_one("#setup-controls").has_class("hidden")
         assert app.query_one("#setup-wizard-controls").has_class("hidden")
+
+
+async def test_a_table_painted_before_it_measures_its_columns_repaints_them() -> None:
+    # Windows CI painted the config table before the DataTable's idle sized
+    # its columns, and the cached cells kept showing "Confi" and "(unse".
+    from defenseclaw.tui.widgets.data_table import MeasuredDataTable
+    from textual.app import App
+
+    class TableApp(App[None]):
+        # A set height, like #panel-table's 1fr: new rows do not resize it.
+        CSS = "DataTable { height: 6; }"
+
+        def compose(self):
+            yield MeasuredDataTable()
+
+    app = TableApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        table = app.query_one(MeasuredDataTable)
+        table.add_columns("Field", "Value")
+        table.add_row("Config Version", "(unset)")
+        screen_text(app)  # a paint before the table's idle
+        await pilot.pause()
+        assert "Config Version  (unset)" in screen_text(app)
 
 
 @pytest.mark.parametrize("width", (87, 120 - 33))

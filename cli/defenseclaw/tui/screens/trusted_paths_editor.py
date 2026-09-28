@@ -35,6 +35,7 @@ from textual.widgets import Button, DataTable, Input, Static
 
 from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 
 TOKENS = DEFAULT_TOKENS
 _LOGGER = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="trusted-editor-dialog"):
             yield Static("Trusted Binary Locations", id="trusted-editor-title")
-            yield DataTable(id="trusted-editor-table", cursor_type="row", zebra_stripes=True)
+            yield MeasuredDataTable(id="trusted-editor-table", cursor_type="row", zebra_stripes=True)
             yield Input(
                 placeholder="Directory to trust (e.g. ~/.local/bin) — Enter to add",
                 id="trusted-editor-add",

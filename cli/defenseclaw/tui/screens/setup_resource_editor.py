@@ -25,6 +25,7 @@ from textual.widgets import Button, DataTable, Static
 
 from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 
 TOKENS = DEFAULT_TOKENS
 ResourceKind = Literal["observability", "webhooks"]
@@ -126,7 +127,7 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="resource-editor-dialog"):
             yield Static(self.dialog_title, id="resource-editor-title")
-            yield DataTable(id="resource-editor-table", cursor_type="row", zebra_stripes=True)
+            yield MeasuredDataTable(id="resource-editor-table", cursor_type="row", zebra_stripes=True)
             yield Static(self._status_text(), id="resource-editor-status")
             with Horizontal(id="resource-editor-buttons"):
                 yield Button("Add", id="resource-add", variant="primary")
