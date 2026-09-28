@@ -194,22 +194,38 @@ func newWatcher(t *testing.T, conn grpc.ClientConnInterface, rec *recorder, cfg 
 	return w
 }
 
+// start runs the watcher in the background; the result arrives on done.
+func start(ctx context.Context, w *Watcher, rec *recorder) (done chan error) {
+	done = make(chan error, 1)
+	go func() { done <- w.Run(ctx, rec.handle) }()
+	return done
+}
+
+// waitFor waits until stop reports true or the watcher ends, and reports
+// whether it ended.
+func waitFor(t *testing.T, rec *recorder, done chan error, stop func() bool) (ended bool, err error) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for !stop() {
+		select {
+		case err := <-done:
+			return true, err
+		case <-deadline:
+			t.Fatalf("watcher did not reach the expected state; events: %v", rec.kinds())
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	return false, nil
+}
+
 // runUntil runs the watcher until stop reports true, then cancels it.
 func runUntil(t *testing.T, w *Watcher, rec *recorder, stop func() bool) error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx, rec.handle) }()
-	deadline := time.After(10 * time.Second)
-	for !stop() {
-		select {
-		case err := <-done:
-			return err
-		case <-deadline:
-			t.Fatalf("watcher did not reach the expected state; events: %v", rec.kinds())
-		case <-time.After(2 * time.Millisecond):
-		}
+	done := start(ctx, w, rec)
+	if ended, err := waitFor(t, rec, done, stop); ended {
+		return err
 	}
 	cancel()
 	return <-done
@@ -255,23 +271,15 @@ func TestWatchDeliversTypedEvents(t *testing.T) {
 		logs[0].Cursor != cur(space, 30) || !logs[0].Time.Equal(time.Unix(1700000000, 0)) {
 		t.Fatalf("ocsf log = %+v / %+v", logs[0], logs[0].Log.OCSF)
 	}
-	if !logs[1].Log.OCSF.Denied() || logs[1].Log.OCSF.Reason == "" {
-		t.Fatalf("denied http = %+v", logs[1].Log.OCSF)
+	if !logs[1].Log.OCSF.Denied() || logs[1].Log.OCSF.Reason == "" || logs[2].Log.OCSF != nil || logs[2].Log.Source != "gateway" {
+		t.Fatalf("denied http = %+v, plain line = %+v", logs[1].Log.OCSF, logs[2].Log)
 	}
-	if logs[2].Log.OCSF != nil || logs[2].Log.Source != "gateway" {
-		t.Fatalf("plain line = %+v", logs[2].Log)
+	p, d := rec.ofKind(KindPlatform)[0].Platform, rec.ofKind(KindDraft)[0].Draft
+	if p.Reason != "Started" || p.Metadata["container"] != "abc" || d.TotalPending != 2 || d.NewChunks != 1 {
+		t.Fatalf("platform = %+v, draft = %+v", p, d)
 	}
-	if p := rec.ofKind(KindPlatform)[0].Platform; p.Reason != "Started" || p.Metadata["container"] != "abc" {
-		t.Fatalf("platform = %+v", p)
-	}
-	if d := rec.ofKind(KindDraft)[0].Draft; d.TotalPending != 2 || d.NewChunks != 1 {
-		t.Fatalf("draft = %+v", d)
-	}
-	if w.Cursor() != cur(space, 39) {
-		t.Fatalf("cursor = %q", w.Cursor())
-	}
-	if last := rec.saved[len(rec.saved)-1]; last != cur(space, 39) {
-		t.Fatalf("saved = %v", rec.saved)
+	if w.Cursor() != cur(space, 39) || rec.saved[len(rec.saved)-1] != cur(space, 39) {
+		t.Fatalf("cursor = %q, saved = %v", w.Cursor(), rec.saved)
 	}
 }
 
@@ -292,11 +300,8 @@ func TestWatchResumesAfterTransportFailure(t *testing.T) {
 	w := newWatcher(t, conn, rec, Config{TailLines: 20, Backoff: Backoff{Initial: 100 * time.Millisecond, Max: time.Second, Multiplier: 2}})
 	_ = runUntil(t, w, rec, func() bool { return len(rec.ofKind(KindLog)) == 3 })
 
-	if g.request(1).GetResumeAfterCursor() != cur(space, 2) || g.request(1).GetLogTailLines() != 0 {
-		t.Fatalf("resume request = %v", g.request(1))
-	}
-	if g.request(2).GetResumeAfterCursor() != cur(space, 2) {
-		t.Fatalf("second resume request = %v", g.request(2))
+	if g.request(1).GetResumeAfterCursor() != cur(space, 2) || g.request(1).GetLogTailLines() != 0 || g.request(2).GetResumeAfterCursor() != cur(space, 2) {
+		t.Fatalf("resume requests = %v, %v", g.request(1), g.request(2))
 	}
 	conns := rec.ofKind(KindConnected)
 	if len(conns) != 2 || conns[0].Connection.Resumed || !conns[1].Connection.Resumed || conns[1].Connection.Cursor != cur(space, 2) {
@@ -332,24 +337,15 @@ func TestWatchOutOfRangeResubscribesWithoutCursorAndReportsGap(t *testing.T) {
 	w := newWatcher(t, conn, rec, Config{Cursor: persisted, TailLines: 200})
 	_ = runUntil(t, w, rec, func() bool { return len(rec.ofKind(KindLog)) == 1 })
 
-	if g.request(0).GetResumeAfterCursor() != persisted {
-		t.Fatalf("first request = %v", g.request(0))
+	if g.request(0).GetResumeAfterCursor() != persisted || g.request(1).GetResumeAfterCursor() != "" || g.request(1).GetLogTailLines() != 200 {
+		t.Fatalf("requests = %v, then %v", g.request(0), g.request(1))
 	}
-	if g.request(1).GetResumeAfterCursor() != "" || g.request(1).GetLogTailLines() != 200 {
-		t.Fatalf("resubscribe request = %v", g.request(1))
-	}
-	gaps := rec.ofKind(KindGap)
-	if len(gaps) != 1 || gaps[0].Gap.Reason != GapCursorOutOfRange || gaps[0].Gap.LostCursor != persisted {
+	if gaps := rec.ofKind(KindGap); len(gaps) != 1 || gaps[0].Gap.Reason != GapCursorOutOfRange || gaps[0].Gap.LostCursor != persisted {
 		t.Fatalf("gaps = %+v", gaps)
 	}
-	if len(rec.sleeps) != 0 {
-		t.Fatalf("a gap must resubscribe immediately, slept %v", rec.sleeps)
-	}
-	if rec.saved[0] != "" || rec.saved[len(rec.saved)-1] != cur(newSpace, 1) {
-		t.Fatalf("saved = %q", rec.saved)
-	}
-	if w.Cursor() != cur(newSpace, 1) {
-		t.Fatalf("cursor = %q", w.Cursor())
+	// A gap resubscribes immediately.
+	if len(rec.sleeps) != 0 || rec.saved[0] != "" || rec.saved[len(rec.saved)-1] != cur(newSpace, 1) || w.Cursor() != cur(newSpace, 1) {
+		t.Fatalf("slept %v, saved %q, cursor %q", rec.sleeps, rec.saved, w.Cursor())
 	}
 }
 
@@ -361,11 +357,8 @@ func TestWatchRejectedCursorIsAGapButBadRequestIsTerminal(t *testing.T) {
 	rec := &recorder{}
 	w := newWatcher(t, conn, rec, Config{Cursor: "v1:foreign:00000000000000000001"})
 	err := w.Run(context.Background(), rec.handle)
-	if status.Code(errors.Unwrap(err)) != codes.InvalidArgument {
-		t.Fatalf("Run = %v", err)
-	}
-	if gaps := rec.ofKind(KindGap); len(gaps) != 1 || gaps[0].Gap.Reason != GapCursorRejected {
-		t.Fatalf("gaps = %+v", gaps)
+	if gaps := rec.ofKind(KindGap); status.Code(errors.Unwrap(err)) != codes.InvalidArgument || len(gaps) != 1 || gaps[0].Gap.Reason != GapCursorRejected {
+		t.Fatalf("Run = %v, gaps = %+v", err, gaps)
 	}
 }
 
@@ -419,19 +412,9 @@ func TestWatchTerminalErrors(t *testing.T) {
 		t.Run(tc.code.String(), func(t *testing.T) {
 			_, conn := startGateway(t, []step{{err: status.Error(tc.code, "no")}})
 			rec := &recorder{}
-			w := newWatcher(t, conn, rec, Config{})
-			err := w.Run(context.Background(), rec.handle)
-			if err == nil {
-				t.Fatal("Run returned nil")
-			}
-			if tc.want != nil && !errors.Is(err, tc.want) {
-				t.Fatalf("Run = %v, want %v", err, tc.want)
-			}
-			if tc.want == nil && status.Code(errors.Unwrap(err)) != tc.code {
-				t.Fatalf("Run = %v", err)
-			}
-			if len(rec.sleeps) != 0 {
-				t.Fatalf("terminal error backed off: %v", rec.sleeps)
+			err := newWatcher(t, conn, rec, Config{}).Run(context.Background(), rec.handle)
+			if err == nil || (tc.want != nil && !errors.Is(err, tc.want)) || (tc.want == nil && status.Code(errors.Unwrap(err)) != tc.code) || len(rec.sleeps) != 0 {
+				t.Fatalf("Run = %v after backing off %v, want %v without backoff", err, rec.sleeps, tc.want)
 			}
 		})
 	}
@@ -443,19 +426,10 @@ func TestWatchTerminalErrors(t *testing.T) {
 func TestWatchEndsWhenItsConnectionIsClosed(t *testing.T) {
 	g, conn := startGateway(t, []step{{send: statusEvent(pb.SandboxPhase_SANDBOX_PHASE_READY)}, {block: true}})
 	rec := &recorder{}
-	w := newWatcher(t, conn, rec, Config{})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx, rec.handle) }()
-	deadline := time.After(5 * time.Second)
-	for len(rec.ofKind(KindStatus)) == 0 {
-		select {
-		case <-deadline:
-			t.Fatalf("no status event; events: %v", rec.kinds())
-		case <-time.After(2 * time.Millisecond):
-		}
-	}
+	done := start(ctx, newWatcher(t, conn, rec, Config{}), rec)
+	waitFor(t, rec, done, func() bool { return len(rec.ofKind(KindStatus)) > 0 })
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -465,11 +439,8 @@ func TestWatchEndsWhenItsConnectionIsClosed(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("the watch kept retrying on a closed connection (%d subscriptions, %d backoffs)", g.calls(), len(rec.sleeps))
 	}
-	if ctx.Err() != nil || status.Code(errors.Unwrap(err)) != codes.Canceled {
-		t.Fatalf("Run = %v, want the closed connection's error", err)
-	}
-	if n := len(rec.sleeps); n > 1 {
-		t.Fatalf("the watch backed off %d times on a closed connection", n)
+	if ctx.Err() != nil || status.Code(errors.Unwrap(err)) != codes.Canceled || len(rec.sleeps) > 1 {
+		t.Fatalf("Run = %v after %d backoffs, want the closed connection's error", err, len(rec.sleeps))
 	}
 }
 
@@ -495,12 +466,9 @@ func TestWatchBackoffGrowsAndCaps(t *testing.T) {
 	if fmt.Sprint(rec.sleeps) != fmt.Sprint(want) {
 		t.Fatalf("backoff = %v, want %v", rec.sleeps, want)
 	}
-}
-
-func TestWatchJitterStaysWithinBounds(t *testing.T) {
-	w := &Watcher{cfg: Config{Backoff: Backoff{Initial: time.Second, Max: time.Second, Multiplier: 1, Jitter: 0.5}}}
+	jittered := &Watcher{cfg: Config{Backoff: Backoff{Initial: time.Second, Max: time.Second, Multiplier: 1, Jitter: 0.5}}}
 	for i := 0; i < 200; i++ {
-		if d := w.jitter(time.Second); d < 500*time.Millisecond || d > time.Second {
+		if d := jittered.jitter(time.Second); d < 500*time.Millisecond || d > time.Second {
 			t.Fatalf("jittered delay %s out of bounds", d)
 		}
 	}
