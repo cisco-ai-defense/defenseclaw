@@ -222,6 +222,9 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
 	}
+	// The harness exits on its own first, so its end-of-session hook runs
+	// and its terminal ends as after /exit (graceful.go).
+	m.endHarness(ctx, gw, b)
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
