@@ -353,16 +353,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				elapsed := time.Since(t0)
 				resp := safeHookPanicResponse(connectorName, req.HookEventName, recovered)
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
-				// Sandbox hooks fail closed: apply the same transformation as
-				// the inline panic path (lines 457-467) so post-evaluation
-				// panics (e.g., in enrichAgentHookSpan, deferred EmitLLMEvent,
-				// finalizeAgentHook) also fail closed for sandbox hooks.
-				if sandboxHookForConnector(ctx, connectorName) {
-					resp.Action, resp.RawAction = "block", "block"
-					resp.WouldBlock = true
-					resp.Mode = "action"
-					resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
-				}
+				// Sandbox hooks fail closed, as on the inline panic path, so
+				// post-evaluation panics (e.g., in enrichAgentHookSpan,
+				// deferred EmitLLMEvent, finalizeAgentHook) also block.
+				resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
@@ -468,16 +462,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		resp, panicked := a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
-		if panicked && sandboxHookForConnector(ctx, connectorName) {
+		if panicked {
 			// Sandbox hooks fail closed: the host's fail-open posture for
 			// a crashed evaluator keeps workflows running outside the
 			// sandbox, but inside it the hook is the only gate on the
-			// tool call, so an undecided call is blocked with a plain
-			// reason.
-			resp.Action, resp.RawAction = "block", "block"
-			resp.WouldBlock = true
-			resp.Mode = "action"
-			resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
+			// tool call, so an undecided call is blocked, and says so.
+			resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked {

@@ -284,3 +284,86 @@ func TestSandboxHookDecisionsCarryToolUseID(t *testing.T) {
 		})
 	}
 }
+
+// TestSandboxEvaluatorFailureIsNotAPolicyBlock pins that a sandbox hook
+// DefenseClaw failed evaluating (a recovered panic) is blocked with a
+// reason that says so, in the harness's own block shape, and is reported to
+// the manager as a hook failure. It was a 200 block that read "Blocked by
+// DefenseClaw policy. Try another approach", which sent the agent looking
+// for a workaround and the user for a rule that does not exist, and nothing
+// counted it as a failed hook. An ordinary policy block is not a failure.
+func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
+	installSandboxMarkerRules(t)
+	var mu sync.Mutex
+	var failures []SandboxHookFailure
+	var decisions []SandboxHookDecision
+	f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
+		c.OnHookFailure = func(fl SandboxHookFailure) {
+			mu.Lock()
+			defer mu.Unlock()
+			failures = append(failures, fl)
+		}
+		c.OnHookDecision = func(d SandboxHookDecision) {
+			mu.Lock()
+			defer mu.Unlock()
+			decisions = append(decisions, d)
+		}
+	})
+	binding, token, err := f.store.Mint(sandboxauth.Spec{
+		SandboxName: "dc-hermes-crash", Connector: "hermes", AgentVersion: "0.19.0", HookContractID: "hermes-hooks-v1",
+		PolicyProfile: "open", Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+		HostUser: sandboxauth.HostUser{UID: "1000", Name: "dev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	take := func() ([]SandboxHookFailure, []SandboxHookDecision) {
+		mu.Lock()
+		defer mu.Unlock()
+		fl, d := failures, decisions
+		failures, decisions = nil, nil
+		return fl, d
+	}
+	post := func(command string) map[string]interface{} {
+		t.Helper()
+		body := `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
+			`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_1","task_id":"t1"}}`
+		rec := f.do(t, http.MethodPost, "/api/v1/hermes/hook", token, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	prev := hookEvaluatorPanicHook
+	hookEvaluatorPanicHook = func() { panic("synthetic evaluator panic for sandbox test") }
+	resp := post("ls")
+	hookEvaluatorPanicHook = prev
+	out, _ := resp["hook_output"].(map[string]interface{})
+	if resp["action"] != "block" || resp["reason"] != sandboxInternalErrorReason ||
+		out["decision"] != "block" || out["reason"] != sandboxInternalErrorReason {
+		t.Fatalf("crashed evaluation = %v", resp)
+	}
+	gotFailures, gotDecisions := take()
+	want := SandboxHookFailure{BindingID: binding.ID, SandboxName: "dc-hermes-crash", Connector: "hermes",
+		Route: sandboxauth.RouteHook, Status: http.StatusInternalServerError}
+	if len(gotFailures) != 1 || gotFailures[0] != want {
+		t.Fatalf("failures = %+v, want %+v", gotFailures, want)
+	}
+	if len(gotDecisions) != 1 || gotDecisions[0].Action != "block" || gotDecisions[0].Reason != sandboxInternalErrorReason {
+		t.Fatalf("decisions = %+v", gotDecisions)
+	}
+
+	// A policy block keeps its rule reason and is no failure.
+	resp = post("echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt")
+	if resp["action"] != "block" || !strings.HasPrefix(resp["reason"].(string), "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER") {
+		t.Fatalf("policy block = %v", resp)
+	}
+	if gotFailures, _ := take(); len(gotFailures) != 0 {
+		t.Fatalf("a policy block was reported as a failure: %+v", gotFailures)
+	}
+}

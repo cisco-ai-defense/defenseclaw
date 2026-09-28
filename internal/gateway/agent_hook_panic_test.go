@@ -421,7 +421,8 @@ func TestHandleAgentHook_SandboxPanicFailsClosed(t *testing.T) {
 	if got, _ := parsed["action"].(string); got != "block" {
 		t.Fatalf("sandbox panic action = %q, want block (sandbox hooks fail closed); body=%s", got, w.Body.String())
 	}
-	if reason, _ := parsed["reason"].(string); !strings.HasPrefix(reason, "Blocked by DefenseClaw") {
-		t.Errorf("sandbox panic reason = %q, want a plain block reason", reason)
+	// Not a policy block: the reason says DefenseClaw failed.
+	if reason, _ := parsed["reason"].(string); reason != sandboxInternalErrorReason {
+		t.Errorf("sandbox panic reason = %q, want %q", reason, sandboxInternalErrorReason)
 	}
 }

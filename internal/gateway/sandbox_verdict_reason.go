@@ -291,6 +291,63 @@ func (a *APIServer) applySandboxVerdictReason(
 	// The verb follows what the harness does: a block DefenseClaw cannot
 	// enforce on this event (a tool result) is flagged, not blocked.
 	plain := sandboxVerdictReason(connectorName, action, resp.RuleIDs, findings)
+	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
+}
+
+// sandboxInternalErrorReason is the plain reason of a sandbox hook that
+// failed closed: DefenseClaw failed while judging the call (a recovered
+// panic), so it blocked the call without a verdict. Read as a policy
+// block, the agent would look for another way to do the same thing, and
+// the user would look for a rule that is not there.
+const sandboxInternalErrorReason = "DefenseClaw hit an internal error while checking this call and blocked it. " +
+	"Retry the call; if this keeps happening, ask the user to run defenseclaw sandbox doctor."
+
+// failSandboxHookClosed turns the response of a sandbox hook whose
+// evaluation or finalization panicked into a block with
+// sandboxInternalErrorReason, and marks the request so the ingress reports
+// it as a hook failure (OnHookFailure). The host's fail-open posture for a
+// crashed evaluator keeps workflows running outside a sandbox, but inside
+// one the hook is the only gate on the tool call. Host responses are
+// returned unchanged.
+func (a *APIServer) failSandboxHookClosed(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) (out agentHookResponse) {
+	if !sandboxHookForConnector(ctx, connectorName) {
+		return resp
+	}
+	markSandboxHookFailedClosed(ctx)
+	resp.Action, resp.RawAction = "block", "block"
+	resp.WouldBlock = true
+	resp.Mode = "action"
+	resp.Findings = nil
+	defer func() {
+		if r := recover(); r != nil {
+			out = resp
+			out.Reason = sandboxInternalErrorReason
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox fail-closed render panic: %v", r))
+		}
+	}()
+	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, sandboxInternalErrorReason)
+}
+
+// renderSandboxVerdict gives a sandbox verdict its plain reason and
+// re-renders the harness output around it. The source reason stays on the
+// response for the audit sinks.
+func (a *APIServer) renderSandboxVerdict(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+	plain string,
+) agentHookResponse {
 	resp.SourceReason = hookSourceReason(resp)
 	resp.Reason = plain
 	switch profile.Name {

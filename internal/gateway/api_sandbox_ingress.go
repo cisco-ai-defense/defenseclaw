@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -144,8 +145,10 @@ type SandboxIngressConfig struct {
 	// OnHookFailure observes every authenticated hook or inspect post the
 	// ingress answered with a status outside 2xx. Sandbox hooks fail closed
 	// on such an answer, so the harness did not do what the hook was about.
-	// A replayed answer to a retried post is not reported again. It runs on
-	// the request goroutine and must not block.
+	// A hook DefenseClaw failed evaluating (a recovered panic) is answered
+	// with a block and reported too, with status 500. A replayed answer to
+	// a retried post is not reported again. It runs on the request
+	// goroutine and must not block.
 	OnHookFailure func(SandboxHookFailure)
 }
 
@@ -186,7 +189,8 @@ type SandboxHookFailure struct {
 	Connector   string
 	// Route is the route class of the post (hook or inspect).
 	Route sandboxauth.Route
-	// Status is the HTTP status of the answer.
+	// Status is the HTTP status of the answer, or 500 for a hook
+	// DefenseClaw failed evaluating and answered with a fail-closed block.
 	Status int
 }
 
@@ -455,6 +459,30 @@ func sandboxIngressRouteFrom(ctx context.Context) (sandboxauth.Route, bool) {
 	return route, ok
 }
 
+// sandboxHookOutcome is what a hook handler tells the ingress about its
+// answer beyond the status: whether it blocked the call because DefenseClaw
+// failed evaluating it (a recovered panic). Such an answer is a 200 block,
+// but it is a hook failure all the same (OnHookFailure).
+type sandboxHookOutcome struct {
+	failedClosed atomic.Bool
+}
+
+type sandboxHookOutcomeKey struct{}
+
+func withSandboxHookOutcome(ctx context.Context) (context.Context, *sandboxHookOutcome) {
+	outcome := &sandboxHookOutcome{}
+	return context.WithValue(ctx, sandboxHookOutcomeKey{}, outcome), outcome
+}
+
+// markSandboxHookFailedClosed records that the request's hook answer is a
+// fail-closed block. A request without an outcome (host traffic) is left
+// alone.
+func markSandboxHookFailedClosed(ctx context.Context) {
+	if outcome, ok := ctx.Value(sandboxHookOutcomeKey{}).(*sandboxHookOutcome); ok {
+		outcome.failedClosed.Store(true)
+	}
+}
+
 func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handler {
 	mux, exact := a.sandboxIngressMux()
 	var reg *AgentRegistry
@@ -663,7 +691,7 @@ func (a *APIServer) sandboxIngressAuthorize(
 		if err := binding.Authorize(route.class, route.connector); err != nil {
 			writeSandboxIngressError(w, http.StatusForbidden, err.Error())
 			if observed {
-				st.observeHookFailure(binding, route, sw)
+				st.observeHookFailure(binding, route, sw, false)
 			}
 			return
 		}
@@ -672,7 +700,7 @@ func (a *APIServer) sandboxIngressAuthorize(
 			w.Header().Set("Retry-After", "1")
 			writeSandboxIngressError(w, http.StatusTooManyRequests, err.Error())
 			if observed {
-				st.observeHookFailure(binding, route, sw)
+				st.observeHookFailure(binding, route, sw, false)
 			}
 			return
 		}
@@ -687,6 +715,7 @@ func (a *APIServer) sandboxIngressAuthorize(
 			r.Header.Del(header)
 		}
 		ctx := withSandboxIngressRoute(r.Context(), route.class)
+		ctx, outcome := withSandboxHookOutcome(ctx)
 		switch route.class {
 		case sandboxauth.RouteHook, sandboxauth.RouteNotify:
 			ctx = withAuthenticatedHookConnector(ctx, binding.Connector)
@@ -705,7 +734,7 @@ func (a *APIServer) sandboxIngressAuthorize(
 		// A panicking handler never gets here: the server drops its
 		// connection, which the hook sees as a transport failure.
 		if observed {
-			st.observeHookFailure(binding, route, sw)
+			st.observeHookFailure(binding, route, sw, outcome.failedClosed.Load())
 		}
 	})
 }
@@ -719,11 +748,18 @@ func sandboxRouteFailsClosed(route sandboxauth.Route) bool {
 }
 
 // observeHookFailure reports an authenticated hook or inspect post answered
-// outside 2xx, unless the answer replays the first answer to a retried post.
-func (st *sandboxIngressState) observeHookFailure(binding sandboxauth.Binding, route sandboxIngressRoute, sw *sandboxStatusRecorder) {
-	status := sw.finalStatus()
-	if (status >= 200 && status < 300) || sw.Header().Get(sandboxIdempotentReplayHeader) != "" {
+// outside 2xx, or with a fail-closed block (failedClosed, reported as 500),
+// unless the answer replays the first answer to a retried post.
+func (st *sandboxIngressState) observeHookFailure(binding sandboxauth.Binding, route sandboxIngressRoute, sw *sandboxStatusRecorder, failedClosed bool) {
+	if sw.Header().Get(sandboxIdempotentReplayHeader) != "" {
 		return
+	}
+	status := sw.finalStatus()
+	if status >= 200 && status < 300 {
+		if !failedClosed {
+			return
+		}
+		status = http.StatusInternalServerError
 	}
 	st.onHookFailure(SandboxHookFailure{
 		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
