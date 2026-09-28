@@ -24,6 +24,7 @@ import requests
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.markup import escape as rich_escape
+from rich.measure import Measurement
 from rich.panel import Panel
 from rich.style import Style
 from rich.table import Table
@@ -282,6 +283,39 @@ _DEFENSECLAW_LOGO = (
     "██████╔╝███████╗██║     ███████╗██║ ╚████║███████║███████╗╚██████╗███████╗██║  ██║╚███╔███╔╝\n"
     "╚═════╝ ╚══════╝╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝"
 )
+_DEFENSECLAW_LOGO_WIDTH = max(len(line) for line in _DEFENSECLAW_LOGO.splitlines())
+_DEFENSECLAW_WORDMARK = "DEFENSECLAW"
+
+
+def _overview_banner_lines(width: int) -> int:
+    """Rows the Overview banner takes when the body is ``width`` cells wide."""
+
+    if width >= _DEFENSECLAW_LOGO_WIDTH:
+        return len(_DEFENSECLAW_LOGO.splitlines())
+    return 1
+
+
+class _OverviewBanner:
+    """The block-letter logo, or a one-line wordmark where the logo would wrap.
+
+    The logo is 92 cells wide; in an 80-column terminal Rich folded each row
+    into two, so the Overview opened on a smear of block glyphs that pushed
+    everything useful below the fold. The choice is made at render time, so
+    it follows the real body width (including resizes) without the
+    snapshot worker needing to know the terminal size.
+    """
+
+    def __init__(self, style: str) -> None:
+        self.style = style
+
+    def __rich_console__(self, console: Any, options: Any) -> Iterator[Text]:
+        if options.max_width >= _DEFENSECLAW_LOGO_WIDTH:
+            yield Text(_DEFENSECLAW_LOGO, style=self.style, no_wrap=True)
+        else:
+            yield Text(_DEFENSECLAW_WORDMARK, style=self.style, no_wrap=True)
+
+    def __rich_measure__(self, console: Any, options: Any) -> Measurement:
+        return Measurement(len(_DEFENSECLAW_WORDMARK), _DEFENSECLAW_LOGO_WIDTH)
 
 
 def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
@@ -7091,7 +7125,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # one spacer before the connector chip. The fallback ``body_text`` has
         # a different line layout, so content validation alone misses clicks on
         # the visible chip.
-        return y == len(_DEFENSECLAW_LOGO.splitlines()) + 2
+        try:
+            body_width = self.query_one("#body", Static).content_region.width
+        except NoMatches:
+            body_width = _DEFENSECLAW_LOGO_WIDTH
+        return y == _overview_banner_lines(body_width) + 2
 
     def _sync_signal_connector_filters(self) -> None:
         """Push the shared connector filter + column flag to the signal panes.
@@ -7956,7 +7994,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         state_by_key = {card.key: card.state or "unknown" for card in service_cards}
         detail_by_key = {card.key: card.detail or card.last_error for card in service_cards}
 
-        banner = Text(_DEFENSECLAW_LOGO, style=f"bold {TOKENS.accent_cyan}")
+        banner = _OverviewBanner(f"bold {TOKENS.accent_cyan}")
         uptime_suffix = ""
         if health is not None and health.uptime_ms:
             uptime_suffix = f"  uptime={health.uptime_ms // 1000}s"

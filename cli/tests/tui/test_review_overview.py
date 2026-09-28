@@ -1,0 +1,53 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Overview banner and metric tiles fit narrow terminals."""
+
+from __future__ import annotations
+
+import io
+
+from defenseclaw.tui.app import _DEFENSECLAW_LOGO_WIDTH, _overview_banner_lines, _OverviewBanner
+from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile
+from rich.console import Console
+
+
+def _render(renderable: object, width: int) -> list[str]:
+    console = Console(width=width, file=io.StringIO(), color_system=None, record=True)
+    console.print(renderable)
+    return [line for line in console.export_text().splitlines() if line.strip()]
+
+
+def test_banner_is_a_single_wordmark_line_when_the_logo_would_wrap() -> None:
+    lines = _render(_OverviewBanner("bold"), 74)
+
+    assert lines == ["DEFENSECLAW"]
+    assert _overview_banner_lines(74) == 1
+
+
+def test_banner_keeps_the_block_logo_when_it_fits() -> None:
+    lines = _render(_OverviewBanner("bold"), _DEFENSECLAW_LOGO_WIDTH + 4)
+
+    assert len(lines) == 6
+    assert all(len(line.rstrip()) <= _DEFENSECLAW_LOGO_WIDTH for line in lines)
+    assert _overview_banner_lines(_DEFENSECLAW_LOGO_WIDTH) == 6
+
+
+def test_status_words_are_not_drawn_with_digit_glyphs() -> None:
+    assert MetricTile.digits_renderable("42")
+    assert not MetricTile.digits_renderable("ON")
+    assert not MetricTile.digits_renderable("OFF")
+
+    tile = MetricTile(
+        MetricDatum(key="guardrail", label="Guardrail", value=0, progress=0.0, detail="", value_text="OFF")
+    )
+    tile.refresh_metric(tile.metric)
+
+    assert tile._word.display and not tile._digits.display
