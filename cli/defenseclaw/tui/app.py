@@ -318,6 +318,22 @@ class _OverviewBanner:
         return Measurement(len(_DEFENSECLAW_WORDMARK), _DEFENSECLAW_LOGO_WIDTH)
 
 
+_ON_PATH_TTL_SECONDS = 15.0
+_on_path_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _on_path(name: str, *, now: float | None = None) -> bool:
+    """``shutil.which(name)`` with a short cache for render paths."""
+
+    now = monotonic() if now is None else now
+    cached = _on_path_cache.get(name)
+    if cached is not None and now - cached[0] < _ON_PATH_TTL_SECONDS:
+        return cached[1]
+    found = shutil.which(name) is not None
+    _on_path_cache[name] = (now, found)
+    return found
+
+
 def _detail_pairs_markup(title: str, pairs: Iterable[tuple[object, object]]) -> str:
     """Detail-pane markup for a title and ``key: value`` rows.
 
@@ -8357,15 +8373,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         sc_table.add_column(width=2, no_wrap=True)
         sc_table.add_column(width=14, no_wrap=True)
         sc_table.add_column(overflow="fold")
-        # Mirror Go TUI: probe external scanners via PATH each render so
-        # an operator who runs `brew install skill-scanner` sees the row
-        # flip from "missing" to "installed" on the next 2 s refresh.
+        # Mirror Go TUI: probe external scanners via PATH so an operator who
+        # runs `brew install skill-scanner` sees the row flip from "missing"
+        # to "installed". The probe is cached for a few seconds: a PATH walk
+        # on every 2 s repaint is disk I/O on the UI thread.
         # Built-ins (aibom + codeguard) ship inside the CLI and are
         # always available. Note: the field is named `aibom` (AI Bill
         # Of Materials) — historic copies of this list spelled it
         # "aibon", which is a typo.
-        skill_available = bool(shutil.which("skill-scanner"))
-        mcp_available = bool(shutil.which("mcp-scanner"))
+        skill_available = _on_path("skill-scanner")
+        mcp_available = _on_path("mcp-scanner")
         scanner_rows: list[tuple[str, str, str, str]] = [
             (
                 "skill-scanner",

@@ -51,3 +51,17 @@ def test_status_words_are_not_drawn_with_digit_glyphs() -> None:
     tile.refresh_metric(tile.metric)
 
     assert tile._word.display and not tile._digits.display
+
+
+def test_scanner_path_probe_is_cached_between_repaints(monkeypatch) -> None:
+    import defenseclaw.tui.app as app_module
+
+    calls: list[str] = []
+    monkeypatch.setattr(app_module.shutil, "which", lambda name: calls.append(name) or "/bin/x")
+    monkeypatch.setattr(app_module, "_on_path_cache", {})
+
+    assert app_module._on_path("skill-scanner", now=100.0)
+    assert app_module._on_path("skill-scanner", now=105.0)
+    assert calls == ["skill-scanner"]
+    app_module._on_path("skill-scanner", now=100.0 + app_module._ON_PATH_TTL_SECONDS + 1)
+    assert calls == ["skill-scanner", "skill-scanner"]
