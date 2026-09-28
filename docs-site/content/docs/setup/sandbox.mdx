@@ -1131,8 +1131,11 @@ until cleanup runs:
   binding to that host (for example `10.200.0.1`) so `upgrade` health checks
   keep working; see [Gateway API: bind address](/docs/reference/gateway-api#bind-address);
 - `/health` reports a `sandbox` subsystem in state `degraded` whose
-  `last_error` says a legacy standalone install was detected. On every other
-  host the `sandbox` subsystem is absent; and
+  `last_error` says a legacy standalone install was detected. On any other
+  host the `sandbox` subsystem is absent only while `openshell.enabled` is
+  `false`; with sandboxes on, it reports the sandbox runtime's state, as the
+  [Gateway API reference](/docs/reference/gateway-api) describes under
+  Health & status; and
 - `defenseclaw doctor` warns about the legacy install and names
   `defenseclaw sandbox legacy-cleanup` as the remediation.
 

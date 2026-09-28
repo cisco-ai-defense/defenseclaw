@@ -160,8 +160,9 @@ for the OpenShell sandbox runtime:
 On a host that still carries the removed legacy standalone sandbox (see
 [Bind address](#bind-address)), `/health` includes a `sandbox` subsystem with
 state `degraded` and a `last_error` of "legacy standalone install detected",
-directing the operator to run `defenseclaw sandbox legacy-cleanup`. Otherwise
-the `sandbox` subsystem is absent from `/health`.
+directing the operator to run `defenseclaw sandbox legacy-cleanup`. On a host
+with neither, where `openshell.enabled` is `false` and no legacy install is
+left, the `sandbox` subsystem is absent from `/health`.
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 
