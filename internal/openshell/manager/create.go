@@ -271,6 +271,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		HarnessVersion: img.HarnessVersion, HookContract: img.HookContract, TamperTier: arts.TamperTier,
 		Violations: wireViolations(in.violations), TokenDelivery: config.OpenShellTokenDeliveryProvider,
 	}
+	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
 	}

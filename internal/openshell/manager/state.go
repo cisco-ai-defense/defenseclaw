@@ -106,6 +106,16 @@ type record struct {
 	// tokenDelivery).
 	TokenDelivery string `json:"token_delivery,omitempty"`
 
+	// Gateway, GatewayEndpoint and GatewayWorkspace say where the sandbox
+	// lives: the gateway registration, its endpoint and the OpenShell
+	// workspace (older records learn them once reconciliation finds the
+	// sandbox). While DefenseClaw is connected to another gateway or
+	// workspace, not finding the sandbox proves nothing, so it is not
+	// released (see gatewayElsewhere).
+	Gateway          string `json:"gateway,omitempty"`
+	GatewayEndpoint  string `json:"gateway_endpoint,omitempty"`
+	GatewayWorkspace string `json:"gateway_workspace,omitempty"`
+
 	CredentialProfile string   `json:"credential_profile,omitempty"`
 	BedrockRegion     string   `json:"bedrock_region,omitempty"`
 	Providers         []string `json:"providers,omitempty"`

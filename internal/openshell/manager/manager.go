@@ -102,7 +102,9 @@ type Options struct {
 	// DataDir is the DefenseClaw data directory. Required.
 	DataDir string
 	// Owner labels the sandboxes this data dir owns (image.Store.Owner), so
-	// two data dirs sharing a gateway never reconcile each other's.
+	// two data dirs sharing a gateway never reconcile each other's. A
+	// sandbox the data dir recorded under an earlier owner id keeps that
+	// one (see loadRecords).
 	Owner string
 	// Config returns the current configuration snapshot. Required.
 	Config func() *config.Config

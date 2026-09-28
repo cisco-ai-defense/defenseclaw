@@ -19,8 +19,11 @@ package manager
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -36,7 +39,14 @@ func (m *Manager) loadRecords() error {
 	defer m.mu.Unlock()
 	for _, r := range recs {
 		if r.Owner != "" && r.Owner != m.opts.Owner {
-			continue
+			// The record is this data dir's (it lives in it), but the
+			// sandbox was created under another owner id: the owner lives
+			// in images.json, which was lost or replaced since. Skipping
+			// the record would let reconciliation revoke the running
+			// sandbox's binding and leave it beyond DefenseClaw's reach;
+			// it is managed under the owner its labels carry instead.
+			m.logf("sandbox %s was created under owner id %s, not this data dir's %s (was %s replaced?); "+
+				"DefenseClaw keeps managing it under %s", r.Name, r.Owner, m.opts.Owner, "sandboxes/images.json", r.Owner)
 		}
 		b := &box{rec: *r, seenChunks: map[string]struct{}{}, retained: r.Retained}
 		m.boxes[r.Name] = b
@@ -63,7 +73,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	if err != nil {
 		return err
 	}
-	sbs, err := gw.Client.ListSandboxes(ctx, m.managedSelector())
+	sbs, err := m.listManaged(ctx, gw)
 	if err != nil {
 		m.dropGateway(gw, err)
 		return err
@@ -84,6 +94,11 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		m.mu.Unlock()
 		if creating {
 			continue
+		}
+		if m.noteGateway(b, gw) {
+			if err := m.saveRecord(b); err != nil {
+				m.logf("save the record of %s: %v", sb.Name, err)
+			}
 		}
 		phase := auditPhase(sb.Status.Phase)
 		m.lifecycle(ctx, b, phase, audit.SandboxTriggerReconcile, startup, nil, sb.Status.ExitCode)
@@ -106,8 +121,9 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		}
 		// The list is a snapshot: a create may have finished, or a delete
 		// and a create of the same name, while this pass was listing. Only
-		// a sandbox OpenShell says is gone now is released.
-		if m.current(b) && m.goneNow(ctx, gw, b) {
+		// a sandbox OpenShell says is gone now is released, and only by
+		// the gateway and workspace it was created on.
+		if m.current(b) && m.goneNow(ctx, gw, b) && !m.gatewayElsewhere(ctx, gw, b) {
 			m.gc(ctx, gw, b)
 		}
 		b.op.Unlock()
@@ -168,6 +184,45 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	m.refreshEgress()
 	m.enforceAll(ctx)
 	return nil
+}
+
+// listManaged lists the sandboxes on gw that carry this data dir's labels:
+// its own owner's, and those of an earlier owner id a record was created
+// under (see loadRecords), limited to the names recorded under it, so a
+// sandbox of another data dir that still uses that id is never adopted.
+func (m *Manager) listManaged(ctx context.Context, gw *Gateway) ([]*openshell.Sandbox, error) {
+	earlier := map[string]map[string]bool{}
+	m.mu.Lock()
+	for name, b := range m.boxes {
+		if o := b.rec.Owner; o != "" && o != m.opts.Owner {
+			if earlier[o] == nil {
+				earlier[o] = map[string]bool{}
+			}
+			earlier[o][name] = true
+		}
+	}
+	m.mu.Unlock()
+	out, err := gw.Client.ListSandboxes(ctx, m.managedSelector())
+	if err != nil {
+		return nil, err
+	}
+	owners := make([]string, 0, len(earlier))
+	for o := range earlier {
+		owners = append(owners, o)
+	}
+	sort.Strings(owners)
+	for _, owner := range owners {
+		sbs, err := gw.Client.ListSandboxes(ctx, map[string]string{LabelManaged: "true", LabelOwner: owner})
+		if err != nil {
+			return nil, err
+		}
+		for _, sb := range sbs {
+			if earlier[owner][sb.Name] {
+				out = append(out, sb)
+			}
+		}
+	}
+	return out, nil
 }
 
 // goneNow asks OpenShell whether b's sandbox is gone (NotFound, or a
@@ -298,9 +353,71 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 		return
 	}
 	defer b.op.Unlock()
-	if m.current(b) && m.goneNow(ctx, gw, b) {
+	if m.current(b) && m.goneNow(ctx, gw, b) && !m.gatewayElsewhere(ctx, gw, b) {
 		m.gc(ctx, gw, b)
 	}
+}
+
+// gatewayElsewhere reports a sandbox created on another gateway
+// registration, endpoint or workspace than gw's: DefenseClaw followed the
+// CLI's active gateway to another one, say, or openshell.gateway changed.
+// Not finding it on gw proves nothing then, and releasing it would revoke
+// the binding and drop the snapshot of a sandbox that may still run. It is
+// marked missing and reported (once per place) instead.
+func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) bool {
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	where := gatewayMismatch(rec, gw)
+	m.mu.Lock()
+	changed := b.elsewhere != where
+	b.elsewhere = where
+	if where != "" {
+		b.missing = true
+	}
+	id := b.identity()
+	m.mu.Unlock()
+	if where == "" || !changed {
+		return where != ""
+	}
+	msg := "sandbox " + rec.Name + " was created on " + where + ", but DefenseClaw is connected to " +
+		gatewayPlace(gw.Name, gw.Endpoint, gw.Client.Workspace()) + "; it is not released while DefenseClaw is connected elsewhere"
+	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
+	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
+	return true
+}
+
+// gatewayMismatch describes where rec's sandbox was created when that is
+// not gw's gateway and workspace ("" when it is, or rec does not say).
+func gatewayMismatch(rec record, gw *Gateway) string {
+	ws := gw.Client.Workspace()
+	if (rec.Gateway == "" || rec.Gateway == gw.Name) && (rec.GatewayEndpoint == "" || rec.GatewayEndpoint == gw.Endpoint) &&
+		(rec.GatewayWorkspace == "" || rec.GatewayWorkspace == ws) {
+		return ""
+	}
+	return gatewayPlace(rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace)
+}
+
+// gatewayPlace names a gateway registration and workspace for a message.
+func gatewayPlace(name, endpoint, workspace string) string {
+	return fmt.Sprintf("gateway %s (%s, workspace %s)", firstNonEmpty(name, "-"), firstNonEmpty(endpoint, "-"), firstNonEmpty(workspace, "-"))
+}
+
+// noteGateway records where a sandbox found on gw lives, for a record
+// that does not say yet or that names another place (the registration was
+// renamed, say): it is evidently on gw. It reports whether the record
+// changed.
+func (m *Manager) noteGateway(b *box, gw *Gateway) bool {
+	ws := gw.Client.Workspace()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b.elsewhere = ""
+	if b.rec.Gateway == gw.Name && b.rec.GatewayEndpoint == gw.Endpoint && b.rec.GatewayWorkspace == ws {
+		return false
+	}
+	b.rec.Gateway, b.rec.GatewayEndpoint, b.rec.GatewayWorkspace = gw.Name, gw.Endpoint, ws
+	return true
 }
 
 // current reports whether b is still the live, settled box for its name.

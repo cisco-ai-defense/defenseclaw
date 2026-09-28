@@ -219,10 +219,14 @@ func TestWatcherEventsAndGC(t *testing.T) {
 	}
 }
 
-func TestRecordsSkipOtherOwners(t *testing.T) {
+// TestRecordsOfAnEarlierOwnerAreKept pins that a record the data dir holds
+// for a sandbox created under an earlier owner id (images.json, which
+// holds the owner, was lost since) is loaded with that owner, and an
+// unreadable one is skipped.
+func TestRecordsOfAnEarlierOwnerAreKept(t *testing.T) {
 	e := newEnv(t, nil)
 	rs := newRecordStore(e.dataDir)
-	if err := rs.save(&record{Name: "foreign", Owner: "ffffffffffffffff"}); err != nil {
+	if err := rs.save(&record{Name: "earlier", Owner: "ffffffffffffffff"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(e.dataDir, "sandboxes", "manager", "broken.json"), []byte("{"), 0o600); err != nil {
@@ -231,9 +235,36 @@ func TestRecordsSkipOtherOwners(t *testing.T) {
 	m := e.newManager()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.boxes) != 0 {
+	b := m.boxes["earlier"]
+	if len(m.boxes) != 1 || b == nil || m.ownerOf(b.rec) != "ffffffffffffffff" {
 		t.Fatalf("boxes = %v", m.boxes)
 	}
+}
+
+// TestSandboxesOfAnEarlierOwnerStayManaged pins that the sandboxes a data
+// dir created before its owner id changed stay DefenseClaw's: a reconcile
+// keeps their bindings, lists them, and a delete removes them and their
+// providers.
+func TestSandboxesOfAnEarlierOwnerStayManaged(t *testing.T) {
+	e := newEnv(t, nil)
+	ctx := context.Background()
+	e.create(sandboxapi.CreateRequest{Name: "oldowner"})
+	e.owner = "fedcba9876543210" // images.json was lost: a new owner id
+	e.m = e.newManager()
+	if err := e.m.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.Lookup("oldowner"); err != nil {
+		t.Fatalf("reconcile revoked the binding of the running sandbox: %v", err)
+	}
+	list, err := e.m.List(ctx)
+	if err != nil || len(list) != 1 || list[0].Name != "oldowner" || list[0].Phase != "ready" {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	if _, err := e.m.Delete(ctx, "oldowner", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	assertNothingLeft(t, e)
 }
 
 // TestGarbageCollectionSkipsReplacedBoxes pins that a reconcile pass that

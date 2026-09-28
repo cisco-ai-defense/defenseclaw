@@ -66,7 +66,11 @@ type box struct {
 	// (record.Retained, see retire): it has no binding, providers or
 	// credential, and only Get, Review, Undo and Delete apply to it.
 	retained bool
-	started  time.Time
+	// elsewhere says where a sandbox missing from the connected gateway
+	// was created, while that is another gateway or workspace
+	// (gatewayElsewhere): it is not released then.
+	elsewhere string
+	started   time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
@@ -438,6 +442,11 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
 		}
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
+	}
+	if b.elsewhere != "" {
+		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on "+b.elsewhere+
+			", not the gateway DefenseClaw is connected to; DefenseClaw keeps it until it connects there again (openshell.gateway), "+
+			"or until you delete it, which releases DefenseClaw's side only")
 	}
 	displaySafe(&v)
 	if b.unrecorded {

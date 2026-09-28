@@ -119,7 +119,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 // List returns every sandbox, refreshed from OpenShell when it is reachable.
 func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	if gw, err := m.gateway(ctx); err == nil {
-		if sbs, err := gw.Client.ListSandboxes(ctx, m.managedSelector()); err == nil {
+		if sbs, err := m.listManaged(ctx, gw); err == nil {
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
@@ -556,7 +556,15 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	var warnings []string
 	if gone {
-		warnings = append(warnings, "OpenShell no longer had sandbox "+name+" (or another sandbox took its name); DefenseClaw released what it held for it")
+		m.mu.Lock()
+		where := gatewayMismatch(b.rec, gw)
+		m.mu.Unlock()
+		if where != "" {
+			warnings = append(warnings, "sandbox "+name+" was created on "+where+", which DefenseClaw is not connected to; "+
+				"DefenseClaw released what it held for it, but the OpenShell sandbox and its providers there are left")
+		} else {
+			warnings = append(warnings, "OpenShell no longer had sandbox "+name+" (or another sandbox took its name); DefenseClaw released what it held for it")
+		}
 	} else {
 		// The watcher keeps running until the sandbox is gone: a delete that
 		// fails leaves it running, still watched and triaged.
