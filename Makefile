@@ -61,7 +61,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
@@ -692,8 +692,8 @@ cli-test: pycli
 cli-test-cov: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-cli-test-snap: pycli
-	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
+tui-test: pycli
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q
 
 gateway-test: sync-openclaw-extension
 	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v

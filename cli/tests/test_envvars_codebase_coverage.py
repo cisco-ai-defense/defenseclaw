@@ -117,10 +117,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
     "cli/tests/test_cmd_keys.py",
-    # TUI agent-TTY smoke harness: DEFENSECLAW_AGENT_TTY_TESTS /
-    # DEFENSECLAW_AGENT_TTY_BIN gate and parameterize a test-only PTY
-    # smoke check. Never read by shipped code.
-    "cli/tests/tui/test_agent_tty_smoke.py",
     # End-to-end harness scripts (developer-run, not shipped). They define
     # DEFENSECLAW_E2E_* knobs to drive throwaway stacks against real
     # providers; none are consumed by the gateway or CLI at runtime.

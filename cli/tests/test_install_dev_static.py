@@ -116,7 +116,7 @@ def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
     for target in (
         "cli-test",
         "cli-test-cov",
-        "cli-test-snap",
+        "tui-test",
         "py-connector-matrix-test",
         "test-verbose",
         "test-file",
