@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"text/template"
 )
 
 // hostHookGoldenPath pins the exact bytes and modes the host hook writers lay
@@ -260,13 +261,40 @@ func TestHostHookScriptBytesGolden(t *testing.T) {
 // read them because they cannot run the Go template.
 const bridgeHostTemplateDir = "testdata/bridge_host"
 
+// bridgeHostTemplateFields are the values setup renders into a plugin
+// bridge; the host template keeps each as its {{.Field}} placeholder.
+var bridgeHostTemplateFields = []string{
+	"APIAddr", "TokenFileJS", "FailMode", "HookSocketJS", "ServiceUID",
+	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS",
+}
+
+// renderBridgeHostTemplate resolves a bridge template's sandbox branches to
+// the host ones and leaves bridgeHostTemplateFields as placeholders. It
+// renders from a map because some fields (ServiceUID) are not strings in
+// templateData; a field missing from the list fails the render.
+func renderBridgeHostTemplate(asset string) ([]byte, error) {
+	content, err := hookFS.ReadFile("hooks/" + asset)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := template.New(asset).Option("missingkey=error").Parse(string(content))
+	if err != nil {
+		return nil, err
+	}
+	data := map[string]any{"Sandbox": false}
+	for _, field := range bridgeHostTemplateFields {
+		data[field] = "{{." + field + "}}"
+	}
+	var out bytes.Buffer
+	if err := tmpl.Execute(&out, data); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
 func TestBridgeHostTemplatesGolden(t *testing.T) {
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		got, err := renderHookTemplate(asset, templateData{
-			APIAddr:     "{{.APIAddr}}",
-			TokenFileJS: "{{.TokenFileJS}}",
-			FailMode:    "{{.FailMode}}",
-		})
+		got, err := renderBridgeHostTemplate(asset)
 		if err != nil {
 			t.Fatalf("render %s: %v", asset, err)
 		}
