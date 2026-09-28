@@ -23196,15 +23196,52 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
     }
+    # Idempotent-Install contract: AVC's Windows installer runs -Action Install
+    # unconditionally after its own preinstall has removed the machine-wide
+    # state. Refusing on an active deployment aborted a legitimate reinstall
+    # on hosts where metadata survived (see the AVC 5.1.21.3862 DART for the
+    # macOS twin). Reconciling in place instead lets the downstream $replaced
+    # artifact-hash rewrites, Assert-DefenseClawRecordedArtifactHashes, and
+    # priorCodexTargetEnabled preflight authenticate the existing deployment
+    # exactly the way Upgrade does; the only difference from Upgrade is that
+    # this run still respects Install's argument surface (-Config, -Manifest).
+    $reconcileInstall = $false
     if ($Action -eq 'Install') {
         if ($null -ne $metadata -and (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
-            throw 'DefenseClaw enterprise mode is already installed; use Upgrade or Repair'
+            # -DeferredConfig against an active deployment is unsafe under the
+            # reconcile-Install lane. The deferred flow stages placeholder
+            # config.yaml + targets.yaml, sets deferred_config_pending=$true,
+            # and skips service restart (see line ~22850 where -NoStart is OR'd
+            # with -DeferredConfig). Applied on top of an active deployment
+            # that reconcile-Install already stopped for atomic swap, the run
+            # completes with services stopped and placeholder policy — the
+            # endpoint is left broken with no automatic recovery. Refuse the
+            # combination and direct callers to Repair, which is the supported
+            # in-place policy-update surface. This is a uniform contract on
+            # every managed endpoint (not per-device handling): the same
+            # -Action Install -DeferredConfig invocation is refused everywhere
+            # a prior active deployment exists.
+            if ($DeferredConfig) {
+                throw (
+                    'refusing -DeferredConfig against an active DefenseClaw ' +
+                    'enterprise deployment; use -Action Repair to update ' +
+                    'policy in place, or -Action Uninstall -Purge before a ' +
+                    'deferred-config Install'
+                )
+            }
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                'DefenseClaw enterprise install: reconciling existing installation ' +
+                'in place (idempotent Install)'
+            )
+            $reconcileInstall = $true
         }
-        if ($null -ne $metadata) {
+        elseif ($null -ne $metadata) {
             # A process can die after committed uninstall transaction cleanup
             # but before its protected prepared journal is retired. The trusted
             # uninstall tombstone authorizes exact cleanup before a direct
             # reinstall opens any transaction or mutates services/hooks.
+            # This tombstone lane is orthogonal to the reconcile-Install case
+            # above; both must not fire from the same run.
             [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -23363,13 +23400,18 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -SnapshotPath $snapshot)
     $committedLifecycleRecovery = $null
     try {
-        if ($Action -eq 'Install' -and $null -ne $metadata) {
+        if ($Action -eq 'Install' -and $null -ne $metadata -and
+            -not $reconcileInstall) {
             # The inactive uninstall tombstone remains the authority for
             # exact-scope adoption until New-DefenseClawTransaction has
             # durably copied it. Retire it only inside that transaction so
             # the hidden requirements helper sees fresh-install state. A
             # failed reinstall restores the exact tombstone preimage; a
             # successful reinstall publishes new active metadata below.
+            #
+            # Skipped for reconcile-Install (metadata is active, not a
+            # tombstone). Remove-DefenseClawInactiveDeploymentMetadataForInstall
+            # otherwise refuses to adopt active metadata and aborts the run.
             Remove-DefenseClawInactiveDeploymentMetadataForInstall `
                 -Layout $Layout `
                 -Metadata $metadata `

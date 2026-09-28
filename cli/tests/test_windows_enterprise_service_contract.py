@@ -378,6 +378,129 @@ def test_public_installer_exposes_complete_truthful_lifecycle() -> None:
     assert "errors = @($failureMessage)" in installer
 
 
+def test_enterprise_module_install_is_idempotent_over_active_metadata() -> None:
+    """AVC's Windows installer runs -Action Install unconditionally after its
+    own preinstall has removed machine-wide state. Refusing on a still-present
+    active deployment aborted a legitimate reinstall on hosts where metadata
+    survived (see the AVC 5.1.21.3862 DART for the macOS twin). The psm1 must
+    reconcile in place: emit the reconcile warning and drive the same
+    downstream artifact-hash rewrites Upgrade does, without touching the
+    inactive-metadata tombstone lane (which refuses to adopt active metadata
+    and would abort the run)."""
+    body = read(MODULE)
+
+    # Old refusal must NOT reappear.
+    assert (
+        "'DefenseClaw enterprise mode is already installed; use Upgrade or Repair'"
+        not in body
+    ), "idempotent-Install regression: the pre-reconcile refusal string is back"
+    assert (
+        "throw 'DefenseClaw enterprise mode is already installed" not in body
+    ), "idempotent-Install regression: any throw of the already-installed text"
+
+    # Reconcile branch must be present.
+    assert "reconciling existing installation" in body, (
+        "psm1 must emit the reconcile warning when Install runs over active metadata"
+    )
+    assert "$reconcileInstall = $false" in body, (
+        "reconcile-Install selector must be declared before the Install/Upgrade dispatch"
+    )
+    assert "$reconcileInstall = $true" in body, (
+        "reconcile-Install selector must be flipped when metadata is installed"
+    )
+    assert "-not $reconcileInstall" in body, (
+        "inactive-metadata tombstone adoption must be gated on -not $reconcileInstall so "
+        "it never fires under reconcile-Install"
+    )
+
+    # -DeferredConfig against an active deployment leaves services stopped
+    # and placeholder policy on disk (see reconcile-Install throw in the psm1).
+    # The refusal must live INSIDE the reconcile branch so a fresh install can
+    # still legitimately use -DeferredConfig.
+    assert "refusing -DeferredConfig against an active DefenseClaw" in body, (
+        "reconcile-Install must refuse -DeferredConfig combined with active metadata"
+    )
+
+    # Structural: verify branch ownership directly — the reconcile clause must
+    # hold the $reconcileInstall = $true assignment AND the DeferredConfig
+    # refusal, and its elseif clause must hold the tombstone-teardown call.
+    # Anchor the search inside an `if ($Action -eq 'Install')` block so a
+    # future refactor cannot silently move the reconcile branch under a
+    # different action (Upgrade / Repair / Reconcile) and keep the tests
+    # green while Install regresses to the old throw.
+    # The public lifecycle has multiple `if ($Action -eq 'Install')` sites; the
+    # one that carries the reconcile branch is the one whose body gates on
+    # Test-DefenseClawMetadataInstalled. Walk each candidate with a balanced-
+    # brace scan so nested `{...}` blocks (there are many in the Install body)
+    # don't confuse a naïve regex.
+    install_body = None
+    for m in re.finditer(
+        r"if\s*\(\s*\$Action\s+-eq\s+'Install'\s*\)\s*\{",
+        body,
+    ):
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(body) and depth > 0:
+            ch = body[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            i += 1
+        candidate = body[start:i - 1]
+        if "Test-DefenseClawMetadataInstalled" in candidate:
+            install_body = candidate
+            break
+    assert install_body is not None, (
+        "psm1 must contain an `if ($Action -eq 'Install')` block whose body "
+        "gates on Test-DefenseClawMetadataInstalled — reconcile-Install must "
+        "be bound to the Install dispatch, not siphoned to another action"
+    )
+
+    branch = re.search(
+        r"""if\s*\(
+            \s*\$null\s+-ne\s+\$metadata\s+-and\s+
+            \(\s*Test-DefenseClawMetadataInstalled\s+-Metadata\s+\$metadata\s*\)\s*
+        \)\s*\{
+            (?P<reconcile>(?:[^{}]|\{[^{}]*\})*)
+        \}\s*
+        elseif\s*\(\s*\$null\s+-ne\s+\$metadata\s*\)\s*\{
+            (?P<tombstone>(?:[^{}]|\{[^{}]*\})*)
+        \}""",
+        install_body,
+        re.S | re.X,
+    )
+    assert branch is not None, (
+        "the `if ($Action -eq 'Install')` block must have an if/elseif pair "
+        "rooted at `if ($null -ne $metadata -and "
+        "(Test-DefenseClawMetadataInstalled ...))` followed by "
+        "`elseif ($null -ne $metadata)` — reconcile-Install and "
+        "tombstone-teardown must be sibling clauses of the same construct, "
+        "and that construct must live inside the Install dispatch"
+    )
+    reconcile_clause = branch.group("reconcile")
+    tombstone_clause = branch.group("tombstone")
+    assert "$reconcileInstall = $true" in reconcile_clause, (
+        "reconcile clause must flip $reconcileInstall to $true"
+    )
+    assert (
+        "refusing -DeferredConfig against an active DefenseClaw" in reconcile_clause
+    ), "reconcile clause must contain the -DeferredConfig refusal"
+    assert "reconciling existing installation" in reconcile_clause, (
+        "reconcile clause must emit the reconcile-in-place warning"
+    )
+    assert (
+        "Remove-DefenseClawCommittedManagedHooksTeardownJournal" in tombstone_clause
+    ), (
+        "tombstone-teardown call must live in the elseif ($null -ne $metadata) "
+        "clause (fires only for a tombstone, never for active metadata)"
+    )
+    assert "$reconcileInstall = $true" not in tombstone_clause, (
+        "reconcile-Install selector must never be flipped in the tombstone clause"
+    )
+
+
 def test_public_windows_lifecycle_cli_preserves_every_security_option() -> None:
     source = read(WINDOWS_LIFECYCLE_CLI)
 

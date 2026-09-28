@@ -260,25 +260,58 @@ forget_install_temporary() {
   done
 }
 
+# _RECONCILE_REINSTALL flips to "true" in the reconcile-preflight block
+# below when this run is reinstalling over an existing DefenseClaw
+# machine-wide install. It is the ONLY signal the file-writing helpers use
+# to decide between "no destination expected" (fresh install → refuse any
+# ambient state) and "destination is one we own and are replacing"
+# (reconcile → atomic mv). Symlinks are refused in both modes; the
+# concurrent-installer guard (`ln` failure) is preserved on the fresh
+# path.
+_RECONCILE_REINSTALL="false"
+
 install_file_no_replace() {
   local source="$1" destination="$2" owner="$3" group="$4" mode="$5"
   local temporary
-  [[ ! -e "${destination}" && ! -L "${destination}" ]] \
-    || die "install destination appeared after fresh-host preflight: ${destination}"
+  if [[ -L "${destination}" ]]; then
+    die "install destination is a symlink; refusing to overwrite: ${destination}"
+  fi
+  if [[ -e "${destination}" && "${_RECONCILE_REINSTALL}" != "true" ]]; then
+    die "install destination appeared after fresh-host preflight: ${destination}"
+  fi
   temporary="$(mktemp "${destination}.new.XXXXXX")" \
     || die "could not reserve a private install file beside ${destination}"
   INSTALL_TEMP_FILES+=("${temporary}")
   install -o "${owner}" -g "${group}" -m "${mode}" "${source}" "${temporary}"
-  ln "${temporary}" "${destination}" \
-    || die "install destination appeared concurrently and was preserved: ${destination}"
-  rm -f -- "${temporary}"
+  if [[ -e "${destination}" ]]; then
+    # Reconcile branch: replace the DefenseClaw-owned file atomically.
+    # rename(2) inside the same directory is a metadata swap the observer
+    # sees as either the old or new file, never partial.
+    /bin/mv -f -- "${temporary}" "${destination}" \
+      || die "could not atomically replace ${destination}"
+  else
+    ln "${temporary}" "${destination}" \
+      || die "install destination appeared concurrently and was preserved: ${destination}"
+    rm -f -- "${temporary}"
+  fi
   forget_install_temporary "${temporary}"
 }
 
 create_install_directory_no_replace() {
   local path="$1" owner="$2" group="$3" mode="$4"
-  [[ ! -e "${path}" && ! -L "${path}" ]] \
-    || die "install directory appeared after fresh-host preflight: ${path}"
+  if [[ -L "${path}" ]]; then
+    die "install directory is a symlink; refusing to adopt: ${path}"
+  fi
+  if [[ -e "${path}" ]]; then
+    if [[ "${_RECONCILE_REINSTALL}" != "true" ]]; then
+      die "install directory appeared after fresh-host preflight: ${path}"
+    fi
+    [[ -d "${path}" ]] \
+      || die "install directory path exists and is not a directory: ${path}"
+    chown "${owner}:${group}" "${path}"
+    chmod "${mode}" "${path}"
+    return 0
+  fi
   mkdir "${path}" \
     || die "install directory appeared concurrently and was preserved: ${path}"
   chown "${owner}:${group}" "${path}"
@@ -299,11 +332,11 @@ trust_strict_ancestors() {
   esac
 }
 
-# Mirrors managed.PlatformInstallerOwnedPath: only /opt/cisco and below is
-# ACLed by the Cisco Secure Client installer, so only there does a permission
-# verdict become an advisory. /opt itself has no other claimant, and the Go
-# trust walk in the gateway treats it the same way, so relaxing it here would
-# only move the failure from install time to first load.
+# Mirrors managed.PlatformInstallerOwnedPath: /opt/cisco and /Library/Logs/Cisco
+# are ACLed by the Cisco Secure Client installer, so a permission verdict on
+# those paths is always advisory. Kept as a named predicate rather than folded
+# into the caller because the Go-side twin (managed.PlatformInstallerOwnedPath)
+# uses the same list — grep-parity matters for future audits.
 platform_installer_owned_path() {
   local path="$1"
   case "${path}" in
@@ -312,13 +345,39 @@ platform_installer_owned_path() {
   esac
 }
 
+# install_time_ancestor_advisory: permission-shaped drift on ANY ancestor
+# above a DefenseClaw-owned path is advisory during install. AVC 5.1.21.3862
+# regression: postinstall re-runs this script after preinstall has already
+# removed machine-wide state, and refusing on a drifted /opt or a shared
+# /Library/Logs/Cisco leaf permission left the host with no gateway at all.
+# We do not own /opt (or /Library/Logs/Cisco); the Go trust walk in the
+# gateway is symmetric — see managed.TrustStrictAncestorsEnv — and downgrades
+# the same verdicts at first load. Structural drift (missing element,
+# symlink, wrong type, unable to inspect) stays fatal at every element.
+install_time_ancestor_advisory() {
+  local path="$1"
+  # Every ancestor of INSTALL_PREFIX, LOGS_DIR, or a platform-installer-owned
+  # path qualifies. Trailing slashes are stripped for the comparison so a
+  # marker value like "/opt/cisco/secureclient" matches ancestors "/opt" and
+  # "/opt/cisco" as well as "/opt/cisco/secureclient".
+  local marker
+  for marker in "${INSTALL_PREFIX:-}" "${LOGS_DIR:-}" /opt/cisco /Library/Logs/Cisco; do
+    marker="${marker%/}"
+    [[ -n "${marker}" ]] || continue
+    case "${marker}/" in
+      "${path%/}"/*) return 0 ;;
+    esac
+  done
+  platform_installer_owned_path "${path}"
+}
+
 trust_ancestor_verdict() {
   local path="$1"
   local reason="$2"
-  if trust_strict_ancestors || ! platform_installer_owned_path "${path}"; then
+  if trust_strict_ancestors || ! install_time_ancestor_advisory "${path}"; then
     die "${reason}"
   fi
-  warn "managed_trust_ancestor_advisory: ${reason}; continuing (permissions are owned by the platform installer)"
+  warn "managed_trust_ancestor_advisory: ${reason}; continuing (install-time ancestor permissions are advisory)"
 }
 
 ensure_shared_install_parent() {
@@ -369,7 +428,7 @@ Usage: sudo $0 [options]
 Gateway options:
   --mode {observe|action}   Guardrail + asset_policy mode (default: ${DEFAULT_MODE})
   --connector LIST          Hook connector(s), comma-separated (default: ${DEFAULT_CONNECTOR})
-                            Supported: amp, codex, claudecode, cursor, opencode
+                            Supported: amp, codex, claudecode, cursor
                             Examples: --connector amp
                                       --connector amp,cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
@@ -469,7 +528,7 @@ PRIMARY_CONNECTOR="${CONNECTORS[0]}"
 
 for c in "${CONNECTORS[@]}"; do
   if ! is_supported_connector "${c}"; then
-    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor|opencode); will be written to config but per-user hooks won't be auto-wired"
+    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
 
@@ -546,74 +605,239 @@ if [[ -n "${AGENT_VERSION}" ]]; then
   AGENT_VERSION=""
 fi
 
-# This bundle is a fresh-install surface, not an updater.  Refuse an
-# existing consumer, legacy-managed, or current-managed installation before
-# building a replacement binary, unloading launchd, or writing any installed
-# path.  In-place changes must be driven by a release-owned staged upgrader so
-# the 0.8.4 controller bridge and rollback contract cannot be bypassed.
-_existing_install_markers=(
+# Idempotent-reinstall contract (managed_enterprise): this installer is
+# designed to be run repeatedly against a managed host without needing an
+# out-of-band uninstall/upgrade path. The refuse-on-existing behavior
+# that used to live here (a die() on any marker, including a stray
+# ~/.defenseclaw or ~/.local/bin/defenseclaw in any local account) left
+# drifted hosts stuck — AVC's postinstall re-runs this script
+# unconditionally after its own preinstall has already removed
+# machine-wide state, and a stray per-user file from a prior run was
+# aborting a legitimate reinstall (see the AVC 5.1.21.3862 DART).
+#
+# Reinstall reconciles machine-wide state this installer owns (gateway
+# binary, config.yaml, plists, launchd bootstrap, hook-guardian manifest
+# and state dir, LOGS_DIR). It never touches per-user ~/.defenseclaw
+# (the hook-guardian owns per-user reconciliation on its 60 s tick),
+# never touches RUNTIME_DIR data (audit.db, judge_bodies.db, device.key,
+# hook-guardian-state), and enumerates per-user consumer markers
+# strictly for install.log forensics.
+_current_managed_markers=(
   "${INSTALL_PREFIX}"
   "${LOGS_DIR}"
   "${PLIST_DST}"
   "${GUARDIAN_PLIST_DST}"
   "${ENUMERATOR_PLIST_DST}"
+)
+_legacy_managed_paths=(
   "${LEGACY_INSTALL_PREFIX}"
   "${LEGACY_SUPPORT_DIR}"
   "${LEGACY_LOGS_DIR}"
   "${LEGACY_PLIST_DST}"
   "${LEGACY_GUARDIAN_PLIST_DST}"
 )
+_current_launchd_labels=(
+  "${LAUNCHD_LABEL}"
+  "${GUARDIAN_LAUNCHD_LABEL}"
+  "${ENUMERATOR_LAUNCHD_LABEL}"
+)
+_legacy_launchd_labels=(
+  "${LEGACY_LAUNCHD_LABEL}"
+  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}"
+)
+
+for _marker in "${_current_managed_markers[@]}"; do
+  if [[ -e "${_marker}" || -L "${_marker}" ]]; then
+    _RECONCILE_REINSTALL="true"
+    break
+  fi
+done
+if [[ "${_RECONCILE_REINSTALL}" != "true" ]]; then
+  for _label in "${_current_launchd_labels[@]}"; do
+    if launchctl print "system/${_label}" >/dev/null 2>&1; then
+      _RECONCILE_REINSTALL="true"
+      break
+    fi
+  done
+fi
+
+if [[ "${_RECONCILE_REINSTALL}" == "true" ]]; then
+  log "reconciling existing DefenseClaw installation in place (idempotent reinstall)"
+else
+  log "fresh managed_enterprise install (no existing markers detected)"
+fi
+
+# Enumerate per-user consumer markers strictly for install.log
+# forensics. The hook-guardian daemon owns the per-user reconcile
+# loop, so we do NOT delete these — the guardian will pick them up
+# after the machine-wide reinstall lands.
+if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  # A system-wide managed daemon interacts with a consumer gateway in any
+  # account, including an account other than --user/SUDO_USER. Always
+  # enumerate every local account's configured home instead of assuming
+  # /Users/<name>. dscl failure is not fatal in reconcile mode: the
+  # guardian's 60 s tick still reconciles per-user hook wiring even
+  # without an install-time enumeration.
+  _local_users="$(dscl . -list /Users 2>/dev/null || true)"
+  if [[ -z "${_local_users}" ]]; then
+    warn "could not enumerate local users via dscl; per-user hook wiring will still be reconciled by the guardian on its 60s tick"
+  else
+    while IFS= read -r _local_user; do
+      [[ -n "${_local_user}" ]] || continue
+      _candidate_home="$(dscl . -read "/Users/${_local_user}" NFSHomeDirectory 2>/dev/null \
+        | sed -n 's/^NFSHomeDirectory: //p')"
+      [[ -n "${_candidate_home}" ]] || continue
+      for _u_marker in \
+        "${_candidate_home}/.defenseclaw" \
+        "${_candidate_home}/.local/bin/defenseclaw" \
+        "${_candidate_home}/.local/bin/defenseclaw-gateway" \
+        "${_candidate_home}/.local/bin/defenseclaw-acp"; do
+        if [[ -e "${_u_marker}" || -L "${_u_marker}" ]]; then
+          log "  (informational) per-user artifact present, will be reconciled by hook-guardian: ${_u_marker}"
+        fi
+      done
+    done <<< "${_local_users}"
+  fi
+fi
+if [[ -n "${TARGET_HOME}" ]]; then
+  for _u_marker in \
+    "${TARGET_HOME}/.defenseclaw" \
+    "${TARGET_HOME}/.local/bin/defenseclaw" \
+    "${TARGET_HOME}/.local/bin/defenseclaw-gateway" \
+    "${TARGET_HOME}/.local/bin/defenseclaw-acp"; do
+    if [[ -e "${_u_marker}" || -L "${_u_marker}" ]]; then
+      log "  (informational) per-user artifact present in --target-home, will be reconciled by hook-guardian: ${_u_marker}"
+    fi
+  done
+fi
+
+# Package-manager / custom-PATH residue (Homebrew, /usr/local/bin,
+# user-installed pip wheels). Same treatment as per-user markers: log,
+# don't die. Uninstall.sh cleans these up on the reverse path.
 if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
   for _installed_command in defenseclaw defenseclaw-gateway defenseclaw-acp; do
     _installed_command_path="$(command -v "${_installed_command}" 2>/dev/null || true)"
-    [[ -n "${_installed_command_path}" ]] \
-      && _existing_install_markers+=("${_installed_command_path}")
+    if [[ -n "${_installed_command_path}" ]]; then
+      log "  (informational) prior ${_installed_command} on PATH: ${_installed_command_path}"
+    fi
   done
 fi
-if [[ -n "${TARGET_HOME}" ]]; then
-  _existing_install_markers+=(
-    "${TARGET_HOME}/.defenseclaw"
-    "${TARGET_HOME}/.local/bin/defenseclaw"
-    "${TARGET_HOME}/.local/bin/defenseclaw-gateway"
-    "${TARGET_HOME}/.local/bin/defenseclaw-acp"
-  )
-fi
-if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
-  # A system-wide managed daemon would contend with a consumer gateway in any
-  # account, including an account other than --user/SUDO_USER. Always enumerate
-  # every local account's configured home instead of assuming /Users/<name>.
-  _local_users="$(dscl . -list /Users 2>/dev/null)" \
-    || die "could not enumerate local users to prove this is a fresh DefenseClaw host; no changes were made"
-  while IFS= read -r _local_user; do
-    [[ -n "${_local_user}" ]] || continue
-    _candidate_home="$(dscl . -read "/Users/${_local_user}" NFSHomeDirectory 2>/dev/null \
-      | sed -n 's/^NFSHomeDirectory: //p')"
-    [[ -n "${_candidate_home}" ]] || continue
-    _existing_install_markers+=(
-      "${_candidate_home}/.defenseclaw"
-      "${_candidate_home}/.local/bin/defenseclaw"
-      "${_candidate_home}/.local/bin/defenseclaw-gateway"
-      "${_candidate_home}/.local/bin/defenseclaw-acp"
-    )
-  done <<< "${_local_users}"
-fi
-for _marker in "${_existing_install_markers[@]}"; do
-  if [[ -e "${_marker}" || -L "${_marker}" ]]; then
-    die "existing DefenseClaw installation detected at ${_marker}; no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner. Do not uninstall or overwrite state to force the upgrade."
+
+# launchd_bootout_until_gone label
+#
+# Bootout the given system-domain launchd label and verify it's actually
+# gone before returning. Some Cisco Secure Client components re-bootstrap
+# DefenseClaw's plist on disk shortly after we tear it down (the plist
+# file is still present at this point — we haven't rewritten it yet),
+# and a back-to-back reinstall can race an external supervisor into
+# reappearing the label ~1 s after our initial bootout returned success.
+# Retry a few times with short sleeps so the caller can rely on the
+# post-condition "label is unloaded".
+#
+# Prints one log line per retry. Never dies; the caller checks return.
+# Returns 0 if the label is gone after the retry budget, non-zero if it
+# is still loaded (indicating something is actively re-registering it).
+launchd_bootout_until_gone() {
+  local _label="$1" _tries=0 _max=6
+  # Require _quiet_target consecutive "absent" probes ~0.5 s apart before
+  # returning success. A supervisor may re-register the plist a beat
+  # after our bootout returned; the initial absence probe would be a
+  # false positive (the label was momentarily gone) and the caller's
+  # file mutation would then race the re-registration. Two consecutive
+  # absent probes prove the label is stably gone through the observed
+  # re-registration delay.
+  local _quiet_target=2
+  while (( _tries < _max )); do
+    local _p=0 _seen_present=false
+    while (( _p < _quiet_target )); do
+      if launchctl print "system/${_label}" >/dev/null 2>&1; then
+        _seen_present=true
+        break
+      fi
+      (( _p++ ))
+      sleep 0.5
+    done
+    if [[ "${_seen_present}" == "false" ]]; then
+      return 0
+    fi
+    if (( _tries > 0 )); then
+      log "  re-bootout attempt ${_tries} for ${_label} (something re-registered it after quiesce)"
+    fi
+    launchctl bootout "system/${_label}" >/dev/null 2>&1 || true
+    (( _tries++ ))
+    sleep 0.5
+  done
+  # Final probe with the retry budget exhausted.
+  launchctl print "system/${_label}" >/dev/null 2>&1 && return 1 || return 0
+}
+
+# Unload current-generation launchd jobs BEFORE writing plists and
+# binaries. Without this the later `launchctl bootstrap system` races
+# an already-loaded job, and even in the racing-doesn't-lose case the
+# running daemon holds an open file descriptor on the old binary —
+# unloading now guarantees the atomic-replace hits a quiescent target.
+# The retry helper handles a supervisor re-bootstrapping the plist
+# behind our back on a back-to-back reinstall.
+#
+# Match each bootout to the bootstrap path this run will actually
+# execute. Without this gate, a reconcile with --skip-launchd would
+# stop every current-gen job and exit at the SKIP_LAUNCHD short-circuit
+# below without re-bootstrapping anything; a reconcile with
+# --skip-connector would stop guardian/enumerator whose bootstrap sits
+# inside the SKIP_CONNECTOR block. Preserve a loaded job when the
+# matching restart path won't run — the operator's running services
+# stay running through a partial install.
+for _label in "${_current_launchd_labels[@]}"; do
+  if ! launchctl print "system/${_label}" >/dev/null 2>&1; then
+    continue
   fi
+  case "${_label}" in
+    "${LAUNCHD_LABEL}")
+      # Gateway is bootstrapped at the end of this script unless
+      # SKIP_LAUNCHD.
+      if [[ "${SKIP_LAUNCHD}" == "true" ]]; then
+        log "preserving loaded ${_label} (--skip-launchd will skip its restart)"
+        continue
+      fi
+      ;;
+    "${GUARDIAN_LAUNCHD_LABEL}"|"${ENUMERATOR_LAUNCHD_LABEL}")
+      # Guardian/enumerator bootstrap sits inside the SKIP_CONNECTOR
+      # block, which itself only runs when SKIP_LAUNCHD is off (the
+      # SKIP_LAUNCHD short-circuit exits before it).
+      if [[ "${SKIP_LAUNCHD}" == "true" || "${SKIP_CONNECTOR}" == "true" ]]; then
+        log "preserving loaded ${_label} (--skip-launchd/--skip-connector will skip its restart)"
+        continue
+      fi
+      ;;
+  esac
+  log "unloading current launchd job for reinstall: ${_label}"
+  launchd_bootout_until_gone "${_label}" \
+    || warn "launchctl bootout system/${_label} failed after retries; bootstrap below may still surface a real failure"
 done
-for _label in \
-  "${LAUNCHD_LABEL}" \
-  "${GUARDIAN_LAUNCHD_LABEL}" \
-  "${ENUMERATOR_LAUNCHD_LABEL}" \
-  "${LEGACY_LAUNCHD_LABEL}" \
-  "${LEGACY_GUARDIAN_LAUNCHD_LABEL}"; do
-  if launchctl print "system/${_label}" >/dev/null 2>&1; then
-    die "existing DefenseClaw launchd job detected (${_label}); no changes were made. This installer is fresh-install-only. Use the release-owned staged upgrade path for that deployment; if no managed-enterprise staged upgrader is published, remain on the current version and contact the deployment owner."
-  fi
-done
-unset _existing_install_markers _marker _label _local_users _local_user _candidate_home \
-  _installed_command _installed_command_path
+
+# Legacy launchd cleanup: unload pre-Cisco-path labels only on the
+# reconcile path. Under fresh install, a loaded legacy job means the
+# host has legacy on-disk state (legacy plists at ${LEGACY_PLIST_DST}
+# and ${LEGACY_GUARDIAN_PLIST_DST}) that the pre-mutation boundary
+# below will reject with die(). Booting the legacy job out first would
+# just leave the operator with a stopped legacy service AND a rejected
+# install with no recovery. Under reconcile, current-gen plists will
+# supersede the legacy plists further down, so bootout here is safe.
+# Legacy bootout is also gated on the same SKIP flags as its current-
+# gen counterparts — we never stop a service we won't replace.
+if [[ "${_RECONCILE_REINSTALL}" == "true" && "${SKIP_LAUNCHD}" != "true" ]]; then
+  for _label in "${_legacy_launchd_labels[@]}"; do
+    if launchctl print "system/${_label}" >/dev/null 2>&1; then
+      log "unloading legacy launchd job: ${_label}"
+      launchd_bootout_until_gone "${_label}" \
+        || warn "launchctl bootout system/${_label} failed after retries; legacy plist will be superseded below"
+    fi
+  done
+fi
+
+unset _current_managed_markers _legacy_managed_paths _current_launchd_labels \
+  _legacy_launchd_labels _marker _label _local_users _local_user \
+  _candidate_home _u_marker _installed_command _installed_command_path
 
 # Resolve the binary. Lookup order matches PLIST_SRC:
 #   1. --binary                              (explicit override)
@@ -660,9 +884,21 @@ else
 fi
 [[ -x "${ACP_BINARY_SRC}" ]] || die "ACP guard not found or not executable: ${ACP_BINARY_SRC}"
 
-# Repeat the launchd/path boundary immediately before mutation. A deployment
-# that appears after the first preflight belongs to the concurrent installer;
-# never boot it out or remove its plist.
+# Repeat the launchd/path boundary immediately before mutation.
+#
+# Under reconcile the current-generation labels were booted out just
+# above, and this second check catches an external supervisor
+# (typically Cisco Secure Client's watchdog) that re-bootstrapped the
+# plist behind our back during the local build / binary resolution
+# window. We ATTEMPT re-bootout here rather than dying immediately —
+# back-to-back reinstalls are a supported flow and dying breaks it —
+# but if the label survives the retry budget, something is actively
+# re-registering it and we cannot bootstrap on top; die with an
+# actionable message so the operator can find the supervisor.
+#
+# Under fresh-install both the label and any of its plist files
+# reappearing means a concurrent installer raced us during the local
+# build — still fatal.
 for _lbl_plist in \
   "${LAUNCHD_LABEL}:${PLIST_DST}" \
   "${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}" \
@@ -672,10 +908,18 @@ for _lbl_plist in \
   _lbl="${_lbl_plist%%:*}"
   _plist="${_lbl_plist#*:}"
   if launchctl print "system/${_lbl}" >/dev/null 2>&1; then
-    die "DefenseClaw launchd job appeared after fresh-host preflight and was preserved: ${_lbl}"
+    if [[ "${_RECONCILE_REINSTALL}" == "true" ]]; then
+      log "  ${_lbl} reappeared after quiesce; re-bootout before mutation"
+      launchd_bootout_until_gone "${_lbl}" \
+        || die "DefenseClaw launchd job ${_lbl} keeps re-registering after quiesce; a supervisor (e.g. Cisco Secure Client watchdog) is holding it. Stop that supervisor, remove the on-disk plist at ${_plist}, or run the install again after a short pause."
+    else
+      die "DefenseClaw launchd job appeared after quiesce and was preserved: ${_lbl}"
+    fi
   fi
-  [[ ! -e "${_plist}" && ! -L "${_plist}" ]] \
-    || die "DefenseClaw plist appeared after fresh-host preflight and was preserved: ${_plist}"
+  if [[ "${_RECONCILE_REINSTALL}" != "true" ]]; then
+    [[ ! -e "${_plist}" && ! -L "${_plist}" ]] \
+      || die "DefenseClaw plist appeared after fresh-host preflight and was preserved: ${_plist}"
+  fi
 done
 unset _lbl_plist _lbl _plist
 
@@ -724,12 +968,81 @@ create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
 POLICIES_DST="${RUNTIME_DIR}/policies"
 create_install_directory_no_replace "${POLICIES_DST}" root wheel 0750
 log "installing guardrail rule packs -> ${POLICIES_DST}/guardrail"
-# cp -R + explicit chown/chmod: we don't have install_dir_no_replace for
-# a whole tree, and RUNTIME_DIR itself is already 0750 root:wheel.
-cp -R "${POLICIES_SRC}/guardrail" "${POLICIES_DST}/guardrail"
-chown -R root:wheel "${POLICIES_DST}/guardrail"
-find "${POLICIES_DST}/guardrail" -type d -exec chmod 0750 {} +
-find "${POLICIES_DST}/guardrail" -type f -exec chmod 0640 {} +
+# Stage the replacement rule-pack tree in a sibling directory and swap
+# atomically so the gateway is never left with a partially-copied
+# policy tree if cp fails mid-copy (macOS cp(1) can leave a partial
+# destination on I/O error) and so the old tree is available for
+# rollback until the new one is in place.
+#
+# The rule-pack tree carries no operator state — it's fully re-rendered
+# from the shipped bundle every install — so wholesale replacement is
+# safe. A pre-existing symlink at the destination path is refused: it
+# can only get there via privileged tampering.
+if [[ -L "${POLICIES_DST}/guardrail" ]]; then
+  die "guardrail policies destination is a symlink; refusing to overwrite: ${POLICIES_DST}/guardrail"
+fi
+_guardrail_stage="${POLICIES_DST}/guardrail.new"
+# Unique-per-run rescue path. Rationale: a prior invocation whose swap
+# succeeded but whose gateway startup was NOT verified (--skip-launchd,
+# aborted run, or a doubly-broken swap+rollback) leaves its rescue
+# tree at `${POLICIES_DST}/guardrail.old-<its pid>-<its ts>/`. If we
+# reused a single `.old` path here, the next live-to-old mv would
+# overwrite that prior baseline with the (possibly bad) current live
+# tree — losing the last-known-good copy. A fresh path per run means
+# any accumulated rescue trees survive intact through this swap and
+# are all cleaned in a single sweep after wait_for_launchd_running
+# succeeds — i.e., only once verified startup confirms the freshly-
+# published rule packs actually work.
+_guardrail_old="${POLICIES_DST}/guardrail.old-$$-$(date +%Y%m%d%H%M%S)"
+# Clean stray staging from an aborted prior install. Any `.old-*`
+# trees present are prior rescue baselines and are DELIBERATELY not
+# touched here — they're cleaned by the post-verification sweep
+# further down, after the freshly-published tree has proven to boot
+# the gateway. `_guardrail_stage` is always safe to wipe.
+rm -rf -- "${_guardrail_stage}"
+cp -R "${POLICIES_SRC}/guardrail" "${_guardrail_stage}" \
+  || { rm -rf -- "${_guardrail_stage}"; die "could not stage guardrail rule packs at ${_guardrail_stage}"; }
+chown -R root:wheel "${_guardrail_stage}"
+find "${_guardrail_stage}" -type d -exec chmod 0750 {} +
+find "${_guardrail_stage}" -type f -exec chmod 0640 {} +
+# Sanity-check the staged tree before touching the running tree. The
+# `default/` profile is required by the gateway's cold-start sidecar
+# init (see internal/config/config.go:3573). A cp that ended with an
+# I/O error would leave a tree without it.
+if [[ ! -d "${_guardrail_stage}/default" ]]; then
+  rm -rf -- "${_guardrail_stage}"
+  die "staged guardrail rule packs are missing the required default profile at ${_guardrail_stage}/default; refusing to swap"
+fi
+# Move any existing tree aside first, then move the staged tree into
+# place. Both moves are atomic rename(2) calls within the same parent
+# directory. If the second move fails, restore the old tree so the
+# gateway keeps its working rule packs.
+if [[ -e "${POLICIES_DST}/guardrail" ]]; then
+  /bin/mv -f -- "${POLICIES_DST}/guardrail" "${_guardrail_old}" \
+    || { rm -rf -- "${_guardrail_stage}"; die "could not move current guardrail tree aside at ${POLICIES_DST}/guardrail"; }
+fi
+if ! /bin/mv -f -- "${_guardrail_stage}" "${POLICIES_DST}/guardrail"; then
+  # Best-effort rollback so the gateway keeps its working rule packs.
+  # If the rollback ALSO fails, do NOT swallow it — the previous tree
+  # survives only at ${_guardrail_old} and the operator needs the
+  # explicit path so they can either restore it by hand OR know that
+  # the next install must not delete it. The next install's top-of-
+  # block guard above preserves ${_guardrail_old} whenever the live
+  # destination is missing, exactly for this recovery path.
+  if [[ -d "${_guardrail_old}" ]]; then
+    if ! /bin/mv -f -- "${_guardrail_old}" "${POLICIES_DST}/guardrail"; then
+      rm -rf -- "${_guardrail_stage}"
+      die "could not publish new guardrail tree at ${POLICIES_DST}/guardrail and could not restore previous tree; previous rule packs are preserved at ${_guardrail_old}"
+    fi
+  fi
+  rm -rf -- "${_guardrail_stage}"
+  die "could not publish new guardrail tree at ${POLICIES_DST}/guardrail"
+fi
+# Rescue tree cleanup is DEFERRED to after wait_for_launchd_running
+# succeeds — see the sweep below the gateway-up probe. Removing
+# ${_guardrail_old} here would strand the operator without a rollback
+# path if the gateway then fails to start with the new rule packs.
+unset _guardrail_stage
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy
@@ -786,8 +1099,17 @@ if [[ "${DC_INSTALLER_SKIP_INSTALL_LOG:-}" != "1" ]]; then
 fi
 
 CONFIG_PATH="${CONFIG_DIR}/config.yaml"
-[[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
-  || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
+# Under reconcile, config.yaml legitimately exists from the prior install
+# and will be atomically replaced by the rendered version below. Only a
+# fresh install treats a pre-existing config as evidence of a concurrent
+# writer. A symlink is refused in either mode — a symlink at this path
+# under a root-owned tree can only get there via privileged tampering.
+if [[ -L "${CONFIG_PATH}" ]]; then
+  die "managed config is a symlink; refusing to overwrite: ${CONFIG_PATH}"
+fi
+if [[ -e "${CONFIG_PATH}" && "${_RECONCILE_REINSTALL}" != "true" ]]; then
+  die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
+fi
 
 # Enumerate eligible local user homes so the sidecar's per-user AI-discovery
 # detectors (skills / rules / plugins / MCP under ~/.claude, ~/.codex, …) can
@@ -816,9 +1138,18 @@ render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "$
   "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
-ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
-  || die "managed config appeared concurrently and was preserved: ${CONFIG_PATH}"
-rm -f -- "${CONFIG_TMP}"
+# Reconcile branch: atomically replace the existing config with the
+# newly rendered one. Fresh-install branch: use ln so a concurrent
+# installer racing to publish the same path fails us loud rather than
+# clobbering an unrelated writer.
+if [[ -e "${CONFIG_PATH}" && "${_RECONCILE_REINSTALL}" == "true" ]]; then
+  /bin/mv -f -- "${CONFIG_TMP}" "${CONFIG_PATH}" \
+    || die "could not atomically replace managed config: ${CONFIG_PATH}"
+else
+  ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
+    || die "managed config appeared concurrently and was preserved: ${CONFIG_PATH}"
+  rm -f -- "${CONFIG_TMP}"
+fi
 forget_install_temporary "${CONFIG_TMP}"
 
 log "chowning runtime dirs to root:wheel (daemon runs as root)"
@@ -882,7 +1213,47 @@ log "waiting for gateway to come up"
 if ! wait_for_launchd_running; then
   warn "gateway did not reach running state within 15s; recent stderr:"
   tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
-  die "${LAUNCHD_LABEL} failed to start; see ${LOGS_DIR}/gateway.err.log"
+  # Do NOT clean the guardrail rescue tree(s) here — if the gateway
+  # did not come up with the freshly-published rule packs, the operator
+  # may want to roll back to the last known-good tree at ${_guardrail_old}
+  # (and to any older `.old-*` trees preserved by prior unverified runs).
+  die "${LAUNCHD_LABEL} failed to start; see ${LOGS_DIR}/gateway.err.log — freshly-published guardrail rule packs are at ${POLICIES_DST}/guardrail; prior-run rescue trees preserved under ${POLICIES_DST}/guardrail.old-*"
+fi
+
+# Verified live: the gateway is running with the freshly-published
+# rule packs. Only now is it safe to delete the rescue tree(s) —
+# earlier deletion would strand the operator without a rollback path
+# if startup panicked on the new packs.
+#
+# Filter the sweep to trees whose encoded PID is NOT currently alive
+# so a concurrent install.sh whose own `wait_for_launchd_running`
+# hasn't finished yet keeps its rescue tree at `.old-<its-pid>-<its-ts>`.
+# Without this filter, whichever run finishes first would wipe every
+# other in-flight run's rescue.
+#
+# find is used rather than a shell glob so `nullglob` state doesn't
+# matter and unmatched patterns are silent. The rescue tree name
+# format is `guardrail.old-<pid>-<utc-timestamp>` (see the swap block
+# above), so the PID is the first `-`-delimited field after the
+# `guardrail.old-` prefix.
+if [[ -n "${_guardrail_old:-}" ]]; then
+  while IFS= read -r _rescue; do
+    [[ -n "${_rescue}" ]] || continue
+    _rescue_base="$(/usr/bin/basename -- "${_rescue}")"
+    _rescue_pid="${_rescue_base#guardrail.old-}"
+    _rescue_pid="${_rescue_pid%%-*}"
+    # A tree owned by THIS process is always safe to clean — we've
+    # just verified our own startup. Only other-PID trees need the
+    # liveness check.
+    if [[ "${_rescue_pid}" != "$$" ]] \
+        && [[ "${_rescue_pid}" =~ ^[0-9]+$ ]] \
+        && /bin/kill -0 "${_rescue_pid}" 2>/dev/null; then
+      log "  preserving concurrent-run rescue tree ${_rescue} (pid ${_rescue_pid} still active)"
+      continue
+    fi
+    rm -rf -- "${_rescue}" 2>/dev/null || true
+  done < <(/usr/bin/find "${POLICIES_DST}" -mindepth 1 -maxdepth 1 -type d -name 'guardrail.old-*' 2>/dev/null)
+  unset _guardrail_old _rescue _rescue_base _rescue_pid
 fi
 
 # ---- per-user hook wiring (multi-user, via hook guardian) --------------
@@ -987,10 +1358,10 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
 
   # A user_lines-non-empty × connector-non-empty cross product that
   # still resolves to zero targets means either (a) every requested
-  # connector is unsupported (not in amp/codex/claudecode/cursor/opencode) or
+  # connector is unsupported (not in amp/codex/claudecode/cursor) or
   # (b) no eligible user has any of the requested connector CLIs
   # installed yet (AIFW-31486: the AVC-shipped .pkg lands on boxes
-  # where Amp/Codex/ClaudeCode/Cursor/OpenCode haven't been installed yet).
+  # where amp/Codex/ClaudeCode/Cursor haven't been installed yet).
   #
   # We do NOT fail the install here — bootstrapping the daemons with
   # an empty manifest is still useful: the hook-enumerator LaunchDaemon
@@ -1012,7 +1383,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
     case "${ZERO_TARGET_REASON}" in
       all-unsupported)
-        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor|opencode; got connectors=${CONNECTOR})"
+        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor; got connectors=${CONNECTOR})"
         warn "  proceeding anyway — the hook-enumerator's tick will NOT fix this on its own; rerun the installer with --connector picking a supported entry"
         ;;
       *)
@@ -1024,9 +1395,20 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"
-  ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
-    || die "manifest appeared concurrently and was preserved: ${GUARDIAN_MANIFEST_PATH}"
-  rm -f -- "${MANIFEST_TMP}"
+  # Reconcile: atomically replace the existing targets.yaml (the guardian
+  # reads it via fsnotify and reconciles on the next tick). Fresh-install:
+  # use ln to preserve the concurrent-installer guard.
+  if [[ -L "${GUARDIAN_MANIFEST_PATH}" ]]; then
+    die "hook-guardian manifest is a symlink; refusing to overwrite: ${GUARDIAN_MANIFEST_PATH}"
+  fi
+  if [[ -e "${GUARDIAN_MANIFEST_PATH}" && "${_RECONCILE_REINSTALL}" == "true" ]]; then
+    /bin/mv -f -- "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
+      || die "could not atomically replace hook-guardian manifest: ${GUARDIAN_MANIFEST_PATH}"
+  else
+    ln "${MANIFEST_TMP}" "${GUARDIAN_MANIFEST_PATH}" \
+      || die "manifest appeared concurrently and was preserved: ${GUARDIAN_MANIFEST_PATH}"
+    rm -f -- "${MANIFEST_TMP}"
+  fi
   forget_install_temporary "${MANIFEST_TMP}"
 
   log "loading hook-enumerator LaunchDaemon"
