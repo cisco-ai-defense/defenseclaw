@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import subprocess
 from pathlib import Path
@@ -107,3 +108,65 @@ def _no_sandbox_machine_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sandbox_panel, "probe_sandbox_machine", lambda: sandbox_machine_check(None, "not probed in tests")
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_agent_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never scan the host for installed agents (binaries, configs, versions).
+
+    Tests that need specific agents patch ``discover_agents`` themselves; a
+    ``patch.object`` inside the test body replaces this stub for its scope.
+    """
+
+    from defenseclaw.inventory import agent_discovery
+
+    def _empty_discovery(*_args: object, **_kwargs: object) -> agent_discovery.AgentDiscovery:
+        return agent_discovery.AgentDiscovery(scanned_at="test", agents={}, cache_hit=True)
+
+    monkeypatch.setattr(agent_discovery, "discover_agents", _empty_discovery)
+
+
+@pytest.fixture(autouse=True)
+def _no_captured_cli_refresh(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never spawn the real CLI for the app's quiet ``--json`` loads in Pilot tests.
+
+    After a (faked) command succeeds the running app reloads panel data
+    through ``_communicate_captured``, which would run ``defenseclaw ...
+    --json`` against the developer's real home. Only ``tui_pilot`` tests are
+    stubbed: unit tests of the loaders fake ``create_subprocess_exec`` and
+    need the real helper. A Pilot test that wants a load patches it again.
+    """
+
+    if request.node.get_closest_marker("tui_pilot") is None:
+        return
+
+    from defenseclaw.tui import app as app_module
+
+    async def _not_run(binary: str, args: tuple[str, ...]) -> tuple[int, bytes, bytes]:
+        return 1, b"", b"captured CLI calls are disabled in TUI tests"
+
+    monkeypatch.setattr(app_module, "_communicate_captured", _not_run)
+
+
+def _uses_pilot(item: pytest.Item) -> bool:
+    function = getattr(item, "function", None)
+    if function is None:
+        return False
+    try:
+        source = inspect.getsource(function)
+    except (OSError, TypeError):
+        return False
+    return "run_test(" in source
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Mark every test that drives the app through ``run_test`` as ``tui_pilot``."""
+
+    tui_dir = Path(__file__).resolve().parent
+    for item in items:
+        try:
+            in_tui = Path(str(item.fspath)).resolve().is_relative_to(tui_dir)
+        except (OSError, ValueError):
+            continue
+        if in_tui and _uses_pilot(item):
+            item.add_marker(pytest.mark.tui_pilot)

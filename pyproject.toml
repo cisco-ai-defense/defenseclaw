@@ -277,10 +277,8 @@ testpaths = ["cli/tests"]
 # ``@pytest.mark.asyncio`` decorations the codebase has 100+ of today.
 asyncio_mode = "auto"
 markers = [
-    "tui_snapshot: marks SVG snapshot tests (slow on first run)",
-    "tui_property: marks Hypothesis-driven invariant tests",
+    "tui_pilot: full-app or modal Pilot tests driven through app.run_test",
     "allow_subprocess: opts test out of the autouse subprocess ban (use only for executor.py integration tests)",
-    "agent_tty: marks tests that spawn an interactive agent under a PTY (legacy marker)",
     "supported_connector_host: runs platform-neutral connector behavior on an explicitly supported host",
 ]
 filterwarnings = [
