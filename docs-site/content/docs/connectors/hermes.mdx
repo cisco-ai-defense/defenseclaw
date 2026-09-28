@@ -325,6 +325,13 @@ See R1, R5 and R18 in the
 defenseclaw guardrail disable --connector hermes --yes
 ```
 
+Disabling removes only DefenseClaw's entries: its hooks from `config.yaml`,
+which keeps every byte outside the `hooks` mapping (comments included), and
+its approvals from `shell-hooks-allowlist.json`.
+
 Then reload or restart every affected Hermes host. Until that happens, the
 Windows native tombstone keeps any cached exact DefenseClaw callback disabled;
-DefenseClaw does not manage Hermes's PortableGit terminal behavior.
+DefenseClaw does not manage Hermes's PortableGit terminal behavior. On Linux
+and macOS, `~/.defenseclaw/hooks/hermes-hook.sh` stays as a stub that exits
+without doing anything, for the same reason: a running Hermes process keeps
+calling it until it restarts.

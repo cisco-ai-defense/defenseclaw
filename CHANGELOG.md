@@ -171,6 +171,15 @@ rest also reach per-user installs.
   Setup, verify and the enterprise guardian's per-user worker waited for a
   writer (`worker for uid N timed out`). The read now fails at once with
   `<path> is a named pipe, not a regular file`.
+- **Disabling Kiro keeps the user's CLI settings.** Teardown put back the
+  `~/.kiro/settings/cli.json` captured at enrollment, which dropped the keys
+  added since. It now removes only DefenseClaw's `chat.defaultAgent` and puts
+  back the user's earlier value.
+- **Disabling Hermes keeps the rest of `config.yaml`.** Teardown rewrote the
+  file without its comments, and approvals in a file put back from an
+  earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
+  only the `hooks` mapping, keeping every byte outside it, and removes all of
+  DefenseClaw's approvals.
 
 ### Added
 

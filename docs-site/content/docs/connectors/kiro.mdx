@@ -113,7 +113,8 @@ enrolls Kiro per user. For each enrolled user it writes and repairs:
 
 It never edits the user's own agents. When a user has set another
 `chat.defaultAgent`, the guardian makes `defenseclaw` the default instead
-(uninstall puts the user's setting back). An agent the user picks explicitly
+(disabling Kiro or uninstalling puts the user's setting back and keeps every
+other key in `cli.json`). An agent the user picks explicitly
 (`--agent`, `/agent swap`) runs without DefenseClaw's hooks. A per-user
 `defenseclaw setup kiro` still adds the hooks to the user's own default agent.
 
