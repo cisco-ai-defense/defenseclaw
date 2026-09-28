@@ -93,6 +93,7 @@ type fakeWorkspace struct {
 	masked       []workspace.MaskedPath
 	lastSnapshot workspace.SnapshotOptions
 	lastMount    workspace.MountOptions
+	lastUndo     workspace.UndoOptions
 	// clean makes Review report a folder without changes.
 	clean bool
 	// onUndo and onDeleteSnapshot run first in Undo and DeleteSnapshot,
@@ -195,6 +196,7 @@ func (f *fakeWorkspace) Undo(ctx context.Context, opts workspace.UndoOptions) (*
 		return nil, f.undoErr
 	}
 	f.undone = append(f.undone, opts.Name)
+	f.lastUndo = opts
 	if rec, ok := f.snapshots[opts.Name]; ok && !opts.Preview {
 		undone := *rec
 		at := time.Now().UTC()

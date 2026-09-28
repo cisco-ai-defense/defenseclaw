@@ -40,6 +40,10 @@ type UndoOptions struct {
 	KeepRefs bool
 	// Now overrides the clock (tests).
 	Now func() time.Time
+	// Quarantined are the project-relative quarantined .git entries of the
+	// session (the nested-repository guard's detections): undo removes the
+	// empty directory trees the restore leaves of them.
+	Quarantined []string
 }
 
 // RefChange is a branch or tag the session created, moved or deleted.
@@ -90,8 +94,11 @@ type UndoResult struct {
 	// ignores or, in a folder that is not a git repository, the dependency
 	// directories it skips. Undo deletes what the session wrote to Python
 	// bytecode caches (Removed) and leaves the rest, each with a Remedy.
-	Ignored  []IgnoredChange `json:"ignored,omitempty"`
-	Warnings []string        `json:"warnings,omitempty"`
+	Ignored []IgnoredChange `json:"ignored,omitempty"`
+	// QuarantineRemoved are the quarantined .git entries of the session
+	// (UndoOptions.Quarantined) undo removed.
+	QuarantineRemoved []string `json:"quarantine_removed,omitempty"`
+	Warnings          []string `json:"warnings,omitempty"`
 }
 
 // Empty reports whether undo has nothing to put back: the folder matches
@@ -153,6 +160,9 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoResult, error) {
 		return nil, err
 	}
 	if !opts.Preview {
+		removed, warnings := removeQuarantined(rec.Project, opts.Quarantined)
+		res.QuarantineRemoved = removed
+		res.Warnings = append(res.Warnings, warnings...)
 		now := time.Now
 		if opts.Now != nil {
 			now = opts.Now
@@ -326,7 +336,7 @@ func newNestedRepos(rec *SnapshotRecord) ([]string, bool, *sentinelScan, error) 
 func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes []TreeChange, res *UndoResult) {
 	man, err := loadIgnored(dataDir, rec.Name)
 	if err != nil {
-		res.Warnings = append(res.Warnings, "the record of the files the snapshot does not copy is unreadable ("+err.Error()+"); undo cannot say what changed there")
+		res.Warnings = append(res.Warnings, "the record of the files the undo point does not copy is unreadable ("+err.Error()+"); undo cannot say what changed there")
 		return
 	}
 	if man == nil {
@@ -334,7 +344,7 @@ func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes
 	}
 	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, changedPaths(changes))
 	if err != nil {
-		res.Warnings = append(res.Warnings, "could not check the files the snapshot does not copy: "+err.Error())
+		res.Warnings = append(res.Warnings, "could not check the files the undo point does not copy: "+err.Error())
 		return
 	}
 	res.Ignored = irep.Changes

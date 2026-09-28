@@ -553,8 +553,8 @@ func groupIgnored(deltas []ignoredDelta, roots map[string]bool) []IgnoredChange 
 func ignoredFlags(changes []IgnoredChange, gitProject bool, sensitive []string) ([]Flag, []string) {
 	dirWhy, fileWhy := "git ignores these files, so they are not in the diff", "git ignores it, so it is not in the diff"
 	if !gitProject {
-		dirWhy = "the undo snapshot does not copy this directory, so they are not in the diff"
-		fileWhy = "the undo snapshot does not copy its directory, so it is not in the diff"
+		dirWhy = "the undo point does not copy this directory, so they are not in the diff"
+		fileWhy = "the undo point does not copy its directory, so it is not in the diff"
 	}
 	var flags []Flag
 	var quiet []string

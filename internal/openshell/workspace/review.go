@@ -146,7 +146,7 @@ func Review(ctx context.Context, opts ReviewOptions) (*ReviewReport, error) {
 	rep := &ReviewReport{Name: rec.Name, Project: rec.Project, Kind: rec.Kind}
 	man, err := loadIgnored(opts.DataDir, opts.Name)
 	if err != nil {
-		rep.Warnings = append(rep.Warnings, "the record of the files the snapshot does not copy is unreadable ("+err.Error()+"); changes there are not reported")
+		rep.Warnings = append(rep.Warnings, "the record of the files the undo point does not copy is unreadable ("+err.Error()+"); changes there are not reported")
 	}
 	now, err := scanSentinels(rec.Project, skipList(rec))
 	if err != nil {
@@ -187,6 +187,9 @@ func reviewGit(ctx context.Context, rec *SnapshotRecord, man *ignoredManifest, n
 	if rep.Changes, err = diffTrees(ctx, st.sh.bare(), gs.Tree, st.postTree); err != nil {
 		return err
 	}
+	var quarantined []Flag
+	rep.Changes, quarantined = splitQuarantined(rep.Changes)
+	rep.Flags = append(rep.Flags, quarantined...)
 	if man != nil {
 		nowRoots, _ := st.sh.ignoredEntries(ctx, maxIgnoredFiles+1)
 		reviewIgnored(rec, man, nowRoots, now, opts, rep)
@@ -294,7 +297,10 @@ func reviewCopy(rec *SnapshotRecord, man *ignoredManifest, now *sentinelScan, op
 	if err != nil {
 		return err
 	}
+	var quarantined []Flag
+	changes, quarantined = splitQuarantined(changes)
 	rep.Changes = changes
+	rep.Flags = append(rep.Flags, quarantined...)
 	if man != nil {
 		reviewIgnored(rec, man, now.heavy, now, opts, rep)
 	}
@@ -332,7 +338,7 @@ func reviewIgnored(rec *SnapshotRecord, man *ignoredManifest, nowRoots []string,
 	}
 	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, exclude)
 	if err != nil {
-		rep.Warnings = append(rep.Warnings, "could not check the files the snapshot does not copy: "+err.Error())
+		rep.Warnings = append(rep.Warnings, "could not check the files the undo point does not copy: "+err.Error())
 		return
 	}
 	git := rec.Kind == SnapshotGit
@@ -341,7 +347,7 @@ func reviewIgnored(rec *SnapshotRecord, man *ignoredManifest, nowRoots []string,
 	if len(quiet) > 0 {
 		what := "Files git ignores"
 		if !git {
-			what = "Files in directories the undo snapshot does not copy"
+			what = "Files in directories the undo point does not copy"
 		}
 		rep.Warnings = append(rep.Warnings, what+" changed during the session in "+strings.Join(firstN(quiet, 5), ", ")+"; they are not in the diff and undo leaves them")
 	}
@@ -502,13 +508,21 @@ func ReviewDiff(ctx context.Context, dataDir, name string) ([]byte, error) {
 			return nil, err
 		}
 		defer st.unlock()
-		return st.sh.bare().output(ctx, "diff-tree", "-p", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", rec.Git.Tree, st.postTree)
+		diff, err := st.sh.bare().output(ctx, "diff-tree", "-p", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", "--no-color", rec.Git.Tree, st.postTree)
+		if err != nil {
+			return nil, err
+		}
+		return withoutQuarantinedDiffs(diff), nil
 	case SnapshotCopy:
 		changes, _, _, err := compareTrees(rec.Copy, rec.Project)
 		if err != nil {
 			return nil, err
 		}
+		changes, quarantined := splitQuarantined(changes)
 		var out bytes.Buffer
+		for _, f := range quarantined {
+			fmt.Fprintf(&out, "… %s is left out: %s\n", f.Label, f.Detail)
+		}
 		for i, c := range changes {
 			if i >= 500 {
 				fmt.Fprintf(&out, "… %d more changed paths\n", len(changes)-i)

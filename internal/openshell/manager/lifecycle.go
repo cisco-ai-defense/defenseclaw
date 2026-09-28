@@ -206,7 +206,7 @@ func (m *Manager) refuseRetained(b *box) error {
 		return nil
 	}
 	return sandboxapi.Errorf(sandboxapi.CodeConflict,
-		"sandbox %s was deleted; only its pre-session snapshot is kept (undo, review or delete it)", name)
+		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
 func (m *Manager) stop(ctx context.Context, b *box) error {
@@ -929,7 +929,11 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		}
 		resp.Stopped = true
 	}
-	res, err := m.ws.Undo(ctx, workspace.UndoOptions{DataDir: m.opts.DataDir, Name: name, Preview: req.Preview, KeepRefs: req.KeepRefs})
+	m.mu.Lock()
+	quarantined := quarantinedPaths(b.rec.Guard)
+	m.mu.Unlock()
+	res, err := m.ws.Undo(ctx, workspace.UndoOptions{DataDir: m.opts.DataDir, Name: name, Preview: req.Preview, KeepRefs: req.KeepRefs,
+		Quarantined: quarantined})
 	m.mu.Lock()
 	id := b.identity()
 	m.mu.Unlock()
@@ -937,7 +941,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
 			Result: audit.SandboxWorkspaceFailed, FailureClass: "undo_failed", Initiator: "operator", Timestamp: m.now()})
 		if errors.Is(err, workspace.ErrSnapshotNotFound) {
-			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "sandbox %s has no snapshot to undo to", name)
+			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "sandbox %s has no undo point", name)
 		}
 		return nil, workspaceError(err)
 	}
@@ -951,7 +955,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
 			Result: result, Initiator: "operator", FileCount: &n, Timestamp: m.now()})
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: name, Reason: "undo",
-			Message: "the project folder was restored to its pre-session snapshot"})
+			Message: "the project folder was restored to its undo point"})
 	}
 	if req.Restart && resp.Stopped {
 		if err := m.start(ctx, b, sandboxapi.StartRequest{}); err != nil {
@@ -984,7 +988,7 @@ func (m *Manager) Review(ctx context.Context, name string, req sandboxapi.Review
 	report, err := m.ws.Review(ctx, opts)
 	if err != nil {
 		if errors.Is(err, workspace.ErrSnapshotNotFound) {
-			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "sandbox %s has no snapshot to review against", name)
+			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "sandbox %s has no undo point to review against", name)
 		}
 		return nil, workspaceError(err)
 	}
