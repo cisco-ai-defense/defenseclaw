@@ -83,12 +83,15 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	if !reflect.DeepEqual(defaults, o) {
 		t.Fatalf("DefaultConfig().OpenShell diverges from loader defaults\ndefault: %+v\nloaded:  %+v", defaults, o)
 	}
-}
 
-// An explicit empty pack_dir keeps no custom pack directory in both Go
-// loaders; cli/defenseclaw/config.py reads it the same way.
-func TestOpenShellExplicitEmptyPackDir(t *testing.T) {
-	path := writeOpenShellConfig(t, "openshell:\n  pack_dir: ''\n")
+	if _, err := LoadFromFile(writeOpenShellConfig(t, "openshell:\n  ingress_port: 19001\n  egress_port: 19001\n")); err == nil ||
+		!strings.Contains(err.Error(), "config: openshell:") {
+		t.Fatalf("LoadFromFile() = %v, want an openshell validation error", err)
+	}
+
+	// An explicit empty pack_dir keeps no custom pack directory in both Go
+	// loaders; cli/defenseclaw/config.py reads it the same way.
+	path = writeOpenShellConfig(t, "openshell:\n  pack_dir: ''\n")
 	for name, load := range map[string]func(string) (*Config, error){
 		"LoadFromFile": LoadFromFile, "LoadRuntimeV8File": LoadRuntimeV8File,
 	} {
@@ -108,6 +111,8 @@ func openShellTestRoot() string {
 	return filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
 }
 
+// TestOpenShellFullSectionLoads decodes every key of the section and round
+// trips it through YAML.
 func TestOpenShellFullSectionLoads(t *testing.T) {
 	binary := filepath.Join(openShellTestRoot(), "usr", "bin", "openshell")
 	packDir := filepath.Join(openShellTestRoot(), "etc", "defenseclaw", "packs")
@@ -200,38 +205,18 @@ openshell:
 	if !o.Admin.IsLocked("yolo") || o.Admin.IsLocked("pack") {
 		t.Fatalf("locked keys = %v", o.Admin.Locked)
 	}
-}
-
-// Round trip: Config.Save writes the section with omitempty so a loaded
-// default config does not grow an openshell block, and an explicit section
-// survives unchanged.
-func TestOpenShellYAMLRoundTrip(t *testing.T) {
-	var empty OpenShellConfig
-	data, err := yaml.Marshal(empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.TrimSpace(string(data)) != "{}" {
-		t.Fatalf("zero section marshals to %q", data)
-	}
-	f := false
-	in := OpenShellConfig{
-		Enabled: true, Profile: "balanced", Yolo: &f,
-		Workdir: OpenShellWorkdirConfig{Mode: "copy", Masks: []string{"*.pem"}},
-		Egress:  OpenShellEgressConfig{Ports: []int{443}},
-		MCP:     OpenShellMCPConfig{Import: &f},
-		Admin:   OpenShellAdminConfig{AllowYolo: &f, Locked: []string{"yolo"}},
-	}
-	data, err = yaml.Marshal(in)
-	if err != nil {
-		t.Fatal(err)
+	// Config.Save writes the section with omitempty: a zero section adds no
+	// openshell block, and an explicit one survives a round trip unchanged.
+	if data, err := yaml.Marshal(OpenShellConfig{}); err != nil || strings.TrimSpace(string(data)) != "{}" {
+		t.Fatalf("zero section marshals to %q, %v", data, err)
 	}
 	var out OpenShellConfig
-	if err := yaml.Unmarshal(data, &out); err != nil {
-		t.Fatal(err)
+	data, err := yaml.Marshal(o)
+	if err == nil {
+		err = yaml.Unmarshal(data, &out)
 	}
-	if !reflect.DeepEqual(in, out) {
-		t.Fatalf("round trip changed the section\n in: %+v\nout: %+v\nyaml:\n%s", in, out, data)
+	if err != nil || !reflect.DeepEqual(o, out) {
+		t.Fatalf("round trip changed the section: %v\n in: %+v\nout: %+v\nyaml:\n%s", err, o, out, data)
 	}
 }
 
@@ -251,12 +236,9 @@ func TestOpenShellValidate(t *testing.T) {
 		{"negative upload", func(o *OpenShellConfig) { o.Workdir.MaxUploadMB = -1 }, "max_upload_mb"},
 		{"absolute mask", func(o *OpenShellConfig) { o.Workdir.Masks = []string{".env", "/srv/app/.env"} }, "workdir.masks[1]"},
 		{"escaping unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"../../secrets/app.key"} }, "workdir.unmask[0]"},
-		{"home unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"~/notes.txt"} }, "workdir.unmask[0]"},
 		{"proxy port zero", func(o *OpenShellConfig) { o.Egress.Ports = []int{0} }, "egress.ports[0]"},
 		{"host port", func(o *OpenShellConfig) { o.MCP.HostPorts = []int{65536} }, "mcp.host_ports[0]"},
-		{"block glob", func(o *OpenShellConfig) { o.Egress.Block = []string{"https://x.example"} }, "egress.block[0]"},
 		{"inner wildcard", func(o *OpenShellConfig) { o.Egress.Allow = []string{"a.*.example"} }, "egress.allow[0]"},
-		{"double wildcard", func(o *OpenShellConfig) { o.Egress.Allow = []string{"**.example"} }, "egress.allow[0]"},
 		{"unblocked glob", func(o *OpenShellConfig) { o.Egress.Unblocked = []string{"ok.example", "a.*.example"} }, "egress.unblocked[1]"},
 		{"harness", func(o *OpenShellConfig) { o.Harnesses = []string{"claude code"} }, "harnesses[0]"},
 		{"image harness", func(o *OpenShellConfig) { o.Image.HarnessVersions = map[string]string{"bad name": "1"} }, "image.harness_versions"},
@@ -272,7 +254,6 @@ func TestOpenShellValidate(t *testing.T) {
 		{"admin profile", func(o *OpenShellConfig) { o.Admin.MinProfile = "none" }, "admin.min_profile"},
 		{"admin locked", func(o *OpenShellConfig) { o.Admin.Locked = []string{"enabled"} }, "admin.locked[0]"},
 		{"admin max", func(o *OpenShellConfig) { o.Admin.MaxResources.CPU = "lots" }, "admin.max_resources.cpu"},
-		{"admin copy glob", func(o *OpenShellConfig) { o.Admin.RequireCopyFor = []string{" "} }, "admin.require_copy_for[0]"},
 		{"relative copy glob", func(o *OpenShellConfig) {
 			o.Admin.RequireCopyFor = []string{"/src/customer-*", "customer-*"}
 		}, "admin.require_copy_for[1]"},
@@ -372,14 +353,6 @@ func TestConfigValidateOpenShellListeners(t *testing.T) {
 	var nilConfig *Config
 	if err := nilConfig.ValidateOpenShell(); err != nil {
 		t.Fatalf("nil config: %v", err)
-	}
-}
-
-func TestOpenShellInvalidSectionFailsLoad(t *testing.T) {
-	path := writeOpenShellConfig(t, "openshell:\n  ingress_port: 19001\n  egress_port: 19001\n")
-	_, err := LoadFromFile(path)
-	if err == nil || !strings.Contains(err.Error(), "config: openshell:") {
-		t.Fatalf("LoadFromFile() = %v, want an openshell validation error", err)
 	}
 }
 

@@ -59,32 +59,13 @@ func TestLegacyStandaloneAPIHost(t *testing.T) {
 	}
 }
 
-func TestAPIBindHostPrecedence(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  *Config
-		want string
-	}{
-		{"nil config", nil, "127.0.0.1"},
-		{"default loopback", legacyShimConfig("", "localhost", ""), "127.0.0.1"},
-		{"host mode ignores guardrail host", legacyShimConfig("", "10.200.0.1", ""), "127.0.0.1"},
-		{"legacy shim", legacyShimConfig("standalone", "10.200.0.1", ""), "10.200.0.1"},
-		{"legacy localhost stays loopback", legacyShimConfig("standalone", "localhost", ""), "127.0.0.1"},
-		{"explicit api_bind wins over shim", legacyShimConfig("standalone", "10.200.0.1", "0.0.0.0"), "0.0.0.0"},
-		{"explicit api_bind", legacyShimConfig("", "localhost", "::1"), "::1"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := APIBindHost(tt.cfg); got != tt.want {
-				t.Fatalf("APIBindHost() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // The Python CLI dials the API through api_bind_host in
-// cli/defenseclaw/config.py; both read the same corpus so they cannot drift.
+// cli/defenseclaw/config.py; both read the same precedence corpus so they
+// cannot drift.
 func TestAPIBindHostSharedCorpus(t *testing.T) {
+	if got := APIBindHost(nil); got != "127.0.0.1" {
+		t.Fatalf("APIBindHost(nil) = %q, want loopback", got)
+	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "api_bind_host", "cases.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -135,16 +116,12 @@ func TestLegacyStandalonePlainGatewayWS(t *testing.T) {
 }
 
 func TestLegacySandboxHome(t *testing.T) {
-	if got := LegacySandboxHome(legacyShimConfig("", "", "")); got != "" {
-		t.Fatalf("host mode sandbox home = %q, want empty", got)
-	}
 	legacy := legacyShimConfig("standalone", "10.200.0.1", "")
-	if got := LegacySandboxHome(legacy); got != DefaultSandboxHome {
-		t.Fatalf("legacy default sandbox home = %q, want %q", got, DefaultSandboxHome)
-	}
+	host, defaulted := LegacySandboxHome(legacyShimConfig("", "", "")), LegacySandboxHome(legacy)
 	legacy.OpenShell.SandboxHome = "/srv/sandbox"
-	if got := LegacySandboxHome(legacy); got != "/srv/sandbox" {
-		t.Fatalf("legacy recorded sandbox home = %q, want /srv/sandbox", got)
+	if recorded := LegacySandboxHome(legacy); host != "" || defaulted != DefaultSandboxHome || recorded != "/srv/sandbox" {
+		t.Fatalf("sandbox home: host mode %q (want empty), legacy default %q (want %q), recorded %q (want /srv/sandbox)",
+			host, defaulted, DefaultSandboxHome, recorded)
 	}
 }
 
