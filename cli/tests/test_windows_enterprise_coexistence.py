@@ -94,6 +94,8 @@ def test_every_per_user_gateway_start_path_refuses_beside_enterprise() -> None:
         first_statement = body.split("\n", 2)[1].strip()
         assert first_statement == "if err := refuseGatewayLifecycleOnManagedHost(); err != nil {", signature
 
+    # The foreground run refuses in the root pre-run, before the bootstrap
+    # registers a PID, loads the per-user config, or opens the audit store.
     root = read(ROOT_COMMAND)
     run = root[root.index("RunE: func(cmd *cobra.Command, args []string) error {") :]
     assert run.index("refuseGatewayLifecycleOnManagedHost()") < run.index("return runSidecar(cmd, args)")
@@ -109,6 +111,21 @@ def test_every_per_user_gateway_start_path_refuses_beside_enterprise() -> None:
     assert "Get-Service -Name $ServiceName" in installer
     assert "Assert-NoEnterpriseDeployment" in function_body(installer, "Invoke-Install")
     assert "Assert-NoEnterpriseDeployment" in function_body(installer, "Invoke-Rollback")
+    pre_run = go_function(root, "func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {")
+    gate = pre_run.index("if cmd != nil && !cmd.HasParent() {")
+    assert pre_run.index("refusePerUserGatewayBesideEnterprise()") > gate
+    for bootstrap in (
+        "daemon.RegisterCurrentProcess()",
+        "loadGatewayConfigV8(cfgPath)",
+        "audit.NewStore(cfg.AuditDB)",
+    ):
+        assert gate < pre_run.index(bootstrap), bootstrap
+    # start and restart keep their own no-op pre-run and refuse in RunE.
+    for command in ("startCmd", "restartCmd"):
+        assert (
+            f"{command}.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {{ return nil }}"
+            in daemon
+        ), command
 
     setup = go_function(
         read(SETUP_MAIN),
