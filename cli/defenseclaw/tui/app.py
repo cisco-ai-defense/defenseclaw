@@ -712,7 +712,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     }
 
     #panel-nav {
-        width: 24;
+        width: 30;
         height: auto;
         max-height: 100%;
         margin: 0 1 0 0;
