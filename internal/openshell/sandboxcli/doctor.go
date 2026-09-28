@@ -25,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -179,6 +180,11 @@ func (a *App) imagesCheck() openshell.Check {
 		c.Status, c.Detail = openshell.StatusFail, err.Error()
 		return c
 	}
+	specs, forbidden := a.allowedHarnesses(specs)
+	if len(specs) == 0 {
+		c.Status, c.Detail = openshell.StatusWarn, "no configured harness may run: "+forbidden
+		return c
+	}
 	recs, err := a.Images.List()
 	if err != nil {
 		c.Status, c.Detail = openshell.StatusWarn, err.Error()
@@ -207,7 +213,46 @@ func (a *App) imagesCheck() openshell.Check {
 		c.Detail = "not built yet: " + strings.Join(missing, ", ") + " (the first run builds it, which takes a while)"
 		c.Fix = &openshell.Fix{Summary: "build the images now", Command: CommandName + " image build " + strings.Join(missing, " ")}
 	}
+	if forbidden != "" {
+		c.Detail += "; " + forbidden
+	}
 	return c
+}
+
+// allowedHarnesses drops the harnesses the sandbox policy (the pack's
+// harness.allowed and openshell.admin.allowed_harnesses) does not let run:
+// building their images would be for nothing. forbidden says which went,
+// and whose policy refuses them; "" when none did. A policy that does not
+// resolve filters nothing (the admin check reports it).
+func (a *App) allowedHarnesses(specs []*harness.Spec) (allowed []*harness.Spec, forbidden string) {
+	if a.Cfg == nil {
+		return specs, ""
+	}
+	eff, _, err := packs.Resolve(a.Cfg, packs.Flags{})
+	if err != nil {
+		return specs, ""
+	}
+	var org, pack []string
+	for _, s := range specs {
+		err := eff.Allow(packs.Action{Kind: packs.ActionHarness, Harness: s.Name})
+		var v *packs.Violation
+		switch {
+		case err == nil:
+			allowed = append(allowed, s)
+		case errors.As(err, &v) && v.Admin():
+			org = append(org, s.Name)
+		default:
+			pack = append(pack, s.Name)
+		}
+	}
+	var parts []string
+	if len(org) > 0 {
+		parts = append(parts, strings.Join(org, ", ")+" not allowed by your organization's policy (openshell.admin.allowed_harnesses)")
+	}
+	if len(pack) > 0 {
+		parts = append(parts, strings.Join(pack, ", ")+" not allowed by the sandbox pack (harness.allowed)")
+	}
+	return allowed, strings.Join(parts, "; ")
 }
 
 func (a *App) wrappersCheck() openshell.Check {
@@ -285,10 +330,13 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 		}
 	}
 	if o.Output == OutputJSON {
+		_, off := sandboxesOff(rep)
 		return writeJSON(a.IO.Out, struct {
 			OK bool `json:"ok"`
+			// Ready is OK with sandboxes turned on (sandboxesOff).
+			Ready bool `json:"ready"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep})
+		}{rep.OK(), rep.OK() && !off, rep})
 	}
 	a.printDoctor(rep)
 	if !rep.OK() {
@@ -324,6 +372,25 @@ func (a *App) printDoctor(rep *openshell.DoctorReport) {
 	}
 	if rep.OK() {
 		a.println()
-		a.ok("ready for sandboxes")
+		if why, off := sandboxesOff(rep); off {
+			a.warn("not ready for sandboxes yet: " + why)
+		} else {
+			a.ok("ready for sandboxes")
+		}
 	}
+}
+
+// sandboxesOff reports a report without failures whose sandboxes are still
+// turned off (openshell.enabled is false, a warning of the daemon check):
+// the machine can run them, but no sandbox starts until they are on.
+func sandboxesOff(rep *openshell.DoctorReport) (string, bool) {
+	c := rep.Get(CheckIDDaemon)
+	if c == nil || c.Status != openshell.StatusWarn {
+		return "", false
+	}
+	why := c.Detail
+	if c.Fix != nil && c.Fix.Command != "" {
+		why += " (" + c.Fix.Command + ")"
+	}
+	return why, true
 }

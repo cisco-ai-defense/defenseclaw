@@ -343,6 +343,56 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	}
 }
 
+// TestDoctorVerdict pins the doctor's last line: not "ready" while
+// sandboxes are turned off, and no image to build for a harness the
+// organization forbids.
+func TestDoctorVerdict(t *testing.T) {
+	ready := func(ta *testApp) {
+		ta.HostDoctor = hostReport(nil)
+		ta.images.recs = []image.Record{{Connector: "claudecode", HookFireVerified: true, UID: os.Getuid(), DefenseClawVersion: manager.ImageVersion(),
+			IngressPort: ta.Cfg.OpenShellIngressPort(), HarnessVersion: "2.1.156"}}
+	}
+	t.Run("sandboxes off", func(t *testing.T) {
+		ta := newTestApp(t, "")
+		ready(ta)
+		ta.daemon.status.Enabled = false
+		if err := ta.RunDoctor(context.Background(), DoctorOptions{}); err != nil {
+			t.Fatalf("doctor = %v", err)
+		}
+		out := ta.output()
+		if strings.Contains(out, "ready for sandboxes\n") && !strings.Contains(out, "not ready for sandboxes yet") {
+			t.Fatalf("doctor says ready while sandboxes are off:\n%s", out)
+		}
+		if !strings.Contains(out, "not ready for sandboxes yet: openshell.enabled is false: sandboxes are off (defenseclaw sandbox setup)") {
+			t.Fatalf("doctor verdict:\n%s", out)
+		}
+		ta.out.Reset()
+		if err := ta.RunDoctor(context.Background(), DoctorOptions{Output: OutputJSON}); err != nil {
+			t.Fatal(err)
+		}
+		var rep struct{ OK, Ready bool }
+		if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || !rep.OK || rep.Ready {
+			t.Fatalf("doctor json ok/ready = %+v, %v", rep, err)
+		}
+	})
+	t.Run("a forbidden harness", func(t *testing.T) {
+		ta := newTestApp(t, "")
+		ready(ta)
+		ta.Cfg.OpenShell.Admin.AllowedHarnesses = []string{"claudecode"}
+		if err := ta.RunDoctor(context.Background(), DoctorOptions{}); err != nil {
+			t.Fatalf("doctor = %v\n%s", err, ta.output())
+		}
+		out := ta.output()
+		if strings.Contains(out, "image build codex") || strings.Contains(out, "not built yet: codex") {
+			t.Fatalf("doctor suggests building a forbidden harness's image:\n%s", out)
+		}
+		if !strings.Contains(out, "hook-verified: claudecode 2.1.156; codex not allowed by your organization's policy (openshell.admin.allowed_harnesses)") ||
+			!strings.Contains(out, "ready for sandboxes") {
+			t.Fatalf("doctor output:\n%s", out)
+		}
+	})
+}
+
 func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "  wrappers: [claudecode]\n")
