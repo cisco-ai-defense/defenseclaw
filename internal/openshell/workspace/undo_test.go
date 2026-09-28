@@ -726,6 +726,44 @@ func TestUndoPreservesIgnoredFilesWhenIgnoreRuleRemoved(t *testing.T) {
 	}
 }
 
+// TestUndoReportsChangedFileWhoseIgnoreRuleWasRemoved: a file ignored
+// before the session that the agent rewrote after removing its ignore rule
+// is kept as it is (the snapshot has no copy of it), so undo must list it
+// among the changes it cannot put back rather than leave it out of both
+// Changes and Unrestored.
+func TestUndoReportsChangedFileWhoseIgnoreRuleWasRemoved(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, "debug.log", "operator marker log\n")
+	writeFile(t, e.project, "quiet.log", "operator marker untouched\n")
+	mustSnapshot(t, e, "s1")
+
+	// Session: the agent drops the *.log rule and rewrites one of the logs.
+	writeFile(t, e.project, ".gitignore", "build/\n.env\n")
+	writeFile(t, e.project, "debug.log", "agent marker rewritten content\n")
+
+	check := func(res *UndoResult, when string) {
+		t.Helper()
+		for _, c := range res.Changes {
+			if c.Path == "debug.log" || c.Path == "quiet.log" {
+				t.Fatalf("%s: pre-session ignored file %s reported as %s", when, c.Path, c.Status)
+			}
+		}
+		un := res.Unrestored()
+		if len(un) != 1 || un[0].Path != "debug.log" || un[0].Modified != 1 {
+			t.Fatalf("%s: unrestored = %+v, want debug.log modified", when, un)
+		}
+	}
+	check(mustUndo(t, e, "s1", true), "preview")
+	check(mustUndo(t, e, "s1", false), "undo")
+	if readFile(t, e.project, ".gitignore") != "*.log\nbuild/\n.env\n" {
+		t.Fatal("undo did not restore .gitignore")
+	}
+	if readFile(t, e.project, "quiet.log") != "operator marker untouched\n" {
+		t.Fatal("undo changed a pre-session ignored file")
+	}
+}
+
 // TestUndoSavesPostSessionRefTips tests p1a-22: before resetting branches
 // and tags, undo must save the post-session tips so they are recoverable.
 func TestUndoSavesPostSessionRefTips(t *testing.T) {

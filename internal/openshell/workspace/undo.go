@@ -400,7 +400,11 @@ func undoGit(ctx context.Context, rec *SnapshotRecord, opts UndoOptions, res *Un
 		res.Warnings = append(res.Warnings, "the folder is too large to check completely for new nested git repositories")
 	}
 	nowIgnored, _ := st.sh.ignoredEntries(ctx, maxIgnoredFiles+1)
-	undoIgnored(rec, opts.DataDir, nowIgnored, allChanges, res)
+	// Only what the reset restores is left out of the ignored comparison.
+	// A file that was ignored before the session and shows up now because
+	// the agent removed its ignore rule is kept as it is on disk, so any
+	// change the session made to it is one undo cannot put back.
+	undoIgnored(rec, opts.DataDir, nowIgnored, res.Changes, res)
 	needed := map[string]struct{}{}
 	for _, oid := range gs.Refs {
 		needed[oid] = struct{}{}
