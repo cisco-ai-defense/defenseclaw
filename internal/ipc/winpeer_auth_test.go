@@ -7,11 +7,15 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -226,6 +230,153 @@ func TestWindowsPeerAuthDoesNotOpenImagesOutsideThePolicy(t *testing.T) {
 		}
 		if opened := peer.opened(); len(opened) != 0 {
 			t.Errorf("%q: gateway opened %q", kernelPath, opened)
+		}
+	}
+}
+
+// unicodeFoldVariants returns every copy of path with one ASCII letter
+// replaced by a non-ASCII rune that Unicode simple folding (and so
+// strings.EqualFold) treats as the same letter, such as U+017F for "s"
+// and U+212A for "k". NTFS keeps each of these a different name.
+func unicodeFoldVariants(t *testing.T, path string) []string {
+	t.Helper()
+	var variants []string
+	for i, r := range path {
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < utf8.RuneSelf {
+				continue
+			}
+			variant := path[:i] + string(f) + path[i+utf8.RuneLen(r):]
+			if !strings.EqualFold(variant, path) {
+				t.Fatalf("premise: EqualFold(%q, %q) = false", variant, path)
+			}
+			variants = append(variants, variant)
+		}
+	}
+	return variants
+}
+
+// TestWindowsPeerAuthRejectsUnicodeFoldLookAlikes is the regression for
+// the look-alike image path: a standard user can create a directory at
+// the root of the system drive whose name differs from Program Files
+// only by a character that Unicode folding equates with an ASCII
+// letter. The gateway must refuse a process started from it without
+// opening anything, because the file it would open and verify is the
+// genuine GUI, not the one the peer runs.
+func TestWindowsPeerAuthRejectsUnicodeFoldLookAlikes(t *testing.T) {
+	kernelVariants := unicodeFoldVariants(t, testGUIKernelImage)
+	longS := `\Device\HarddiskVolume3\Program File` + "\u017f" + ` (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+	kelvin := `\Device\Harddis` + "\u212a" + `Volume3\Program Files (x86)\Cisco\Cisco Secure Client\UI\csc_ui.exe`
+	for _, want := range []string{longS, kelvin} {
+		if !slices.Contains(kernelVariants, want) {
+			t.Fatalf("fold variants miss %q", want)
+		}
+	}
+	for _, kernelPath := range kernelVariants {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = kernelPath
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+			t.Errorf("%q: reason = %q", kernelPath, reason)
+		}
+		if opened := peer.opened(); len(opened) != 0 {
+			t.Errorf("%q: gateway opened %q", kernelPath, opened)
+		}
+	}
+
+	// The drive-letter side: the opened file's final path must match the
+	// allowed path by the same rule before WinVerifyTrust runs.
+	policy := testWindowsPeerPolicy(t)
+	finalVariants := unicodeFoldVariants(t, testGUIImage)
+	if len(finalVariants) == 0 {
+		t.Fatal("no fold variants of the allowed drive path")
+	}
+	for _, finalPath := range finalVariants {
+		if policy.allowsImage(finalPath) {
+			t.Errorf("allowsImage(%q) = true", finalPath)
+		}
+		peer := genuineWindowsPeer()
+		peer.image.finalPath = finalPath
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") {
+			t.Errorf("final path %q: reason = %q", finalPath, reason)
+		}
+		if peer.image.verified {
+			t.Errorf("final path %q: WinVerifyTrust ran", finalPath)
+		}
+	}
+}
+
+func TestSameWindowsPathFoldsASCIIOnly(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{testGUIImage, testGUIImage, true},
+		{testGUIImage, strings.ToUpper(testGUIImage), true},
+		{testGUIKernelImage, strings.ToLower(testGUIKernelImage), true},
+		{`C:\Files`, `C:\File` + "\u017f", false},
+		{`C:\Files`, `C:\FILE` + "\u017f", false},
+		{`C:\Kit`, `C:\` + "\u212a" + `it`, false},
+		{`C:\Kit`, `C:\` + "\u212a" + `IT`, false},
+		// Non-ASCII letters are compared exactly, even where NTFS would
+		// treat the two cases as one name: refusing is the safe side.
+		{`C:\` + "\u00c9", `C:\` + "\u00e9", false},
+		{`C:\` + "\u00e9", `C:\` + "\u00e9", true},
+		{`C:\a` + "\ufffd", `C:\a` + "\ufffd", false},
+		{"C:\\a\xff", "C:\\a\xff", false},
+		{`C:\a`, `C:\a\`, false},
+		{`C:\a`, `C:\b`, false},
+		{`C:\[`, `C:\{`, false},
+		{`C:\@`, `C:\` + "`", false},
+	} {
+		if got := sameWindowsPath(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameWindowsPath(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+		if tc.want && windowsPathKey(tc.a) != windowsPathKey(tc.b) {
+			t.Errorf("windowsPathKey(%q) != windowsPathKey(%q)", tc.a, tc.b)
+		}
+	}
+	if windowsPathKey(`C:\Files`) == windowsPathKey(`C:\File`+"\u017f") {
+		t.Fatal("windowsPathKey folded U+017F")
+	}
+}
+
+// TestKernelImageNameRefusesLossyNames checks the UTF-16 conversion of
+// the kernel image name: nothing that a lossy conversion would turn
+// into a different, possibly allowed, name is accepted.
+func TestKernelImageNameRefusesLossyNames(t *testing.T) {
+	encode := func(s string) []uint16 { return utf16.Encode([]rune(s)) }
+	name, err := kernelImageName(encode(testGUIKernelImage))
+	if err != nil || name != testGUIKernelImage {
+		t.Fatalf("kernelImageName = (%q, %v)", name, err)
+	}
+	pair := `\Device\HarddiskVolume3\` + "\U0001F600" + `\csc_ui.exe`
+	if name, err := kernelImageName(encode(pair)); err != nil || name != pair {
+		t.Fatalf("surrogate pair: (%q, %v)", name, err)
+	}
+	// A terminator counted in the length ends the name; it does not
+	// change it.
+	if name, err := kernelImageName(append(encode(testGUIKernelImage), 0, 0)); err != nil || name != testGUIKernelImage {
+		t.Fatalf("counted terminator: (%q, %v)", name, err)
+	}
+	withNUL := append(encode(testGUIKernelImage), 0)
+	withNUL = append(withNUL, encode(`\x.exe`)...)
+	for label, units := range map[string][]uint16{
+		"embedded NUL":       withNUL,
+		"only NULs":          {0, 0},
+		"empty":              {},
+		"lone high":          append(encode(`\Device\a`), 0xd800),
+		"lone high then NUL": append(encode(`\Device\a`), 0xd800, 0),
+		"high then ASCII":    append(append(encode(`\Device\a`), 0xd83d), encode("b")...),
+		"lone low":           append(encode(`\Device\a`), 0xdc00),
+		"low then high":      append(encode(`\Device\a`), 0xde00, 0xd83d),
+		"high then high":     append(encode(`\Device\a`), 0xd83d, 0xd83d, 0xde00),
+		"leading NUL":        append([]uint16{0}, encode(testGUIKernelImage)...),
+		"high at very start": append([]uint16{0xd800}, encode(`\x`)...),
+	} {
+		if name, err := kernelImageName(units); err == nil {
+			t.Errorf("%s: accepted as %q", label, name)
 		}
 	}
 }

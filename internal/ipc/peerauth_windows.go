@@ -236,7 +236,14 @@ func systemProcessImageName(pid uint32) (string, error) {
 	if length == 0 || length > len(buffer) {
 		return "", fmt.Errorf("pid %d has no image name", pid)
 	}
-	return windows.UTF16ToString(buffer[:length]), nil
+	// The name is compared exactly against the policy, so convert it
+	// without the NUL truncation and U+FFFD substitution of
+	// windows.UTF16ToString.
+	name, err := kernelImageName(buffer[:length])
+	if err != nil {
+		return "", fmt.Errorf("pid %d: %w", pid, err)
+	}
+	return name, nil
 }
 
 type systemProcessSnapshotEntry struct {

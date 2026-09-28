@@ -33,6 +33,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -157,7 +159,7 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string, d
 				return windowsPeerPolicy{}, fmt.Errorf("ipc: windows peer auth: image %q: %w", rel, err)
 			}
 			full := root + `\` + secureClientWindowsInstallRelativeDir + `\` + rel
-			key := strings.ToLower(full)
+			key := windowsPathKey(full)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -179,17 +181,16 @@ func newWindowsPeerPolicy(programFilesRoots, relativeImages, signers []string, d
 }
 
 // allowsImage reports whether finalPath is exactly one of the allowed
-// executables. NTFS names are case-insensitive, so the comparison is
-// too; anything that is not already canonical is refused rather than
-// normalized here, because the production path comes from
-// GetFinalPathNameByHandle and a non-canonical value means something
-// upstream is wrong.
+// executables, compared with sameWindowsPath. Anything that is not
+// already canonical is refused rather than normalized here, because
+// the production path comes from GetFinalPathNameByHandle and a
+// non-canonical value means something upstream is wrong.
 func (p windowsPeerPolicy) allowsImage(finalPath string) bool {
 	if !isCanonicalWindowsDrivePath(finalPath) {
 		return false
 	}
 	for _, image := range p.images {
-		if strings.EqualFold(finalPath, image.drivePath) {
+		if sameWindowsPath(finalPath, image.drivePath) {
 			return true
 		}
 	}
@@ -197,16 +198,98 @@ func (p windowsPeerPolicy) allowsImage(finalPath string) bool {
 }
 
 // matchKernelImage returns the allowed drive path whose NT form is
-// exactly kernelPath (case-insensitively), or false. It is a string
-// comparison only: nothing is opened for a process whose image name
-// is not already one of the allowed executables.
+// exactly kernelPath, compared with sameWindowsPath, or false. It is a
+// string comparison only: nothing is opened for a process whose image
+// name is not already one of the allowed executables. The file opened
+// afterwards is the policy's own path, so this comparison is what ties
+// the peer process to the file whose signature is checked; it must
+// never report a match for a name that NTFS resolves to another file.
 func (p windowsPeerPolicy) matchKernelImage(kernelPath string) (string, bool) {
 	for _, image := range p.images {
-		if strings.EqualFold(kernelPath, image.kernelPath) {
+		if sameWindowsPath(kernelPath, image.kernelPath) {
 			return image.drivePath, true
 		}
 	}
 	return "", false
+}
+
+// sameWindowsPath reports whether two paths are the same string under
+// the one case rule the peer check relies on: ASCII letters match in
+// either case, and every other character must be identical.
+//
+// strings.EqualFold must not be used for this. Its Unicode simple
+// folding equates characters that NTFS and the object manager keep
+// apart, for example U+017F (LATIN SMALL LETTER LONG S) with "s" and
+// U+212A (KELVIN SIGN) with "k". A standard user can create a
+// directory at the root of the system drive, so a look-alike of
+// "Program Files (x86)" would otherwise pass as the allowed path while
+// naming a different file. Non-ASCII letters that NTFS does treat as
+// one name in either case are compared exactly, so this comparison
+// can only refuse a name NTFS would accept, never the reverse. A
+// U+FFFD replacement character (what an unpaired UTF-16 surrogate
+// decodes to) or invalid UTF-8 never matches, so two different raw
+// names cannot collapse into one string.
+func sameWindowsPath(a, b string) bool {
+	if len(a) != len(b) || !plainWindowsPathText(a) || !plainWindowsPathText(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if asciiLower(a[i]) != asciiLower(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func plainWindowsPathText(path string) bool {
+	return utf8.ValidString(path) && !strings.ContainsRune(path, utf8.RuneError)
+}
+
+// windowsPathKey is the map key form of sameWindowsPath: ASCII letters
+// lowered, every other byte kept.
+func windowsPathKey(path string) string {
+	key := []byte(path)
+	for i := range key {
+		key[i] = asciiLower(key[i])
+	}
+	return string(key)
+}
+
+func asciiLower(c byte) byte {
+	if 'A' <= c && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+// kernelImageName converts the counted UTF-16 image name the kernel
+// reports into a string. It refuses input that a lossy conversion
+// would turn into another name: a NUL inside the name, where a
+// NUL-terminated conversion would cut it short, and an unpaired
+// surrogate, which would decode to U+FFFD. Terminating NULs counted in
+// the length are dropped; they end the name rather than change it.
+func kernelImageName(units []uint16) (string, error) {
+	for len(units) > 0 && units[len(units)-1] == 0 {
+		units = units[:len(units)-1]
+	}
+	if len(units) == 0 {
+		return "", errors.New("image name is empty")
+	}
+	for i := 0; i < len(units); i++ {
+		unit := units[i]
+		switch {
+		case unit == 0:
+			return "", errors.New("image name contains NUL")
+		case unit >= 0xd800 && unit <= 0xdbff:
+			if i+1 >= len(units) || units[i+1] < 0xdc00 || units[i+1] > 0xdfff {
+				return "", errors.New("image name contains an unpaired surrogate")
+			}
+			i++
+		case unit >= 0xdc00 && unit <= 0xdfff:
+			return "", errors.New("image name contains an unpaired surrogate")
+		}
+	}
+	return string(utf16.Decode(units)), nil
 }
 
 // isLocalNTDeviceName accepts a single-segment NT device name such as
@@ -498,7 +581,7 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity,
 	defer image.Close()
 	finalPath := image.FinalPath()
 	id.ImagePath = finalPath
-	if !l.policy.allowsImage(finalPath) || !strings.EqualFold(finalPath, drivePath) {
+	if !l.policy.allowsImage(finalPath) || !sameWindowsPath(finalPath, drivePath) {
 		return id, "peer image is not an allowed Secure Client GUI executable"
 	}
 	signer, err := image.VerifySigner()

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	pb "github.com/defenseclaw/defenseclaw/proto/defenseclaw/secureclient/v1"
 )
 
@@ -217,10 +218,11 @@ func TestVerifySignerRejectsUnsignedGoBinary(t *testing.T) {
 	}
 }
 
-// TestVerifySignerExtractsLeafOfSignedBinary exercises the WinTrust
-// provider-data walk on an embedded-signed executable, and checks that
-// a trusted signer other than Cisco is still refused by the policy.
-func TestVerifySignerExtractsLeafOfSignedBinary(t *testing.T) {
+// embeddedSignedExecutable returns an executable on this host whose
+// embedded Authenticode signature WinVerifyTrust accepts, and the
+// signer it validated.
+func embeddedSignedExecutable(t *testing.T) (string, windowsImageSigner, bool) {
+	t.Helper()
 	candidates := []string{
 		filepath.Join(os.Getenv("ProgramFiles"), "PowerShell", "7", "pwsh.exe"),
 		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
@@ -241,25 +243,35 @@ func TestVerifySignerExtractsLeafOfSignedBinary(t *testing.T) {
 		if err != nil {
 			continue
 		}
-		if signer.CommonName == "" || len(signer.ThumbprintSHA256) != 64 {
-			t.Fatalf("%s: signer = %+v", resolved, signer)
-		}
-		policy := testWindowsPeerPolicy(t)
-		if signer.CommonName != testCiscoSigner && policy.signerRejection(signer) == "" {
-			t.Fatalf("%s: policy admitted non-Cisco signer %q", resolved, signer.CommonName)
-		}
-		allowOwn, err := newWindowsPeerPolicy([]string{testProgramFiles}, []string{`UI\csc_ui.exe`},
-			append([]string{signer.CommonName}, signer.Organizations...), testDriveDevice)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if reason := allowOwn.signerRejection(signer); reason != "" {
-			t.Fatalf("%s: policy naming the signer still rejected it: %s", resolved, reason)
-		}
-		t.Logf("%s signed by %q %q", resolved, signer.CommonName, signer.Organizations)
-		return
+		return resolved, signer, true
 	}
-	t.Skip("no embedded-signed executable available on this host")
+	return "", windowsImageSigner{}, false
+}
+
+// TestVerifySignerExtractsLeafOfSignedBinary exercises the WinTrust
+// provider-data walk on an embedded-signed executable, and checks that
+// a trusted signer other than Cisco is still refused by the policy.
+func TestVerifySignerExtractsLeafOfSignedBinary(t *testing.T) {
+	resolved, signer, ok := embeddedSignedExecutable(t)
+	if !ok {
+		t.Skip("no embedded-signed executable available on this host")
+	}
+	if signer.CommonName == "" || len(signer.ThumbprintSHA256) != 64 {
+		t.Fatalf("%s: signer = %+v", resolved, signer)
+	}
+	policy := testWindowsPeerPolicy(t)
+	if signer.CommonName != testCiscoSigner && policy.signerRejection(signer) == "" {
+		t.Fatalf("%s: policy admitted non-Cisco signer %q", resolved, signer.CommonName)
+	}
+	allowOwn, err := newWindowsPeerPolicy([]string{testProgramFiles}, []string{`UI\csc_ui.exe`},
+		append([]string{signer.CommonName}, signer.Organizations...), testDriveDevice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := allowOwn.signerRejection(signer); reason != "" {
+		t.Fatalf("%s: policy naming the signer still rejected it: %s", resolved, reason)
+	}
+	t.Logf("%s signed by %q %q", resolved, signer.CommonName, signer.Organizations)
 }
 
 type recordedReject struct {
@@ -430,5 +442,142 @@ func TestWindowsSecureClientListenerRejectsUnsignedClient(t *testing.T) {
 	}
 	if !strings.Contains(first.reason, "signature rejected") {
 		t.Fatalf("reason = %q, want an Authenticode rejection", first.reason)
+	}
+}
+
+func copyTestFile(t *testing.T, source, destination string) {
+	t.Helper()
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestWindowsSecureClientListenerRejectsLookAlikeRoot is the live
+// regression for the look-alike image path. The policy root holds a
+// correctly signed executable at the GUI path, standing in for the
+// genuine GUI. The client is this unsigned test binary at the same
+// relative path under a sibling directory whose name differs by one
+// U+017F (LATIN SMALL LETTER LONG S). Unicode folding equates the two
+// directory names and NTFS does not. The client must be refused on its
+// image name, before the gateway opens and verifies the signed file.
+func TestWindowsSecureClientListenerRejectsLookAlikeRoot(t *testing.T) {
+	if os.Getenv(peerAuthHelperSocketEnv) != "" {
+		t.Skip("running as helper")
+	}
+	signed, signer, ok := embeddedSignedExecutable(t)
+	if !ok {
+		t.Skip("no embedded-signed executable available on this host")
+	}
+	scratch, err := filepath.EvalSymlinks(shortSocketDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	genuineRoot := filepath.Join(scratch, "Files")
+	lookAlikeRoot := filepath.Join(scratch, "File\u017f")
+	relative := filepath.Join("Cisco", "Cisco Secure Client", "UI", "csc_ui.exe")
+	copyTestFile(t, signed, filepath.Join(genuineRoot, relative))
+	lookAlikeGUI := filepath.Join(lookAlikeRoot, relative)
+	copyTestFile(t, selfExecutable(t), lookAlikeGUI)
+	genuineInfo, err := os.Stat(genuineRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookAlikeInfo, err := os.Stat(lookAlikeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(genuineInfo, lookAlikeInfo) {
+		t.Skip("this volume folds U+017F, so the look-alike directory is the same directory")
+	}
+	if !strings.EqualFold(genuineRoot, lookAlikeRoot) {
+		t.Fatal("premise: Unicode folding no longer equates the two roots")
+	}
+
+	policy, err := newWindowsPeerPolicy([]string{genuineRoot}, []string{`UI\csc_ui.exe`},
+		append([]string{signer.CommonName}, signer.Organizations...), dosDeviceForDrive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Premise: the signed stand-in passes every check that runs after
+	// the image-name match, so only that match can refuse the client.
+	image, err := openWindowsPeerImage(filepath.Join(genuineRoot, relative))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stand, err := image.VerifySigner()
+	finalPath := image.FinalPath()
+	_ = image.Close()
+	if err != nil || policy.signerRejection(stand) != "" || !policy.allowsImage(finalPath) {
+		t.Fatalf("premise: signed stand-in %s not accepted (signer %+v, err %v)", finalPath, stand, err)
+	}
+
+	inner, socketPath := listenTestUnix(t)
+	recorder := &rejectRecorder{}
+	serveSecureClientAPI(t, inner, policy, recorder)
+
+	command := exec.Command(lookAlikeGUI, "-test.run=^TestWindowsPeerAuthHelperProcess$", "-test.count=1")
+	command.Env = append(os.Environ(), peerAuthHelperSocketEnv+"="+socketPath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "HELPER-RECEIVED") || !strings.Contains(string(output), "HELPER-REJECTED") {
+		t.Fatalf("client under the look-alike root was not refused:\n%s", output)
+	}
+	rejects := recorder.snapshot()
+	if len(rejects) == 0 {
+		t.Fatal("no rejection recorded")
+	}
+	first := rejects[0]
+	if first.id.PID == uint32(os.Getpid()) || first.id.PID == 0 {
+		t.Fatalf("rejected pid = %d, want the helper's pid", first.id.PID)
+	}
+	if !strings.Contains(first.reason, "not an allowed Secure Client GUI executable") {
+		t.Fatalf("reason = %q, want an image-name rejection", first.reason)
+	}
+	// Refused on the kernel image name: the reported path is still the
+	// look-alike NT path, not a file the gateway opened.
+	if !strings.HasPrefix(first.id.ImagePath, `\Device\`) || !strings.Contains(first.id.ImagePath, "File\u017f") {
+		t.Fatalf("rejected image = %q, want the look-alike NT path", first.id.ImagePath)
+	}
+}
+
+// TestValidateWindowsSocketPathRefusesLookAlikeTrustedRoot checks the
+// socket-path anchor with the same comparison: an ASCII case variant of
+// the trusted managed IPC directory is accepted, and a Unicode-fold
+// look-alike of it is refused.
+func TestValidateWindowsSocketPathRefusesLookAlikeTrustedRoot(t *testing.T) {
+	if allowUnsafeSocketOverrideForTest {
+		t.Fatal("socket override test hook is set")
+	}
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil || programFiles == "" {
+		t.Skipf("trusted Program Files root unavailable: %v", err)
+	}
+	trustedParent := filepath.Clean(filepath.Join(programFiles, windowsManagedIPCRelativeDir))
+	if filepath.Base(trustedParent) != "ipc" {
+		t.Fatalf("trusted parent %q does not end in ipc", trustedParent)
+	}
+	prefix := filepath.Dir(trustedParent)
+	for _, parent := range []string{trustedParent, filepath.Join(strings.ToUpper(prefix), "ipc"), filepath.Join(strings.ToLower(prefix), "ipc")} {
+		if err := validateWindowsSocketPathOverride(filepath.Join(parent, SocketFileName)); err != nil {
+			t.Errorf("%s: %v", parent, err)
+		}
+	}
+	variants := unicodeFoldVariants(t, prefix)
+	if len(variants) == 0 {
+		t.Fatalf("no fold variants of %q", prefix)
+	}
+	for _, variant := range variants {
+		if err := validateWindowsSocketPathOverride(filepath.Join(variant, "ipc", SocketFileName)); err == nil {
+			t.Errorf("look-alike parent %q accepted", variant)
+		}
 	}
 }
