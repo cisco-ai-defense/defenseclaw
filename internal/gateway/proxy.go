@@ -838,11 +838,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	if targetOrigin == "" && p.modelRouter != nil {
 		var routePartial struct {
-			Model    string        `json:"model"`
-			Messages []ChatMessage `json:"messages"`
-			Stream   bool          `json:"stream"`
+			Model    string          `json:"model"`
+			Messages []ChatMessage   `json:"messages"`
+			Input    json.RawMessage `json:"input,omitempty"`
+			Stream   bool            `json:"stream"`
 		}
 		_ = json.Unmarshal(body, &routePartial)
+		if len(routePartial.Messages) == 0 && len(routePartial.Input) > 0 {
+			routePartial.Messages = extractResponsesAPIMessages(routePartial.Input)
+		}
 		requestModel := strings.TrimSpace(routePartial.Model)
 		if requestModel == "" {
 			requestModel = bedrockModelFromPath(r.URL.Path)
@@ -939,9 +943,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[routing] passthrough router check: modelRouter=%v bodyLen=%d\n", p.modelRouter != nil, len(body))
 	if p.modelRouter != nil {
 		var routePartial struct {
-			Model    string        `json:"model"`
-			Messages []ChatMessage `json:"messages"`
-			Stream   bool          `json:"stream"`
+			Model    string          `json:"model"`
+			Messages []ChatMessage   `json:"messages"`
+			Input    json.RawMessage `json:"input,omitempty"`
+			Stream   bool            `json:"stream"`
 		}
 		routeBody := body
 		if isZstdBody(routeBody) {
@@ -950,6 +955,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		_ = json.Unmarshal(routeBody, &routePartial)
+		if len(routePartial.Messages) == 0 && len(routePartial.Input) > 0 {
+			routePartial.Messages = extractResponsesAPIMessages(routePartial.Input)
+		}
 		requestModel := strings.TrimSpace(routePartial.Model)
 		if requestModel == "" {
 			requestModel = bedrockModelFromPath(r.URL.Path)
@@ -5032,6 +5040,42 @@ func (p *GuardrailProxy) recordTelemetry(
 
 // injectSystemMessage prepends a system message to the "messages" array in
 // the raw JSON body. This preserves all other fields the client sent.
+// extractResponsesAPIMessages parses Responses API input[] items into
+// ChatMessage slice for routing classification. Handles both string
+// input and array-of-item formats.
+func extractResponsesAPIMessages(input json.RawMessage) []ChatMessage {
+	if len(input) == 0 {
+		return nil
+	}
+	switch input[0] {
+	case '"':
+		var text string
+		if json.Unmarshal(input, &text) == nil && text != "" {
+			return []ChatMessage{{Role: "user", Content: text}}
+		}
+	case '[':
+		var rawItems []json.RawMessage
+		if json.Unmarshal(input, &rawItems) != nil {
+			return nil
+		}
+		var msgs []ChatMessage
+		for _, raw := range rawItems {
+			var wrapper struct {
+				Type    string          `json:"type"`
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			}
+			if json.Unmarshal(raw, &wrapper) == nil && wrapper.Role != "" {
+				msg := ChatMessage{Role: wrapper.Role, RawContent: wrapper.Content}
+				_ = json.Unmarshal(raw, &msg)
+				msgs = append(msgs, msg)
+			}
+		}
+		return msgs
+	}
+	return nil
+}
+
 // Works for OpenAI Chat Completions, Anthropic (also uses "messages"), and
 // any other API that mirrors the Chat Completions schema.
 func injectSystemMessage(raw json.RawMessage, content string) (json.RawMessage, error) {
