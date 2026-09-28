@@ -266,6 +266,12 @@ type HookCoverage struct {
 	Unreachable       bool      `json:"unreachable,omitempty"`
 	UnreachableSince  time.Time `json:"unreachable_since,omitzero"`
 	UnreachableReason string    `json:"unreachable_reason,omitempty"`
+	// NoHookYet is set with Unreachable when the harness called its model
+	// but DefenseClaw saw no hook request of the session at all, not even
+	// a refused or unanswered one: no tool call is known to have been
+	// blocked yet, so the warning opens with HooksNotReachedYetWarning
+	// rather than HooksUnreachableWarning.
+	NoHookYet bool `json:"no_hook_yet,omitempty"`
 }
 
 // Endpoint is an OpenShell EndpointStatus: the last network result of a
@@ -589,6 +595,30 @@ const (
 // guard publishes.
 const ReasonNestedRepo = "nested_repo"
 
+// ReasonHostPortClosed is the Reason of the egress.blocked event of a
+// connection to a port on this machine the sandbox may not reach: the run
+// did not declare it with --host-port, or the policy does not open host
+// ports. Its Message is the plain line with the way on (the flag to run
+// with), and Host is host.openshell.internal.
+const ReasonHostPortClosed = "host_port_closed"
+
+// ReasonHookFinding is the Reason of the finding event of a hook verdict
+// that let a tool call run but flagged it (an alert); Severity is the
+// verdict's.
+const ReasonHookFinding = "hook_finding"
+
+// ReasonPolicyChanged is the Reason of the sandbox.lifecycle event a
+// sandbox gets when a configuration change moves the policy it runs under
+// (its pack, profile, network mode, approvals, skip-permissions or the
+// organization's egress lists); the Message says what changed.
+const ReasonPolicyChanged = "policy_changed"
+
+// ReasonEgressOff is the Reason of the egress.blocked event a sandbox gets
+// when its policy turns its web egress off while it runs (the deny network
+// mode, as an organization's required strict pack sets): the egress proxy
+// answers its requests with a 403 that says why.
+const ReasonEgressOff = "egress_off"
+
 // ReasonHooksUnreachable is the Reason of the finding event a session gets
 // when its hooks do not reach DefenseClaw; ReasonHooksRestored follows once
 // an authenticated hook arrives after all.
@@ -603,6 +633,11 @@ const (
 	HooksUnreachableWarning = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
 	HooksDoctorHint         = "Run: defenseclaw sandbox doctor"
 )
+
+// HooksNotReachedYetWarning opens the warning about a session whose harness
+// called its model while not one hook request reached DefenseClaw
+// (HookCoverage.NoHookYet); HooksDoctorHint closes it too.
+const HooksNotReachedYetWarning = "no hook has reached DefenseClaw yet"
 
 // Activity sources for egress events.
 const (

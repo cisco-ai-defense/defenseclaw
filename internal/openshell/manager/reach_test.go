@@ -192,10 +192,10 @@ func TestHookReachSilentWork(t *testing.T) {
 		do   func(*reachEnv)
 	}{
 		{"model call", func(r *reachEnv) {
-			r.ocsf("HTTP:POST [INFO] ALLOWED POST https://api.anthropic.com/v1/messages [policy:anthropic engine:l7]")
+			r.ocsf("NET:OPEN [INFO] ALLOWED " + testClaudeBin + "(9) -> api.anthropic.com:443 [policy:_provider_anthropic engine:opa]")
 		}},
 		{"local model endpoint", func(r *reachEnv) {
-			r.ocsf("NET:OPEN [INFO] ALLOWED /usr/bin/node(9) -> host.openshell.internal:28921 [policy:dc_cred_1 engine:opa]")
+			r.ocsf("NET:OPEN [INFO] ALLOWED " + testClaudeBin + "(9) -> host.openshell.internal:28921 [policy:_provider_dc_cred_1 engine:opa]")
 		}},
 	} {
 		t.Run(work.name, func(t *testing.T) {
@@ -208,7 +208,7 @@ func TestHookReachSilentWork(t *testing.T) {
 			}
 			r.advance(2 * time.Second)
 			r.m.checkHookReach(context.Background())
-			if h := r.hooks(); !h.Unreachable || !strings.Contains(h.UnreachableReason, "the harness has been working for 31s") {
+			if h := r.hooks(); !h.Unreachable || !strings.Contains(h.UnreachableReason, "the harness has been calling its model for 31s") {
 				t.Fatalf("hooks = %+v", h)
 			}
 		})
@@ -241,10 +241,10 @@ func TestHookReachIdleTelemetry(t *testing.T) {
 	if h := r.hooks(); h.Unreachable {
 		t.Fatalf("an idle harness exporting telemetry was flagged: %+v", h)
 	}
-	r.ocsf("HTTP:POST [INFO] ALLOWED POST https://bedrock-mantle.us-east-1.api.aws/v1/responses [policy:_provider_x engine:l7]")
+	r.ocsf("NET:OPEN [INFO] ALLOWED " + testClaudeBin + "(81) -> bedrock-mantle.us-east-1.api.aws:443 [policy:_provider_x engine:opa]")
 	r.advance(DefaultHookReachWindow + time.Second)
 	r.m.checkHookReach(context.Background())
-	if h := r.hooks(); !h.Unreachable || !strings.Contains(h.UnreachableReason, "the harness has been working") {
+	if h := r.hooks(); !h.Unreachable || !strings.Contains(h.UnreachableReason, "the harness has been calling its model") {
 		t.Fatalf("a model call without hooks = %+v", h)
 	}
 }

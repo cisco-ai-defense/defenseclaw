@@ -179,17 +179,34 @@ func (e *Effective) allowUnblock(host string) error {
 	return nil
 }
 
+// hostInternalViolation refuses a destination that is this machine (or
+// what only it reaches) by another way than a host port, and says how to
+// reach a service on it instead: a --host-port and host.openshell.internal.
+func hostInternalViolation(key, host string, port int, reason string) *Violation {
+	p := "PORT"
+	if port > 0 {
+		p = strconv.Itoa(port)
+	}
+	detail := strings.TrimSpace(reason)
+	if detail != "" && !strings.HasSuffix(detail, ".") {
+		detail += "."
+	}
+	detail = strings.TrimSpace(detail + " To reach a service on this machine, run the sandbox with --host-port " + p +
+		" and connect to " + OpenShellHostAlias + ":" + p + ".")
+	return &Violation{
+		Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
+		Message: "DefenseClaw never opens this machine, link-local, cloud metadata or reserved addresses to a sandbox",
+		Detail:  detail,
+	}
+}
+
 // guardViolation refuses what the egress proxy's guard never lets an
 // unblock or approval open: this machine and what only it reaches, and
 // private networks (only an allow entry opens those).
 func guardViolation(key, host string, dec egress.Decision) error {
 	switch dec.Category {
 	case egress.CategoryHostInternal:
-		return &Violation{
-			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
-			Message: "DefenseClaw never opens this machine, link-local, cloud metadata or reserved addresses to a sandbox",
-			Detail:  dec.Reason,
-		}
+		return hostInternalViolation(key, host, 0, dec.Reason)
 	case egress.CategoryPrivateNetwork:
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
@@ -340,11 +357,7 @@ func (e *Effective) allowApproval(key string, action Action, always bool) error 
 	dec := d.DecideHost(policyProbe, host)
 	switch dec.Category {
 	case egress.CategoryHostInternal:
-		return &Violation{
-			Key: key, Source: SourceUser, Attempted: host, Constraint: "defenseclaw",
-			Message: "DefenseClaw never opens this machine, link-local, cloud metadata or reserved addresses to a sandbox",
-			Detail:  dec.Reason,
-		}
+		return hostInternalViolation(key, host, port, dec.Reason)
 	case egress.CategoryInvalidDestination:
 		// A single-label name, which resolvers complete with the host's
 		// search domains.

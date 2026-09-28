@@ -710,6 +710,10 @@ func judgeEndpoint(ctx context.Context, ep Endpoint, allowedIPs []string, pol Po
 		case dec.Category == egress.CategoryIPLiteral:
 			return reject(d, ReasonIPLiteral, "IP-literal destinations bypass the egress blocklist; use a host name through the proxy, "+
 				"or unblock "+host+" first")
+		case dec.Source == egress.SourceGuard && dec.Category == egress.CategoryHostInternal:
+			// An address or name of this machine: its services are reached
+			// only through a host port, which says what to do instead.
+			return reject(d, ReasonResolvesToHost, "the egress proxy refuses "+host+": "+dec.Reason+hostPortHint(ep.Port))
 		case dec.Source == egress.SourceGuard:
 			return reject(d, ReasonInvalid, "the egress proxy refuses "+host+": "+dec.Reason)
 		case dec.Source == egress.SourceAdmin, dec.Source == egress.SourceOperator, dec.Source == egress.SourceFeed:
@@ -806,7 +810,7 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 	switch {
 	case chk.Category == egress.CategoryHostInternal:
 		return reject(verdict, ReasonResolvesToHost, verdict.Host+" resolves to "+resolvedWhat(chk)+
-			"; sandboxes reach services on this machine only through a host port")
+			"; sandboxes reach services on this machine only through a host port"+hostPortHint(verdict.Port))
 	case chk.Category == egress.CategoryPrivateNetwork:
 		if !decider.UnblocksAllowed() {
 			verdict.Violation = &packs.Violation{
@@ -1047,6 +1051,18 @@ func ask(d Decision, r Reason, msg string) Decision {
 func approve(d Decision, r Reason, msg string) Decision {
 	d.Verdict, d.Reason, d.Message = Approve, r, msg
 	return d
+}
+
+// hostPortHint is the way to a service on this machine on port, for a
+// rejection of a destination that reaches the machine another way.
+func hostPortHint(port int) string {
+	if port <= 0 {
+		return "; to reach a service on this machine, run the sandbox with --host-port PORT and connect to " +
+			packs.OpenShellHostAlias + ":PORT"
+	}
+	p := strconv.Itoa(port)
+	return "; to reach a service on this machine, run the sandbox with --host-port " + p + " and connect to " +
+		packs.OpenShellHostAlias + ":" + p
 }
 
 func portText(port int) string {

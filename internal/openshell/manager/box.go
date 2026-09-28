@@ -95,7 +95,10 @@ type box struct {
 	// synthetic maps the synthetic addresses OpenShell's policy DNS handed
 	// the sandbox to their names (noteSyntheticAddress).
 	synthetic map[string]string
-	blocked   int
+	// closedPorts are the undeclared host ports whose denial the feed
+	// explained this session (hostPortDenied).
+	closedPorts map[int]bool
+	blocked     int
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// triageBusy is set while a triageNow poll runs; triageAgain asks it
@@ -242,6 +245,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
 		b.reach = hookReach{}
+		b.closedPorts = nil
 		// A restarted daemon that finds the sandbox still ready keeps the
 		// time it became ready (uptime); a real transition takes now.
 		if previous != audit.SandboxPhaseReady || b.rec.ReadyAt.IsZero() {
@@ -440,6 +444,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,
+		NoHookYet: !b.reach.since.IsZero() && b.reach.noHookYet,
 	}
 	for _, a := range m.approvals {
 		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {

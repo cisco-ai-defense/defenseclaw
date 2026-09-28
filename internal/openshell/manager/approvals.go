@@ -94,6 +94,10 @@ type approval struct {
 	// deferrals counts the apply-time checks of an operator approval that
 	// could not be made (triage.ErrDeferred) since it was queued.
 	deferrals int
+	// local marks an ask DefenseClaw raised itself, with no OpenShell
+	// draft chunk behind it (hostPortAsk): approving merges its rule into
+	// the sandbox policy directly (applyHostPortAsk).
+	local bool
 }
 
 // approvalID names the ask for one proposed rule of one sandbox: a digest
@@ -876,7 +880,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		a.status = approvalDeciding
 	}
 	// While deciding, triage leaves the approval's proposal alone.
-	p, chunkID := a.proposal, a.chunkID
+	p, chunkID, local := a.proposal, a.chunkID, a.local
 	host, port := a.decision.Host, a.decision.Port
 	m.mu.Unlock()
 	if status != sandboxapi.ApprovalPending {
@@ -910,13 +914,18 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 			}
 		}
 		// The whole proposal is judged again against the current policy:
-		// approving applies every endpoint, port and allowed IP in it.
-		cur := triage.Classify(ctx, p, m.triagePolicy(b, eff))
-		if cur.Verdict == triage.Reject {
-			if cur.Violation != nil {
-				return nil, m.violationErrorFor(ctx, cur.Violation, a.sandbox, audit.SandboxPolicyRuleAdd, host)
+		// approving applies every endpoint, port and allowed IP in it. An
+		// ask DefenseClaw raised itself is no agent proposal; the policy's
+		// checks below judge it.
+		var cur triage.Decision
+		if !local {
+			cur = triage.Classify(ctx, p, m.triagePolicy(b, eff))
+			if cur.Verdict == triage.Reject {
+				if cur.Violation != nil {
+					return nil, m.violationErrorFor(ctx, cur.Violation, a.sandbox, audit.SandboxPolicyRuleAdd, host)
+				}
+				return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
 			}
-			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation, Message: cur.Message}
 		}
 		if d.Always && cur.Verdict == triage.Ask && cur.Reason == triage.ReasonPrivateNetwork {
 			// "Always" saves the host to openshell.egress.unblocked, and
@@ -941,6 +950,11 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		a.status, a.actor, a.always = sandboxapi.ApprovalQueued, actorOperator, d.Always
 		m.mu.Unlock()
 		decided = true
+		if local {
+			go m.applyHostPortAsk(a, bindingID)
+			res.Message = "approved; DefenseClaw opens the port once the sandbox's hooks are quiet"
+			break
+		}
 		m.batcher.Enqueue(triage.Item{Sandbox: a.sandbox, BindingID: bindingID, ChunkID: chunkID, Digest: p.Digest, Tag: a.id})
 		res.Message = "approved; OpenShell applies it once the sandbox's hooks are quiet"
 	case sandboxapi.DecisionReject:
@@ -948,8 +962,10 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		if reason == "" {
 			reason = "rejected by the operator"
 		}
-		if err := gw.Client.RejectDraftChunk(ctx, a.sandbox, chunkID, truncate(reason, 512)); err != nil && !openshell.IsNotFound(err) {
-			return nil, upstream("reject proposal", err)
+		if chunkID != "" {
+			if err := gw.Client.RejectDraftChunk(ctx, a.sandbox, chunkID, truncate(reason, 512)); err != nil && !openshell.IsNotFound(err) {
+				return nil, upstream("reject proposal", err)
+			}
 		}
 		if d.Always && len(hosts) > 0 {
 			for _, h := range hosts {

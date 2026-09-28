@@ -139,6 +139,10 @@ type record struct {
 	ReadyAt time.Time `json:"ready_at,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
+	// HostAlias is what OpenShell last reported of host.openshell.internal
+	// in the sandbox (noteSyntheticAddress): a watch resumed at Cursor
+	// starts past that report.
+	HostAlias *hostAliasRecord `json:"host_alias,omitempty"`
 	// Unblocks are sandbox-scoped egress unblock patterns.
 	Unblocks []string `json:"unblocks,omitempty"`
 	// ApprovedRules are the triaged OpenShell rules (allow_*) approvals

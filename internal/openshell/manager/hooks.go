@@ -73,6 +73,7 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 		return
 	}
 	restored := false
+	box.ingressAnsweredLocked(now)
 	switch route {
 	case sandboxauth.RouteHook:
 		box.hooks.lastHook = now

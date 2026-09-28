@@ -198,11 +198,13 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 1 {
 		t.Fatalf("a curl's denial counted as %d blocked sites, want 1", got.Egress.Blocked)
 	}
+	// A tool's denied connection is no model call of the harness either
+	// (reach.go): it starts no reachability window.
 	e.m.mu.Lock()
 	firstWork = e.m.boxes[sb.Name].reach.firstWork
 	e.m.mu.Unlock()
-	if firstWork.IsZero() {
-		t.Fatal("a curl's connection did not count as harness work")
+	if !firstWork.IsZero() {
+		t.Fatal("a curl's denied connection counted as harness work")
 	}
 	curl := e.fake.AddDraftChunk(openshell.DefaultWorkspace, sb.Name, chunk("allow_raw_githubusercontent_com_443", "raw.githubusercontent.com", 443))
 	e.watch.push(t, sb.Name, stream.Event{Kind: stream.KindDraft, Draft: &stream.DraftUpdate{NewChunks: 1}})
@@ -278,16 +280,18 @@ func TestOpenShellDenialsCountConnections(t *testing.T) {
 	if len(got) != 3 || got[1].Host != "api.example.org" || got[1].Port != 8443 || got[2].Host != "198.18.0.9" {
 		t.Fatalf("feed = %+v, want the mapped name, then an unmapped address as recorded", got)
 	}
-	// The host alias's synthetic address is the host alias: a host port,
-	// which triage asks about, not a blocked site.
+	// The host alias's synthetic address is the host alias: a port on this
+	// machine the run did not declare, which the feed names as such (no
+	// synthetic address, the flag that opens it), once.
 	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998 mapping_id=m2", now)
 	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:29170 [reason:transparent_tcp_mapping_denied]", now)
-	if got := feed(); len(got) != 3 || blocked() != 3 {
-		t.Fatalf("feed = %+v, blocked %d; the host alias's address counted as a blocked site", got, blocked())
+	if got := feed(); len(got) != 4 || blocked() != 4 || got[3].Host != "host.openshell.internal" || got[3].Port != 29170 ||
+		got[3].Reason != sandboxapi.ReasonHostPortClosed || !strings.Contains(got[3].Message, "--host-port 29170") {
+		t.Fatalf("feed = %+v, blocked %d; want the host alias's port named", got, blocked())
 	}
 	// Records from before the daemon started are replays.
 	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> old.example.org:443 [reason:transparent_tcp_policy_denied]", e.m.startedAt.Add(-time.Minute))
-	if got := feed(); len(got) != 4 || !got[3].Replayed {
+	if got := feed(); len(got) != 5 || !got[4].Replayed {
 		t.Fatalf("feed = %+v, want the replayed record marked", got)
 	}
 }

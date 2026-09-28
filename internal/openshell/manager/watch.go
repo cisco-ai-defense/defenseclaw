@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -273,7 +274,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	case ocsf.ClassConfig:
 		m.noteSyntheticAddress(b, r.Message)
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
-		host := m.namedHost(b, triage.NormalizeHost(r.Host))
+		host := m.namedHost(b, triage.NormalizeHost(r.Host), r.Port)
 		if host == openshellHostAlias {
 			m.hostAliasEvent(ctx, b, r, at, harnessName)
 			return
@@ -290,12 +291,14 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// A refused name lookup (dnsRefusal) is no blocked request: the
 		// connection that follows it is, and it is denied and counted on
 		// its own. Nor is a connection to the sandbox's own host name
-		// (ownHostName), which reaches nothing. Both are audited, but
-		// neither counted nor shown on the feed.
-		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host)))
+		// (ownHostName), which reaches nothing, or one OpenShell closed
+		// because the policy changed under it (policyReloadCut), which the
+		// policy still allows: the client connects again. They are
+		// audited, but neither counted nor shown on the feed.
+		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host) || policyReloadCut(r)))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
-			m.markWork(b, at, ofHarness)
+			m.markWork(b, at, ofHarness, harnessModelCall(r, ofHarness))
 		} else if ofHarness {
 			m.markActive(b, at)
 		}
@@ -372,11 +375,30 @@ const maxSyntheticNames = 512
 // DNS staged unapproved name <name> synthetic=<addr> …".
 var syntheticMapping = regexp.MustCompile(`^Policy DNS (?:mapped|staged unapproved name) (\S+) (?:\S+ )*?synthetic=(\S+)`)
 
+// mappingPorts is the port list of a "Policy DNS mapped" record: the ports
+// the name's transparent mapping covers ("ports=38821,38871,38872").
+var mappingPorts = regexp.MustCompile(`(?:^| )ports=([0-9,]+)(?: |$)`)
+
+// maxMappedPorts bounds the host alias ports a record keeps.
+const maxMappedPorts = 64
+
+// hostAliasRecord is what OpenShell's policy DNS last reported of the host
+// alias in a sandbox: its synthetic address and the ports its transparent
+// mapping covers. It is kept on the record because a restarted daemon's
+// watch resumes past that report, and a later connection to the address
+// names only the address.
+type hostAliasRecord struct {
+	Addr  string `json:"addr"`
+	Ports []int  `json:"ports,omitempty"`
+}
+
 // noteSyntheticAddress keeps the name behind a synthetic address OpenShell
 // reports (syntheticMapping), so a later record of a connection to the
-// address names the destination (namedHost).
+// address names the destination (namedHost). The host alias's address and
+// mapped ports also go on the record.
 func (m *Manager) noteSyntheticAddress(b *box, msg string) {
-	sub := syntheticMapping.FindStringSubmatch(strings.TrimSpace(msg))
+	msg = strings.TrimSpace(msg)
+	sub := syntheticMapping.FindStringSubmatch(msg)
 	if sub == nil {
 		return
 	}
@@ -385,27 +407,73 @@ func (m *Manager) noteSyntheticAddress(b *box, msg string) {
 	if err != nil || name == "" || !syntheticPrefix.Contains(addr.Unmap()) {
 		return
 	}
+	key := addr.Unmap().String()
+	var alias *hostAliasRecord
+	if name == openshellHostAlias && strings.HasPrefix(msg, "Policy DNS mapped ") {
+		alias = &hostAliasRecord{Addr: key}
+		if p := mappingPorts.FindStringSubmatch(msg); p != nil {
+			for _, f := range strings.Split(p[1], ",") {
+				if port, err := strconv.Atoi(f); err == nil && port > 0 && port < 65536 && len(alias.Ports) < maxMappedPorts &&
+					!slices.Contains(alias.Ports, port) {
+					alias.Ports = append(alias.Ports, port)
+				}
+			}
+			slices.Sort(alias.Ports)
+		}
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if b.synthetic == nil || len(b.synthetic) >= maxSyntheticNames {
 		b.synthetic = map[string]string{}
 	}
-	b.synthetic[addr.Unmap().String()] = name
+	b.synthetic[key] = name
+	changed := alias != nil && !b.deleted && (b.rec.HostAlias == nil || b.rec.HostAlias.Addr != alias.Addr ||
+		!slices.Equal(b.rec.HostAlias.Ports, alias.Ports))
+	if changed {
+		b.rec.HostAlias = alias
+	}
+	recName := b.rec.Name
+	m.mu.Unlock()
+	if changed {
+		if err := m.saveRecord(b); err != nil {
+			m.logf("sandbox %s: record the host alias mapping: %v", recName, err)
+		}
+	}
 }
 
 // namedHost is the destination name behind a synthetic address OpenShell
-// reported (noteSyntheticAddress), else host as recorded.
-func (m *Manager) namedHost(b *box, host string) string {
+// reported (noteSyntheticAddress), else host as recorded. A synthetic
+// address DefenseClaw has seen no mapping record for since it started is
+// the host alias when the record names the host alias's address, or when
+// port is one only the host alias's mapping covers (hostAliasPortLocked).
+func (m *Manager) namedHost(b *box, host string, port int) string {
 	addr, err := netip.ParseAddr(host)
 	if err != nil || !syntheticPrefix.Contains(addr.Unmap()) {
 		return host
 	}
+	key := addr.Unmap().String()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if name := b.synthetic[addr.Unmap().String()]; name != "" {
+	if name := b.synthetic[key]; name != "" {
 		return name
 	}
+	if (b.rec.HostAlias != nil && b.rec.HostAlias.Addr == key) || m.hostAliasPortLocked(b, port) {
+		return openshellHostAlias
+	}
 	return host
+}
+
+// hostAliasPortLocked reports a port only the host alias's mapping serves in
+// b: DefenseClaw's own listeners, the host ports the run declared, and the
+// ports OpenShell last reported the mapping covers. Callers hold
+// Manager.mu.
+func (m *Manager) hostAliasPortLocked(b *box, port int) bool {
+	if port <= 0 {
+		return false
+	}
+	if port == m.opts.IngressPort || port == m.opts.EgressPort || slices.Contains(b.rec.Flags.HostPorts, port) {
+		return true
+	}
+	return b.rec.HostAlias != nil && slices.Contains(b.rec.HostAlias.Ports, port)
 }
 
 const openshellHostAlias = "host.openshell.internal"
@@ -432,16 +500,38 @@ func ownHostName(host string) bool {
 // Relays to DefenseClaw's own listeners are reported by those listeners,
 // except what only OpenShell sees of the hooks: a connection or request to
 // the ingress it refused, or one that never became an authenticated
-// request. Any other host port (a local model endpoint, a --host-port
-// service) is harness work.
+// request. None of them is a blocked site: this install's own ports never
+// reach the feed's blocks or the blocked counts. The harness reaching any
+// other host port (a local model endpoint, a --host-port service) is its
+// work; a denied connection to one is hostPortDenied's.
 func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time, harnessName string) {
 	switch r.Port {
 	case m.opts.IngressPort:
-		m.observeHookConnection(ctx, b, r.Denied() && !policyReloadCut(r), at)
+		outcome := hookConnAttempt
+		switch {
+		case !r.Denied() || policyReloadCut(r):
+		case mappingDenial(r):
+			outcome = hookConnMappingDenied
+		default:
+			outcome = hookConnRefused
+		}
+		m.observeHookConnection(ctx, b, outcome, at)
 	case m.opts.EgressPort, 0:
 	default:
-		m.markWork(b, at, harnessActivity(harnessName, r.Binary))
+		ofHarness := harnessActivity(harnessName, r.Binary)
+		m.markWork(b, at, ofHarness, ofHarness && r.Allowed())
+		if r.Denied() {
+			m.hostPortDenied(ctx, b, r, at)
+		}
 	}
+}
+
+// mappingDenial reports OpenShell's denial of a connection to a synthetic
+// address that its transparent mapping does not cover for the port
+// ("transparent_tcp_mapping_denied"): the port is not open, or the mapping
+// was republished under the connection (a policy or provider reload).
+func mappingDenial(r ocsf.Record) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Reason), "transparent_tcp_mapping_denied")
 }
 
 // harnessFetchDenial reports an OpenShell denial of one of the sandbox
@@ -473,18 +563,40 @@ func policyReloadCut(r ocsf.Record) bool {
 	return strings.Contains(reason, "policy changed") || strings.Contains(reason, "policy generation is stale")
 }
 
-// markWork records network activity of the sandbox's workload: it keeps
-// the session's reachability check going and, when the harness's own
-// binary made it (harnessActivity), the hooks' silence check too.
-func (m *Manager) markWork(b *box, at time.Time, ofHarness bool) {
+// markWork records network activity of the sandbox's workload: when the
+// harness's own binary made it (harnessActivity) it keeps the hooks'
+// silence check going, and when it is a model call of the harness
+// (harnessModelCall) it starts the session's reachability window. Other
+// traffic (the harness's start-up and onboarding requests, tools, `sandbox
+// exec` commands) is no sign that hooks are overdue.
+func (m *Manager) markWork(b *box, at time.Time, ofHarness, modelCall bool) {
 	if ofHarness {
 		m.markActive(b, at)
+	}
+	if !modelCall {
+		return
 	}
 	m.mu.Lock()
 	if !at.Before(b.started) {
 		m.noteWorkLocked(b)
 	}
 	m.mu.Unlock()
+}
+
+// providerRulePrefix starts the names of the rules OpenShell adds for the
+// providers attached to a sandbox (policy.go), the only rules that carry
+// credentials: the harness's model provider and --credential bindings.
+const providerRulePrefix = "_provider_"
+
+// harnessModelCall reports an OCSF record of a model call of the sandbox's
+// harness: a connection OpenShell allowed under a provider rule that the
+// harness's own binary made (ofHarness). A harness reaches its model only
+// after a prompt, which fires its hooks; the requests it makes on its own
+// before one (update checks, telemetry, onboarding) go elsewhere. Layer-7
+// records name no binary and do not count: the connection before them
+// does.
+func harnessModelCall(r ocsf.Record, ofHarness bool) bool {
+	return ofHarness && r.Allowed() && strings.HasPrefix(r.Policy, providerRulePrefix)
 }
 
 // harnessActivity reports an OCSF event of the harness itself: its binary

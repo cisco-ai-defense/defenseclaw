@@ -542,8 +542,11 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	if b != nil {
 		ident = b.identity()
 		if e.Kind == egress.EventAllowed || e.Kind == egress.EventClosed {
+			// Egress keeps the silence check going, but it is no sign that
+			// hooks are overdue (see reach.go): the proxy cannot tell the
+			// harness's start-up requests from anything else, and the
+			// harness reaches its model around the proxy.
 			b.activeAt = m.now()
-			m.noteWorkLocked(b)
 		}
 	}
 	m.mu.Unlock()
