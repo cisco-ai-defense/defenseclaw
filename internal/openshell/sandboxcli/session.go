@@ -245,25 +245,29 @@ var reconnectDelay = 2 * time.Second
 func (s *session) followActivity(ctx context.Context, since uint64) {
 	var down time.Time
 	for {
-		_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
-			s.onActivity(ctx, ev)
-			return nil
-		})
-		if ctx.Err() != nil {
-			return
-		}
-		since = 0
-		if _, err := s.api.Status(ctx); err != nil {
+		if down.IsZero() {
+			_ = s.api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: s.sb.Name, Since: since, Follow: true}, func(ev sandboxapi.ActivityEvent) error {
+				s.onActivity(ctx, ev)
+				return nil
+			})
 			if ctx.Err() != nil {
 				return
 			}
-			if down.IsZero() {
+			since = 0
+			if _, err := s.api.Status(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				down = s.app.Now()
 				s.daemonDown()
 			}
-		} else if !down.IsZero() {
+		} else if _, err := s.api.Status(ctx); err == nil {
+			// Back: follow again at once.
 			s.daemonBack(down)
 			down = time.Time{}
+			continue
+		} else if ctx.Err() != nil {
+			return
 		}
 		t := time.NewTimer(reconnectDelay)
 		select {
@@ -359,7 +363,6 @@ func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		what += " (" + path.Base(binary) + ")"
 	}
 	s.notice("ask "+ev.ApprovalID, askText(s.sb.Name, ev, binary), "? asked to reach "+what)
-	s.bell()
 }
 
 // blockNotice announces a destination DefenseClaw blocked, once per host,

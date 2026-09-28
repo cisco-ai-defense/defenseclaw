@@ -85,6 +85,10 @@ type fakeDaemon struct {
 	// that were neither undone nor accepted: like the manager, a start
 	// then keeps the snapshot unless it asks for a new one.
 	pendingChanges bool
+	// hold, when set, keeps a followed activity stream open, like the
+	// daemon's, until it is closed (the daemon went away) or the client
+	// leaves.
+	hold chan struct{}
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -252,6 +256,17 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			for _, ev := range out {
 				_ = sandboxapi.WriteEvent(w, ev)
+			}
+			if hold := d.hold; hold != nil {
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				d.mu.Unlock()
+				select {
+				case <-hold:
+				case <-r.Context().Done():
+				}
+				d.mu.Lock()
 			}
 			return
 		}

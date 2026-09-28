@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -145,9 +146,18 @@ func TestDaemonOutageIsAnnouncedLive(t *testing.T) {
 	ta := newTestApp(t, "")
 	stderr := liveErr(ta)
 	noChanges(ta)
+	// Like the daemon's, the followed stream stays open until the daemon
+	// goes away.
+	ta.daemon.hold = make(chan struct{})
+	following := func() bool {
+		return slices.ContainsFunc(ta.daemon.callsTo("GET", sandboxapi.PathActivity), func(c call) bool { return strings.Contains(c.Query, "follow=true") })
+	}
 	ta.term.during = func() {
+		waitFor(t, "the session to follow the feed", following)
 		ta.daemon.mu.Lock()
 		ta.daemon.errors["GET "+sandboxapi.PathStatus] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "stopped"}
+		close(ta.daemon.hold)
+		ta.daemon.hold = make(chan struct{})
 		ta.daemon.mu.Unlock()
 		waitFor(t, "the outage notice", func() bool {
 			return strings.Contains(stderr.String(), "⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: Claude Code can't use its tools until it is back")
@@ -155,6 +165,8 @@ func TestDaemonOutageIsAnnouncedLive(t *testing.T) {
 		ta.daemon.mu.Lock()
 		delete(ta.daemon.errors, "GET "+sandboxapi.PathStatus)
 		ta.daemon.mu.Unlock()
+		// Back, it holds the new stream open: the return is said without
+		// waiting for that stream to end.
 		waitFor(t, "the return notice", func() bool { return strings.Contains(stderr.String(), "✓ the DefenseClaw daemon is reachable again") })
 	}
 	if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {

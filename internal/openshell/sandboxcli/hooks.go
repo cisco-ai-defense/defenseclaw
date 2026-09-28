@@ -77,8 +77,9 @@ type sessionNotice struct {
 // end-of-session summary. A line written into a harness's TUI would
 // corrupt it (it lands on the input box and stays after the redraw), so an
 // interactive session shows the notice in the terminal's title and as a
-// desktop notification (OSC 9, where the terminal has them), and the
-// summary repeats it; a headless session prints a line on stderr.
+// desktop notification (OSC 9, where the terminal has them) and rings the
+// bell (a harness may take the title back at once), and the summary
+// repeats it; a headless session prints a line on stderr.
 func (s *session) notice(key, msg, summary string) {
 	msg = sandboxapi.DisplayText(msg)
 	tui := s.app.IO.TTY && !s.headless
@@ -110,14 +111,8 @@ func (s *session) notice(key, msg, summary string) {
 	}
 	b.WriteString("\x1b]2;[defenseclaw] " + truncate(msg, 160) + "\a")
 	b.WriteString("\x1b]9;DefenseClaw: " + msg + "\a")
+	b.WriteString("\a")
 	fmt.Fprint(s.app.IO.Err, b.String())
-}
-
-// bell rings the terminal: an ask waits for the user.
-func (s *session) bell() {
-	if s.app.IO.TTY && !s.headless {
-		fmt.Fprint(s.app.IO.Err, "\a")
-	}
 }
 
 // restoreTitle puts back the terminal title the session's notices
