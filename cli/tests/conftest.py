@@ -117,7 +117,6 @@ def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
     reload path monkeypatch ``OrchestratorClient.reload_policy`` themselves.
     """
     import requests
-
     from defenseclaw import gateway
 
     def _unreachable(self):
