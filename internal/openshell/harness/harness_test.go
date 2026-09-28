@@ -207,7 +207,7 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"kiro-older", Kiro, "2.22.0", "", ErrUnknownContract},
 		{"kiro-latest", Kiro, "latest", "", nil},
 		{"devin-pin", Devin, "", "'https://static.devin.ai/cli/3000.4.25/devin-3000.4.25-aarch64-unknown-linux.tar.gz'", nil},
-		{"devin-newer", Devin, "3000.11.3", "", ErrUnknownContract},
+		{"devin-newer", Devin, "3000.12.0", "", ErrUnknownContract},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -266,7 +266,7 @@ func TestDevinSandboxArtifactsShape(t *testing.T) {
 			t.Fatalf("%s groups = %+v", event, groups)
 		}
 	}
-	if _, err := NewDevinConnector().SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "3000.11.3"}); err == nil {
+	if _, err := NewDevinConnector().SandboxArtifacts(SandboxRenderTarget{IngressPort: 18971, AgentVersion: "3000.12.0"}); err == nil {
 		t.Fatal("an unreviewed Devin release rendered sandbox artifacts")
 	}
 }
