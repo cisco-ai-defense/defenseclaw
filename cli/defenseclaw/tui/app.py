@@ -10780,9 +10780,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if width <= 0 or not rows:
             return rows
         # One column of padding each side per cell, plus the panel's border,
-        # padding and scrollbar.
+        # padding and scrollbar. A wrapped cell is as wide as its longest line.
         others = sum(
-            max(len(column), *(len(str(row[index])) for row in rows)) + 2
+            max(len(column), *(_longest_line(str(row[index])) for row in rows)) + 2
             for index, column in enumerate(columns[:-1])
         )
         room = width - others - 2 - 8
@@ -10791,6 +10791,24 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return tuple(
             (*row[:-1], "\n".join(textwrap.wrap(row[-1], room)) if len(row[-1]) > room else row[-1])
             for row in rows
+        )
+
+    def _fit_setup_section_values(self, rows: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+        """Fit a section row's value (Field, Value, Kind, Hint) to the room the Field column leaves.
+
+        A section's value is read-only text, such as the sandbox wizard's
+        machine check (one line per check). A line wider than the room was
+        cut at the screen edge, and on one line the machine check hid the
+        checks after it.
+        """
+        width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+        if width <= 0 or not rows:
+            return rows
+        room = width - (max(len("Field"), *(len(row[0]) for row in rows)) + 2) - 2 - 8
+        if room < 24:
+            return rows
+        return tuple(
+            (row[0], _fit_section_value(row[1], room), *row[2:]) if row[2] == "section" else row for row in rows
         )
 
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
@@ -10806,21 +10824,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             )
         if self.setup_model.form_active:
             columns = ("Field", "Value", "Kind", "Hint")
-            return (
-                columns,
-                self._wrap_last_table_column(
-                    columns,
-                    tuple(
-                        (
-                            field.label,
-                            render_wizard_value(field, reveal=self.setup_model.form_reveal),
-                            str(field.kind),
-                            field.hint,
-                        )
-                        for field in self.setup_model.form_fields
-                    ),
-                ),
+            rows = tuple(
+                (
+                    field.label,
+                    render_wizard_value(field, reveal=self.setup_model.form_reveal),
+                    str(field.kind),
+                    field.hint,
+                )
+                for field in self.setup_model.form_fields
             )
+            return columns, self._wrap_last_table_column(columns, self._fit_setup_section_values(rows))
         if self.setup_model.mode == "config":
             if not self.setup_model.sections:
                 return ("Field", "Value", "Hint"), ()
@@ -14380,6 +14393,24 @@ def _truncate_ellipsis(value: str, width: int) -> str:
     if width <= 1:
         return value[:width]
     return value[: width - 1] + "…"
+
+
+def _longest_line(value: str) -> int:
+    return max(len(line) for line in value.split("\n"))
+
+
+# The Setup table shows five lines at 80x24: a section value of at most four
+# stays on screen with the field below it.
+_SECTION_VALUE_MAX_LINES = 4
+
+
+def _fit_section_value(value: str, width: int) -> str:
+    """Wrap each line of ``value`` to ``width`` if it all fits in four lines, else cut each line."""
+    lines = value.split("\n")
+    wrapped = [part for line in lines for part in textwrap.wrap(line, width, subsequent_indent="  ") or [line]]
+    if len(wrapped) <= _SECTION_VALUE_MAX_LINES:
+        return "\n".join(wrapped)
+    return "\n".join(_truncate_ellipsis(line, width) for line in lines)
 
 
 def _truncate_display(value: str, width: int) -> str:

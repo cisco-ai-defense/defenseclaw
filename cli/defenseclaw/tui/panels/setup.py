@@ -4629,7 +4629,7 @@ def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str 
 class SandboxMachineCheck:
     """What ``defenseclaw sandbox doctor --json`` says about this machine, for the wizard."""
 
-    summary: str
+    summary: str  # one line per check
     openshell_needed: bool = False
     openshell_detail: str = ""
     error: str = ""
@@ -4692,7 +4692,9 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     elif mounts in {"warn", "fail"}:
         off = detail("bind-mounts").startswith("disabled")
         parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
-    return SandboxMachineCheck(summary=" · ".join(parts), openshell_needed=needed, openshell_detail=openshell)
+    # One check per line: joined on one line, the checks after the first
+    # few were cut off at 80 columns.
+    return SandboxMachineCheck(summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell)
 
 
 def _sandbox_allowed_harnesses(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:

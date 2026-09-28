@@ -291,7 +291,12 @@ def test_a_missing_openshell_presets_the_install_and_says_why() -> None:
     model.apply_sandbox_machine_check(sandbox_machine_check(NO_OPENSHELL))
     assert not model.sandbox_machine_wanted()
     machine = _row(model, "This machine").value
-    assert machine == "✓ Docker 29.4.0 · ✓ Landlock ABI 6 · ✗ OpenShell not installed · ✗ bind mounts off"
+    assert machine.split("\n") == [
+        "✓ Docker 29.4.0",
+        "✓ Landlock ABI 6",
+        "✗ OpenShell not installed",
+        "✗ bind mounts off",
+    ]
     install = _row(model, "Install OpenShell")
     assert install.value == "yes"
     assert install.hint.startswith("OpenShell is not installed: yes installs OpenShell 0.1.1")
@@ -311,7 +316,7 @@ def test_a_missing_openshell_presets_the_install_and_says_why() -> None:
 
 def test_an_installed_openshell_needs_no_install() -> None:
     check = sandbox_machine_check(READY)
-    assert check.summary == "✓ Docker 29.4.0 · ✓ OpenShell 0.1.1 · ✓ bind mounts"
+    assert check.summary.split("\n") == ["✓ Docker 29.4.0", "✓ OpenShell 0.1.1", "✓ bind mounts"]
     assert check.openshell_needed is False
     fields = sandbox_wizard_fields({}, machine=check)
     install = next(field for field in fields if field.label == "Install OpenShell")
@@ -378,6 +383,57 @@ async def test_opening_the_wizard_checks_the_machine_once(monkeypatch) -> None:
         app._apply_setup_action(SetupPanelAction(True))  # noqa: SLF001 - answered: no new probe
         await pilot.pause()
     assert probes == [1]
+
+
+# The doctor on a Mac whose Docker Desktop VM kernel has no Landlock, with a
+# bind-mount check that needs a long reason.
+MAC_DOCKER_DESKTOP = {
+    "ok": False,
+    "docker_version": "29.1.5",
+    "cli_version": "0.1.1",
+    "checks": [
+        {"id": "platform", "title": "Platform", "status": "warn", "detail": "darwin/arm64"},
+        {"id": "docker", "title": "Docker", "status": "pass", "detail": "Docker 29.1.5 (Docker Desktop)"},
+        {"id": "landlock", "title": "Landlock", "status": "fail", "detail": "the Docker Desktop VM kernel has no Landlock"},
+        {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": "0.1.1 at /opt/homebrew/bin/openshell"},
+        {"id": "gateway-service", "title": "Gateway service", "status": "pass", "detail": "running"},
+        {
+            "id": "bind-mounts",
+            "title": "Project bind mounts",
+            "status": "warn",
+            "detail": "enabled in gateway.toml, but the gateway has not been restarted since it changed",
+        },
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_every_machine_check_is_on_screen_at_80x24(monkeypatch) -> None:
+    # On one line, the machine check was cut off at 80 columns after the first few checks.
+    from defenseclaw.tui import sandbox_panel
+    from defenseclaw.tui.app import DefenseClawTUI
+    from defenseclaw.tui.panels.setup import SetupPanelAction
+    from fixtures import screen_text
+
+    monkeypatch.setattr(sandbox_panel, "probe_sandbox_machine", lambda: sandbox_machine_check(MAC_DOCKER_DESKTOP))
+    app = DefenseClawTUI(config=None, setup_model=SetupPanelModel(None, os_name="darwin"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("setup")
+        app.setup_model.open_goal_menu(SetupWizard.SANDBOX)
+        app._apply_setup_action(SetupPanelAction(True))  # noqa: SLF001
+        for _ in range(20):
+            await pilot.pause()
+            if app.setup_model.sandbox_machine is not None:
+                break
+        # Walk down to the field under the machine check, as a person would.
+        for _ in app.setup_model.form_fields:
+            if app.setup_model.focused_row_metadata().label == "Install OpenShell":
+                break
+            await pilot.press("down")
+        await pilot.pause()
+        text = screen_text(app)
+    for check in ("✓ Docker 29.1.5", "✗ Landlock", "✓ OpenShell 0.1.1", "✗ bind mounts: enabled in gateway.toml"):
+        assert check in text, text
 
 
 def test_credential_summary_names_sources_never_values(tmp_path: Path) -> None:
