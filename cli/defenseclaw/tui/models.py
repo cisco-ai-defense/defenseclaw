@@ -204,3 +204,6 @@ class HintState:
     panel_keys: str = ""
     # Conditions that switch view keys on (Setup: restart_pending, ...).
     panel_conditions: tuple[str, ...] = ()
+    # False when the active panel's table is empty (Sandboxes uses it to
+    # stop advertising row keys that have no row to act on).
+    panel_has_rows: bool = True

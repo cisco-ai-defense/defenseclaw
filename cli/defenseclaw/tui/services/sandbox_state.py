@@ -177,12 +177,16 @@ def harness_command(name: str) -> str:
     return _HARNESS_COMMANDS.get(name, name)
 
 
-def sandbox_keys_hint(view: str, *, unblock: bool = True, always: bool = True) -> str:
+def sandbox_keys_hint(view: str, *, unblock: bool = True, always: bool = True, has_rows: bool = True) -> str:
     """The hint bar's keys for a Sandboxes view (one line at 80 columns).
 
     ``unblock`` and ``always`` are False when the selected feed row or ask
-    does not take ``u`` or ``A``, which the line then leaves out.
+    does not take ``u`` or ``A``, which the line then leaves out. With no
+    sandbox rows the row keys (connect, stop, delete...) can only answer
+    "Select a sandbox first", so the hint lists what does work.
     """
+    if view == "sandboxes" and not has_rows:
+        return "KEYS  t view | n new run | w sandboxed on/off | r refresh"
     if view == "asks":
         return "KEYS  t view | Enter detail | a approve | " + ("A always | " if always else "") + "x reject | r refresh"
     if view == "activity":
@@ -1407,7 +1411,7 @@ class SandboxesPanelModel:
             return sandbox_keys_hint(self.view, unblock=self.unblock_offered())
         if self.view == "asks":
             return sandbox_keys_hint(self.view, always=self.selected_ask() is None or self.always_offered())
-        return sandbox_keys_hint(self.view)
+        return sandbox_keys_hint(self.view, has_rows=bool(self.rows))
 
     def data_table_columns(self, compact: bool = False) -> tuple[str, ...]:
         """``compact`` (a narrow terminal) leaves out what the Enter detail shows."""
@@ -1492,8 +1496,11 @@ class SandboxesPanelModel:
             return "No activity yet. Destinations, blocks, tool blocks and findings appear here as they happen."
         if self.view == "asks":
             return NO_ASKS_TEXT
-        if self.state() == "ready":
+        state = self.state()
+        if state == "ready":
             return "No sandboxes yet. Press n to start one, or run: cd <project> && defenseclaw sandbox run claude"
+        if state == "unreachable":
+            return "Start the gateway (: then defenseclaw-gateway start), or find out why with: defenseclaw doctor"
         return ""
 
     def recent_blocks(self, limit: int = 3) -> tuple[ActivityRow, ...]:

@@ -85,7 +85,9 @@ class HintEngine:
         if panel == "sandboxes":
             from defenseclaw.tui.services.sandbox_state import sandbox_keys_hint
 
-            return state.panel_keys or sandbox_keys_hint(state.panel_view or "sandboxes")
+            return state.panel_keys or sandbox_keys_hint(
+                state.panel_view or "sandboxes", has_rows=state.panel_has_rows
+            )
         if panel == "policies":
             from defenseclaw.platform_support import openshell_sandboxes_supported
             from defenseclaw.tui.services.policy_state import policies_keys_hint

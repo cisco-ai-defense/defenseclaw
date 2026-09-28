@@ -558,16 +558,20 @@ class SandboxPanelMixin:
         ready = model.state() == "ready"
         selected = model.selected_sandbox()
         view = model.view
+        # Row buttons for a sandbox only on the Sandboxes view: in Asks they
+        # filled the bar and pushed Approve / Always / Reject off an
+        # 80-column screen.
+        row = ready and selected is not None and view == "sandboxes"
         visible = {
             "sandboxes-refresh": True,
             "sandboxes-view": True,
             "sandboxes-new": ready,
             "sandboxes-wrappers": True,
-            "sandboxes-connect": ready and selected is not None,
-            "sandboxes-stop": ready and selected is not None and selected.running,
-            "sandboxes-delete": ready and selected is not None,
-            "sandboxes-undo": ready and selected is not None and selected.undo_available,
-            "sandboxes-review": ready and selected is not None and selected.workdir_mode != "copy",
+            "sandboxes-connect": row,
+            "sandboxes-stop": row and selected.running,
+            "sandboxes-delete": row,
+            "sandboxes-undo": row and selected.undo_available,
+            "sandboxes-review": row and selected.workdir_mode != "copy",
             "sandboxes-unblock": ready and self._sandbox_can_unblock(),
             "sandboxes-approve": ready and view == "asks" and model.selected_ask() is not None,
             # Private, IP-literal and host-local asks open for one sandbox only.
