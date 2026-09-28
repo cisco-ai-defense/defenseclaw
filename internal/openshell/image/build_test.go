@@ -135,7 +135,7 @@ func TestBuildRecordsVerifiedImage(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 	if rec.Tag != c.Tag || rec.ContentHash != c.ContentHash || rec.HookContract != "codex-hooks-v4" || rec.HarnessVersion != "0.146.0" ||
-		!rec.BuiltAt.Equal(fixed) || len(rec.NetworkBinaries) != 1 || len(rec.Binaries) != len(c.Artifacts.Binaries) || rec.ImageID == "" {
+		!rec.BuiltAt.Equal(fixed) || len(rec.NetworkBinaries) != 1 || len(rec.Binaries) != len(c.Artifacts.Binaries)+len(c.ImageBinaries) || rec.ImageID == "" {
 		t.Fatalf("record = %+v", rec)
 	}
 	if got := rec.NetworkRealpaths(); len(got) != 1 || !strings.HasSuffix(got[0], "/bin/codex") {

@@ -290,6 +290,9 @@ func goodProbeOutput(c *Context) string {
 		}
 		fmt.Fprintf(&b, "bin %s %s %s 755 0 0\n", bin.Name, realpath, digest)
 	}
+	for _, name := range c.ImageBinaries {
+		fmt.Fprintf(&b, "bin %s %s.12 %s 755 0 0\n", name, name, digest)
+	}
 	switch c.Spec.Harness.Name {
 	case "claudecode":
 		fmt.Fprintf(&b, "version %s (Claude Code)\n", c.HarnessVersion)
@@ -374,7 +377,7 @@ func TestParseProbeAndVerify(t *testing.T) {
 		if err := c.Verify(res); err != nil {
 			t.Fatalf("%s: Verify: %v", h.Name, err)
 		}
-		if res.HarnessVersion != c.HarnessVersion || len(res.NetworkBinary) != 1 || len(res.Binaries) != len(c.Artifacts.Binaries) {
+		if res.HarnessVersion != c.HarnessVersion || len(res.NetworkBinary) != 1 || len(res.Binaries) != len(c.Artifacts.Binaries)+len(c.ImageBinaries) {
 			t.Fatalf("%s: parsed %+v", h.Name, res)
 		}
 	}
@@ -399,6 +402,14 @@ func TestVerifyRejectsDrift(t *testing.T) {
 		"tr-group-owned": func(s string) string { return replaceField(s, "bin tr ", 6, "1000") },
 		"head-writable":  func(s string) string { return replaceField(s, "bin head ", 4, "775") },
 		"claude-in-work": func(s string) string { return replaceField(s, "bin claude ", 2, "/work/proj/claude") },
+		// The supervisor's interpreter runs in place of every interactive
+		// harness a terminal session starts.
+		"python-in-home": func(s string) string {
+			return replaceField(s, "bin "+harness.SupervisorInterpreter+" ", 2, "/sandbox/.local/bin/python3")
+		},
+		"python-user-owned": func(s string) string {
+			return replaceField(s, "bin "+harness.SupervisorInterpreter+" ", 5, "1000")
+		},
 		"net-user-owned": func(s string) string { return replaceField(s, "net ", 4, "1000") },
 		"net-writable":   func(s string) string { return replaceField(s, "net ", 3, "757") },
 		"wrong-version":  func(s string) string { return strings.Replace(s, "version 2.1.156", "version 2.1.157", 1) },
@@ -419,6 +430,28 @@ func TestVerifyRejectsDrift(t *testing.T) {
 				t.Fatal("drifted image verified")
 			}
 		})
+	}
+}
+
+// TestVerifyAllowsAnImageWithoutPython3: a base image without the
+// supervisor's interpreter still verifies (the launcher execs the harness
+// without the supervisor), and the probe asks for it at the path the
+// launcher execs.
+func TestVerifyAllowsAnImageWithoutPython3(t *testing.T) {
+	c := mustContext(t, testSpec(harness.ClaudeCode))
+	if !slices.Contains(c.ImageBinaries, harness.SupervisorInterpreter) {
+		t.Fatalf("image binaries %v lack %s", c.ImageBinaries, harness.SupervisorInterpreter)
+	}
+	if script := probeScript(c); !strings.Contains(script, "if [ -x "+shQuote(harness.SupervisorInterpreter)+" ]") {
+		t.Fatalf("the probe does not look for %s:\n%s", harness.SupervisorInterpreter, script)
+	}
+	out := strings.Replace(dropLine(goodProbeOutput(c), "bin "+harness.SupervisorInterpreter+" "), "end\n", "nobin "+harness.SupervisorInterpreter+"\nend\n", 1)
+	res, err := ParseProbe([]byte(out), harness.ClaudeCode.Probe().VersionRE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Verify(res); err != nil {
+		t.Fatalf("an image without %s failed: %v", harness.SupervisorInterpreter, err)
 	}
 }
 

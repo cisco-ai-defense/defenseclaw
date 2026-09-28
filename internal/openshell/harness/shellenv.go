@@ -125,7 +125,7 @@ fi
 
 // supervisorScript is the Python supervisor that resumes a stopped harness.
 // See launcherJobControl for when it runs.
-const supervisorScript = `#!/usr/bin/python3 -I -S
+const supervisorScript = `#!` + SupervisorInterpreter + ` -I -S
 """DefenseClaw sandbox harness supervisor for terminal sessions.
 
 The sandbox's seccomp filter (OpenShell 0.1.1) blocks kill() when the target

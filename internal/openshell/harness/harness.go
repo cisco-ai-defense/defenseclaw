@@ -48,6 +48,10 @@ const (
 	LauncherDir = connector.SandboxLibDir + "/bin"
 	// SupervisorPath is the Python supervisor that resumes a stopped harness.
 	SupervisorPath = LauncherDir + "/dc_supervisor.py"
+	// SupervisorInterpreter runs SupervisorPath. The base image provides it;
+	// dc_launch execs the harness without the supervisor where it is
+	// missing, and the image probe refuses one the workload could replace.
+	SupervisorInterpreter = "/usr/bin/python3"
 	// WorkRoot is where projects are mounted in mount mode.
 	WorkRoot = "/work"
 )
@@ -147,7 +151,8 @@ export NODE_DISABLE_COMPILE_CACHE
 //
 // Without a terminal dc_launch execs COMMAND directly: headless and detached
 // runs keep the launcher's pid for the harness. Without /proc, or when the
-// supervisor is absent, it execs COMMAND too.
+// supervisor or its interpreter (SupervisorInterpreter, which a base image
+// may lack) is absent, it execs COMMAND too.
 const launcherJobControl = `# A harness TUI stops itself on Ctrl-Z, which the sandbox refuses, and no
 # shell in the sandbox can resume a stopped job either: run a terminal session
 # under dc_supervisor.py, which resumes the harness whenever it stops.
@@ -158,8 +163,8 @@ dc_foreground() {
   [ "$tpgid" = "$own_pgrp" ]
 }
 dc_launch() {
-  if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_foreground && [ -x ` + SupervisorPath + ` ]; then
-    exec /usr/bin/python3 -I -S ` + SupervisorPath + ` "$@"
+  if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_foreground && [ -x ` + SupervisorPath + ` ] && [ -x ` + SupervisorInterpreter + ` ]; then
+    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` "$@"
   fi
   exec "$@"
 }

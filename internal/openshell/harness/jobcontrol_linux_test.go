@@ -444,6 +444,21 @@ func TestLauncherJobControl(t *testing.T) {
 		}
 	})
 
+	t.Run("without the supervisor's interpreter the launcher execs the harness", func(t *testing.T) {
+		// A base image without /usr/bin/python3: the terminal session
+		// would supervise the harness, but the launcher must still start it.
+		launcher, dir := launcherFixture(t, ClaudeCode, "echo \"stub pid=$$\"; exit 5\n")
+		rewriteLauncher(t, launcher, SupervisorInterpreter+" ", filepath.Join(dir, "no-python3")+" ")
+		r := startPTY(t, dir, nil, launcher)
+		code, out := r.wait()
+		if code != 5 {
+			t.Fatalf("exit %d, want the harness's 5:\n%s", code, out)
+		}
+		if want := fmt.Sprintf("stub pid=%d", r.cmd.Process.Pid); strings.TrimSpace(out) != want {
+			t.Errorf("output %q, want %q (the harness keeps the launcher's pid)", out, want)
+		}
+	})
+
 	t.Run("under a job-control shell the launcher supervises the harness", func(t *testing.T) {
 		// The shell (a `sandbox connect --shell` prompt) runs the launcher
 		// as a foreground job. In a sandbox its fg could not resume a

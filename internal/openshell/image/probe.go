@@ -108,6 +108,11 @@ func probeScript(c *Context) string {
 		}
 		fmt.Fprintf(&b, "p=\"$(%s 2>/dev/null)\"; case \"$p\" in /*) r=\"$(readlink -f \"$p\")\"; printf 'bin %%s %%s %%s %%s\\n' %s \"$r\" \"$(digest \"$r\")\" \"$(meta \"$r\")\" ;; *) printf 'nobin %%s\\n' %s ;; esac\n", lookup, q, q)
 	}
+	// Image binaries are looked up at the path the launchers exec.
+	for _, name := range c.ImageBinaries {
+		q := shQuote(name)
+		fmt.Fprintf(&b, "if [ -x %s ]; then r=\"$(readlink -f %s)\"; printf 'bin %%s %%s %%s %%s\\n' %s \"$r\" \"$(digest \"$r\")\" \"$(meta \"$r\")\"; else printf 'nobin %%s\\n' %s; fi\n", q, q, q, q)
+	}
 	probe := c.Spec.Harness.Probe()
 	argv := make([]string, 0, len(probe.VersionArgv))
 	for _, a := range probe.VersionArgv {
@@ -278,6 +283,14 @@ func (c *Context) Verify(res ProbeResult) error {
 		}
 		if problem := workloadWritableBinary(got.Realpath, res.Owners[got.Realpath]); problem != "" {
 			problems = append(problems, "binary "+bin.Name+" "+problem)
+		}
+	}
+	// An image binary may be missing, never replaceable by the workload.
+	for _, name := range c.ImageBinaries {
+		if got, ok := res.Binaries[name]; ok {
+			if problem := workloadWritableBinary(got.Realpath, res.Owners[got.Realpath]); problem != "" {
+				problems = append(problems, "binary "+name+" "+problem)
+			}
 		}
 	}
 	for _, bin := range res.NetworkBinary {

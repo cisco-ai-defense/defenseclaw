@@ -132,6 +132,13 @@ type Context struct {
 	ImageFiles []ImageFile
 	// Dirs are the DefenseClaw-owned directories that must be root 0755.
 	Dirs []string
+	// ImageBinaries are programs from the base image that DefenseClaw's
+	// in-image files exec by absolute path and that the post-build probe
+	// cannot see run: the supervisor's interpreter, which only an
+	// interactive launch in an orphaned terminal session starts. An image
+	// may lack one (the launcher then does without it), but one the
+	// workload could replace fails verification.
+	ImageBinaries []string
 	// UserDirs are the directories below the image HOME that hold
 	// user-owned artifacts; the Dockerfile creates them (owned by the run-as
 	// uid, 0755) before copying, because COPY --chmod would give the
@@ -211,7 +218,8 @@ func NewContext(spec BuildSpec) (*Context, error) {
 		return nil, fmt.Errorf("openshell image: harness %s rendered %s artifacts", spec.Harness.Name, artifacts.Connector)
 	}
 
-	c := &Context{Spec: spec, HarnessVersion: version, Contract: artifacts.HookContract, Artifacts: artifacts}
+	c := &Context{Spec: spec, HarnessVersion: version, Contract: artifacts.HookContract, Artifacts: artifacts,
+		ImageBinaries: []string{harness.SupervisorInterpreter}}
 	sources := append([]connector.SandboxFile(nil), artifacts.Files...)
 	sources = append(sources, spec.Harness.Launcher())
 	sources = append(sources, spec.Harness.ShellFiles()...)
