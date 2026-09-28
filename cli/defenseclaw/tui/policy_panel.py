@@ -833,6 +833,7 @@ def mode_change_modal(model: PoliciesPanelModel, row: Any, new: str) -> Conseque
         own = model.own_setting("mode")
         if own:
             details.append("Connectors with their own mode keep it: " + ", ".join(own) + ".")
+        details.append("A running gateway restarts to apply it.")
     details.append(_run_line(intent))
     consequence = ""
     if weaker:
@@ -943,11 +944,11 @@ def level_change_modal(model: PoliciesPanelModel, row: Any, kind: str, choice: s
     elif connector:
         details.append("Only this connector changes; a running gateway restarts to apply it.")
     elif model.multi_connector:
-        details.append("Every connector without its own level follows it; a running gateway applies it live.")
+        details.append("Every connector without its own level follows it; a running gateway restarts to apply it.")
         if change.keep_own:
             details.append("Keep their own level: " + ", ".join(change.keep_own) + ".")
     else:
-        details.append("A running gateway applies it live, without a restart.")
+        details.append("A running gateway restarts to apply it.")
     if after.alert_clamped:
         details.append(f"Alerts start at {after.alert_at}: anything that blocks also alerts.")
     details.append(_run_line(intent))

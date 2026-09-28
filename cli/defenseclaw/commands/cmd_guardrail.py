@@ -2505,12 +2505,13 @@ def _gateway_running(app: AppContext) -> bool:
 def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: bool, quiet: bool) -> str:
     """Make a saved guardrail change reach a running gateway; returns the outcome.
 
-    Hot config reload applies global policy fields such as ``guardrail.mode``,
-    but refuses ``rule_pack_dir`` and ``guardrail.connectors`` changes (the
-    gateway reports "config reload requires gateway restart") and never
-    re-reads a pack directory recomposed in place. Those restart a running
-    gateway; a stopped gateway is never started here. ``quiet`` sends the
-    restart progress to stderr so ``--json`` stdout stays parseable.
+    Hot config reload refuses ``rule_pack_dir`` and ``guardrail.connectors``
+    changes (the gateway reports "config reload requires gateway restart"),
+    never re-reads a pack directory recomposed in place, and doesn't reach
+    hook decisions at all: those read the API server's copy of the config,
+    taken when the gateway starts. So mode, level and pack changes restart a
+    running gateway; a stopped gateway is never started here. ``quiet`` sends
+    the restart progress to stderr so ``--json`` stdout stays parseable.
     """
     if not getattr(app.cfg.guardrail, "enabled", False):
         return "guardrail_off"
@@ -3350,9 +3351,9 @@ def mode_cmd(
     _log_guardrail_change(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
-    outcome = _apply_to_running_gateway(
-        app, needs_restart=connector_key is not None or bool(fail_flips), restart=restart, quiet=json_out
-    )
+    # Hook decisions read the config the gateway started with, so even a
+    # global mode change needs a restart to reach them.
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
 
     plain = {"action": "enforces the policy (blocks what it blocks)", "observe": "logs findings, blocks nothing"}
     if connector_key is None:
@@ -3531,7 +3532,8 @@ def _set_tool_call_level(
         f"guardrail-{words['command']}",
         f"scope={scope} {setting}={value or 'inherit'} previous={previous or 'inherit'}",
     )
-    outcome = _apply_to_running_gateway(app, needs_restart=connector_key is not None, restart=restart, quiet=json_out)
+    # Like mode: hook decisions only see the new level after a restart.
+    outcome = _apply_to_running_gateway(app, needs_restart=True, restart=restart, quiet=json_out)
 
     levels = _levels()
     label, source, _rank = _setting(levels)

@@ -85,7 +85,7 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
     assert app.logger.log_action.call_args.args[0] == "guardrail-mode"
 
 
-def test_global_switch_is_live_unless_a_hook_fail_mode_flips(app, restarts) -> None:
+def test_global_switch_restarts_a_running_gateway(app, restarts) -> None:
     # codex inherits hook_fail_mode=closed, which only applies in action mode:
     # observe -> action flips its hooks from fail-open to fail-closed.
     result, payload = _run(app, "action", "--json")
@@ -94,9 +94,11 @@ def test_global_switch_is_live_unless_a_hook_fail_mode_flips(app, restarts) -> N
     assert "fail open" in text.output
     assert len(restarts) == 2
 
+    # Even without a hook fail-mode flip: hook decisions only see the new
+    # mode after a restart.
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode="closed")}
     _, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "live" and len(restarts) == 2
+    assert payload["gateway"] == "restarted" and len(restarts) == 3
 
 
 def test_connector_override_created_on_a_single_install(app, restarts) -> None:
