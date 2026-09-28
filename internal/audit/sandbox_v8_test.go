@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,6 +67,28 @@ func (harness *sandboxHarness) bind(t *testing.T, admission router.Admission) (*
 	return runtime, NewSandboxRecorder(harness.logger)
 }
 
+// recordOne binds a fresh runtime, records one event (in the envelope's
+// context when one is given), and returns the only record it produced. An
+// ordinary record is checked against the runtime contract.
+func (harness *sandboxHarness) recordOne(
+	t *testing.T, admission router.Admission, event any, envelope ...CorrelationEnvelope,
+) (*testRuntimeV8Emitter, observability.Record) {
+	t.Helper()
+	runtime, recorder := harness.bind(t, admission)
+	ctx := context.Background()
+	if len(envelope) > 0 {
+		ctx = ContextWithEnvelope(ctx, envelope[0])
+	}
+	if err := recordSandboxEvent(ctx, recorder, event); err != nil {
+		t.Fatalf("record %T: %v", event, err)
+	}
+	_, record := onlySandboxRecord(t, runtime)
+	if !record.IsFloorOnly() {
+		assertRecordMatchesRuntimeContract(t, record)
+	}
+	return runtime, record
+}
+
 // newSandboxTestRecorder binds a recorder to its own store for cases that
 // assert on event-history rows.
 func newSandboxTestRecorder(t *testing.T, admission router.Admission) (*Logger, *testRuntimeV8Emitter, *SandboxRecorder) {
@@ -73,6 +96,27 @@ func newSandboxTestRecorder(t *testing.T, admission router.Admission) (*Logger, 
 	harness := newSandboxHarness(t)
 	runtime, recorder := harness.bind(t, admission)
 	return harness.logger, runtime, recorder
+}
+
+// recordSandboxEvent sends a typed sandbox event through its producer.
+func recordSandboxEvent(ctx context.Context, recorder *SandboxRecorder, event any) error {
+	switch event := event.(type) {
+	case SandboxLifecycleEvent:
+		return recorder.RecordSandboxLifecycle(ctx, event)
+	case SandboxEgressEvent:
+		return recorder.RecordSandboxEgress(ctx, event)
+	case SandboxApprovalEvent:
+		return recorder.RecordSandboxApproval(ctx, event)
+	case SandboxPolicyEvent:
+		return recorder.RecordSandboxPolicy(ctx, event)
+	case SandboxHealthEvent:
+		return recorder.RecordSandboxHealth(ctx, event)
+	case SandboxFindingEvent:
+		return recorder.RecordSandboxFinding(ctx, event)
+	case SandboxWorkspaceEvent:
+		return recorder.RecordSandboxWorkspace(ctx, event)
+	}
+	panic(fmt.Sprintf("recordSandboxEvent: unsupported event %T", event))
 }
 
 func onlySandboxRecord(t *testing.T, runtime *testRuntimeV8Emitter) (router.Metadata, observability.Record) {
@@ -89,7 +133,7 @@ func onlySandboxRecord(t *testing.T, runtime *testRuntimeV8Emitter) (router.Meta
 
 func assertSandboxCorrelation(t *testing.T, body map[string]any, identity SandboxIdentity) {
 	t.Helper()
-	want := map[string]any{
+	assertSandboxFields(t, body, map[string]any{
 		"defenseclaw.sandbox.id":             identity.ID,
 		"defenseclaw.sandbox.name":           identity.Name,
 		"defenseclaw.sandbox.runtime":        identity.Runtime,
@@ -100,12 +144,27 @@ func assertSandboxCorrelation(t *testing.T, body map[string]any, identity Sandbo
 		"defenseclaw.sandbox.pack":           identity.Pack,
 		"defenseclaw.sandbox.phase":          string(identity.Phase),
 		"defenseclaw.sandbox.workdir.mode":   identity.WorkdirMode,
-	}
+	})
+}
+
+// assertSandboxFields checks body fields; a nil expectation means the field
+// must be absent.
+func assertSandboxFields(t *testing.T, body map[string]any, want map[string]any) {
+	t.Helper()
 	for key, value := range want {
-		if body[key] != value {
-			t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, body[key], value, body)
+		if got, present := body[key]; (value == nil && present) || (value != nil && got != value) {
+			t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, got, value, body)
 		}
 	}
+}
+
+// optional turns a zero expectation into nil: the field must be absent.
+func optional[T comparable](value T) any {
+	var zero T
+	if value == zero {
+		return nil
+	}
+	return value
 }
 
 // validatedSandboxMetrics holds the record IDs of metric points already
@@ -145,10 +204,7 @@ func metricAttributes(t *testing.T, record observability.Record) map[string]any 
 // table expectations can compare them directly.
 func sandboxBody(t *testing.T, record observability.Record) map[string]any {
 	t.Helper()
-	return sandboxNumbers(securityActionBody(t, record))
-}
-
-func sandboxNumbers(object map[string]any) map[string]any {
+	object := securityActionBody(t, record)
 	for key, value := range object {
 		if number, ok := value.(json.Number); ok {
 			if integer, err := number.Int64(); err == nil {
@@ -174,8 +230,25 @@ func sandboxMetricValue(t *testing.T, record observability.Record) int64 {
 	return value
 }
 
+// lastActiveGauges returns each connector's final active gauge. A gauge keeps
+// the last value written, so its points must reach the runtime in the order
+// the phases changed: each point moves a connector's gauge by at most one.
+func lastActiveGauges(t *testing.T, runtime *testRuntimeV8Emitter) map[string]int64 {
+	t.Helper()
+	last := map[string]int64{}
+	for _, metric := range sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive) {
+		connector, _ := metricAttributes(t, metric)["defenseclaw.connector.source"].(string)
+		value := sandboxMetricValue(t, metric)
+		if step := value - last[connector]; step > 1 || step < -1 {
+			t.Fatalf("%s gauge jumped %d -> %d: points reached the runtime out of order", connector, last[connector], value)
+		}
+		last[connector] = value
+	}
+	return last
+}
+
 func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
-	_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
+	logger, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
 	identity := testSandboxIdentity()
 	exitCode := int32(0)
 	steps := []struct {
@@ -212,16 +285,15 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 		}
 		body := sandboxBody(t, record)
 		assertSandboxCorrelation(t, body, identity)
-		if got, _ := body["defenseclaw.sandbox.phase.previous"].(string); got != step.previous {
-			t.Fatalf("step %d previous phase=%q want %q", index, got, step.previous)
+		var exit any
+		if step.exitCode != nil {
+			exit = int64(*step.exitCode)
 		}
-		if body["defenseclaw.sandbox.lifecycle.trigger"] != string(step.trigger) {
-			t.Fatalf("step %d trigger=%#v", index, body["defenseclaw.sandbox.lifecycle.trigger"])
-		}
-		_, hasExit := body["defenseclaw.sandbox.exit_code"]
-		if hasExit != (step.exitCode != nil) {
-			t.Fatalf("step %d exit code presence=%v body=%#v", index, hasExit, body)
-		}
+		assertSandboxFields(t, body, map[string]any{
+			"defenseclaw.sandbox.phase.previous":    optional(step.previous),
+			"defenseclaw.sandbox.lifecycle.trigger": string(step.trigger),
+			"defenseclaw.sandbox.exit_code":         exit,
+		})
 		active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
 		last := active[len(active)-1]
 		if sandboxMetricValue(t, last) != step.active ||
@@ -252,17 +324,22 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 	if len(recorder.phases) != 0 {
 		t.Fatalf("deleted sandbox is still tracked: %#v", recorder.phases)
 	}
+	// Every record reaches the event history.
+	rows, err := logger.store.ListEvents(10)
+	if err != nil || len(rows) != len(steps) || rows[0].Action != string(ActionSandboxLifecycle) ||
+		rows[0].Structured["defenseclaw.sandbox.name"] != identity.Name {
+		t.Fatalf("event history rows=%d err=%v first=%#v", len(rows), err, rows)
+	}
 }
 
+// TestSandboxLifecycleConditionOnlyUpdateSkipsTransitionMetric also drops a
+// gateway condition reason that is not a registered token.
 func TestSandboxLifecycleConditionOnlyUpdateSkipsTransitionMetric(t *testing.T) {
 	_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
 	identity := testSandboxIdentity()
 	for index, condition := range []*SandboxCondition{
 		{Type: "Ready", Status: "True", Reason: "SupervisorReady"},
-		{
-			Type: "ConfigurationReady", Status: "False", Reason: "not a token!",
-			Message: strings.Repeat("é", 1000),
-		},
+		{Type: "ConfigurationReady", Status: "False", Reason: "not a token!"},
 	} {
 		previous := SandboxPhase("")
 		if index == 0 {
@@ -278,18 +355,10 @@ func TestSandboxLifecycleConditionOnlyUpdateSkipsTransitionMetric(t *testing.T) 
 	if len(records) != 2 {
 		t.Fatalf("records=%d want 2", len(records))
 	}
-	body := securityActionBody(t, records[1])
-	if body["defenseclaw.sandbox.phase.previous"] != "ready" || body["defenseclaw.sandbox.condition.type"] != "ConfigurationReady" ||
-		body["defenseclaw.sandbox.condition.status"] != "False" {
-		t.Fatalf("condition body=%#v", body)
-	}
-	if _, kept := body["defenseclaw.sandbox.condition.reason"]; kept {
-		t.Fatalf("malformed gateway reason token was kept: %#v", body)
-	}
-	message, _ := body["defenseclaw.sandbox.condition.message"].(string)
-	if len(message) > maxSandboxConditionMessage || !utf8.ValidString(message) || message == "" {
-		t.Fatalf("condition message was not bounded on a code point: %d bytes", len(message))
-	}
+	assertSandboxFields(t, securityActionBody(t, records[1]), map[string]any{
+		"defenseclaw.sandbox.phase.previous": "ready", "defenseclaw.sandbox.condition.type": "ConfigurationReady",
+		"defenseclaw.sandbox.condition.status": "False", "defenseclaw.sandbox.condition.reason": nil,
+	})
 	if transitions := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxTransitions); len(transitions) != 1 {
 		t.Fatalf("a phase-preserving update emitted %d transition metrics, want 1", len(transitions))
 	}
@@ -304,23 +373,15 @@ func TestSandboxLifecycleActiveGaugeIsPerConnector(t *testing.T) {
 			t.Fatalf("RecordSandboxLifecycle(%s): %v", name, err)
 		}
 	}
-	lastGauge := func() map[string]int64 {
-		values := map[string]int64{}
-		for _, metric := range sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive) {
-			connector, _ := metricAttributes(t, metric)["defenseclaw.connector.source"].(string)
-			values[connector] = sandboxMetricValue(t, metric)
-		}
-		return values
-	}
 	record("dc-claudecode-a-0001", "claudecode", SandboxPhaseReady)
 	record("dc-claudecode-b-0002", "claudecode", SandboxPhaseStarting)
 	record("dc-codex-a-0003", "codex", SandboxPhaseReady)
-	if got := lastGauge(); got["claudecode"] != 2 || got["codex"] != 1 {
+	if got := lastActiveGauges(t, runtime); got["claudecode"] != 2 || got["codex"] != 1 {
 		t.Fatalf("active gauges=%#v", got)
 	}
 	record("dc-claudecode-a-0001", "claudecode", SandboxPhaseError)
 	record("dc-claudecode-b-0002", "codex", SandboxPhaseReady)
-	if got := lastGauge(); got["claudecode"] != 0 || got["codex"] != 2 {
+	if got := lastActiveGauges(t, runtime); got["claudecode"] != 0 || got["codex"] != 2 {
 		t.Fatalf("active gauges after error and connector change=%#v", got)
 	}
 }
@@ -372,16 +433,7 @@ func TestSandboxLifecycleConcurrentGaugeIsOrdered(t *testing.T) {
 		if transitions := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxTransitions); len(transitions) != events {
 			t.Fatalf("round %d transition metrics=%d want %d", round, len(transitions), events)
 		}
-		last := map[string]int64{}
-		for _, metric := range sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive) {
-			connector, _ := metricAttributes(t, metric)["defenseclaw.connector.source"].(string)
-			value := sandboxMetricValue(t, metric)
-			if step := value - last[connector]; step > 1 || step < -1 {
-				t.Fatalf("round %d %s gauge jumped %d -> %d: points reached the runtime out of order",
-					round, connector, last[connector], value)
-			}
-			last[connector] = value
-		}
+		last := lastActiveGauges(t, runtime)
 		for connector, active := range want {
 			if last[connector] != active {
 				t.Fatalf("round %d final %s gauge=%d want %d (all=%#v)", round, connector, last[connector], active, last)
@@ -428,10 +480,10 @@ func TestSandboxRecorderConcurrentRetriesAfterRejectedEmits(t *testing.T) {
 	recorder := NewSandboxRecorder(harness.logger)
 	// Rejections follow the global call count, so under contention one caller
 	// can draw several in a row; the bound only stops a broken retry path.
-	retry := func(record func() error) error {
+	retry := func(event any) error {
 		var err error
 		for attempt := 0; attempt < 64; attempt++ {
-			if err = record(); err == nil {
+			if err = recordSandboxEvent(context.Background(), recorder, event); err == nil {
 				return nil
 			}
 		}
@@ -457,22 +509,13 @@ func TestSandboxRecorderConcurrentRetriesAfterRejectedEmits(t *testing.T) {
 			defer group.Done()
 			for _, phase := range phases {
 				identity.Phase = phase
-				errs <- retry(func() error {
-					return recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
-				})
-				if phase != SandboxPhaseReady {
-					continue
-				}
-				errs <- retry(func() error {
-					return recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+				errs <- retry(SandboxLifecycleEvent{Sandbox: identity})
+				if phase == SandboxPhaseReady {
+					errs <- retry(SandboxEgressEvent{
 						Sandbox: identity, Source: SandboxEgressSourceProxy, Host: "registry.npmjs.org", Port: 443,
 					})
-				})
-				errs <- retry(func() error {
-					return recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
-						Sandbox: identity, Operation: SandboxWorkspaceSnapshot, SnapshotKind: SandboxSnapshotGit,
-					})
-				})
+					errs <- retry(SandboxWorkspaceEvent{Sandbox: identity, Operation: SandboxWorkspaceSnapshot, SnapshotKind: SandboxSnapshotGit})
+				}
 			}
 		}(SandboxIdentity{Name: fmt.Sprintf("dc-%s-repo-%04d", connector, index), Connector: connector}, phases)
 	}
@@ -497,8 +540,7 @@ func TestSandboxRecorderConcurrentRetriesAfterRejectedEmits(t *testing.T) {
 		}
 		body := sandboxBody(t, record)
 		name, _ := body["defenseclaw.sandbox.name"].(string)
-		got, _ := body["defenseclaw.sandbox.phase.previous"].(string)
-		if got != previous[name] {
+		if got, _ := body["defenseclaw.sandbox.phase.previous"].(string); got != previous[name] {
 			t.Fatalf("%s previous phase=%q want %q: a rejected event moved the tracked phase", name, got, previous[name])
 		}
 		previous[name], _ = body["defenseclaw.sandbox.phase"].(string)
@@ -512,21 +554,15 @@ func TestSandboxRecorderConcurrentRetriesAfterRejectedEmits(t *testing.T) {
 			t.Fatalf("%s records=%d want %d (all=%#v)", eventName, counts[eventName], want, counts)
 		}
 	}
-	if transitions := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxTransitions); len(transitions) != lifecycleEvents {
-		t.Fatalf("transition metrics=%d want %d", len(transitions), lifecycleEvents)
-	}
-	if egress := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawEgressEvents); len(egress) != sandboxes {
-		t.Fatalf("egress metrics=%d want %d", len(egress), sandboxes)
-	}
-	last := map[string]int64{}
-	for _, metric := range sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive) {
-		connector, _ := metricAttributes(t, metric)["defenseclaw.connector.source"].(string)
-		value := sandboxMetricValue(t, metric)
-		if step := value - last[connector]; step > 1 || step < -1 {
-			t.Fatalf("%s gauge jumped %d -> %d", connector, last[connector], value)
+	for instrument, want := range map[string]int{
+		observability.TelemetryInstrumentDefenseClawSandboxTransitions: lifecycleEvents,
+		observability.TelemetryInstrumentDefenseClawEgressEvents:       sandboxes,
+	} {
+		if got := len(sandboxMetrics(t, runtime.testRuntimeV8Emitter, instrument)); got != want {
+			t.Fatalf("%s points=%d want %d", instrument, got, want)
 		}
-		last[connector] = value
 	}
+	last := lastActiveGauges(t, runtime.testRuntimeV8Emitter)
 	for _, connector := range connectors {
 		if last[connector] != want[connector] {
 			t.Fatalf("final %s gauge=%d want %d (all=%#v)", connector, last[connector], want[connector], last)
@@ -558,216 +594,350 @@ func (emitter *flakyRuntimeV8Emitter) EmitRuntimeV8(
 func TestSandboxLifecycleTrackingEdges(t *testing.T) {
 	harness := newSandboxHarness(t)
 	t.Run("failed emit does not advance the phase", func(t *testing.T) {
-		testSandboxLifecycleFailedEmitDoesNotAdvancePhase(t, harness)
+		runtime := &flakyRuntimeV8Emitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, harness.logger.store, router.AdmissionOrdinary)}
+		harness.logger.SetRuntimeV8Emitter(runtime)
+		recorder := NewSandboxRecorder(harness.logger)
+		identity := testSandboxIdentity()
+		record := func(phase SandboxPhase) error {
+			identity.Phase = phase
+			return recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
+		}
+		if err := record(SandboxPhaseCreating); err != nil {
+			t.Fatalf("creating: %v", err)
+		}
+		runtime.failNext = true
+		if err := record(SandboxPhaseProvisioning); err == nil {
+			t.Fatal("a failed emission reported success")
+		}
+		if tracked := recorder.phases[identity.Name]; tracked.phase != SandboxPhaseCreating {
+			t.Fatalf("failed emission advanced the tracked phase to %q", tracked.phase)
+		}
+		if active := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive); len(active) != 1 {
+			t.Fatalf("failed emission published a gauge point: %d points", len(active))
+		}
+		if err := record(SandboxPhaseProvisioning); err != nil {
+			t.Fatalf("retried provisioning: %v", err)
+		}
+		_, records := runtime.snapshot()
+		if len(records) != 2 || securityActionBody(t, records[1])["defenseclaw.sandbox.phase.previous"] != "creating" {
+			t.Fatalf("records=%d; the retried record must follow creating", len(records))
+		}
+		transitions := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxTransitions)
+		if len(transitions) != 2 || metricAttributes(t, transitions[1])["defenseclaw.sandbox.phase.from"] != "creating" {
+			t.Fatalf("transitions after retry=%d", len(transitions))
+		}
+		if last := lastActiveGauges(t, runtime.testRuntimeV8Emitter); last[identity.Connector] != 1 {
+			t.Fatalf("active gauge after retry=%#v want 1", last)
+		}
 	})
+	// A restarted daemon reconciling a running sandbox and a repeated deleted
+	// event know no previous phase, and neither is a new sandbox.
 	t.Run("unknown previous counts only creation", func(t *testing.T) {
-		testSandboxLifecycleUnknownPreviousCountsOnlyCreation(t, harness)
+		runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
+		identity := testSandboxIdentity()
+		for _, step := range []struct {
+			phase       SandboxPhase
+			previous    SandboxPhase
+			transitions int
+			active      int64
+		}{
+			{phase: SandboxPhaseReady, transitions: 0, active: 1},
+			{phase: SandboxPhaseStopping, transitions: 1, active: 1},
+			{phase: SandboxPhaseDeleted, transitions: 2},
+			{phase: SandboxPhaseDeleted, transitions: 2},
+			{phase: SandboxPhaseStopped, previous: SandboxPhaseStopping, transitions: 3},
+		} {
+			identity.Phase = step.phase
+			if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
+				Sandbox: identity, PreviousPhase: step.previous, Trigger: SandboxTriggerReconcile,
+			}); err != nil {
+				t.Fatalf("%s: %v", step.phase, err)
+			}
+			transitions := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxTransitions)
+			active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
+			if len(transitions) != step.transitions || sandboxMetricValue(t, active[len(active)-1]) != step.active {
+				t.Fatalf("%s: transitions=%d want %d, active=%d want %d", step.phase, len(transitions), step.transitions,
+					sandboxMetricValue(t, active[len(active)-1]), step.active)
+			}
+		}
+		_, records := runtime.snapshot()
+		if _, present := securityActionBody(t, records[3])["defenseclaw.sandbox.phase.previous"]; present {
+			t.Fatalf("a repeated deleted event claimed a previous phase")
+		}
 	})
+	// The transition counter and the active gauge stay on the sandbox
+	// identity's connector even when the envelope names another one.
 	t.Run("metrics use the identity connector", func(t *testing.T) {
-		testSandboxLifecycleMetricsUseIdentityConnector(t, harness)
+		runtime, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxLifecycleEvent{
+			Sandbox: SandboxIdentity{Name: "dc-unbound-repo-0001", Phase: SandboxPhaseCreating},
+		}, CorrelationEnvelope{Connector: "codex"})
+		if record.Connector() != "codex" {
+			t.Fatalf("record connector=%q want the envelope's codex", record.Connector())
+		}
+		for _, instrument := range []string{
+			observability.TelemetryInstrumentDefenseClawSandboxTransitions,
+			observability.TelemetryInstrumentDefenseClawSandboxActive,
+		} {
+			metrics := sandboxMetrics(t, runtime, instrument)
+			if len(metrics) != 1 {
+				t.Fatalf("%s points=%d want 1", instrument, len(metrics))
+			}
+			if connector, present := metricAttributes(t, metrics[0])["defenseclaw.connector.source"]; present {
+				t.Fatalf("%s took connector %#v from the envelope, not the sandbox identity", instrument, connector)
+			}
+		}
 	})
 }
 
-func testSandboxLifecycleFailedEmitDoesNotAdvancePhase(t *testing.T, harness *sandboxHarness) {
-	runtime := &flakyRuntimeV8Emitter{testRuntimeV8Emitter: newTestRuntimeV8Emitter(t, harness.logger.store, router.AdmissionOrdinary)}
-	harness.logger.SetRuntimeV8Emitter(runtime)
-	recorder := NewSandboxRecorder(harness.logger)
-	identity := testSandboxIdentity()
-	record := func(phase SandboxPhase) error {
-		identity.Phase = phase
-		return recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity})
-	}
-	if err := record(SandboxPhaseCreating); err != nil {
-		t.Fatalf("creating: %v", err)
-	}
-	runtime.failNext = true
-	if err := record(SandboxPhaseProvisioning); err == nil {
-		t.Fatal("a failed emission reported success")
-	}
-	if tracked := recorder.phases[identity.Name]; tracked.phase != SandboxPhaseCreating {
-		t.Fatalf("failed emission advanced the tracked phase to %q", tracked.phase)
-	}
-	if active := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive); len(active) != 1 {
-		t.Fatalf("failed emission published a gauge point: %d points", len(active))
-	}
-	if err := record(SandboxPhaseProvisioning); err != nil {
-		t.Fatalf("retried provisioning: %v", err)
-	}
-	_, records := runtime.snapshot()
-	if len(records) != 2 {
-		t.Fatalf("records=%d want 2", len(records))
-	}
-	if previous := securityActionBody(t, records[1])["defenseclaw.sandbox.phase.previous"]; previous != "creating" {
-		t.Fatalf("retried record previous phase=%#v want creating", previous)
-	}
-	transitions := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxTransitions)
-	if len(transitions) != 2 || metricAttributes(t, transitions[1])["defenseclaw.sandbox.phase.from"] != "creating" {
-		t.Fatalf("transitions after retry=%d", len(transitions))
-	}
-	active := sandboxMetrics(t, runtime.testRuntimeV8Emitter, observability.TelemetryInstrumentDefenseClawSandboxActive)
-	if last := active[len(active)-1]; sandboxMetricValue(t, last) != 1 {
-		t.Fatalf("active gauge after retry=%d want 1", sandboxMetricValue(t, last))
-	}
-}
-
-// testSandboxLifecycleUnknownPreviousCountsOnlyCreation covers a restarted
-// daemon reconciling a running sandbox and a repeated deleted event: neither
-// knows the previous phase, and neither is a new sandbox.
-func testSandboxLifecycleUnknownPreviousCountsOnlyCreation(t *testing.T, harness *sandboxHarness) {
-	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-	identity := testSandboxIdentity()
-	for _, step := range []struct {
-		phase       SandboxPhase
-		previous    SandboxPhase
-		transitions int
-		active      int64
-	}{
-		{phase: SandboxPhaseReady, transitions: 0, active: 1},
-		{phase: SandboxPhaseStopping, transitions: 1, active: 1},
-		{phase: SandboxPhaseDeleted, transitions: 2},
-		{phase: SandboxPhaseDeleted, transitions: 2},
-		{phase: SandboxPhaseStopped, previous: SandboxPhaseStopping, transitions: 3},
-	} {
-		identity.Phase = step.phase
-		if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
-			Sandbox: identity, PreviousPhase: step.previous, Trigger: SandboxTriggerReconcile,
-		}); err != nil {
-			t.Fatalf("%s: %v", step.phase, err)
-		}
-		transitions := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxTransitions)
-		active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
-		if len(transitions) != step.transitions || sandboxMetricValue(t, active[len(active)-1]) != step.active {
-			t.Fatalf("%s: transitions=%d want %d, active=%d want %d", step.phase, len(transitions), step.transitions,
-				sandboxMetricValue(t, active[len(active)-1]), step.active)
-		}
-	}
-	_, records := runtime.snapshot()
-	if _, present := securityActionBody(t, records[3])["defenseclaw.sandbox.phase.previous"]; present {
-		t.Fatalf("a repeated deleted event claimed a previous phase")
-	}
-}
-
-// testSandboxLifecycleMetricsUseIdentityConnector keeps the transition counter
-// and the active gauge on the same connector key even when the context
-// envelope names a different connector for the record.
-func testSandboxLifecycleMetricsUseIdentityConnector(t *testing.T, harness *sandboxHarness) {
-	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-	ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{Connector: "codex"})
-	if err := recorder.RecordSandboxLifecycle(ctx, SandboxLifecycleEvent{
-		Sandbox: SandboxIdentity{Name: "dc-unbound-repo-0001", Phase: SandboxPhaseCreating},
-	}); err != nil {
-		t.Fatalf("RecordSandboxLifecycle: %v", err)
-	}
-	if _, record := onlySandboxRecord(t, runtime); record.Connector() != "codex" {
-		t.Fatalf("record connector=%q want the envelope's codex", record.Connector())
-	}
-	for _, instrument := range []string{
-		observability.TelemetryInstrumentDefenseClawSandboxTransitions,
-		observability.TelemetryInstrumentDefenseClawSandboxActive,
-	} {
-		metrics := sandboxMetrics(t, runtime, instrument)
-		if len(metrics) != 1 {
-			t.Fatalf("%s points=%d want 1", instrument, len(metrics))
-		}
-		if connector, present := metricAttributes(t, metrics[0])["defenseclaw.connector.source"]; present {
-			t.Fatalf("%s took connector %#v from the envelope, not the sandbox identity", instrument, connector)
-		}
-	}
-}
-
-func TestSandboxEgressReusesEgressFamiliesAndMetric(t *testing.T) {
+// TestSandboxFamilies pins the family, bucket, outcome, severity, mandatory
+// flag, and registered fields each sandbox producer emits for representative
+// events. Egress also reuses the egress metric and never keeps a URL query or
+// fragment. Some identifiers arrive padded: the producers validate them
+// trimmed, so the record must carry the trimmed value, and padding can
+// neither fail the registered pattern nor cost a mandatory record.
+func TestSandboxFamilies(t *testing.T) {
 	harness := newSandboxHarness(t)
-	for _, test := range []struct {
+	sb := testSandboxIdentity()
+	count := func(value int64) *int64 { return &value }
+	envelope := CorrelationEnvelope{SessionID: "session-sandbox-1", AgentID: "agent-sandbox-1", RunID: "run-sandbox-1"}
+	const (
+		info   = observability.SeverityInfo
+		medium = observability.SeverityMedium
+		high   = observability.SeverityHigh
+	)
+	type familyCase struct {
 		name      string
-		input     SandboxEgressEvent
+		event     any
 		eventName string
+		bucket    observability.Bucket
 		outcome   observability.Outcome
-		severity  observability.Severity
-		body      map[string]any
-		absent    []string
-	}{
+		severity  observability.Severity // "" is not checked
+		mandatory bool
+		body      map[string]any // a nil value must be absent
+	}
+	cases := []familyCase{
 		{
-			name: "proxy allowed",
-			input: SandboxEgressEvent{
-				Source: SandboxEgressSourceProxy, Host: "Registry.NPMJS.org.", Port: 443, Scheme: "HTTPS",
+			name: "egress/proxy allowed",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "Registry.NPMJS.org.", Port: 443, Scheme: "HTTPS",
 				Path: "/react?token=secret#frag", ResolvedIP: "104.16.0.35",
 				DecisionCode: "SANDBOX_EGRESS_DEFAULT_ALLOW", PolicyOutcome: "allow-by-default",
 			},
-			eventName: observability.TelemetryEventEgressAllowed, outcome: observability.OutcomeAllowed,
-			severity: observability.SeverityInfo,
+			eventName: observability.TelemetryEventEgressAllowed, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeAllowed, severity: info,
 			body: map[string]any{
 				"defenseclaw.network.target_ref": "registry.npmjs.org", "server.address": "registry.npmjs.org",
 				"server.port": int64(443), "url.scheme": "https", "defenseclaw.network.target_path": "/react",
 				"defenseclaw.network.source": "dc-egress-proxy", "defenseclaw.network.decision": "allow",
 				"defenseclaw.network.blocked": false, "defenseclaw.network.resolved_ip": "104.16.0.35",
 				"defenseclaw.network.decision_code": "SANDBOX_EGRESS_DEFAULT_ALLOW",
+				"gen_ai.conversation.id":            "session-sandbox-1", "gen_ai.agent.id": "agent-sandbox-1",
 			},
 		},
 		{
-			name: "openshell blocked loopback",
-			input: SandboxEgressEvent{
-				Source: SandboxEgressSourceOpenShell, Host: "[::1]", Port: 18970, Blocked: true,
-				DecisionCode: "SANDBOX_EGRESS_PRIVATE_NETWORK", Reason: "loopback destinations are never reachable",
+			name: "egress/openshell blocked loopback",
+			event: SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceOpenShell, Host: "[::1]", Port: 18970, Blocked: true,
+				DecisionCode: " SANDBOX_EGRESS_PRIVATE_NETWORK\n", Reason: "loopback destinations are never reachable",
 				Path: "relative-not-kept",
 			},
-			eventName: observability.TelemetryEventEgressBlocked, outcome: observability.OutcomeBlocked,
-			severity: observability.SeverityMedium,
+			eventName: observability.TelemetryEventEgressBlocked, bucket: observability.BucketNetworkEgress,
+			outcome: observability.OutcomeBlocked, severity: medium, mandatory: true,
 			body: map[string]any{
 				"defenseclaw.network.target_ref": "0:0:0:0:0:0:0:1", "defenseclaw.network.source": "openshell",
 				"defenseclaw.network.decision": "block", "defenseclaw.network.blocked": true,
-				"defenseclaw.network.reason": "loopback destinations are never reachable",
+				"defenseclaw.network.reason":        "loopback destinations are never reachable",
+				"defenseclaw.network.decision_code": "SANDBOX_EGRESS_PRIVATE_NETWORK",
+				"defenseclaw.network.target_path":   nil, "url.scheme": nil, "defenseclaw.network.resolved_ip": nil,
+				"gen_ai.conversation.id": "session-sandbox-1", "gen_ai.agent.id": "agent-sandbox-1",
 			},
-			absent: []string{"defenseclaw.network.target_path", "url.scheme", "defenseclaw.network.resolved_ip"},
 		},
+		{
+			name: "approval/network rule requested",
+			event: SandboxApprovalEvent{
+				Sandbox: sb, Stage: SandboxApprovalRequested, ApprovalID: " draft-7", Kind: SandboxApprovalNetworkRule,
+				Host: "10.0.0.8", Port: 5432, Risky: true, Reason: "private network reach",
+			},
+			eventName: observability.TelemetryEventApprovalRequested, bucket: observability.BucketComplianceActivity,
+			outcome: observability.OutcomeAttempted,
+			body: map[string]any{
+				"defenseclaw.approval.id": "draft-7", "defenseclaw.sandbox.approval.kind": "network_rule",
+				"server.address": "10.0.0.8", "server.port": int64(5432), "defenseclaw.approval.dangerous": true,
+				"defenseclaw.guardrail.reason": "private network reach",
+			},
+		},
+		{
+			name: "approval/host port approved always",
+			event: SandboxApprovalEvent{
+				Sandbox: sb, Stage: SandboxApprovalResolved, ApprovalID: "host-port-5432 \t", Kind: SandboxApprovalHostPort,
+				Port: 5432, Result: SandboxApprovalApproved, ActorType: SandboxApprovalByOperator, Scope: SandboxApprovalScopeAlways,
+			},
+			eventName: observability.TelemetryEventApprovalResolved, bucket: observability.BucketComplianceActivity,
+			outcome: observability.OutcomeApproved, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.approval.id": "host-port-5432", "defenseclaw.approval.result": "approved",
+				"defenseclaw.approval.actor_type":    "operator",
+				"defenseclaw.sandbox.approval.scope": "always", "defenseclaw.sandbox.approval.kind": "host_port",
+				"defenseclaw.approval.dangerous": false,
+			},
+		},
+		{
+			name: "approval/triage expiry",
+			event: SandboxApprovalEvent{
+				Sandbox: sb, Stage: SandboxApprovalResolved, ApprovalID: "draft-9", Kind: SandboxApprovalNetworkRule,
+				Result: SandboxApprovalExpired, ActorType: SandboxApprovalByAutomatic,
+			},
+			eventName: observability.TelemetryEventApprovalResolved, bucket: observability.BucketComplianceActivity,
+			outcome: observability.OutcomeTimedOut, mandatory: true,
+			body: map[string]any{"defenseclaw.approval.result": "expired", "defenseclaw.approval.actor_type": "automatic"},
+		},
+		{
+			name: "policy/egress unblock",
+			event: SandboxPolicyEvent{
+				Sandbox:   func() SandboxIdentity { next := sb; next.PolicyVersion = 4; return next }(),
+				Operation: SandboxEgressUnblock, PreviousVersion: 3, PolicyHash: strings.Repeat("0f", 32),
+				Actor: "cli:alice", Origin: "cli", Target: "webhook.site", Reason: "operator_unblock", ChangeCount: 1,
+			},
+			eventName: observability.TelemetryEventPolicyUpdated, bucket: observability.BucketComplianceActivity,
+			outcome: observability.OutcomeApplied, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.admin.operation": "sandbox.egress.unblock", "defenseclaw.admin.principal_ref": "cli:alice",
+				"defenseclaw.admin.actor_ref": "cli:alice", "defenseclaw.admin.origin": "cli",
+				"defenseclaw.admin.target_ref": "webhook.site", "defenseclaw.admin.revision": "v4",
+				"defenseclaw.admin.current_revision": "v3", "defenseclaw.admin.after_summary": "sha256:" + strings.Repeat("0f", 32),
+				"defenseclaw.admin.reason": "operator_unblock", "defenseclaw.admin.change_count": int64(1),
+			},
+		},
+		{
+			name: "workspace/snapshot before the session",
+			event: SandboxWorkspaceEvent{
+				Sandbox: sb, Operation: SandboxWorkspaceSnapshot, SnapshotKind: SandboxSnapshotGit,
+				SnapshotRef: "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
+			},
+			eventName: observability.TelemetryEventSandboxWorkspace, bucket: observability.BucketEnforcementAction,
+			outcome: observability.OutcomeCompleted, severity: info,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.operation": "snapshot", "defenseclaw.sandbox.workspace.snapshot.kind": "git",
+				"defenseclaw.sandbox.workspace.lines_removed": nil,
+			},
+		},
+		{
+			name: "workspace/review flags host-executable changes",
+			event: SandboxWorkspaceEvent{
+				Sandbox: sb, Operation: SandboxWorkspaceReview, FileCount: count(8), LinesAdded: count(212), LinesRemoved: count(37),
+				FlaggedCount: count(2), Paths: []string{"package.json", ".envrc"},
+			},
+			eventName: observability.TelemetryEventSandboxWorkspace, bucket: observability.BucketEnforcementAction,
+			outcome: observability.OutcomeCompleted, severity: medium, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.operation": "review", "defenseclaw.sandbox.workspace.file_count": int64(8),
+				"defenseclaw.sandbox.workspace.flagged_count": int64(2), "defenseclaw.sandbox.workspace.lines_added": int64(212),
+				"defenseclaw.sandbox.workspace.lines_removed": int64(37), "defenseclaw.enforcement.effective_action": "review",
+			},
+		},
+		{
+			name: "workspace/undo restores the git snapshot",
+			event: SandboxWorkspaceEvent{
+				Sandbox: sb, Operation: SandboxWorkspaceUndo, SnapshotKind: SandboxSnapshotGit, Initiator: "operator ",
+				SnapshotRef: "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a", FileCount: count(0),
+			},
+			eventName: observability.TelemetryEventSandboxWorkspace, bucket: observability.BucketEnforcementAction,
+			outcome: observability.OutcomeApplied, severity: info, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.snapshot.kind": "git", "defenseclaw.enforcement.initiator": "operator",
+				"defenseclaw.sandbox.workspace.snapshot.ref": "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
+				"defenseclaw.sandbox.workspace.file_count":   int64(0), "defenseclaw.sandbox.workspace.lines_removed": nil,
+			},
+		},
+		{
+			name: "workspace/quarantine of a nested repository",
+			event: SandboxWorkspaceEvent{
+				Sandbox: sb, Operation: SandboxWorkspaceQuarantine, Initiator: "defenseclaw", FileCount: count(1), FlaggedCount: count(1),
+				Paths: []string{"vendor/evil/.git"}, Severity: "HIGH",
+			},
+			eventName: observability.TelemetryEventSandboxWorkspace, bucket: observability.BucketEnforcementAction,
+			outcome: observability.OutcomeApplied, severity: high, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.operation": "quarantine", "defenseclaw.sandbox.workspace.file_count": int64(1),
+				"defenseclaw.enforcement.initiator": "defenseclaw",
+			},
+		},
+		{
+			name: "workspace/failed pull",
+			event: SandboxWorkspaceEvent{
+				Sandbox: sb, Operation: SandboxWorkspacePull, PullMode: SandboxPullApply, Result: SandboxWorkspaceFailed,
+				FailureClass: "merge_conflict", ByteCount: count(4096),
+			},
+			eventName: observability.TelemetryEventSandboxWorkspace, bucket: observability.BucketEnforcementAction,
+			outcome: observability.OutcomeFailed, severity: high, mandatory: true,
+			body: map[string]any{
+				"defenseclaw.sandbox.workspace.pull.mode": "apply", "defenseclaw.enforcement.failure_class": "merge_conflict",
+				"defenseclaw.sandbox.workspace.byte_count": int64(4096),
+			},
+		},
+	}
+	// Health describes the gateway integration, or one sandbox when degraded.
+	for _, health := range []struct {
+		state     SandboxHealthState
+		eventName string
+		outcome   observability.Outcome
+		severity  observability.Severity
+	}{
+		{SandboxHealthStarting, observability.TelemetryEventSubsystemLifecycle, observability.OutcomeAttempted, info},
+		{SandboxHealthStopped, observability.TelemetryEventSubsystemLifecycle, observability.OutcomeCompleted, info},
+		{SandboxHealthReady, observability.TelemetryEventSubsystemReady, observability.OutcomeCompleted, info},
+		{SandboxHealthRestored, observability.TelemetryEventSubsystemRestored, observability.OutcomeCompleted, info},
+		{SandboxHealthDegraded, observability.TelemetryEventSubsystemDegraded, observability.OutcomeFailed, high},
+		{SandboxHealthFailed, observability.TelemetryEventSubsystemDegraded, observability.OutcomeFailed, high},
 	} {
+		event := SandboxHealthEvent{State: health.state, ErrorCode: "openshell_watch_lost", ErrorSummary: "stream reset"}
+		body := map[string]any{
+			"defenseclaw.health.subsystem": "openshell", "defenseclaw.health.state": string(health.state),
+			"defenseclaw.schema.error_code": "openshell_watch_lost", "defenseclaw.sandbox.name": nil,
+		}
+		if health.state == SandboxHealthDegraded {
+			event.Sandbox = sb
+			delete(body, "defenseclaw.sandbox.name")
+		}
+		cases = append(cases, familyCase{
+			name: "health/" + string(health.state), event: event, eventName: health.eventName, bucket: observability.BucketPlatformHealth,
+			outcome: health.outcome, severity: health.severity, mandatory: true, body: body,
+		})
+	}
+	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			identity := testSandboxIdentity()
-			test.input.Sandbox = identity
-			ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
-				SessionID: "session-sandbox-1", AgentID: "agent-sandbox-1", RunID: "run-sandbox-1",
-			})
-			if err := recorder.RecordSandboxEgress(ctx, test.input); err != nil {
-				t.Fatalf("RecordSandboxEgress: %v", err)
-			}
-			metadata, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
+			runtime, record := harness.recordOne(t, router.AdmissionOrdinary, test.event, envelope)
 			severity, _ := record.Severity()
-			if record.EventName() != observability.EventName(test.eventName) || record.Outcome() != test.outcome ||
-				record.Mandatory() != test.input.Blocked || metadata.Source() != observability.SourceGateway ||
-				metadata.Action() != observability.ProducerKey(ActionSandboxEgress) ||
-				severity != test.severity || record.Bucket() != observability.BucketNetworkEgress ||
-				record.Correlation().SessionID != "session-sandbox-1" {
-				t.Fatalf("record identity=%#v outcome=%q mandatory=%v severity=%q correlation=%#v",
-					record.Identity(), record.Outcome(), record.Mandatory(), severity, record.Correlation())
+			if record.EventName() != observability.EventName(test.eventName) || record.Bucket() != test.bucket ||
+				record.Outcome() != test.outcome || record.Mandatory() != test.mandatory ||
+				(test.severity != "" && severity != test.severity) || record.Correlation().SessionID != "session-sandbox-1" {
+				t.Fatalf("record identity=%#v bucket=%q outcome=%q mandatory=%v severity=%q correlation=%#v",
+					record.Identity(), record.Bucket(), record.Outcome(), record.Mandatory(), severity, record.Correlation())
 			}
 			body := sandboxBody(t, record)
-			assertSandboxCorrelation(t, body, identity)
-			for key, want := range test.body {
-				if body[key] != want {
-					t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, body[key], want, body)
+			if _, uncorrelated := test.body["defenseclaw.sandbox.name"]; !uncorrelated {
+				want := sb
+				if policy, ok := test.event.(SandboxPolicyEvent); ok {
+					want = policy.Sandbox
 				}
+				assertSandboxCorrelation(t, body, want)
 			}
-			for _, key := range test.absent {
-				if _, present := body[key]; present {
-					t.Fatalf("body unexpectedly carries %q: %#v", key, body)
-				}
+			assertSandboxFields(t, body, test.body)
+			egress, ok := test.event.(SandboxEgressEvent)
+			if !ok {
+				return
 			}
-			if body["gen_ai.conversation.id"] != "session-sandbox-1" || body["gen_ai.agent.id"] != "agent-sandbox-1" {
-				t.Fatalf("agent correlation missing: %#v", body)
+			metadata, _ := runtime.snapshot()
+			if metadata[0].Source() != observability.SourceGateway || metadata[0].Action() != observability.ProducerKey(ActionSandboxEgress) {
+				t.Fatalf("egress metadata source=%q action=%q", metadata[0].Source(), metadata[0].Action())
 			}
-			encoded, _ := json.Marshal(body)
-			if bytes.Contains(encoded, []byte("token=secret")) || bytes.Contains(encoded, []byte("frag")) {
+			if encoded, _ := json.Marshal(body); bytes.Contains(encoded, []byte("token=secret")) || bytes.Contains(encoded, []byte("frag")) {
 				t.Fatalf("egress body kept the query or fragment: %s", encoded)
 			}
 			events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents)
-			if len(events) != 1 {
-				t.Fatalf("egress metrics=%d want 1", len(events))
-			}
-			attributes := metricAttributes(t, events[0])
-			if attributes["defenseclaw.metric.source"] != string(test.input.Source) ||
-				attributes["defenseclaw.metric.decision"] != test.body["defenseclaw.network.decision"] {
-				t.Fatalf("egress metric attributes=%#v", attributes)
+			if len(events) != 1 || metricAttributes(t, events[0])["defenseclaw.metric.source"] != string(egress.Source) ||
+				metricAttributes(t, events[0])["defenseclaw.metric.decision"] != test.body["defenseclaw.network.decision"] {
+				t.Fatalf("egress metrics=%d, want one labeled with the source and decision", len(events))
 			}
 			if audits := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawAuditEventsTotal); len(audits) != 1 ||
 				metricAttributes(t, audits[0])["defenseclaw.metric.action"] != string(ActionSandboxEgress) {
@@ -775,6 +945,24 @@ func TestSandboxEgressReusesEgressFamiliesAndMetric(t *testing.T) {
 			}
 		})
 	}
+	t.Run("event timestamp is preserved", func(t *testing.T) {
+		at := time.Date(2026, 9, 26, 12, 0, 0, 0, time.FixedZone("EDT", -4*3600))
+		if _, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxHealthEvent{State: SandboxHealthReady, Timestamp: at}); !record.Timestamp().Equal(at.UTC()) {
+			t.Fatalf("timestamp=%v want %v", record.Timestamp(), at.UTC())
+		}
+	})
+	t.Run("workspace paths are bounded", func(t *testing.T) {
+		paths := make([]string, 0, 100)
+		for index := 0; index < 100; index++ {
+			paths = append(paths, fmt.Sprintf("secrets/%03d.env", index))
+		}
+		_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxWorkspaceEvent{
+			Sandbox: sb, Operation: SandboxWorkspaceMask, Paths: paths, FileCount: count(100),
+		})
+		if kept, _ := sandboxBody(t, record)["defenseclaw.sandbox.workspace.paths"].([]any); len(kept) != maxSandboxWorkspacePaths {
+			t.Fatalf("paths kept=%d want %d", len(kept), maxSandboxWorkspacePaths)
+		}
+	})
 }
 
 func TestSandboxEgressAdmissionPaths(t *testing.T) {
@@ -804,11 +992,10 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	// The remaining cases never persist a row, so they share one store; the
 	// drop case still proves it stays empty.
 	harness := newSandboxHarness(t)
+	allowed := SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.org"}
 	t.Run("allowed floor has no path", func(t *testing.T) {
 		runtime, recorder := harness.bind(t, router.AdmissionFloor)
-		if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
-			Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.org",
-		}); err == nil {
+		if err := recorder.RecordSandboxEgress(context.Background(), allowed); err == nil {
 			t.Fatal("a non-mandatory egress accepted a mandatory-floor admission")
 		}
 		if _, records := runtime.snapshot(); len(records) != 0 {
@@ -817,9 +1004,7 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	})
 	t.Run("collection drop still counts the decision", func(t *testing.T) {
 		runtime, recorder := harness.bind(t, router.AdmissionDrop)
-		if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
-			Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.org",
-		}); err != nil {
+		if err := recorder.RecordSandboxEgress(context.Background(), allowed); err != nil {
 			t.Fatalf("RecordSandboxEgress: %v", err)
 		}
 		rows, err := harness.logger.store.ListEvents(10)
@@ -843,192 +1028,11 @@ func TestSandboxEgressAdmissionPaths(t *testing.T) {
 	})
 }
 
-func TestSandboxApprovalFamilies(t *testing.T) {
-	harness := newSandboxHarness(t)
-	for _, test := range []struct {
-		name      string
-		input     SandboxApprovalEvent
-		eventName string
-		outcome   observability.Outcome
-		mandatory bool
-		body      map[string]any
-	}{
-		{
-			name: "network rule requested",
-			input: SandboxApprovalEvent{
-				Stage: SandboxApprovalRequested, ApprovalID: "draft-7", Kind: SandboxApprovalNetworkRule,
-				Host: "10.0.0.8", Port: 5432, Risky: true, Reason: "private network reach",
-			},
-			eventName: observability.TelemetryEventApprovalRequested, outcome: observability.OutcomeAttempted,
-			body: map[string]any{
-				"defenseclaw.approval.id": "draft-7", "defenseclaw.sandbox.approval.kind": "network_rule",
-				"server.address": "10.0.0.8", "server.port": int64(5432), "defenseclaw.approval.dangerous": true,
-				"defenseclaw.guardrail.reason": "private network reach",
-			},
-		},
-		{
-			name: "host port approved always",
-			input: SandboxApprovalEvent{
-				Stage: SandboxApprovalResolved, ApprovalID: "host-port-5432", Kind: SandboxApprovalHostPort,
-				Port: 5432, Result: SandboxApprovalApproved, ActorType: SandboxApprovalByOperator,
-				Scope: SandboxApprovalScopeAlways,
-			},
-			eventName: observability.TelemetryEventApprovalResolved, outcome: observability.OutcomeApproved, mandatory: true,
-			body: map[string]any{
-				"defenseclaw.approval.result": "approved", "defenseclaw.approval.actor_type": "operator",
-				"defenseclaw.sandbox.approval.scope": "always", "defenseclaw.sandbox.approval.kind": "host_port",
-				"defenseclaw.approval.dangerous": false,
-			},
-		},
-		{
-			name: "triage expiry",
-			input: SandboxApprovalEvent{
-				Stage: SandboxApprovalResolved, ApprovalID: "draft-9", Kind: SandboxApprovalNetworkRule,
-				Result: SandboxApprovalExpired, ActorType: SandboxApprovalByAutomatic,
-			},
-			eventName: observability.TelemetryEventApprovalResolved, outcome: observability.OutcomeTimedOut, mandatory: true,
-			body: map[string]any{"defenseclaw.approval.result": "expired", "defenseclaw.approval.actor_type": "automatic"},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			test.input.Sandbox = testSandboxIdentity()
-			if err := recorder.RecordSandboxApproval(context.Background(), test.input); err != nil {
-				t.Fatalf("RecordSandboxApproval: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			if record.EventName() != observability.EventName(test.eventName) || record.Outcome() != test.outcome ||
-				record.Mandatory() != test.mandatory || record.Bucket() != observability.BucketComplianceActivity {
-				t.Fatalf("record identity=%#v outcome=%q mandatory=%v", record.Identity(), record.Outcome(), record.Mandatory())
-			}
-			body := sandboxBody(t, record)
-			assertSandboxCorrelation(t, body, test.input.Sandbox)
-			for key, want := range test.body {
-				if body[key] != want {
-					t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, body[key], want, body)
-				}
-			}
-		})
-	}
-}
-
-// TestSandboxRecorderEmitsTrimmedIdentifiers covers identifiers the producers
-// validate after trimming: the record carries the trimmed value, so padding
-// can neither fail the registered pattern nor cost a mandatory record.
-func TestSandboxRecorderEmitsTrimmedIdentifiers(t *testing.T) {
-	harness := newSandboxHarness(t)
-	for _, test := range []struct {
-		name      string
-		record    func(*SandboxRecorder) error
-		mandatory bool
-		field     string
-		want      string
-	}{
-		{
-			name: "requested approval id",
-			record: func(r *SandboxRecorder) error {
-				return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
-					Sandbox: testSandboxIdentity(), Stage: SandboxApprovalRequested, ApprovalID: " draft-7",
-					Kind: SandboxApprovalNetworkRule,
-				})
-			},
-			field: "defenseclaw.approval.id", want: "draft-7",
-		},
-		{
-			name: "resolved approval id",
-			record: func(r *SandboxRecorder) error {
-				return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
-					Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-7 \t",
-					Kind: SandboxApprovalNetworkRule, Result: SandboxApprovalApproved, ActorType: SandboxApprovalByOperator,
-				})
-			},
-			mandatory: true, field: "defenseclaw.approval.id", want: "draft-7",
-		},
-		{
-			name: "workspace initiator",
-			record: func(r *SandboxRecorder) error {
-				return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
-					Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceSnapshot, Initiator: "operator ",
-				})
-			},
-			field: "defenseclaw.enforcement.initiator", want: "operator",
-		},
-		{
-			name: "egress decision code",
-			record: func(r *SandboxRecorder) error {
-				return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
-					Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "pastebin.com", Blocked: true,
-					DecisionCode: " SANDBOX_EGRESS_BLOCKLIST\n",
-				})
-			},
-			mandatory: true, field: "defenseclaw.network.decision_code", want: "SANDBOX_EGRESS_BLOCKLIST",
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := test.record(recorder); err != nil {
-				t.Fatalf("a padded identifier cost the record: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			if record.Mandatory() != test.mandatory {
-				t.Fatalf("mandatory=%v want %v", record.Mandatory(), test.mandatory)
-			}
-			if got := sandboxBody(t, record)[test.field]; got != test.want {
-				t.Fatalf("%s=%#v want %q", test.field, got, test.want)
-			}
-		})
-	}
-}
-
-func TestSandboxPolicyUpdateIsMandatoryControlPlaneRecord(t *testing.T) {
-	harness := newSandboxHarness(t)
-	runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-	identity := testSandboxIdentity()
-	identity.PolicyVersion = 4
-	hash := strings.Repeat("0f", 32)
-	if err := recorder.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{
-		Sandbox: identity, Operation: SandboxEgressUnblock, PreviousVersion: 3, PolicyHash: hash,
-		Actor: "cli:alice", Origin: "cli", Target: "webhook.site", Reason: "operator_unblock", ChangeCount: 1,
-	}); err != nil {
-		t.Fatalf("RecordSandboxPolicy: %v", err)
-	}
-	_, record := onlySandboxRecord(t, runtime)
-	assertRecordMatchesRuntimeContract(t, record)
-	if record.EventName() != observability.EventName(observability.TelemetryEventPolicyUpdated) ||
-		!record.Mandatory() || record.Outcome() != observability.OutcomeApplied {
-		t.Fatalf("policy record identity=%#v mandatory=%v outcome=%q", record.Identity(), record.Mandatory(), record.Outcome())
-	}
-	body := sandboxBody(t, record)
-	assertSandboxCorrelation(t, body, identity)
-	for key, want := range map[string]any{
-		"defenseclaw.admin.operation": "sandbox.egress.unblock", "defenseclaw.admin.principal_ref": "cli:alice",
-		"defenseclaw.admin.actor_ref": "cli:alice", "defenseclaw.admin.origin": "cli",
-		"defenseclaw.admin.target_ref": "webhook.site", "defenseclaw.admin.revision": "v4",
-		"defenseclaw.admin.current_revision": "v3", "defenseclaw.admin.after_summary": "sha256:" + hash,
-		"defenseclaw.admin.reason": "operator_unblock", "defenseclaw.admin.change_count": int64(1),
-	} {
-		if body[key] != want {
-			t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, body[key], want, body)
-		}
-	}
-
-	runtime, recorder = harness.bind(t, router.AdmissionFloor)
-	if err := recorder.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{
-		Sandbox: identity, Operation: SandboxPolicyApply, NoChange: true,
-	}); err != nil {
-		t.Fatalf("RecordSandboxPolicy floor: %v", err)
-	}
-	if _, floor := onlySandboxRecord(t, runtime); !floor.IsFloorOnly() || floor.Outcome() != observability.OutcomeNoChange {
-		t.Fatalf("policy floor=%v outcome=%q", floor.IsFloorOnly(), floor.Outcome())
-	}
-}
-
 // TestSandboxPolicyTargetRecordsEgressPatterns pins the target_ref of egress
 // rule changes. The decider accepts host patterns that cannot start an
 // identifier, and a mandatory record that opens *.pastebin.com or ::/0 must
-// still say so: those two forms are rewritten, never dropped.
+// still say so: those two forms are rewritten, never dropped. A no-change
+// apply keeps a floor record.
 func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
 	harness := newSandboxHarness(t)
 	for _, test := range []struct {
@@ -1037,7 +1041,6 @@ func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
 		target    string
 		want      string
 	}{
-		{"exact host", SandboxEgressUnblock, "webhook.site", "webhook.site"},
 		{"wildcard host", SandboxEgressUnblock, "*.pastebin.com", "suffix:pastebin.com"},
 		{"padded wildcard host", SandboxEgressBlock, " *.example.com\t", "suffix:example.com"},
 		{"service label host", SandboxEgressUnblock, "_x.dcmarker.example", "host:_x.dcmarker.example"},
@@ -1051,25 +1054,14 @@ func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
 		{"no target", SandboxPolicyApply, "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{
+			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxPolicyEvent{
 				Sandbox: testSandboxIdentity(), Operation: test.operation, Actor: "cli:alice", Origin: "cli",
 				Target: test.target, ChangeCount: 1,
-			}); err != nil {
-				t.Fatalf("RecordSandboxPolicy: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
+			})
 			if !record.Mandatory() {
 				t.Fatal("a policy change must be mandatory")
 			}
-			got, present := sandboxBody(t, record)["defenseclaw.admin.target_ref"]
-			if present != (test.want != "") || (present && got != test.want) {
-				t.Fatalf("target_ref=%#v present=%v want %q", got, present, test.want)
-			}
-			if test.want == "" {
-				return
-			}
+			assertSandboxFields(t, sandboxBody(t, record), map[string]any{"defenseclaw.admin.target_ref": optional(test.want)})
 			// A rewritten address still parses to the prefix it replaced.
 			if prefix, err := netip.ParsePrefix(test.target); err == nil {
 				if again, err := netip.ParsePrefix(test.want); err != nil || again != prefix {
@@ -1083,51 +1075,11 @@ func TestSandboxPolicyTargetRecordsEgressPatterns(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestSandboxHealthStatesMapToSubsystemFamilies(t *testing.T) {
-	harness := newSandboxHarness(t)
-	for _, test := range []struct {
-		state     SandboxHealthState
-		eventName string
-		health    string
-		outcome   observability.Outcome
-		severity  observability.Severity
-	}{
-		{SandboxHealthStarting, observability.TelemetryEventSubsystemLifecycle, "starting", observability.OutcomeAttempted, observability.SeverityInfo},
-		{SandboxHealthStopped, observability.TelemetryEventSubsystemLifecycle, "stopped", observability.OutcomeCompleted, observability.SeverityInfo},
-		{SandboxHealthReady, observability.TelemetryEventSubsystemReady, "ready", observability.OutcomeCompleted, observability.SeverityInfo},
-		{SandboxHealthRestored, observability.TelemetryEventSubsystemRestored, "restored", observability.OutcomeCompleted, observability.SeverityInfo},
-		{SandboxHealthDegraded, observability.TelemetryEventSubsystemDegraded, "degraded", observability.OutcomeFailed, observability.SeverityHigh},
-		{SandboxHealthFailed, observability.TelemetryEventSubsystemDegraded, "failed", observability.OutcomeFailed, observability.SeverityHigh},
-	} {
-		t.Run(string(test.state), func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			input := SandboxHealthEvent{State: test.state, ErrorCode: "openshell_watch_lost", ErrorSummary: "stream reset"}
-			if test.state == SandboxHealthDegraded {
-				input.Sandbox = testSandboxIdentity()
-			}
-			if err := recorder.RecordSandboxHealth(context.Background(), input); err != nil {
-				t.Fatalf("RecordSandboxHealth: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			severity, _ := record.Severity()
-			if record.EventName() != observability.EventName(test.eventName) || record.Outcome() != test.outcome ||
-				!record.Mandatory() || severity != test.severity {
-				t.Fatalf("record identity=%#v outcome=%q mandatory=%v severity=%q",
-					record.Identity(), record.Outcome(), record.Mandatory(), severity)
-			}
-			body := sandboxBody(t, record)
-			if body["defenseclaw.health.subsystem"] != "openshell" || body["defenseclaw.health.state"] != test.health ||
-				body["defenseclaw.schema.error_code"] != "openshell_watch_lost" {
-				t.Fatalf("health body=%#v", body)
-			}
-			_, hasSandbox := body["defenseclaw.sandbox.name"]
-			if hasSandbox != (test.state == SandboxHealthDegraded) {
-				t.Fatalf("sandbox correlation presence=%v body=%#v", hasSandbox, body)
-			}
-		})
+	_, floor := harness.recordOne(t, router.AdmissionFloor, SandboxPolicyEvent{
+		Sandbox: testSandboxIdentity(), Operation: SandboxPolicyApply, NoChange: true,
+	})
+	if !floor.IsFloorOnly() || floor.Outcome() != observability.OutcomeNoChange {
+		t.Fatalf("policy floor=%v outcome=%q", floor.IsFloorOnly(), floor.Outcome())
 	}
 }
 
@@ -1138,24 +1090,21 @@ func TestSandboxFindingKinds(t *testing.T) {
 		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload, SandboxFindingNestedRepo,
 	} {
 		t.Run(string(kind), func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
+			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxFindingEvent{
 				Sandbox: testSandboxIdentity(), Kind: kind, Severity: "high", Title: "sandbox observation",
 				Evidence: "uploaded 30 MiB to a first-seen host", TargetRef: "files.example", Confidence: 0.9,
-			}); err != nil {
-				t.Fatalf("RecordSandboxFinding: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
+			})
 			body := sandboxBody(t, record)
-			wantRule := "SANDBOX-" + strings.ToUpper(strings.ReplaceAll(string(kind), "_", "-"))
 			findingID, _ := body["defenseclaw.finding.id"].(string)
 			if record.EventName() != observability.EventName(observability.TelemetryEventFindingObserved) ||
-				body["defenseclaw.finding.rule_id"] != wantRule || body["defenseclaw.finding.category"] != "sandbox."+string(kind) ||
-				body["defenseclaw.security.severity"] != "HIGH" || findingID == "" ||
-				record.Correlation().FindingOccurrenceID != findingID || body["defenseclaw.finding.confidence"] != 0.9 {
+				findingID == "" || record.Correlation().FindingOccurrenceID != findingID {
 				t.Fatalf("finding record identity=%#v body=%#v correlation=%#v", record.Identity(), body, record.Correlation())
 			}
+			assertSandboxFields(t, body, map[string]any{
+				"defenseclaw.finding.rule_id":  "SANDBOX-" + strings.ToUpper(strings.ReplaceAll(string(kind), "_", "-")),
+				"defenseclaw.finding.category": "sandbox." + string(kind), "defenseclaw.security.severity": "HIGH",
+				"defenseclaw.finding.confidence": 0.9,
+			})
 			assertSandboxCorrelation(t, body, testSandboxIdentity())
 		})
 	}
@@ -1165,126 +1114,6 @@ func TestSandboxFindingKinds(t *testing.T) {
 	}); err == nil {
 		t.Fatal("a finding without severity was accepted")
 	}
-}
-
-func TestSandboxWorkspaceOperations(t *testing.T) {
-	harness := newSandboxHarness(t)
-	count := func(value int64) *int64 { return &value }
-	for _, test := range []struct {
-		name      string
-		input     SandboxWorkspaceEvent
-		outcome   observability.Outcome
-		severity  observability.Severity
-		mandatory bool
-		body      map[string]any
-	}{
-		{
-			name: "snapshot before the session",
-			input: SandboxWorkspaceEvent{
-				Operation: SandboxWorkspaceSnapshot, SnapshotKind: SandboxSnapshotGit,
-				SnapshotRef: "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
-			},
-			outcome: observability.OutcomeCompleted, severity: observability.SeverityInfo,
-			body: map[string]any{
-				"defenseclaw.sandbox.workspace.operation": "snapshot", "defenseclaw.sandbox.workspace.snapshot.kind": "git",
-			},
-		},
-		{
-			name: "review flags host-executable changes",
-			input: SandboxWorkspaceEvent{
-				Operation: SandboxWorkspaceReview, FileCount: count(8), LinesAdded: count(212), LinesRemoved: count(37),
-				FlaggedCount: count(2), Paths: []string{"package.json", ".envrc"},
-			},
-			outcome: observability.OutcomeCompleted, severity: observability.SeverityMedium, mandatory: true,
-			body: map[string]any{
-				"defenseclaw.sandbox.workspace.operation": "review", "defenseclaw.sandbox.workspace.file_count": int64(8),
-				"defenseclaw.sandbox.workspace.flagged_count": int64(2), "defenseclaw.sandbox.workspace.lines_added": int64(212),
-				"defenseclaw.enforcement.effective_action": "review",
-			},
-		},
-		{
-			name: "undo restores the git snapshot",
-			input: SandboxWorkspaceEvent{
-				Operation: SandboxWorkspaceUndo, SnapshotKind: SandboxSnapshotGit, Initiator: "operator",
-				SnapshotRef: "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a", FileCount: count(0),
-			},
-			outcome: observability.OutcomeApplied, severity: observability.SeverityInfo, mandatory: true,
-			body: map[string]any{
-				"defenseclaw.sandbox.workspace.snapshot.kind": "git", "defenseclaw.enforcement.initiator": "operator",
-				"defenseclaw.sandbox.workspace.snapshot.ref": "refs/defenseclaw/pre/dc-claudecode-myapp-7f3a",
-				"defenseclaw.sandbox.workspace.file_count":   int64(0),
-			},
-		},
-		{
-			name: "quarantine of a nested repository",
-			input: SandboxWorkspaceEvent{
-				Operation: SandboxWorkspaceQuarantine, Initiator: "defenseclaw", FileCount: count(1), FlaggedCount: count(1),
-				Paths: []string{"vendor/evil/.git"}, Severity: "HIGH",
-			},
-			outcome: observability.OutcomeApplied, severity: observability.SeverityHigh, mandatory: true,
-			body: map[string]any{
-				"defenseclaw.sandbox.workspace.operation": "quarantine", "defenseclaw.sandbox.workspace.file_count": int64(1),
-				"defenseclaw.enforcement.initiator": "defenseclaw",
-			},
-		},
-		{
-			name: "failed pull",
-			input: SandboxWorkspaceEvent{
-				Operation: SandboxWorkspacePull, PullMode: SandboxPullApply, Result: SandboxWorkspaceFailed,
-				FailureClass: "merge_conflict", ByteCount: count(4096),
-			},
-			outcome: observability.OutcomeFailed, severity: observability.SeverityHigh, mandatory: true,
-			body: map[string]any{
-				"defenseclaw.sandbox.workspace.pull.mode": "apply", "defenseclaw.enforcement.failure_class": "merge_conflict",
-				"defenseclaw.sandbox.workspace.byte_count": int64(4096),
-			},
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			test.input.Sandbox = testSandboxIdentity()
-			if err := recorder.RecordSandboxWorkspace(context.Background(), test.input); err != nil {
-				t.Fatalf("RecordSandboxWorkspace: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			severity, _ := record.Severity()
-			if record.EventName() != observability.EventName(observability.TelemetryEventSandboxWorkspace) ||
-				record.Bucket() != observability.BucketEnforcementAction || record.Outcome() != test.outcome ||
-				severity != test.severity || record.Mandatory() != test.mandatory {
-				t.Fatalf("workspace record identity=%#v outcome=%q severity=%q mandatory=%v",
-					record.Identity(), record.Outcome(), severity, record.Mandatory())
-			}
-			body := sandboxBody(t, record)
-			assertSandboxCorrelation(t, body, test.input.Sandbox)
-			for key, want := range test.body {
-				if body[key] != want {
-					t.Fatalf("body[%q]=%#v want %#v; body=%#v", key, body[key], want, body)
-				}
-			}
-			if _, present := body["defenseclaw.sandbox.workspace.lines_removed"]; present != (test.input.LinesRemoved != nil) {
-				t.Fatalf("nil count was not omitted: %#v", body)
-			}
-		})
-	}
-	t.Run("paths are bounded", func(t *testing.T) {
-		runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-		paths := make([]string, 0, 100)
-		for index := 0; index < 100; index++ {
-			paths = append(paths, fmt.Sprintf("secrets/%03d.env", index))
-		}
-		if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
-			Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceMask, Paths: paths, FileCount: count(100),
-		}); err != nil {
-			t.Fatalf("RecordSandboxWorkspace: %v", err)
-		}
-		_, record := onlySandboxRecord(t, runtime)
-		assertRecordMatchesRuntimeContract(t, record)
-		kept, _ := sandboxBody(t, record)["defenseclaw.sandbox.workspace.paths"].([]any)
-		if len(kept) != maxSandboxWorkspacePaths {
-			t.Fatalf("paths kept=%d want %d", len(kept), maxSandboxWorkspacePaths)
-		}
-	})
 }
 
 // TestSandboxWorkspaceMandatoryFloor pins which workspace records no route
@@ -1321,32 +1150,23 @@ func TestSandboxWorkspaceMandatoryFloor(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.input.Sandbox = testSandboxIdentity()
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxWorkspace(context.Background(), test.input); err != nil {
-				t.Fatalf("ordinary: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			if record.Mandatory() != test.mandatory {
+			if _, record := harness.recordOne(t, router.AdmissionOrdinary, test.input); record.Mandatory() != test.mandatory {
 				t.Fatalf("mandatory=%v want %v", record.Mandatory(), test.mandatory)
 			}
-
-			runtime, recorder = harness.bind(t, router.AdmissionFloor)
+			runtime, recorder := harness.bind(t, router.AdmissionFloor)
 			err := recorder.RecordSandboxWorkspace(context.Background(), test.input)
-			if !test.mandatory {
-				if err == nil {
-					t.Fatal("an ordinary workspace record took the mandatory floor")
-				}
-			} else {
+			if !test.mandatory && err == nil {
+				t.Fatal("an ordinary workspace record took the mandatory floor")
+			}
+			if test.mandatory {
 				if err != nil {
 					t.Fatalf("floor: %v", err)
 				}
-				_, floor := onlySandboxRecord(t, runtime)
-				if !floor.IsFloorOnly() || !floor.Mandatory() || floor.Bucket() != observability.BucketEnforcementAction {
+				if _, floor := onlySandboxRecord(t, runtime); !floor.IsFloorOnly() || !floor.Mandatory() ||
+					floor.Bucket() != observability.BucketEnforcementAction {
 					t.Fatalf("floor record floor=%v mandatory=%v bucket=%q", floor.IsFloorOnly(), floor.Mandatory(), floor.Bucket())
 				}
 			}
-
 			_, recorder = harness.bind(t, router.AdmissionDrop)
 			if err := recorder.RecordSandboxWorkspace(context.Background(), test.input); (err != nil) != test.mandatory {
 				t.Fatalf("drop admission err=%v, want an error only for a mandatory record", err)
@@ -1357,160 +1177,76 @@ func TestSandboxWorkspaceMandatoryFloor(t *testing.T) {
 
 func TestSandboxRecorderRejectsInvalidInputBeforeEmission(t *testing.T) {
 	valid := testSandboxIdentity()
-	mutate := func(change func(*SandboxIdentity)) SandboxIdentity {
-		identity := valid
-		change(&identity)
-		return identity
+	identity := func(change func(*SandboxIdentity)) SandboxLifecycleEvent {
+		sandbox := valid
+		change(&sandbox)
+		return SandboxLifecycleEvent{Sandbox: sandbox}
 	}
-	count := int64(-1)
+	approval := func(stage SandboxApprovalStage, result, actor string, scope SandboxApprovalScope) SandboxApprovalEvent {
+		return SandboxApprovalEvent{
+			Sandbox: valid, Stage: stage, ApprovalID: "a1", Kind: SandboxApprovalHostPort, Result: result, ActorType: actor, Scope: scope,
+		}
+	}
+	policy := func(operation SandboxPolicyOperation, target string) SandboxPolicyEvent {
+		return SandboxPolicyEvent{Sandbox: valid, Operation: operation, Target: target}
+	}
+	negative := int64(-1)
 	for _, test := range []struct {
-		name   string
-		record func(*SandboxRecorder) error
+		name  string
+		event any
 	}{
-		{"missing name", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Name = "" })})
-		}},
-		{"name with spaces", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Name = "my sandbox" })})
-		}},
-		{"missing phase", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Phase = "" })})
-		}},
-		{"unknown phase", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Phase = "running" })})
-		}},
-		{"unknown previous phase", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: valid, PreviousPhase: "booting"})
-		}},
-		{"unknown trigger", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: valid, Trigger: "cron"})
-		}},
-		{"bad severity", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: valid, Severity: "SEVERE"})
-		}},
-		{"unknown driver", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Driver = "firecracker" })})
-		}},
-		{"unknown profile", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Profile = "yolo" })})
-		}},
-		{"unknown workdir mode", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.WorkdirMode = "overlay" })})
-		}},
-		{"unknown runtime", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Runtime = "qcontrol" })})
-		}},
-		{"bad image digest", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.ImageDigest = "sha256:ABC" })})
-		}},
-		{"connector not a token", func(r *SandboxRecorder) error {
-			return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: mutate(func(i *SandboxIdentity) { i.Connector = "Claude Code" })})
-		}},
-		{"egress without source", func(r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Host: "example.org"})
-		}},
-		{"egress bad resolved ip", func(r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{Sandbox: valid, Source: SandboxEgressSourceProxy, Host: "example.org", ResolvedIP: "not-an-ip"})
-		}},
-		{"approval without id", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, Kind: SandboxApprovalNetworkRule})
-		}},
-		{"approval blank id", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: " \t", Kind: SandboxApprovalNetworkRule})
-		}},
-		{"approval id with spaces", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "draft 7", Kind: SandboxApprovalNetworkRule})
-		}},
-		{"approval unknown kind", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "a1", Kind: "mount"})
-		}},
-		{"approval unknown stage", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: "pending", ApprovalID: "a1", Kind: SandboxApprovalHostPort})
-		}},
-		{"requested approval with result", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "a1", Kind: SandboxApprovalHostPort, Result: SandboxApprovalApproved})
-		}},
-		{"resolved approval without result", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalResolved, ApprovalID: "a1", Kind: SandboxApprovalHostPort})
-		}},
-		{"denied approval with scope", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalResolved, ApprovalID: "a1", Kind: SandboxApprovalHostPort, Result: SandboxApprovalDenied, Scope: SandboxApprovalScopeAlways})
-		}},
-		{"approval unknown actor", func(r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalResolved, ApprovalID: "a1", Kind: SandboxApprovalHostPort, Result: SandboxApprovalDenied, ActorType: "robot"})
-		}},
-		{"policy unknown operation", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: "sandbox.policy.nuke"})
-		}},
-		{"policy bad hash", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, PolicyHash: "XYZ"})
-		}},
-		{"policy unknown origin", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, Origin: "email"})
-		}},
-		{"policy negative count", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, ChangeCount: -1})
-		}},
-		{"policy free-text reason", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, Reason: "because I said so"})
-		}},
-		{"policy free-text target", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyRuleAdd, Target: "the pastebin rule"})
-		}},
-		{"policy bare wildcard target", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressUnblock, Target: "*."})
-		}},
-		{"policy nested wildcard target", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressUnblock, Target: "*.*.example.com"})
-		}},
-		{"policy underscore target that is not a name", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: "_x/dcmarker"})
-		}},
-		{"policy colon target that is not an address", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: "::not-an-ip"})
-		}},
-		{"policy oversized target", func(r *SandboxRecorder) error {
-			return r.RecordSandboxPolicy(context.Background(), SandboxPolicyEvent{Sandbox: valid, Operation: SandboxEgressBlock, Target: strings.Repeat("t", maxSandboxPolicyTargetBytes+1)})
-		}},
-		{"health unknown state", func(r *SandboxRecorder) error {
-			return r.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: "sleepy"})
-		}},
-		{"health bad error code", func(r *SandboxRecorder) error {
-			return r.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: SandboxHealthDegraded, ErrorCode: "Watch Lost"})
-		}},
-		{"finding unknown kind", func(r *SandboxRecorder) error {
-			return r.RecordSandboxFinding(context.Background(), SandboxFindingEvent{Sandbox: valid, Kind: "vibes", Severity: "HIGH"})
-		}},
-		{"finding bad confidence", func(r *SandboxRecorder) error {
-			return r.RecordSandboxFinding(context.Background(), SandboxFindingEvent{Sandbox: valid, Kind: SandboxFindingHookSilence, Severity: "HIGH", Confidence: 1.5})
-		}},
-		{"finding bad id", func(r *SandboxRecorder) error {
-			return r.RecordSandboxFinding(context.Background(), SandboxFindingEvent{Sandbox: valid, Kind: SandboxFindingHookSilence, Severity: "HIGH", FindingID: "has spaces"})
-		}},
-		{"workspace unknown operation", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: "shred"})
-		}},
-		{"workspace unknown result", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceUndo, Result: "maybe"})
-		}},
-		{"workspace negative count", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceReview, FileCount: &count})
-		}},
-		{"workspace unknown pull mode", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspacePull, PullMode: "rsync"})
-		}},
-		{"workspace initiator with spaces", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceUndo, Initiator: "the operator"})
-		}},
-		{"workspace unknown snapshot kind", func(r *SandboxRecorder) error {
-			return r.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceSnapshot, SnapshotKind: "zfs"})
-		}},
+		{"missing name", identity(func(i *SandboxIdentity) { i.Name = "" })},
+		{"name with spaces", identity(func(i *SandboxIdentity) { i.Name = "my sandbox" })},
+		{"missing phase", identity(func(i *SandboxIdentity) { i.Phase = "" })},
+		{"unknown phase", identity(func(i *SandboxIdentity) { i.Phase = "running" })},
+		{"unknown driver", identity(func(i *SandboxIdentity) { i.Driver = "firecracker" })},
+		{"unknown profile", identity(func(i *SandboxIdentity) { i.Profile = "yolo" })},
+		{"unknown workdir mode", identity(func(i *SandboxIdentity) { i.WorkdirMode = "overlay" })},
+		{"unknown runtime", identity(func(i *SandboxIdentity) { i.Runtime = "qcontrol" })},
+		{"bad image digest", identity(func(i *SandboxIdentity) { i.ImageDigest = "sha256:ABC" })},
+		{"connector not a token", identity(func(i *SandboxIdentity) { i.Connector = "Claude Code" })},
+		{"unknown previous phase", SandboxLifecycleEvent{Sandbox: valid, PreviousPhase: "booting"}},
+		{"unknown trigger", SandboxLifecycleEvent{Sandbox: valid, Trigger: "cron"}},
+		{"bad severity", SandboxLifecycleEvent{Sandbox: valid, Severity: "SEVERE"}},
+		{"egress without source", SandboxEgressEvent{Sandbox: valid, Host: "example.org"}},
+		{"egress bad resolved ip", SandboxEgressEvent{Sandbox: valid, Source: SandboxEgressSourceProxy, Host: "example.org", ResolvedIP: "not-an-ip"}},
+		{"approval without id", SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, Kind: SandboxApprovalNetworkRule}},
+		{"approval blank id", SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: " \t", Kind: SandboxApprovalNetworkRule}},
+		{"approval id with spaces", SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "draft 7", Kind: SandboxApprovalNetworkRule}},
+		{"approval unknown kind", SandboxApprovalEvent{Sandbox: valid, Stage: SandboxApprovalRequested, ApprovalID: "a1", Kind: "mount"}},
+		{"approval unknown stage", approval("pending", "", "", "")},
+		{"requested approval with result", approval(SandboxApprovalRequested, SandboxApprovalApproved, "", "")},
+		{"resolved approval without result", approval(SandboxApprovalResolved, "", "", "")},
+		{"denied approval with scope", approval(SandboxApprovalResolved, SandboxApprovalDenied, "", SandboxApprovalScopeAlways)},
+		{"approval unknown actor", approval(SandboxApprovalResolved, SandboxApprovalDenied, "robot", "")},
+		{"policy unknown operation", policy("sandbox.policy.nuke", "")},
+		{"policy bad hash", SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, PolicyHash: "XYZ"}},
+		{"policy unknown origin", SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, Origin: "email"}},
+		{"policy negative count", SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, ChangeCount: -1}},
+		{"policy free-text reason", SandboxPolicyEvent{Sandbox: valid, Operation: SandboxPolicyApply, Reason: "because I said so"}},
+		{"policy free-text target", policy(SandboxPolicyRuleAdd, "the pastebin rule")},
+		{"policy bare wildcard target", policy(SandboxEgressUnblock, "*.")},
+		{"policy nested wildcard target", policy(SandboxEgressUnblock, "*.*.example.com")},
+		{"policy underscore target that is not a name", policy(SandboxEgressBlock, "_x/dcmarker")},
+		{"policy colon target that is not an address", policy(SandboxEgressBlock, "::not-an-ip")},
+		{"policy oversized target", policy(SandboxEgressBlock, strings.Repeat("t", maxSandboxPolicyTargetBytes+1))},
+		{"health unknown state", SandboxHealthEvent{State: "sleepy"}},
+		{"health bad error code", SandboxHealthEvent{State: SandboxHealthDegraded, ErrorCode: "Watch Lost"}},
+		{"finding unknown kind", SandboxFindingEvent{Sandbox: valid, Kind: "vibes", Severity: "HIGH"}},
+		{"finding bad confidence", SandboxFindingEvent{Sandbox: valid, Kind: SandboxFindingHookSilence, Severity: "HIGH", Confidence: 1.5}},
+		{"finding bad id", SandboxFindingEvent{Sandbox: valid, Kind: SandboxFindingHookSilence, Severity: "HIGH", FindingID: "has spaces"}},
+		{"workspace unknown operation", SandboxWorkspaceEvent{Sandbox: valid, Operation: "shred"}},
+		{"workspace unknown result", SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceUndo, Result: "maybe"}},
+		{"workspace negative count", SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceReview, FileCount: &negative}},
+		{"workspace unknown pull mode", SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspacePull, PullMode: "rsync"}},
+		{"workspace initiator with spaces", SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceUndo, Initiator: "the operator"}},
+		{"workspace unknown snapshot kind", SandboxWorkspaceEvent{Sandbox: valid, Operation: SandboxWorkspaceSnapshot, SnapshotKind: "zfs"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			logger := NewLogger(nil)
 			runtime := &countingRuntimeV8Emitter{}
 			logger.SetRuntimeV8Emitter(runtime)
-			if err := test.record(NewSandboxRecorder(logger)); err == nil {
+			if err := recordSandboxEvent(context.Background(), NewSandboxRecorder(logger), test.event); err == nil {
 				t.Fatal("invalid sandbox input was accepted")
 			}
 			if runtime.logs != 0 || runtime.metrics != 0 {
@@ -1549,6 +1285,9 @@ func (emitter *countingRuntimeV8Emitter) RecordRuntimeV8GeneratedMetricBatch(
 	return nil
 }
 
+// TestSandboxRecorderFailsClosedWithoutRuntime covers a recorder with no
+// runtime, one whose runtime detached, and a runtime that rejects or does
+// not persist the occurrence: none reports success.
 func TestSandboxRecorderFailsClosedWithoutRuntime(t *testing.T) {
 	identity := testSandboxIdentity()
 	for _, test := range []struct {
@@ -1574,45 +1313,18 @@ func TestSandboxRecorderFailsClosedWithoutRuntime(t *testing.T) {
 	logger.SetRuntimeV8Emitter(nil)
 	if err := NewSandboxRecorder(logger).RecordSandboxEgress(context.Background(), SandboxEgressEvent{
 		Sandbox: identity, Source: SandboxEgressSourceProxy, Host: "example.org",
-	}); err == nil {
-		t.Fatal("egress recorded after the runtime detached")
+	}); err == nil || detached.logs != 0 || detached.metrics != 0 {
+		t.Fatalf("egress after the runtime detached: err=%v logs=%d metrics=%d", err, detached.logs, detached.metrics)
 	}
-	if detached.logs != 0 || detached.metrics != 0 {
-		t.Fatalf("a detached runtime was still called: logs=%d metrics=%d", detached.logs, detached.metrics)
-	}
-}
-
-func TestSandboxRecorderReportsRuntimeRejection(t *testing.T) {
-	logger := NewLogger(nil)
+	snapshot := SandboxWorkspaceEvent{Sandbox: identity, Operation: SandboxWorkspaceSnapshot}
 	rejecting := &rejectingRuntimeV8Emitter{err: fmt.Errorf("runtime closed")}
 	logger.SetRuntimeV8Emitter(rejecting)
-	err := NewSandboxRecorder(logger).RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
-		Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceSnapshot,
-	})
-	if err == nil || rejecting.calls != 1 {
+	if err := NewSandboxRecorder(logger).RecordSandboxWorkspace(context.Background(), snapshot); err == nil || rejecting.calls != 1 {
 		t.Fatalf("runtime rejection err=%v calls=%d", err, rejecting.calls)
 	}
-	unpersisted := &rejectingRuntimeV8Emitter{}
-	logger.SetRuntimeV8Emitter(unpersisted)
-	if err := NewSandboxRecorder(logger).RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
-		Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceSnapshot,
-	}); err == nil {
+	logger.SetRuntimeV8Emitter(&rejectingRuntimeV8Emitter{})
+	if err := NewSandboxRecorder(logger).RecordSandboxWorkspace(context.Background(), snapshot); err == nil {
 		t.Fatal("an admitted occurrence that was not persisted was reported as success")
-	}
-}
-
-func TestSandboxRecordsPersistToEventHistory(t *testing.T) {
-	logger, _, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
-	identity := testSandboxIdentity()
-	if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{Sandbox: identity}); err != nil {
-		t.Fatalf("RecordSandboxLifecycle: %v", err)
-	}
-	rows, err := logger.store.ListEvents(10)
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("event history rows=%d err=%v", len(rows), err)
-	}
-	if rows[0].Action != string(ActionSandboxLifecycle) || rows[0].Structured["defenseclaw.sandbox.name"] != identity.Name {
-		t.Fatalf("event history row=%#v", rows[0])
 	}
 }
 
@@ -1691,9 +1403,9 @@ func TestSandboxHostCanonicalization(t *testing.T) {
 }
 
 // TestSandboxRecorderToleratesAgentChosenValues covers values the sandboxed
-// agent picks (destinations, file names, finding targets): they are
-// canonicalized, sanitized, bounded, or omitted, never allowed to cost the
-// occurrence its record. The cases share one store.
+// agent picks (destinations, file names, finding targets, free text, session
+// and agent IDs): they are canonicalized, sanitized, bounded, or omitted,
+// never allowed to cost the occurrence its record. The cases share one store.
 func TestSandboxRecorderToleratesAgentChosenValues(t *testing.T) {
 	harness := newSandboxHarness(t)
 	t.Run("egress hosts", func(t *testing.T) { testSandboxEgressHostileHostsAreStillRecorded(t, harness) })
@@ -1712,38 +1424,25 @@ func TestSandboxRecorderToleratesAgentChosenValues(t *testing.T) {
 // gen_ai.agent.id are omitted, never allowed to fail the record. A padded
 // identifier is trimmed.
 func testSandboxAgentCorrelationIsIdentifierChecked(t *testing.T, harness *sandboxHarness) {
+	sb := testSandboxIdentity()
 	producers := []struct {
 		name      string
 		mandatory bool
-		record    func(context.Context, *SandboxRecorder) error
+		event     any
 	}{
-		{"egress allowed", false, func(ctx context.Context, r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(ctx, SandboxEgressEvent{
-				Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "registry.npmjs.org",
-			})
+		{"egress allowed", false, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceProxy, Host: "registry.npmjs.org"}},
+		{"egress blocked", true, SandboxEgressEvent{Sandbox: sb, Source: SandboxEgressSourceOpenShell, Host: "pastebin.com", Blocked: true}},
+		{"approval requested", false, SandboxApprovalEvent{
+			Sandbox: sb, Stage: SandboxApprovalRequested, ApprovalID: "draft-9", Kind: SandboxApprovalNetworkRule,
 		}},
-		{"egress blocked", true, func(ctx context.Context, r *SandboxRecorder) error {
-			return r.RecordSandboxEgress(ctx, SandboxEgressEvent{
-				Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceOpenShell, Host: "pastebin.com", Blocked: true,
-			})
-		}},
-		{"approval requested", false, func(ctx context.Context, r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(ctx, SandboxApprovalEvent{
-				Sandbox: testSandboxIdentity(), Stage: SandboxApprovalRequested, ApprovalID: "draft-9",
-				Kind: SandboxApprovalNetworkRule,
-			})
-		}},
-		{"approval resolved", true, func(ctx context.Context, r *SandboxRecorder) error {
-			return r.RecordSandboxApproval(ctx, SandboxApprovalEvent{
-				Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-9",
-				Kind: SandboxApprovalNetworkRule, Result: SandboxApprovalDenied, ActorType: SandboxApprovalByOperator,
-			})
+		{"approval resolved", true, SandboxApprovalEvent{
+			Sandbox: sb, Stage: SandboxApprovalResolved, ApprovalID: "draft-9", Kind: SandboxApprovalNetworkRule,
+			Result: SandboxApprovalDenied, ActorType: SandboxApprovalByOperator,
 		}},
 	}
 	for _, ids := range []struct {
-		name, session, agent string
-		wantSession          string
-		wantAgent            string
+		name, session, agent   string
+		wantSession, wantAgent string
 	}{
 		{name: "space", session: "my session", agent: "my agent"},
 		{name: "leading underscore", session: "_abc", agent: "_agent"},
@@ -1754,10 +1453,8 @@ func testSandboxAgentCorrelationIsIdentifierChecked(t *testing.T, harness *sandb
 		for _, producer := range producers {
 			t.Run(ids.name+"/"+producer.name, func(t *testing.T) {
 				runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-				ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{
-					SessionID: ids.session, AgentID: ids.agent,
-				})
-				if err := producer.record(ctx, recorder); err != nil {
+				ctx := ContextWithEnvelope(context.Background(), CorrelationEnvelope{SessionID: ids.session, AgentID: ids.agent})
+				if err := recordSandboxEvent(ctx, recorder, producer.event); err != nil {
 					t.Fatalf("an agent-chosen session or agent id cost the record: %v", err)
 				}
 				_, record := onlySandboxRecord(t, runtime)
@@ -1776,15 +1473,9 @@ func testSandboxAgentCorrelationIsIdentifierChecked(t *testing.T, harness *sandb
 				if record.Mandatory() != producer.mandatory {
 					t.Fatalf("mandatory=%v want %v", record.Mandatory(), producer.mandatory)
 				}
-				body := sandboxBody(t, record)
-				for key, want := range map[string]string{
-					"gen_ai.conversation.id": ids.wantSession, "gen_ai.agent.id": ids.wantAgent,
-				} {
-					got, present := body[key]
-					if present != (want != "") || (present && got != want) {
-						t.Fatalf("%s=%#v present=%v want %q", key, got, present, want)
-					}
-				}
+				assertSandboxFields(t, sandboxBody(t, record), map[string]any{
+					"gen_ai.conversation.id": optional(ids.wantSession), "gen_ai.agent.id": optional(ids.wantAgent),
+				})
 			})
 		}
 	}
@@ -1796,6 +1487,7 @@ func testSandboxAgentCorrelationIsIdentifierChecked(t *testing.T, harness *sandb
 // bounded on a code point, dropped when it is not UTF-8 or blank, and never
 // allowed to cost the occurrence (mandatory or not) its record.
 func testSandboxFreeTextIsBoundedNotRejected(t *testing.T, harness *sandboxHarness) {
+	sb := testSandboxIdentity()
 	hostile := map[string]string{
 		"invalid utf-8":      "dc\xff\xfemarker",
 		"control characters": "\x1b[2J\r\nline two\x00after nul\u2028",
@@ -1806,65 +1498,37 @@ func testSandboxFreeTextIsBoundedNotRejected(t *testing.T, harness *sandboxHarne
 		name      string
 		mandatory bool
 		fields    []string
-		record    func(*SandboxRecorder, string) error
+		event     func(string) any
 	}{
-		{
-			name: "egress", mandatory: true,
-			fields: []string{"defenseclaw.network.reason", "defenseclaw.network.policy_outcome"},
-			record: func(r *SandboxRecorder, text string) error {
-				return r.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
-					Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceOpenShell, Host: "pastebin.com",
-					Blocked: true, Reason: text, PolicyOutcome: text,
-				})
-			},
-		},
-		{
-			name: "approval", mandatory: true, fields: []string{"defenseclaw.guardrail.reason"},
-			record: func(r *SandboxRecorder, text string) error {
-				return r.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
-					Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-12",
-					Kind: SandboxApprovalNetworkRule, Result: SandboxApprovalDenied, Reason: text,
-				})
-			},
-		},
-		{
-			name: "lifecycle", fields: []string{"defenseclaw.sandbox.condition.message"},
-			record: func(r *SandboxRecorder, text string) error {
-				return r.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
-					Sandbox: testSandboxIdentity(), Condition: &SandboxCondition{Type: "Ready", Status: "False", Message: text},
-				})
-			},
-		},
-		{
-			name: "health", mandatory: true, fields: []string{"defenseclaw.health.error_summary"},
-			record: func(r *SandboxRecorder, text string) error {
-				return r.RecordSandboxHealth(context.Background(), SandboxHealthEvent{
-					Sandbox: testSandboxIdentity(), State: SandboxHealthDegraded, ErrorSummary: text,
-				})
-			},
-		},
-		{
-			name: "finding",
-			fields: []string{
-				"defenseclaw.finding.title", "defenseclaw.finding.description",
-				"defenseclaw.guardrail.evidence_summary", "defenseclaw.finding.remediation",
-			},
-			record: func(r *SandboxRecorder, text string) error {
-				return r.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
-					Sandbox: testSandboxIdentity(), Kind: SandboxFindingLargeUpload, Severity: "HIGH",
-					Title: text, Description: text, Evidence: text, Remediation: text,
-				})
-			},
-		},
+		{"egress", true, []string{"defenseclaw.network.reason", "defenseclaw.network.policy_outcome"}, func(text string) any {
+			return SandboxEgressEvent{
+				Sandbox: sb, Source: SandboxEgressSourceOpenShell, Host: "pastebin.com", Blocked: true, Reason: text, PolicyOutcome: text,
+			}
+		}},
+		{"approval", true, []string{"defenseclaw.guardrail.reason"}, func(text string) any {
+			return SandboxApprovalEvent{
+				Sandbox: sb, Stage: SandboxApprovalResolved, ApprovalID: "draft-12", Kind: SandboxApprovalNetworkRule,
+				Result: SandboxApprovalDenied, Reason: text,
+			}
+		}},
+		{"lifecycle", false, []string{"defenseclaw.sandbox.condition.message"}, func(text string) any {
+			return SandboxLifecycleEvent{Sandbox: sb, Condition: &SandboxCondition{Type: "Ready", Status: "False", Message: text}}
+		}},
+		{"health", true, []string{"defenseclaw.health.error_summary"}, func(text string) any {
+			return SandboxHealthEvent{Sandbox: sb, State: SandboxHealthDegraded, ErrorSummary: text}
+		}},
+		{"finding", false, []string{
+			"defenseclaw.finding.title", "defenseclaw.finding.description",
+			"defenseclaw.guardrail.evidence_summary", "defenseclaw.finding.remediation",
+		}, func(text string) any {
+			return SandboxFindingEvent{
+				Sandbox: sb, Kind: SandboxFindingLargeUpload, Severity: "HIGH", Title: text, Description: text, Evidence: text, Remediation: text,
+			}
+		}},
 	} {
 		for label, text := range hostile {
 			t.Run(test.name+"/"+label, func(t *testing.T) {
-				runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-				if err := test.record(recorder, text); err != nil {
-					t.Fatalf("hostile text cost the record: %v", err)
-				}
-				_, record := onlySandboxRecord(t, runtime)
-				assertRecordMatchesRuntimeContract(t, record)
+				_, record := harness.recordOne(t, router.AdmissionOrdinary, test.event(text))
 				if record.Mandatory() != test.mandatory {
 					t.Fatalf("mandatory=%v want %v", record.Mandatory(), test.mandatory)
 				}
@@ -1915,14 +1579,10 @@ func testSandboxEgressHostileHostsAreStillRecorded(t *testing.T, harness *sandbo
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, admission := range []router.Admission{router.AdmissionOrdinary, router.AdmissionFloor} {
-				runtime, recorder := harness.bind(t, admission)
-				if err := recorder.RecordSandboxEgress(context.Background(), SandboxEgressEvent{
+				runtime, record := harness.recordOne(t, admission, SandboxEgressEvent{
 					Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: test.host, Port: test.port,
 					Blocked: true, DecisionCode: "SANDBOX_EGRESS_BLOCKLIST",
-				}); err != nil {
-					t.Fatalf("admission %v: the host cost the blocked decision its record: %v", admission, err)
-				}
-				_, record := onlySandboxRecord(t, runtime)
+				})
 				encoded, err := record.MarshalJSON()
 				if err != nil || !record.Mandatory() || record.IsFloorOnly() != (admission == router.AdmissionFloor) {
 					t.Fatalf("admission %v: err=%v mandatory=%v floor=%v", admission, err, record.Mandatory(), record.IsFloorOnly())
@@ -1933,17 +1593,10 @@ func testSandboxEgressHostileHostsAreStillRecorded(t *testing.T, harness *sandbo
 				if admission == router.AdmissionFloor {
 					continue
 				}
-				assertRecordMatchesRuntimeContract(t, record)
-				body := sandboxBody(t, record)
-				if body["defenseclaw.network.target_ref"] != test.target {
-					t.Fatalf("target_ref=%#v want %q", body["defenseclaw.network.target_ref"], test.target)
-				}
-				if address, present := body["server.address"]; present != (test.address != "") || (present && address != test.address) {
-					t.Fatalf("server.address=%#v present=%v want %q", address, present, test.address)
-				}
-				if port, present := body["server.port"]; present != (test.wantPort != 0) || (present && port != test.wantPort) {
-					t.Fatalf("server.port=%#v present=%v want %d", port, present, test.wantPort)
-				}
+				assertSandboxFields(t, sandboxBody(t, record), map[string]any{
+					"defenseclaw.network.target_ref": test.target,
+					"server.address":                 optional(test.address), "server.port": optional(test.wantPort),
+				})
 				if events := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawEgressEvents); len(events) != 1 {
 					t.Fatalf("egress metrics=%d want 1", len(events))
 				}
@@ -1965,26 +1618,16 @@ func testSandboxApprovalHostileHostIsOmitted(t *testing.T, harness *sandboxHarne
 		{name: "service label name", host: "_x.dcmarker.example:443", wantPort: 443},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxApproval(context.Background(), SandboxApprovalEvent{
+			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxApprovalEvent{
 				Sandbox: testSandboxIdentity(), Stage: SandboxApprovalResolved, ApprovalID: "draft-11",
 				Kind: SandboxApprovalNetworkRule, Host: test.host, Port: test.port, Result: SandboxApprovalDenied,
-			}); err != nil {
-				t.Fatalf("the host cost the approval its record: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			encoded, _ := record.MarshalJSON()
-			if bytes.Contains(encoded, []byte("dcsecret")) {
+			})
+			if encoded, _ := record.MarshalJSON(); bytes.Contains(encoded, []byte("dcsecret")) {
 				t.Fatalf("approval kept userinfo: %s", encoded)
 			}
-			body := sandboxBody(t, record)
-			if address, present := body["server.address"]; present != (test.address != "") || (present && address != test.address) {
-				t.Fatalf("server.address=%#v present=%v want %q", address, present, test.address)
-			}
-			if port, present := body["server.port"]; present != (test.wantPort != 0) || (present && port != test.wantPort) {
-				t.Fatalf("server.port=%#v present=%v want %d", port, present, test.wantPort)
-			}
+			assertSandboxFields(t, sandboxBody(t, record), map[string]any{
+				"server.address": optional(test.address), "server.port": optional(test.wantPort),
+			})
 		})
 	}
 }
@@ -2008,30 +1651,30 @@ func testSandboxWorkspacePathsAreSanitizedNotRejected(t *testing.T, harness *san
 		{name: "nothing survives", paths: []string{"/abs", "../up", "\x00"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxWorkspaceEvent{
 				Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview,
 				FileCount: count(int64(len(test.paths))), FlaggedCount: count(int64(len(test.paths))), Paths: test.paths,
-			}); err != nil {
-				t.Fatalf("a hostile file name cost the review its record: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
+			})
 			body := sandboxBody(t, record)
 			if body["defenseclaw.sandbox.workspace.flagged_count"] != int64(len(test.paths)) {
 				t.Fatalf("flagged count=%#v want %d", body["defenseclaw.sandbox.workspace.flagged_count"], len(test.paths))
 			}
 			kept, present := body["defenseclaw.sandbox.workspace.paths"].([]any)
-			if present != (len(test.want) > 0) || len(kept) != len(test.want) {
+			if present != (len(test.want) > 0) || !slices.Equal(sandboxStrings(kept), test.want) {
 				t.Fatalf("paths=%#v want %q", body["defenseclaw.sandbox.workspace.paths"], test.want)
-			}
-			for index, want := range test.want {
-				if kept[index] != want {
-					t.Fatalf("paths[%d]=%q want %q", index, kept[index], want)
-				}
 			}
 		})
 	}
+}
+
+// sandboxStrings reads a decoded string list; a non-string item reads as "".
+func sandboxStrings(values []any) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		text, _ := value.(string)
+		out = append(out, text)
+	}
+	return out
 }
 
 // testSandboxWorkspacePathsFitTheirEncodedBound pins the path list to the
@@ -2065,26 +1708,16 @@ func testSandboxWorkspacePathsFitTheirEncodedBound(t *testing.T, harness *sandbo
 					t.Fatalf("fixture path is %d bytes, over the item bound", len(candidate))
 				}
 			}
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
+			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxWorkspaceEvent{
 				Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview,
 				FileCount: count(int64(len(test.paths))), FlaggedCount: count(1), Paths: test.paths,
-			}); err != nil {
-				t.Fatalf("the path list cost the flagged review its record: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
+			})
 			if !record.Mandatory() {
 				t.Fatal("a flagged review must be mandatory")
 			}
 			kept, _ := sandboxBody(t, record)["defenseclaw.sandbox.workspace.paths"].([]any)
-			if len(kept) != test.want {
-				t.Fatalf("paths kept=%d want %d", len(kept), test.want)
-			}
-			for index, value := range kept {
-				if value != test.paths[index] {
-					t.Fatalf("paths[%d]=%q want %q", index, value, test.paths[index])
-				}
+			if !slices.Equal(sandboxStrings(kept), test.paths[:test.want]) {
+				t.Fatalf("paths kept=%d want the first %d", len(kept), test.want)
 			}
 			var encoded bytes.Buffer
 			encoder := json.NewEncoder(&encoded)
@@ -2109,18 +1742,10 @@ func testSandboxFindingTargetRefIsBoundedNotDropped(t *testing.T, harness *sandb
 		{"not an identifier", "/usr/local/bin/claude", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			runtime, recorder := harness.bind(t, router.AdmissionOrdinary)
-			if err := recorder.RecordSandboxFinding(context.Background(), SandboxFindingEvent{
+			_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxFindingEvent{
 				Sandbox: testSandboxIdentity(), Kind: SandboxFindingBinaryDrift, Severity: "HIGH", TargetRef: test.in,
-			}); err != nil {
-				t.Fatalf("the target reference cost the finding its record: %v", err)
-			}
-			_, record := onlySandboxRecord(t, runtime)
-			assertRecordMatchesRuntimeContract(t, record)
-			got, present := sandboxBody(t, record)["defenseclaw.finding.target_ref"]
-			if present != (test.want != "") || (present && got != test.want) {
-				t.Fatalf("target_ref=%#v present=%v want %q", got, present, test.want)
-			}
+			})
+			assertSandboxFields(t, sandboxBody(t, record), map[string]any{"defenseclaw.finding.target_ref": optional(test.want)})
 		})
 	}
 }
@@ -2130,18 +1755,10 @@ func testSandboxFindingTargetRefIsBoundedNotDropped(t *testing.T, harness *sandb
 // passes, and each single-field violation of the envelope, correlation,
 // provenance, or body fails.
 func TestRuntimeSchemaValidationRejectsContractViolations(t *testing.T) {
-	runtime, recorder := newSandboxHarness(t).bind(t, router.AdmissionOrdinary)
 	flagged := int64(2)
-	if err := recorder.RecordSandboxWorkspace(context.Background(), SandboxWorkspaceEvent{
-		Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview, FlaggedCount: &flagged,
-		Paths: []string{"package.json"},
-	}); err != nil {
-		t.Fatalf("RecordSandboxWorkspace: %v", err)
-	}
-	_, record := onlySandboxRecord(t, runtime)
-	if err := runtimeSchemaViolation(t, decodeRecordWire(t, record)); err != nil {
-		t.Fatalf("the unmodified record fails the schema: %v", err)
-	}
+	_, record := newSandboxHarness(t).recordOne(t, router.AdmissionOrdinary, SandboxWorkspaceEvent{
+		Sandbox: testSandboxIdentity(), Operation: SandboxWorkspaceReview, FlaggedCount: &flagged, Paths: []string{"package.json"},
+	})
 	nested := func(wire map[string]any, key string) map[string]any {
 		object, _ := wire[key].(map[string]any)
 		return object
@@ -2641,16 +2258,5 @@ func assertCatalogValue(t *testing.T, family, key, fieldType string, value any, 
 		}
 	default:
 		t.Fatalf("%s %s has unsupported catalog type %s", family, key, fieldType)
-	}
-}
-
-func TestSandboxEventTimestampIsPreserved(t *testing.T) {
-	_, runtime, recorder := newSandboxTestRecorder(t, router.AdmissionOrdinary)
-	at := time.Date(2026, 9, 26, 12, 0, 0, 0, time.FixedZone("EDT", -4*3600))
-	if err := recorder.RecordSandboxHealth(context.Background(), SandboxHealthEvent{State: SandboxHealthReady, Timestamp: at}); err != nil {
-		t.Fatalf("RecordSandboxHealth: %v", err)
-	}
-	if _, record := onlySandboxRecord(t, runtime); !record.Timestamp().Equal(at.UTC()) {
-		t.Fatalf("timestamp=%v want %v", record.Timestamp(), at.UTC())
 	}
 }
