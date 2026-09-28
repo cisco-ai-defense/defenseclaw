@@ -1962,7 +1962,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionTool, trustedArgs, toolCWD = "shell", args, dir
 			}
 		}
-		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		// A sandbox shell call is also judged on its command alone when its
+		// other arguments leave the parse partial.
+		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
+		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
 				Args:                     trustedArgs,
@@ -1975,7 +1978,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
 			record:             toolChainRecorder(req.toolChain),
-		})
+		}, command, commandTool)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 

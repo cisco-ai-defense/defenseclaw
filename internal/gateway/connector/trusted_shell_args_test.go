@@ -254,3 +254,68 @@ func TestCursorTrustedShellArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestShellCommandArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name, connector, tool, args, want string
+	}{
+		{"unlisted", "opencode", "bash", `{"command":"echo hi > /tmp/x","workdir":"/w","dc_unlisted_arg":"x"}`, `{"command":"echo hi > /tmp/x"}`},
+		{"mistyped", "hermes", "terminal", `{"command":"ls","background":"yes"}`, `{"command":"ls"}`},
+		{"no-listed", "copilot", "bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
+		{"exact", "devin", "exec", `{"command":"ls"}`, `{"command":"ls"}`},
+		{"argv", "codex", "Bash", `{"command":["bash","-lc","ls"],"dc_unlisted_arg":1}`, `{"command":["bash","-lc","ls"]}`},
+		{"repeated", "kiro", "shell", `{"command":"ls","command":"echo hi > /tmp/x"}`, `{"command":"echo hi > /tmp/x"}`},
+		{"agy", "antigravity", "run_command", `{"CommandLine":"a && b","Cwd":7,"dc_unlisted_arg":1}`, `{"CommandLine":"a && b"}`},
+		{"openhands", "openhands", "terminal", `{"command":"ls","kind":"Other"}`, `{"command":"ls"}`},
+		{"omnigent", "omnigent", "sys_os_shell", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
+		{"claudecode", "claudecode", "Bash", `{"command":"ls","dc_unlisted_arg":1}`, `{"command":"ls"}`},
+		{"connector-case", " Cursor ", "Shell", `{"command":"ls","cwd":7}`, `{"command":"ls"}`},
+		// Refused.
+		{"blank", "opencode", "bash", `{"command":"  ","dc_unlisted_arg":1}`, ""},
+		{"null", "opencode", "bash", `{"command":null}`, ""},
+		{"not-text", "opencode", "bash", `{"command":7}`, ""},
+		{"empty-argv", "opencode", "bash", `{"command":[]}`, ""},
+		{"argv-not-text", "opencode", "bash", `{"command":["ls",1]}`, ""},
+		{"no-command", "opencode", "bash", `{"workdir":"/w"}`, ""},
+		{"other-key", "antigravity", "run_command", `{"command":"ls"}`, ""},
+		{"not-an-object", "opencode", "bash", `"ls"`, ""},
+		{"invalid-json", "opencode", "bash", `{"command":"ls"`, ""},
+		{"other-tool", "opencode", "read", `{"command":"ls"}`, ""},
+		{"tool-case", "cursor", "shell", `{"command":"ls"}`, ""},
+		{"other-connector", "zed", "bash", `{"command":"ls"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ShellCommandArgs(tc.connector, tc.tool, json.RawMessage(tc.args))
+			if ok != (tc.want != "") || string(got) != tc.want {
+				t.Fatalf("ShellCommandArgs = %s, %t; want %s", got, ok, tc.want)
+			}
+		})
+	}
+	// Every shell tool the trusted-action projection reads has its command
+	// named.
+	for connectorName, tools := range trustedShellTools {
+		for tool := range tools {
+			if shellCommandKeys[connectorName][tool] == "" {
+				t.Errorf("%s %s names no command key", connectorName, tool)
+			}
+		}
+	}
+}
+
+func TestCursorShellCommandArgs(t *testing.T) {
+	got, ok := CursorShellCommandArgs("beforeShellExecution", json.RawMessage(`{"command":"echo hi > /tmp/x","cwd":7,"sandbox":false}`))
+	if !ok || string(got) != `{"command":"echo hi > /tmp/x"}` {
+		t.Fatalf("projection = %s, %t", got, ok)
+	}
+	for name, tc := range map[string]struct{ event, payload string }{
+		"other-event":   {"preToolUse", `{"command":"ls"}`},
+		"no-command":    {"beforeShellExecution", `{"cwd":"/w"}`},
+		"blank-command": {"beforeShellExecution", `{"command":" "}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, ok := CursorShellCommandArgs(tc.event, json.RawMessage(tc.payload)); ok || got != nil {
+				t.Fatalf("projection = %s, %t; want refused", got, ok)
+			}
+		})
+	}
+}

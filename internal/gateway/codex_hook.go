@@ -237,7 +237,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:     "codex",
 			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
 		}
-		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
 				Args:                     toolArgs,
@@ -251,7 +252,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			EnforcementCapable:        true,
 			DowngradeReadOnlyDataArgs: mode != "action",
 			record:                    toolChainRecorderFromContext(ctx),
-		})
+		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}

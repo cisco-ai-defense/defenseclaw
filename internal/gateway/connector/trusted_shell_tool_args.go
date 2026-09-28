@@ -169,6 +169,90 @@ func trustedShellArgValue(kind trustedShellArg, raw json.RawMessage) bool {
 	return false
 }
 
+// shellCommandKeys names, per connector and shell tool (as the tool is
+// named to hooks), the argument that holds the command: the tools
+// trustedShellTools lists, OpenHands' terminal, agy's run_command,
+// OmniGent's sys_os_shell, and Claude Code's and Codex's Bash.
+var shellCommandKeys = map[string]map[string]string{
+	"opencode":    {"bash": "command"},
+	"hermes":      {"terminal": "command"},
+	"amp":         {"shell_command": "command"},
+	"cursor":      {"Shell": "command"},
+	"devin":       {"exec": "command"},
+	"kiro":        {"shell": "command", "execute_bash": "command"},
+	"copilot":     {"bash": "command", "powershell": "command"},
+	"openhands":   {"terminal": "command"},
+	"antigravity": {"run_command": "CommandLine"},
+	"omnigent":    {"sys_os_shell": "command"},
+	"claudecode":  {"Bash": "command"},
+	"codex":       {"Bash": "command"},
+}
+
+// ShellCommandArgs reduces a shell tool call to its command, in the shell
+// shape the trusted-action parser proves ({"command": ...}, or agy's
+// {"CommandLine": ...}), whatever else the call carries.
+//
+// The trusted-action projections (TrustedShellArgs and the connectors' own)
+// take out only the arguments they know, with the JSON values they expect.
+// An argument they do not list, or a listed one with another value, stays
+// next to the command, and the parse is only partial: no command rule can
+// close its trusted-action proof, and a CRITICAL command finding is an
+// allowed candidate. For a sandbox, whose hooks are the only gate on its
+// tool calls, the gateway also judges the command alone (see
+// inspectSandboxShellToolPolicyCtx), so one extra argument cannot turn a
+// block into an allow. The reduced shape is only ever used to add a
+// verdict, never to lift one: the arguments it drops may change how the
+// command runs.
+//
+// The command is a non-blank string, or a non-empty list of strings (an
+// argv). When the key repeats, the last value is the command, as JSON
+// decoders in the harnesses read it. Refused (ok false) for any other tool,
+// or unless the arguments are a JSON object with such a command.
+func ShellCommandArgs(connectorName, toolName string, args json.RawMessage) (json.RawMessage, bool) {
+	key := shellCommandKeys[strings.ToLower(strings.TrimSpace(connectorName))][strings.TrimSpace(toolName)]
+	if key == "" {
+		return nil, false
+	}
+	return shellCommandOnly(key, args)
+}
+
+// CursorShellCommandArgs reduces a Cursor beforeShellExecution payload to
+// its command in the {"command": ...} shape, whatever else it carries (see
+// ShellCommandArgs); CursorTrustedShellArgs refuses one whose cwd is
+// neither a string nor null. Refused (ok false) for any other event, or
+// unless the payload is a JSON object with a command.
+func CursorShellCommandArgs(event string, payload json.RawMessage) (json.RawMessage, bool) {
+	if canonicalHookEvent(event) != "beforeshellexecution" {
+		return nil, false
+	}
+	return shellCommandOnly("command", payload)
+}
+
+func shellCommandOnly(key string, args json.RawMessage) (json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(args, &fields); err != nil || fields == nil {
+		return nil, false
+	}
+	var command interface{}
+	var text string
+	var argv []string
+	switch raw := fields[key]; {
+	case json.Unmarshal(raw, &text) == nil && strings.TrimSpace(text) != "":
+		command = text
+	case json.Unmarshal(raw, &argv) == nil && len(argv) > 0:
+		command = argv
+	default:
+		return nil, false
+	}
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(map[string]interface{}{key: command}); err != nil {
+		return nil, false
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), true
+}
+
 // CursorTrustedShellArgs projects a Cursor beforeShellExecution payload onto
 // the {"command": ...} shell shape and returns its cwd, the command's
 // working directory. The event names no tool and has no tool_input: the
