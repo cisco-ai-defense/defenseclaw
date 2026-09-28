@@ -4494,7 +4494,12 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
-        sandboxes.set_class(self.active_panel != "sandboxes" or self.help_open, "hidden")
+        # Under 100 columns the KEYS line carries the Sandboxes keys and the
+        # rows get the bar's rows.
+        sandboxes.set_class(
+            self.active_panel != "sandboxes" or self.help_open or self._sandbox_button_bar_collapsed(),
+            "hidden",
+        )
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
         # Keep the plugins bar panel-scoped. When a connector cannot
@@ -9272,6 +9277,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
             logs_paused=bool(self.logs_model.paused),
             new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
             panel_view=self.sandbox_model.view if active_panel == "sandboxes" else "",
+            panel_keys=self.sandbox_model.keys_line() if active_panel == "sandboxes" else "",
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))

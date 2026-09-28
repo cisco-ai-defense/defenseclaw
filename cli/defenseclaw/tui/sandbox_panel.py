@@ -25,19 +25,23 @@ The pure state lives in :mod:`defenseclaw.tui.services.sandbox_state`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import signal
 import subprocess
+import sys
 import threading
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from rich.markup import escape as rich_escape
+from textual import events
 
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
-    SANDBOX_HARNESSES,
     SandboxLaunch,
     SandboxLaunchScreen,
     harness_choices,
@@ -45,10 +49,12 @@ from defenseclaw.tui.screens.sandbox_launch import (
 )
 from defenseclaw.tui.services.sandbox_state import (
     ADMIN_MESSAGE,
+    DEFAULT_SANDBOX_HARNESSES,
     VIEW_TITLES,
     SandboxesPanelModel,
     SandboxPanelAction,
     fit,
+    harness_command,
     review_pairs,
     undo_is_empty,
     undo_preview_text,
@@ -62,8 +68,9 @@ SANDBOX_BACKGROUND_EVERY = 3
 # Stream reconnect backoff, and the wait after the daemon says sandboxes are off.
 STREAM_BACKOFF_MAX = 30.0
 STREAM_DISABLED_WAIT = 60.0
-
-_HARNESS_COMMANDS = {"claudecode": "claude", "codex": "codex"}
+# Under this many columns the panel drops its button bar: the KEYS line
+# names the same keys, and the rows need the room.
+SANDBOX_BUTTON_BAR_MIN_WIDTH = 100
 
 # Buttons of the panel's control bar, mapped to the key they press.
 SANDBOX_BUTTON_KEYS: dict[str, str] = {
@@ -92,6 +99,63 @@ _DETAIL_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
     "activity": (("u",), "Keys: u unblock · Esc close"),
     "asks": (("a", "A", "x"), "Keys: a approve · A always approve · x reject · Esc close"),
 }
+
+
+class _PromptInterruptedError(Exception):
+    """Ctrl-C at the "Press Enter" prompt: back to the TUI."""
+
+
+class _HandoverCtrlC:
+    """The SIGINT handler while a child owns the terminal.
+
+    A Python handler rather than SIG_IGN, so the child still gets the
+    default one (exec resets it). Ctrl-C does nothing in the TUI, except at
+    the "Press Enter" prompt (``at_prompt``), which it ends.
+    """
+
+    def __init__(self) -> None:
+        self.at_prompt = False
+
+    def __call__(self, _signum: int, _frame: Any) -> None:
+        if self.at_prompt:
+            self.at_prompt = False
+            raise _PromptInterruptedError
+
+
+@contextlib.contextmanager
+def _child_owns_ctrl_c() -> Iterator[_HandoverCtrlC]:
+    """Keep the TUI's own SIGINT handler away while a child runs in the terminal.
+
+    The TUI shares the terminal's foreground process group with the child,
+    so a Ctrl-C meant for the child's prompt reaches the TUI as well, and
+    asyncio's handler cancels the app's main task on the first one: the TUI
+    quit silently once the child ended, and the next keys went to the shell.
+    """
+    handler = _HandoverCtrlC()
+    if threading.current_thread() is not threading.main_thread():
+        yield handler
+        return
+    try:
+        previous = signal.signal(signal.SIGINT, handler)
+    except (ValueError, OSError):
+        yield handler
+        return
+    try:
+        yield handler
+    finally:
+        handler.at_prompt = False
+        signal.signal(signal.SIGINT, previous)
+
+
+def _drop_pending_input() -> None:
+    """Discard keys typed while the child had the terminal (a stray Ctrl-C would quit the TUI)."""
+    try:
+        import termios
+
+        if sys.stdin is not None and sys.stdin.isatty():
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (ImportError, OSError, ValueError):
+        pass
 
 
 @dataclass
@@ -154,10 +218,6 @@ def fetch_sandbox_snapshot(config: object | None) -> SandboxFetch:
         return fetch
     finally:
         client.close()
-
-
-def _harness_command(name: str) -> str:
-    return _HARNESS_COMMANDS.get(name, name)
 
 
 def probe_sandbox_machine() -> Any:
@@ -358,7 +418,12 @@ class SandboxPanelMixin:
         notices = self.sandbox_model.add_events(events, toast=toast, live=toast)
         for notice in notices:
             self.notify_toast(notice.level, notice.message)  # type: ignore[attr-defined]
-        if any(event.get("kind") in {"approval.requested", "approval.resolved"} for event in events):
+        if any(
+            event.get("kind") in {"approval.requested", "approval.resolved"}
+            or (event.get("kind") == "finding" and event.get("reason") == "hook_tamper")
+            for event in events
+        ):
+            # The list's asks and its tamper count change with these.
             self._schedule_sandbox_poll()
         if getattr(self, "active_panel", "") == "sandboxes" and not getattr(self, "help_open", False):
             self._render_chrome()  # type: ignore[attr-defined]
@@ -408,8 +473,8 @@ class SandboxPanelMixin:
         view_line = f"View: {views}   [{TOKENS.text_muted}]feed {feed}"
         if model.wrappers or model.harnesses:
             wrapped = " · ".join(
-                f"{_harness_command(name)} {'on' if name in model.wrappers else 'off'}"
-                for name in (model.harnesses or tuple(name for name, _label in SANDBOX_HARNESSES))
+                f"{harness_command(name)} {'on' if name in model.wrappers else 'off'}"
+                for name in (model.harnesses or DEFAULT_SANDBOX_HARNESSES)
             )
             extra = f"   sandboxed by default: {wrapped} (w)"
             if len(plain) + len(extra) <= width:
@@ -436,6 +501,22 @@ class SandboxPanelMixin:
                 lines.append(f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]")
         return "\n".join(lines)
 
+    def _sandbox_button_bar_collapsed(self) -> bool:
+        """Whether the terminal is too narrow for the button bar (the KEYS line stays)."""
+        width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
+        return 0 < width < SANDBOX_BUTTON_BAR_MIN_WIDTH
+
+    def on_resize(self, _event: events.Resize) -> None:
+        # The table's columns and the button bar follow the width.
+        if getattr(self, "active_panel", "") != "sandboxes" or getattr(self, "help_open", False):
+            return
+        from textual.css.query import NoMatches
+
+        try:
+            self._render_chrome()  # type: ignore[attr-defined]
+        except NoMatches:
+            pass
+
     def _sandbox_body_width(self) -> int:
         """Columns for one header line (the body panel's margin, padding and a scrollbar)."""
         size = getattr(self, "size", None)
@@ -459,7 +540,8 @@ class SandboxPanelMixin:
             "sandboxes-review": ready and selected is not None and selected.workdir_mode != "copy",
             "sandboxes-unblock": ready and self._sandbox_can_unblock(),
             "sandboxes-approve": ready and view == "asks" and model.selected_ask() is not None,
-            "sandboxes-always": ready and view == "asks" and model.selected_ask() is not None,
+            # Private, IP-literal and host-local asks open for one sandbox only.
+            "sandboxes-always": ready and view == "asks" and model.always_offered(),
             "sandboxes-reject": ready and view == "asks" and model.selected_ask() is not None,
             "sandboxes-detail": bool(model.data_table_rows()),
         }
@@ -561,16 +643,33 @@ class SandboxPanelMixin:
         finally:
             client.close()
 
-    async def _confirm(self, title: str, subtitle: str, yes: MenuAction) -> bool:
+    async def _confirm(self, title: str, subtitle: str, yes: MenuAction, *, cancel_first: bool = False) -> bool:
+        """Ask before an action; ``cancel_first`` focuses Cancel (irreversible or permanent actions)."""
         choice = await self.push_screen_wait(  # type: ignore[attr-defined]
-            ActionMenuScreen(title, (yes, MenuAction("cancel", "Cancel")), subtitle=subtitle)
+            ActionMenuScreen(
+                title,
+                (yes, MenuAction("cancel", "Cancel")),
+                subtitle=subtitle,
+                selected_index=1 if cancel_first else None,
+            )
         )
         return choice == yes.action_id
+
+    def _sandbox_detail_keys(self) -> tuple[tuple[str, ...], str]:
+        """The keys the detail window offers for the selected row."""
+        model = self.sandbox_model
+        keys, keys_hint = _DETAIL_KEYS.get(model.view, ((), ""))
+        if model.view == "activity" and not model.unblock_offered():
+            # A tool block, an allowed or lifted destination: u does nothing here.
+            return (), "Keys: Esc close"
+        if model.view == "asks" and not model.always_offered():
+            return ("a", "x"), "Keys: a approve once · x reject · Esc close"
+        return keys, keys_hint
 
     async def _open_sandbox_detail(self) -> None:
         model = self.sandbox_model
         title, pairs = model.detail_pairs()
-        keys, keys_hint = _DETAIL_KEYS.get(model.view, ((), ""))
+        keys, keys_hint = self._sandbox_detail_keys()
         key: str | None = None
         try:
             if pairs:
@@ -598,11 +697,14 @@ class SandboxPanelMixin:
             )
         )
         actions.append(MenuAction("cancel", "Cancel"))
+        # Say why it was blocked, so the user knows what the unblock lifts.
+        why = self.sandbox_model.block_explanation(sandbox, host)
+        subtitle = f"DefenseClaw blocked this destination: {why}" if why else "DefenseClaw blocked this destination."
         choice = await self.push_screen_wait(  # type: ignore[attr-defined]
             ActionMenuScreen(
                 f"Unblock {host}",
                 tuple(actions),
-                subtitle="DefenseClaw blocked this destination.",
+                subtitle=subtitle,
                 show_descriptions=True,
             )
         )
@@ -618,6 +720,7 @@ class SandboxPanelMixin:
                 "Every sandbox, now and future, may reach it (openshell.egress.unblocked). "
                 "Private networks and this machine stay closed.",
                 MenuAction("always", "Unblock everywhere", variant="warning"),
+                cancel_first=True,
             )
             if not confirmed:
                 self._set_status("Unblock cancelled.")  # type: ignore[attr-defined]
@@ -635,10 +738,17 @@ class SandboxPanelMixin:
         ask = next((ask for ask in self.sandbox_model.asks if ask.id == action.approval_id), None)
         target = ask.destination if ask else action.approval_id
         if approve and action.always:
+            if ask is not None and ask.always_refusal:
+                # The daemon refuses it too; never ask to confirm what cannot be done.
+                message = f"No always for {target}: {ask.always_refusal}; press a to approve once."
+                self._set_status(message)  # type: ignore[attr-defined]
+                self.notify_toast("warn", message)  # type: ignore[attr-defined]
+                return
             confirmed = await self._confirm(
                 f"Always allow {target}?",
                 "Every future sandbox may reach it too (openshell.egress.unblocked).",
                 MenuAction("always", "Always allow", variant="warning"),
+                cancel_first=True,
             )
             if not confirmed:
                 self._set_status("Approval cancelled.")  # type: ignore[attr-defined]
@@ -647,7 +757,11 @@ class SandboxPanelMixin:
             "decide_sandbox_approval", action.approval_id, approve=approve, always=action.always
         )
         message = str(result.get("message") or "")
-        if not message:
+        if approve and action.always:
+            # The daemon's message is the one-time approve's; say what was saved.
+            saved = " (saved to openshell.egress.unblocked)" if result.get("persisted") else ""
+            message = f"always allowed {target}{saved}" + (f"; {message}" if message else "")
+        elif not message:
             verb = "approved" if approve else "rejected"
             message = f"{target} {verb}" + (" (applies when the agent is idle)" if approve else "")
         self.sandbox_model.asks = tuple(a for a in self.sandbox_model.asks if a.id != action.approval_id)
@@ -667,6 +781,7 @@ class SandboxPanelMixin:
             f"Undo {name}?",
             f"Puts the project folder back to its pre-session snapshot{stops}. " + undo_preview_text(preview),
             MenuAction("undo", "Undo everything", variant="warning"),
+            cancel_first=True,
         )
         if not confirmed:
             self._set_status("Undo cancelled; nothing changed.")  # type: ignore[attr-defined]
@@ -704,16 +819,18 @@ class SandboxPanelMixin:
         self._set_status(message)  # type: ignore[attr-defined]
         self.notify_toast("success", message)  # type: ignore[attr-defined]
 
-    async def _sandbox_delete(self, name: str) -> None:
+    async def _sandbox_delete(self, name: str) -> bool:
+        """Delete ``name`` after asking; whether it was deleted."""
         confirmed = await self._confirm(
             f"Delete {name}?",
             "Deletes the sandbox with its providers, credentials and snapshot (undo is no longer possible). "
             "Your project folder keeps its current contents.",
             MenuAction("delete", "Delete", variant="error"),
+            cancel_first=True,
         )
         if not confirmed:
             self._set_status("Delete cancelled.")  # type: ignore[attr-defined]
-            return
+            return False
         result = await self._sandbox_call("delete_sandbox", name)
         message = f"{name} deleted"
         warnings = [str(w) for w in result.get("warnings") or [] if w]
@@ -721,13 +838,14 @@ class SandboxPanelMixin:
             message += f" ({warnings[0]})"
         self._set_status(message)  # type: ignore[attr-defined]
         self.notify_toast("success", message)  # type: ignore[attr-defined]
+        return True
 
     async def _sandbox_wrappers_menu(self) -> None:
         model = self.sandbox_model
-        names = model.harnesses or tuple(name for name, _label in SANDBOX_HARNESSES)
+        names = model.harnesses or DEFAULT_SANDBOX_HARNESSES
         actions = []
         for name in names:
-            command = _harness_command(name)
+            command = harness_command(name)
             on = name in model.wrappers
             actions.append(
                 MenuAction(
@@ -749,7 +867,7 @@ class SandboxPanelMixin:
         if choice in (None, "cancel"):
             return
         verb = "disable" if choice in model.wrappers else "enable"
-        command = _harness_command(choice)
+        command = harness_command(choice)
         await self._run_command(  # type: ignore[attr-defined]
             "defenseclaw", ("sandbox", verb, command), display_name=f"sandbox {verb} {command}"
         )
@@ -772,7 +890,65 @@ class SandboxPanelMixin:
         if launch is None:
             self._set_status("New run cancelled.")  # type: ignore[attr-defined]
             return
-        self._run_sandbox_terminal(launch)
+        launch = await self._resolve_live_mount(launch)
+        if launch is not None:
+            self._run_sandbox_terminal(launch)
+
+    async def _resolve_live_mount(self, launch: SandboxLaunch) -> SandboxLaunch | None:
+        """Offer a copy, the sandbox already there, or deleting it, when it mounts the folder live.
+
+        A folder takes one live mount (two would each undo the other's work),
+        so the daemon would refuse this run; ``sandbox run`` asks the same on
+        a terminal. None when nothing should start here.
+        """
+        if "--copy" in launch.argv:
+            return launch
+        holder = self.sandbox_model.live_mount_holder(launch.cwd)
+        if holder is None:
+            return launch
+        name = holder.name
+        choice = await self.push_screen_wait(  # type: ignore[attr-defined]
+            ActionMenuScreen(
+                f"{name} already mounts this folder live",
+                (
+                    MenuAction(
+                        "copy",
+                        "Run this one on a copy (--copy)",
+                        "defenseclaw sandbox pull brings its changes back to the folder.",
+                    ),
+                    MenuAction(
+                        "connect",
+                        f"Connect {name} instead",
+                        f"Resumes {name} ({holder.harness_label}, {holder.phase or '-'}): "
+                        f"defenseclaw sandbox connect {name}",
+                    ),
+                    MenuAction(
+                        "delete",
+                        f"Delete {name} first…",
+                        f"Asks first, then this run mounts the folder: defenseclaw sandbox delete {name}",
+                    ),
+                    MenuAction("cancel", "Cancel"),
+                ),
+                subtitle=f"{holder.project} takes one live mount: two would each undo the other's work.",
+                show_descriptions=True,
+            )
+        )
+        if choice == "copy":
+            return replace(launch, argv=(*launch.argv, "--copy"))
+        if choice == "connect":
+            await self._sandbox_connect(name)
+            return None
+        if choice == "delete":
+            try:
+                deleted = await self._sandbox_delete(name)
+            except SandboxAPIError as exc:
+                self._sandbox_report_error(exc)
+                return None
+            finally:
+                self._schedule_sandbox_poll()
+            return launch if deleted else None
+        self._set_status(f"New run cancelled; {name} still mounts {holder.project} live.")  # type: ignore[attr-defined]
+        return None
 
     def _sandbox_default_folder(self) -> str:
         """The launch dialog's folder: the selected, else the newest, sandbox's project.
@@ -815,19 +991,27 @@ class SandboxPanelMixin:
         returncode = 0
         try:
             with self.suspend():  # type: ignore[attr-defined]
-                print(f"\n→ {command}   (the TUI comes back when it ends)\n", flush=True)
-                try:
-                    returncode = subprocess.run([binary, *launch.argv], cwd=launch.cwd, check=False).returncode
-                except OSError as exc:
-                    print(f"could not start {binary}: {exc}", flush=True)
-                    returncode = 127
-                except KeyboardInterrupt:
-                    returncode = 130
-                # Keep the session summary on screen until the operator is done reading.
-                try:
-                    input("\nPress Enter to return to DefenseClaw... ")
-                except (EOFError, KeyboardInterrupt, OSError):
-                    pass
+                # Ctrl-C belongs to the child (its keep prompt, say); at the
+                # "Press Enter" prompt it returns to the TUI.
+                with _child_owns_ctrl_c() as ctrl_c:
+                    try:
+                        print(f"\n→ {command}   (the TUI comes back when it ends)\n", flush=True)
+                        try:
+                            returncode = subprocess.run([binary, *launch.argv], cwd=launch.cwd, check=False).returncode
+                        except OSError as exc:
+                            print(f"could not start {binary}: {exc}", flush=True)
+                            returncode = 127
+                        except KeyboardInterrupt:
+                            returncode = 130
+                        # Keep the session summary on screen until the operator is done reading.
+                        ctrl_c.at_prompt = True
+                        try:
+                            input("\nPress Enter to return to DefenseClaw... ")
+                        finally:
+                            ctrl_c.at_prompt = False
+                    except (EOFError, KeyboardInterrupt, OSError, _PromptInterruptedError):
+                        pass
+                    _drop_pending_input()
         except SuspendNotSupported:
             if notify_unsupported:
                 self.notify_toast(  # type: ignore[attr-defined]

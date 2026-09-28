@@ -27,11 +27,13 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
+from defenseclaw.tui.services.sandbox_state import SANDBOX_HARNESS_SPECS, harness_command
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
-# The harnesses the Go tree runs today, by command name (sandboxcli.ResolveHarness
-# accepts both the connector and the command name).
-SANDBOX_HARNESSES: tuple[tuple[str, str], ...] = (("claudecode", "Claude Code"), ("codex", "Codex"))
+# The harnesses the Go tree runs, as (connector name, display name). A run
+# names the harness by its command (sandboxcli.ResolveHarness accepts both),
+# so the line the TUI prints is the one a user would type.
+SANDBOX_HARNESSES: tuple[tuple[str, str], ...] = tuple((name, label) for name, label, _command in SANDBOX_HARNESS_SPECS)
 SANDBOX_PROFILES: tuple[str, ...] = ("open", "balanced", "strict")
 _PACK_DEFAULT = "(pack default)"
 
@@ -94,7 +96,8 @@ class SandboxLaunchValues:
         if problem:
             raise SandboxLaunchError(problem)
         folder = os.path.abspath(os.path.expanduser(self.folder.strip()))
-        argv: list[str] = ["sandbox", "run", harness]
+        command = harness_command(harness)
+        argv: list[str] = ["sandbox", "run", command]
         name = self.name.strip()
         if name:
             argv += ["--name", name]
@@ -107,7 +110,7 @@ class SandboxLaunchValues:
             if profile not in SANDBOX_PROFILES:
                 raise SandboxLaunchError(f"unknown profile {profile!r}")
             argv += ["--profile", profile]
-        return SandboxLaunch(tuple(argv), folder, f"sandbox run {harness} in {folder}")
+        return SandboxLaunch(tuple(argv), folder, f"sandbox run {command} in {folder}")
 
 
 def harness_choices(configured: tuple[str, ...], allowed: tuple[str, ...] = ()) -> tuple[tuple[str, str], ...]:

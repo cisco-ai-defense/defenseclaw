@@ -21,6 +21,9 @@ connection.
 
 from __future__ import annotations
 
+import ipaddress
+import os
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -34,29 +37,138 @@ VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
 FEED_LIMIT = 500
 # A destination blocked again within this window does not toast again.
 TOAST_DEDUPE_SECONDS = 60.0
+# The header's blocked-destination line shows blocks this recent; older ones
+# stay in Activity (t).
+BLOCK_BANNER_SECONDS = 15 * 60
 
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+# The next step after an openshell.admin.allow_unblock refusal.
+ADMIN_UNBLOCK_NEXT = "ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)"
+# A saved unblock (openshell.egress.unblocked) the organization's policy ignores.
+ADMIN_UNBLOCK_IGNORED = "your saved unblock is off: openshell.admin.allow_unblock"
+# u on a tool block: DefenseClaw's rules decided it, not the egress policy.
+TOOL_BLOCK_HINT = (
+    "u lifts only blocked destinations (✗); DefenseClaw's guardrail rules decide tool calls "
+    "(see: defenseclaw policy list)."
+)
+TOOL_BLOCK_DECIDED_BY = "DefenseClaw's guardrail rules, which u does not change (see: defenseclaw policy list)"
 # sandboxapi.HooksUnreachableWarning.
 HOOKS_UNREACHABLE_WARNING = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
-# The Asks view with nothing waiting: what asks depends on each sandbox's pack
-# (its approvals mode: open auto, balanced triage, strict manual). The macOS
-# app's Asks card says the same (SandboxSnapshot.noAsksText).
+# The Asks view with nothing waiting. An ask is an OpenShell draft rule for a
+# connection that went around DefenseClaw's proxy and that triage does not
+# decide on its own (triage.judgeEndpoint): a private-network address with
+# every pack, a host off the allowlist with balanced, and every new
+# destination with strict. A port on this machine drafts none (OpenShell
+# denies the mapping itself), so it is opened with --host-port instead.
 NO_ASKS_TEXT = (
-    "No asks are waiting. Doors into your machine or network (localhost ports, private IPs) ask; "
-    "so do hosts off the allowlist with the balanced pack, and every new destination with strict."
+    "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
+    "to a private-network address with any pack, to a host off the allowlist with balanced, "
+    "and to every new destination with strict. Ports on this machine never ask; run with --host-port PORT."
 )
 
+# sandboxcli.reasonTexts, plus the triage reasons of rejected proposals: the
+# tokens a blocked destination's category or reason holds, in plain words.
+REASON_LABELS: dict[str, str] = {
+    "transparent_tcp_policy_denied": "no OpenShell rule allows it",
+    "transparent_tcp_mapping_denied": "no OpenShell rule allows this port",
+    "policy_dns_ineligible": "no OpenShell rule allows the name",
+    "paste_site": "paste site",
+    "file_drop": "file-sharing site",
+    "webhook_catcher": "webhook catcher",
+    "tunnel": "tunnel service",
+    "anonymizer": "anonymizer",
+    "host_internal": "this machine",
+    "host_local": "this machine",
+    "private_network": "private network",
+    "port_not_allowed": "port not allowed",
+    "invalid_destination": "invalid destination",
+    "admin_block": "blocked by your organization",
+    "admin_allow_only": "not on your organization's allowed list",
+    "admin_violation": "blocked by your organization",
+    "operator_block": "on your block list",
+    "not_allowlisted": "not on the allowlist",
+    "rate_limited": "rate limited",
+    "ip_literal": "IP address instead of a name",
+    "blocklisted": "on the egress blocklist",
+    "resolves_to_host": "the name leads to this machine",
+    "unresolved": "the name does not resolve",
+    "policy_refused": "the sandbox policy refuses it",
+    "wildcard_destination": "wildcard destination",
+}
+
+
+def _is_token(text: str) -> bool:
+    """A lower-case snake_case token (``webhook_catcher``) rather than a sentence."""
+    return text.isidentifier() and text == text.lower()
+
+
+def reason_label(text: str) -> str:
+    """A reason or category token in plain words (sandboxcli.reasonText); other text as is."""
+    text = text.strip()
+    if not _is_token(text):
+        return text
+    return REASON_LABELS.get(text, text.replace("_", " "))
+
+
+# How a sandbox tool verdict's reason starts (gateway.sandboxVerdictReason):
+# "Blocked by DefenseClaw rule ID: Title." or "Blocked by DefenseClaw
+# policy.", then advice written for the agent ("... or ask the user to ..."),
+# which the feed leaves out.
+_VERDICT_REASON = re.compile(
+    r"^((?:Blocked|Held for approval|Flagged) by DefenseClaw (?:rule \S+.*?|policy))\.(?:\s|$)", re.DOTALL
+)
+
+
+def verdict_reason(text: str) -> str:
+    """A tool verdict's reason without the advice addressed to the agent."""
+    text = text.strip()
+    match = _VERDICT_REASON.match(text)
+    return match.group(1) if match else text
+
+
 _RUNNING_PHASES = frozenset({"ready", "running"})
-# Harness command names, for narrow tables.
-_HARNESS_COMMANDS = {"claudecode": "claude", "codex": "codex"}
+
+# Every harness the Go tree runs (harness.Names()) as (connector name, display
+# name, command): Claude Code and Codex, setup's defaults, first.
+SANDBOX_HARNESS_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("claudecode", "Claude Code", "claude"),
+    ("codex", "Codex", "codex"),
+    ("amp", "Amp", "amp"),
+    ("antigravity", "Antigravity", "agy"),
+    ("copilot", "GitHub Copilot CLI", "copilot"),
+    ("cursor", "Cursor Agent", "cursor-agent"),
+    ("devin", "Devin CLI", "devin"),
+    ("hermes", "Hermes Agent", "hermes"),
+    ("kiro", "Kiro CLI", "kiro-cli-chat"),
+    ("omnigent", "OmniGent", "omnigent"),
+    ("opencode", "OpenCode", "opencode"),
+    ("openhands", "OpenHands", "openhands"),
+)
+# sandboxcli.defaultHarnesses: the harnesses when openshell.harnesses is empty.
+DEFAULT_SANDBOX_HARNESSES: tuple[str, ...] = ("claudecode", "codex")
+# Harness command names (what the user types; sandboxcli.ResolveHarness takes them).
+_HARNESS_COMMANDS = {name: command for name, _label, command in SANDBOX_HARNESS_SPECS}
 
 
-def sandbox_keys_hint(view: str) -> str:
-    """The hint bar's keys for a Sandboxes view (one line at 80 columns)."""
+def harness_command(name: str) -> str:
+    """The command a harness runs as (``claudecode`` → ``claude``)."""
+    return _HARNESS_COMMANDS.get(name, name)
+
+
+def sandbox_keys_hint(view: str, *, unblock: bool = True, always: bool = True) -> str:
+    """The hint bar's keys for a Sandboxes view (one line at 80 columns).
+
+    ``unblock`` and ``always`` are False when the selected feed row or ask
+    does not take ``u`` or ``A``, which the line then leaves out.
+    """
     if view == "asks":
-        return "KEYS  t view | Enter detail | a approve | A always | x reject | r refresh"
+        return "KEYS  t view | Enter detail | a approve | " + ("A always | " if always else "") + "x reject | r refresh"
     if view == "activity":
-        return "KEYS  t view | Enter detail | u unblock | n new run | w sandboxed | r refresh"
+        return (
+            "KEYS  t view | Enter detail | "
+            + ("u unblock | " if unblock else "")
+            + "n new run | w sandboxed | r refresh"
+        )
     return "KEYS  t view | c connect | s stop | d delete | U undo | R review | u unblock"
 
 
@@ -127,6 +239,12 @@ def host_matches(pattern: str, host: str) -> bool:
     if pattern.startswith("*."):
         return host.endswith(pattern[1:])
     return pattern == host
+
+
+def _paths_overlap(a: str, b: str) -> bool:
+    """workspace.Overlaps: the same folder, or one inside the other."""
+    a, b = a.rstrip(os.sep) or os.sep, b.rstrip(os.sep) or os.sep
+    return a == b or a.startswith(b.rstrip(os.sep) + os.sep) or b.startswith(a.rstrip(os.sep) + os.sep)
 
 
 def fit(text: str, width: int) -> str:
@@ -217,9 +335,7 @@ class SandboxRow:
         out.extend(repo.line for repo in self.nested_repos)
         if self.hooks_unreachable:
             why = f" ({self.unreachable_reason})" if self.unreachable_reason else ""
-            out.append(
-                f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor"
-            )
+            out.append(f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor")
         elif self.ingress_refused:
             out.append(f"OpenShell refused {self.ingress_refused} hook request(s) to DefenseClaw")
         if self.hooks_silent:
@@ -242,6 +358,13 @@ class SandboxRow:
         if self.orphaned:
             parts.append("orphaned")
         return ", ".join(parts) or "-"
+
+
+def _tool_calls_text(row: SandboxRow) -> str:
+    """The Tool calls column: "57", or "57 (1 blocked)"."""
+    if row.tool_blocked:
+        return f"{row.tool_calls} ({row.tool_blocked} blocked)"
+    return str(row.tool_calls)
 
 
 def decode_sandbox(raw: Any) -> SandboxRow | None:
@@ -313,8 +436,10 @@ class ActivityRow:
     tool: str = ""
     severity: str = ""
     bytes_up: int = 0
-    # An egress.unblocked event lifted this block since it happened.
+    # An unblock (or an approved ask for the same host) lifted this block
+    # since it happened; ``lifted_by`` says which.
     unblocked: bool = False
+    lifted_by: str = ""
 
     @property
     def blocked_destination(self) -> bool:
@@ -322,6 +447,7 @@ class ActivityRow:
 
     @property
     def glyph(self) -> str:
+        # Tool blocks get their own glyph: u lifts only blocked destinations (✗).
         return {
             "egress.allowed": "✓",
             "egress.blocked": "✗",
@@ -329,7 +455,8 @@ class ActivityRow:
             "egress.large_upload": "⚠",
             "approval.requested": "?",
             "approval.resolved": "·",
-            "tool.blocked": "✗",
+            "tool.blocked": "⊘",
+            "hook.failed": "✗",
             "finding": "⚠",
             "sandbox.lifecycle": "·",
             "workspace": "·",
@@ -337,25 +464,48 @@ class ActivityRow:
         }.get(self.kind, "·")
 
     @property
+    def why(self) -> str:
+        """The block's category or reason in plain words ("webhook catcher")."""
+        return reason_label(self.category or self.reason)
+
+    @property
+    def explanation(self) -> str:
+        """Why DefenseClaw blocked the destination, in a sentence when the daemon sent one."""
+        reason = self.reason.strip()
+        if reason and not _is_token(reason):
+            return reason
+        return self.why
+
+    @property
     def summary(self) -> str:
         """The display line, without the glyph the daemon's message may carry."""
         text = self.message.strip()
-        if text[:1] in {"✓", "✗", "⚠", "?", "↺"}:
+        if text[:1] in {"✓", "✗", "⚠", "?", "↺", "⊘"}:
             text = text[1:].strip()
         if self.kind == "egress.allowed":
             return host_port(self.host, self.port) or text
         if self.kind == "egress.blocked":
             if not self.host:
-                return text or self.reason or "a destination was blocked"
-            why = self.category or self.reason
+                return text or reason_label(self.reason) or "a destination was blocked"
+            why = self.why
             return host_port(self.host, self.port) + (f" ({why})" if why else "")
         if self.kind == "approval.requested":
             # The daemon's message is a whole sentence ("the sandbox asks to
-            # reach port 5432 on your machine"), as the Go CLI prints it.
-            return text or "asks to reach " + (host_port(self.host, self.port) or "a destination")
+            # reach port 5432 on your machine"), as the Go CLI prints it; a
+            # triage reason that does not say what is asked ("approvals are
+            # manual for the strict profile") gets the destination first.
+            where = host_port(self.host, self.port)
+            if text and (not self.host or self.host in text or "asks to reach" in text):
+                return text
+            if text:
+                return f"asks to reach {where} ({text})"
+            return "asks to reach " + (where or "a destination")
         if self.kind == "tool.blocked":
-            line = f"{self.tool or 'tool call'} blocked"
-            return line + (f": {self.reason}" if self.reason else "")
+            tool = self.tool or "tool call"
+            reason = verdict_reason(self.reason)
+            if reason.startswith("Blocked by "):
+                return f"{tool} blocked by {reason.removeprefix('Blocked by ')}"
+            return f"{tool} blocked" + (f": {reason}" if reason else "")
         if self.kind == "sandbox.lifecycle":
             return text or f"now {self.message or self.reason or 'changed'}"
         return text or self.reason or self.kind
@@ -394,6 +544,15 @@ def decode_activity(raw: Any) -> ActivityRow | None:
     )
 
 
+def _approved(row: ActivityRow) -> bool:
+    """Whether an approval.resolved event says OpenShell applied the approval.
+
+    Its reason is then who approved it (manager.actorOperator,
+    actorAutomatic); a rejection or a failed apply carries another reason.
+    """
+    return row.reason in {"operator", "automatic"} and row.message.strip().startswith("approved")
+
+
 @dataclass(frozen=True)
 class AskRow:
     """One rare ask (a draft proposal triage would not decide on its own)."""
@@ -412,6 +571,8 @@ class AskRow:
     hit_count: int = 0
     status: str = ""
     created_at: datetime | None = None
+    allowed_ips: tuple[str, ...] = ()
+    endpoint_hosts: tuple[str, ...] = ()
 
     @property
     def destination(self) -> str:
@@ -421,17 +582,79 @@ class AskRow:
     def kind_label(self) -> str:
         return {"host_port": "port on this machine", "network_rule": "network"}.get(self.kind, self.kind or "-")
 
+    @property
+    def always_refusal(self) -> str:
+        """Why "always" is not offered for this ask, or "".
+
+        The daemon opens a port on this machine, a private or IP-literal
+        address, and a proposal with allowed IPs for one sandbox only
+        (manager.alwaysApprovable); ``risky`` marks exactly that reach.
+        """
+        hosts = self.endpoint_hosts or ((self.host,) if self.host else ())
+        if self.kind == "host_port" or any(_host_local(host) for host in hosts):
+            port = f" {self.port}" if self.port else ""
+            return f"a port on this machine opens for this sandbox only (future sandboxes: run with --host-port{port})"
+        if self.risky or self.allowed_ips or any(_ip_literal(host) for host in hosts):
+            return "private, IP-literal and host-local destinations open for this sandbox only"
+        return ""
+
+    @property
+    def short_reason(self) -> str:
+        """The reason without the destination the row already shows, for narrow tables."""
+        text = self.reason.strip()
+        for pattern, short in _SHORT_ASK_REASONS:
+            match = pattern.search(text)
+            if match:
+                return short.format(*match.groups())
+        return text
+
+    @property
+    def binary_name(self) -> str:
+        return os.path.basename(self.binary.rstrip("/")) or self.binary
+
+
+# triage.go's ask sentences, shortened to what they add to the destination.
+_SHORT_ASK_REASONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"on your private network"), "private network"),
+    (re.compile(r"reach port \S+ on your machine"), "port on this machine"),
+    (re.compile(r"is not on the allowlist"), "not on the allowlist"),
+    (re.compile(r"approvals are manual for the (\S+) profile"), "manual approvals ({0})"),
+    (re.compile(r"the (\S+) profile has no web egress"), "no web egress ({0})"),
+    (re.compile(r"^OpenShell's policy advisor flagged"), "flagged by OpenShell"),
+)
+
+
+def _host_local(host: str) -> bool:
+    """triage.IsHostLocal: this machine's names and loopback or unspecified addresses."""
+    text = normalize_host(host)
+    if text in {"localhost", "host.openshell.internal", "host.docker.internal", "gateway.docker.internal"}:
+        return True
+    if text.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_unspecified
+
+
+def _ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(normalize_host(host))
+    except ValueError:
+        return False
+    return True
+
 
 def decode_ask(raw: Any) -> AskRow | None:
     item = _dict(raw)
     ask_id = _text(item.get("id")).strip()
     if not ask_id:
         return None
-    endpoints = tuple(
-        host_port(_text(e.get("host")), _int(e.get("port")))
-        for e in (_dict(x) for x in _list(item.get("endpoints")))
-        if e.get("host")
-    )
+    raw_endpoints = [e for e in (_dict(x) for x in _list(item.get("endpoints"))) if e.get("host")]
+    endpoints = tuple(host_port(_text(e.get("host")), _int(e.get("port"))) for e in raw_endpoints)
     return AskRow(
         id=ask_id,
         sandbox=_text(item.get("sandbox")),
@@ -447,6 +670,8 @@ def decode_ask(raw: Any) -> AskRow | None:
         hit_count=_int(item.get("hit_count")),
         status=_text(item.get("status")),
         created_at=_time(item.get("created_at")),
+        allowed_ips=tuple(_text(ip) for ip in _list(item.get("allowed_ips")) if ip),
+        endpoint_hosts=tuple(_text(e.get("host")) for e in raw_endpoints),
     )
 
 
@@ -574,6 +799,8 @@ class SandboxesPanelModel:
     admin: AdminPolicy = field(default_factory=AdminPolicy)
     wrappers: tuple[str, ...] = ()
     harnesses: tuple[str, ...] = ()
+    # openshell.egress.unblocked: the hosts every sandbox may reach.
+    saved_unblocks: tuple[str, ...] = ()
     _toasted: dict[tuple[str, str], float] = field(default_factory=dict)
 
     # ---- snapshot ---------------------------------------------------------
@@ -610,6 +837,10 @@ class SandboxesPanelModel:
         openshell = getattr(cfg, "openshell", None)
         self.wrappers = tuple(str(w) for w in (getattr(openshell, "wrappers", None) or ()) if str(w).strip())
         self.harnesses = tuple(str(h) for h in (getattr(openshell, "harnesses", None) or ()) if str(h).strip())
+        egress = getattr(openshell, "egress", None)
+        self.saved_unblocks = tuple(
+            str(h) for h in (getattr(egress, "unblocked", None) or ()) if isinstance(h, str) and h.strip()
+        )
 
     # ---- activity ---------------------------------------------------------
 
@@ -645,6 +876,10 @@ class SandboxesPanelModel:
             if row.kind == "egress.unblocked" and row.host:
                 # Scope "always" lifts the host in every sandbox.
                 self.mark_unblocked(row.sandbox, row.host, always=row.reason == "always")
+            if row.kind == "approval.resolved" and row.host and _approved(row):
+                # OpenShell now allows the host: its earlier blocks in that
+                # sandbox are resolved.
+                self.mark_unblocked(row.sandbox, row.host, lifted_by="approved")
             self.feed.append(row)
             if toast:
                 notice = self._notice_for(row, now=now)
@@ -655,12 +890,13 @@ class SandboxesPanelModel:
         self._clamp()
         return notices
 
-    def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False) -> None:
+    def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False, lifted_by: str = "unblocked") -> None:
         """Mark the feed's earlier blocks of ``host`` as lifted.
 
         ``always`` covers every sandbox; otherwise only ``sandbox``'s blocks.
         A later block of the same host (say, on another port) arrives as a
-        new event and is unblockable again.
+        new event and is unblockable again. ``lifted_by`` is what the feed
+        row says instead of "u unblocks" (unblocked, approved).
         """
         if not host:
             return
@@ -673,7 +909,7 @@ class SandboxesPanelModel:
                 and (always or row.sandbox == sandbox)
                 and host_matches(host, row.host)
             ):
-                row = replace(row, unblocked=True, unblockable=False)
+                row = replace(row, unblocked=True, unblockable=False, lifted_by=lifted_by)
                 changed = True
             rows.append(row)
         if changed:
@@ -705,6 +941,8 @@ class SandboxesPanelModel:
             return SandboxNotice("success", f"{row.sandbox}: {row.summary}")
         if row.kind == "finding" and row.reason == "nested_repo":
             return SandboxNotice("warn", f"⚠ {row.sandbox}: {row.summary}")
+        if row.kind == "finding" and row.reason == "hook_tamper":
+            return SandboxNotice("error", f"⚠ {row.sandbox}: {row.summary}. Sandboxes panel (7): Enter for details")
         return None
 
     # ---- navigation -------------------------------------------------------
@@ -758,6 +996,22 @@ class SandboxesPanelModel:
             return self.asks[self.cursor]
         return None
 
+    def live_mount_holder(self, folder: str) -> SandboxRow | None:
+        """The sandbox that mounts ``folder`` (or a folder inside or around it) live, stopped or not.
+
+        A folder takes one live mount (two would each undo the other's
+        work), so the daemon refuses a second (sandboxcli.liveMountHolder).
+        """
+        if not folder:
+            return None
+        target = os.path.realpath(os.path.expanduser(folder))
+        for row in sorted(self.rows, key=lambda row: row.name):
+            if row.workdir_mode != "mount" or not row.project or row.phase == "deleted":
+                continue
+            if _paths_overlap(target, os.path.realpath(row.project)):
+                return row
+        return None
+
     def _sandbox_exists(self, name: str) -> bool:
         # Before the first list read nothing is known to be gone.
         return not name or not self.status.loaded or any(row.name == name for row in self.rows)
@@ -779,6 +1033,14 @@ class SandboxesPanelModel:
 
     def latest_unblockable(self, sandbox: str = "") -> ActivityRow | None:
         return next((row for row in self.current_blocks(sandbox) if row.unblockable), None)
+
+    def block_explanation(self, sandbox: str, host: str) -> str:
+        """Why the newest block of ``host`` (in ``sandbox``, when named) happened, for the unblock dialog."""
+        row = next(
+            (row for row in self.current_blocks(sandbox) if host_matches(host, row.host) and row.explanation),
+            None,
+        )
+        return row.explanation if row is not None else ""
 
     def _unblock_scope(self) -> tuple[bool, str]:
         """(scoped, sandbox): the sandbox ``u`` is limited to, when one is selected."""
@@ -848,9 +1110,11 @@ class SandboxesPanelModel:
         # openshell.admin.allow_unblock: false makes the daemon report every
         # block as not unblockable, so say why before looking at the flag.
         if self.admin.unblock_refused and self.current_blocks():
-            return SandboxPanelAction("hint", hint=f"Unblocking is {ADMIN_MESSAGE}.")
+            return SandboxPanelAction("hint", hint=f"Unblocking is {ADMIN_MESSAGE}; {ADMIN_UNBLOCK_NEXT}.")
         if self.view == "activity":
             event = self.selected_event()
+            if event is not None and event.kind == "tool.blocked":
+                return SandboxPanelAction("hint", hint=TOOL_BLOCK_HINT)
             if event is None or not event.blocked_destination:
                 return SandboxPanelAction("hint", hint="Select a blocked destination (✗) to unblock it.")
             if event.unblocked:
@@ -893,7 +1157,36 @@ class SandboxesPanelModel:
             return SandboxPanelAction("reject", sandbox=ask.sandbox, approval_id=ask.id)
         if key == "A" and self.admin.unblock_refused:
             return SandboxPanelAction("hint", hint=f"Always-approve is {ADMIN_MESSAGE}; press a to approve once.")
+        if key == "A" and ask.always_refusal:
+            return SandboxPanelAction(
+                "hint", hint=f"No always for {ask.destination}: {ask.always_refusal}; press a to approve once."
+            )
         return SandboxPanelAction("approve", sandbox=ask.sandbox, approval_id=ask.id, always=key == "A")
+
+    def always_offered(self) -> bool:
+        """Whether the selected ask may be approved for every sandbox (A)."""
+        ask = self.selected_ask()
+        return ask is not None and not ask.always_refusal and not self.admin.unblock_refused
+
+    def unblock_offered(self) -> bool:
+        """Whether ``u`` lifts the selected Activity row (a blocked destination still in force)."""
+        event = self.selected_event()
+        return (
+            event is not None
+            and event.blocked_destination
+            and event.unblockable
+            and not event.unblocked
+            and not self.admin.unblock_refused
+            and self._sandbox_exists(event.sandbox)
+        )
+
+    def saved_unblock_ignored(self, row: ActivityRow) -> bool:
+        """A block of a host openshell.egress.unblocked lists, while the organization turns unblocks off."""
+        return (
+            self.admin.unblock_refused
+            and row.blocked_destination
+            and any(host_matches(pattern, row.host) for pattern in self.saved_unblocks)
+        )
 
     def _sandbox_action(self, key: str) -> SandboxPanelAction:
         row = self.selected_sandbox()
@@ -960,6 +1253,11 @@ class SandboxesPanelModel:
         return f"Organization policy: {self.status.admin_detail or self.status.admin_authority}"
 
     def keys_line(self) -> str:
+        """The hint bar's keys for the view and the selected row."""
+        if self.view == "activity":
+            return sandbox_keys_hint(self.view, unblock=self.unblock_offered())
+        if self.view == "asks":
+            return sandbox_keys_hint(self.view, always=self.selected_ask() is None or self.always_offered())
         return sandbox_keys_hint(self.view)
 
     def data_table_columns(self, compact: bool = False) -> tuple[str, ...]:
@@ -967,23 +1265,39 @@ class SandboxesPanelModel:
         if self.view == "activity":
             return ("Time", "Sandbox", "", "Event")
         if self.view == "asks":
+            if compact:
+                return ("Sandbox", "Destination", "Binary", "Risk", "Reason")
             return ("Sandbox", "Kind", "Destination", "Binary", "Risk", "Reason")
         if compact:
-            return ("Name", "Phase", "Harness", "Sites", "Blocked", "Tools", "Alerts")
-        return ("Name", "Phase", "Harness", "Pack/Profile", "Mode", "Up", "Sites", "Blocked", "Tools", "Alerts")
+            return ("Name", "Phase", "Harness", "Sites", "Blocked", "Tool calls", "Alerts")
+        return ("Name", "Phase", "Harness", "Pack/Profile", "Mode", "Up", "Sites", "Blocked", "Tool calls", "Alerts")
+
+    def _feed_suffix(self, row: ActivityRow) -> str:
+        if row.unblocked:
+            return f"  ({row.lifted_by or 'unblocked'})"
+        if self.saved_unblock_ignored(row):
+            return f"  ({ADMIN_UNBLOCK_IGNORED})"
+        return "  (u unblocks)" if row.unblockable else ""
 
     def data_table_rows(self, compact: bool = False) -> tuple[tuple[str, ...], ...]:
         if self.view == "activity":
             return tuple(
-                (
-                    row.time_text,
-                    row.sandbox or "-",
-                    row.glyph,
-                    row.summary + ("  (unblocked)" if row.unblocked else "  (u unblocks)" if row.unblockable else ""),
-                )
+                (row.time_text, row.sandbox or "-", row.glyph, row.summary + self._feed_suffix(row))
                 for row in self.feed_rows()
             )
         if self.view == "asks":
+            if compact:
+                # The destination names the host, so the reason keeps only what it adds.
+                return tuple(
+                    (
+                        ask.sandbox,
+                        ask.destination,
+                        ask.binary_name or "-",
+                        "risky" if ask.risky else "-",
+                        ask.short_reason or "-",
+                    )
+                    for ask in self.asks
+                )
             return tuple(
                 (
                     ask.sandbox,
@@ -1003,7 +1317,7 @@ class SandboxesPanelModel:
                     _HARNESS_COMMANDS.get(row.harness, row.harness_label),
                     str(row.destinations),
                     str(row.blocked),
-                    f"{row.tool_blocked}/{row.tool_calls}" if row.tool_calls else "0",
+                    _tool_calls_text(row),
                     row.alert_badge,
                 )
                 for row in self.rows
@@ -1018,7 +1332,7 @@ class SandboxesPanelModel:
                 row.uptime_text,
                 str(row.destinations),
                 str(row.blocked),
-                f"{row.tool_blocked}/{row.tool_calls}" if row.tool_calls else "0",
+                _tool_calls_text(row),
                 row.alert_badge,
             )
             for row in self.rows
@@ -1036,21 +1350,30 @@ class SandboxesPanelModel:
     def recent_blocks(self, limit: int = 3) -> tuple[ActivityRow, ...]:
         return self.current_blocks()[:limit]
 
-    def block_notice(self) -> tuple[str, str, str]:
+    def block_notice(self, now: datetime | None = None) -> tuple[str, str, str]:
         """(block, where, note) for the header's one blocked-destination line.
 
-        The newest block still in force, the sandbox it happened in, and
-        whether ``u`` lifts it from here and how many more there are. The
-        panel shortens ``block`` first when the line is too long.
+        The newest block still in force from the last BLOCK_BANNER_SECONDS,
+        the sandbox it happened in, and whether ``u`` lifts it from here and
+        how many more there are. A block an unblock or an approved ask
+        resolved, or an old one, is left to Activity. The panel shortens
+        ``block`` first when the line is too long.
         """
-        blocks = self.current_blocks()
+        clock = now or datetime.now(timezone.utc)
+        blocks = tuple(
+            block
+            for block in self.current_blocks()
+            if block.time is None or (clock - block.time).total_seconds() <= BLOCK_BANNER_SECONDS
+        )
         if not blocks:
             return "", "", ""
         row = blocks[0]
         where = f" in {row.sandbox}" if row.sandbox else ""
         notes: list[str] = []
         target = self.unblock_target()
-        if self.admin.unblock_refused:
+        if self.saved_unblock_ignored(row):
+            notes.append(ADMIN_UNBLOCK_IGNORED)
+        elif self.admin.unblock_refused:
             notes.append(f"unblocking is {ADMIN_MESSAGE}")
         elif target is row:
             notes.append("u unblocks")
@@ -1066,8 +1389,11 @@ class SandboxesPanelModel:
         pairs = [(row, alert) for row in self.rows for alert in row.alerts]
         if not pairs:
             return "", ""
-        # Hooks that cannot reach DefenseClaw block every tool call: say that first.
-        urgent = next((pair for pair in pairs if HOOKS_UNREACHABLE_WARNING in pair[1]), None)
+        # Hooks that cannot reach DefenseClaw block every tool call: say that
+        # first, then a tool that ran without a verdict (hook tamper).
+        urgent = next((pair for pair in pairs if HOOKS_UNREACHABLE_WARNING in pair[1]), None) or next(
+            (pair for pair in pairs if pair[1].startswith("hook tamper:")), None
+        )
         row, alert = urgent or pairs[0]
         more = len(pairs) - 1
         note = f"+{more} more · Enter" if more else "Enter for details"
@@ -1087,15 +1413,21 @@ class SandboxesPanelModel:
             ]
             if event.host:
                 pairs.append(("Destination", host_port(event.host, event.port)))
-            if event.category:
-                pairs.append(("Category", event.category))
-            if event.reason:
-                pairs.append(("Reason", event.reason))
+            category = reason_label(event.category)
+            if category:
+                pairs.append(("Category", category))
+            reason = verdict_reason(event.reason) if event.kind == "tool.blocked" else reason_label(event.reason)
+            if reason and reason != category:
+                pairs.append(("Reason", reason))
+            if event.kind == "tool.blocked":
+                pairs.append(("Decided by", TOOL_BLOCK_DECIDED_BY))
             if event.blocked_destination:
                 if event.unblocked:
-                    unblock = "unblocked since"
+                    unblock = f"{event.lifted_by or 'unblocked'} since"
+                elif self.saved_unblock_ignored(event):
+                    unblock = f"{ADMIN_UNBLOCK_IGNORED}; {ADMIN_UNBLOCK_NEXT}"
                 elif self.admin.unblock_refused:
-                    unblock = ADMIN_MESSAGE
+                    unblock = f"{ADMIN_MESSAGE}; {ADMIN_UNBLOCK_NEXT}"
                 elif event.unblockable:
                     unblock = "press u"
                 else:
@@ -1122,7 +1454,13 @@ class SandboxesPanelModel:
                     pairs.append((label, value))
             if ask.hit_count:
                 pairs.append(("Attempts", str(ask.hit_count)))
-            pairs.append(("Decide", "a approve · A always approve · x reject"))
+            if ask.always_refusal:
+                decide = f"a approve once · x reject (no always: {ask.always_refusal})"
+            elif self.admin.unblock_refused:
+                decide = f"a approve once · x reject (always-approve is {ADMIN_MESSAGE})"
+            else:
+                decide = "a approve · A always approve · x reject"
+            pairs.append(("Decide", decide))
             return "Ask", tuple(pairs)
         row = self.selected_sandbox()
         if row is None:
@@ -1139,7 +1477,7 @@ class SandboxesPanelModel:
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked)"),
         ]
         if row.last_blocked:
-            pairs.append(("Last tool block", row.last_blocked))
+            pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:
             pairs.append(("Asks waiting", str(row.pending_approvals)))
         pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))

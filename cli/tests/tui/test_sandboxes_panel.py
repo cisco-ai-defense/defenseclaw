@@ -106,6 +106,33 @@ ASK = {
 }
 
 
+# A public host off the balanced allowlist: the one kind of ask "always" may save.
+PUBLIC_ASK = {
+    "id": "ask-2",
+    "sandbox": "myapp-claude-7f3a",
+    "kind": "network_rule",
+    "host": "www.example.com",
+    "port": 443,
+    "binary": "/usr/bin/curl",
+    "reason": "www.example.com is not on the allowlist",
+    "status": "pending",
+    "created_at": "2026-09-27T12:01:00Z",
+}
+# triage.judgeEndpoint's private-network ask.
+PRIVATE_ASK = {
+    "id": "ask-3",
+    "sandbox": "myapp-claude-7f3a",
+    "kind": "network_rule",
+    "host": "10.0.1.3",
+    "port": 38591,
+    "binary": "/usr/bin/curl",
+    "risky": True,
+    "reason": "the sandbox asks to reach 10.0.1.3 on your private network",
+    "status": "pending",
+    "created_at": "2026-09-27T12:02:00Z",
+}
+
+
 def _events(*items: dict[str, Any]) -> list[dict[str, Any]]:
     return list(items)
 
@@ -336,11 +363,133 @@ def test_activity_rows_render_plain_lines() -> None:
     )
     model.view = "activity"
     rows = model.data_table_rows()
-    assert rows[0][2:] == ("✗", "Bash blocked: DC-TOOL-1: deletes your home folder")
+    # A tool block has its own glyph: u lifts only blocked destinations (✗).
+    assert rows[0][2:] == ("⊘", "Bash blocked: DC-TOOL-1: deletes your home folder")
     assert rows[1][2:] == ("✗", "10.0.0.5:22 (private network)")
     assert rows[2][2:] == ("✗", "webhook.site (exfil destination)  (u unblocks)")
     assert rows[3][2:] == ("✓", "registry.npmjs.org")
     assert model.data_table_columns() == ("Time", "Sandbox", "", "Event")
+
+
+# What the daemon sends (manager/egress.go, watch.go, hooks.go).
+PROXY_BLOCK = {
+    "seq": 50,
+    "kind": "egress.blocked",
+    "sandbox": "myapp-claude-7f3a",
+    "host": "webhook.site",
+    "category": "webhook_catcher",
+    "reason": "Webhook catchers record every request sent to them for whoever holds the URL, "
+    "a common exfiltration sink.",
+    "unblockable": True,
+    "message": "✗ webhook.site (webhook_catcher)",
+}
+OPENSHELL_BLOCK = {
+    "seq": 51,
+    "kind": "egress.blocked",
+    "sandbox": "myapp-claude-7f3a",
+    "host": "www.iana.org",
+    "reason": "transparent_tcp_policy_denied",
+    "message": "✗ www.iana.org (direct connection denied by OpenShell)",
+}
+TOOL_BLOCK = {
+    "seq": 52,
+    "kind": "tool.blocked",
+    "sandbox": "myapp-claude-7f3a",
+    "tool": "Bash",
+    "reason": "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. "
+    "Try another approach that does not need this action, or ask the user to review the DefenseClaw policy.",
+    "message": "✗ Bash blocked by DefenseClaw: Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: ...",
+}
+
+
+def test_feed_rows_use_plain_labels_and_no_advice_for_the_agent() -> None:
+    model = _model()
+    model.add_events([PROXY_BLOCK, OPENSHELL_BLOCK, TOOL_BLOCK])
+    model.view = "activity"
+    events = [row[3] for row in model.data_table_rows()]
+    assert events == [
+        "Bash blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command",
+        "www.iana.org (no OpenShell rule allows it)",
+        "webhook.site (webhook catcher)  (u unblocks)",
+    ]
+    assert all("_" not in event and "ask the user" not in event for event in events)
+    model.cursor = 0
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Reason"] == "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
+    model.cursor = 2
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Category"] == "webhook catcher" and pairs["Reason"].startswith("Webhook catchers record")
+    # The unblock dialog says why the destination was blocked.
+    assert model.block_explanation("myapp-claude-7f3a", "webhook.site").startswith("Webhook catchers record")
+    assert model.block_explanation("myapp-claude-7f3a", "www.iana.org") == "no OpenShell rule allows it"
+    # The sandbox's last tool block reads the same.
+    model.set_snapshot(
+        STATUS, [{**RUNNING, "hooks": {"tool_calls": 3, "tool_blocked": 1, "last_blocked": TOOL_BLOCK["reason"]}}], []
+    )
+    model.view = "sandboxes"
+    model.cursor = 0
+    assert dict(model.detail_pairs()[1])["Last tool block"] == (
+        "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_unblock_dialog_says_why_it_was_blocked(fetch, monkeypatch) -> None:
+    app = DefenseClawTUI(config=_config())
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return None
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        app.sandbox_model.add_events([PROXY_BLOCK])
+        await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
+    assert screens[0].subtitle == (
+        "DefenseClaw blocked this destination: Webhook catchers record every request sent to them "
+        "for whoever holds the URL, a common exfiltration sink."
+    )
+
+
+def test_tool_blocks_do_not_offer_unblock() -> None:
+    model = _model()
+    model.add_events([PROXY_BLOCK, TOOL_BLOCK])
+    model.view = "activity"
+    model.cursor = 0  # the tool block
+    assert model.unblock_offered() is False
+    assert "u unblock" not in model.keys_line()
+    action = model.handle_key("u")
+    assert action.kind == "hint" and "guardrail rules decide tool calls" in action.hint
+    assert "defenseclaw policy" in dict(model.detail_pairs()[1])["Decided by"]
+    model.cursor = 1  # the blocked destination
+    assert model.unblock_offered() is True
+    assert "u unblock" in model.keys_line()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_block_detail_offers_no_unblock_key(fetch, monkeypatch) -> None:
+    app = DefenseClawTUI(config=_config())
+    shown: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        shown.append(screen)
+        return None
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        app.sandbox_model.add_events([PROXY_BLOCK, TOOL_BLOCK])
+        app.sandbox_model.view = "activity"
+        app.sandbox_model.cursor = 0
+        app.sandbox_model.detail_open = True
+        await app._open_sandbox_detail()  # noqa: SLF001
+        app.sandbox_model.cursor = 1
+        app.sandbox_model.detail_open = True
+        await app._open_sandbox_detail()  # noqa: SLF001
+    assert (shown[0].keys, shown[0].keys_hint) == (frozenset(), "Keys: Esc close")
+    assert shown[1].keys == frozenset({"u"}) and "u unblock" in shown[1].keys_hint
 
 
 # --- keys --------------------------------------------------------------------
@@ -390,8 +539,9 @@ def test_ask_keys() -> None:
     first = model.handle_key("a")
     assert first.kind == "view" and model.view == "asks" and "a to approve" in first.hint
     assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1")
-    assert model.handle_key("A").always is True
     assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-1")
+    model.set_snapshot(STATUS, [RUNNING], [PUBLIC_ASK])
+    assert model.handle_key("A").always is True
     # r refreshes in every view, as in every other panel; it never rejects.
     assert model.handle_key("r").kind == "refresh"
     model.view = "sandboxes"
@@ -420,7 +570,11 @@ def test_no_asks_text_holds_for_every_pack() -> None:
     model.view = "asks"
     text = model.empty_state()
     assert text.startswith("No asks are waiting.") and "Only" not in text
-    assert "localhost ports" in text and "balanced" in text and "strict" in text
+    assert "private-network address" in text and "balanced" in text and "strict" in text
+    # A port on this machine drafts no proposal (OpenShell denies the mapping
+    # itself), so the text must not promise that one asks (R2-47).
+    assert "localhost ports" not in text and "Ports on this machine never ask" in text
+    assert "--host-port" in text
 
 
 @pytest.mark.parametrize(
@@ -482,6 +636,9 @@ def test_empty_panel_has_no_selection_hint() -> None:
 def test_sandbox_table_rows() -> None:
     model = _model()
     assert model.data_table_columns()[:6] == ("Name", "Phase", "Harness", "Pack/Profile", "Mode", "Up")
+    # "Tool calls" says what the numbers are (a bare "1/57" under "Tools" did not).
+    assert model.data_table_columns()[8] == "Tool calls"
+    assert model.data_table_columns(compact=True)[5] == "Tool calls"
     row = model.data_table_rows()[1]
     assert row == (
         "myapp-claude-7f3a",
@@ -492,9 +649,11 @@ def test_sandbox_table_rows() -> None:
         "1h02m",
         "23",
         "1",
-        "1/57",
+        "57 (1 blocked)",
         "tamper, nested repo",
     )
+    assert model.data_table_rows(compact=True)[1][5] == "57 (1 blocked)"
+    assert model.data_table_rows()[0][8] == "0"  # fix-tests made no tool call
     model.view = "asks"
     assert model.data_table_rows() == (
         (
@@ -575,8 +734,10 @@ def test_launch_values_build_the_run_argv(tmp_path: Path) -> None:
         str(project),
         f"sandbox run codex in {project}",
     )
+    # The run names the command the user types (sandboxcli.ResolveHarness takes it).
     plain = SandboxLaunchValues(harness="claudecode", folder=str(project), profile="(pack default)").build()
-    assert plain.argv == ("sandbox", "run", "claudecode")
+    assert plain.argv == ("sandbox", "run", "claude")
+    assert plain.display == f"sandbox run claude in {project}"
 
 
 def test_launch_values_refuse_bad_folders(tmp_path: Path, monkeypatch) -> None:
@@ -601,9 +762,16 @@ def test_launch_values_refuse_bad_folders(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_harness_choices_follow_config_and_organization() -> None:
-    assert harness_choices(()) == (("Claude Code", "claudecode"), ("Codex", "codex"))
-    assert harness_choices(("codex",)) == (("Codex", "codex"), ("Claude Code", "claudecode"))
+    # Every harness the Go tree runs (harness.Names()), the defaults first.
+    everything = harness_choices(())
+    assert everything[:2] == (("Claude Code", "claudecode"), ("Codex", "codex"))
+    assert {name for _label, name in everything} == {
+        "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
+        "devin", "hermes", "kiro", "omnigent", "opencode", "openhands",
+    }  # fmt: skip
+    assert harness_choices(("codex",))[:2] == (("Codex", "codex"), ("Claude Code", "claudecode"))
     assert harness_choices((), ("codex",)) == (("Codex", "codex"),)
+    assert harness_choices(("opencode",), ("opencode", "codex"))[0] == ("OpenCode", "opencode")
 
 
 # --- the app -----------------------------------------------------------------
@@ -716,16 +884,72 @@ async def test_unblock_asks_for_the_scope(fetch, monkeypatch, choice, expected) 
 
 @pytest.mark.asyncio
 async def test_always_approve_confirms_first(fetch, monkeypatch) -> None:
+    fetch.approvals = [PUBLIC_ASK]
     app = DefenseClawTUI(config=_config())
-    calls = _Calls({"message": "queued: applies when the agent is idle"})
+    calls = _Calls({"message": "approved; OpenShell applies it once the sandbox's hooks are quiet", "persisted": True})
+    toasts: list[tuple[str, str]] = []
     monkeypatch.setattr(app, "_sandbox_call", calls)
     monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "always"))
-    action = SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1", always=True)
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
+    action = SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2", always=True)
     async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         await app._sandbox_decide(action, approve=True)  # noqa: SLF001
         assert calls.calls == []
         await app._sandbox_decide(action, approve=True)  # noqa: SLF001
-    assert calls.calls == [("decide_sandbox_approval", ("ask-1",), {"approve": True, "always": True})]
+    assert calls.calls == [("decide_sandbox_approval", ("ask-2",), {"approve": True, "always": True})]
+    # Its own confirmation, not the one-time approve's words (R2-56).
+    assert toasts[-1] == (
+        "success",
+        "always allowed www.example.com (saved to openshell.egress.unblocked); "
+        "approved; OpenShell applies it once the sandbox's hooks are quiet",
+    )
+
+
+@pytest.mark.parametrize("raw", [ASK, PRIVATE_ASK, {**PUBLIC_ASK, "allowed_ips": ["10.0.0.0/8"]}])
+def test_always_is_not_offered_for_asks_that_open_one_sandbox_only(raw) -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [raw])
+    model.view = "asks"
+    ask = model.selected_ask()
+    assert ask is not None and ask.always_refusal
+    assert model.always_offered() is False
+    action = model.handle_key("A")
+    assert action.kind == "hint" and "press a to approve once" in action.hint
+    assert "A always" not in model.keys_line()
+    decide = dict(model.detail_pairs()[1])["Decide"]
+    assert decide.startswith("a approve once") and "A always" not in decide
+    assert model.handle_key("a").kind == "approve"
+
+
+def test_always_is_offered_for_a_public_host() -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [PUBLIC_ASK])
+    model.view = "asks"
+    assert model.always_offered() is True
+    assert "A always" in model.keys_line()
+    assert dict(model.detail_pairs()[1])["Decide"] == "a approve · A always approve · x reject"
+
+
+@pytest.mark.asyncio
+async def test_a_private_ask_never_asks_to_confirm_always(fetch, monkeypatch) -> None:
+    fetch.approvals = [PRIVATE_ASK]
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls()
+    toasts: list[tuple[str, str]] = []
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", lambda _screen: pytest.fail("a confirmation was shown"))
+    monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
+    action = SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3", always=True)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_decide(action, approve=True)  # noqa: SLF001
+        app.sandbox_model.view = "asks"
+        app._sync_sandbox_controls()  # noqa: SLF001
+        assert app.query_one("#sandboxes-always").has_class("hidden")
+        assert not app.query_one("#sandboxes-approve").has_class("hidden")
+    assert calls.calls == []
+    assert toasts[-1][0] == "warn" and "press a to approve once" in toasts[-1][1]
 
 
 @pytest.mark.asyncio
@@ -1092,14 +1316,34 @@ def test_u_names_the_organization_policy_when_unblocking_is_refused() -> None:
     # allow_unblock: false makes the daemon report every block as not unblockable.
     model = _model(admin=AdminPolicy(allow_unblock=False))
     model.add_events([{**BLOCKED, "unblockable": False}])
+    # The refusal says what to do next, as the always-approve one does.
+    refusal = (
+        f"Unblocking is {ADMIN_MESSAGE}; ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)."
+    )
     model.cursor = 1
-    assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
+    assert model.handle_key("u").hint == refusal
     model.cursor = 0
-    assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
+    assert model.handle_key("u").hint == refusal
     model.view = "activity"
-    assert model.handle_key("u").hint == f"Unblocking is {ADMIN_MESSAGE}."
-    assert dict(model.detail_pairs()[1])["Unblock"] == ADMIN_MESSAGE
+    assert model.handle_key("u").hint == refusal
+    assert dict(model.detail_pairs()[1])["Unblock"].startswith(ADMIN_MESSAGE + "; ask your DefenseClaw administrator")
     assert ADMIN_MESSAGE in model.block_notice()[2]
+
+
+def test_a_saved_unblock_the_organization_turned_off_says_so() -> None:
+    cfg = SimpleNamespace(
+        openshell=SimpleNamespace(
+            admin=SimpleNamespace(allow_unblock=False, allowed_harnesses=[]),
+            egress=SimpleNamespace(unblocked=["*.webhook.site", "pastebin.com"]),
+        )
+    )
+    model = _model()
+    model.set_config(cfg)
+    model.add_events([{**BLOCKED, "host": "pastebin.com", "unblockable": False}])
+    model.view = "activity"
+    assert model.data_table_rows()[0][3].endswith("(your saved unblock is off: openshell.admin.allow_unblock)")
+    assert model.block_notice()[2].startswith("your saved unblock is off")
+    assert dict(model.detail_pairs()[1])["Unblock"].startswith("your saved unblock is off")
 
 
 def test_hint_bar_keys_fit_one_line_at_80_columns() -> None:
@@ -1238,7 +1482,9 @@ async def test_always_unblock_confirms_and_a_done_unblock_is_no_longer_offered(f
         assert calls.calls == [], "cancelling the confirmation unblocks nothing"
         await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
         assert app.sandbox_model.current_blocks() == ()
-    assert calls.calls == [("unblock_sandbox_egress", ("webhook.site",), {"sandbox": "myapp-claude-7f3a", "always": False})]
+    assert calls.calls == [
+        ("unblock_sandbox_egress", ("webhook.site",), {"sandbox": "myapp-claude-7f3a", "always": False})
+    ]
 
 
 @pytest.mark.asyncio
@@ -1303,3 +1549,284 @@ def test_the_launch_dialog_starts_in_a_sandbox_project(tmp_path: Path, monkeypat
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(home)
     assert app._sandbox_default_folder() == ""  # noqa: SLF001 - never the home folder
+
+
+# --- manual round 2 -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_during_the_handover_never_reaches_the_tui(fetch, monkeypatch) -> None:
+    """R2-46: Ctrl-C at the child's prompt reaches the TUI too (same foreground group).
+
+    asyncio's handler cancels the app's main task on the first one, so the
+    TUI quit once the child ended. While the terminal is handed over the
+    TUI ignores it; at "Press Enter" it returns to the TUI.
+    """
+    import signal
+    import time
+
+    app = DefenseClawTUI(config=_config())
+    ran = _fake_terminal(monkeypatch, app)
+    reached_the_tui: list[int] = []
+    after_prompt_ctrl_c: list[bool] = []
+
+    def child(argv, cwd=None, check=False):
+        ran.append((argv, cwd))
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.05)  # the handler runs here
+        return SimpleNamespace(returncode=0)
+
+    def prompt(_text: str = "") -> str:
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.05)
+        after_prompt_ctrl_c.append(True)
+        return ""
+
+    monkeypatch.setattr(sandbox_panel.subprocess, "run", child)
+    monkeypatch.setattr("builtins.input", prompt)
+    async with app.run_test(size=(160, 44)):
+
+        def tui_handler(signum: int, _frame: Any) -> None:
+            reached_the_tui.append(signum)
+
+        previous = signal.signal(signal.SIGINT, tui_handler)
+        try:
+            code = app._run_sandbox_terminal(SandboxLaunch(("sandbox", "connect", "x"), "/p", "x"))  # noqa: SLF001
+            assert signal.getsignal(signal.SIGINT) is tui_handler, "the TUI's handler is back"
+        finally:
+            signal.signal(signal.SIGINT, previous)
+    assert code == 0 and len(ran) == 1
+    assert reached_the_tui == [], "Ctrl-C reached the TUI's own handler"
+    assert after_prompt_ctrl_c == [], "Ctrl-C at the prompt returns to the TUI"
+
+
+@pytest.mark.asyncio
+async def test_irreversible_confirmations_focus_cancel(fetch, monkeypatch) -> None:
+    """R2-55: pressing the key and Enter must not delete, undo or unblock everywhere."""
+    fetch.approvals = [PUBLIC_ASK]
+    app = DefenseClawTUI(config=_config())
+    screens: list[Any] = []
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        # The unblock scope menu picks "always"; every confirmation is cancelled.
+        return "always" if len(screens) == 1 else "cancel"
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    monkeypatch.setattr(app, "_sandbox_call", _Calls({"result": {"changes": [{"path": "a.txt"}]}}))
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
+        await app._sandbox_delete("docs")  # noqa: SLF001
+        await app._sandbox_undo("myapp-claude-7f3a")  # noqa: SLF001
+        await app._sandbox_decide(  # noqa: SLF001
+            SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2", always=True), approve=True
+        )
+        await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
+    confirmations = {screen.title: screen for screen in screens[1:]}
+    for title in (
+        "Unblock webhook.site in every sandbox?",
+        "Delete docs?",
+        "Undo myapp-claude-7f3a?",
+        "Always allow www.example.com?",
+    ):
+        screen = confirmations[title]
+        assert screen.selected_index is not None, title
+        assert screen.actions[screen.selected_index].action_id == "cancel", title
+    # Stop keeps the sandbox for connect: it keeps its default.
+    assert confirmations["Stop myapp-claude-7f3a?"].selected_index is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_first_menu_answers_enter_with_cancel() -> None:
+    from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
+    from textual.app import App
+
+    results: list[Any] = []
+
+    class Host(App[None]):
+        def on_mount(self) -> None:
+            self.push_screen(
+                ActionMenuScreen(
+                    "Delete x?",
+                    (MenuAction("delete", "Delete", variant="error"), MenuAction("cancel", "Cancel")),
+                    selected_index=1,
+                ),
+                results.append,
+            )
+
+    app = Host()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+    assert results == ["cancel"]
+
+
+def test_the_block_banner_clears_once_the_block_is_resolved_or_old() -> None:
+    """R2-58: an approved ask for the host resolves its blocks; old blocks leave the banner."""
+    model = _model()
+    model.cursor = 1  # myapp-claude-7f3a
+    model.add_events([{**OPENSHELL_BLOCK, "time": "2026-09-28T10:00:00Z"}])
+    now = datetime(2026, 9, 28, 10, 1, tzinfo=timezone.utc)
+    assert model.block_notice(now=now)[:2] == ("✗ www.iana.org (no OpenShell rule allows it)", " in myapp-claude-7f3a")
+    assert model.block_notice(now=now + timedelta(minutes=16)) == ("", "", "")
+    rejected = {
+        "seq": 60,
+        "kind": "approval.resolved",
+        "sandbox": "myapp-claude-7f3a",
+        "approval_id": "ask-9",
+        "host": "www.iana.org",
+        "port": 443,
+        "reason": "rejected",
+        "message": "rejected www.iana.org",
+    }
+    model.add_events([rejected])
+    assert model.block_notice(now=now)[0], "a rejection resolves nothing"
+    model.add_events([{**rejected, "seq": 61, "reason": "operator", "message": "approved www.iana.org"}])
+    assert model.block_notice(now=now) == ("", "", "")
+    model.view = "activity"
+    assert "www.iana.org (no OpenShell rule allows it)  (approved)" in [row[3] for row in model.data_table_rows()]
+
+
+def _holder_fetch(fetch, project: Path) -> None:
+    fetch.sandboxes = [RUNNING, {**STOPPED, "project": str(project), "harness_name": "Claude Code"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("copy", [("sandbox", "run", "claude", "--name", "two", "--copy")]),
+        ("connect", [("sandbox", "connect", "docs")]),
+        ("cancel", []),
+    ],
+)
+async def test_new_run_offers_copy_connect_or_delete_when_the_folder_is_held(
+    fetch, monkeypatch, tmp_path: Path, answer, expected
+) -> None:
+    """R2-57: another sandbox mounting the folder live becomes a choice, not a refusal."""
+    project = tmp_path / "app"
+    project.mkdir()
+    _holder_fetch(fetch, project)
+    app = DefenseClawTUI(config=_config())
+    ran = _fake_terminal(monkeypatch, app, returncode=3)
+    launch = SandboxLaunchValues(harness="claudecode", folder=str(project), name="two").build()
+    screens: list[Any] = []
+    answers = [launch, answer]
+
+    async def push_screen_wait(screen: Any) -> Any:
+        screens.append(screen)
+        return answers.pop(0)
+
+    monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_new_run()  # noqa: SLF001
+    menu = screens[1]
+    assert menu.title == "docs already mounts this folder live"
+    assert [action.action_id for action in menu.actions] == ["copy", "connect", "delete", "cancel"]
+    assert "defenseclaw sandbox connect docs" in menu.actions[1].description
+    assert "defenseclaw sandbox delete docs" in menu.actions[2].description
+    assert [tuple(argv[1:]) for argv, _cwd in ran] == expected
+    if answer == "copy":
+        # The TUI names the run by the command a user would type.
+        assert app.status_text == "defenseclaw sandbox run claude --name two --copy exited 3"
+
+
+@pytest.mark.asyncio
+async def test_new_run_can_delete_the_sandbox_holding_the_folder(fetch, monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    project.mkdir()
+    _holder_fetch(fetch, project)
+    app = DefenseClawTUI(config=_config())
+    ran = _fake_terminal(monkeypatch, app)
+    calls = _Calls({"deleted": True})
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    launch = SandboxLaunchValues(harness="claudecode", folder=str(project)).build()
+    monkeypatch.setattr(app, "push_screen_wait", _screen_answers(launch, "delete", "delete"))
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_new_run()  # noqa: SLF001
+    assert calls.calls == [("delete_sandbox", ("docs",), {})]
+    assert [tuple(argv[1:]) for argv, _cwd in ran] == [("sandbox", "run", "claude")]
+
+
+def test_only_a_live_mount_of_the_same_or_a_nested_folder_holds_it(tmp_path: Path) -> None:
+    project = tmp_path / "app"
+    (project / "sub").mkdir(parents=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    model = SandboxesPanelModel()
+    model.set_snapshot(
+        STATUS, [{**STOPPED, "project": str(project)}, {**COPY, "project": str(other), "workdir_mode": "copy"}], []
+    )
+    assert model.live_mount_holder(str(project)).name == "docs"
+    assert model.live_mount_holder(str(project / "sub")).name == "docs"
+    assert model.live_mount_holder(str(tmp_path)).name == "docs"  # around it
+    assert model.live_mount_holder(str(other)) is None  # a copy holds nothing
+    assert model.live_mount_holder(str(tmp_path / "app2")) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("size", "hidden"), [((80, 24), True), ((99, 30), True), ((120, 30), False)])
+async def test_narrow_terminals_drop_the_button_bar(fetch, size, hidden) -> None:
+    """R2-61: under 100 columns the KEYS line carries the keys and the rows get the room."""
+    app = DefenseClawTUI(config=_config())
+    async with app.run_test(size=size) as pilot:
+        await pilot.press("7")
+        await app._refresh_sandbox_snapshot(render=True)  # noqa: SLF001
+        await pilot.pause()
+        assert app.query_one("#sandboxes-controls").has_class("hidden") is hidden
+        assert "KEYS" in app.hint_text
+
+
+def test_narrow_asks_keep_what_the_reason_adds() -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [PRIVATE_ASK, PUBLIC_ASK])
+    model.view = "asks"
+    assert model.data_table_columns(compact=True) == ("Sandbox", "Destination", "Binary", "Risk", "Reason")
+    assert model.data_table_rows(compact=True) == (
+        ("myapp-claude-7f3a", "www.example.com", "curl", "-", "not on the allowlist"),
+        ("myapp-claude-7f3a", "10.0.1.3:38591", "curl", "risky", "private network"),
+    )
+
+
+def test_hook_tamper_raises_a_toast_and_marks_the_sandbox() -> None:
+    model = _model()
+    notices = model.add_events(
+        [
+            {
+                "seq": 70,
+                "kind": "finding",
+                "sandbox": "myapp-claude-7f3a",
+                "reason": "hook_tamper",
+                "severity": "HIGH",
+                "message": "⚠ hook tamper: Bash ran without a DefenseClaw verdict; "
+                "the sandbox keeps running (hooks.on_tamper: alert)",
+            }
+        ]
+    )
+    assert [n.level for n in notices] == ["error"]
+    assert notices[0].message.startswith("⚠ myapp-claude-7f3a: hook tamper: Bash ran without a DefenseClaw verdict")
+    row = next(row for row in model.rows if row.name == "myapp-claude-7f3a")
+    assert row.alert_badge.startswith("tamper")
+    assert model.alert_notice()[0].startswith("⚠ myapp-claude-7f3a: hook tamper: 2 tool call(s)")
+
+
+def test_an_ask_row_names_what_is_asked() -> None:
+    model = SandboxesPanelModel()
+    model.add_events(
+        [
+            {
+                "seq": 1,
+                "kind": "approval.requested",
+                "sandbox": "x",
+                "host": "www.example.com",
+                "port": 443,
+                "approval_id": "ap_1",
+                "message": "approvals are manual for the strict profile",
+            }
+        ]
+    )
+    assert model.feed[0].summary == "asks to reach www.example.com (approvals are manual for the strict profile)"

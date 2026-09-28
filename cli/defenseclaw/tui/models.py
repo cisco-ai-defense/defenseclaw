@@ -199,3 +199,6 @@ class HintState:
     # The active panel's sub-view, for panels whose keys differ by view
     # (Sandboxes: sandboxes, activity, asks).
     panel_view: str = ""
+    # The panel's own key line when it also depends on the selected row
+    # (Sandboxes: no u on a tool block, no A on a private-network ask).
+    panel_keys: str = ""

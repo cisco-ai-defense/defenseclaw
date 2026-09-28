@@ -83,7 +83,7 @@ class HintEngine:
         if panel == "sandboxes":
             from defenseclaw.tui.services.sandbox_state import sandbox_keys_hint
 
-            return sandbox_keys_hint(state.panel_view or "sandboxes")
+            return state.panel_keys or sandbox_keys_hint(state.panel_view or "sandboxes")
         if panel == "setup":
             return self._setup_hint(state, status)
         if panel in {"first-run", "firstrun"}:
