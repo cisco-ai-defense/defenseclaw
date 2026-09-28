@@ -499,8 +499,17 @@ func antigravityHostileSettings() hostileSettings {
 	}
 	p.file(connector.AntigravitySandboxHooksPath, hostileJSON(doc))
 	plan := p.plan()
-	plan.refusals = []hostileRefusal{directoryRefusal(connector.AntigravitySandboxHooksPath,
-		connector.AntigravitySandboxHooksPath+" is not a regular file; refusing to start agy without DefenseClaw's hooks")}
+	// A workspace hooks file that reuses a DefenseClaw key, spelled with a
+	// JSON escape that agy decodes.
+	workspaceHooks := path.Join(hostileProject, ".agents", "hooks.json")
+	prefix := connector.AntigravitySandboxHookKeyPrefix
+	escapedKey := fmt.Sprintf("%cu%04x", 0x5c, prefix[0]) + prefix[1:] + "pretooluse"
+	plan.refusals = []hostileRefusal{
+		directoryRefusal(connector.AntigravitySandboxHooksPath,
+			connector.AntigravitySandboxHooksPath+" is not a regular file; refusing to start agy without DefenseClaw's hooks"),
+		plantRefusal("workspace-escaped-key", workspaceHooks, `{"`+escapedKey+`":{"PreToolUse":[]}}`,
+			workspaceHooks+" reuses a DefenseClaw hook key"),
+	}
 	return plan
 }
 

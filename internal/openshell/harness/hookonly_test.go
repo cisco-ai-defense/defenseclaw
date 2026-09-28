@@ -19,6 +19,7 @@ package harness
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -378,6 +379,87 @@ func TestAntigravityLauncher(t *testing.T) {
 	}
 	if got := l.run(t, workspace, []string{"HOME=" + home}); got.exit != 2 || got.record != "" {
 		t.Fatalf("workspace hooks reusing a DefenseClaw key: exit %d record %q", got.exit, got.record)
+	}
+}
+
+// jsonEscape spells s with a JSON \u escape for every character.
+func jsonEscape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		fmt.Fprintf(&b, "%cu%04x", 0x5c, r)
+	}
+	return b.String()
+}
+
+// TestAntigravityLauncherRefusesReusedHookKeys plants hooks files agy reads
+// besides the restored global one, each reusing a DefenseClaw hook key the
+// way agy's JSON reader decodes it (literally, with \u escapes, in another
+// letter case, in a file with comments), in the working directory, in
+// --add-dir directories and in plugins. Each must stop the launcher, while
+// hooks files with keys of their own (JSON escapes in their commands
+// included) still start agy.
+func TestAntigravityLauncherRefusesReusedHookKeys(t *testing.T) {
+	if _, err := exec.LookPath("/usr/bin/jq"); err != nil {
+		t.Skip("/usr/bin/jq is required")
+	}
+	prefix := connector.AntigravitySandboxHookKeyPrefix
+	key := prefix + "pretooluse"
+	escaped := jsonEscape(prefix[:1]) + key[1:]
+	doc := func(k string) string { return `{"` + k + `":{"PreToolUse":[]}}` }
+	type planting struct {
+		rel     string // under the workspace (w/), the --add-dir directory (a/) or HOME (h/)
+		data    string
+		args    []string
+		refused bool
+	}
+	for name, tc := range map[string]planting{
+		"literal key":            {rel: "w/.agents/hooks.json", data: doc(key), refused: true},
+		"escaped key":            {rel: "w/.agents/hooks.json", data: doc(escaped), refused: true},
+		"fully escaped key":      {rel: "w/.agents/hooks.json", data: doc(jsonEscape(key)), refused: true},
+		"upper-case key":         {rel: "w/.agents/hooks.json", data: doc(strings.ToUpper(key)), refused: true},
+		"second document":        {rel: "w/.agents/hooks.json", data: doc("lint") + "\n" + doc(escaped), refused: true},
+		"commented literal key":  {rel: "w/.agents/hooks.json", data: "{\n  // mine\n  \"" + key + "\": {\"PreToolUse\": []},\n}\n", refused: true},
+		"commented escape":       {rel: "w/.agents/hooks.json", data: "{\n  // mine\n  \"" + escaped + "\": {\"PreToolUse\": []},\n}\n", refused: true},
+		"add-dir":                {rel: "a/.agents/hooks.json", data: doc(escaped), args: []string{"--add-dir", "{a}"}, refused: true},
+		"add-dir inline":         {rel: "a/.agents/hooks.json", data: doc(key), args: []string{"--add-dir={a}"}, refused: true},
+		"add-dir single dash":    {rel: "a/.agents/hooks.json", data: doc(key), args: []string{"-add-dir", "{a}"}, refused: true},
+		"workspace plugin":       {rel: "w/.agents/plugins/p/hooks.json", data: doc(escaped), refused: true},
+		"add-dir plugin":         {rel: "a/.agents/plugins/p/hooks/hooks.json", data: doc(key), args: []string{"--add-dir", "{a}"}, refused: true},
+		"user plugin":            {rel: "h/.gemini/config/plugins/.p/hooks/hooks.json", data: doc(escaped), refused: true},
+		"cli hooks":              {rel: "h/.gemini/antigravity-cli/hooks.json", data: doc(key), refused: true},
+		"own key":                {rel: "w/.agents/hooks.json", data: `{"lint":{"PostToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"make lint ` + jsonEscape("&&") + ` true"}]}]}}`},
+		"commented own key":      {rel: "w/.agents/hooks.json", data: "{\n  // mine\n  \"lint\": {\"PostToolUse\": []},\n}\n"},
+		"add-dir without hooks":  {rel: "a/README", data: "x", args: []string{"--add-dir", "{a}"}},
+		"add-dir plugin own key": {rel: "a/.agents/plugins/p/hooks.json", data: doc("lint"), args: []string{"--add-dir", "{a}"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := newHookOnlyLauncher(t, Antigravity)
+			roots := map[string]string{"w": t.TempDir(), "a": t.TempDir(), "h": t.TempDir()}
+			for k, dir := range roots {
+				resolved, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				roots[k] = resolved
+			}
+			root, rel, _ := strings.Cut(tc.rel, "/")
+			file := filepath.Join(roots[root], filepath.FromSlash(rel))
+			writeFile(t, file, []byte(tc.data))
+			args := []string{"-p", "hi"}
+			for _, a := range tc.args {
+				args = append(args, strings.ReplaceAll(a, "{a}", roots["a"]))
+			}
+			got := l.run(t, roots["w"], []string{"HOME=" + roots["h"]}, args...)
+			if !tc.refused {
+				if got.exit != 0 || got.record == "" {
+					t.Fatalf("refused: exit %d %s", got.exit, got.output)
+				}
+				return
+			}
+			if got.exit != 2 || got.record != "" || !strings.Contains(got.output, file+" ") || !strings.Contains(got.output, "refusing to start agy") {
+				t.Fatalf("exit %d record %q output %q, want a refusal naming %s", got.exit, got.record, got.output, file)
+			}
+		})
 	}
 }
 

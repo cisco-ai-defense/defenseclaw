@@ -28,6 +28,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
@@ -437,6 +438,80 @@ func TestOpenCodeHostileRefusalsStopTheLauncher(t *testing.T) {
 			}
 			if err := os.Remove(root + r.file); err != nil {
 				t.Fatal(err)
+			}
+		})
+	}
+	if data, _ := os.ReadFile(root + hostileRanLog); len(data) != 0 {
+		t.Fatalf("planted code ran: %s", data)
+	}
+}
+
+// TestAntigravityHostileRefusalsStopTheLauncher plants each of the
+// Antigravity plan's refusals, relocated under a temp dir, and starts the
+// image's real agy launcher (the binary replaced by a stub) the way the
+// probe does: every planting, the workspace hooks key spelled with a JSON
+// escape among them, must stop it with the refusal the probe greps for.
+func TestAntigravityHostileRefusalsStopTheLauncher(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/jq"); err != nil {
+		t.Skip("/usr/bin/jq is required")
+	}
+	root := relocatedHostileSetup(t, "antigravity")
+	plan := hostileSettingsPlans["antigravity"]
+	if len(plan.refusals) != 2 {
+		t.Fatalf("refusals = %+v", plan.refusals)
+	}
+	relocate := strings.NewReplacer("'/sandbox/", "'"+root+"/sandbox/", "/work/", root+"/work/")
+	stub := filepath.Join(root, "agy-stub")
+	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho agy-started\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(root, "canonical-hooks.json")
+	if err := os.WriteFile(canonical, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := strings.NewReplacer("/usr/local/bin/agy", stub, connector.AntigravitySandboxCanonicalHooksPath, canonical).
+		Replace(string(harness.Antigravity.Launcher().Data))
+	launcher := filepath.Join(root, "antigravity-launch")
+	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := func() (int, string) {
+		t.Helper()
+		cmd := exec.Command(launcher, "-p", builtinAllowPrompt)
+		cmd.Dir = root + hostileProject
+		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root + "/sandbox"}
+		out, err := cmd.CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), string(out)
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return 0, string(out)
+	}
+	if code, out := start(); code != 0 || !strings.Contains(out, "agy-started") {
+		t.Fatalf("the plan's settings alone stopped the launcher: exit %d\n%s", code, out)
+	}
+	for _, r := range plan.refusals {
+		t.Run(r.label, func(t *testing.T) {
+			if !strings.Contains(r.setup, r.file) || !strings.Contains(r.message, r.file) {
+				t.Fatalf("refusal %+v does not plant and name its file", r)
+			}
+			if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(r.setup)).CombinedOutput(); err != nil {
+				t.Fatalf("setup: %v\n%s", err, out)
+			}
+			code, out := start()
+			if want := root + r.message; code == 0 || strings.Contains(out, "agy-started") || !strings.Contains(out, want) {
+				t.Fatalf("exit %d, want a refusal saying %q:\n%s", code, want, out)
+			}
+			cleanup := "rm -rf " + shQuote(r.file) + "\n"
+			if r.cleanup != "" {
+				cleanup = r.cleanup
+			}
+			if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(cleanup)).CombinedOutput(); err != nil {
+				t.Fatalf("cleanup: %v\n%s", err, out)
+			}
+			if code, out := start(); code != 0 || !strings.Contains(out, "agy-started") {
+				t.Fatalf("after the cleanup: exit %d\n%s", code, out)
 			}
 		})
 	}

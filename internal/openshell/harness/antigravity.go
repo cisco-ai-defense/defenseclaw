@@ -102,7 +102,7 @@ var Antigravity = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"restore ~/.gemini/config/hooks.json from the root-owned canonical copy (an edit made during a session is undone at the next start)",
-		"refuse to start when the workspace's .agents/hooks.json reuses a DefenseClaw hook key",
+		"refuse to start when a hooks.json agy adds to the global one (the workspace's and every --add-dir directory's .agents/hooks.json, their and the user's plugins', ~/.gemini/antigravity-cli/hooks.json) reuses a DefenseClaw hook key, as JSON decodes it",
 		"select the gemini model provider in ~/.gemini/antigravity-cli/settings.json when GEMINI_API_KEY is set (an API key skips the Google sign-in)",
 	},
 })
@@ -152,22 +152,74 @@ func antigravityInstallSteps(version string) ([]InstallStep, error) {
 // AntigravityLauncherPath is the in-image Antigravity launcher.
 const AntigravityLauncherPath = LauncherDir + "/antigravity-launch"
 
+// antigravityHookKeyGuard refuses to start agy while a hooks file it reads
+// besides the restored global one carries a DefenseClaw hook key, which
+// could take the place of DefenseClaw's hook group: the .agents/hooks.json
+// of the working directory and of every --add-dir directory (agy parses Go
+// flags: one or two dashes, the value next or after "="), the hooks.json
+// files of the plugins in their .agents/plugins and in
+// ~/.gemini/config/plugins (up to three directories deep), and
+// ~/.gemini/antigravity-cli/hooks.json, the other hooks path the pinned
+// binary names.
+//
+// Keys are compared as agy decodes them: jq reads each file as JSON, so a
+// key that spells the prefix with \u escapes is caught like a literal one
+// (in any letter case). A file jq cannot parse, such as JSON with comments
+// or trailing commas, which agy's reader accepts, is searched byte by byte:
+// a JSON key can spell the prefix only literally or with \u escapes, so the
+// file is refused when it names the prefix or holds an escape.
+var antigravityHookKeyGuard = `ag_prefix=` + shellQuote(connector.AntigravitySandboxHookKeyPrefix) + `
+ag_files=("$workspace/.agents/hooks.json" "$home/.gemini/antigravity-cli/hooks.json")
+ag_plugins=("$workspace/.agents/plugins" "$home/.gemini/config/plugins")
+ag_prev=""
+for ag_arg in "$@"; do
+  ag_dir=""
+  case "$ag_prev" in -add-dir|--add-dir) ag_dir="$ag_arg" ;; esac
+  case "$ag_arg" in -add-dir=*|--add-dir=*) ag_dir="${ag_arg#*=}" ;; esac
+  if [ -n "$ag_dir" ]; then
+    ag_files+=("$ag_dir/.agents/hooks.json")
+    ag_plugins+=("$ag_dir/.agents/plugins")
+  fi
+  ag_prev="$ag_arg"
+done
+shopt -s dotglob
+for ag_dir in "${ag_plugins[@]}"; do
+  [ -d "$ag_dir" ] || continue
+  for ag_file in "$ag_dir"/*/hooks.json "$ag_dir"/*/*/hooks.json "$ag_dir"/*/*/*/hooks.json; do
+    [ -f "$ag_file" ] && ag_files+=("$ag_file")
+  done
+done
+shopt -u dotglob
+for ag_file in "${ag_files[@]}"; do
+  [ -f "$ag_file" ] || continue
+  /usr/bin/jq -e -s --arg p "$ag_prefix" 'any(.[] | objects | keys[]; ascii_downcase | startswith($p))' "$ag_file" >/dev/null 2>&1
+  case $? in
+    0) ag_reason="reuses a DefenseClaw hook key" ;;
+    1) continue ;;
+    *)
+      LC_ALL=C /usr/bin/grep -aqiF "$ag_prefix" "$ag_file" 2>/dev/null || LC_ALL=C /usr/bin/grep -aqF '\u' "$ag_file" 2>/dev/null || continue
+      ag_reason="is not plain JSON and names a DefenseClaw hook key or holds a \\u escape that could spell one"
+      ;;
+  esac
+  echo "defenseclaw: $ag_file $ag_reason and could replace DefenseClaw's hooks; refusing to start agy" >&2
+  exit 2
+done
+unset ag_prefix ag_files ag_plugins ag_prev ag_arg ag_dir ag_file ag_reason
+`
+
 var antigravityLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v3
 # DefenseClaw Antigravity launcher (OpenShell sandbox images, root-owned).
 # agy has no managed hook tier: its global hooks live in
 # ~/.gemini/config/hooks.json, which this restores from the root-owned
-# canonical copy before every start. A workspace .agents/hooks.json that
-# reuses a DefenseClaw hook key is refused. With GEMINI_API_KEY set it
-# selects agy's gemini model provider, then execs the pinned agy.
+# canonical copy before every start. A workspace, --add-dir or plugin
+# hooks.json that reuses a DefenseClaw hook key is refused. With
+# GEMINI_API_KEY set it selects agy's gemini model provider, then execs the
+# pinned agy.
 set -u
 ` + launcherPreamble + `home="${HOME:-/sandbox}"
 workspace="$(pwd -P 2>/dev/null || pwd)"
-if [ -f "$workspace/.agents/hooks.json" ] && /usr/bin/grep -qF ` + shellQuote(`"`+connector.AntigravitySandboxHookKeyPrefix) + ` "$workspace/.agents/hooks.json" 2>/dev/null; then
-  echo "defenseclaw: $workspace/.agents/hooks.json reuses a DefenseClaw hook key and could replace DefenseClaw's hooks; refusing to start agy" >&2
-  exit 2
-fi
-` + restoreUserHooksScript("agy", connector.AntigravitySandboxCanonicalHooksPath, "$home/.gemini/config", "$home/.gemini/config/hooks.json",
+` + antigravityHookKeyGuard + restoreUserHooksScript("agy", connector.AntigravitySandboxCanonicalHooksPath, "$home/.gemini/config", "$home/.gemini/config/hooks.json",
 	"$home/.gemini", "$home/.gemini/config", "$home/.gemini/config/hooks.json") + `
 # An API key skips the Google sign-in only with the gemini model provider.
 settings="$home/.gemini/antigravity-cli/settings.json"
