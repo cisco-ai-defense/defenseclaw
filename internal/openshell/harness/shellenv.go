@@ -123,14 +123,223 @@ if [ "$#" -eq 0 ]; then
 fi
 ` + launcherPreamble + shimPathScript + launcherExec(`"$@"`)
 
+// supervisorScript is the Python supervisor that resumes a stopped harness.
+// See launcherJobControl for when it runs.
+const supervisorScript = `#!/usr/bin/python3 -I -S
+"""DefenseClaw sandbox harness supervisor for orphaned process groups.
+
+When openshell sandbox exec --tty starts a launcher as a session leader whose
+parent is outside the session (orphaned process group), the kernel discards
+SIGTSTP sent by a TUI that suspends itself. This supervisor forks the harness
+into its own process group, makes it the terminal's foreground group, and
+resumes it when it stops.
+
+This supervisor is invoked only when stdin/stdout/stderr are a terminal and
+the launcher's process group is orphaned (checked in the launcher shell code).
+For headless runs and sessions under a job-control shell, the launcher execs
+the harness directly.
+
+The sandbox's seccomp filter (OpenShell 0.1.1) blocks kill() when the target
+is a process group (negative pid or zero), so this supervisor finds group
+members by scanning /proc and signals each pid individually.
+"""
+
+import os
+import signal
+import sys
+import time
+
+# Signal handling: ignore job-control signals for the supervisor itself.
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+signal.signal(signal.SIGTTIN, signal.SIG_IGN)
+signal.signal(signal.SIGTSTP, signal.SIG_IGN)
+
+# Parse arguments: command and its args.
+if len(sys.argv) < 2:
+    sys.exit(2)
+
+command = sys.argv[1:]
+child_pid = None
+child_pgrp = None
+
+
+def find_pgrp_members(pgrp):
+    """Find all PIDs in the given process group by scanning /proc."""
+    members = []
+    try:
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f'/proc/{entry}/stat', 'r') as f:
+                    stat = f.read()
+                    # Format: pid (comm) state ppid pgrp ...
+                    # Find the comm part (enclosed in parentheses) and skip it.
+                    close_paren = stat.rfind(')')
+                    if close_paren == -1:
+                        continue
+                    # After the comm: state, ppid, pgrp, ...
+                    fields = stat[close_paren + 2:].split()
+                    if len(fields) < 3:
+                        continue
+                    pid_pgrp = int(fields[2])
+                    if pid_pgrp == pgrp:
+                        members.append(int(entry))
+            except (IOError, OSError, ValueError):
+                # Process may have exited or we can't read it.
+                continue
+    except (IOError, OSError):
+        pass
+    return members
+
+
+def send_signal_to_group(pgrp, sig):
+    """Send signal to all members of a process group (individual kill calls).
+
+    The group's leader, the harness itself, is always signalled first."""
+    members = find_pgrp_members(pgrp)
+    for pid in [pgrp] + [p for p in members if p != pgrp]:
+        try:
+            os.kill(pid, sig)
+        except (OSError, ProcessLookupError):
+            # Process exited between listing and signaling.
+            pass
+
+
+def forward_signal(signum, frame):
+    """Forward SIGHUP and SIGTERM to the child and its group."""
+    if child_pgrp is not None:
+        send_signal_to_group(child_pgrp, signum)
+
+
+signal.signal(signal.SIGHUP, forward_signal)
+signal.signal(signal.SIGTERM, forward_signal)
+
+# Fork the harness.
+child_pid = os.fork()
+if child_pid == 0:
+    # Child: create a new process group and become the terminal's foreground group.
+    try:
+        os.setpgid(0, 0)
+
+        # Make this process group the terminal's foreground group (fd 0;
+        # /dev/tty cannot be opened in the sandbox). SIGTTOU is still
+        # ignored here, so the call cannot stop the new background group.
+        os.tcsetpgrp(0, os.getpgrp())
+
+        # Restore default signal handlers for job-control signals.
+        signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+        signal.signal(signal.SIGTTIN, signal.SIG_DFL)
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+
+        # Exec the harness.
+        os.execvp(command[0], command)
+    except Exception as e:
+        sys.stderr.write(f"dc_supervisor: child setup failed: {e}\n")
+        sys.exit(1)
+
+# Parent: set the child's process group too, whichever runs first. The
+# group's ID is the child's PID either way.
+child_pgrp = child_pid
+try:
+    os.setpgid(child_pid, child_pid)
+except (OSError, ProcessLookupError):
+    # The child already set it, or has exec'd.
+    pass
+
+# A TUI that suspends itself restores the terminal (canonical mode) and
+# signals its process group, then waits for SIGCONT to take the terminal
+# back. The sandbox refuses a kill() aimed at a process group, so on
+# OpenShell that signal fails, nothing stops, and the harness waits for a
+# SIGCONT forever. The supervisor therefore also watches the terminal: when
+# the harness, as the terminal's foreground group, left raw mode for
+# canonical mode and stays there for SUSPEND_WAIT seconds, it is treated as
+# suspended and resumed. It arms again only once the terminal is raw again.
+SUSPEND_WAIT = 0.5
+POLL = 0.2
+
+
+def terminal_canonical():
+    """Whether the terminal on fd 0 is in canonical (cooked) mode."""
+    try:
+        import termios
+        return bool(termios.tcgetattr(0)[3] & termios.ICANON)
+    except Exception:
+        return None
+
+
+def harness_owns_terminal():
+    try:
+        return os.tcgetpgrp(0) == child_pgrp
+    except OSError:
+        return False
+
+
+def finish(status):
+    """Exit with the harness's status once it ended."""
+    # What it left in its group gets the SIGHUP a session leader's exit
+    # would send its foreground group.
+    send_signal_to_group(child_pgrp, signal.SIGHUP)
+    send_signal_to_group(child_pgrp, signal.SIGCONT)
+    # Try to give the terminal back to the supervisor's group.
+    try:
+        os.tcsetpgrp(0, os.getpgrp())
+    except OSError:
+        pass
+    if os.WIFEXITED(status):
+        sys.exit(os.WEXITSTATUS(status))
+    sys.exit(128 + os.WTERMSIG(status))
+
+
+armed = False       # the harness had the terminal in raw mode
+cooked_since = None  # when it went back to canonical mode
+
+# Main loop: wait for the child to stop or exit, and watch the terminal.
+while True:
+    try:
+        pid, status = os.waitpid(child_pid, os.WUNTRACED | os.WNOHANG)
+    except ChildProcessError:
+        # Child is gone.
+        sys.exit(1)
+
+    if pid == child_pid and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+        finish(status)
+
+    if pid == child_pid and os.WIFSTOPPED(status):
+        # Child stopped (SIGTSTP, SIGTTIN, SIGTTOU, or SIGSTOP).
+        # Re-assert that the child's group is the terminal's foreground group.
+        try:
+            os.tcsetpgrp(0, child_pgrp)
+        except OSError:
+            pass
+        # Send SIGCONT to the child and all members of its process group.
+        send_signal_to_group(child_pgrp, signal.SIGCONT)
+        armed, cooked_since = False, None
+        continue
+
+    canonical = terminal_canonical()
+    if canonical is False and harness_owns_terminal():
+        armed, cooked_since = True, None
+    elif canonical and armed and harness_owns_terminal():
+        now = time.monotonic()
+        if cooked_since is None:
+            cooked_since = now
+        elif now - cooked_since >= SUSPEND_WAIT:
+            send_signal_to_group(child_pgrp, signal.SIGCONT)
+            armed, cooked_since = False, None
+    time.sleep(POLL)
+`
+
 // ShellFiles are the root-owned files every overlay image carries next to
 // the launcher: the login-shell profile fragment, the `sandbox exec` command
-// wrapper and the harness command's shim.
+// wrapper, the harness command's shim, and the supervisor that resumes a
+// stopped harness.
 func (s *Spec) ShellFiles() []connector.SandboxFile {
 	return []connector.SandboxFile{
 		{Path: SandboxProfilePath, Mode: 0o644, Owner: connector.SandboxOwnerRoot, Data: []byte(s.profile())},
 		{Path: SandboxEnvPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(sandboxEnvLauncher)},
 		{Path: s.ShimPath(), Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(s.shim())},
+		{Path: SupervisorPath, Mode: 0o755, Owner: connector.SandboxOwnerRoot, Data: []byte(supervisorScript)},
 	}
 }
 

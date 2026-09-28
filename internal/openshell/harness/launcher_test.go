@@ -77,6 +77,9 @@ func launcherFixture(t *testing.T, spec *Spec, stubBody string) (string, string)
 	// the root-owned templates they restore from are laid out below it.
 	script = strings.ReplaceAll(script, "HOME="+connector.SandboxHomeDir+"\n", "HOME="+dir+"\n")
 	script = strings.ReplaceAll(script, `"`+connector.SandboxLibDir+"/", `"`+dir+connector.SandboxLibDir+"/")
+	// The supervisor is installed below the test directory too.
+	script = strings.ReplaceAll(script, SupervisorPath, filepath.Join(dir, filepath.FromSlash(SupervisorPath)))
+	// Install root-owned artifacts from the provider.
 	for _, file := range artifactsFor(t, spec).Files {
 		if file.Owner != connector.SandboxOwnerRoot || !strings.HasPrefix(file.Path, connector.SandboxLibDir+"/") {
 			continue
@@ -86,6 +89,23 @@ func launcherFixture(t *testing.T, spec *Spec, stubBody string) (string, string)
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(dest, file.Data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Install the ShellFiles (profile, sandbox-env, shim, supervisor).
+	for _, file := range spec.ShellFiles() {
+		if file.Owner != connector.SandboxOwnerRoot || !strings.HasPrefix(file.Path, connector.SandboxLibDir+"/") {
+			continue
+		}
+		dest := filepath.Join(dir, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0o644)
+		if file.Mode&0o111 != 0 {
+			mode = 0o755
+		}
+		if err := os.WriteFile(dest, file.Data, mode); err != nil {
 			t.Fatal(err)
 		}
 	}

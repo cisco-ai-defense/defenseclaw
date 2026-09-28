@@ -46,6 +46,8 @@ const (
 	InstallRootBase = "/opt/defenseclaw-harness"
 	// LauncherDir holds the root-owned in-image launchers.
 	LauncherDir = connector.SandboxLibDir + "/bin"
+	// SupervisorPath is the Python supervisor that resumes a stopped harness.
+	SupervisorPath = LauncherDir + "/dc_supervisor.py"
 	// WorkRoot is where projects are mounted in mount mode.
 	WorkRoot = "/work"
 )
@@ -70,7 +72,9 @@ var launcherScrubbedEnv = []string{"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "
 // launcherPreamble is the environment set-up every launcher runs first:
 // system directories lead PATH, Node's compile cache is off, and the egress
 // proxy is exported (egressEnvScript, which the sandbox's login shells and
-// `sandbox exec` commands run too; see shellenv.go).
+// `sandbox exec` commands run too; see shellenv.go). It also defines
+// dc_launch, which launcherExec starts the harness with
+// (launcherJobControl).
 //
 // Node keeps its compile cache wherever NODE_COMPILE_CACHE (or a harness's
 // own module.enableCompileCache) says, which for the Cursor Agent wrapper is
@@ -84,17 +88,88 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-` + egressEnvScript
+` + egressEnvScript + launcherJobControl
 
-// launcherExec is the launcher's last line: exec command (the pinned binary
-// and its arguments, in shell syntax) without the shell start-up variables.
+// launcherJobControl defines dc_launch COMMAND..., which every launcher
+// ends with: it execs COMMAND, except in a terminal session where nothing
+// could resume a harness that stops itself.
+//
+// A harness TUI handles Ctrl-Z itself: it restores the terminal and stops
+// its process group (Claude Code and OpenCode send SIGTSTP to it and redraw
+// only on SIGCONT; Codex carries on once the signal returns). In an
+// OpenShell sandbox that stop never happens: the seccomp filter refuses any
+// kill() aimed at a process group, and `openshell sandbox exec --tty`
+// starts the launcher as the leader of a new session whose parent, the
+// sandbox supervisor, is outside it, so the harness's process group is
+// orphaned and the kernel would discard the stop too. A harness waiting for
+// SIGCONT then hangs with the terminal in cooked mode (measured on OpenShell
+// 0.1.1 with Claude Code 2.1.156 and OpenCode 1.18.31).
+//
+// When stdin, stdout and stderr are a terminal whose foreground process
+// group is the launcher's, and no ancestor outside that group shares its
+// session (dc_orphaned: the group is orphaned, so no job-control shell is
+// above it), dc_launch execs the root-owned dc_supervisor.py, which forks
+// the harness into its own process group, makes it the terminal's foreground
+// group (tcsetpgrp on fd 0), and loops on waitpid(WUNTRACED). When the
+// harness stops (SIGTSTP, SIGTTIN, SIGTTOU or SIGSTOP), the supervisor
+// re-asserts tcsetpgrp and sends SIGCONT to the child and every member of
+// its process group (scanning /proc/*/stat, individual kill() calls, never
+// killpg, because the sandbox's seccomp filter blocks kill() aimed at a
+// process group). Because the harness's own suspend fails in the sandbox,
+// the supervisor also watches the terminal: when the harness left raw mode
+// for canonical mode and stays there for half a second, it is treated as
+// suspended and sent SIGCONT. The supervisor forwards SIGHUP and SIGTERM it
+// receives and exits with the harness's status (128+n for signals). Ctrl-C
+// (SIGINT) and resizes (SIGWINCH) reach the harness as usual.
+//
+// Under a job-control shell (a `sandbox connect --shell` prompt) Ctrl-Z
+// suspends the harness to that shell as usual, so dc_launch execs COMMAND
+// directly, as it does without a terminal: headless and detached runs keep
+// the launcher's pid for the harness. Without /proc, or when the supervisor
+// is absent, it execs COMMAND too.
+const launcherJobControl = `# A harness TUI stops itself on Ctrl-Z. With no job-control shell above
+# the launcher (openshell sandbox exec --tty), run it under dc_supervisor.py,
+# which resumes it whenever it stops.
+dc_orphaned() {
+  local stat ppid pgrp sid tpgid own_pgrp own_sid rest
+  read -r stat 2>/dev/null </proc/$$/stat || return 1
+  read -r rest ppid own_pgrp own_sid rest tpgid rest <<<"${stat##*) }"
+  [ "$tpgid" = "$own_pgrp" ] || return 1
+  while [ "$ppid" -gt 0 ] 2>/dev/null; do
+    read -r stat 2>/dev/null </proc/$ppid/stat || return 0
+    read -r rest ppid pgrp sid rest <<<"${stat##*) }"
+    if [ "$pgrp" != "$own_pgrp" ]; then
+      [ "$sid" != "$own_sid" ]
+      return
+    fi
+  done
+  return 0
+}
+dc_launch() {
+  if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_orphaned && [ -x ` + SupervisorPath + ` ]; then
+    exec /usr/bin/python3 -I -S ` + SupervisorPath + ` "$@"
+  fi
+  exec "$@"
+}
+`
+
+// launcherExec is the launcher's last line: start command (the pinned
+// binary and its arguments, in shell syntax) without the shell start-up
+// variables, through dc_launch (launcherJobControl), which execs it or, in a
+// terminal session nothing else could resume it in, supervises it.
 func launcherExec(command string) string {
+	return "dc_launch " + launcherEnvCommand(command) + "\n"
+}
+
+// launcherEnvCommand is command run by /usr/bin/env without the shell
+// start-up variables.
+func launcherEnvCommand(command string) string {
 	var b strings.Builder
-	b.WriteString("exec /usr/bin/env")
+	b.WriteString("/usr/bin/env")
 	for _, name := range launcherScrubbedEnv {
 		b.WriteString(" -u " + name)
 	}
-	b.WriteString(" " + command + "\n")
+	b.WriteString(" " + command)
 	return b.String()
 }
 

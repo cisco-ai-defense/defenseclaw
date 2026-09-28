@@ -69,7 +69,17 @@ func TestShellFilesParse(t *testing.T) {
 				t.Errorf("%s %s is not root-owned", name, f.Path)
 			}
 			shells := []string{"/bin/sh"}
-			if strings.HasPrefix(string(f.Data), "#!/bin/bash") {
+			if strings.HasPrefix(string(f.Data), "#!/usr/bin/python3 ") {
+				// The supervisor: check it compiles, when Python is here.
+				shells = nil
+				if _, err := os.Stat("/usr/bin/python3"); err == nil {
+					cmd := exec.Command("/usr/bin/python3", "-I", "-S", "-c", "import sys; compile(sys.stdin.read(), 'dc_supervisor.py', 'exec')")
+					cmd.Stdin = strings.NewReader(string(f.Data))
+					if out, err := cmd.CombinedOutput(); err != nil {
+						t.Errorf("%s %s does not compile: %v\n%s", name, f.Path, err, out)
+					}
+				}
+			} else if strings.HasPrefix(string(f.Data), "#!/bin/bash") {
 				shells = []string{"/bin/bash"}
 				if !strings.HasPrefix(string(f.Data), "#!/bin/bash -p\n") {
 					t.Errorf("%s %s must run under bash -p", name, f.Path)

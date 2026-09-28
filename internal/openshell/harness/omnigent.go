@@ -293,7 +293,7 @@ var omnigentReuseGuard = `if [ -d /proc/self ]; then
   og_records="$(og_foreign)"
   if [ -n "$og_records" ]; then
     echo "defenseclaw: stopping the OmniGent server or host daemon that was not started with DefenseClaw's configuration" >&2
-    ` + strings.TrimSuffix(strings.TrimPrefix(launcherExec(`/usr/local/bin/omnigent stop --force`), "exec "), "\n") + ` </dev/null >/dev/null 2>&1
+    ` + launcherEnvCommand(`/usr/local/bin/omnigent stop --force`) + ` </dev/null >/dev/null 2>&1
     for f in $(og_foreign); do
       /bin/rm -f "$f" "${f%.pid}.sig" "${f%.pid}.logpath" 2>/dev/null
     done

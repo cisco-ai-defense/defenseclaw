@@ -71,7 +71,8 @@ import (
 //   - hook tamper during a live TUI session: a PostToolUse for a harmless
 //     marker call whose PreToolUse never reached DefenseClaw raises
 //     hook_tamper, and the session keeps working;
-//   - Ctrl-Z leaves the TUI running, /exit and Ctrl-C end the session with the
+//   - Ctrl-Z: Codex suspends itself and the launcher brings it straight back
+//     (nothing stays stopped); /exit and Ctrl-C end the session with the
 //     summary, and the keep/undo prompt shows the diff and undoes the edit;
 //   - --safe keeps Codex's approval prompt (and PermissionRequest), which the
 //     skip-permissions run does not show for the same command;
@@ -402,20 +403,32 @@ func (x *tuiCodex) tamper() {
 	t.Logf("hook tamper: %q (tampered %d → %d)", ev.Message, before.Tampered, after.Tampered)
 }
 
-// ctrlZ: Codex's TUI handles Ctrl-Z in the sandbox terminal; it neither
-// suspends the session nor leaves the terminal hanging.
+// jobNotice is a shell's job-status line ("[1]+  Stopped  codex").
+var jobNotice = regexp.MustCompile(`\[\d+\][+-]? +(Stopped|Running|Done)`)
+
+// ctrlZ: Codex's TUI suspends itself on Ctrl-Z (it restores the terminal and
+// stops its process group); the launcher's job control brings it straight
+// back to the foreground, so nothing in the sandbox stays stopped and the
+// session carries on.
 func (x *tuiCodex) ctrlZ() {
+	t := x.t
 	m := x.find("yolo")
 	m.keys("C-z")
-	// Codex may redraw its screen after the key; text typed during the
+	// Codex redraws its screen when it comes back; text typed during the
 	// redraw is lost (live: the composer came back empty), so the prompt
 	// waits until the composer is back and the screen stops changing.
 	last := ""
-	m.waitFor(30*time.Second, "the composer to settle after Ctrl-Z", func(s string) bool {
+	screen := m.waitFor(30*time.Second, "the composer to settle after Ctrl-Z", func(s string) bool {
 		settled := s == last && strings.Contains(lastLines(s, 8), "› ")
 		last = s
 		return settled
 	})
+	if jobNotice.MatchString(screen) {
+		t.Fatalf("the screen shows a job notice after Ctrl-Z:\n%s", screen)
+	}
+	if got := x.exec(x.get(x.yolo), 30*time.Second, true, "sh", "-c", "ps -eo stat=,args= | grep '^T' || true"); strings.TrimSpace(got.stdout) != "" {
+		t.Fatalf("processes stayed stopped after Ctrl-Z:\n%s", got.stdout)
+	}
 	x.prompt(m, x.yolo, "Say hello.", "DCE2E-TURN-DONE default", 2*time.Minute)
 	m.save("ctrl-z")
 }
