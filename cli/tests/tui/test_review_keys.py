@@ -102,3 +102,17 @@ async def test_help_sheet_scrolls_to_its_end_at_80x24(tmp_path) -> None:
         await pilot.press("end")
         await pilot.pause()
         assert "Press ? again to close" in screen_text(app)
+
+
+async def test_shift_d_runs_the_background_doctor_on_alerts(tmp_path) -> None:
+    app = snapshot_app(tmp_path)
+    calls: list[str] = []
+    app.action_run_diagnose = lambda: calls.append("diagnose")  # type: ignore[method-assign]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("alerts")
+        await pilot.pause()
+        await pilot.press("D")
+        await pilot.pause()
+        assert calls == ["diagnose"]
+        assert len(app.screen_stack) == 1

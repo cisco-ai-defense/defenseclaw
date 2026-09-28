@@ -14056,7 +14056,10 @@ def _panel_key(event: events.Key) -> str:
         # ``T`` Tools panel vs ``t`` activity transcript). Anything
         # outside this set is lowercased so global vim-style shortcuts
         # ignore Shift/CapsLock state.
-        if event.character in {"A", "C", "E", "G", "J", "M", "N", "R", "S", "T", "V", "X"}:
+        # ``D`` (background doctor) and ``Y`` (copy last output) are global
+        # bindings: folding them to ``d``/``y`` let Alerts turn Shift+D into
+        # "dismiss alert" and Overview into a foreground doctor preview.
+        if event.character in {"A", "C", "D", "E", "G", "J", "M", "N", "R", "S", "T", "V", "X", "Y"}:
             return event.character
         return event.character.lower()
     return event.key
