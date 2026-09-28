@@ -2617,9 +2617,6 @@ func rollbackSetupTransactionWithRuntime(
 		}
 	}
 	restoreRuntime := func(restoreStoppedFreshRuntime bool) error {
-		if !restoreServices.Gateway && !restoreServices.Watchdog {
-			return nil
-		}
 		// A successful fresh-install rollback deliberately leaves no runtime to
 		// restore. If file rollback failed, however, the transaction-owned
 		// payload is still present and services stopped above must be restarted
@@ -2628,10 +2625,18 @@ func rollbackSetupTransactionWithRuntime(
 			return nil
 		}
 		// An enterprise deployment installed since the operation began owns
-		// the hook port now. Leave the restored per-user runtime stopped; its
-		// gateway start would be refused and hold the journal open.
-		if refusal := refuseRuntimeRestoreBesideEnterprise(); refusal != nil {
-			reportRuntimeRestoreSkipped(refusal)
+		// the hook port now. Leave the restored per-user runtime stopped and
+		// remove its exact-owned logon start, even if no service was running.
+		if restoreServices.Gateway || restoreServices.Watchdog || transaction.PreviousAutoStart.Existed {
+			if refusal := refuseRuntimeRestoreBesideEnterprise(); refusal != nil {
+				reportRuntimeRestoreSkipped(refusal)
+				if err := disableAutoStartOnEnterpriseRollback(currentGateway); err != nil {
+					return fmt.Errorf("disable per-user gateway auto-start beside enterprise service: %w", err)
+				}
+				return nil
+			}
+		}
+		if !restoreServices.Gateway && !restoreServices.Watchdog {
 			return nil
 		}
 		gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")

@@ -29,6 +29,14 @@ var refuseRuntimeRestoreBesideEnterprise = func() error {
 	return winenterprise.RefusePerUser("restart its gateway")
 }
 
+// Only the exact-owned per-user Run value may be removed after an enterprise
+// service appears during rollback. Keeping it would restart a restored older
+// gateway at the next logon, even though the current rollback left it stopped.
+var disableAutoStartOnEnterpriseRollback = func(gatewayPath string) error {
+	_, _, err := configureGatewayAutoStart(gatewayPath, false)
+	return err
+}
+
 // setupNoticeOutput receives notices about steps Setup skipped on purpose.
 var setupNoticeOutput io.Writer = os.Stderr
 

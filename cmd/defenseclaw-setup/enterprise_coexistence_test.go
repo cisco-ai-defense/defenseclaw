@@ -41,11 +41,14 @@ func TestRunInstallRefusesBesideEnterpriseBeforeAnyStateChange(t *testing.T) {
 func stubRuntimeRestoreRefusal(t *testing.T, refusal error) *bytes.Buffer {
 	t.Helper()
 	previousRefusal, previousOutput := refuseRuntimeRestoreBesideEnterprise, setupNoticeOutput
+	previousDisable := disableAutoStartOnEnterpriseRollback
 	notices := &bytes.Buffer{}
 	refuseRuntimeRestoreBesideEnterprise = func() error { return refusal }
+	disableAutoStartOnEnterpriseRollback = func(string) error { return nil }
 	setupNoticeOutput = notices
 	t.Cleanup(func() {
 		refuseRuntimeRestoreBesideEnterprise, setupNoticeOutput = previousRefusal, previousOutput
+		disableAutoStartOnEnterpriseRollback = previousDisable
 	})
 	return notices
 }
@@ -59,6 +62,11 @@ func stubRuntimeRestoreRefusal(t *testing.T, refusal error) *bytes.Buffer {
 func TestQuiescingRecoveryLeavesPerUserRuntimeStoppedBesideEnterprise(t *testing.T) {
 	refusal := errors.New("enterprise deployment present")
 	notices := stubRuntimeRestoreRefusal(t, refusal)
+	autoStartDisabled := false
+	disableAutoStartOnEnterpriseRollback = func(string) error {
+		autoStartDisabled = true
+		return nil
+	}
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	previous := testInstallState(
 		installRoot,
@@ -94,7 +102,6 @@ func TestQuiescingRecoveryLeavesPerUserRuntimeStoppedBesideEnterprise(t *testing
 		Rollback: func(got setupTransaction) error {
 			return rollbackSetupTransactionWithRuntime(
 				got,
-				func(string, string) error { return nil },
 				func(string, string) (serviceState, error) { return serviceState{}, nil },
 				func(string, string) error { return nil },
 				func(setupTransaction) error { return nil },
@@ -116,6 +123,9 @@ func TestQuiescingRecoveryLeavesPerUserRuntimeStoppedBesideEnterprise(t *testing
 	}
 	if phase != setupPhaseComplete {
 		t.Fatalf("journal phase = %q, want complete", phase)
+	}
+	if !autoStartDisabled {
+		t.Fatal("rollback left the per-user gateway logon auto-start enabled")
 	}
 	assertInstallVersion(t, installRoot, transaction, previous.Version)
 	assertPathAbsent(t, transaction.StagingPath)
@@ -280,7 +290,6 @@ func TestRollbackRestoresPerUserRuntimeWithoutEnterpriseDeployment(t *testing.T)
 	var restored serviceState
 	err := rollbackSetupTransactionWithRuntime(
 		transaction,
-		func(string, string) error { return nil },
 		func(string, string) (serviceState, error) { return serviceState{}, nil },
 		func(string, string) error { return nil },
 		func(setupTransaction) error { return nil },

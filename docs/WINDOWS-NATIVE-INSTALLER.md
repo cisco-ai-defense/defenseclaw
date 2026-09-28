@@ -317,8 +317,11 @@ Windows service exists), per-user releases that include the enterprise
 coexistence check refuse to run beside it. The refusal covers `install.ps1`,
 Setup install, upgrade, and repair, and the per-user gateway `start`,
 `restart`, and foreground run. Both products serve hooks on the same local
-port. Setup uninstall stays available, so an existing per-user copy can be
-removed.
+port. A per-user gateway from this release that is already running when the
+service appears checks every five seconds and stops itself. Setup rollback
+and interrupted-operation recovery restore files while leaving that runtime
+stopped and logon auto-start disabled. Setup uninstall stays available, so an
+existing per-user copy can be removed.
 
 A per-user install from an earlier release has no such check. Its logon helper
 and hook cold-start recovery still start the per-user gateway, the enterprise
