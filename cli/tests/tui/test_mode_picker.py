@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import pytest
 from defenseclaw.tui.screens.mode_picker import (
     MODE_PICKER_CHOICES,
     ModePickerScreen,
@@ -19,6 +20,25 @@ from defenseclaw.tui.screens.mode_picker import (
     choice_for_wire,
     preview_for_switch,
 )
+from textual.app import App, ComposeResult
+from textual.widgets import Static
+
+
+class ModePickerHarness(App[str | None]):
+    def __init__(self, current: str = "openclaw", *, os_name: str | None = None) -> None:
+        super().__init__()
+        self.current = current
+        self.os_name = os_name
+        self.result: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("mode-picker harness")
+
+    def on_mount(self) -> None:
+        self.push_screen(ModePickerScreen(self.current, os_name=self.os_name), self._set_result)
+
+    def _set_result(self, result: str | None) -> None:
+        self.result = result
 
 
 def test_mode_picker_choices_cover_go_connectors() -> None:
@@ -88,3 +108,18 @@ def test_mode_picker_default_never_fabricates_hidden_connector() -> None:
     win = ModePickerScreen("openclaw", os_name="windows")
     assert win.current_wire != "openclaw"
     assert win.current_wire == win.choices[0].wire
+
+
+@pytest.mark.asyncio
+async def test_mode_picker_windows_hidden_hotkey_is_noop() -> None:
+    app = ModePickerHarness("claudecode", os_name="windows")
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("o")  # openclaw is hidden on Windows -> no-op
+        await pilot.pause()
+        assert app.result is None
+        assert isinstance(app.screen, ModePickerScreen)  # still open
+
+        await pilot.press("c")  # codex is supported -> dismisses
+        await pilot.pause()
+        assert app.result == "codex"

@@ -10,18 +10,41 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
-from datetime import datetime, timezone
+import json
+import sys
+import threading
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import perf_counter
 
 import defenseclaw.tui.panels.alerts as alerts_panel
 import pytest
+from defenseclaw.db import Store
 from defenseclaw.tui.app import DefenseClawTUI
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertsPanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel
 from defenseclaw.tui.panels.logs import LogsPanelModel
 from defenseclaw.tui.panels.overview import OverviewConfig, OverviewPanelModel
 from defenseclaw.tui.services.overview_state import ConnectorHealth, HealthSnapshot, SubsystemHealth
+
+
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 8.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("timed out waiting for deferred TUI work")
+        await asyncio.sleep(0.01)
+
+
+async def _wait_for_panel(app: DefenseClawTUI, panel: str) -> None:
+    await _wait_until(
+        lambda: panel not in app._panel_render_queued  # noqa: SLF001
+        and panel not in app._panel_render_running  # noqa: SLF001
+        and panel not in app._panel_render_pending,  # noqa: SLF001
+    )
 
 
 def _multi_connector_overview(data_dir: Path | None = None) -> OverviewPanelModel:
@@ -131,6 +154,133 @@ def test_high_volume_alert_summary_skips_unneeded_detail_parsing(
 
     assert "In scope 7000" in alerts.summary_text()
     assert parse_details_calls == 0
+
+
+def _seed_responsiveness_store(path: Path, *, event_count: int = 7_000) -> Store:
+    store = Store(str(path))
+    store.init()
+    # The production gateway owns the complete v8 event projection.  Python's
+    # bootstrap store intentionally creates only its compatibility subset, so
+    # make this high-volume fixture match a gateway-migrated database.
+    columns = {
+        str(row[1]) for row in store.db.execute("PRAGMA table_info(audit_events)")
+    }
+    for column in (
+        "source",
+        "signal",
+        "payload_json",
+        "projected_record_json",
+        "redaction_profile",
+        "trace_id",
+        "request_id",
+        "session_id",
+        "turn_id",
+        "scan_id",
+        "finding_id",
+    ):
+        if column not in columns:
+            store.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+    now = datetime.now(timezone.utc)
+    connectors = ("claudecode", "cursor", "openclaw")
+    rows: list[tuple[object, ...]] = []
+    for index in range(event_count):
+        connector = connectors[index % len(connectors)]
+        decision = "block" if index % 7 == 0 else "alert" if index % 5 == 0 else "allow"
+        severity = "HIGH" if decision == "block" else "MEDIUM" if decision == "alert" else "LOW"
+        rows.append(
+            (
+                f"event-{index}",
+                (now - timedelta(seconds=index)).isoformat(),
+                "connector-hook",
+                "preToolUse",
+                "fixture",
+                f"connector={connector} decision={decision} severity={severity} tool=Bash",
+                None,
+                severity,
+                f"run-{index // 20}",
+                connector,
+                int(decision == "block"),
+                "enforcement.action",
+                "action.applied",
+                "gateway",
+                "logs",
+                json.dumps({"defenseclaw.enforcement.effective_action": decision}),
+                "{}",
+                "none",
+            )
+        )
+    store.db.executemany(
+        """INSERT INTO audit_events (
+               id, timestamp, action, target, actor, details,
+               structured_json, severity, run_id, connector, enforced,
+               bucket, event_name, source, signal, payload_json,
+               projected_record_json, redaction_profile
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    store.db.commit()
+    return store
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows responsiveness guard")
+@pytest.mark.asyncio
+async def test_native_windows_high_volume_tab_ack_under_150ms(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _seed_responsiveness_store(tmp_path / "audit.db")
+    try:
+        alerts = AlertsPanelModel(tmp_path, store=store)
+        alerts.show_all_severities = True
+        audit = AuditPanelModel(store)
+        audit.show_all_events = True
+        app = DefenseClawTUI(
+            data_dir=tmp_path,
+            alerts_model=alerts,
+            audit_model=audit,
+            overview_model=_multi_connector_overview(tmp_path),
+        )
+        builder_started = threading.Event()
+        original = app._build_overview_render_snapshot  # noqa: SLF001
+
+        def observed_builder(detached: DefenseClawTUI, generation: int, source: tuple[str, object | None]):
+            builder_started.set()
+            return original(detached, generation, source)
+
+        monkeypatch.setattr(app, "_build_overview_render_snapshot", observed_builder)
+        monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
+        monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
+        monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+        async with app.run_test(size=(160, 48)) as pilot:
+            await pilot.press("2")
+            await _wait_for_panel(app, "alerts")
+            # Repository-backed snapshots are loaded off the Textual event
+            # loop.  Panel rendering can settle before that first immutable
+            # snapshot is applied, so wait for the data boundary explicitly.
+            await _wait_until(
+                lambda: len(alerts.audit_events) == 500 and len(audit.items) == 500
+            )
+            assert len(alerts.audit_events) == 500
+            assert len(audit.items) == 500
+
+            started = perf_counter()
+            app.action_switch_panel("overview")
+            # Model a health/config/audit invalidation landing in the same turn;
+            # it coalesces onto the one latest Overview generation.
+            app._health_poll_running = True  # noqa: SLF001
+            app._schedule_active_panel_refresh("health-and-audit")  # noqa: SLF001
+            acknowledgement_ms = (perf_counter() - started) * 1_000
+
+            assert app.query_one("#tabs").active == "tab-overview"
+            assert acknowledgement_ms < 150
+            await _wait_until(builder_started.is_set)
+            await _wait_for_panel(app, "overview")
+            snapshot = app._overview_render_snapshot  # noqa: SLF001
+            assert snapshot is not None
+            hook_calls = next(metric.value for metric in snapshot.metrics if metric.key == "hook_calls")
+            assert hook_calls == 7_000
+    finally:
+        store.close()
 
 
 def test_detached_context_retains_large_row_snapshots_without_iterating() -> None:
