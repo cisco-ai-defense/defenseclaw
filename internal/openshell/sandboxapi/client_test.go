@@ -71,45 +71,36 @@ func TestClientRequests(t *testing.T) {
 		}
 	})
 	ctx := context.Background()
-	list, err := c.List(ctx)
-	if err != nil || len(list) != 2 {
+	if list, err := c.List(ctx); err != nil || len(list) != 2 {
 		t.Fatalf("list = %v, %v", list, err)
 	}
-	sb, err := c.Create(ctx, CreateRequest{Name: "box", Harness: "claudecode", Project: "/p"})
-	if err != nil || sb.Name != "box" || sb.Phase != "ready" {
+	if sb, err := c.Create(ctx, CreateRequest{Name: "box", Harness: "claudecode", Project: "/p"}); err != nil || sb.Name != "box" || sb.Phase != "ready" {
 		t.Fatalf("create = %+v, %v", sb, err)
 	}
-	if _, err := c.Delete(ctx, "box", DeleteRequest{KeepSnapshot: true}); err != nil {
-		t.Fatal(err)
+	_, delErr := c.Delete(ctx, "box", DeleteRequest{KeepSnapshot: true})
+	_, stopErr := c.Stop(ctx, "box")
+	if delErr != nil || stopErr != nil {
+		t.Fatalf("delete = %v, stop = %v", delErr, stopErr)
 	}
-	if _, err := c.Stop(ctx, "box"); err != nil {
-		t.Fatal(err)
-	}
-	asks, err := c.Approvals(ctx, "box")
-	if err != nil || len(asks) != 1 {
+	if asks, err := c.Approvals(ctx, "box"); err != nil || len(asks) != 1 {
 		t.Fatalf("approvals = %v, %v", asks, err)
 	}
-	res, err := c.Decide(ctx, "ap_1", ApprovalDecision{Decision: DecisionApprove, Always: true})
-	if err != nil || res.Approval.Status != ApprovalQueued {
+	if res, err := c.Decide(ctx, "ap_1", ApprovalDecision{Decision: DecisionApprove, Always: true}); err != nil || res.Approval.Status != ApprovalQueued {
 		t.Fatalf("decide = %+v, %v", res, err)
 	}
 
-	for _, call := range *calls {
-		if call.header.Get("Authorization") != "Bearer master-token" || call.header.Get(ClientHeader) != ClientName {
+	want := []string{"GET " + PathSandboxes + "?", "POST " + PathSandboxes + "?", "DELETE " + PathSandboxes + "/box?",
+		"POST " + PathSandboxes + "/box/stop?", "GET " + PathApprovals + "?sandbox=box", "POST " + PathApprovals + "/ap_1?"}
+	if len(*calls) != len(want) {
+		t.Fatalf("calls = %+v", *calls)
+	}
+	for i, call := range *calls {
+		if got := call.method + " " + call.path + "?" + call.query; got != want[i] {
+			t.Fatalf("call %d = %s, want %s", i, got, want[i])
+		}
+		if call.header.Get("Authorization") != "Bearer master-token" || call.header.Get(ClientHeader) != ClientName ||
+			(call.method != http.MethodGet && !strings.Contains(call.header.Get("Content-Type"), "application/json")) {
 			t.Fatalf("%s %s headers = %v", call.method, call.path, call.header)
-		}
-		if call.method != http.MethodGet && !strings.Contains(call.header.Get("Content-Type"), "application/json") {
-			t.Fatalf("%s %s content type = %q", call.method, call.path, call.header.Get("Content-Type"))
-		}
-	}
-	want := []struct{ method, path, query string }{
-		{"GET", PathSandboxes, ""}, {"POST", PathSandboxes, ""}, {"DELETE", PathSandboxes + "/box", ""},
-		{"POST", PathSandboxes + "/box/stop", ""}, {"GET", PathApprovals, "sandbox=box"}, {"POST", PathApprovals + "/ap_1", ""},
-	}
-	for i, w := range want {
-		got := (*calls)[i]
-		if got.method != w.method || got.path != w.path || got.query != w.query {
-			t.Fatalf("call %d = %s %s?%s, want %s %s?%s", i, got.method, got.path, got.query, w.method, w.path, w.query)
 		}
 	}
 	if !strings.Contains((*calls)[2].body, `"keep_snapshot":true`) || !strings.Contains((*calls)[5].body, `"always":true`) {
@@ -131,17 +122,14 @@ func TestClientErrors(t *testing.T) {
 			_, _ = io.WriteString(w, `{"error":"unauthorized"}`)
 		}
 	})
-	_, err := c.Status(context.Background())
 	var e *Error
-	if !errors.As(err, &e) || e.Code != CodeAdminViolation || e.Status != http.StatusForbidden || e.Violation == nil || !e.Violation.Admin {
+	if _, err := c.Status(context.Background()); !errors.As(err, &e) || e.Code != CodeAdminViolation || e.Status != http.StatusForbidden || e.Violation == nil || !e.Violation.Admin {
 		t.Fatalf("admin error = %#v", err)
 	}
-	_, err = c.List(context.Background())
-	if !IsCode(err, CodeUpstream) || !strings.Contains(err.Error(), "plain failure") {
+	if _, err := c.List(context.Background()); !IsCode(err, CodeUpstream) || !strings.Contains(err.Error(), "plain failure") {
 		t.Fatalf("plain error = %v", err)
 	}
-	_, err = c.Get(context.Background(), "x")
-	if !errors.As(err, &e) || e.Status != http.StatusUnauthorized || e.Message != "unauthorized" {
+	if _, err := c.Get(context.Background(), "x"); !errors.As(err, &e) || e.Status != http.StatusUnauthorized || e.Message != "unauthorized" {
 		t.Fatalf("auth error = %#v", err)
 	}
 
@@ -209,11 +197,9 @@ func TestQueryRoundTrips(t *testing.T) {
 func TestReadEventsMultiline(t *testing.T) {
 	stream := ": hello\n\nid: 1\nevent: activity\ndata: {\"seq\":1,\ndata: \"kind\":\"k\"}\n\n"
 	var got []ActivityEvent
-	if err := ReadEvents(strings.NewReader(stream), func(ev ActivityEvent) error { got = append(got, ev); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Seq != 1 || got[0].Kind != "k" {
-		t.Fatalf("events = %+v", got)
+	if err := ReadEvents(strings.NewReader(stream), func(ev ActivityEvent) error { got = append(got, ev); return nil }); err != nil ||
+		len(got) != 1 || got[0].Seq != 1 || got[0].Kind != "k" {
+		t.Fatalf("events = %+v, %v", got, err)
 	}
 	if err := ReadEvents(strings.NewReader("data: {bad\n\n"), func(ActivityEvent) error { return nil }); err == nil {
 		t.Fatal("malformed event accepted")

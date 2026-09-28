@@ -41,16 +41,12 @@ func TestDisplayText(t *testing.T) {
 }
 
 func TestDisplayTexts(t *testing.T) {
-	clean := []string{"a", "b"}
-	if got := DisplayTexts(clean); &got[0] != &clean[0] {
+	// A clean list is returned as is; a dirty one is copied, never edited.
+	clean, in := []string{"a", "b"}, []string{"a", "b\x1b", "c"}
+	if got := DisplayTexts(clean); &got[0] != &clean[0] || DisplayTexts(nil) != nil {
 		t.Fatal("a clean list was copied")
 	}
-	in := []string{"a", "b\x1b", "c"}
-	got := DisplayTexts(in)
-	if !slices.Equal(got, []string{"a", "b�", "c"}) || in[1] != "b\x1b" {
+	if got := DisplayTexts(in); !slices.Equal(got, []string{"a", "b�", "c"}) || in[1] != "b\x1b" {
 		t.Fatalf("DisplayTexts = %q (input %q)", got, in)
-	}
-	if DisplayTexts(nil) != nil {
-		t.Fatal("nil in, non-nil out")
 	}
 }
