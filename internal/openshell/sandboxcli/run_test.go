@@ -371,6 +371,42 @@ func TestRunRefusals(t *testing.T) {
 	}
 }
 
+// TestRunSaysWhyTheSandboxDidNotStart: on a Mac every run ended with
+// "wait for sandbox … failed: … is in error state", OpenShell's reason (its
+// supervisor's Landlock probe) only in the gateway log (manual test M13).
+// The daemon now passes the reason on, and on macOS a run or a start that
+// failed on Landlock says what that means there.
+func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
+	const detail = `openshell: wait for sandbox "myapp-d395": Internal: sandbox "myapp-d395" is in error state; ` +
+		`OpenShell says: SupervisorFailed: Landlock allow/deny probe failed`
+	failure := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox myapp-d395 failed", Detail: detail}
+	hint := "; macOS sandboxes cannot run on Docker Desktop today: its Linux VM has no Landlock, which OpenShell sandboxes need " +
+		"(`defenseclaw sandbox doctor` checks it; see " + setupTroubleshootingURL + ")"
+	for goos, want := range map[string]string{"linux": failure.Error(), "darwin": failure.Error() + hint} {
+		ta := newTestApp(t, "")
+		ta.GOOS = goos
+		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = failure
+		if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != want {
+			t.Fatalf("%s: Run = %v\nwant %s", goos, err, want)
+		}
+		old := sampleSandbox("myapp-d395")
+		old.Phase, old.Project = "stopped", ta.project
+		ta.daemon.add(old)
+		ta.daemon.errors["POST /api/v1/sandbox/sandboxes/myapp-d395/start"] = failure
+		if err := ta.Connect(bg, ConnectOptions{Name: "myapp-d395"}); err == nil || err.Error() != want {
+			t.Fatalf("%s: Connect = %v\nwant %s", goos, err, want)
+		}
+	}
+	// A configuration OpenShell refused for a Landlock path is not that.
+	ta := newTestApp(t, "")
+	ta.GOOS = "darwin"
+	rejected := &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected, Message: "OpenShell rejected the sandbox configuration", Detail: "landlock path /nope does not exist"}
+	ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = rejected
+	if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != rejected.Error() {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
 func TestRunNestedRunsNatively(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.env["DEFENSECLAW_SANDBOX_ID"] = "sb-1"

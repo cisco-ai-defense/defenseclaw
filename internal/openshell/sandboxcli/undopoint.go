@@ -129,7 +129,7 @@ func (a *App) startError(sb *sandboxapi.Sandbox, err error) error {
 			return fmt.Errorf("%s; delete it (`%s delete %s`) and run it again", msg, CommandName, sb.Name)
 		}
 	}
-	return errors.New(msg)
+	return a.landlockHint(errors.New(msg))
 }
 
 // keptUndoPoint reports whether a start kept the undo point it found: the

@@ -139,6 +139,22 @@ func (s *sandboxClient) WaitReady(ctx context.Context, workspace, name string, o
 	if err := s.f.enter(MethodWaitReady); err != nil {
 		return nil, err
 	}
+	s.f.mu.Lock()
+	failure := s.f.state(workspace, name).startFailure
+	s.f.mu.Unlock()
+	if failure != nil {
+		// The sandbox fails to start, as one whose supervisor exits does:
+		// the gateway puts it in the error phase, with conditions saying
+		// why, and the SDK's wait reports only the phase.
+		sb, err := s.inner.Get(ctx, workspace, name)
+		if err != nil {
+			return nil, err
+		}
+		sb.Status.Phase, sb.Status.Conditions = types.SandboxError, failure
+		sb.ResourceVersion++
+		s.f.sdk.AddSandbox(workspace, sb)
+		return nil, statusErr(types.ErrorInternal, "sandbox %q is in error state", name)
+	}
 	sb, err := s.inner.WaitReady(ctx, workspace, name, opts...)
 	if err != nil {
 		return nil, err

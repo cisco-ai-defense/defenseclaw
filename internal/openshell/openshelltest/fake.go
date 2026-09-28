@@ -137,6 +137,9 @@ type sandboxState struct {
 	draftVersion    uint64
 	history         []types.DraftHistoryEntry
 	nextChunkNumber int
+	// startFailure, when set, fails every WaitReady: the sandbox goes to
+	// the error phase with these conditions (see FailStart).
+	startFailure []types.SandboxCondition
 }
 
 // Option configures a Fake.
@@ -321,6 +324,15 @@ func (f *Fake) SetAdmission(workspace, name string, state types.ConfigurationAdm
 	defer f.mu.Unlock()
 	st := f.state(workspace, name)
 	st.admission, st.admissionError = state, message
+}
+
+// FailStart makes a sandbox fail to start, as one whose supervisor exits
+// does: every WaitReady puts it in the error phase with conditions (which
+// say why) and fails the way the SDK does, naming only the phase.
+func (f *Fake) FailStart(workspace, name string, conditions ...types.SandboxCondition) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.state(workspace, name).startFailure = append([]types.SandboxCondition{}, conditions...)
 }
 
 // SetPhase forces a sandbox phase, as the gateway would on a driver event.

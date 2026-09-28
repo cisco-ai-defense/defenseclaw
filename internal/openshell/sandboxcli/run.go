@@ -286,7 +286,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		if taken {
 			return nameTakenError(req.Name, headless)
 		}
-		return apiError(err)
+		return a.landlockHint(apiError(err))
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
@@ -571,6 +571,21 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 		return nil
 	}
 	return apiError(err)
+}
+
+// landlockHint completes, on macOS, a sandbox that ended in the error
+// phase for a reason naming Landlock (OpenShell's supervisor probes it
+// before the harness runs): there sandboxes run on the kernel of Docker
+// Desktop's Linux VM, which has none today.
+func (a *App) landlockHint(err error) error {
+	if err == nil || a.GOOS != "darwin" {
+		return err
+	}
+	if msg := strings.ToLower(err.Error()); !strings.Contains(msg, "error state") || !strings.Contains(msg, "landlock") {
+		return err
+	}
+	return fmt.Errorf("%w; macOS sandboxes cannot run on Docker Desktop today: its Linux VM has no Landlock, which OpenShell sandboxes need "+
+		"(`%s doctor` checks it; see %s)", err, CommandName, setupTroubleshootingURL)
 }
 
 func nameTakenError(name string, headless bool) error {

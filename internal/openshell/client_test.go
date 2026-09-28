@@ -231,6 +231,37 @@ func TestWaits(t *testing.T) {
 			t.Fatalf("WaitReady = %v", err)
 		}
 	})
+	// A sandbox that fails to start said only "sandbox x is in error
+	// state", while OpenShell said why on the sandbox (manual test M13).
+	t.Run("error phase says OpenShell's reason", func(t *testing.T) {
+		f, c := created(t, false)
+		f.FailStart(ws, "box",
+			types.SandboxCondition{Type: "Scheduled", Status: "True", Reason: "Scheduled", Message: "container created"},
+			types.SandboxCondition{Type: "Ready", Status: "False", Reason: "SupervisorFailed", Message: "Landlock allow/deny probe failed: probe child exited with status 1"})
+		_, err := c.WaitReady(ctx, "box")
+		want := `openshell: wait for sandbox "box": Internal: sandbox "box" is in error state; OpenShell says: SupervisorFailed: Landlock allow/deny probe failed: probe child exited with status 1`
+		if err == nil || err.Error() != want {
+			t.Fatalf("WaitReady = %v\nwant %s", err, want)
+		}
+		var status *v1.StatusError
+		if !errors.As(err, &status) || status.Code != v1.ErrorInternal {
+			t.Fatalf("the SDK's error is gone: %#v", err)
+		}
+	})
+	t.Run("error phase reason on one printable line", func(t *testing.T) {
+		f, c := created(t, false)
+		f.FailStart(ws, "box", types.SandboxCondition{Type: "Ready", Status: "False", Message: "probe failed:\n  exit 1\x1b]52;c;cGF3bmVk\a"})
+		if _, err := c.WaitReady(ctx, "box"); err == nil || !strings.HasSuffix(err.Error(), "; OpenShell says: probe failed: exit 1�]52;c;cGF3bmVk�") {
+			t.Fatalf("WaitReady = %q", err)
+		}
+	})
+	t.Run("error phase without a reason", func(t *testing.T) {
+		f, c := created(t, false)
+		f.FailStart(ws, "box")
+		if _, err := c.WaitReady(ctx, "box"); err == nil || err.Error() != `openshell: wait for sandbox "box": Internal: sandbox "box" is in error state` {
+			t.Fatalf("WaitReady = %v", err)
+		}
+	})
 	t.Run("ready", func(t *testing.T) {
 		f, c := created(t, false)
 		f.FailNext(openshelltest.MethodWaitReady, unavailable)

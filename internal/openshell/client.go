@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
@@ -555,7 +557,7 @@ func (c *client) WaitReady(ctx context.Context, name string) (*Sandbox, error) {
 		return err
 	})
 	if err != nil {
-		return nil, wrap(fmt.Sprintf("wait for sandbox %q", name), err)
+		return nil, wrap(fmt.Sprintf("wait for sandbox %q", name), c.withFailureReason(ctx, name, err))
 	}
 	for {
 		state, msg := configurationState(sb)
@@ -580,6 +582,50 @@ func (c *client) WaitReady(ctx context.Context, name string) (*Sandbox, error) {
 			return sb, fmt.Errorf("openshell: sandbox %q entered phase %s while its configuration was pending", name, sb.Status.Phase)
 		}
 	}
+}
+
+// withFailureReason adds to a wait that ended with the sandbox in the
+// error phase what OpenShell says went wrong: the SDK's error names only
+// the phase ("sandbox x is in error state").
+func (c *client) withFailureReason(ctx context.Context, name string, err error) error {
+	if ctx.Err() != nil {
+		return err
+	}
+	sb, gerr := c.getForWait(ctx, name)
+	if gerr != nil || sb == nil || sb.Status.Phase != PhaseError {
+		return err
+	}
+	if reason := failureReason(sb); reason != "" {
+		return fmt.Errorf("%w; OpenShell says: %s", err, reason)
+	}
+	return err
+}
+
+// failureReason is what a sandbox's conditions that do not hold say
+// ("reason: message" each, "; " between), on one line and without control
+// characters, or "" when none says anything.
+func failureReason(sb *Sandbox) string {
+	var parts []string
+	for _, cond := range sb.Status.Conditions {
+		if strings.EqualFold(cond.Status, "True") {
+			continue
+		}
+		var said []string
+		for _, s := range []string{cond.Reason, cond.Message} {
+			if s = strings.Join(strings.Fields(s), " "); s != "" {
+				said = append(said, strings.Map(func(r rune) rune {
+					if unicode.IsControl(r) {
+						return unicode.ReplacementChar
+					}
+					return r
+				}, s))
+			}
+		}
+		if text := strings.Join(said, ": "); text != "" && !slices.Contains(parts, text) {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (c *client) WaitStopped(ctx context.Context, name string) (*Sandbox, error) {
