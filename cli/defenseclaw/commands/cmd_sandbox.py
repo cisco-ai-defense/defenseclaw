@@ -519,10 +519,53 @@ class GatewayCommand(click.Command):
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         ctx.meta[_RAW_ARGS_KEY] = tuple(args)
-        return super().parse_args(ctx, args)
+        return super().parse_args(ctx, _click_view(self, args))
 
 
 _RAW_ARGS_KEY = "defenseclaw.sandbox.raw_args"
+
+# The values a pflag bool flag takes after "=" (strconv.ParseBool).
+_PFLAG_TRUE = frozenset({"1", "t", "T", "TRUE", "true", "True"})
+_PFLAG_FALSE = frozenset({"0", "f", "F", "FALSE", "false", "False"})
+
+
+def _click_view(command: click.Command, args: list[str]) -> list[str]:
+    """Return *args* as Click should parse them.
+
+    A Go bool flag also takes an explicit value (``--copy=false``,
+    ``-y=true``), which a Click flag refuses: such a flag becomes the bare
+    flag, or goes, as pflag reads it. A value pflag refuses stays for Click
+    to refuse too. Only the check sees this view; the command forwards
+    *args* as typed.
+    """
+    by_opt: dict[str, GatewayOption] = {}
+    for param in command.params:
+        if isinstance(param, GatewayOption):
+            for opt in param.opts:
+                by_opt[opt] = param
+    out: list[str] = []
+    takes_value = False
+    for i, arg in enumerate(args):
+        if takes_value:
+            # The value of the option before it, whatever it looks like.
+            out.append(arg)
+            takes_value = False
+            continue
+        if arg == "--":
+            out.extend(args[i:])
+            break
+        name, eq, value = arg.partition("=")
+        param = by_opt.get(name) if arg.startswith("-") else None
+        if param is not None and param.go_type == "bool" and eq:
+            if value in _PFLAG_TRUE:
+                out.append(name)
+                continue
+            if value in _PFLAG_FALSE:
+                continue
+        elif param is not None and param.go_type != "bool" and not eq:
+            takes_value = True
+        out.append(arg)
+    return out
 
 
 def _click_option(flag: _Flag) -> GatewayOption:

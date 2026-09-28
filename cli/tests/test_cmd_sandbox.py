@@ -206,6 +206,10 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["enable", "claude", "--shell", "zsh"],
         ["disable", "codex", "--rc", "/tmp/rc"],
         ["teardown", "--dry-run", "--keep-images"],
+        # pflag's bool flags take an explicit value too.
+        ["run", "claude", "--copy=false", "--safe=true", "-y=true", "--", "--resume=false"],
+        ["teardown", "--yes=1", "--dry-run=F", "--keep-images=True"],
+        ["run", "claude", "--prompt", "--copy=false", "--detach=t"],
     ],
 )
 def test_stub_execs_the_gateway_with_the_same_argv(exec_capture: list[list[str]], args: list[str]) -> None:
@@ -231,6 +235,8 @@ def test_the_root_cli_forwards_through_the_stub(exec_capture: list[list[str]], m
         (["run", "claude", "--host-port", "abc"], "is not a port"),
         (["activity", "--since", "-1"], "--since"),
         (["logs", "x", "-n", "many"], "not a valid integer"),
+        # A value pflag refuses for a bool flag is refused here too.
+        (["run", "claude", "--copy=maybe"], "does not take a value"),
     ],
 )
 def test_usage_errors_stop_before_the_gateway_runs(exec_capture, args: list[str], message: str) -> None:
