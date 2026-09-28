@@ -838,7 +838,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         Binding("?", "toggle_help", "Help"),
         Binding(":", "open_command", "Command"),
         Binding("ctrl+k", "open_command", "Command"),
-        Binding("ctrl+p", "open_panel_jumper", "Jump panel"),
+        # Priority, so it wins over Textual's own command palette on Ctrl+P
+        # (App.COMMAND_PALETTE_BINDING, itself a priority binding).
+        Binding("ctrl+p", "open_panel_jumper", "Jump panel", priority=True),
         # Ctrl+\ opens the theme picker. ``\`` was chosen because it's
         # not claimed by readline / GNU terminal conventions, doesn't
         # collide with the setup-wizard's Ctrl+T (reveal secrets), and
@@ -2999,6 +3001,9 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         name to switch to, or ``None`` to cancel.
         """
 
+        if len(self.screen_stack) > 1:
+            # A priority binding reaches modals too; never stack a jumper on one.
+            return
         visible = [
             PanelChoice(name=name, label=label, hotkey=key)
             for name, key, label in PANELS
@@ -10530,11 +10535,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         if key in {"right", "]"}:
             self.setup_model.active_wizard = SetupWizard((int(self.setup_model.active_wizard) + 1) % len(WIZARD_NAMES))
             return SetupPanelAction(True)
-        if key.isdigit():
-            value = int(key)
-            if value < len(WIZARD_NAMES):
-                self.setup_model.active_wizard = SetupWizard(value)
-                return SetupPanelAction(True)
+        # Digits are not taken here: they switch panels, as the tab bar says.
         if key in {"enter", "e", "space"}:
             if not self.setup_model.wizard_available(self.setup_model.active_wizard):
                 return SetupPanelAction(
@@ -10571,13 +10572,7 @@ class DefenseClawTUI(SandboxPanelMixin, App[None]):
         if key in {"down", "j", "tab"}:
             self.setup_model.move_goal_cursor(1)
             return SetupPanelAction(True)
-        if key.isdigit():
-            index = int(key)
-            if 0 <= index < len(goals):
-                self.setup_model.goal_cursor = index
-                self.setup_model.select_active_goal()
-                return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
-            return SetupPanelAction(True)
+        # Digits switch panels here too; only an open form types them.
         if key in {"enter", "space", "e", "right"}:
             self.setup_model.select_active_goal()
             return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
