@@ -32,46 +32,79 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
-// TestClaudeCodeHostileSettingsPlantsBothTiers runs the planting fragment
-// with its absolute roots moved under a temp dir and checks what the probe
-// container would see: both settings files, every knob set, and every planted
-// program leaving its label when started the way Claude would start it.
-func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
+// relocatedHostileSetup runs a plan's planting fragment with its absolute
+// roots moved under a temp dir, and returns that root and the relocation.
+func relocatedHostileSetup(t *testing.T, name string) (string, *strings.Replacer) {
+	t.Helper()
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash not available")
 	}
-	plan, ok := hostileSettingsPlans["claudecode"]
-	if !ok {
-		t.Fatal("no hostile-settings plan for claudecode")
+	plan, ok := hostileSettingsPlans[name]
+	if !ok || plan.workdir != hostileProject {
+		t.Fatalf("%s hostile plan = %+v, want a project under the pre-trusted work root", name, plan)
 	}
-	if plan.workdir != "/work/dc-hookfire-project" {
-		t.Fatalf("workdir = %q, want a project under the pre-trusted work root", plan.workdir)
+	// Resolved, so paths the launcher prints (pwd -P) match on macOS too.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	root := t.TempDir()
 	relocate := strings.NewReplacer(
 		hostileRoot, root+hostileRoot,
 		"'/sandbox/", "'"+root+"/sandbox/",
+		"\"/sandbox/", "\""+root+"/sandbox/",
+		" /sandbox/", " "+root+"/sandbox/",
 		"/work/", root+"/work/",
 	)
-	setup := relocate.Replace(plan.setup)
-	if out, err := exec.Command(bash, "-c", setup).CombinedOutput(); err != nil {
+	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
 		t.Fatalf("setup: %v\n%s", err, out)
 	}
-	ranLog := root + hostileRanLog
-	ran := func() []string {
-		t.Helper()
-		data, err := os.ReadFile(ranLog)
-		if err != nil && !os.IsNotExist(err) {
-			t.Fatal(err)
-		}
-		_ = os.Remove(ranLog)
-		return strings.Fields(string(data))
-	}
-	if got := ran(); len(got) != 0 {
+	if got := takeRan(t, root); len(got) != 0 {
 		t.Fatalf("planting ran planted programs: %v", got)
 	}
+	return root, relocate
+}
 
+// takeRan returns and clears the labels planted programs logged under root.
+func takeRan(t *testing.T, root string) []string {
+	t.Helper()
+	data, err := os.ReadFile(root + hostileRanLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	_ = os.Remove(root + hostileRanLog)
+	return strings.Fields(string(data))
+}
+
+// runPlanted starts each planted program the way its harness would and
+// requires it, and only it, to log tier:label.
+func runPlanted(t *testing.T, root, tier string, programs map[string][]string) {
+	t.Helper()
+	for label, argv := range programs {
+		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v\n%s", label, err, out)
+		}
+		if got := takeRan(t, root); len(got) != 1 || got[0] != tier+":"+label {
+			t.Fatalf("%s left %v in the planted-run log, want %s:%s", label, got, tier, label)
+		}
+	}
+}
+
+func sortedKeys(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, " ")
+}
+
+// TestClaudeCodeHostileSettingsPlantsBothTiers checks what the probe
+// container would see: both settings files, every knob set, and every
+// planted program leaving its label when started the way Claude would start
+// it.
+func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
+	root, _ := relocatedHostileSetup(t, "claudecode")
 	for tier, file := range map[string]string{
 		"user":    root + "/sandbox/.claude/settings.json",
 		"project": root + "/work/dc-hookfire-project/.claude/settings.json",
@@ -102,62 +135,35 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 			if err := json.Unmarshal(data, &settings); err != nil {
 				t.Fatalf("settings are not JSON: %v\n%s", err, data)
 			}
-			if !settings.DisableAllHooks {
-				t.Error("disableAllHooks not planted")
+			env := settings.Env
+			if want := "BASH_ENV CLAUDE_CODE_SHELL CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SIMPLE DEFENSECLAW_GATEWAY_TOKEN DEFENSECLAW_HOME PATH SHELL"; !settings.DisableAllHooks ||
+				sortedKeys(env) != want || env["CLAUDE_CODE_SIMPLE"] != "1" || env["SHELL"] != env["CLAUDE_CODE_SHELL"] {
+				t.Fatalf("planted disableAllHooks %t env %v, want %s", settings.DisableAllHooks, env, want)
 			}
-			var keys []string
-			for key := range settings.Env {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			want := []string{
-				"BASH_ENV", "CLAUDE_CODE_SHELL", "CLAUDE_CODE_SHELL_PREFIX", "CLAUDE_CODE_SIMPLE",
-				"DEFENSECLAW_GATEWAY_TOKEN", "DEFENSECLAW_HOME", "PATH", "SHELL",
-			}
-			if strings.Join(keys, " ") != strings.Join(want, " ") {
-				t.Fatalf("planted env = %v, want %v", keys, want)
-			}
-			if settings.Env["CLAUDE_CODE_SIMPLE"] != "1" {
-				t.Errorf("CLAUDE_CODE_SIMPLE = %q", settings.Env["CLAUDE_CODE_SIMPLE"])
-			}
-			if _, err := os.Stat(filepath.Join(settings.Env["DEFENSECLAW_HOME"], ".disabled")); err != nil {
+			if _, err := os.Stat(filepath.Join(env["DEFENSECLAW_HOME"], ".disabled")); err != nil {
 				t.Errorf("DEFENSECLAW_HOME is not marked disabled: %v", err)
 			}
-
+			hooks := settings.Hooks["PreToolUse"]
+			if len(hooks) != 1 || len(hooks[0].Hooks) != 1 || hooks[0].Hooks[0].Type != "command" || settings.StatusLine.Type != "command" {
+				t.Fatalf("planted PreToolUse hook = %+v statusLine %+v, want the schema's command objects", hooks, settings.StatusLine)
+			}
 			// Claude runs the prefix with the command as one argument, the
 			// shell with -c, and settings hooks, auth helpers and the status
 			// line through /bin/sh.
-			bin := strings.SplitN(settings.Env["PATH"], ":", 2)[0]
-			hooks := settings.Hooks["PreToolUse"]
-			if len(hooks) != 1 || len(hooks[0].Hooks) != 1 || hooks[0].Hooks[0].Type != "command" {
-				t.Fatalf("planted PreToolUse hook = %+v", hooks)
-			}
-			if settings.StatusLine.Type != "command" {
-				t.Fatalf("planted statusLine = %+v, want the schema's command object", settings.StatusLine)
-			}
-			for label, argv := range map[string][]string{
-				"shell-prefix":  {settings.Env["CLAUDE_CODE_SHELL_PREFIX"], "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"},
-				"shell":         {settings.Env["CLAUDE_CODE_SHELL"], "-c", "true"},
+			bin := strings.SplitN(env["PATH"], ":", 2)[0]
+			runPlanted(t, root, tier, map[string][]string{
+				"shell-prefix":  {env["CLAUDE_CODE_SHELL_PREFIX"], "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh"},
+				"shell":         {env["CLAUDE_CODE_SHELL"], "-c", "true"},
 				"curl":          {filepath.Join(bin, "curl"), "-q"},
 				"jq":            {filepath.Join(bin, "jq"), "-r"},
 				"settings-hook": {"/bin/sh", "-c", hooks[0].Hooks[0].Command},
-				"bash-env":      {bash, "-c", ". " + settings.Env["BASH_ENV"]},
+				"bash-env":      {"bash", "-c", ". " + env["BASH_ENV"]},
 				"apikey-helper": {"/bin/sh", "-c", settings.APIKeyHelper},
 				"aws-refresh":   {"/bin/sh", "-c", settings.AWSAuthRefresh},
 				"aws-export":    {"/bin/sh", "-c", settings.AWSCredentialExport},
 				"gcp-refresh":   {"/bin/sh", "-c", settings.GCPAuthRefresh},
 				"status-line":   {"/bin/sh", "-c", settings.StatusLine.Command},
-			} {
-				if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-					t.Fatalf("%s: %v\n%s", label, err, out)
-				}
-				if got := ran(); len(got) != 1 || got[0] != tier+":"+label {
-					t.Fatalf("%s left %v in the planted-run log, want %s:%s", label, got, tier, label)
-				}
-			}
-			if settings.Env["SHELL"] != settings.Env["CLAUDE_CODE_SHELL"] {
-				t.Errorf("SHELL = %q, want the planted shell", settings.Env["SHELL"])
-			}
+			})
 		})
 	}
 }
@@ -166,29 +172,7 @@ func TestClaudeCodeHostileSettingsPlantsBothTiers(t *testing.T) {
 // both config files parse as TOML with the documented keys, and every
 // planted program and sourced file leaves its label.
 func TestCodexHostileSettingsPlantsBothTiers(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash not available")
-	}
-	plan := hostileSettingsPlans["codex"]
-	if plan.workdir != "/work/dc-hookfire-project" {
-		t.Fatalf("workdir = %q", plan.workdir)
-	}
-	root := t.TempDir()
-	relocate := strings.NewReplacer(hostileRoot, root+hostileRoot, "'/sandbox/", "'"+root+"/sandbox/", "/work/", root+"/work/")
-	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
-		t.Fatalf("setup: %v\n%s", err, out)
-	}
-	ranLog := root + hostileRanLog
-	ran := func() []string {
-		t.Helper()
-		data, _ := os.ReadFile(ranLog)
-		_ = os.Remove(ranLog)
-		return strings.Fields(string(data))
-	}
-	if got := ran(); len(got) != 0 {
-		t.Fatalf("planting ran planted programs: %v", got)
-	}
+	root, _ := relocatedHostileSetup(t, "codex")
 	for tier, file := range map[string]string{
 		"user":    root + "/sandbox/.codex/config.toml",
 		"project": root + "/work/dc-hookfire-project/.codex/config.toml",
@@ -221,73 +205,25 @@ func TestCodexHostileSettingsPlantsBothTiers(t *testing.T) {
 			if err := toml.Unmarshal(data, &cfg); err != nil {
 				t.Fatalf("config is not TOML: %v\n%s", err, data)
 			}
-			if cfg.Features.Hooks == nil || *cfg.Features.Hooks || cfg.ApprovalPolicy != "never" || cfg.ModelProvider != "hostile" || len(cfg.Notify) != 1 {
+			if cfg.Features.Hooks == nil || *cfg.Features.Hooks || cfg.ApprovalPolicy != "never" || cfg.ModelProvider != "hostile" || len(cfg.Notify) != 1 ||
+				len(cfg.Hooks.PreToolUse) != 1 || len(cfg.Hooks.PreToolUse[0].Hooks) != 1 ||
+				sortedKeys(cfg.Shell.Set) != "BASH_ENV DEFENSECLAW_HOME DEFENSECLAW_SANDBOX_TOKEN ENV PATH" {
 				t.Fatalf("planted config = %+v", cfg)
 			}
-			var keys []string
-			for key := range cfg.Shell.Set {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			if strings.Join(keys, " ") != "BASH_ENV DEFENSECLAW_HOME DEFENSECLAW_SANDBOX_TOKEN ENV PATH" {
-				t.Fatalf("planted shell env = %v", keys)
-			}
-			if len(cfg.Hooks.PreToolUse) != 1 || len(cfg.Hooks.PreToolUse[0].Hooks) != 1 {
-				t.Fatalf("planted hooks = %+v", cfg.Hooks)
-			}
 			bin := strings.SplitN(cfg.Shell.Set["PATH"], ":", 2)[0]
-			for label, argv := range map[string][]string{
+			runPlanted(t, root, tier, map[string][]string{
 				"curl":        {filepath.Join(bin, "curl")},
 				"jq":          {filepath.Join(bin, "jq")},
 				"notify":      {cfg.Notify[0], "{}"},
 				"config-hook": {"/bin/sh", "-c", cfg.Hooks.PreToolUse[0].Hooks[0].Command},
-				"shell-env":   {bash, "-c", ". " + cfg.Shell.Set["BASH_ENV"]},
-			} {
-				if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-					t.Fatalf("%s: %v\n%s", label, err, out)
-				}
-				if got := ran(); len(got) != 1 || got[0] != tier+":"+label {
-					t.Fatalf("%s left %v in the planted-run log", label, got)
-				}
-			}
+				"shell-env":   {"bash", "-c", ". " + cfg.Shell.Set["BASH_ENV"]},
+			})
 		})
 	}
 }
 
-// relocatedHostileSetup runs a plan's planting fragment with its absolute
-// roots moved under a temp dir and returns that root.
-func relocatedHostileSetup(t *testing.T, name string) string {
-	t.Helper()
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash not available")
-	}
-	plan, ok := hostileSettingsPlans[name]
-	if !ok || plan.workdir != hostileProject {
-		t.Fatalf("%s hostile plan = %+v", name, plan)
-	}
-	// Resolved, so paths the launcher prints (pwd -P) match on macOS too.
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	relocate := strings.NewReplacer(
-		hostileRoot, root+hostileRoot,
-		"'/sandbox/", "'"+root+"/sandbox/",
-		"\"/sandbox/", "\""+root+"/sandbox/",
-		"/work/", root+"/work/",
-	)
-	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
-		t.Fatalf("setup: %v\n%s", err, out)
-	}
-	if data, _ := os.ReadFile(root + hostileRanLog); len(data) != 0 {
-		t.Fatalf("planting ran planted programs: %s", data)
-	}
-	return root
-}
-
 func TestCopilotHostileSettingsPlants(t *testing.T) {
-	root := relocatedHostileSetup(t, "copilot")
+	root, relocate := relocatedHostileSetup(t, "copilot")
 	for _, file := range []string{"/sandbox/.copilot/settings.json", "/work/dc-hookfire-project/.github/copilot/settings.json"} {
 		data, err := os.ReadFile(root + file)
 		if err != nil || strings.TrimSpace(string(data)) != `{"disableAllHooks":true}` {
@@ -313,14 +249,7 @@ func TestCopilotHostileSettingsPlants(t *testing.T) {
 		}
 		// Copilot runs a bash hook through bash (the setup already relocated
 		// its path).
-		if out, err := exec.Command("bash", "-c", doc.Hooks["preToolUse"][0].Bash).CombinedOutput(); err != nil {
-			t.Fatalf("%s hook: %v\n%s", tier, err, out)
-		}
-		data, _ = os.ReadFile(root + hostileRanLog)
-		_ = os.Remove(root + hostileRanLog)
-		if strings.TrimSpace(string(data)) != tier+":settings-hook" {
-			t.Fatalf("%s hook left %q", tier, data)
-		}
+		runPlanted(t, root, tier, map[string][]string{"settings-hook": {"bash", "-c", doc.Hooks["preToolUse"][0].Bash}})
 	}
 	planted, _ := filepath.Glob(root + "/sandbox/*/*/pkg/*/99.0.0/index.js")
 	more, _ := filepath.Glob(root + "/sandbox/.copilot/pkg/*/99.0.0/index.js")
@@ -332,42 +261,32 @@ func TestCopilotHostileSettingsPlants(t *testing.T) {
 	// shell) records it and never runs the command; every program the
 	// planted PATH puts first records itself.
 	plan := hostileSettingsPlans["copilot"]
-	relocate := strings.NewReplacer(hostileRoot, root+hostileRoot)
-	env := []string{}
+	var env []string
 	for key, value := range plan.env {
 		env = append(env, key+"="+relocate.Replace(value))
 	}
-	sort.Strings(env)
-	if want := []string{"BASH_ENV=", "ENV=", "PATH="}; len(env) != len(want) {
-		t.Fatalf("launch env = %v", env)
+	if sortedKeys(plan.env) != "BASH_ENV ENV PATH" {
+		t.Fatalf("launch env = %v", plan.env)
 	}
 	cmd := exec.Command("/bin/bash", "-c", "echo hook-ran")
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
-	data, _ := os.ReadFile(root + hostileRanLog)
-	_ = os.Remove(root + hostileRanLog)
-	if err != nil || strings.Contains(string(out), "hook-ran") || strings.TrimSpace(string(data)) != "user:bash-env" {
-		t.Fatalf("BASH_ENV: %v, output %q, ran %q", err, out, data)
+	if ran := takeRan(t, root); err != nil || strings.Contains(string(out), "hook-ran") || strings.Join(ran, " ") != "user:bash-env" {
+		t.Fatalf("BASH_ENV: %v, output %q, ran %v", err, out, ran)
 	}
 	path := relocate.Replace(plan.env["PATH"])
 	if !strings.HasSuffix(path, ":"+harness.LauncherSystemPATH) {
 		t.Fatalf("PATH = %q, want the planted bin ahead of the system PATH", path)
 	}
+	programs := map[string][]string{}
 	for _, name := range []string{"bash", "sh", "curl", "jq"} {
-		program := filepath.Join(strings.SplitN(path, ":", 2)[0], name)
-		if out, err := exec.Command(program).CombinedOutput(); err != nil {
-			t.Fatalf("%s: %v\n%s", name, err, out)
-		}
-		data, _ := os.ReadFile(root + hostileRanLog)
-		_ = os.Remove(root + hostileRanLog)
-		if strings.TrimSpace(string(data)) != "user:path-"+name {
-			t.Fatalf("planted %s left %q", name, data)
-		}
+		programs["path-"+name] = []string{filepath.Join(strings.SplitN(path, ":", 2)[0], name)}
 	}
+	runPlanted(t, root, "user", programs)
 }
 
 func TestOpenCodeHostileSettingsPlants(t *testing.T) {
-	root := relocatedHostileSetup(t, "opencode")
+	root, _ := relocatedHostileSetup(t, "opencode")
 	for _, file := range []string{
 		"/sandbox/.config/opencode/opencode.json",
 		"/work/dc-hookfire-project/opencode.json",
@@ -380,143 +299,87 @@ func TestOpenCodeHostileSettingsPlants(t *testing.T) {
 	}
 }
 
-// TestOpenCodeHostileRefusalsStopTheLauncher plants each of the OpenCode
-// plan's refusals, relocated under a temp dir, and starts the image's real
-// OpenCode launcher (the binary replaced by a stub) the way the probe does:
-// every planting must stop it with the refusal the probe greps for, and the
-// plan's other settings alone must not.
-func TestOpenCodeHostileRefusalsStopTheLauncher(t *testing.T) {
+// TestHostileRefusalsStopTheLauncher plants each refusal of the OpenCode and
+// Antigravity plans, relocated under a temp dir, and starts the image's real
+// launcher (the harness binary replaced by a stub) the way the probe does:
+// every planting (the agy workspace hooks key spelled with a JSON escape
+// among them) must stop it with the refusal the probe greps for, while the
+// plan's other settings alone, and each planting's cleanup, must not.
+func TestHostileRefusalsStopTheLauncher(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/jq"); err != nil {
 		t.Skip("/usr/bin/jq is required")
 	}
-	root := relocatedHostileSetup(t, "opencode")
-	plan := hostileSettingsPlans["opencode"]
-	if len(plan.refusals) != 3 {
-		t.Fatalf("refusals = %+v", plan.refusals)
-	}
-	relocate := strings.NewReplacer(
-		hostileRoot, root+hostileRoot,
-		"'/sandbox/", "'"+root+"/sandbox/",
-		" /sandbox/", " "+root+"/sandbox/",
-		"/work/", root+"/work/",
-	)
-	stub := filepath.Join(root, "opencode-stub")
-	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho opencode-started\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	launcher := filepath.Join(root, "opencode-launch")
-	if err := os.WriteFile(launcher, []byte(strings.ReplaceAll(string(harness.OpenCode.Launcher().Data), "/usr/local/bin/opencode", stub)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	start := func() (int, string) {
-		t.Helper()
-		cmd := exec.Command(launcher, "run", "--auto", builtinAllowPrompt)
-		cmd.Dir = root + hostileProject
-		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root + "/sandbox"}
-		out, err := cmd.CombinedOutput()
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), string(out)
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		return 0, string(out)
-	}
-	if code, out := start(); code != 0 || !strings.Contains(out, "opencode-started") {
-		t.Fatalf("the plan's settings alone stopped the launcher: exit %d\n%s", code, out)
-	}
-	for _, r := range plan.refusals {
-		t.Run(r.label, func(t *testing.T) {
-			if !strings.Contains(r.setup, r.file) || !strings.Contains(r.message, r.file) {
-				t.Fatalf("refusal %+v does not plant and name its file", r)
+	for _, tc := range []struct {
+		spec     *harness.Spec
+		refusals int
+		binary   string
+		// canonical is a root-owned file the launcher reads, moved under
+		// the temp dir.
+		canonical string
+		args      []string
+	}{
+		{harness.OpenCode, 3, "/usr/local/bin/opencode", "", []string{"run", "--auto", builtinAllowPrompt}},
+		{harness.Antigravity, 2, "/usr/local/bin/agy", connector.AntigravitySandboxCanonicalHooksPath, []string{"-p", builtinAllowPrompt}},
+	} {
+		t.Run(tc.spec.Name, func(t *testing.T) {
+			root, relocate := relocatedHostileSetup(t, tc.spec.Name)
+			plan := hostileSettingsPlans[tc.spec.Name]
+			if len(plan.refusals) != tc.refusals {
+				t.Fatalf("refusals = %+v", plan.refusals)
 			}
-			if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(r.setup)).CombinedOutput(); err != nil {
-				t.Fatalf("setup: %v\n%s", err, out)
+			write := func(file, body string, mode os.FileMode) string {
+				t.Helper()
+				if err := os.WriteFile(file, []byte(body), mode); err != nil {
+					t.Fatal(err)
+				}
+				return file
 			}
-			code, out := start()
-			if want := relocate.Replace(r.message); code == 0 || strings.Contains(out, "opencode-started") || !strings.Contains(out, want) {
-				t.Fatalf("exit %d, want a refusal saying %q:\n%s", code, want, out)
+			swap := []string{tc.binary, write(filepath.Join(root, "harness-stub"), "#!/bin/bash\necho harness-started\n", 0o755)}
+			if tc.canonical != "" {
+				swap = append(swap, tc.canonical, write(filepath.Join(root, "canonical"), "{}\n", 0o644))
 			}
-			if err := os.Remove(root + r.file); err != nil {
-				t.Fatal(err)
+			launcher := write(filepath.Join(root, "launcher"), strings.NewReplacer(swap...).Replace(string(tc.spec.Launcher().Data)), 0o755)
+			start := func(when string, refusal string) {
+				t.Helper()
+				cmd := exec.Command(launcher, tc.args...)
+				cmd.Dir = root + hostileProject
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root + "/sandbox"}
+				out, err := cmd.CombinedOutput()
+				exitErr, refused := err.(*exec.ExitError)
+				if err != nil && !refused {
+					t.Fatal(err)
+				}
+				switch started := strings.Contains(string(out), "harness-started"); {
+				case refusal == "" && (err != nil || !started):
+					t.Fatalf("%s stopped the launcher: %v\n%s", when, err, out)
+				case refusal != "" && (!refused || exitErr.ExitCode() == 0 || started || !strings.Contains(string(out), refusal)):
+					t.Fatalf("%s: %v, want a refusal saying %q:\n%s", when, err, refusal, out)
+				}
 			}
-		})
-	}
-	if data, _ := os.ReadFile(root + hostileRanLog); len(data) != 0 {
-		t.Fatalf("planted code ran: %s", data)
-	}
-}
-
-// TestAntigravityHostileRefusalsStopTheLauncher plants each of the
-// Antigravity plan's refusals, relocated under a temp dir, and starts the
-// image's real agy launcher (the binary replaced by a stub) the way the
-// probe does: every planting, the workspace hooks key spelled with a JSON
-// escape among them, must stop it with the refusal the probe greps for.
-func TestAntigravityHostileRefusalsStopTheLauncher(t *testing.T) {
-	if _, err := os.Stat("/usr/bin/jq"); err != nil {
-		t.Skip("/usr/bin/jq is required")
-	}
-	root := relocatedHostileSetup(t, "antigravity")
-	plan := hostileSettingsPlans["antigravity"]
-	if len(plan.refusals) != 2 {
-		t.Fatalf("refusals = %+v", plan.refusals)
-	}
-	relocate := strings.NewReplacer("'/sandbox/", "'"+root+"/sandbox/", "/work/", root+"/work/")
-	stub := filepath.Join(root, "agy-stub")
-	if err := os.WriteFile(stub, []byte("#!/bin/bash\necho agy-started\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	canonical := filepath.Join(root, "canonical-hooks.json")
-	if err := os.WriteFile(canonical, []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script := strings.NewReplacer("/usr/local/bin/agy", stub, connector.AntigravitySandboxCanonicalHooksPath, canonical).
-		Replace(string(harness.Antigravity.Launcher().Data))
-	launcher := filepath.Join(root, "antigravity-launch")
-	if err := os.WriteFile(launcher, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	start := func() (int, string) {
-		t.Helper()
-		cmd := exec.Command(launcher, "-p", builtinAllowPrompt)
-		cmd.Dir = root + hostileProject
-		cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + root + "/sandbox"}
-		out, err := cmd.CombinedOutput()
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return exitErr.ExitCode(), string(out)
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		return 0, string(out)
-	}
-	if code, out := start(); code != 0 || !strings.Contains(out, "agy-started") {
-		t.Fatalf("the plan's settings alone stopped the launcher: exit %d\n%s", code, out)
-	}
-	for _, r := range plan.refusals {
-		t.Run(r.label, func(t *testing.T) {
-			if !strings.Contains(r.setup, r.file) || !strings.Contains(r.message, r.file) {
-				t.Fatalf("refusal %+v does not plant and name its file", r)
+			start("the plan's settings alone", "")
+			for _, r := range plan.refusals {
+				if !strings.Contains(r.setup, r.file) || !strings.Contains(r.message, r.file) {
+					t.Fatalf("refusal %+v does not plant and name its file", r)
+				}
+				run := func(script string) {
+					t.Helper()
+					if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(script)).CombinedOutput(); err != nil {
+						t.Fatalf("%s: %v\n%s", r.label, err, out)
+					}
+				}
+				run(r.setup)
+				// The message may open with the path.
+				start("the "+r.label+" planting", strings.TrimPrefix(relocate.Replace(" "+r.message), " "))
+				if r.cleanup == "" {
+					r.cleanup = "rm -rf " + shQuote(r.file) + "\n"
+				}
+				run(r.cleanup)
+				start("the "+r.label+" cleanup", "")
 			}
-			if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(r.setup)).CombinedOutput(); err != nil {
-				t.Fatalf("setup: %v\n%s", err, out)
-			}
-			code, out := start()
-			if want := root + r.message; code == 0 || strings.Contains(out, "agy-started") || !strings.Contains(out, want) {
-				t.Fatalf("exit %d, want a refusal saying %q:\n%s", code, want, out)
-			}
-			cleanup := "rm -rf " + shQuote(r.file) + "\n"
-			if r.cleanup != "" {
-				cleanup = r.cleanup
-			}
-			if out, err := exec.Command("/bin/bash", "-c", relocate.Replace(cleanup)).CombinedOutput(); err != nil {
-				t.Fatalf("cleanup: %v\n%s", err, out)
-			}
-			if code, out := start(); code != 0 || !strings.Contains(out, "agy-started") {
-				t.Fatalf("after the cleanup: exit %d\n%s", code, out)
+			if ran := takeRan(t, root); len(ran) != 0 {
+				t.Fatalf("planted code ran: %v", ran)
 			}
 		})
-	}
-	if data, _ := os.ReadFile(root + hostileRanLog); len(data) != 0 {
-		t.Fatalf("planted code ran: %s", data)
 	}
 }
 

@@ -17,11 +17,9 @@
 package image
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -38,7 +36,8 @@ import (
 // kiroSim plays Kiro CLI in its scripted-response mode: it reads the script
 // the probe wrote for the run, posts the agent hooks the way the sandbox
 // kiro-hook.sh does (preToolUse carrying the scripted shell command), and
-// reports the tool's side effect only when preToolUse was not denied.
+// reports the tool's side effect only when preToolUse was not denied. The
+// scripted mock needs no model endpoint, so no run may name one.
 type kiroSim struct {
 	t    *testing.T
 	port int
@@ -58,14 +57,11 @@ func (s kiroSim) handle(args []string) (string, int) {
 	if len(args) > 0 && args[0] == "rm" {
 		return "", 0
 	}
-	env := map[string]string{}
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "-e" {
-			k, v, _ := strings.Cut(args[i+1], "=")
-			env[k] = v
-		}
+	argv := parseProbeArgv(args)
+	env, script := argv.env, argv.script
+	if joined := strings.Join(args, " "); strings.Contains(joined, "ANTHROPIC_BASE_URL") || strings.Contains(joined, "OPENAI_API_KEY") {
+		s.t.Errorf("a Kiro run was pointed at a model endpoint: %v", args)
 	}
-	script := args[len(args)-1]
 	if env["KIRO_MOCK_CHAT_RESPONSE"] != "/tmp/dc-hookfire-kiro-mock.json" || env["KIRO_API_KEY"] == "" || !strings.Contains(script, harness.KiroLauncherPath) {
 		s.t.Errorf("kiro hook-fire argv lacks the scripted mock or the launcher: %v", args)
 		return "", 1
@@ -93,27 +89,15 @@ func (s kiroSim) handle(args []string) (string, int) {
 		if s.skip[event] || (event == "postToolUse" && blocked) {
 			continue
 		}
-		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": event, "tool_name": "shell", "tool_input": call.Args})
-		req, _ := http.NewRequest(http.MethodPost, "http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(s.port))+"/api/v1/kiro/hook", bytes.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer "+env[connector.SandboxTokenEnv])
-		req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", "k-"+event)
-		resp, err := kiroSimClient.Do(req)
+		body, err := postHook(kiroSimClient, "http://"+net.JoinHostPort("127.0.0.1", strconv.Itoa(s.port))+"/api/v1/kiro/hook",
+			env[connector.SandboxTokenEnv], "k-"+event, map[string]interface{}{"hook_event_name": event, "tool_name": "shell", "tool_input": call.Args})
 		if err != nil {
 			s.t.Errorf("post %s: %v", event, err)
 			return "", 1
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if event == "preToolUse" && strings.Contains(string(body), `"decision":"block"`) {
-			blocked = true
-		}
+		blocked = blocked || (event == "preToolUse" && strings.Contains(body, `"decision":"block"`))
 	}
-	out := "::rc=0\n"
-	if blocked {
-		out += "::side-effect=absent\n"
-	} else {
-		out += "::side-effect=present\n"
-	}
+	out := "::rc=0\n" + simSideEffect(!blocked)
 	if strings.Contains(script, hostileRanLog) {
 		out += s.hostileOutput
 	}
@@ -151,21 +135,6 @@ func TestHookFireScriptedMockDrivesKiro(t *testing.T) {
 			}
 		})
 	}
-	// The scripted mock runs without a model endpoint: no argv or env of the
-	// probe names one.
-	var sawScript bool
-	sim := kiroSim{t: t, port: c.Spec.IngressPort}
-	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
-		joined := strings.Join(args, " ")
-		if strings.Contains(joined, "ANTHROPIC_BASE_URL") || strings.Contains(joined, "OPENAI_API_KEY") {
-			t.Errorf("a Kiro run was pointed at a model endpoint: %v", args)
-		}
-		sawScript = sawScript || strings.Contains(joined, "dc-hookfire-kiro-mock.json")
-		return sim.handle(args)
-	}}
-	if _, err := (&Builder{Docker: docker}).HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"}); err != nil || !sawScript {
-		t.Fatalf("probe: %v, scripted mock seen %t", err, sawScript)
-	}
 }
 
 func TestKiroScriptedMockRendersEveryScenario(t *testing.T) {
@@ -192,92 +161,35 @@ func TestKiroScriptedMockRendersEveryScenario(t *testing.T) {
 	}
 }
 
-// TestHookFireBuiltinRefusesCursorAndDevin: neither CLI can run a turn
-// without a vendor account, so the zero-value probe refuses before any
-// container starts and names what is missing; their images stay unverified.
-func TestHookFireBuiltinRefusesCursorAndDevin(t *testing.T) {
-	for _, tc := range []struct {
-		spec *harness.Spec
-		want string
-	}{
-		{harness.Cursor, "CURSOR_API_KEY"},
-		{harness.Devin, "devin auth login"},
-	} {
-		c := hookFireContextFor(t, tc.spec)
-		b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
-			t.Errorf("a container ran: %v", args)
-			return "", 1
-		}}}
-		_, err := b.HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
-		if err == nil || errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), tc.want) {
-			t.Fatalf("%s: error = %v", tc.spec.Name, err)
-		}
-	}
-}
-
-// TestHookSinkDeniesCursorKiroDevin checks the stand-in ingress answers each
-// harness's pre-tool hook with the verdict its sandbox hook reads.
-func TestHookSinkDeniesCursorKiroDevin(t *testing.T) {
-	for name, want := range map[string]string{
-		"cursor": `"permission":"deny"`,
-		"kiro":   `"decision":"block"`,
-		"devin":  `"decision":"block"`,
-	} {
-		adapter := hookSinkAdapters[name]
-		sink := &hookSink{token: "tok", adapter: adapter}
-		sink.begin(&BlockScenario{Marker: "BLOCKME"})
-		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": adapter.preToolEvent(), "tool_input": map[string]string{"command": "echo BLOCKME"}})
-		req, _ := http.NewRequest(http.MethodPost, "/api/v1/"+name+"/hook", bytes.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer tok")
-		rec := &responseRecorder{header: http.Header{}}
-		sink.ServeHTTP(rec, req)
-		if !strings.Contains(rec.body.String(), want) || !strings.Contains(rec.body.String(), `"action":"block"`) {
-			t.Fatalf("%s verdict = %s", name, rec.body.String())
-		}
-	}
-}
-
-func readFile(path string) (string, error) {
-	raw, err := os.ReadFile(path)
-	return string(raw), err
-}
-
 func TestKiroHostileSettingsPlants(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash not available")
-	}
 	plan := hostileSettingsPlans["kiro"]
 	// With the launcher's agent directory pinned nothing is refused: every
 	// planting must leave the hooks firing.
-	if plan.workdir != hostileProject || len(plan.refusals) != 0 {
-		t.Fatalf("plan = %+v", plan)
+	if len(plan.refusals) != 0 {
+		t.Fatalf("refusals = %+v", plan.refusals)
 	}
 	for _, name := range []string{"KIRO_HOME", connector.KiroSandboxAgentDirEnv, "KIRO_TEST_AGENTS_DIR", "KIRO_CHAT_SHELL", "AMAZON_Q_CHAT_SHELL", "BASH_ENV", "ENV", "PATH"} {
 		if !strings.HasPrefix(plan.env[name], hostileRoot+"/") {
 			t.Errorf("hostile env %s = %q", name, plan.env[name])
 		}
 	}
-	root := t.TempDir()
-	relocate := strings.NewReplacer(hostileRoot, root+hostileRoot, "'/sandbox/", "'"+root+"/sandbox/", "'/work/", "'"+root+"/work/")
-	if out, err := exec.Command(bash, "-c", relocate.Replace(plan.setup)).CombinedOutput(); err != nil {
-		t.Fatalf("setup: %v\n%s", err, out)
-	}
+	root, _ := relocatedHostileSetup(t, "kiro")
 	// Hookless agents named defenseclaw under the DefenseClaw file name and
 	// under names that sort before it, in HOME, the project and every
 	// directory the hostile env names.
+	name := connector.KiroSandboxAgentName + ".json"
 	for _, file := range []string{
-		connector.SandboxHomeDir + "/.kiro/agents/" + connector.KiroSandboxAgentName + ".json",
+		connector.SandboxHomeDir + "/.kiro/agents/" + name,
 		connector.SandboxHomeDir + "/.kiro/agents/a.json",
-		hostileProject + "/.kiro/agents/" + connector.KiroSandboxAgentName + ".json",
+		hostileProject + "/.kiro/agents/" + name,
 		hostileProject + "/.kiro/agents/project.json",
-		plan.env["KIRO_HOME"] + "/agents/" + connector.KiroSandboxAgentName + ".json",
-		plan.env["KIRO_HOME"] + "/.kiro/agents/" + connector.KiroSandboxAgentName + ".json",
-		plan.env[connector.KiroSandboxAgentDirEnv] + "/" + connector.KiroSandboxAgentName + ".json",
-		plan.env["KIRO_TEST_AGENTS_DIR"] + "/" + connector.KiroSandboxAgentName + ".json",
+		plan.env["KIRO_HOME"] + "/agents/" + name,
+		plan.env["KIRO_HOME"] + "/.kiro/agents/" + name,
+		plan.env[connector.KiroSandboxAgentDirEnv] + "/" + name,
+		plan.env["KIRO_TEST_AGENTS_DIR"] + "/" + name,
 	} {
-		agent, err := readFile(root + file)
-		if err != nil || !strings.Contains(agent, `"name":"`+connector.KiroSandboxAgentName+`"`) || !strings.Contains(agent, `"hooks":{}`) {
+		agent, err := os.ReadFile(root + file)
+		if err != nil || !strings.Contains(string(agent), `"name":"`+connector.KiroSandboxAgentName+`"`) || !strings.Contains(string(agent), `"hooks":{}`) {
 			t.Errorf("no hookless agent at %s: %q %v", file, agent, err)
 		}
 	}
@@ -290,7 +202,7 @@ func TestKiroHostileSettingsPlants(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(out)) != "ran-command" {
 		t.Fatalf("planted chat shell: %q %v", out, err)
 	}
-	if ran, _ := readFile(root + hostileRanLog); !strings.Contains(ran, "user:chat-shell") {
-		t.Fatalf("the planted chat shell left no trace: %q", ran)
+	if ran := takeRan(t, root); strings.Join(ran, " ") != "user:chat-shell" {
+		t.Fatalf("the planted chat shell left %v", ran)
 	}
 }

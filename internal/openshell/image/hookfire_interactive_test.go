@@ -17,7 +17,6 @@
 package image
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,20 +45,8 @@ type omnigentSim struct {
 }
 
 func (s *omnigentSim) handle(args []string) (string, int) {
-	host, token := "", ""
-	for i := 0; i+1 < len(args); i++ {
-		switch args[i] {
-		case "--add-host":
-			if v, ok := strings.CutPrefix(args[i+1], connector.SandboxIngressHost+":"); ok {
-				host = v
-			}
-		case "-e":
-			if v, ok := strings.CutPrefix(args[i+1], connector.SandboxTokenEnv+"="); ok {
-				token = v
-			}
-		}
-	}
-	script := args[len(args)-1]
+	argv := parseProbeArgv(args)
+	script := argv.script
 	s.scripts = append(s.scripts, script)
 	interactive := strings.Contains(script, ptyDriver)
 	if interactive && s.ttyCrashes {
@@ -71,11 +58,8 @@ func (s *omnigentSim) handle(args []string) (string, int) {
 	}
 	blocked := false
 	for _, event := range requiredHookEvents["omnigent"] {
-		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": event, "tool_input": map[string]string{"command": command}})
-		req, _ := http.NewRequest(http.MethodPost, "http://"+net.JoinHostPort(host, strconv.Itoa(s.port))+"/api/v1/omnigent/policy", bytes.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", "k-"+event)
-		resp, err := http.DefaultClient.Do(req)
+		body, err := postHook(http.DefaultClient, "http://"+net.JoinHostPort(argv.host, strconv.Itoa(s.port))+"/api/v1/omnigent/policy",
+			argv.env[connector.SandboxTokenEnv], "k-"+event, map[string]interface{}{"hook_event_name": event, "tool_input": map[string]string{"command": command}})
 		if err != nil {
 			s.t.Errorf("post %s: %v", event, err)
 			return "", 1
@@ -83,17 +67,12 @@ func (s *omnigentSim) handle(args []string) (string, int) {
 		var verdict struct {
 			Action string `json:"action"`
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&verdict)
-		resp.Body.Close()
+		_ = json.Unmarshal([]byte(body), &verdict)
 		blocked = blocked || (event == "PreToolUse" && verdict.Action == "block")
 	}
 	out := "::rc=0\n"
 	if strings.Contains(script, "::side-effect=") {
-		if blocked {
-			out += "::side-effect=absent\n"
-		} else {
-			out += "::side-effect=present\n"
-		}
+		out += simSideEffect(!blocked)
 	}
 	return out + "::output-begin\nok\n::output-end\n", 0
 }

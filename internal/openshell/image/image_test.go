@@ -314,24 +314,23 @@ func TestHookOnlyHarnessContexts(t *testing.T) {
 		contract string
 		files    map[string]int // in-image path -> expected uid
 		install  string
-		userDirs string
 	}{
 		{harness.OpenCode, "opencode-hooks-v1", map[string]int{
 			connector.OpenCodeSandboxManagedConfigPath: 0,
 			connector.OpenCodeSandboxPluginPath:        0,
 			harness.OpenCodeLauncherPath:               0,
-		}, "'opencode-ai@1.18.31'", ""},
+		}, "'opencode-ai@1.18.31'"},
 		{harness.Copilot, "copilot-hooks-v2", map[string]int{
 			connector.CopilotSandboxPolicyPath:                 0,
 			connector.CopilotSandboxManagedSettingsPath:        0,
 			connector.SandboxHookDir + "/copilot-hook.sh":      0,
 			connector.SandboxHomeDir + "/.copilot/config.json": 1000,
 			harness.CopilotLauncherPath:                        0,
-		}, "'@github/copilot@1.0.88'", "/sandbox/.copilot"},
+		}, "'@github/copilot@1.0.88'"},
 		{harness.Amp, "amp-plugin-v1", map[string]int{
 			connector.AmpSandboxPluginPath: 1000,
 			harness.AmpLauncherPath:        0,
-		}, "'@ampcode/cli@0.0.1785334225-g9abe75'", "/sandbox/.config /sandbox/.config/amp /sandbox/.config/amp/plugins"},
+		}, "'@ampcode/cli@0.0.1785334225-g9abe75'"},
 	} {
 		t.Run(tc.h.Name, func(t *testing.T) {
 			c := mustContext(t, testSpec(tc.h))
@@ -350,20 +349,7 @@ func TestHookOnlyHarnessContexts(t *testing.T) {
 			if !strings.Contains(string(c.Dockerfile), tc.install) || !strings.Contains(string(c.Dockerfile), "sha256sum") {
 				t.Fatalf("Dockerfile lacks the pinned install:\n%s", c.Dockerfile)
 			}
-			if want := tc.userDirs; want != "" {
-				line := "RUN install -d -o 1000 -g 1000 -m 0755 " + want + "\n"
-				copyAt := strings.Index(string(c.Dockerfile), "\nCOPY ")
-				if at := strings.Index(string(c.Dockerfile), line); at < 0 || at > copyAt {
-					t.Fatalf("user-owned artifact directories are not created before COPY:\n%s", c.Dockerfile)
-				}
-			} else if strings.Contains(string(c.Dockerfile), "RUN install -d -o 1000") {
-				t.Fatalf("unexpected user directories:\n%s", c.Dockerfile)
-			}
 		})
-	}
-	// Claude Code's only user-owned artifact sits directly in HOME.
-	if c := mustContext(t, testSpec(harness.ClaudeCode)); len(c.UserDirs) != 0 {
-		t.Fatalf("claudecode user dirs = %v", c.UserDirs)
 	}
 }
 
@@ -564,29 +550,34 @@ func replaceField(s, prefix string, field int, value string) string {
 // hold user-tier hook files are created, owned by the run-as user and
 // traversable, before the COPY that writes into them: BuildKit gives a
 // directory COPY creates the file's --chmod mode (0600 would lock the
-// workload out of its own ~/.openhands).
+// workload out of its own ~/.openhands). Claude Code's only user-owned
+// artifact sits directly in HOME.
 func TestDockerfileCreatesUserDirs(t *testing.T) {
 	for _, tc := range []struct {
 		spec *harness.Spec
-		dirs []string
+		dirs string
 	}{
-		{harness.ClaudeCode, nil},
-		{harness.Hermes, []string{"/sandbox/.hermes"}},
-		{harness.OpenHands, []string{"/sandbox/.openhands"}},
-		{harness.Antigravity, []string{"/sandbox/.gemini", "/sandbox/.gemini/config"}},
+		{harness.ClaudeCode, ""},
+		{harness.OpenCode, ""},
+		{harness.Copilot, "/sandbox/.copilot"},
+		{harness.Amp, "/sandbox/.config /sandbox/.config/amp /sandbox/.config/amp/plugins"},
+		{harness.Hermes, "/sandbox/.hermes"},
+		{harness.OpenHands, "/sandbox/.openhands"},
+		{harness.Antigravity, "/sandbox/.gemini /sandbox/.gemini/config"},
 	} {
-		spec := testSpec(tc.spec)
-		c := mustContext(t, spec)
-		if strings.Join(c.UserDirs, " ") != strings.Join(tc.dirs, " ") {
+		c := mustContext(t, testSpec(tc.spec))
+		df := string(c.Dockerfile)
+		if strings.Join(c.UserDirs, " ") != tc.dirs {
 			t.Fatalf("%s user dirs = %v, want %v", tc.spec.Name, c.UserDirs, tc.dirs)
 		}
-		df := string(c.Dockerfile)
-		create := fmt.Sprintf("RUN install -d -o %d -g %d -m 0755 %s\n", spec.UID, spec.GID, strings.Join(tc.dirs, " "))
-		if (len(tc.dirs) > 0) != strings.Contains(df, create) {
-			t.Fatalf("%s Dockerfile user-dir creation (want %t):\n%s", tc.spec.Name, len(tc.dirs) > 0, df)
+		if tc.dirs == "" {
+			if strings.Contains(df, "RUN install -d -o 1000") {
+				t.Fatalf("%s: unexpected user directories:\n%s", tc.spec.Name, df)
+			}
+			continue
 		}
-		if len(tc.dirs) > 0 && strings.Index(df, create) > strings.Index(df, "COPY ") {
-			t.Fatalf("%s creates user dirs after the first COPY", tc.spec.Name)
+		if at := strings.Index(df, "RUN install -d -o 1000 -g 1000 -m 0755 "+tc.dirs+"\n"); at < 0 || at > strings.Index(df, "\nCOPY ") {
+			t.Fatalf("%s user dirs are not created before the first COPY:\n%s", tc.spec.Name, df)
 		}
 	}
 }

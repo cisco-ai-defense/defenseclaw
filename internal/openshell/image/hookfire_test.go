@@ -25,6 +25,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -72,26 +73,60 @@ var (
 	simBaseURLRE   = regexp.MustCompile(`model_providers\.dcprobe\.base_url="([^"]+)"`)
 )
 
-func (s containerSim) handle(args []string) (string, int) {
-	host, token, script, user := "", "", "", ""
-	env := map[string]string{}
+// probeArgv is what a hook-fire docker run hands the harness: the run-as
+// user, the ingress host it maps, its environment and the shell script.
+type probeArgv struct {
+	user, host, script string
+	env                map[string]string
+}
+
+func parseProbeArgv(args []string) probeArgv {
+	p := probeArgv{env: map[string]string{}, script: args[len(args)-1]}
 	for i := 0; i+1 < len(args); i++ {
 		switch args[i] {
 		case "--user":
-			user = args[i+1]
+			p.user = args[i+1]
 		case "--add-host":
 			if v, ok := strings.CutPrefix(args[i+1], connector.SandboxIngressHost+":"); ok {
-				host = v
+				p.host = v
 			}
 		case "-e":
 			k, v, _ := strings.Cut(args[i+1], "=")
-			env[k] = v
-			if k == connector.SandboxTokenEnv {
-				token = v
-			}
+			p.env[k] = v
 		}
 	}
-	script = args[len(args)-1]
+	return p
+}
+
+// postHook posts one hook event with token (and the idempotency key, when
+// set) the way the rendered hooks do and returns the verdict.
+func postHook(client *http.Client, url, token, key string, payload interface{}) (string, error) {
+	raw, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	req.Header.Set("Authorization", "Bearer "+token)
+	if key != "" {
+		req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", key)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body), nil
+}
+
+// simSideEffect is the probe script's report of the tool's side effect.
+func simSideEffect(ran bool) string {
+	if ran {
+		return "::side-effect=present\n"
+	}
+	return "::side-effect=absent\n"
+}
+
+func (s containerSim) handle(args []string) (string, int) {
+	argv := parseProbeArgv(args)
+	host, token, script, user, env := argv.host, argv.env[connector.SandboxTokenEnv], argv.script, argv.user, argv.env
 	if host == "" || token == "" || !(strings.Contains(script, harness.ClaudeCodeLauncherPath) || strings.Contains(script, harness.CodexLauncherPath)) {
 		s.t.Errorf("hook-fire argv lacks the sink host, token or launcher: %v", args)
 		return "", 1
@@ -139,30 +174,21 @@ func (s containerSim) handle(args []string) (string, int) {
 	}
 	blocked := false
 	for _, event := range events {
-		payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": event, "tool_input": toolInput})
-		req, _ := http.NewRequest(http.MethodPost, "http://"+target+"/api/v1/claude-code/hook", bytes.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer "+token)
-		if !s.noKey {
-			req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", "k-"+event)
+		key := "k-" + event
+		if s.noKey {
+			key = ""
 		}
-		resp, err := http.DefaultClient.Do(req)
+		body, err := postHook(http.DefaultClient, "http://"+target+"/api/v1/claude-code/hook", token, key,
+			map[string]interface{}{"hook_event_name": event, "tool_input": toolInput})
 		if err != nil {
 			s.t.Errorf("post %s: %v", event, err)
 			return "", 1
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if event == "PreToolUse" && strings.Contains(string(body), `"action":"block"`) && !s.ignoreVerdict {
-			blocked = true
-		}
+		blocked = blocked || (event == "PreToolUse" && strings.Contains(body, `"action":"block"`) && !s.ignoreVerdict)
 	}
 	out := "::rc=0\n"
 	if strings.Contains(script, "::side-effect=") {
-		if blocked || s.toolNeverRuns {
-			out += "::side-effect=absent\n"
-		} else {
-			out += "::side-effect=present\n"
-		}
+		out += simSideEffect(!blocked && !s.toolNeverRuns)
 	}
 	if hostile && s.plantedRan != "" {
 		out += "::planted-ran=" + s.plantedRan + "\n"
@@ -305,9 +331,8 @@ func TestHookFireBuiltinMockDrivesEveryHarness(t *testing.T) {
 				if err != nil {
 					t.Fatalf("HookFireProbe: %v", err)
 				}
-				// p2-render-10: Codex now has hostile-settings too, so both harnesses get 3 runs.
-				wantRuns := 3
-				if len(res.Runs) != wantRuns || res.Network != mode {
+				// Allow, block and hostile settings.
+				if len(res.Runs) != 3 || res.Network != mode {
 					t.Fatalf("result = %+v", res)
 				}
 				for _, run := range res.Runs {
@@ -330,6 +355,10 @@ func TestHookFireProbeFailures(t *testing.T) {
 		"forged-token":       {containerSim{events: fullClaudeRun, badToken: true}, false, "without the sandbox token"},
 		"no-idempotency-key": {containerSim{events: fullClaudeRun, noKey: true}, false, "no idempotency key"},
 		"verdict-ignored":    {containerSim{events: fullClaudeRun, ignoreVerdict: true}, true, "still ran"},
+		// Under the built-in mock every hook fires but the allowed tool call
+		// never runs (for example a planted shell that swallows it).
+		"allowed-tool-never-ran": {containerSim{events: fullClaudeRun, llm: true, toolNeverRuns: true}, false,
+			"the allowed tool call never ran (" + builtinAllowSideEffect + " is missing)"},
 		// A settings knob that diverts the hooks: the planted wrapper
 		// swallows them, so none reaches the sink.
 		"hostile-settings-swallow-hooks": {
@@ -352,12 +381,13 @@ func TestHookFireProbeFailures(t *testing.T) {
 			sim := tc.sim
 			sim.t, sim.port = t, c.Spec.IngressPort
 			b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) { return sim.handle(args) }}}
-			_, err := b.HookFireProbe(context.Background(), c, hostOpts(tc.block))
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %v, want %q", err, tc.want)
+			opts := hostOpts(tc.block)
+			if sim.llm {
+				opts = HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"}
 			}
-			if !errors.Is(err, ErrHooksNotFired) {
-				t.Fatalf("error = %v, want ErrHooksNotFired", err)
+			_, err := b.HookFireProbe(context.Background(), c, opts)
+			if !errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want ErrHooksNotFired saying %q", err, tc.want)
 			}
 		})
 	}
@@ -443,23 +473,9 @@ func TestHookFireHostileLaunchEnvAndRefusals(t *testing.T) {
 	}
 }
 
-// TestHookFireBuiltinRequiresTheAllowedToolToRun fails an image whose hooks
-// all fire but whose allowed tool call never runs (for example a planted
-// shell that swallows it).
-func TestHookFireBuiltinRequiresTheAllowedToolToRun(t *testing.T) {
-	c := hookFireContextFor(t, harness.Codex)
-	sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true, toolNeverRuns: true}
-	b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) { return sim.handle(args) }}}
-	_, err := b.HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
-	if !errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), "the allowed tool call never ran ("+builtinAllowSideEffect+" is missing)") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestHookFireProbeRejectsBadOptions(t *testing.T) {
 	c := hookFireContext(t)
-	b := &Builder{Docker: &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 0 }}}
-	for name, opts := range map[string]HookFireOptions{
+	cases := map[string]HookFireOptions{
 		"custom-mock-no-prompt": {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Env: map[string]string{"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}},
 		"public-sink":           {Network: HookFireNetworkHost, SinkHost: "10.0.0.5", Prompt: "p"},
 		"hostname-sink":         {Network: HookFireNetworkHost, SinkHost: "localhost", Prompt: "p"},
@@ -468,10 +484,33 @@ func TestHookFireProbeRejectsBadOptions(t *testing.T) {
 		"bad-side-effect":       {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Prompt: "p", Block: &BlockScenario{Prompt: "b", Marker: "m", SideEffect: "/tmp/$(x)"}},
 		"bad-allow-side-effect": {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Prompt: "p", AllowSideEffect: "relative/file"},
 		"incomplete-block":      {Network: HookFireNetworkHost, SinkHost: "127.0.0.1", Prompt: "p", Block: &BlockScenario{Prompt: "b"}},
+	}
+	// Run files are bind-mounted read-only: only clean absolute paths
+	// without mount-option separators.
+	for name, bad := range map[string]RunFile{
+		"relative-run-file-host": {HostPath: "run.json", Path: "/etc/x.json"},
+		"relative-run-file-path": {HostPath: "/tmp/run.json", Path: "etc/x.json"},
+		"run-file-comma":         {HostPath: "/tmp/run.json,x", Path: "/etc/x.json"},
+		"unclean-run-file":       {HostPath: "/tmp/run.json", Path: "/etc/../x.json"},
 	} {
+		opts := hostOpts(true)
+		opts.RunFiles = []RunFile{bad}
+		cases[name] = opts
+	}
+	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := b.HookFireProbe(context.Background(), c, opts); err == nil {
-				t.Fatal("bad options accepted")
+			sim := containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort}
+			b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+				// The block scenario's side effect is checked when its run
+				// starts, after the allow run; it never reaches a container.
+				if name == "bad-side-effect" && !strings.Contains(strings.Join(args, " "), "$(x)") {
+					return sim.handle(args)
+				}
+				t.Errorf("a container ran with bad options: %v", args)
+				return "", 1
+			}}}
+			if _, err := b.HookFireProbe(context.Background(), c, opts); err == nil || errors.Is(err, ErrHooksNotFired) {
+				t.Fatalf("bad options: %v, want a refusal before their run", err)
 			}
 		})
 	}
@@ -502,58 +541,53 @@ func TestDefaultHookFireNetworkMatchesPlatform(t *testing.T) {
 	}
 }
 
-func TestHookSinkVerdicts(t *testing.T) {
+// sinkPost sends one hook request carrying token to sink and returns the
+// status and body.
+func sinkPost(sink *hookSink, path, token, body string, header map[string]string) (int, string) {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	sink.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// TestHookSinkRequiresTheToken: a hook or OTLP request without the sandbox
+// token is refused and recorded as unauthorized; an authorized OTLP export
+// is only counted, and for Codex (whose launcher hands the harness the OTLP
+// header) an export without the token fails the probe.
+func TestHookSinkRequiresTheToken(t *testing.T) {
 	sink := &hookSink{token: "tok"}
 	sink.begin(&BlockScenario{Marker: "BLOCKME"})
-	post := func(path, event, token, body string, headers map[string]string) (int, string) {
-		req, _ := http.NewRequest(http.MethodPost, path, strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		rec := &responseRecorder{header: http.Header{}}
-		sink.ServeHTTP(rec, req)
-		return rec.status(), rec.body.String()
-	}
-	if code, body := post("/api/v1/claude-code/hook", "", "tok", `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo BLOCKME"}}`, nil); code != 200 ||
+	if code, body := sinkPost(sink, "/api/v1/claude-code/hook", "tok", `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo BLOCKME"}}`, nil); code != 200 ||
 		!strings.Contains(body, `"permissionDecision":"deny"`) || !strings.Contains(body, `"codex_output"`) {
 		t.Fatalf("block verdict = %d %s", code, body)
 	}
-	if code, body := post("/api/v1/codex/hook", "", "tok", `{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}`, map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse"}); code != 200 || body != `{"action":"allow"}` {
-		t.Fatalf("allow verdict = %d %s", code, body)
+	for path, token := range map[string]string{"/api/v1/claude-code/hook": "nope", "/v1/metrics": "bad"} {
+		if code, _ := sinkPost(sink, path, token, `{"hook_event_name":"Stop"}`, nil); code != http.StatusUnauthorized {
+			t.Fatalf("forged token on %s = %d", path, code)
+		}
 	}
-	if code, _ := post("/api/v1/claude-code/hook", "", "nope", `{"hook_event_name":"Stop"}`, nil); code != http.StatusUnauthorized {
-		t.Fatalf("forged token = %d", code)
-	}
-	if code, _ := post("/v1/logs", "", "tok", `{}`, nil); code != 200 {
+	if code, _ := sinkPost(sink, "/v1/logs", "tok", `{}`, nil); code != 200 {
 		t.Fatalf("otlp = %d", code)
 	}
-	if code, _ := post("/v1/metrics", "", "bad", `{}`, nil); code != http.StatusUnauthorized {
-		t.Fatalf("forged otlp = %d", code)
-	}
 	events, otlp := sink.end()
-	if len(events) != 3 || otlp != 1 || !events[0].Blocked || events[1].Event != "PreToolUse" || events[2].Authorized {
+	if len(events) != 2 || otlp != 1 || !events[0].Blocked || events[1].Authorized {
 		t.Fatalf("events = %+v otlp=%d", events, otlp)
 	}
-}
 
-// TestHookSinkCodexOTLPNeedsTheToken pins that the Codex probe fails when an
-// OTLP export arrives without the sandbox token (the launcher hands Codex
-// the header in OTEL_EXPORTER_OTLP_*_HEADERS), while an authorized one is
-// only counted.
-func TestHookSinkCodexOTLPNeedsTheToken(t *testing.T) {
-	sink := &hookSink{token: "tok", adapter: hookSinkAdapters["codex"]}
-	sink.begin(nil)
-	for _, token := range []string{"tok", "missing"} {
-		req, _ := http.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader("{}"))
-		if token != "missing" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
-		sink.ServeHTTP(&responseRecorder{header: http.Header{}}, req)
+	codex := &hookSink{token: "tok", adapter: hookSinkAdapters["codex"]}
+	codex.begin(nil)
+	for _, token := range []string{"tok", ""} {
+		sinkPost(codex, "/v1/logs", token, "{}", nil)
 	}
-	events, otlp := sink.end()
+	events, otlp = codex.end()
 	if otlp != 1 || len(events) != 1 || events[0].Authorized || events[0].Path != "/v1/logs" {
-		t.Fatalf("events = %+v otlp=%d", events, otlp)
+		t.Fatalf("codex events = %+v otlp=%d", events, otlp)
 	}
 	problems := requiredHookProblems(HookFireRun{Events: events}, nil)
 	if len(problems) != 1 || !strings.Contains(problems[0], "/v1/logs OTLP export arrived without the sandbox token") {
@@ -567,30 +601,27 @@ func TestHookSinkCodexOTLPNeedsTheToken(t *testing.T) {
 // every other hook is still a plain allow.
 func TestHookSinkAdvisoryAlert(t *testing.T) {
 	for _, tc := range []struct {
-		harness, path string
-		header        map[string]string
+		harness, path, header string
 	}{
-		{"claudecode", "/api/v1/claude-code/hook", nil},
-		{"codex", "/api/v1/codex/hook", map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse"}},
+		{"claudecode", "/api/v1/claude-code/hook", ""},
+		{"codex", "/api/v1/codex/hook", "X-DefenseClaw-Hook-Event"},
 	} {
 		t.Run(tc.harness, func(t *testing.T) {
 			sink := &hookSink{token: "tok", adapter: hookSinkAdapters[tc.harness]}
 			sink.begin(&BlockScenario{Marker: "BLOCKME"})
-			post := func(body string, header map[string]string) map[string]interface{} {
-				req, _ := http.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
-				req.Header.Set("Authorization", "Bearer tok")
-				for k, v := range header {
-					req.Header.Set(k, v)
+			post := func(event, command string) map[string]interface{} {
+				header := map[string]string{}
+				if tc.header != "" {
+					header[tc.header] = event
 				}
-				rec := &responseRecorder{header: http.Header{}}
-				sink.ServeHTTP(rec, req)
+				code, body := sinkPost(sink, tc.path, "tok", `{"hook_event_name":"`+event+`","tool_input":{"command":"`+command+`"}}`, header)
 				var out map[string]interface{}
-				if err := json.Unmarshal(rec.body.Bytes(), &out); err != nil || rec.status() != http.StatusOK {
-					t.Fatalf("answer %d %q: %v", rec.status(), rec.body.String(), err)
+				if err := json.Unmarshal([]byte(body), &out); err != nil || code != http.StatusOK {
+					t.Fatalf("answer %d %q: %v", code, body, err)
 				}
 				return out
 			}
-			alert := post(`{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok"}}`, tc.header)
+			alert := post("PreToolUse", "echo ok")
 			if alert["action"] != "alert" || alert["would_block"] != false {
 				t.Fatalf("allowed PreToolUse answered %v, want an advisory alert", alert)
 			}
@@ -600,14 +631,10 @@ func TestHookSinkAdvisoryAlert(t *testing.T) {
 					t.Fatalf("%s = %v, want the harness notice only", field, alert[field])
 				}
 			}
-			if blocked := post(`{"hook_event_name":"PreToolUse","tool_input":{"command":"echo BLOCKME"}}`, tc.header); blocked["action"] != "block" {
+			if blocked := post("PreToolUse", "echo BLOCKME"); blocked["action"] != "block" {
 				t.Fatalf("the marker was answered %v", blocked)
 			}
-			stopHeader := map[string]string{}
-			if tc.header != nil {
-				stopHeader["X-DefenseClaw-Hook-Event"] = "Stop"
-			}
-			if stop := post(`{"hook_event_name":"Stop"}`, stopHeader); stop["action"] != "allow" || len(stop) != 1 {
+			if stop := post("Stop", "echo ok"); stop["action"] != "allow" || len(stop) != 1 {
 				t.Fatalf("Stop answered %v, want a plain allow", stop)
 			}
 			events, _ := sink.end()
@@ -624,60 +651,67 @@ func TestHookSinkAdvisoryAlert(t *testing.T) {
 	}
 }
 
-// TestHookSinkHookOnlyContracts drives the stand-in ingress the way the
-// OpenCode and Amp plugins and the Copilot hook do: the event comes from the
-// body or Copilot's event header, the marker is found in the pre-tool
-// payload wherever the harness puts the tool input, and the deny is shaped
-// for the harness's sandbox hook.
-func TestHookSinkHookOnlyContracts(t *testing.T) {
+// TestHookSinkDeniesThePreToolMarker drives the stand-in ingress the way each
+// harness's sandbox hook does: the event comes from the body or the
+// harness's event header, the marker is found wherever the harness puts the
+// tool input, the deny is shaped for the harness's hook, and the marker in
+// another event or field is a plain allow.
+func TestHookSinkDeniesThePreToolMarker(t *testing.T) {
+	cmd := `"tool_input":{"command":"echo BLOCKME"}`
 	for _, tc := range []struct {
 		harness string
-		path    string
-		header  map[string]string
-		preTool string
-		other   string
+		header  string // the event header the hook sends, if any
+		preTool string // the pre-tool payload
 		verdict string
+		// other are event, payload pairs carrying the marker that must be
+		// allowed.
+		other []string
 	}{
-		{"opencode", "/api/v1/opencode/hook", nil,
-			`{"hook_event_name":"tool.execute.before","tool_input":{"command":"echo BLOCKME"}}`,
-			`{"hook_event_name":"tool.execute.after","tool_input":{"command":"echo BLOCKME"}}`,
-			`"hook_output":{"decision":"deny"`},
-		{"copilot", "/api/v1/copilot/hook", map[string]string{"X-DefenseClaw-Copilot-Event": "preToolUse"},
-			`{"sessionId":"s","toolName":"bash","toolArgs":{"command":"echo BLOCKME"}}`,
-			`{"sessionId":"s","prompt":"BLOCKME"}`,
-			`"hook_output":{"permissionDecision":"deny"`},
-		{"amp", "/api/v1/amp/hook", nil,
-			`{"hook_event_name":"tool.call","tool_input":{"cmd":"echo BLOCKME"}}`,
-			`{"hook_event_name":"agent.start","prompt":"BLOCKME"}`,
-			`"action":"block"`},
+		{"claudecode", "", cmd, `"permissionDecision":"deny"`, []string{"Stop", cmd}},
+		{"codex", "X-DefenseClaw-Hook-Event", cmd, `"permissionDecision":"deny"`, []string{"PostToolUse", cmd}},
+		{"opencode", "", cmd, `"hook_output":{"decision":"deny"`, []string{"tool.execute.after", cmd}},
+		{"copilot", "X-DefenseClaw-Copilot-Event", `"sessionId":"s","toolName":"bash","toolArgs":{"command":"echo BLOCKME"}`,
+			`"hook_output":{"permissionDecision":"deny"`, []string{"userPromptSubmitted", `"sessionId":"s","prompt":"BLOCKME"`}},
+		{"amp", "", `"tool_input":{"cmd":"echo BLOCKME"}`, `"action":"block"`, []string{"agent.start", `"prompt":"BLOCKME"`}},
+		{"cursor", "", cmd, `"permission":"deny"`, nil},
+		{"kiro", "", cmd, `"hook_output":{"decision":"block"`, nil},
+		{"devin", "", cmd, `"hook_output":{"decision":"block"`, nil},
+		{"hermes", "", cmd, `"hook_output":{"decision":"block"`, []string{"PreToolUse", cmd}},
+		{"openhands", "", cmd, `"hook_output":{"decision":"deny"`, []string{"PreToolUse", `"message":"BLOCKME"`}},
+		{"antigravity", "X-DefenseClaw-Antigravity-Event", `"toolInput":{"CommandLine":"echo BLOCKME"}`, `"hook_output":{"decision":"deny"`,
+			[]string{"PostToolUse", `"toolInput":{"CommandLine":"echo BLOCKME"}`}},
+		{"omnigent", "", cmd, `"action":"block"`, nil},
 	} {
 		t.Run(tc.harness, func(t *testing.T) {
-			sink := &hookSink{token: "tok", adapter: hookSinkAdapters[tc.harness]}
+			adapter := hookSinkAdapters[tc.harness]
+			sink := &hookSink{token: "tok", adapter: adapter}
 			sink.begin(&BlockScenario{Marker: "BLOCKME"})
-			post := func(body string, headers map[string]string) string {
-				req, _ := http.NewRequest(http.MethodPost, tc.path, strings.NewReader(body))
-				req.Header.Set("Authorization", "Bearer tok")
-				req.Header.Set("X-DefenseClaw-Hook-Idempotency-Key", "k")
-				for k, v := range headers {
-					req.Header.Set(k, v)
+			post := func(event, payload string) string {
+				header := map[string]string{"X-DefenseClaw-Hook-Idempotency-Key": "k"}
+				if tc.header != "" {
+					header[tc.header] = event
+				} else {
+					payload = `"hook_event_name":"` + event + `",` + payload
 				}
-				rec := &responseRecorder{header: http.Header{}}
-				sink.ServeHTTP(rec, req)
-				return rec.body.String()
+				_, body := sinkPost(sink, "/api/v1/"+tc.harness+"/hook", "tok", "{"+payload+"}", header)
+				return body
 			}
-			if body := post(tc.preTool, tc.header); !strings.Contains(body, tc.verdict) || !strings.Contains(body, `"action":"block"`) {
+			if body := post(adapter.preToolEvent(), tc.preTool); !strings.Contains(body, tc.verdict) || !strings.Contains(body, `"action":"block"`) {
 				t.Fatalf("pre-tool verdict = %s", body)
 			}
-			otherHeaders := map[string]string{}
-			if tc.harness == "copilot" {
-				otherHeaders["X-DefenseClaw-Copilot-Event"] = "userPromptSubmitted"
-			}
-			if body := post(tc.other, otherHeaders); body != `{"action":"allow"}` {
-				t.Fatalf("a non-pre-tool hook carrying the marker was answered %s", body)
+			for i := 0; i < len(tc.other); i += 2 {
+				if body := post(tc.other[i], tc.other[i+1]); body != `{"action":"allow"}` {
+					t.Fatalf("%s %s was answered %s", tc.other[i], tc.other[i+1], body)
+				}
 			}
 			events, _ := sink.end()
-			if len(events) != 2 || !events[0].Blocked || events[1].Blocked || events[0].Event != hookSinkAdapters[tc.harness].preToolEvent() {
+			if len(events) != 1+len(tc.other)/2 || !events[0].Blocked || events[0].Event != adapter.preToolEvent() {
 				t.Fatalf("events = %+v", events)
+			}
+			for _, ev := range events[1:] {
+				if ev.Blocked {
+					t.Fatalf("events = %+v", events)
+				}
 			}
 		})
 	}
@@ -689,24 +723,39 @@ func TestHookSinkHookOnlyContracts(t *testing.T) {
 			t.Errorf("harness %s has no hook-sink adapter", name)
 		}
 	}
+	// The hook-only harnesses the Chat Completions, Gemini and Responses
+	// mocks drive.
+	for _, name := range []string{"antigravity", "hermes", "omnigent", "openhands"} {
+		if _, ok := builtinMockLaunch[name]; !ok {
+			t.Errorf("%s has no built-in mock wiring", name)
+		}
+	}
 }
 
-// TestHookFireBuiltinRefusesUnverifiedHarness: Amp cannot be driven by the
-// built-in mock, so the zero-value probe refuses before any container runs
-// and says why; its images stay unverified.
-func TestHookFireBuiltinRefusesUnverifiedHarness(t *testing.T) {
-	c := hookFireContextFor(t, harness.Amp)
-	b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
-		t.Errorf("a container ran: %v", args)
-		return "", 1
-	}}}
-	_, err := b.HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
-	if err == nil || errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), "AMP_API_KEY") {
-		t.Fatalf("error = %v", err)
-	}
-	// `sandbox image build amp` prints it: no Go API names.
-	if msg := err.Error(); strings.Contains(msg, "HookFireOptions") || !strings.Contains(msg, "image stays unverified") {
-		t.Fatalf("error = %v", err)
+// TestHookFireBuiltinRefusesUnprobeableHarnesses: the built-in mock cannot
+// drive Amp (no model endpoint), Cursor or Devin (a vendor account runs every
+// turn), so the zero-value probe refuses before any container runs and names
+// what is missing and what it means, not a Go option (`sandbox image build`
+// prints it); their images stay unverified.
+func TestHookFireBuiltinRefusesUnprobeableHarnesses(t *testing.T) {
+	for _, tc := range []struct {
+		spec *harness.Spec
+		want string
+	}{
+		{harness.Amp, "AMP_API_KEY"},
+		{harness.Cursor, "CURSOR_API_KEY"},
+		{harness.Devin, "devin auth login"},
+	} {
+		c := hookFireContextFor(t, tc.spec)
+		b := &Builder{Docker: &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+			t.Errorf("a container ran: %v", args)
+			return "", 1
+		}}}
+		_, err := b.HookFireProbe(context.Background(), c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
+		if err == nil || errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), tc.want) ||
+			!strings.Contains(err.Error(), "image stays unverified") || strings.Contains(err.Error(), "HookFireOptions") {
+			t.Fatalf("%s: error = %v", tc.spec.Name, err)
+		}
 	}
 }
 
@@ -872,18 +921,6 @@ func TestBuildVerifiesWithTheBuiltinMock(t *testing.T) {
 	}
 }
 
-func TestVerifyHooksRequiresABlockScenario(t *testing.T) {
-	c := hookFireContext(t)
-	docker := &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 1 }}
-	b := &Builder{Docker: docker, Store: testStore(t)}
-	if _, _, err := b.VerifyHooks(context.Background(), c, hostOpts(false)); err == nil || !strings.Contains(err.Error(), "block scenario") {
-		t.Fatalf("error = %v", err)
-	}
-	if len(docker.calls) != 0 {
-		t.Fatalf("docker ran: %v", docker.calls)
-	}
-}
-
 func TestVerifyHooksRefusesUnrecordedOrReplacedImages(t *testing.T) {
 	c := hookFireContext(t)
 	sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort}
@@ -950,15 +987,23 @@ func TestVerifyHooksKeepsVerdictWhenProbeCannotRun(t *testing.T) {
 		return "", 1
 	}}
 	b := &Builder{Docker: docker, Store: store}
-	for name, opts := range map[string]HookFireOptions{
-		"docker-failure":         hostOpts(true),
-		"builtin-docker-failure": {Network: HookFireNetworkRelay},
-		"bad-options":            {Network: HookFireNetworkHost, SinkHost: "10.0.0.5"},
-		"no-block-scenario":      hostOpts(false),
+	for name, tc := range map[string]struct {
+		opts HookFireOptions
+		// refusal is what options refused before any container runs say.
+		refusal string
+	}{
+		"docker-failure":         {hostOpts(true), ""},
+		"builtin-docker-failure": {HookFireOptions{Network: HookFireNetworkRelay}, ""},
+		"bad-options":            {HookFireOptions{Network: HookFireNetworkHost, SinkHost: "10.0.0.5"}, "must be a loopback address"},
+		"no-block-scenario":      {hostOpts(false), "block scenario"},
 	} {
-		_, _, err := b.VerifyHooks(context.Background(), c, opts)
-		if err == nil || errors.Is(err, ErrHooksNotFired) {
+		runs := docker.count("run")
+		_, _, err := b.VerifyHooks(context.Background(), c, tc.opts)
+		if err == nil || errors.Is(err, ErrHooksNotFired) || !strings.Contains(err.Error(), tc.refusal) {
 			t.Fatalf("%s: error = %v, want a probe error that is not a verdict", name, err)
+		}
+		if tc.refusal != "" && docker.count("run") != runs {
+			t.Fatalf("%s: a container ran", name)
 		}
 		rec, _, _ := store.Get(c.Tag)
 		if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(verifiedAt) {
@@ -992,22 +1037,6 @@ func TestVerifyHooksIgnoresProbeOfReplacedImage(t *testing.T) {
 	}
 }
 
-type responseRecorder struct {
-	header http.Header
-	code   int
-	body   bytes.Buffer
-}
-
-func (r *responseRecorder) Header() http.Header         { return r.header }
-func (r *responseRecorder) Write(b []byte) (int, error) { return r.body.Write(b) }
-func (r *responseRecorder) WriteHeader(code int)        { r.code = code }
-func (r *responseRecorder) status() int {
-	if r.code == 0 {
-		return http.StatusOK
-	}
-	return r.code
-}
-
 // TestHookFireProbeMountsRunFiles pins that every probe container sees the
 // run files read-only, so VerifyHooks proves an image together with a
 // sandbox's per-run managed configuration.
@@ -1030,17 +1059,6 @@ func TestHookFireProbeMountsRunFiles(t *testing.T) {
 	}
 	if runs != 3 {
 		t.Fatalf("%d probe containers", runs)
-	}
-	for name, bad := range map[string]RunFile{
-		"relative host": {HostPath: "run.json", Path: "/etc/x.json"},
-		"relative path": {HostPath: file, Path: "etc/x.json"},
-		"comma":         {HostPath: file + ",x", Path: "/etc/x.json"},
-		"unclean":       {HostPath: file, Path: "/etc/../x.json"},
-	} {
-		opts.RunFiles = []RunFile{bad}
-		if _, err := b.HookFireProbe(context.Background(), c, opts); err == nil {
-			t.Errorf("%s run file accepted", name)
-		}
 	}
 }
 

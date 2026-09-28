@@ -161,74 +161,68 @@ func TestBuildRecordsVerifiedImage(t *testing.T) {
 	}
 }
 
-func TestBuildRemovesImagesThatFailVerification(t *testing.T) {
+// TestBuildFailures: an image that fails the static probe is removed and
+// never recorded, an unknown hook contract is refused before docker runs,
+// and a docker failure is reported as one.
+func TestBuildFailures(t *testing.T) {
 	c := mustContext(t, testSpec(harness.ClaudeCode))
-	tampered := strings.Replace(goodProbeOutput(c), "version 2.1.156", "version 2.1.999", 1)
-	docker := imageDocker(t, c, tampered)
-	store := testStore(t)
-	b := &Builder{Docker: docker, Store: store}
-	if _, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{}); err == nil || !strings.Contains(err.Error(), "failed verification") {
-		t.Fatalf("Build error = %v", err)
-	}
-	if docker.count("image", "rm") != 1 {
-		t.Fatal("unverified image was left behind")
-	}
-	if records, _ := store.List(); len(records) != 0 {
-		t.Fatalf("unverified image recorded: %v", records)
-	}
-}
-
-func TestBuildRefusesUnknownContractWithoutDocker(t *testing.T) {
-	docker := &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 0 }}
-	b := &Builder{Docker: docker, Store: testStore(t)}
-	spec := testSpec(harness.Codex)
-	spec.HarnessVersion = "0.117.0"
-	if _, err := b.Build(context.Background(), spec, BuildOptions{}); err == nil {
-		t.Fatal("unknown contract built")
-	}
-	if len(docker.calls) != 0 {
-		t.Fatalf("docker was invoked: %v", docker.calls)
-	}
-}
-
-func TestBuildPropagatesDockerFailure(t *testing.T) {
-	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
-		if args[0] == "build" {
-			return "", 1
+	unknown := testSpec(harness.Codex)
+	unknown.HarnessVersion = "0.117.0"
+	for name, tc := range map[string]struct {
+		spec   BuildSpec
+		docker *fakeDocker
+		want   string
+		calls  map[string]int // docker verbs ("" is any call) and how often they run
+	}{
+		"tampered image": {testSpec(harness.ClaudeCode), imageDocker(t, c, strings.Replace(goodProbeOutput(c), "version 2.1.156", "version 2.1.999", 1)),
+			"failed verification", map[string]int{"image rm": 1}},
+		"unknown contract": {unknown, &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 0 }}, "", map[string]int{"": 0}},
+		"docker failure":   {testSpec(harness.ClaudeCode), &fakeDocker{handler: func([]string, []byte) (string, int) { return "", 1 }}, "docker build", nil},
+	} {
+		store := testStore(t)
+		b := &Builder{Docker: tc.docker, Store: store}
+		if _, err := b.Build(context.Background(), tc.spec, BuildOptions{}); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: Build error = %v", name, err)
 		}
-		return "", 1
-	}}
-	b := &Builder{Docker: docker, Store: testStore(t)}
-	if _, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{}); err == nil || !strings.Contains(err.Error(), "docker build") {
-		t.Fatalf("Build error = %v", err)
+		for verb, n := range tc.calls {
+			if got := tc.docker.count(strings.Fields(verb)...); got != n {
+				t.Fatalf("%s: docker %q ran %d times, want %d: %v", name, verb, got, n, tc.docker.calls)
+			}
+		}
+		if records, _ := store.List(); len(records) != 0 {
+			t.Fatalf("%s: a failed build was recorded: %v", name, records)
+		}
 	}
 }
 
 func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	store := testStore(t)
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
-	own := func(r Record) Record {
-		r.Owner = testOwner
-		return r
-	}
-	for _, r := range []Record{
-		own(Record{Tag: "e-repo:claudecode-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0}),
-		own(Record{Tag: "e-repo:claudecode-older-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-2 * time.Hour)}),
-		own(Record{Tag: "e-repo:claudecode-new-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(time.Hour)}),
+	for _, r := range []struct {
+		tag      string
+		built    time.Duration
+		verified bool
+		owner    string
+	}{
+		{"e-repo:claudecode-old-u1000", 0, false, testOwner},
+		{"e-repo:claudecode-older-u1000", -2 * time.Hour, false, testOwner},
+		{"e-repo:claudecode-new-u1000", time.Hour, false, testOwner},
 		// The newest hook-verified image is what Store.Current selects for
 		// an unchanged spec, so it survives a newer unverified build.
-		own(Record{Tag: "e-repo:claudecode-verified-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(30 * time.Minute), HookFireVerified: true}),
-		own(Record{Tag: "e-repo:claudecode-verified-old-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-time.Hour), HookFireVerified: true}),
-		own(Record{Tag: "e-repo:codex-only-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0}),
-		own(Record{Tag: "e-repo:codex-gone-u1000", Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(2 * time.Hour)}),
-		own(Record{Tag: "other:claudecode-x-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0}),
+		{"e-repo:claudecode-verified-u1000", 30 * time.Minute, true, testOwner},
+		{"e-repo:claudecode-verified-old-u1000", -time.Hour, true, testOwner},
+		{"e-repo:codex-only-u1000", 0, false, testOwner},
+		{"e-repo:codex-gone-u1000", 2 * time.Hour, false, testOwner},
+		{"other:claudecode-x-u1000", 0, false, testOwner},
 		// Recorded here without this store's owner (a record from before
 		// store owners), and recorded under the owner but now naming an
 		// image without its label: neither is removed.
-		{Tag: "e-repo:claudecode-legacy-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-3 * time.Hour)},
-		own(Record{Tag: "e-repo:claudecode-relabelled-u1000", Connector: "claudecode", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(-4 * time.Hour)}),
+		{"e-repo:claudecode-legacy-u1000", -3 * time.Hour, false, ""},
+		{"e-repo:claudecode-relabelled-u1000", -4 * time.Hour, false, testOwner},
 	} {
-		if err := store.Put(r); err != nil {
+		connector, _, _ := strings.Cut(strings.SplitN(r.tag, ":", 2)[1], "-")
+		if err := store.Put(Record{Tag: r.tag, Connector: connector, UID: 1000, GID: 1000, IngressPort: 18971,
+			BuiltAt: t0.Add(r.built), HookFireVerified: r.verified, Owner: r.owner}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -565,7 +559,6 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 	}
 }
 
-// recordFor is the record Build writes for c.
 // withHarnessVersion is c for another pin of its harness, as a later
 // DefenseClaw release that pins it would render it: every harness has a
 // single pinned release today, so NewContext refuses any other version.
@@ -582,6 +575,7 @@ func withHarnessVersion(t *testing.T, c *Context, version string) *Context {
 	return &out
 }
 
+// recordFor is the record Build writes for c.
 func recordFor(c *Context, builtAt time.Time, verified bool) Record {
 	r := Record{
 		Tag: c.Tag, ImageID: "sha256:" + strings.Repeat("1", 64), ContentHash: c.ContentHash,
