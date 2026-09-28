@@ -941,9 +941,11 @@ Adds host patterns to `openshell.egress.allow` in `config.yaml`, and refuses
 patterns that cover every host or a whole top-level domain. Allow entries
 matter under the `balanced` profile, which reaches only allowed hosts. Under
 `strict`, a direct connection to an allowed host is approved without asking.
-The daemon applies the change to running sandboxes within a few seconds. With
-`openshell.admin.allow_unblock: false` the entries are saved but ignored, and
-the command still succeeds.
+The daemon applies the change to running sandboxes within a few seconds.
+Under your organization's `openshell.admin` limits the command refuses an
+entry, names the limit, and changes nothing: every entry when
+`allow_unblock` is `false` (your own allow entries would be ignored), and a
+host on `egress_block` or outside `egress_allow_only`.
 
 ```bash
 defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
