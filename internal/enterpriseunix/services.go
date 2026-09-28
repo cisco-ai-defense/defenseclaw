@@ -111,6 +111,14 @@ type fragmentReporter interface {
 	FragmentPath(ctx context.Context, unit Unit) string
 }
 
+// plannedRestartReporter is implemented by service managers that report a
+// unit waiting for its automatic restart after a run that ended cleanly. The
+// sensor helper and the guardian exit that way to reload; a unit that
+// crashed is not in a planned restart.
+type plannedRestartReporter interface {
+	PlannedRestart(ctx context.Context, unit Unit) bool
+}
+
 func newServiceManager(env *Env) ServiceManager {
 	if env.GOOS == "darwin" {
 		return &launchdManager{env: env}
@@ -264,6 +272,14 @@ func (m *systemdManager) Active(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "ActiveState")["ActiveState"] == "active"
 }
 
+// PlannedRestart is systemd's restart delay (auto-restart, and
+// auto-restart-queued on systemd 254 and later) after a run whose Result is
+// success.
+func (m *systemdManager) PlannedRestart(ctx context.Context, unit Unit) bool {
+	props := m.properties(ctx, unit.Name, "ActiveState", "SubState", "Result")
+	return props["ActiveState"] == "activating" && strings.HasPrefix(props["SubState"], "auto-restart") && props["Result"] == "success"
+}
+
 // Enabled reports whether the unit is enabled to start at boot.
 func (m *systemdManager) Enabled(ctx context.Context, unit Unit) bool {
 	return m.properties(ctx, unit.Name, "UnitFileState")["UnitFileState"] == "enabled"
@@ -345,6 +361,7 @@ var (
 	launchdStatePattern = regexp.MustCompile(`(?m)^\s*state = ([^\n]*?)\s*$`)
 	launchdPIDPattern   = regexp.MustCompile(`(?m)^\s*pid = (\d+)`)
 	launchdRunsPattern  = regexp.MustCompile(`(?m)^\s*runs = (\d+)`)
+	launchdExitPattern  = regexp.MustCompile(`(?m)^\s*last exit code = (\S+)`)
 )
 
 func (m *launchdManager) Status(ctx context.Context, unit Unit) (enterprisestatus.Service, error) {
@@ -397,6 +414,18 @@ func (m *launchdManager) Active(ctx context.Context, unit Unit) bool {
 		return status.State != "not_loaded"
 	}
 	return status.State == "running"
+}
+
+// PlannedRestart is a KeepAlive daemon whose respawn launchd scheduled
+// (ThrottleInterval) after a run that exited 0.
+func (m *launchdManager) PlannedRestart(ctx context.Context, unit Unit) bool {
+	result, err := m.env.Runner.Run(ctx, "launchctl", "print", "system/"+unit.Name)
+	if err != nil {
+		return false
+	}
+	state := launchdStatePattern.FindSubmatch(result.Stdout)
+	exit := launchdExitPattern.FindSubmatch(result.Stdout)
+	return state != nil && string(state[1]) == "spawn scheduled" && exit != nil && string(exit[1]) == "0"
 }
 
 func launchdAlreadyLoaded(err error) bool {

@@ -39,9 +39,10 @@ type fakeServices struct {
 	failStart map[string]error
 	// failed units report systemd's failed state.
 	failed map[string]bool
-	// restarting units are in systemd's restart delay: Status reports it
-	// once, and the unit is active again after that.
-	restarting map[string]bool
+	// restarting units are in systemd's restart delay after a run with this
+	// Result ("success" for a planned restart, "exit-code" for a crash).
+	// PlannedRestart reads it once, and the unit is active again after that.
+	restarting map[string]string
 	reloads    int
 	inner      ServiceManager // definition paths and unit list
 	env        *Env
@@ -49,7 +50,7 @@ type fakeServices struct {
 
 func newFakeServices(env *Env) *fakeServices {
 	inner := newServiceManager(env)
-	return &fakeServices{goos: env.GOOS, version: 255, active: map[string]bool{}, enabled: map[string]bool{}, failStart: map[string]error{}, failed: map[string]bool{}, restarting: map[string]bool{}, inner: inner, env: env}
+	return &fakeServices{goos: env.GOOS, version: 255, active: map[string]bool{}, enabled: map[string]bool{}, failStart: map[string]error{}, failed: map[string]bool{}, restarting: map[string]string{}, inner: inner, env: env}
 }
 
 func (f *fakeServices) Enabled(_ context.Context, u Unit) bool {
@@ -139,13 +140,19 @@ func (f *fakeServices) Status(_ context.Context, u Unit) (enterprisestatus.Servi
 	if f.failed[u.Name] {
 		state = "failed/failed"
 	}
-	if f.restarting[u.Name] {
-		state = "activating/auto-restart"
+	f.mu.Unlock()
+	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil
+}
+
+func (f *fakeServices) PlannedRestart(_ context.Context, u Unit) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	result, restarting := f.restarting[u.Name]
+	if restarting {
 		delete(f.restarting, u.Name)
 		f.active[u.Name] = true
 	}
-	f.mu.Unlock()
-	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil
+	return result == "success"
 }
 
 func (f *fakeServices) Active(_ context.Context, u Unit) bool { return f.isActive(u.Name) }

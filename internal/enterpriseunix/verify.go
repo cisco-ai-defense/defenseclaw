@@ -236,13 +236,13 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 // or launchd (ThrottleInterval 5) restarts it.
 const restartSettle = 15 * time.Second
 
-// backFromRestart reports whether a unit that is not active is waiting for
-// its automatic restart (systemd's auto-restart, launchd's spawn scheduled)
-// and is active again within restartSettle.
+// backFromRestart reports whether a unit that is not active is in a planned
+// restart and is active again within restartSettle. A unit that crashed is
+// not waited for: a crash loop would come back for a moment each time and
+// read as healthy.
 func (l *lifecycle) backFromRestart(ctx context.Context, unit Unit) bool {
 	env := l.env
-	status, err := env.Services.Status(ctx, unit)
-	if err != nil || (status.State != "activating/auto-restart" && status.State != "spawn scheduled") {
+	if restarts, ok := env.Services.(plannedRestartReporter); !ok || !restarts.PlannedRestart(ctx, unit) {
 		return false
 	}
 	deadline := env.Now().Add(restartSettle)
