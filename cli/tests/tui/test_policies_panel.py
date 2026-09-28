@@ -185,3 +185,27 @@ async def test_protection_center_shows_nav_table_and_aside_at_160x45(tmp_path, m
         assert len(app.query_one("#panel-table", DataTable).columns) >= 6
     for scope in ("global", "codex", "claudecode"):
         assert scope in text
+
+
+@pytest.mark.asyncio
+async def test_a_load_asked_for_during_a_load_runs_once_it_finishes(tmp_path, monkeypatch) -> None:
+    import threading
+
+    app, _reads, _captured, _runs = policies_app(tmp_path, monkeypatch)
+    release = threading.Event()
+    configs: list[object] = []
+
+    def slow_catalog(config):
+        configs.append(config)
+        if len(configs) == 1:
+            release.wait(10)
+        return policy_panel.PolicyCatalogRead(policies=[DEFAULT])
+
+    monkeypatch.setattr(policy_panel, "read_policy_catalog", slow_catalog)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await until(pilot, lambda: len(configs) == 1)
+        app._schedule_policy_load()  # e.g. the config changed while the first read ran
+        release.set()
+        await until(pilot, lambda: len(configs) == 2)
+        await app.workers.wait_for_complete()
+        assert len(configs) == 2

@@ -228,6 +228,9 @@ class PolicyPanelMixin:
         self.policy_model = model or PoliciesPanelModel(sandbox_supported=openshell_sandboxes_supported())
         self.policy_model.set_config(getattr(self, "config", None))
         self._policy_load_running = False
+        # A load asked for while one runs (a config change mid-read): the
+        # running read saw the old config, so one more load follows it.
+        self._policy_load_pending = False
         self._policy_sandbox_running = False
 
     def _policy_mount(self) -> None:
@@ -243,7 +246,10 @@ class PolicyPanelMixin:
         if sandbox and self.policy_model.sandbox_supported and not self._policy_sandbox_running:
             self._policy_sandbox_running = True
             self.run_worker(self._load_sandbox_packs(), exclusive=False, thread=False)  # type: ignore[attr-defined]
-        if self._policy_model_injected or self._policy_load_running:
+        if self._policy_model_injected:
+            return
+        if self._policy_load_running:
+            self._policy_load_pending = True
             return
         self._policy_load_running = True
         self.policy_model.loading = True
@@ -280,6 +286,9 @@ class PolicyPanelMixin:
         self._policy_publish_active()
         if getattr(self, "active_panel", "") in {"policies", "overview"} and not getattr(self, "help_open", False):
             self._render_chrome()  # type: ignore[attr-defined]
+        if self._policy_load_pending:
+            self._policy_load_pending = False
+            self._schedule_policy_load()
 
     async def _load_sandbox_packs(self) -> None:
         from defenseclaw.tui import app as app_module
