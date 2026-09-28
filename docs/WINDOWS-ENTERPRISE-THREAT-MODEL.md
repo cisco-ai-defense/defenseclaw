@@ -750,16 +750,26 @@ authority.
    never authenticates hook, inspect or management routes or another
    connector ([R7](ENTERPRISE-THREAT-MODEL.md#residual-risks)). Target-owned
    file reads and comparisons are bounded, and an authorized oversized
-   runtime leaf is quarantined for repair. The accidental port conflict is
-   closed: while the `DefenseClawGateway`
+   runtime leaf is quarantined for repair. Per-user releases with the
+   enterprise coexistence check refuse while the `DefenseClawGateway`
    service exists, the per-user `install.ps1`, the per-user Setup install,
    upgrade, and repair actions, and the per-user gateway `start`, `restart`, and
    foreground run all refuse. A production deployment also owns
    `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
    changes a value that Group Policy or another administrator already set, and
    Uninstall removes the value only if it still carries the deployment's owner
-   marker. A deliberate listener from any other standard-user program remains
-   an availability residual. Disk-full,
+   marker. Two availability residuals remain. A per-user install from an
+   earlier release has no coexistence check: its logon helper (the
+   `DefenseClawGateway` value under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and its hook
+   cold-start recovery still start a per-user gateway, which can take the port
+   while the SCM gateway restarts. The enterprise lifecycle does not detect,
+   report, or remove such an install, and the owned self-update policy keeps it
+   on its release. Administrators must uninstall pre-existing per-user copies
+   for every user before or after deploying; while one holds the port, managed
+   hooks fail closed with `enterprise_managed_gateway_peer_unverified`. A
+   deliberate listener from any other standard-user program also remains an
+   availability residual. Disk-full,
    handle exhaustion, continuously generated new data, and broader endpoint
    resource starvation remain availability residuals. SCM recovery, monitoring,
    and endpoint resource controls reduce but do not eliminate them.

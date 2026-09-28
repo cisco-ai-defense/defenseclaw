@@ -312,11 +312,27 @@ unless the value already exists, and removes it on uninstall only if it still
 carries the deployment's owner marker.
 
 While a managed-enterprise deployment is installed (its `DefenseClawGateway`
-Windows service exists), the per-user product refuses to run beside it. The
-refusal covers `install.ps1`, Setup install, upgrade, and repair, and the
-per-user gateway `start`, `restart`, and foreground run. Both products serve
-hooks on the same local port. Setup uninstall stays available, so an existing
-per-user copy can be removed.
+Windows service exists), per-user releases that include the enterprise
+coexistence check refuse to run beside it. The refusal covers `install.ps1`,
+Setup install, upgrade, and repair, and the per-user gateway `start`,
+`restart`, and foreground run. Both products serve hooks on the same local
+port. Setup uninstall stays available, so an existing per-user copy can be
+removed.
+
+A per-user install from an earlier release has no such check. Its logon helper
+and hook cold-start recovery still start the per-user gateway, the enterprise
+deployment does not detect or remove it, and the owned self-update policy
+keeps it on its release. Uninstall every pre-existing per-user copy, as each
+affected user, before or after deploying the enterprise product:
+
+```powershell
+& "$env:LOCALAPPDATA\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /uninstall /quiet
+```
+
+A per-user copy registers the `DefenseClawGateway` value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. While a per-user
+gateway holds the port, the enterprise managed hooks fail closed with
+`enterprise_managed_gateway_peer_unverified`.
 
 ## Release gate
 
