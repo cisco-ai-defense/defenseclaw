@@ -6,8 +6,13 @@ package cli
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -253,4 +258,135 @@ func TestEnterpriseCoexistenceWatchIsOffForEnterpriseGatewayAndOffWindows(t *tes
 			}
 		})
 	}
+}
+
+// The watch tests above call runWithEnterpriseCoexistenceWatch directly, so
+// they still pass if runSidecar stops using it. runSidecar is the only place
+// in this package that builds and runs a gateway sidecar (the bare root
+// command, the start daemon child, and the Windows service all reach it).
+// It must run sc.Run through the watch with the context and cancel that
+// shut the gateway down, return the watch's error so the exit says why the
+// gateway stopped, and never call sc.Run directly.
+func TestRunSidecarRunsTheGatewayThroughTheEnterpriseCoexistenceWatch(t *testing.T) {
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	var runSidecarDecl *ast.FuncDecl
+	var constructors []string
+	for _, source := range sources {
+		if strings.HasSuffix(source, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, source, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if fn.Recv == nil && fn.Name.Name == "runSidecar" {
+				runSidecarDecl = fn
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if call, ok := node.(*ast.CallExpr); ok && isSelectorNamed(call.Fun, "gateway", "NewSidecar") {
+					constructors = append(constructors, source+": "+fn.Name.Name)
+				}
+				return true
+			})
+		}
+	}
+	if runSidecarDecl == nil {
+		t.Fatal("runSidecar not found in package cli")
+	}
+	if len(constructors) != 1 || constructors[0] != "sidecar.go: runSidecar" {
+		t.Fatalf("gateway.NewSidecar callers = %v, want only runSidecar; "+
+			"any other gateway run path must also run through runWithEnterpriseCoexistenceWatch", constructors)
+	}
+
+	var sidecarName string
+	var cancelFromWithCancel bool
+	var watchCalls []*ast.CallExpr
+	var watchResult string
+	var returnsWatchCall bool
+	ast.Inspect(runSidecarDecl.Body, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			if len(node.Rhs) != 1 {
+				return true
+			}
+			call, ok := node.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch {
+			case isSelectorNamed(call.Fun, "gateway", "NewSidecar") && len(node.Lhs) >= 1:
+				if id, ok := node.Lhs[0].(*ast.Ident); ok {
+					sidecarName = id.Name
+				}
+			case isSelectorNamed(call.Fun, "context", "WithCancel") && len(node.Lhs) == 2:
+				cancelFromWithCancel = isIdentNamed(node.Lhs[0], "ctx") && isIdentNamed(node.Lhs[1], "cancel")
+			case isIdentNamed(call.Fun, "runWithEnterpriseCoexistenceWatch") && len(node.Lhs) == 1:
+				if id, ok := node.Lhs[0].(*ast.Ident); ok {
+					watchResult = id.Name
+				}
+			}
+		case *ast.ReturnStmt:
+			if len(node.Results) == 1 {
+				if call, ok := node.Results[0].(*ast.CallExpr); ok && isIdentNamed(call.Fun, "runWithEnterpriseCoexistenceWatch") {
+					returnsWatchCall = true
+				}
+			}
+		case *ast.CallExpr:
+			if isIdentNamed(node.Fun, "runWithEnterpriseCoexistenceWatch") {
+				watchCalls = append(watchCalls, node)
+			}
+		}
+		return true
+	})
+	if sidecarName == "" {
+		t.Fatal("runSidecar does not assign the gateway.NewSidecar result")
+	}
+	ast.Inspect(runSidecarDecl.Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok && isSelectorNamed(call.Fun, sidecarName, "Run") {
+			t.Errorf("runSidecar calls %s.Run directly at %s; run it through runWithEnterpriseCoexistenceWatch",
+				sidecarName, fset.Position(call.Pos()))
+		}
+		return true
+	})
+	if !cancelFromWithCancel {
+		t.Fatal("runSidecar does not derive ctx, cancel from context.WithCancel")
+	}
+	if len(watchCalls) != 1 {
+		t.Fatalf("runSidecar calls runWithEnterpriseCoexistenceWatch %d times, want once", len(watchCalls))
+	}
+	args := watchCalls[0].Args
+	if len(args) != 4 ||
+		!isIdentNamed(args[0], "ctx") ||
+		!isIdentNamed(args[1], "cancel") ||
+		!isSelectorNamed(args[2], "cfg", "DeploymentMode") ||
+		!isSelectorNamed(args[3], sidecarName, "Run") {
+		t.Fatalf("runWithEnterpriseCoexistenceWatch call at %s, want (ctx, cancel, cfg.DeploymentMode, %s.Run)",
+			fset.Position(watchCalls[0].Pos()), sidecarName)
+	}
+	if !returnsWatchCall {
+		body := runSidecarDecl.Body.List
+		final, ok := body[len(body)-1].(*ast.ReturnStmt)
+		if watchResult == "" || !ok || len(final.Results) != 1 || !isIdentNamed(final.Results[0], watchResult) {
+			t.Fatal("runSidecar does not return the error from runWithEnterpriseCoexistenceWatch")
+		}
+	}
+}
+
+func isIdentNamed(expr ast.Expr, name string) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+func isSelectorNamed(expr ast.Expr, receiver, name string) bool {
+	selector, ok := expr.(*ast.SelectorExpr)
+	return ok && selector.Sel.Name == name && isIdentNamed(selector.X, receiver)
 }
