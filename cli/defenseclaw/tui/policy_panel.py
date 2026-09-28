@@ -105,9 +105,6 @@ POLICY_BUTTON_KEYS: dict[str, str] = {
     "policies-refresh": "r",
 }
 
-# Consequence modals list at most this many of a pack's rules (80x24).
-_MODAL_RULES = 3
-
 
 @dataclass
 class PolicyCatalogRead:
@@ -124,6 +121,7 @@ class PolicyCatalogRead:
     pack_rules: dict[str, tuple[PackRule, ...]] = field(default_factory=dict)
     families: dict[str, list[Any]] = field(default_factory=dict)
     chains: list[Any] = field(default_factory=list)
+    pack_bases: dict[str, str] = field(default_factory=dict)
     posture_error: str = ""
 
 
@@ -182,6 +180,16 @@ def read_policy_catalog(config: object | None) -> PolicyCatalogRead:
         read.chains = list(tool_chains()) if callable(tool_chains) else []
     except Exception as exc:  # noqa: BLE001
         errors.append(str(exc) or type(exc).__name__)
+    read_manifest = getattr(policy_catalog, "read_protection_manifest", None)
+    if callable(read_manifest):
+        for path in dict.fromkeys(str(getattr(row, "pack_path", "") or "") for row in read.postures):
+            try:
+                manifest = read_manifest(path)
+            except Exception:  # noqa: BLE001 - no manifest just means "not composed"
+                manifest = None
+            base = str(getattr(manifest, "base_name", "") or "") if manifest is not None else ""
+            if manifest is not None:
+                read.pack_bases[path] = base or os.path.basename(str(getattr(manifest, "base", "") or ""))
     rule_families = getattr(policy_catalog, "rule_families", None)
     if callable(rule_families):
         for path in dict.fromkeys(str(getattr(row, "pack_path", "") or "") for row in read.postures):
@@ -250,6 +258,7 @@ class PolicyPanelMixin:
             pack_rules=read.pack_rules,
             families=read.families,
             chains=read.chains,
+            pack_bases=read.pack_bases,
         )
         if read.posture_error:
             model.set_posture_error(read.posture_error)
@@ -642,7 +651,8 @@ def _scope_words(model: PoliciesPanelModel, row: Any) -> str:
 
 
 def _run_line(intent: Any, suffix: str = "") -> str:
-    return f"Runs: {fit(' '.join(intent.argv), 72)}{suffix}"
+    # Never shortened: the modal promises to run exactly this.
+    return f"Runs: {' '.join(intent.argv)}{suffix}"
 
 
 def _confirm(action_id: str, hotkey: str, label: str, weaker: bool) -> ConsequenceAction:
@@ -734,7 +744,7 @@ def rule_pack_change_modal(model: PoliciesPanelModel, choice: RulePackChoice) ->
     where = connector or "every connector"
     return _modal(
         f"Use the {choice.name} rule pack for {where}?",
-        "The gateway applies the new pack without a restart.",
+        "A running gateway restarts to load the new pack.",
         details,
         consequence,
         _confirm("use", "u", f"Use {choice.name}", weaker),
@@ -754,13 +764,18 @@ def mode_change_modal(model: PoliciesPanelModel, row: Any, new: str) -> Conseque
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets the global mode.")
     elif connector:
-        details.append("Only this connector changes; the others keep their mode.")
+        details.append("Only this connector changes; the others keep their mode. A running gateway restarts.")
     else:
         own = model.own_setting("mode")
         if own:
             details.append("Connectors with their own mode keep it: " + ", ".join(own) + ".")
     details.append(_run_line(intent))
-    consequence = f"This weakens protection: {scope} stops blocking; findings are only logged." if weaker else ""
+    consequence = ""
+    if weaker:
+        consequence = (
+            f"This weakens protection: {scope} stops blocking; findings are only logged, and its hooks "
+            "fail open while the gateway is down unless their fail mode is set to closed."
+        )
     title = f"Switch {connector} to {new} mode?" if connector else f"Set the global guardrail mode to {new}?"
     return _modal(title, f"{old} → {new}", details, consequence, _confirm("mode", "s", f"Switch to {new}", weaker))
 
@@ -878,19 +893,16 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
     weaker = not enable
     if enable:
         summary = protection_claim(name, scope)
-        details.append(f"It blocks: {covers}." if covers else "It adds the pack's blocking rules.")
-        rules = model.pack_rules.get(name) or ()
-        for rule in rules[:_MODAL_RULES]:
-            details.append("  " + " · ".join(part for part in (rule.id, rule.severity, rule.title) if part))
-        if len(rules) > _MODAL_RULES:
-            details.append(f"  … and {len(rules) - _MODAL_RULES} more (see the details)")
+        count = int(getattr(pack, "rule_count", 0) or 0)
+        rules = f" ({count} rule{'s' if count != 1 else ''}; the details list them)" if count else ""
+        details.append(f"It blocks: {covers}{rules}." if covers else "It adds the pack's blocking rules.")
         current_path = str(getattr(row, "pack_path", "") or "")
         base = str(getattr(row, "pack", "") or "-")
         target = composed_pack_path(model, row)
         folder = os.path.join("guardrail", os.path.basename(target))
         details.append(
-            f"Builds {folder} in your policy folder from {base} and the opt-in packs, "
-            f"checks it, then switches {where} to it."
+            f"Builds {folder} in your policy folder from {base} and the opt-in packs, checks it, "
+            f"and switches {where} to it; a running gateway restarts."
         )
         if not connector:
             own = model.own_setting("pack")
@@ -911,6 +923,7 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
         remaining = [p for p in model.scope_protection(row) if p != name]
         if not remaining:
             details.append(f"That is the last opt-in pack, so {where} goes back to its base pack.")
+        details.append("A running gateway restarts to load the change.")
         details.append(f"No longer blocked: {covers}." if covers else "Its rules stop applying.")
         consequence = f"This weakens protection: {title} is turned off for {scope}."
     details.append(_run_line(intent))

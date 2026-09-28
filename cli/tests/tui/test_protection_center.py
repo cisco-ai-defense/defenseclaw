@@ -480,3 +480,19 @@ def test_read_catalog_survives_a_broken_protection_catalog(monkeypatch) -> None:
     model.loaded = True
     model.set_view("chains")
     assert "tool-chains.json" in model.headline() and model.empty_state() == ""
+
+
+def test_a_composed_pack_shows_its_base_and_why_its_levels_changed() -> None:
+    model = PoliciesPanelModel()
+    composed = Posture(
+        "codex",
+        pack="protected-codex",
+        pack_path="/p/guardrail/protected-codex",
+        pack_source="override",
+        protection=("database-destruction-protection",),
+    )
+    model.apply_protection([Posture("global"), composed], PACKS, pack_bases={"/p/guardrail/protected-codex": "strict"})
+    model.handle_key("down")
+    assert model.data_table_rows(74)[1][5] == "strict+1"
+    assert model.data_table_rows(74)[1][2] == "CRITICAL"  # the folder name reads as default levels
+    assert any(line.startswith("Rule pack: protected-codex = strict + 1") for line in model.aside()[1])

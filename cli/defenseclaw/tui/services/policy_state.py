@@ -740,6 +740,7 @@ class PoliciesPanelModel:
         self.pack_rules: dict[str, tuple[PackRule, ...]] = {}
         self.families: dict[str, tuple[Any, ...]] = {}
         self.chains: tuple[Any, ...] = ()
+        self.pack_bases: dict[str, str] = {}
         self.multi_connector = False
         self.policy_dir = ""
 
@@ -779,8 +780,12 @@ class PoliciesPanelModel:
         pack_rules: Mapping[str, Iterable[PackRule]] | None = None,
         families: Mapping[str, Iterable[Any]] | None = None,
         chains: Iterable[Any] = (),
+        pack_bases: Mapping[str, str] | None = None,
     ) -> None:
-        """Scopes, opt-in packs (selectable first), their rules, families per pack path, chains."""
+        """Scopes, opt-in packs (selectable first), their rules, families per pack path, chains.
+
+        ``pack_bases`` maps a composed pack's folder to the pack it was built on.
+        """
         self.postures = tuple(postures)
         listed = tuple(packs)
         self.protection = tuple(p for p in listed if _attr(p, "status") != "staged") + tuple(
@@ -789,6 +794,7 @@ class PoliciesPanelModel:
         self.pack_rules = {name: tuple(rules) for name, rules in (pack_rules or {}).items()}
         self.families = {path: tuple(rows) for path, rows in (families or {}).items()}
         self.chains = tuple(chains)
+        self.pack_bases = dict(pack_bases or {})
         self.posture_error = ""
         self._clamp()
 
@@ -915,6 +921,14 @@ class PoliciesPanelModel:
     def scope_levels(self, row: object | None) -> tuple[str, str]:
         """``(blocks at, alerts at)`` for the scope's tool calls."""
         return profile_levels(str(_attr(row, "pack_path")) if row is not None else "")
+
+    def scope_pack_label(self, row: object) -> str:
+        """``strict``, or ``strict+1`` for a pack composed from strict and one opt-in pack."""
+        pack = str(_attr(row, "pack")) or "-"
+        base = self.pack_bases.get(str(_attr(row, "pack_path")))
+        if base:
+            return f"{base}+{len(self.scope_protection(row))}"
+        return pack
 
     def scope_protection(self, row: object | None = None) -> tuple[str, ...]:
         row = row if row is not None else self.selected_scope()
@@ -1272,7 +1286,7 @@ class PoliciesPanelModel:
             block, alert = self.scope_levels(row)
             own = bool(self.connector_of(row))
             mode = str(_attr(row, "mode")) or "observe"
-            pack = str(_attr(row, "pack")) or "-"
+            pack = self.scope_pack_label(row)
             on = len(self.scope_protection(row))
             scope = str(_attr(row, "scope"))
             hilt = str(_attr(row, "hilt")) or "off"
@@ -1505,7 +1519,7 @@ class PoliciesPanelModel:
             f"Tool calls ({mode}, {source}):",
             *matrix_lines(mode, block, alert, hilt),
             "",
-            f"Rule pack: {_attr(row, 'pack') or '-'} ({pack_profile(str(_attr(row, 'pack_path')))} levels)",
+            self._pack_line(row),
         ]
         protection = self.scope_protection(row)
         if protection:
@@ -1518,6 +1532,18 @@ class PoliciesPanelModel:
                 f"{active.block_at or '?'}, alerts at {active.alert_at or '?'}."
             )
         return f"Posture · {scope}", tuple(lines)
+
+    def _pack_line(self, row: object) -> str:
+        pack = str(_attr(row, "pack")) or "-"
+        profile = pack_profile(str(_attr(row, "pack_path")))
+        base = self.pack_bases.get(str(_attr(row, "pack_path")))
+        if base:
+            on = len(self.scope_protection(row))
+            return (
+                f"Rule pack: {pack} = {base} + {on} opt-in pack{'s' if on != 1 else ''}; tool calls use "
+                f"{profile} levels (the gateway reads them from the folder name)."
+            )
+        return f"Rule pack: {pack} ({profile} levels)"
 
     def _protection_aside(self) -> tuple[str, tuple[str, ...]]:
         pack = self.selected_protection()
