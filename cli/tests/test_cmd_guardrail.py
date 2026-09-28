@@ -715,18 +715,21 @@ class PerConnectorToggleTests(unittest.TestCase):
         # claudecode inherits the defaults.
         from defenseclaw import config as dcconfig
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app = make_multi_ctx({"codex": None, "claudecode": None, "copilot": None})
         app.cfg.guardrail.connectors["codex"].rule_pack_dir = "/packs/strict"
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
+        app.cfg.guardrail.connectors["copilot"].rule_pack_dir = "/packs/protected-copilot/default"
         app.cfg.guardrail.block_at = "HIGH"
-        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout
+            result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Rule pack", result.output)
         self.assertIn("strict", result.output)    # codex's own pack
         self.assertIn("default", result.output)   # claudecode inherits
         self.assertIn("on@LOW", result.output)    # codex's own HILT
+        self.assertIn("protected-copilot", result.output)  # a composed pack by its scope
         # Tool-call levels: the global block_at over each connector's pack.
         self.assertIn("HIGH+/LOW+", result.output)     # codex: strict alerts LOW+
         self.assertIn("HIGH+/MEDIUM+", result.output)  # claudecode: default alerts MEDIUM+

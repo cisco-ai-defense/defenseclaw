@@ -664,7 +664,9 @@ def status_cmd(app: AppContext, connector_flag: str | None) -> None:
             if hasattr(gc, "effective_rule_pack_dir")
             else ""
         )
-        rule_pack_raw = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        # A composed protection pack (protected-<scope>/<profile>) is named
+        # after its scope folder, not its profile folder.
+        rule_pack_raw = policy_catalog.pack_name_for_path(app.cfg, rp_dir)[0] if rp_dir.strip() else "default"
         rule_pack = ux.accent(rule_pack_raw) if rule_pack_raw != "default" else ux.dim(rule_pack_raw)
         # Per-connector HILT (human-in-the-loop): on@<min-severity> or off, so
         # the roster reflects `guardrail hilt --connector X` overrides.
