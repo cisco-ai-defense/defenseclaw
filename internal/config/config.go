@@ -1416,6 +1416,21 @@ type AgentHookConfig struct {
 	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
 	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
 	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
+	// AllowUnmanagedHooks opts a managed_enterprise Claude Code deployment
+	// out of the managed-hooks-only lock (allowManagedHooksOnly) that the
+	// machine-managed DefenseClaw policy sets by default. With the opt-out,
+	// user, project, local and plugin hooks run beside DefenseClaw's managed
+	// hooks; status and verify report the opt-out.
+	AllowUnmanagedHooks bool `mapstructure:"allow_unmanaged_hooks" yaml:"allow_unmanaged_hooks,omitempty"`
+}
+
+// ClaudeCodeAllowUnmanagedHooks reports the administrator opt-out from the
+// managed Claude Code hooks-only lock.
+func (c *Config) ClaudeCodeAllowUnmanagedHooks() bool {
+	if c == nil {
+		return false
+	}
+	return c.ConnectorHookConfig("claudecode").AllowUnmanagedHooks
 }
 
 // EffectiveFailMode returns the per-connector POLICY-LAYER fail

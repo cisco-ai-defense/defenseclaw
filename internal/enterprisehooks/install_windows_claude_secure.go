@@ -93,6 +93,8 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
 		HookExecutable:     hookExecutable,
+
+		ClaudeCodeAllowUnmanagedHooks: opts.ClaudeCodeAllowUnmanagedHooks,
 	}
 	if err := validateWindowsEnterpriseImpersonationSetup(setup); err != nil {
 		return InstallResult{}, err
@@ -387,6 +389,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		HookContractID:             lockEntry.ContractID,
 		HookContractLockUpdatedAt:  lockUpdatedAt,
 		HookContractEntryUpdatedAt: entryUpdatedAt,
+		ClaudeManagedHooksOnly:     ClaudeManagedHooksOnlyState(setup.ClaudeCodeAllowUnmanagedHooks),
 	}, nil
 }
 

@@ -1327,6 +1327,19 @@ can use another target's credential. This is distinct from normal/unmanaged
 mode, whose existing per-user hook and auto-heal behavior is unchanged.
 Invalid or tampered ownership metadata also fails closed.
 
+The drop-in also sets `allowManagedHooksOnly: true`, so Claude Code loads only
+administrator-managed hooks on the endpoint and the tool input DefenseClaw
+inspects is the input that runs. User, project, local, and plugin hooks do not
+load. An administrator who must keep them can set
+`claude_code.allow_unmanaged_hooks: true` in the protected DefenseClaw config.
+`defenseclaw enterprise hooks status` and `verify` then print a warning, and
+verify results report `claude_managed_hooks_only: disabled_by_admin`. While the
+lock is enforced, another managed-settings file that sets
+`allowManagedHooksOnly: false` (for example a later-sorting drop-in) is reported
+as a conflict, and install and verify fail until the file is changed or the
+opt-out is set. A managed file that sets `disableAllHooks: true` is always
+reported.
+
 The Program Files Claude policy is machine-global whenever at least one
 managed Claude target is enabled. It can therefore be loaded by other
 interactive users on that endpoint; those users are not silently treated as

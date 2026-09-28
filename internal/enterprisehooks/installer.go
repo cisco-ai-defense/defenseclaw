@@ -77,6 +77,9 @@ type InstallOptions struct {
 	// standalone Amp and OpenCode plugins run for the foreign-hook guard
 	// (see connector.SetupOpts). Empty everywhere else.
 	ForeignHookGuardBinary string
+	// ClaudeCodeAllowUnmanagedHooks is the administrator opt-out from the
+	// allowManagedHooksOnly lock in the machine-managed Claude Code policy.
+	ClaudeCodeAllowUnmanagedHooks bool
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -106,6 +109,29 @@ type InstallResult struct {
 	HookContractID             string   `json:"hook_contract_id,omitempty"`
 	HookContractLockUpdatedAt  string   `json:"hook_contract_lock_updated_at,omitempty"`
 	HookContractEntryUpdatedAt string   `json:"hook_contract_entry_updated_at,omitempty"`
+	// ClaudeManagedHooksOnly reports the allowManagedHooksOnly lock state of
+	// the machine-managed Claude Code policy: ClaudeManagedHooksOnlyEnforced
+	// or ClaudeManagedHooksOnlyDisabledByAdmin. Empty for other connectors.
+	ClaudeManagedHooksOnly string `json:"claude_managed_hooks_only,omitempty"`
+}
+
+const (
+	// ClaudeManagedHooksOnlyEnforced means user, project, local and plugin
+	// Claude Code hooks are blocked by the managed policy.
+	ClaudeManagedHooksOnlyEnforced = "enforced"
+	// ClaudeManagedHooksOnlyDisabledByAdmin means the administrator set
+	// claude_code.allow_unmanaged_hooks, so non-managed Claude Code hooks can
+	// run beside DefenseClaw's managed hooks.
+	ClaudeManagedHooksOnlyDisabledByAdmin = "disabled_by_admin"
+)
+
+// ClaudeManagedHooksOnlyState maps the administrator opt-out to the reported
+// lock state.
+func ClaudeManagedHooksOnlyState(allowUnmanagedHooks bool) string {
+	if allowUnmanagedHooks {
+		return ClaudeManagedHooksOnlyDisabledByAdmin
+	}
+	return ClaudeManagedHooksOnlyEnforced
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor

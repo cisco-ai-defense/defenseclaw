@@ -490,6 +490,9 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		return enterpriseHooksInstallError(cmd, err)
 	}
 	opts.MachinePolicyContractID = machineContract
+	if err := applyEnterpriseHookMachinePolicyPreferences(&opts); err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
@@ -861,6 +864,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			enterpriseHooksClaudeEffectivePolicyVerified(state.Results)
 	}
 	report.OK = len(report.Errors) == 0
+	report.Warnings = enterpriseHookMachinePolicyWarnings(cfg, report.Verification)
 	if enterpriseHookJSON {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 			return err
@@ -869,6 +873,9 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("enterprise hooks status unhealthy")
 		}
 		return nil
+	}
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), warning)
 	}
 	if report.OK {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
@@ -1350,12 +1357,16 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	}
 	failures := run.Failures - len(run.Excused)
 	ok := failures == 0 && run.AuthorizationErr == nil
+	warnings := enterpriseHookMachinePolicyWarnings(cfg, run.Rows)
 	if enterpriseHookJSON {
 		payload := map[string]any{
 			"ok":                               ok,
 			"manifest":                         run.Manifest,
 			"results":                          run.Rows,
 			"claude_effective_policy_verified": enterpriseHooksClaudeEffectivePolicyVerified(run.Rows),
+		}
+		if len(warnings) > 0 {
+			payload["warnings"] = warnings
 		}
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
@@ -1388,6 +1399,9 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	}
 	if run.AuthorizationErr != nil {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("!", "fg=yellow", "bold"), warning)
 	}
 	if !ok {
 		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", failures)
@@ -1693,7 +1707,10 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
-			result, targetErr = enterprisehooks.Verify(ctx, opts)
+			targetErr = applyEnterpriseHookMachinePolicyPreferences(&opts)
+			if targetErr == nil {
+				result, targetErr = enterprisehooks.Verify(ctx, opts)
+			}
 			if targetErr == nil {
 				row.Result = &result
 				row.UserHome = result.UserHome
@@ -2034,6 +2051,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
 				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 			}
+			err = applyEnterpriseHookMachinePolicyPreferences(&opts)
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 					for _, dir := range dirs {
