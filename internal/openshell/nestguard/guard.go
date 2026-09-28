@@ -38,6 +38,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -57,6 +58,9 @@ const (
 	DefaultMaxEntries   = 500000
 	// indexSettle debounces index rewrites before gitlinks are checked.
 	indexSettle = 500 * time.Millisecond
+	// MergeWindow is how soon after a folder's last quarantine a new .git
+	// entry there is part of the same repository creation (Detection.Also).
+	MergeWindow = 10 * time.Second
 )
 
 // Kind classifies a detection.
@@ -87,6 +91,11 @@ type Detection struct {
 	// Quarantined is the project-relative path the .git entry was renamed
 	// to; empty for gitlinks and failed quarantines.
 	Quarantined string `json:"quarantined,omitempty"`
+	// Also are the project-relative names of the .git entries created in
+	// Dir right after it and quarantined too (MergeWindow): `git init`
+	// recreates the directory the guard renamed while it was still writing
+	// it. One repository creation is one detection.
+	Also []string `json:"also,omitempty"`
 	// Error is set when the quarantine failed.
 	Error string    `json:"error,omitempty"`
 	At    time.Time `json:"at"`
@@ -131,6 +140,10 @@ type Options struct {
 	Baseline Baseline
 	// OnDetect receives every detection. Required.
 	OnDetect func(Detection)
+	// OnMerge receives a detection a later quarantine of the same folder
+	// was merged into (its Also grew); nil drops the update. The entry is
+	// quarantined either way.
+	OnMerge func(Detection)
 	// Mode forces events or polling; empty picks events where the
 	// platform supports them cheaply (Linux inotify).
 	Mode         Mode
@@ -163,7 +176,15 @@ type Guard struct {
 	failed   map[string]string
 	gitlinks map[string]bool
 	handled  []Detection
-	mode     Mode
+	// lastQuarantine is, per dir, the handled detection its last
+	// quarantine went to and when (MergeWindow).
+	lastQuarantine map[string]quarantined
+	mode           Mode
+}
+
+type quarantined struct {
+	index int
+	at    time.Time
 }
 
 // New validates opts.
@@ -195,7 +216,8 @@ func New(opts Options) (*Guard, error) {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
-	g := &Guard{opts: opts, known: map[string]bool{}, failed: map[string]string{}, gitlinks: map[string]bool{}}
+	g := &Guard{opts: opts, known: map[string]bool{}, failed: map[string]string{}, gitlinks: map[string]bool{},
+		lastQuarantine: map[string]quarantined{}}
 	for _, r := range opts.Baseline.Repos {
 		g.known[cleanRel(r)] = true
 	}
@@ -382,8 +404,32 @@ func (g *Guard) handle(dir string) {
 		d.Error = err.Error()
 	default:
 		d.Quarantined = path.Join(dir, newName)
+		if merged, ok := g.merge(dir, d.Quarantined, now); ok {
+			if g.opts.OnMerge != nil {
+				g.opts.OnMerge(merged)
+			}
+			return
+		}
 	}
 	g.record(d)
+}
+
+// merge adds a quarantine of dir at now to the detection of dir's last
+// quarantine when that was within MergeWindow, and returns the updated
+// detection.
+func (g *Guard) merge(dir, name string, now time.Time) (Detection, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	last, ok := g.lastQuarantine[dir]
+	if !ok || last.index >= len(g.handled) || now.Sub(last.at) < 0 || now.Sub(last.at) > MergeWindow {
+		return Detection{}, false
+	}
+	d := &g.handled[last.index]
+	d.Also = append(slices.Clip(d.Also), name)
+	g.lastQuarantine[dir] = quarantined{index: last.index, at: now}
+	out := *d
+	out.Also = slices.Clone(d.Also)
+	return out, true
 }
 
 // errPreexisting is quarantine's answer for an entry older than the
@@ -393,6 +439,9 @@ var errPreexisting = errors.New("nestguard: the entry existed before the session
 func (g *Guard) record(d Detection) {
 	g.mu.Lock()
 	g.handled = append(g.handled, d)
+	if d.Kind == KindRepository && d.Quarantined != "" {
+		g.lastQuarantine[d.Dir] = quarantined{index: len(g.handled) - 1, at: d.At}
+	}
 	g.mu.Unlock()
 	g.opts.OnDetect(d)
 }

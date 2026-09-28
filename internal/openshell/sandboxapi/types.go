@@ -222,9 +222,13 @@ type NestedRepo struct {
 	Path string `json:"path"`
 	// Quarantined is the project-relative name the .git entry was renamed
 	// to; empty for gitlinks and failed quarantines.
-	Quarantined string    `json:"quarantined,omitempty"`
-	Error       string    `json:"error,omitempty"`
-	At          time.Time `json:"at"`
+	Quarantined string `json:"quarantined,omitempty"`
+	// Also are the further names the same repository creation was
+	// quarantined under (git init recreating the .git the guard renamed
+	// while it wrote it): one creation is one entry.
+	Also  []string  `json:"also,omitempty"`
+	Error string    `json:"error,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 // Launch carries the harness launch inputs (harness.LaunchOptions).

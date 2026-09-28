@@ -136,8 +136,8 @@ func TestSweepQuarantinesNewRepositories(t *testing.T) {
 	mkdir(t, filepath.Join(root, "a", "b", ".git", "hooks"))
 	write(t, filepath.Join(root, "a", "b", ".git", "config"), "[core]\n")
 	write(t, filepath.Join(root, "file-repo", ".git"), "gitdir: ../x\n")
-	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Now: fixedNow, Gitlinks: noLinks})
+	var c, merged collector
+	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, OnMerge: merged.add, Now: fixedNow, Gitlinks: noLinks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,8 @@ func TestSweepQuarantinesNewRepositories(t *testing.T) {
 	}
 	// A second sweep finds nothing new; a .git created again in a folder
 	// whose first one was quarantined is quarantined too, under a fresh
-	// name, and so is a third.
+	// name, and so is a third. Within MergeWindow (the fixed clock) they
+	// belong to the first detection.
 	g.sweep(".")
 	if n := len(c.list()); n != 2 {
 		t.Fatalf("second sweep detections = %d", n)
@@ -175,9 +176,9 @@ func TestSweepQuarantinesNewRepositories(t *testing.T) {
 	for i, suffix := range []string{"-1", "-2"} {
 		mkdir(t, filepath.Join(root, "a", "b", ".git"))
 		g.sweep(".")
-		got = c.list()
-		if len(got) != 3+i || got[2+i].Dir != "a/b" || !strings.HasSuffix(got[2+i].Quarantined, suffix) {
-			t.Fatalf("repeat quarantine %d = %+v", i+1, got)
+		m := merged.list()
+		if len(c.list()) != 2 || len(m) != 1+i || m[i].Dir != "a/b" || len(m[i].Also) != 1+i || !strings.HasSuffix(m[i].Also[i], suffix) {
+			t.Fatalf("repeat quarantine %d = %+v, merged %+v", i+1, c.list(), m)
 		}
 		if _, err := os.Lstat(filepath.Join(root, "a", "b", ".git")); !os.IsNotExist(err) {
 			t.Fatalf("repeat %d: a/b/.git still exists", i+1)
@@ -195,7 +196,12 @@ func TestRepeatRepositoryInEventsMode(t *testing.T) {
 	mkdir(t, filepath.Join(root, "src"))
 	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
 	var c collector
-	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: ModeEvents, Gitlinks: noLinks})
+	// A clock the loop moves past MergeWindow: each .git is a repository
+	// of its own.
+	var mu sync.Mutex
+	now := time.Now()
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: ModeEvents, Gitlinks: noLinks, Now: clock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,6 +219,9 @@ func TestRepeatRepositoryInEventsMode(t *testing.T) {
 		if got[i-1].Dir != "src" || got[i-1].Quarantined == "" {
 			t.Fatalf("detection %d = %+v", i, got[i-1])
 		}
+		mu.Lock()
+		now = now.Add(MergeWindow + time.Second)
+		mu.Unlock()
 	}
 }
 

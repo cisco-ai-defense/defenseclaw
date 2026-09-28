@@ -342,6 +342,7 @@ func (m *Manager) guardOptions(ctx context.Context, b *box, rec record) nestguar
 	return nestguard.Options{
 		Root: rec.Project, Baseline: baseline, Now: m.now, Gitlinks: m.opts.GuardGitlinks,
 		OnDetect: func(d nestguard.Detection) { m.nestedRepo(ctx, b, d) },
+		OnMerge:  func(d nestguard.Detection) { m.nestedRepoMerged(b, d) },
 		Logf: func(format string, args ...any) {
 			m.logf("sandbox %s: "+format, append([]any{rec.Name}, args...)...)
 		},
@@ -461,6 +462,62 @@ func (m *Manager) nestedRepo(ctx context.Context, b *box, d nestguard.Detection)
 	})
 }
 
+// maxDetectionAlso bounds the further quarantined names a detection keeps.
+const maxDetectionAlso = 8
+
+// nestedRepoMerged records that a repository creation the guard reported
+// was quarantined again under another name (the guard merged it into the
+// detection): the record's detection gets the name, so the review and undo
+// know it, without a second finding or feed line.
+func (m *Manager) nestedRepoMerged(b *box, d nestguard.Detection) {
+	m.mu.Lock()
+	g := b.rec.Guard
+	found := false
+	if g != nil {
+		next := *g
+		next.Detections = slices.Clone(g.Detections)
+		dir, name := truncate(d.Dir, maxDetectionText), truncate(d.Quarantined, maxDetectionText)
+		for i := range next.Detections {
+			if kept := &next.Detections[i]; kept.Kind == d.Kind && kept.Dir == dir && kept.Quarantined == name {
+				also := make([]string, 0, min(len(d.Also), maxDetectionAlso))
+				for _, a := range d.Also[:min(len(d.Also), maxDetectionAlso)] {
+					also = append(also, truncate(a, maxDetectionText))
+				}
+				kept.Also, found = also, true
+				break
+			}
+		}
+		if found {
+			b.rec.Guard = &next
+		}
+	}
+	name := b.rec.Name
+	m.mu.Unlock()
+	if !found {
+		return
+	}
+	m.logf("sandbox %s: quarantined %s again as %s (the same repository creation)", name, sandboxapi.DisplayText(d.Label()),
+		sandboxapi.DisplayText(d.Also[len(d.Also)-1]))
+	if err := m.saveRecord(b); err != nil {
+		m.logf("sandbox %s: save the nested-repository detection: %v", name, err)
+	}
+}
+
+// quarantinedPaths are the quarantined .git entries of a record's session.
+func quarantinedPaths(g *guardRecord) []string {
+	if g == nil {
+		return nil
+	}
+	var out []string
+	for _, d := range g.Detections {
+		if d.Quarantined != "" {
+			out = append(out, d.Quarantined)
+		}
+		out = append(out, d.Also...)
+	}
+	return out
+}
+
 // nestedView renders a record's detections for the API.
 func nestedView(g *guardRecord) []sandboxapi.NestedRepo {
 	if g == nil {
@@ -470,7 +527,7 @@ func nestedView(g *guardRecord) []sandboxapi.NestedRepo {
 	for _, d := range g.Detections {
 		out = append(out, sandboxapi.NestedRepo{
 			Kind: string(d.Kind), Path: sandboxapi.DisplayText(d.Label()), Quarantined: sandboxapi.DisplayText(d.Quarantined),
-			Error: sandboxapi.DisplayText(d.Error), At: d.At,
+			Also: sandboxapi.DisplayTexts(d.Also), Error: sandboxapi.DisplayText(d.Error), At: d.At,
 		})
 	}
 	return out
