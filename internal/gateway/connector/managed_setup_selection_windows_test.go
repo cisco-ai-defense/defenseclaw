@@ -115,3 +115,48 @@ func TestManagedSetupSelectionRefusesUnknownContractsAndUnprotectedConnectors(t 
 		t.Fatalf("refused selections must not write a receipt: %v", err)
 	}
 }
+
+// A standard user moved their own ~\.defenseclaw aside, so the
+// guardian's runtime-only OpenCode row found neither the protected contract
+// lock nor a setup receipt and could never republish the contract. The
+// guardian's managed selection receipt is the authority that re-establishes
+// it, and it still binds the contract to the exact selected image.
+func TestManagedSetupSelectionRepublishesOpenCodeAfterLostProtectedState(t *testing.T) {
+	opts := prepareOpenCodeSetupAdmissionFixture(t)
+	// The moved state: no protected lock and no receipt.
+	if err := os.Remove(filepath.Join(opts.DataDir, agentSelectionFile)); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := NewHookContractLockEntryForMode(opts, NewOpenCodeConnector(), "test-build", true)
+	if err != nil {
+		t.Fatalf("build OpenCode contract entry: %v", err)
+	}
+	entry.HookFailMode = "closed"
+	entry.HookScriptDigests = nil
+	entry.Locations = ConnectorLocations{HookConfigPaths: []string{`C:\ProgramData\opencode\opencode.json`}}
+	if err := SaveRecoveredHookContractLockEntryForMode(opts.DataDir, entry, "", ""); err == nil ||
+		!strings.Contains(err.Error(), "fresh protected setup receipt or reusable protected contract lock is required") {
+		t.Fatalf("publication without lock or receipt error = %v, want the missing-authority refusal", err)
+	}
+
+	if err := WriteManagedSetupAgentSelection(opts.DataDir, "opencode", opts.AgentExecutable, opts.AgentVersion); err != nil {
+		t.Fatalf("write guardian selection: %v", err)
+	}
+	if err := SaveRecoveredHookContractLockEntryForMode(opts.DataDir, entry, "", ""); err != nil {
+		t.Fatalf("republish OpenCode contract with the guardian selection: %v", err)
+	}
+	lock := LoadHookContractLockEntry(opts.DataDir, "opencode")
+	if !sameCodexExecutablePath(lock.AgentExecutable, opts.AgentExecutable) || lock.AgentExecutableSHA256 == "" {
+		t.Fatalf("republished OpenCode lock executable=%q digest=%q, want %q", lock.AgentExecutable, lock.AgentExecutableSHA256, opts.AgentExecutable)
+	}
+
+	// The selection is still bound to the image it hashed: a later
+	// replacement is refused at admission.
+	if err := atomicWriteFile(opts.AgentExecutable, []byte("MZ replaced after the guardian selection"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateOpenCodeWindowsSetupAdmission(opts); err == nil ||
+		!strings.Contains(err.Error(), "digest does not match protected evidence") {
+		t.Fatalf("admission after replacement error = %v, want digest refusal", err)
+	}
+}

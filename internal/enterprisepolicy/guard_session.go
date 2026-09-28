@@ -425,20 +425,23 @@ func unverifiableSessionRecord(key SessionKey, path string, err error) *SessionR
 }
 
 // stickySessionDecision denies a call because an earlier call of the same
-// session or agent process was denied for a foreign hook.
+// session or agent process was denied for a foreign hook. Such a block is
+// recorded when the session starts, so the first prompt the user sends may
+// already get this message.
 func stickySessionDecision(decision GuardDecision, connector string, record SessionRecord) GuardDecision {
-	var earlier string
+	var cause string
 	note := sessionBlockNote
 	switch {
 	case strings.HasPrefix(record.Reason, incompleteScanReason):
-		earlier = "DefenseClaw's hook scan stopped before it checked every hook file (" + strings.TrimPrefix(record.Reason, incompleteScanReason) + ")"
+		cause = "When this agent session started, DefenseClaw's hook scan stopped before it checked every hook file (" + strings.TrimPrefix(record.Reason, incompleteScanReason) + ")."
 		note = sessionIncompleteNote
 	case strings.HasPrefix(record.Reason, "cannot verify"):
+		// This call's own record could not be read.
 		what := strings.TrimPrefix(record.Reason, "cannot verify hook file: ")
 		if record.Path != "" && !strings.Contains(what, record.Path) {
 			what = record.Path + ": " + what
 		}
-		earlier = "DefenseClaw could not verify this session's hooks (" + what + ")"
+		cause = "DefenseClaw could not verify this session's hooks (" + what + ")."
 	default:
 		what := "defined a hook"
 		if record.Reason == "plugin" || record.Reason == "plugin directory" {
@@ -448,12 +451,13 @@ func stickySessionDecision(decision GuardDecision, connector string, record Sess
 		if scope == "" {
 			scope = "hook"
 		}
-		earlier = fmt.Sprintf("the %s file %s %s (digest sha256:%s)", scope, record.Path, what, record.Digest)
+		cause = fmt.Sprintf("When this agent session started, the %s file %s %s (digest sha256:%s). %s",
+			scope, record.Path, what, record.Digest, foreignHookAdvice(connector, record.Reason))
 	}
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(
-		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. Earlier in this agent session %s. %s",
-		connector, earlier, note,
+		"enterprise_foreign_hook_blocked: your organization blocks %s hooks it has not approved, because they can change a tool call after DefenseClaw checks it. %s %s",
+		connector, cause, note,
 	)
 	decision.Findings = append([]Finding{{
 		Connector: connector,

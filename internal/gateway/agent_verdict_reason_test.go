@@ -221,6 +221,12 @@ func TestHookResponsesCarryTheDefenseClawPolicyWording(t *testing.T) {
 	if copilot.Reason != orgBlockWording {
 		t.Fatalf("generic hook reason = %q", copilot.Reason)
 	}
+	// OpenCode cannot ask: the confirmation runs as an alert, flagged for review.
+	review := agentHookResponseFor(agentHookRequest{ConnectorName: "opencode", HookEventName: "tool.execute.before", ToolName: "bash"},
+		"alert", "confirm", "HIGH", markerRuleReason, nil, "action", false, connector.HookCapability{})
+	if !strings.Contains(review.Reason, "flagged this action for review under your organization's policy (rule TEST-MARKER-BLOCK).") {
+		t.Fatalf("unaskable confirm reason = %q", review.Reason)
+	}
 
 	inspect := (&ToolInspectVerdict{Action: "block", Severity: "CRITICAL", Reason: markerRuleReason}).sanitizeForResponse(false)
 	if inspect.Reason != orgBlockWording {
@@ -229,5 +235,39 @@ func TestHookResponsesCarryTheDefenseClawPolicyWording(t *testing.T) {
 	// The source reason stays intact for the audit record.
 	if claude.SourceReason != markerRuleReason || codex.SourceReason != markerRuleReason {
 		t.Fatalf("source reasons changed: %q %q", claude.SourceReason, codex.SourceReason)
+	}
+}
+
+// On Hermes and OpenHands a confirmation became an alert and the tool call
+// ran with nothing on screen, since neither hook can ask or show a notice.
+// The standalone enterprise profile blocks it and says the rule wanted the
+// user's confirmation; per-user installs keep the alert.
+func TestStandaloneBlocksAConfirmationHermesAndOpenHandsCannotAsk(t *testing.T) {
+	opts := connector.SetupOpts{APIAddr: "127.0.0.1:18970"}
+	for _, c := range []struct {
+		profile      connector.HookProfile
+		event, agent string
+	}{
+		{connector.NewHermesConnector().HookProfile(opts), "pre_tool_call", "Hermes"},
+		{connector.NewOpenHandsConnector().HookProfile(opts), "PreToolUse", "OpenHands"},
+	} {
+		useAgentVerdictProfile(t, false, false)
+		if action, _ := mapHookActionForProfile("confirm", "action", c.event, c.profile.Capabilities, c.profile, nil); action != "alert" {
+			t.Fatalf("%s per-user confirm = %q, want alert", c.agent, action)
+		}
+		useAgentVerdictProfile(t, true, false)
+		action, _ := mapHookActionForProfile("confirm", "action", c.event, c.profile.Capabilities, c.profile, nil)
+		if action != "block" {
+			t.Fatalf("%s standalone confirm = %q, want block", c.agent, action)
+		}
+		req := agentHookRequest{ConnectorName: c.profile.Name, HookEventName: c.event, ToolName: "terminal"}
+		resp := agentHookResponseForProfile(c.profile, req, action, "confirm", "HIGH", markerRuleReason, nil, "action", false, c.profile.Capabilities)
+		data, err := json.Marshal(resp.HookOutput)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "needs your confirmation for it (rule TEST-MARKER-BLOCK), and " + c.agent + " cannot ask for it."; !strings.Contains(string(data), want) {
+			t.Fatalf("%s hook output %s\nwant %q", c.agent, data, want)
+		}
 	}
 }

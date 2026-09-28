@@ -359,14 +359,13 @@ func TestManagedAuditStoreOpensReadOnly(t *testing.T) {
 	}
 	_ = store.Close()
 
-	previousConfig, previousReadOnly := cfg, auditStoreReadOnly
+	previousConfig := cfg
 	previousOut, previousConnector, previousLimit, previousActivity := auditExportOut, auditExportConnector, auditExportLimit, auditExportIncludeActivity
 	t.Cleanup(func() {
-		cfg, auditStoreReadOnly = previousConfig, previousReadOnly
+		cfg = previousConfig
 		auditExportOut, auditExportConnector, auditExportLimit, auditExportIncludeActivity = previousOut, previousConnector, previousLimit, previousActivity
 	})
 	cfg = &config.Config{AuditDB: path}
-	auditStoreReadOnly = true
 	auditExportOut = filepath.Join(t.TempDir(), "out.jsonl")
 	auditExportConnector, auditExportLimit, auditExportIncludeActivity = "", 0, false
 	if err := runAuditExport(nil, nil); err != nil {

@@ -142,12 +142,21 @@ func dispatchTrustedAction(
 	// for a rule that match cannot depend on the dropped redirect and path
 	// facts (redirectReductionCandidate). A non-match or a skipped rule never
 	// suppresses its legacy fallback, which, like every recovery lane below,
-	// still sees the whole action.
+	// still sees the whole action. A partial action with && or || lists gets
+	// the same treatment on the complete analysis of its commands that are
+	// certain to run: every statement of the top-level sequence, and of each
+	// list only its first command (listReductionCandidate). A command after
+	// && or || might not run, so a match on it alone stays detection-only.
 	semanticFacts := facts
-	redirectReduced := false
+	// viewCandidate is set when semanticFacts is a reduced view, and reports
+	// whether a rule's match on that view may stand for the whole action.
+	var viewCandidate func(compiledSemanticRule) bool
 	if !facts.Authoritative() {
-		reduced, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts)
-		if !ok {
+		if view, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate = view, redirectReductionCandidate
+		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
+			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else {
 			var fallbackTelemetry trustedActionTelemetry
 			findings, fallbackTelemetry = dispatchTrustedFallback(
 				generation,
@@ -158,8 +167,8 @@ func dispatchTrustedAction(
 			telemetry.merge(fallbackTelemetry)
 			return findings
 		}
-		semanticFacts, redirectReduced = reduced, true
 	}
+	reduced := viewCandidate != nil
 	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
@@ -190,11 +199,11 @@ func dispatchTrustedAction(
 		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 			continue
 		}
-		if redirectReduced && !redirectReductionCandidate(candidate) {
+		if reduced && !viewCandidate(candidate) {
 			continue
 		}
 		if !candidate.owner.eligible(semanticFacts) {
-			if !redirectReduced && candidate.owner.suppressFallback != nil &&
+			if !reduced && candidate.owner.suppressFallback != nil &&
 				candidate.owner.suppressFallback(semanticFacts) {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
@@ -212,7 +221,7 @@ func dispatchTrustedAction(
 			continue
 		}
 		if !result.Matched {
-			if !redirectReduced {
+			if !reduced {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
 			continue
@@ -375,6 +384,15 @@ func dispatchTrustedAction(
 func redirectReductionCandidate(candidate compiledSemanticRule) bool {
 	return candidate.owner.prerequisite == nil &&
 		candidate.program.RedirectReductionSafe()
+}
+
+// listReductionCandidate is redirectReductionCandidate for the view from
+// actionfacts.ShortCircuitListReduction: the expression must be one that
+// more commands, and the facts they own, cannot turn off
+// (semantic.Program.ListReductionSafe).
+func listReductionCandidate(candidate compiledSemanticRule) bool {
+	return candidate.owner.prerequisite == nil &&
+		candidate.program.ListReductionSafe()
 }
 
 func excludeSemanticOwner(

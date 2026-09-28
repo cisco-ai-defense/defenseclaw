@@ -65,7 +65,7 @@ CodeGuard matches, parser-shadow evidence, partial or invalid facts, and proof
 for another rule remain detection-only unless a separate complete proof is
 pinned to that same rule; lexical metadata alone never authorizes.
 
-One partial form still gets a semantic decision: when the only unknown part of
+Two partial forms still get a semantic decision. First, when the only unknown part of
 a POSIX command is a redirect target the shell expands at run time and that
 can only name a file (`> ~/out.txt`, `> "$HOME/out.txt"`, `> out-*.txt`), CEL
 rules also run on the analysis of the same command with a static stand-in
@@ -77,6 +77,16 @@ prerequisite and cannot depend on the dropped redirect and path (no `!`,
 `authoritative` read). A non-match proves nothing, so the regex fallback still
 sees the whole command. Nearly all built-in rules have a code-owned
 prerequisite, so for them such a command still falls back to the regex.
+
+Second, for a POSIX command with `&&` or `||` lists (`<cmd> && ...`,
+`<cmd> || true`), CEL rules also run on the analysis of the commands certain
+to run: every statement of the top-level sequence, and of each list only its
+first command. A match there is complete proof for a rule that has no
+code-owned prerequisite and cannot depend on the left-out commands (no `!`,
+`==`, `!=`, `in` or `all()` over `commands`, `paths`, `network`, `data_flows`,
+`artifacts` or `archive_lineages`, and no `parse`, `argv_complete` or lineage
+`authoritative` read). A command after `&&` or `||` might not run, so a match
+on it alone stays detection-only.
 
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only

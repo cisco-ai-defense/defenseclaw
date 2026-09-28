@@ -31,6 +31,19 @@ import (
 
 func init() {
 	enterprisehooks.SetWindowsOpenCodeMachinePolicy(windowsOpenCodeMachinePolicy)
+	enterprisehooks.SetWindowsClaudeManagedHooksOnlyPolicy(windowsClaudeManagedHooksOnlyEnforced)
+}
+
+// windowsClaudeManagedHooksOnlyEnforced reports whether the loaded config's
+// claudecode machine policy keeps the managed-hooks-only lock: everything
+// but an explicit managed_hooks_only: preserve (the default is enforce). The
+// standalone lifecycle renders allowManagedHooksOnly into the machine-wide
+// Claude Code drop-in from it.
+func windowsClaudeManagedHooksOnlyEnforced() bool {
+	if cfg == nil {
+		return true
+	}
+	return cfg.Enterprise.MachinePolicy.PolicyFor(enterprisepolicy.ConnectorClaudeCode).ManagedHooksOnly != config.ManagedHooksOnlyPreserve
 }
 
 // windowsOpenCodeMachinePolicy is the OpenCode machine policy check the

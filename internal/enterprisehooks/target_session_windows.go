@@ -12,6 +12,9 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 // windowsEnterpriseStandaloneDeferredDataDirAbsent reports whether a pending
@@ -21,6 +24,27 @@ import (
 // failure stay hard errors, and Secure Client keeps requiring the directory.
 func windowsEnterpriseStandaloneDeferredDataDirAbsent(err error) bool {
 	return windowsEnterpriseStandaloneProcess() && errors.Is(err, fs.ErrNotExist)
+}
+
+// windowsEnterpriseStandaloneDeferredDataDirAccountCreated reports, in a
+// standalone process only, a data directory the account created itself
+// before enrollment (windowsAccountCreatedDataDir). It holds no managed
+// runtime, so it proves the pending state like an absent one; enrollment
+// adopts it in the account's session.
+func windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir string, target *windows.SID) bool {
+	if !windowsEnterpriseStandaloneProcess() {
+		return false
+	}
+	extended, err := winpath.Extended(dataDir)
+	if err != nil {
+		return false
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	ok, err := windowsAccountCreatedDataDir(dataDir, descriptor, target)
+	return err == nil && ok
 }
 
 func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget) error {
@@ -47,14 +71,16 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		return err
 	}
 	if err := validateWindowsUserPathElement(dataDir, targetSID, true, true, true); err != nil {
-		if !windowsEnterpriseStandaloneDeferredDataDirAbsent(err) {
+		if !windowsEnterpriseStandaloneDeferredDataDirAbsent(err) &&
+			!windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir, targetSID) {
 			return fmt.Errorf(
 				"enterprise hooks: deferred target data directory is untrusted: %w",
 				err,
 			)
 		}
 		// Standalone writes every discovered row deferred, including users
-		// DefenseClaw has never touched. An absent canonical data directory
+		// DefenseClaw has never touched. An absent canonical data directory,
+		// or one the account created itself before enrollment,
 		// holds no runtime, so it proves the pending state as well as a
 		// trusted empty one; the selector-absence proof below still runs.
 	}

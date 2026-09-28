@@ -163,7 +163,7 @@ func TestForeignHookGuardLetsABlockedSessionStop(t *testing.T) {
 			if !tc.deny(result.code, result.stdout) {
 				t.Fatalf("%s: the session's tool calls must stay denied: code=%d stdout=%q stderr=%q", tc.tool, result.code, result.stdout, result.stderr)
 			}
-			if !strings.Contains(result.stdout+result.stderr, "Earlier in this agent session") {
+			if !strings.Contains(result.stdout+result.stderr, "When this agent session started") {
 				t.Fatalf("%s: the denial must say the session is blocked: stdout=%q stderr=%q", tc.tool, result.stdout, result.stderr)
 			}
 			want = append(want, tc.tool)

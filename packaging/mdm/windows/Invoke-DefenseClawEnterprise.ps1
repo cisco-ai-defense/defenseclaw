@@ -513,13 +513,32 @@ function Assert-WrapperSetup {
     }
 }
 
+function ConvertTo-WrapperPublicText {
+    # The config copy in the wrapper's staging folder is deleted when the
+    # wrapper exits, so a result that names it (a next-step command such as
+    # "/ensure CONFIG=<staging copy>") could not be run afterwards. Name the
+    # administrator's own -ConfigPath instead, or <config.yaml> for a config
+    # read from standard input. Both the raw and the JSON-escaped forms are
+    # replaced; a replacement path with spaces is quoted in commands.
+    param([string]$Text, [string]$Staged, [string]$Public)
+    if (-not $Text -or -not $Staged) { return $Text }
+    if (-not $Public) { $Public = '<config.yaml>' }
+    $quoted = if ($Public -match '\s') { '"' + $Public + '"' } else { $Public }
+    $escapedStaged = $Staged.Replace('\', '\\')
+    $escapedPublic = $Public.Replace('\', '\\')
+    $escapedQuoted = $quoted.Replace('\', '\\').Replace('"', '\"')
+    $Text = $Text.Replace('CONFIG=' + $escapedStaged, 'CONFIG=' + $escapedQuoted)
+    $Text = $Text.Replace('CONFIG=' + $Staged, 'CONFIG=' + $quoted)
+    return $Text.Replace($escapedStaged, $escapedPublic).Replace($Staged, $Public)
+}
+
 function Write-LifecycleResult {
     # Passes a schema v2 result through; wraps anything else (Setup's own
     # argument errors, crashes) in one.
     param($Run, [string]$Label)
     $code = [int]$Run.ExitCode
     if (@(0, 1603, 1618, 1639, 3010) -notcontains $code) { $code = $script:ExitFailure }
-    $text = ([string]$Run.StdOut).Trim()
+    $text = ConvertTo-WrapperPublicText -Text ([string]$Run.StdOut).Trim() -Staged $script:StagedConfig -Public $ConfigPath
     $document = $null
     if ($text) { try { $document = $text | ConvertFrom-Json -ErrorAction Stop } catch { $document = $null } }
     if ($null -ne $document -and $document.PSObject.Properties['schema_version'] -and $document.schema_version -eq 2) {
@@ -528,7 +547,8 @@ function Write-LifecycleResult {
         return $code
     }
     if ($code -eq 0) { $code = $script:ExitFailure }
-    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($text + ' ' + [string]$Run.StdErr).Trim()) }
+    $stderr = ConvertTo-WrapperPublicText -Text ([string]$Run.StdErr) -Staged $script:StagedConfig -Public $ConfigPath
+    $detail = if ($null -ne $document -and $document.PSObject.Properties['error']) { [string]$document.error } else { (($text + ' ' + $stderr).Trim()) }
     if ($detail.Length -gt 2048) { $detail = $detail.Substring(0, 2048) }
     $json = ConvertTo-DefenseClawResultJson -Action $script:ResultAction -ExitCode $code -Code 'mdm_lifecycle_no_result' -Message "$Label printed no lifecycle result: $detail"
     [Console]::Out.WriteLine($json)
@@ -596,6 +616,7 @@ if ($ConfigFromStdin) {
     $config = Join-Path $staging 'config.yaml'
     Copy-WrapperInput -Source $ConfigPath -Destination $config -Limit $script:MaxConfigBytes -Label 'config' -RequireAdminOnly
 }
+$script:StagedConfig = $config
 $secret = ''
 if ($SecretName) {
     $secret = Join-Path $staging 'secret'
@@ -613,7 +634,9 @@ try {
         Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'
         Assert-WrapperSetup -Staged $stagedSetup
         Write-WrapperLog -Message "verified Setup (trust=$($script:Mode) sha256=$(if ($script:PinnedSha256) { $script:PinnedSha256 } else { 'unpinned' }))"
-        $arguments = @('/' + $normalizedAction, 'JSON=1')
+        # Parenthesize the switch: the comma operator binds tighter than +, so
+        # '/' + $normalizedAction, 'JSON=1' is one string "/ensure JSON=1".
+        $arguments = @(('/' + $normalizedAction), 'JSON=1')
         if ($config) { $arguments += "CONFIG=$config" }
         if ($script:Signers.Count -gt 0) { $arguments += ('ALLOWEDSIGNERS=' + ($script:Signers -join ',')) }
         $run = Invoke-DefenseClawNative -FilePath $stagedSetup -ArgumentList $arguments

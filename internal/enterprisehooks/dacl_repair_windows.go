@@ -256,18 +256,271 @@ func repairWindowsTargetOwnedPathDACLNoFollowWithACL(
 	if err != nil {
 		return err
 	}
-	if err := windows.SetSecurityInfo(
-		handle,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	); err != nil {
+	if err := setWindowsObjectDACLNoPropagation(handle, acl, directory); err != nil {
 		return fmt.Errorf("enterprise hooks: restore canonical target DACL by handle: %w", err)
 	}
 	return nil
+}
+
+// setWindowsObjectDACLNoPropagation replaces the protected DACL of exactly the
+// object behind handle. SetSecurityInfo and SetNamedSecurityInfo also rewrite
+// the inherited ACEs of every existing descendant of a directory. Managed
+// descendants carry their own protected DACLs, so that walk never changed a
+// managed object; it only rewrote the ACLs of the user's own files and, on a
+// connector home that holds the agent's install (about 130,000 objects for
+// Hermes under %LOCALAPPDATA%\hermes), made one reconcile take minutes.
+//
+// SetKernelObjectSecurity stores an ACL exactly as given, so the ACL is first
+// put in the applied form SetSecurityInfo stores (windowsAppliedDACL); the
+// resulting DACL is the one the canonical validators expect.
+func setWindowsObjectDACLNoPropagation(handle windows.Handle, acl *windows.ACL, directory bool) error {
+	if acl == nil {
+		return errors.New("enterprise hooks: DACL update has no DACL")
+	}
+	applied, err := windowsAppliedDACL(acl, directory)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.NewSecurityDescriptor()
+	if err != nil {
+		return err
+	}
+	if err := sd.SetDACL(applied, true, false); err != nil {
+		return err
+	}
+	// AUTO_INHERIT_REQ asks the object manager to record the DACL as
+	// auto-inherited (SDDL "PAI"), as SetSecurityInfo does; it only computes
+	// this object's descriptor and never touches descendants.
+	const control = windows.SE_DACL_PROTECTED | windows.SE_DACL_AUTO_INHERITED | windows.SE_DACL_AUTO_INHERIT_REQ
+	if err := sd.SetControl(control, control); err != nil {
+		return err
+	}
+	return windows.SetKernelObjectSecurity(
+		handle,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		sd,
+	)
+}
+
+// windowsAppliedDACL returns acl in the form SetSecurityInfo stores on a file
+// object: generic rights of an effective ACE are mapped to file rights, and on
+// a directory an inheritable ACE that carries generic rights becomes an
+// effective ACE with the mapped rights plus an inherit-only ACE that keeps the
+// generic rights for new children. Only access-allowed ACEs are supported.
+func windowsAppliedDACL(acl *windows.ACL, directory bool) (*windows.ACL, error) {
+	const genericRights = windows.GENERIC_ALL | windows.GENERIC_READ | windows.GENERIC_WRITE | windows.GENERIC_EXECUTE
+	const inheritable = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+	var sddl strings.Builder
+	sddl.WriteString("D:P")
+	add := func(flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) {
+		fmt.Fprintf(&sddl, "(A;%s;0x%x;;;%s)", windowsSDDLACEFlags(flags), uint32(mask), sid.String())
+	}
+	for index := uint32(0); index < uint32(acl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, index, &ace); err != nil {
+			return nil, fmt.Errorf("enterprise hooks: inspect DACL entry %d: %w", index, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return nil, errors.New("enterprise hooks: object-only DACL update supports access-allowed entries only")
+		}
+		flags := ace.Header.AceFlags
+		if flags&^uint8(windows.VALID_INHERIT_FLAGS) != 0 {
+			return nil, fmt.Errorf("enterprise hooks: DACL entry %d has unsupported flags 0x%x", index, flags)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		mask := ace.Mask
+		switch {
+		case flags&windows.INHERIT_ONLY_ACE != 0:
+			add(flags, mask, sid)
+		case directory && flags&inheritable != 0 && mask&genericRights != 0:
+			add(flags&^uint8(inheritable|windows.NO_PROPAGATE_INHERIT_ACE), mapWindowsUserPathGenericMask(mask), sid)
+			add(flags|windows.INHERIT_ONLY_ACE, mask, sid)
+		default:
+			add(flags, mapWindowsUserPathGenericMask(mask), sid)
+		}
+	}
+	sd, err := windows.SecurityDescriptorFromString(sddl.String())
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: build applied DACL: %w", err)
+	}
+	applied, _, err := sd.DACL()
+	if err != nil {
+		return nil, err
+	}
+	return applied, nil
+}
+
+func windowsSDDLACEFlags(flags uint8) string {
+	var out strings.Builder
+	for _, flag := range []struct {
+		bit  uint8
+		sddl string
+	}{
+		{windows.OBJECT_INHERIT_ACE, "OI"},
+		{windows.CONTAINER_INHERIT_ACE, "CI"},
+		{windows.NO_PROPAGATE_INHERIT_ACE, "NP"},
+		{windows.INHERIT_ONLY_ACE, "IO"},
+		{windows.INHERITED_ACE, "ID"},
+	} {
+		if flags&flag.bit != 0 {
+			out.WriteString(flag.sddl)
+		}
+	}
+	return out.String()
+}
+
+// windowsRecoverSetupRelaxedHookDirectory is replaceable in tests.
+var windowsRecoverSetupRelaxedHookDirectory = recoverWindowsSetupRelaxedHookDirectory
+
+// recoverWindowsSetupRelaxedHookDirectory restores the canonical managed DACL
+// on <dataDir>\hooks when a guardian stopped between relaxing that directory
+// for a connector setup and hardening it again (for example when a lifecycle
+// stopped the guardian at its coverage deadline). The relaxed DACL grants only
+// LocalSystem and OWNER RIGHTS, so an elevated administrator cannot read it
+// and LocalSystem finds 2 ACEs instead of the canonical 7: every retire of
+// that user's managed runtime generations refused, and no lifecycle action
+// could recover the host.
+//
+// It runs on a dedicated locked thread with backup and restore privileges
+// (held by LocalSystem and elevated administrators), opens the data directory
+// and then its hooks child without following reparse points, requires both to
+// be owned by the target SID, and rewrites only a DACL that is exactly the
+// relaxed setup shape. It reports whether it changed the directory.
+func recoverWindowsSetupRelaxedHookDirectory(dataDir string, target *windows.SID) (bool, error) {
+	if target == nil {
+		return false, errors.New("enterprise hooks: target SID is unavailable for hooks directory recovery")
+	}
+	if !filepath.IsAbs(dataDir) || filepath.Clean(dataDir) != dataDir {
+		return false, fmt.Errorf("enterprise hooks: hooks directory recovery needs an absolute clean data directory: %s", dataDir)
+	}
+	type outcome struct {
+		changed bool
+		err     error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		runtime.LockOSThread()
+		if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+			runtime.UnlockOSThread()
+			result <- outcome{err: fmt.Errorf("enterprise hooks: create dedicated hooks recovery token: %w", err)}
+			return
+		}
+		changed, err := recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir, target)
+		if revertErr := windows.RevertToSelf(); revertErr != nil {
+			// Do not return a still-privileged thread to the runtime pool.
+			result <- outcome{changed: changed, err: errors.Join(
+				err,
+				fmt.Errorf("enterprise hooks: revert hooks recovery token: %w", revertErr),
+			)}
+			return
+		}
+		runtime.UnlockOSThread()
+		result <- outcome{changed: changed, err: err}
+	}()
+	out := <-result
+	return out.changed, out.err
+}
+
+func recoverWindowsSetupRelaxedHookDirectoryPrivileged(dataDir string, target *windows.SID) (bool, error) {
+	var token windows.Token
+	if err := windows.OpenThreadToken(
+		windows.CurrentThread(),
+		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY,
+		false,
+		&token,
+	); err != nil {
+		return false, fmt.Errorf("enterprise hooks: open hooks recovery token: %w", err)
+	}
+	defer token.Close()
+	for _, privilege := range []string{"SeBackupPrivilege", "SeRestorePrivilege"} {
+		if err := enableWindowsThreadPrivilege(token, privilege); err != nil {
+			return false, err
+		}
+	}
+	root, err := openWindowsGuardianACLRoot(dataDir, false)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(root)
+	if err := validateWindowsGuardianACLHandle(root, target, true, false, false); err != nil {
+		return false, fmt.Errorf("enterprise hooks: reject managed runtime data directory %s: %w", dataDir, err)
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	hooks, err := openWindowsGuardianACLChild(root, "hooks", true, true)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: open %s without following: %w", hookDir, err)
+	}
+	defer windows.CloseHandle(hooks)
+	if err := validateWindowsGuardianACLHandle(hooks, target, true, true, false); err != nil {
+		return false, fmt.Errorf("enterprise hooks: reject %s: %w", hookDir, err)
+	}
+	sd, err := windows.GetSecurityInfo(hooks, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: read DACL of %s: %w", hookDir, err)
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(sd)
+	if err != nil || !relaxed {
+		return false, err
+	}
+	acl, err := windowsUserPathProtectionACL(target, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(hooks, acl, true); err != nil {
+		return false, fmt.Errorf("enterprise hooks: restore canonical DACL on %s: %w", hookDir, err)
+	}
+	return true, nil
+}
+
+// windowsSetupRelaxedDirectoryDACL reports whether sd carries exactly the
+// protected owner-private DACL relaxWindowsStandalonePerUserDirectory applies
+// (windowsSetupRelaxedDirectorySDDL), in either ACE order.
+func windowsSetupRelaxedDirectoryDACL(sd *windows.SECURITY_DESCRIPTOR) (bool, error) {
+	if sd == nil {
+		return false, nil
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return false, err
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return false, nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 2 {
+		return false, nil
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return false, err
+	}
+	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
+	if err != nil {
+		return false, err
+	}
+	const fullAccess windows.ACCESS_MASK = 0x001f01ff
+	const inherit = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+	sawSystem, sawOwnerRights := false, false
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return false, err
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags != inherit || ace.Mask != fullAccess {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		switch {
+		case sid.Equals(system) && !sawSystem:
+			sawSystem = true
+		case sid.Equals(ownerRights) && !sawOwnerRights:
+			sawOwnerRights = true
+		default:
+			return false, nil
+		}
+	}
+	return sawSystem && sawOwnerRights, nil
 }
 
 func openWindowsGuardianACLRoot(path string, final bool) (windows.Handle, error) {

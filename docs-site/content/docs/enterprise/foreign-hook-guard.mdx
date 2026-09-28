@@ -31,21 +31,10 @@ not write and you have not approved. See
 | Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
 | Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
 
-**Windows and Claude Code.** On Windows the Claude Code drop-in carries
-hooks only and does not set the vendor lock. With the default
-`managed_hooks_only: enforce`, the guard is also off for Claude Code, so
-neither covers user and project Claude Code hooks there. To cover them, set:
-
-```yaml title="config.yaml (excerpt)"
-enterprise:
-  machine_policy:
-    connectors:
-      claudecode:
-        managed_hooks_only: preserve   # Windows: turns the guard on for Claude Code
-```
-
-On Linux and macOS, `preserve` also removes the vendor lock; see
-[Machine policy](/docs/enterprise/machine-policy#locks-on-linux-and-macos).
+This holds on every OS. `preserve` also removes the vendor lock, except
+Codex's on Windows, which DefenseClaw always sets; see
+[Machine policy](/docs/enterprise/machine-policy#locks-on-linux-and-macos) and
+[Windows differences](/docs/enterprise/machine-policy#windows-differences).
 
 ## What it does
 
@@ -199,16 +188,19 @@ hook is enough.
 Hermes shows the same text after `DefenseClaw blocked this tool call:`, with
 `(enterprise_foreign_hook_blocked)` at the end.
 
-Later in a session that was blocked, the message says so:
+The rest of a session that started with the hook is blocked too, from the
+first prompt on, and the message says so:
 
 ```text
 enterprise_foreign_hook_blocked: your organization blocks claudecode hooks it
 has not approved, because they can change a tool call after DefenseClaw checks
-it. Earlier in this agent session the project file
+it. When this agent session started, the project file
 /home/alice/repo/.claude/settings.local.json defined a hook (digest
-sha256:9b1e…). The agent can keep running a hook it loaded when the session
-started, even after the file changes, so DefenseClaw blocks tool calls for the
-rest of this session: after removing the hook, restart the agent.
+sha256:9b1e…). Remove it, or ask your administrator to add the digest to
+enterprise.machine_policy.connectors.claudecode.allowed_hooks. The agent can
+keep running a hook it loaded when the session started, even after the file
+changes, so DefenseClaw blocks tool calls for the rest of this session: after
+removing the hook, restart the agent.
 ```
 
 The real message carries the full 64-character digest, and every connector's
@@ -344,8 +336,8 @@ with `enterprise_machine_policy_summary_untrusted`.
   session-start check reads the files, a hook added after the session
   started, or a session still running 7 days after its block was recorded.
   The per-call check still denies while a foreign hook is present. For
-  Claude Code and Codex on Linux and macOS, the vendor lock
-  (`managed_hooks_only: enforce`, the default) is the complete control.
+  Claude Code and Codex, the vendor lock (`managed_hooks_only: enforce`,
+  the default) is the complete control.
 - The session block follows the agent process when DefenseClaw can name it
   (the nearest parent of the hook that is not a shell or launcher), using its
   PID and start time even if the executable name is unavailable. If the OS

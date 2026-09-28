@@ -723,6 +723,59 @@ func TestStandaloneReconcileSeparatesPendingFromTrustFailures(t *testing.T) {
 	}
 }
 
+// Disabling a connector removes its manifest rows and the gateway then
+// refuses those users' hooks, so a registration left in a home stops the
+// agent at a hook that fails closed. The guardian removes it as the user,
+// records a home that is not available until the removal can run, and
+// leaves the home of a machine-policy row alone: it installed nothing there.
+func TestStandaloneReconcileRemovesRegistrationsTheManifestNoLongerEnrolls(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	bob := filepath.Join(f.homes, "bob") // not mounted yet
+	for name, home := range map[string]string{"alice": alice, "bob": bob} {
+		resolver.accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}
+	}
+	protected := func(userName, home, connectorName string) enterpriseHookReconcileRow {
+		row := protectedRow(userName, home, connectorName)
+		row.UID = uid
+		return row
+	}
+	machineRow := enterpriseHookReconcileRow{User: "alice", UserHome: alice, Connector: "claudecode", OK: true, UID: uid}
+	f.writeLedger(t, protected("alice", alice, "codex"), protected("alice", alice, "kiro"), protected("bob", bob, "kiro"), machineRow)
+	// kiro is disabled: the enumerator keeps only alice's codex row.
+	f.writeManifest(t, enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"})
+
+	reconcile := func() {
+		t.Helper()
+		run, err := runEnterpriseHookReconcileOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireLedgerOrStateTrust(t, run.StateErr)
+	}
+	reconcile()
+	targets := f.workerTargets()
+	if _, machine := targets["claudecode@"+alice]; machine || targets["kiro@"+alice].Mode != enterpriseHookWorkerModeRemove ||
+		targets["codex@"+alice].Mode != enterpriseHookWorkerModeVerifyOrRepair {
+		t.Fatalf("alice's kiro registration must be removed, her codex kept and her machine-policy row left alone: %+v", targets)
+	}
+	pending, err := loadEnterpriseHookUserCleanups(f.dataDir)
+	if err != nil || len(pending) != 1 || pending[0].Connector != "kiro" || pending[0].User != "bob" || pending[0].UID != uid {
+		t.Fatalf("bob's unavailable home must be recorded for cleanup: %+v, %v", pending, err)
+	}
+
+	f.home(t, "bob", 0o700)
+	reconcile()
+	if f.workerTargets()["kiro@"+bob].Mode != enterpriseHookWorkerModeRemove {
+		t.Fatalf("bob's kiro registration was not removed once his home is available: %+v", f.workerTargets())
+	}
+	if pending, err := loadEnterpriseHookUserCleanups(f.dataDir); err != nil || len(pending) != 0 {
+		t.Fatalf("a done cleanup must leave the ledger: %+v, %v", pending, err)
+	}
+}
+
 func TestStandaloneReconcileBindingsDetectUIDReuseAndKeepRepairRights(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}

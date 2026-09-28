@@ -377,6 +377,11 @@ func runWindowsEnterpriseLifecycle(
 			return failPreflight(err)
 		}
 	}
+	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure") {
+		if err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath); err != nil {
+			return failPreflight(fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+		}
+	}
 	if action == "ensure" {
 		return runWindowsEnterpriseStandaloneEnsure(ctx, cmd, opts, script)
 	}
@@ -1441,6 +1446,12 @@ func validateWindowsServiceConfig(
 			)
 		}
 		report.Profile = managed.ProfileStandalone
+		// The gateway service compiles this file strictly at start; prove
+		// it can before the lifecycle starts it. Secure Client
+		// keeps its historical validation.
+		if err := validateStandaloneGatewayConfig(configPath, expectedDataDir); err != nil {
+			return windowsServiceConfigValidation{}, err
+		}
 	}
 	return report, nil
 }

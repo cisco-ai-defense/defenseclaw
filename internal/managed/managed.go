@@ -22,6 +22,10 @@ const (
 	DeploymentModeEnv               = "DEFENSECLAW_DEPLOYMENT_MODE"
 	HookGuardianAuthorizationDirEnv = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
 	HookGuardianAuthorizationFile   = "protected_targets.json"
+	// HookGuardianUserCleanupFile, next to the authorization ledger, lists
+	// the DefenseClaw per-user registrations the hook guardian still has to
+	// remove from the homes of users it no longer enrolls.
+	HookGuardianUserCleanupFile = "user-cleanup.json"
 	// WindowsServiceAccountEnv identifies the exact virtual service account
 	// permitted to write the managed runtime tree. It is installed in the
 	// administrator-owned per-service registry Environment value; it never

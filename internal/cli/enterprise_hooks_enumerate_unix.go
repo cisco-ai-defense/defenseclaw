@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -300,6 +301,7 @@ func runEnterpriseHooksEnumerateCycle(
 		},
 		DirectoryConfigured:     enterpriseHooksEnumerateDirectoryConfigured,
 		MachinePolicyConnectors: machinePolicy,
+		OwnershipOffConnectors:  enterprisepolicy.OwnershipOffConnectors(current, runtime.GOOS),
 		SessionUIDs:             enterpriseHookSessionUIDs,
 		Discover:                enterpriseHooksEnumerateDiscover,
 		DiscoverStatic:          enterpriseHooksEnumerateDiscoverStatic,

@@ -187,6 +187,12 @@ func installWindowsRuntimeOnlyManagedResult(
 				return err
 			}
 			fail := func(cause error) error {
+				if transaction.createdDataDir {
+					// The selection receipt below is the only file outside
+					// the runtime snapshot; a data dir this row created must
+					// be empty again for the rollback to remove it.
+					removeWindowsManagedSetupSelectionReceipt(target.dataDir)
+				}
 				if restoreErr := restoreWindowsCodexUserRuntime(transaction); restoreErr != nil {
 					return fmt.Errorf("%v (%s runtime rollback failed: %v)", cause, name, restoreErr)
 				}
@@ -202,6 +208,13 @@ func installWindowsRuntimeOnlyManagedResult(
 				target.dataDir, target.setup.APIAddr, name, target.setup.HookAPIToken,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write %s managed runtime: %w", name, err))
+			}
+			// OpenCode binds its contract publication to protected executable
+			// evidence. After the user's own lock is lost (a moved or deleted
+			// ~\.defenseclaw) only a fresh guardian receipt can re-establish
+			// it, exactly as on the full setup route.
+			if err := recordWindowsManagedSetupSelection(target); err != nil {
+				return fail(err)
 			}
 			lockEntry, err = connector.NewHookContractLockEntryForMode(
 				target.setup, target.conn, version.Current().BinaryVersion, true,

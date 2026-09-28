@@ -32,6 +32,14 @@ var (
 	apiListenHeldRetryInterval = 2 * time.Second
 )
 
+// apiListenTCP binds the API address. Replaceable by tests, which use it to
+// return bind failures a single test process cannot produce, such as the one
+// Windows returns under another account's wildcard listener.
+var apiListenTCP = func(ctx context.Context, addr string) (net.Listener, error) {
+	var lc net.ListenConfig
+	return lc.Listen(ctx, "tcp", addr)
+}
+
 // acquireAPIListener returns the API listener: the socket-activated "api"
 // descriptor when systemd passed one, otherwise a bound listener. An
 // inherited socket must be exactly the configured api_bind:api_port — a
@@ -57,7 +65,6 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 // when ctx ends, closing a listener Run did not take, and logs a held port
 // once a minute rather than on every attempt.
 func (a *APIServer) retryAPIListenerBind(ctx context.Context, bound chan<- net.Listener) {
-	var lc net.ListenConfig
 	ticker := time.NewTicker(apiListenHeldRetryInterval)
 	defer ticker.Stop()
 	lastLogged := time.Now()
@@ -67,7 +74,7 @@ func (a *APIServer) retryAPIListenerBind(ctx context.Context, bound chan<- net.L
 			return
 		case <-ticker.C:
 		}
-		ln, err := lc.Listen(ctx, "tcp", a.addr)
+		ln, err := apiListenTCP(ctx, a.addr)
 		if err != nil {
 			if time.Since(lastLogged) >= time.Minute {
 				fmt.Fprintf(os.Stderr, "[sidecar-api] %s still unavailable; retrying the API bind: %v\n", a.addr, err)

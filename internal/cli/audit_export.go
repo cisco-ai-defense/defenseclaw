@@ -46,19 +46,15 @@ opened read-only: the review never migrates it or becomes a second writer.`,
 	PersistentPreRunE: auditPersistentPreRunE,
 }
 
-// auditStoreReadOnly records that the audit commands opened the managed
-// gateway's store read-only (auditPersistentPreRunE).
-var auditStoreReadOnly bool
-
-// auditPersistentPreRunE opens the audit store for the audit commands. A
-// per-user install keeps the root initializer. On a unix standalone host an
-// administrator or the service account gets the managed config and the
-// service-owned store, validated as a managed runtime file (owned by root
-// or the service account, no group/other writers) and opened read-only;
-// the writer path's owner check would refuse the service-owned file, and
-// its migrations must never run beside the managed gateway.
+// auditPersistentPreRunE opens the audit store for the audit commands other
+// than export, which has its own config-only initializer. A per-user install
+// keeps the root initializer. On a unix standalone host an administrator or
+// the service account gets the managed config and the service-owned store,
+// validated as a managed runtime file (owned by root or the service account,
+// no group/other writers) and opened read-only; the writer path's owner
+// check would refuse the service-owned file, and its migrations must never
+// run beside the managed gateway.
 func auditPersistentPreRunE(cmd *cobra.Command, args []string) error {
-	auditStoreReadOnly = false
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	if _, admin := managedStandaloneAdminCaller(nil); !admin {
 		return rootPersistentPreRunE(cmd, args)
@@ -75,7 +71,6 @@ func auditPersistentPreRunE(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	auditStore = store
-	auditStoreReadOnly = true
 	return nil
 }
 
@@ -112,10 +107,55 @@ are still written oldest first). --since and --until select a time window
 2026-09-27T18:30:00Z or a duration ago such as 30m or 2h. Activity rows
 follow the same window.
 
+The export reads the audit database read-only beside the running gateway.
+On a Windows host with a standalone managed deployment, run it from an
+elevated Administrator prompt (or as LocalSystem): it then reads the managed
+deployment's configuration and audit log.
+
 Examples:
   defenseclaw-gateway audit export --since 30m
   defenseclaw-gateway audit export --connector claudecode --limit 50 --newest`,
-	RunE: runAuditExport,
+	// Export only reads audit.db. It loads the configuration without opening
+	// the audit store: the store opens read-write and, on a managed host,
+	// only as the gateway service, so an administrator could never export.
+	PersistentPreRunE: auditExportPersistentPreRunE,
+	RunE:              runAuditExport,
+}
+
+// auditExportPersistentPreRunE replaces the audit initializer for export:
+// resolve a managed deployment for an administrator, then load the
+// configuration only. On a Windows standalone host an elevated
+// administrator or LocalSystem gets the managed layout and service pins; on
+// a unix standalone host an administrator or the service account gets the
+// managed config, and the service-owned database must pass the same
+// managed runtime file check the other audit commands apply before the
+// export reads it.
+func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	if err := prepareManagedAuditExportEnvironment(); err != nil {
+		return err
+	}
+	var warn io.Writer
+	if cmd != nil {
+		warn = cmd.ErrOrStderr()
+	}
+	applyManagedStandaloneAdminEnv(warn)
+	if err := loadGatewayCommandConfigOnly(); err != nil {
+		return err
+	}
+	return checkManagedAuditExportDatabase()
+}
+
+// checkManagedAuditExportDatabase validates the managed audit database for
+// a unix standalone administrator's export. Every other caller reads its
+// own database, which the read-only handle leaves untouched.
+func checkManagedAuditExportDatabase() error {
+	if _, admin := managedStandaloneAdminCaller(nil); !admin || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	if err := managedAuditStoreTrustCheck(cfg.AuditDB); err != nil {
+		return fmt.Errorf("failed to open the managed audit store: %w", err)
+	}
+	return nil
 }
 
 func init() {
@@ -162,13 +202,7 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
 
-	var db *sql.DB
-	var err error
-	if auditStoreReadOnly {
-		db, err = audit.OpenReadOnlyDB(cfg.AuditDB)
-	} else {
-		db, err = sql.Open("sqlite", cfg.AuditDB)
-	}
+	db, err := audit.OpenReadOnlyDB(cfg.AuditDB)
 	if err != nil {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}

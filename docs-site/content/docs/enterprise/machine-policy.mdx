@@ -26,7 +26,7 @@ Only agents you select in the config are protected; see
 | Connector | Linux and macOS | Windows |
 | --- | --- | --- |
 | Codex (`codex`) | Machine policy, with the vendor lock | Machine policy, with the vendor lock always on |
-| Claude Code (`claudecode`) | Machine policy, with the vendor lock | Machine policy, hooks only (no lock); see [Windows differences](#windows-differences) |
+| Claude Code (`claudecode`) | Machine policy, with the vendor lock | Machine policy, with the vendor lock; see [Windows differences](#windows-differences) |
 | Cursor (`cursor`) | Machine policy, with the foreign-hook guard | Same |
 | GitHub Copilot CLI (`copilot`) | Machine policy, with the foreign-hook guard | Same |
 | OpenCode (`opencode`) | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard | Same |
@@ -100,6 +100,17 @@ For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of
 On every OS the guardian keeps each enrolled user's DefenseClaw runtime in
 step with the policy, and `verify` reports any drift. On Linux and macOS the
 guardian never writes machine policy itself.
+
+On Windows, the guardian publishes Cursor's `hooks.json`, and the protected
+PowerShell adapter next to it, only while at least one user is enrolled for
+Cursor. A user is enrolled when the enumerator finds Cursor Desktop or the
+Cursor Agent CLI (`%LOCALAPPDATA%\cursor-agent`) in their profile at a
+version with a verified hook contract. Until then the file does not exist
+and Cursor runs without DefenseClaw hooks. `enterprise windows status` names
+each Cursor install it could not enroll (`hook_contract_unverified` for an
+Agent CLI build DefenseClaw has not reviewed), and `policy show` and
+`policy verify` report the missing file with this reason. Once a user is
+enrolled, Cursor refuses the tool calls of every user who is not.
 
 ## Managed OpenCode plugin
 
@@ -185,16 +196,17 @@ macOS use. That engine writes only the Copilot drop-in, OpenCode's managed
 config and plugin, and the foreign-hook guard summary. See
 [Who writes machine policy](#who-writes-machine-policy).
 
-- **Claude Code.** The drop-in carries DefenseClaw's hooks only. It does
-  not set `allowManagedHooksOnly`, so user and project Claude Code hooks
-  still run. With the default `managed_hooks_only: enforce`, the
-  foreign-hook guard is also off for Claude Code, so nothing stops a user
-  or project Claude Code hook from changing a tool call after DefenseClaw
-  checked it. To have the guard cover Claude Code on Windows, set
-  `enterprise.machine_policy.connectors.claudecode.managed_hooks_only: preserve`
-  in the Windows config. Keep a separate config for Linux and macOS: there
-  `preserve` removes Claude Code's vendor lock, which is the stronger
-  control.
+- **Claude Code.** The drop-in
+  `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`
+  carries DefenseClaw's hooks and, with the default
+  `managed_hooks_only: enforce`, sets `allowManagedHooksOnly: true`, so
+  user and project Claude Code hooks do not run. `preserve` leaves the lock
+  out and turns the foreign-hook guard on for Claude Code, as on Linux and
+  macOS. A drop-in that an earlier release wrote without the lock is
+  rewritten with it. A `managed-settings.d` file that sorts after
+  `90-defenseclaw.json` and sets `allowManagedHooksOnly` to `false` turns
+  the lock off; `enterprise policy verify` and `enterprise windows verify`
+  report that file.
 - **Claude Code registry policy.** While
   `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` holds a non-empty value, DefenseClaw
   does not publish its Claude Code drop-in and reports an error for each
@@ -205,15 +217,16 @@ config and plugin, and the foreign-hook guard summary. See
   `allow_managed_hooks_only = true` and `[features] hooks = true`. If your
   file sets either to `false`, the transaction fails. Each Codex hook command
   names its installer-bound event and hook contract.
-- **Settings.** `ownership`, `managed_hooks_only` and
-  `higher_precedence_sources` do not change how Codex, Claude Code or
-  Cursor policy is written. `ownership` applies to Copilot and OpenCode,
-  and `connectors.claudecode.ownership` also applies to the
+- **Settings.** `ownership` and `higher_precedence_sources` do not change
+  how Codex, Claude Code or Cursor policy is written, and
+  `managed_hooks_only` changes only the Claude Code lock. `ownership`
+  applies to Copilot and OpenCode, and `connectors.claudecode.ownership`
+  also applies to the
   [Claude Code version floor](#claude-code-version-floor) drop-in, but not
   to `90-defenseclaw.json`.
-  `managed_hooks_only` for `claudecode` turns the foreign-hook guard on or
-  off, as above. `foreign_hooks` and `allowed_hooks` apply to the
-  foreign-hook guard as on the other OSes.
+  `managed_hooks_only` also turns the foreign-hook guard on or off for
+  Codex and Claude Code, and `foreign_hooks` and `allowed_hooks` apply to
+  the guard, as on the other OSes.
 - **Vendor folders under `%ProgramData%`.** Standard users may create
   folders in `%ProgramData%`. A vendor folder a standard user created first
   gets DefenseClaw's owner and protected DACL. A file, junction, symbolic
@@ -224,9 +237,8 @@ config and plugin, and the foreign-hook guard summary. See
   user left in Copilot's `policy.d` is moved aside the same way. Objects
   Administrators, LocalSystem or TrustedInstaller own are never removed;
   DefenseClaw reports them instead.
-- **`policy show`.** It checks Claude Code against the Linux and macOS
-  rules, so under `enforce` it reports that `allowManagedHooksOnly` is not
-  set. Setting `preserve` for `claudecode` matches what Windows writes.
+- **`policy show`.** It checks Claude Code with the same rules as on Linux
+  and macOS, including the lock under `enforce`.
 
 ## Locks on Linux and macOS
 
@@ -236,10 +248,12 @@ With `managed_hooks_only: enforce` (the default):
   DefenseClaw also always pins `[features] hooks = true`, so a user's own
   config cannot turn managed hooks off.
 - **Claude Code.** The drop-in sets `allowManagedHooksOnly: true`, so user
-  and project hooks do not run.
+  and project hooks do not run. A user's `disableAllHooks` does not turn
+  managed hooks off.
 - **Your own values win.** If your policy sets a lock to `false`, for
-  example `allow_managed_hooks_only = false`, DefenseClaw does not rewrite
-  it. It reports a conflict and the connector counts as not covered. The
+  example `allow_managed_hooks_only = false` in `requirements.toml`, or
+  `allowManagedHooksOnly: false` in a Claude Code `managed-settings.d` file
+  that sorts after `90-defenseclaw.json`, DefenseClaw does not rewrite it. It reports a conflict and the connector counts as not covered. The
   same applies to a managed `disableAllHooks: true` or a `policyHelper` for
   Claude Code, and to `hooks.state` in Codex requirements.
 
@@ -265,7 +279,7 @@ enterprise:
 | --- | --- |
 | `merge` (default) | Writes its entries and repairs them |
 | `verify_only` | Only checks the file. When its entries are missing, it reports `missing_defenseclaw_hooks` and the export command to use. |
-| `off` | Neither writes nor checks the file |
+| `off` | Neither writes nor checks the file. On Linux and macOS, Codex, Claude Code, Cursor and Copilot then get no DefenseClaw hooks at all: the enumerator does not enroll them for per-user hooks, and the guardian removes per-user hooks an earlier release wrote for them. `policy show` lists them as `ownership off: machine policy not managed`. OpenCode keeps its per-user plugin |
 
 Quote `"off"`: YAML 1.1 tools read a bare `off` as the boolean `false`,
 which the config refuses. Use `verify_only` when an MDM already writes the
@@ -279,11 +293,18 @@ writes the Claude Code hook drop-in, `90-defenseclaw.json`, whatever
 ## Claude Code version floor
 
 Claude Code refuses to start when its version is below the managed
-`requiredMinimumVersion`. DefenseClaw sets it to the lowest Claude Code
-version it has a verified hook contract for (2.1.154), so a build whose
-hooks DefenseClaw cannot govern does not start. The value is in its own
-drop-in, `00-defenseclaw-version-floor.json`, next to `90-defenseclaw.json`;
-the hook drop-in does not change.
+`requiredMinimumVersion`, but only Claude Code 2.1.163 and later read that
+setting. Older builds ignore it and start. DefenseClaw sets it to the lowest
+Claude Code version it has a verified hook contract for (2.1.154). Every
+build below 2.1.154 is older than 2.1.163, so this floor does not stop any
+build: 2.1.153, for example, starts with the floor in place. A value of
+2.1.163 or later, such as one you set yourself, stops only the builds from
+2.1.163 that are below it. To keep older builds off a host, use application
+control (see
+[Vendor limits](#vendor-limits); tracked in
+[#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). The
+value is in its own drop-in, `00-defenseclaw-version-floor.json`, next to
+`90-defenseclaw.json`; the hook drop-in does not change.
 
 ```yaml title="config.yaml (excerpt)"
 enterprise:
@@ -345,9 +366,10 @@ policy; see
   `ownership: "off"`. Windows follows the same name-based rule for the
   floor, not the enrolled-row rule it uses for `90-defenseclaw.json`: a
   Windows config that names `claudecode` writes the floor even when no
-  Claude Code user is enrolled, so older builds refuse to start there too.
-  Linux and macOS write it at install and every reconcile; on Windows the
-  guardian writes it every cycle, under the same lock the lifecycle uses for
+  Claude Code user is enrolled. Linux and macOS write it at install and at
+  every lifecycle run that applies changes (`ensure`, `repair` or
+  `reconcile`), not in the background; on Windows the guardian writes it
+  every cycle, under the same lock the lifecycle uses for
   `90-defenseclaw.json`. Uninstall removes it.
 - **It follows `connectors.claudecode.ownership` on every OS.** `merge`
   writes and repairs it. `verify_only` neither writes nor removes it: deploy
@@ -358,7 +380,10 @@ policy; see
   floor that is missing or cannot apply (see the next bullet and the ones
   above) is a conflict: `policy show` lists Claude Code as not covered, and
   `policy verify` exits 1. The hook drop-in stays in place, and Claude
-  Code's hook calls are still inspected.
+  Code's hook calls are still inspected. On Linux and macOS, when
+  DefenseClaw's own drop-in is missing, `status` and `verify` also warn
+  with `claude_version_floor_missing` (verify still passes), and the next
+  `ensure` writes it back.
 - **Higher-precedence sources.** Claude Code builds older than 2.1.242
   ignore `"managedSourcesBehavior": "merge"` and read only the
   higher-precedence source (`HKLM\SOFTWARE\Policies\ClaudeCode\Settings`,
@@ -370,8 +395,8 @@ policy; see
   then `policy show` marks the floor `not applied` and `policy verify` fails
   (a warning with `higher_precedence_sources: warn`).
 - **Limits.** The check runs when a session starts; running sessions go
-  on. Builds that predate the setting ignore it, and builds that do not
-  read `managed-settings.d` ignore the drop-in altogether; see
+  on. Builds before 2.1.163 predate the setting and ignore it, and builds
+  that do not read `managed-settings.d` ignore the drop-in altogether; see
   [Vendor limits](#vendor-limits).
 
 ## Higher-precedence sources
@@ -457,7 +482,8 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
   of a canary tool call in its event history, so the gateway must be running
   and collecting tool activity; `--audit-db` names the gateway's audit
   database if it is not in the standard place. On Linux and macOS run it as
-  root or as that user. On Windows run it in that user's own session.
+  root or as that user. A managed Windows host refuses `--live`; see
+  [Windows](/docs/enterprise/windows#inspect-machine-policy).
 
 ## Vendor limits
 
@@ -467,6 +493,11 @@ These come from the agents themselves:
   `SessionStart` and `UserPromptSubmit` hooks. `PreToolUse` and later tool
   hooks still run, so tool calls stay inspected; prompt inspection is best
   effort.
+- **Claude Code before 2.1.163.** These builds do not read
+  `requiredMinimumVersion`, so no floor stops them, DefenseClaw's or yours.
+  Those that read `managed-settings.d`, such as 2.1.153, still run
+  DefenseClaw's hooks; older ones are the next item. Use application control
+  to allow only the Claude Code versions you support.
 - **Older Claude Code releases (Linux and macOS).** Releases that do not
   read `managed-settings.d` ignore both of DefenseClaw's drop-ins, the
   hooks in `90-defenseclaw.json` and the

@@ -154,12 +154,14 @@ Claude Code gets machine policy instead of the per-user files above. The
 `C:\Program Files\ClaudeCode` on Windows) holds `90-defenseclaw.json` with the
 hooks and `00-defenseclaw-version-floor.json`, which sets
 `requiredMinimumVersion` to 2.1.154, the lowest Claude Code version with a
-verified DefenseClaw hook contract, so older builds refuse to start. Your own
+verified DefenseClaw hook contract. Claude Code reads that setting only from
+2.1.163, so builds older than 2.1.163 ignore it and this floor stops no
+build; use application control to keep older builds off a host. Your own
 `requiredMinimumVersion` wins, and a file at that name that DefenseClaw did
 not write (for example the `version-floor` export you deploy) is yours:
 DefenseClaw never rewrites or removes it. A higher-precedence source (HKLM `Settings`,
-macOS managed preferences) has to carry the key itself, because the builds
-the floor stops read only that source. See
+macOS managed preferences) has to carry the key itself, because Claude Code
+builds before 2.1.242 read only that source. See
 [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor).
 
 ## Hook capabilities

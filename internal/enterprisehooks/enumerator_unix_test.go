@@ -444,6 +444,13 @@ func TestEnumerateUnixMachinePolicyConnectorsNeedDenyForRows(t *testing.T) {
 	if strings.Join(report.Connectors, ",") != "codex,cursor" {
 		t.Fatalf("unenrolled_users=deny needs rows for machine-policy connectors: %v", report.Connectors)
 	}
+	// ownership: "off" leaves the agent on no DefenseClaw route: no
+	// per-user rows, not even under deny.
+	opts.OwnershipOffConnectors = []string{"cursor"}
+	_, report, _ = EnumerateUnix(context.Background(), cfg, registry, opts)
+	if strings.Join(report.Connectors, ",") != "codex" {
+		t.Fatalf("an ownership-off connector must get no per-user rows: %v", report.Connectors)
+	}
 }
 
 func TestWriteUnixTargetsManifestAtomicIsByteStable(t *testing.T) {

@@ -69,6 +69,9 @@ func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 	if lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "codex"); strings.TrimSpace(lock.Connector) != "" {
 		t.Fatalf("hook contract lock entry kept: %+v", lock)
 	}
+	if _, err := os.Lstat(filepath.Join(home, ".defenseclaw", "hooks", ".hook-codex.token")); !os.IsNotExist(err) {
+		t.Fatalf("the connector's hook credential was kept: %v", err)
+	}
 	// A second removal and a missing home are both no-ops.
 	if err := RemoveUserHooks(context.Background(), opts); err != nil {
 		t.Fatalf("repeat RemoveUserHooks: %v", err)

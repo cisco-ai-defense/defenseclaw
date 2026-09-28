@@ -716,3 +716,30 @@ func TestWindowsOpenCodeMovesAsideAConfigAUserPlanted(t *testing.T) {
 		})
 	}
 }
+
+// Every account's Amp reads %ProgramData%\ampcode. The guardian
+// holds it: a folder a standard account made is reported, then taken back
+// with what that account put there moved aside.
+func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
+	opts := windowsTestOptions(t)
+	dir := filepath.Join(opts.WindowsProgramData, "ampcode")
+	userCreatedDir(t, dir)
+	planted := filepath.Join(dir, "AGENTS.md")
+	if err := os.WriteFile(planted, []byte("marker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ownAs(t, planted, wellKnownSID(t, windows.WinBuiltinUsersSid))
+	if problems := InspectWindowsAmpMachineFolder(opts); len(problems) == 0 {
+		t.Fatal("a user-created Amp machine folder must be reported")
+	}
+	if _, err := PublishWindowsGoOwned(opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	requireProtected(t, dir)
+	if _, err := os.Lstat(planted); !os.IsNotExist(err) {
+		t.Fatalf("the planted guidance must no longer be in force: %v", err)
+	}
+	if problems := InspectWindowsAmpMachineFolder(opts); len(problems) != 0 {
+		t.Fatalf("a held Amp machine folder must not be reported: %v", problems)
+	}
+}

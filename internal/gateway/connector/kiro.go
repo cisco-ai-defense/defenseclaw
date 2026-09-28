@@ -350,6 +350,9 @@ const (
 //   - v3 / IDE: "Exit code 2: Block execution (PreToolUse, UserPromptSubmit,
 //     PreTaskExec only)" (kiro.dev/docs/hooks/actions). DefenseClaw installs
 //     no PreTaskExecution hook, so it claims the two it installs.
+//     kiro-cli 2.24.1 --v3 does not apply the UserPromptSubmit veto: it
+//     attaches the hook's result to the prompt and calls the model. A
+//     request cannot tell it from Kiro IDE, so the block is still reported.
 //   - CLI 2.x: "Exit code 2: (preToolUse only) Block tool execution" and
 //     "Other exit codes: Hook failed. STDERR is shown as a warning"
 //     (kiro.dev/docs/cli/2x-reference). Its trigger table lists

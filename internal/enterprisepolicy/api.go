@@ -213,6 +213,9 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 				// Say why OpenCode is not on its machine policy route.
 				openCodePerUserFallback(opts, opts.PolicyFor(name), &state)
 			}
+			if name == connectorAmp && opts.goos() == "windows" {
+				state.Conflicts = append(state.Conflicts, InspectWindowsAmpMachineFolder(opts)...)
+			}
 			result.States = append(result.States, state)
 			continue
 		}

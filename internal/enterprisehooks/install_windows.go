@@ -336,16 +336,31 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		return InstallResult{}, fmt.Errorf("enterprise hooks: managed policy executable %s does not match trusted hook executable %s", state.HookExecutable, hookExecutable)
 	}
 	// Standalone verifies every row against the one deployment-wide body.
-	policySetup := claudeMachinePolicySetup(setupOpts, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess())
+	policySetup := withWindowsClaudeManagedHooksOnly(
+		claudeMachinePolicySetup(setupOpts, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess()),
+	)
 	expectedPolicy, err := provider.ManagedHookPolicy(policySetup)
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: build canonical Claude Code managed policy: %w", err)
 	}
 	if !bytes.Equal(policySnapshot.data, expectedPolicy) {
+		// Name the lock when it is what is missing, as after an upgrade from
+		// a release whose drop-in did not carry it.
+		if policySetup.ClaudeAllowManagedHooksOnly && !windowsClaudeManagedPolicyHasLock(policySnapshot.data) {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: Claude Code managed policy differs from the canonical DefenseClaw hook matrix: %s does not set allowManagedHooksOnly: true, so user and project hooks can rewrite tool input after inspection; repair rewrites it", policyPath)
+		}
 		return InstallResult{}, fmt.Errorf("enterprise hooks: Claude Code managed policy differs from the canonical DefenseClaw hook matrix")
 	}
 	if err := provider.VerifyManagedHookPolicy(policySnapshot.data, policySetup); err != nil {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: verify Claude Code managed policy: %w", err)
+	}
+	// Claude Code applies later managed-settings.d files over DefenseClaw's
+	// drop-in, so an administrator file there can turn the lock off although
+	// the drop-in itself is canonical.
+	if policySetup.ClaudeAllowManagedHooksOnly {
+		if err := connector.ClaudeCodeManagedHooksOnlyOverride(policyPath); err != nil {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: %w", err)
+		}
 	}
 
 	lock, err := verifyWindowsClaudeUserRuntimeReadOnly(home, dataDir, policyPath, targetSID, setupOpts, conn)
@@ -535,6 +550,43 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	}, nil
 }
 
+// recordWindowsManagedSetupSelection hashes the guardian-selected image of a
+// per-user connector with protected executable admission (Amp, Hermes,
+// OpenCode) as the target user and records it in that user's
+// agent_selection.json receipt. The connector's contract publication binds
+// to the receipt when the user's protected contract lock is missing or
+// stale, so every per-user install route must write it before it publishes
+// the lock: the full setup route and the runtime-only route alike. Without
+// it, a user who moves their own ~\.defenseclaw aside leaves a runtime-only
+// OpenCode row that no reconcile can republish. Rows without a
+// selected executable, and connectors without protected admission, are
+// left unchanged. Callers hold the target user's impersonation token.
+func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) error {
+	if target.conn == nil || strings.TrimSpace(target.setup.AgentExecutable) == "" ||
+		!connector.ProtectedSetupSelectionConnector(target.conn.Name()) {
+		return nil
+	}
+	if err := connector.WriteManagedSetupAgentSelection(
+		target.dataDir,
+		target.conn.Name(),
+		target.setup.AgentExecutable,
+		target.setup.AgentVersion,
+	); err != nil {
+		return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
+	}
+	return nil
+}
+
+// removeWindowsManagedSetupSelectionReceipt deletes the selection receipt
+// and its lock file from a data directory that the failing install created
+// itself. Best effort: the directory removal that follows reports anything
+// left behind.
+func removeWindowsManagedSetupSelectionReceipt(dataDir string) {
+	for _, name := range []string{"agent_selection.json", "agent_selection.json.lock"} {
+		_ = os.Remove(filepath.Join(dataDir, name))
+	}
+}
+
 func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
@@ -572,7 +624,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 		// guardian's LocalSystem process token. Only the certified built-in,
 		// filesystem-only connector contract with process-launching options
 		// disabled may cross this boundary.
-		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
+		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() (setupErr error) {
 			if _, verifiedSID, err := validateWindowsEnterpriseHome(target.home, target.sid.String()); err != nil {
 				return err
 			} else if !verifiedSID.Equals(target.sid) {
@@ -586,20 +638,24 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
 			}
-			if err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint); err != nil {
+			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
+			// Hardening below only runs when the setup succeeds. A failed setup
+			// must not leave the relaxed directories owner-private.
+			defer func() {
+				if setupErr == nil || len(relaxed) == 0 {
+					return
+				}
+				if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, relaxed); restoreErr != nil {
+					setupErr = fmt.Errorf("%w (restore relaxed setup directories failed: %v)", setupErr, restoreErr)
+				}
+			}()
+			if err != nil {
 				return err
 			}
 			// Hash the guardian-selected image as the target user and record
 			// it where the connector's executable admission reads it.
-			if target.setup.AgentExecutable != "" {
-				if err := connector.WriteManagedSetupAgentSelection(
-					target.dataDir,
-					target.conn.Name(),
-					target.setup.AgentExecutable,
-					target.setup.AgentVersion,
-				); err != nil {
-					return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
-				}
+			if err := recordWindowsManagedSetupSelection(target); err != nil {
+				return err
 			}
 			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
 			if err := target.conn.Setup(ctx, target.setup); err != nil {

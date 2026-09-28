@@ -776,3 +776,54 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 		})
 	}
 }
+
+// A lifecycle that stopped the guardian between relaxing <data dir>\hooks for
+// a connector setup and hardening it again left the relaxed owner-private
+// DACL behind (2 ACEs, no Administrators). Every later retire of that user's
+// managed runtime generations then refused, as LocalSystem and as an elevated
+// administrator, and no lifecycle action could recover the host. The retire
+// restores the canonical DACL on exactly that shape.
+func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, windowsSetupRelaxedDirectorySDDL)
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+		t.Fatal("relaxed hooks directory validated as canonical")
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err != nil || removed != 0 {
+		t.Fatalf("collect with a relaxed hooks directory: removed=%d err=%v", removed, err)
+	}
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
+		t.Fatalf("hooks directory was not restored to the canonical DACL: %v", err)
+	}
+}
+
+func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, target *windows.SID, sddl string) {
+	t.Helper()
+	if err := os.Mkdir(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, hookDir, target)
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(hookDir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}

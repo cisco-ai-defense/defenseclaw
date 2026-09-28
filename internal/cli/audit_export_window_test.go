@@ -57,16 +57,15 @@ func auditWindowTestDatabase(t *testing.T, timestamps ...string) string {
 // returns the exported row ids in output order.
 func runAuditExportForTest(t *testing.T, path string, limit int, newest bool, since, until string) ([]string, error) {
 	t.Helper()
-	previousConfig, previousReadOnly := cfg, auditStoreReadOnly
+	previousConfig := cfg
 	previous := []any{auditExportOut, auditExportConnector, auditExportLimit, auditExportIncludeActivity, auditExportSince, auditExportUntil, auditExportNewest}
 	t.Cleanup(func() {
-		cfg, auditStoreReadOnly = previousConfig, previousReadOnly
+		cfg = previousConfig
 		auditExportOut, auditExportConnector, auditExportLimit = previous[0].(string), previous[1].(string), previous[2].(int)
 		auditExportIncludeActivity, auditExportSince, auditExportUntil = previous[3].(bool), previous[4].(string), previous[5].(string)
 		auditExportNewest = previous[6].(bool)
 	})
 	cfg = &config.Config{AuditDB: path}
-	auditStoreReadOnly = false
 	auditExportOut = filepath.Join(t.TempDir(), "out.jsonl")
 	auditExportConnector, auditExportIncludeActivity = "", false
 	auditExportLimit, auditExportNewest, auditExportSince, auditExportUntil = limit, newest, since, until

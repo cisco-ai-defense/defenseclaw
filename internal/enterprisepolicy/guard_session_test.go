@@ -96,7 +96,9 @@ func TestSessionStateKeepsDenyingASessionAfterTheHookIsRemoved(t *testing.T) {
 	if !later.Deny || !strings.HasPrefix(later.Reason, "enterprise_foreign_hook_blocked:") {
 		t.Fatalf("a clean scan later in the session must still deny: %+v", later)
 	}
-	for _, want := range []string{"Earlier in this agent session", hookFile, "sha256:aa11", "restart the agent"} {
+	// The block was recorded at session start, so the user's first prompt
+	// may get this message: it says when, and names the allowlist key.
+	for _, want := range []string{"When this agent session started, the", hookFile, "sha256:aa11", "connectors.claudecode.allowed_hooks", "restart the agent"} {
 		if !strings.Contains(later.Reason, want) {
 			t.Fatalf("the session denial must say %q: %s", want, later.Reason)
 		}
@@ -553,7 +555,7 @@ func TestSessionStateBlocksWhenTheSessionStartScanStopsOnABudget(t *testing.T) {
 			t.Fatalf("premise: the cleared files scan clean: %+v", clean)
 		}
 		later := h.apply("s-1", false, clean)
-		for _, want := range []string{"enterprise_foreign_hook_blocked:", "Earlier in this agent session", "more than 512 files", "restart the agent"} {
+		for _, want := range []string{"enterprise_foreign_hook_blocked:", "When this agent session started", "more than 512 files", "restart the agent"} {
 			if !later.Deny || !strings.Contains(later.Reason, want) {
 				t.Fatalf("a later call of the session must still deny and say %q: %+v", want, later)
 			}
@@ -711,7 +713,7 @@ func TestGatewaySessionStoreEvictsOnlyCleanRecords(t *testing.T) {
 		}
 	}
 	if call := h.applyAs(blockedProcess, "blocked", false, GuardDecision{}); !call.Deny ||
-		!strings.Contains(call.Reason, "Earlier in this agent session") {
+		!strings.Contains(call.Reason, "When this agent session started") {
 		t.Fatalf("blocked session allowed after the flood: %+v", call)
 	}
 

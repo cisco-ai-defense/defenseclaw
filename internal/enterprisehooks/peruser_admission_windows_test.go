@@ -90,6 +90,20 @@ func TestWindowsStandalonePerUserAdmissionSelectsOnlyAdmissibleImages(t *testing
 	if got, reason := windowsStandalonePerUserManagedExecutable(home, "hermes"); got != hermes {
 		t.Fatalf("hermes = %q (%s), want %q", got, reason, hermes)
 	}
+	// An image this token cannot read (a folder on its path left
+	// with an older release's owner-only permissions) is reported as
+	// unreadable with the way forward, not as missing.
+	if err := os.Remove(hermes); err != nil {
+		t.Fatal(err)
+	}
+	previousUnreadable := windowsStandaloneExecutableUnreadable
+	t.Cleanup(func() { windowsStandaloneExecutableUnreadable = previousUnreadable })
+	windowsStandaloneExecutableUnreadable = func(string, error) bool { return true }
+	if _, reason := windowsStandalonePerUserManagedExecutable(home, "hermes"); !strings.Contains(reason, "cannot be read as this account") ||
+		!strings.Contains(reason, "LocalSystem") {
+		t.Fatalf("unreadable hermes image: reason = %q", reason)
+	}
+	windowsStandaloneExecutableUnreadable = previousUnreadable
 
 	// Connectors without protected executable admission need no image.
 	if exe, reason := windowsStandalonePerUserManagedExecutable(home, "copilot"); exe != "" || reason != "" {

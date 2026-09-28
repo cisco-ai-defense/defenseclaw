@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -322,13 +323,44 @@ func validateOpenCodeManagedPluginProtection(path string, opts SetupOpts) error 
 	return safefile.ValidatePrivateFile(path)
 }
 
+// readHookConfigFile reads a vendor hook config. The file is opened without
+// blocking and must be a regular file (a symlink to one is still followed),
+// so a named pipe or device in its place is reported by path instead of
+// stalling the per-user worker until its deadline.
+func readHookConfigFile(path string) ([]byte, error) {
+	file, err := openHookConfigForRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is %s, not a regular file; replace it with a regular file", path, hookConfigFileKind(info.Mode()))
+	}
+	return io.ReadAll(file)
+}
+
+func hookConfigFileKind(mode os.FileMode) string {
+	switch {
+	case mode.IsDir():
+		return "a directory"
+	case mode&os.ModeNamedPipe != 0:
+		return "a named pipe"
+	default:
+		return "a special file"
+	}
+}
+
 // configFileReferencesHook reports whether the file at path contains any of
 // the owned hook command needles. A missing file reports false (not present)
 // rather than an error: a deleted connector config is exactly the tamper case
 // the guard re-installs. Any other read error is surfaced so the guard can log
 // and skip rather than heal on incomplete information.
 func configFileReferencesHook(path string, needles []string) (bool, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil

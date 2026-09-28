@@ -61,7 +61,9 @@ var copilotShellArgs = map[string]trustedShellArg{
 //   - Cursor Agent preToolUse Shell: cwd, the call's working_directory
 //     (timeout is part of the shell shape).
 //   - Devin 3000.10 exec: workdir, absolute; timeout, tty.
-//   - Kiro CLI 2.24 shell: working_dir; execute_bash: also summary.
+//   - Kiro CLI 2.24 shell: working_dir and the __tool_use_purpose note;
+//     execute_bash (also --v3): also summary, and cwd, description and
+//     timeout, which v3 sends unset (null).
 //   - Copilot CLI 1.0.8x bash and powershell: copilotShellArgs.
 //
 // Arguments that change where or how the command runs are left for the
@@ -81,8 +83,11 @@ var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 	"cursor": {"Shell": {"cwd": trustedShellWorkdir}},
 	"devin":  {"exec": {"workdir": trustedShellWorkdir, "timeout": trustedShellNumber, "tty": trustedShellFlag}},
 	"kiro": {
-		"shell":        {"working_dir": trustedShellWorkdir},
-		"execute_bash": {"working_dir": trustedShellWorkdir, "summary": trustedShellLabel},
+		"shell": {"working_dir": trustedShellWorkdir, "__tool_use_purpose": trustedShellLabel},
+		"execute_bash": {
+			"working_dir": trustedShellWorkdir, "summary": trustedShellLabel,
+			"cwd": trustedShellWorkdir, "description": trustedShellLabel, "timeout": trustedShellNumber,
+		},
 	},
 	"copilot": {"bash": copilotShellArgs, "powershell": copilotShellArgs},
 }

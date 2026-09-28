@@ -36,6 +36,18 @@ const (
 	publicDirSDDL    = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 	privateDirSDDL   = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 	adminOwnerSIDStr = "S-1-5-32-544"
+
+	// openCodePluginFileSDDL is publicFileSDDL plus FILE_WRITE_ATTRIBUTES
+	// (0x100) for BUILTIN\Users, on the managed OpenCode plugin only.
+	// OpenCode's runtime (Bun) opens every source module with
+	// READ_CONTROL|FILE_WRITE_ATTRIBUTES|SYNCHRONIZE|GENERIC_READ, even to
+	// read it, so with read and execute alone a standard account's import
+	// fails ("EPERM reading") and OpenCode runs without the plugin. The
+	// right changes only timestamps and basic attributes; the content, the
+	// DACL, the owner and the name stay administrator-only.
+	openCodePluginFileSDDL   = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1201a9;;;BU)"
+	openCodePluginReadAccess = windows.ACCESS_MASK(0x1200a9)
+	openCodePluginLoadAccess = openCodePluginReadAccess | windows.FILE_WRITE_ATTRIBUTES
 )
 
 var trustedOwner = func(uint32) bool { return true }
@@ -100,6 +112,163 @@ var validateTrustedFile = func(path string) error {
 
 func validateTrustedPolicyFile(_ Options, path string) error {
 	return validateTrustedFile(path)
+}
+
+// validateOpenCodePluginFile applies the machine policy trust rules to the
+// managed OpenCode plugin, with its own rule for the file (see
+// openCodePluginLoadable): ancestors as for every policy file.
+func validateOpenCodePluginFile(_ Options, path string) error {
+	if err := validateTrustedDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	_, err := openCodePluginLoadable(Options{}, path)
+	return err
+}
+
+func atomicWriteOpenCodePlugin(_ Options, path string, data []byte) error {
+	return atomicWriteSDDL(path, data, openCodePluginFileSDDL)
+}
+
+// releaseOpenCodePluginName undoes, before the plugin is rewritten or
+// removed, what a standard account can do with the FILE_WRITE_ATTRIBUTES
+// right it holds on the installed copy: a read-only attribute (no rename
+// replaces the file) and a reparse point set on it (no reader can open it,
+// and it is no longer a regular file to replace). It works through a handle
+// that does not follow reparse points, changes nothing unless the plugin's
+// folder passes the trust rules, and leaves a directory for the writer to
+// refuse.
+func releaseOpenCodePluginName(_ Options, path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) || (err == nil && info.IsDir()) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES|windows.FILE_WRITE_ATTRIBUTES|windows.SYNCHRONIZE,
+		share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+	var basic struct {
+		CreationTime, LastAccessTime, LastWriteTime, ChangeTime int64
+		FileAttributes                                          uint32
+		_                                                       uint32
+	}
+	if err := windows.GetFileInformationByHandleEx(handle, windows.FileBasicInfo, (*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
+		return err
+	}
+	attributes := basic.FileAttributes
+	if attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
+		attributes&(windows.FILE_ATTRIBUTE_READONLY|windows.FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+		return nil
+	}
+	if err := validateTrustedDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	if attributes&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		basic.CreationTime, basic.LastAccessTime, basic.LastWriteTime, basic.ChangeTime = 0, 0, 0, 0
+		basic.FileAttributes = attributes &^ (windows.FILE_ATTRIBUTE_READONLY | windows.FILE_ATTRIBUTE_REPARSE_POINT)
+		if basic.FileAttributes == 0 {
+			basic.FileAttributes = windows.FILE_ATTRIBUTE_NORMAL
+		}
+		if err := windows.SetFileInformationByHandle(handle, windows.FileBasicInfo, (*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
+			return fmt.Errorf("clear the read-only attribute of %s: %w", path, err)
+		}
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return nil
+	}
+	// Delete the reparse object itself; the writer then creates the plugin.
+	target, err := windows.CreateFile(name, windows.DELETE|windows.SYNCHRONIZE, share, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return fmt.Errorf("remove the reparse point at %s: %w", path, err)
+	}
+	defer windows.CloseHandle(target)
+	deleteFile := byte(1)
+	if err := windows.SetFileInformationByHandle(target, windows.FileDispositionInfo, &deleteFile, 1); err != nil {
+		return fmt.Errorf("remove the reparse point at %s: %w", path, err)
+	}
+	return nil
+}
+
+// openCodePluginLoadable inspects the installed plugin's own descriptor. It
+// is trusted when it is a regular file, not a reparse point, owned by
+// Administrators or LocalSystem, and every other principal holds at most
+// read and execute plus FILE_WRITE_ATTRIBUTES. It reports loadable when
+// BUILTIN\Users holds that access and nothing denies it; a copy written by
+// 1.0.52 or earlier (read and execute only) is trusted but not loadable by a
+// standard account's OpenCode.
+func openCodePluginLoadable(_ Options, path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("%s is not a regular file", path)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false, err
+	}
+	attributes, err := windows.GetFileAttributes(name)
+	if err != nil {
+		return false, err
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return false, fmt.Errorf("%s is a reparse point", path)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	if owner == nil || !(owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || owner.IsWellKnown(windows.WinLocalSystemSid)) {
+		return false, fmt.Errorf("%s is not owned by Administrators or LocalSystem", path)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false, fmt.Errorf("%s has no DACL", path)
+	}
+	usersLoad, denied := false, false
+	for i := uint16(0); i < dacl.AceCount; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+		case windows.ACCESS_DENIED_ACE_TYPE, 0x6, 0xA, 0xC: // denied, denied object, denied callback (object)
+			denied = true
+			continue
+		default:
+			return false, fmt.Errorf("%s has an unsupported ACE type 0x%x", path, ace.Header.AceType)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			continue
+		}
+		if ace.Mask&^openCodePluginLoadAccess != 0 {
+			return false, fmt.Errorf("%s grants %s access 0x%x beyond read", path, sid, uint32(ace.Mask))
+		}
+		if sid.IsWellKnown(windows.WinBuiltinUsersSid) && ace.Mask&openCodePluginLoadAccess == openCodePluginLoadAccess {
+			usersLoad = true
+		}
+	}
+	return usersLoad && !denied, nil
 }
 
 func openNoFollow(path string) (*os.File, error) {
@@ -388,6 +557,19 @@ func clearPolicyFileName(opts Options, path string) (string, error) {
 // administrator owns are left for inspection to report, and keep (the
 // DefenseClaw drop-in) is handled by its writer.
 func displaceUntrustedPolicyFiles(opts Options, dir, keep string, state *State) {
+	displaceUntrusted(opts, dir, state, false, func(name string) bool {
+		return strings.HasSuffix(strings.ToLower(name), ".json") && !strings.EqualFold(name, keep)
+	})
+}
+
+// displaceUntrustedEntries moves aside every entry of a vendor folder
+// DefenseClaw holds (files of any kind and folders) that an unprivileged
+// principal owns or can change.
+func displaceUntrustedEntries(opts Options, dir string, state *State) {
+	displaceUntrusted(opts, dir, state, true, func(string) bool { return true })
+}
+
+func displaceUntrusted(opts Options, dir string, state *State, dirs bool, match func(string) bool) {
 	if opts.SkipTrustChecks {
 		return
 	}
@@ -400,12 +582,12 @@ func displaceUntrustedPolicyFiles(opts Options, dir, keep string, state *State) 
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") || strings.EqualFold(name, keep) {
+		if !match(name) {
 			continue
 		}
 		path := filepath.Join(dir, name)
 		info, err := os.Lstat(path)
-		if err != nil || plainDirectory(info) {
+		if err != nil || (plainDirectory(info) && (!dirs || validateTrustedDir(path) == nil)) {
 			continue
 		}
 		if info.Mode().IsRegular() && validateTrustedPolicyFile(opts, path) == nil {
@@ -627,6 +809,16 @@ func reclaimDir(path string) error {
 }
 
 func atomicWrite(_ Options, path string, data []byte, public bool) error {
+	sddl := privateFileSDDL
+	if public {
+		sddl = publicFileSDDL
+	}
+	return atomicWriteSDDL(path, data, sddl)
+}
+
+// atomicWriteSDDL writes data beside path, applies sddl and renames it
+// into place.
+func atomicWriteSDDL(path string, data []byte, sddl string) error {
 	dir := filepath.Dir(path)
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
@@ -651,10 +843,6 @@ func atomicWrite(_ Options, path string, data []byte, public bool) error {
 	if err := file.Close(); err != nil {
 		cleanup()
 		return err
-	}
-	sddl := privateFileSDDL
-	if public {
-		sddl = publicFileSDDL
 	}
 	if err := applySDDL(tmp, sddl); err != nil {
 		cleanup()

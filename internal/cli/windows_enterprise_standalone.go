@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -84,6 +85,11 @@ type windowsEnterpriseInstallerReport struct {
 	// lifecycle's report.
 	UserRegistrationsPending json.RawMessage `json:"user_registrations_pending"`
 	UserRegistrationsFailed  json.RawMessage `json:"user_registrations_failed"`
+	// Pending-transaction recovery reports each managed-hook lifecycle step
+	// it ran with the Setup's verified gateway, and why it kept the staged
+	// one. Decoded leniently, like the registration lists.
+	RecoveryGatewayRuns    json.RawMessage `json:"recovery_gateway_runs"`
+	RecoveryGatewayRefusal json.RawMessage `json:"recovery_gateway_refusal"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed or transaction_pending field): the
@@ -387,17 +393,30 @@ func applyWindowsEnterpriseInstallerReport(
 			}
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)
+		applyWindowsEnterpriseAmpMachineFolder(result)
 	}
 	messages := append([]string{}, report.Errors...)
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
 		messages = append(messages, report.Error)
 	}
+	// A failed lifecycle tells the administrator what failed in plain terms
+	// and what to run next; internal security-descriptor detail stays in a
+	// lifecycle_diagnostic warning for support.
+	lifecycle := windowsEnterpriseStandaloneLifecycleAction(result.Action)
+	firstError := len(result.Errors)
 	for _, message := range messages {
 		message = strings.TrimSpace(message)
 		if message == "" {
 			continue
 		}
-		result.AddError(windowsEnterpriseMessageCode(message, "lifecycle_error"), message)
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if lifecycle {
+			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
+				result.AddWarning("lifecycle_diagnostic", windowsEnterpriseBoundedDiagnostic(message))
+				message = text
+			}
+		}
+		result.AddError(code, message)
 	}
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
@@ -406,7 +425,55 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		result.AddError(code, fmt.Sprintf("the standalone deployment is not healthy (installer exit %d)", run.ExitCode))
 	}
+	if lifecycle && !report.OK && len(result.Errors) > firstError {
+		configPath := ""
+		if opts != nil {
+			configPath = opts.configPath
+		}
+		if next := windowsEnterpriseStandaloneNextStep(
+			result.Action,
+			configPath,
+			report.TransactionPending,
+			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
+			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
+		); next != "" {
+			result.Errors[firstError].Message += " " + next
+		}
+	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+}
+
+// addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a
+// pending-transaction recovery ran and why. Ensure can apply the same
+// installer report twice (once when a repair recovers, again as the final
+// result), so an identical warning is recorded once.
+func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if result == nil || report == nil {
+		return
+	}
+	for _, warning := range windowsEnterpriseRecoveryGatewayWarnings(
+		decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
+		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
+	) {
+		duplicate := false
+		for _, existing := range result.Warnings {
+			if existing == warning {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			result.AddWarning(warning.Code, warning.Message)
+		}
+	}
+}
+
+func windowsEnterpriseBoundedDiagnostic(message string) string {
+	if len(message) > windowsEnterpriseDiagnosticMax {
+		return message[:windowsEnterpriseDiagnosticMax] + "..."
+	}
+	return message
 }
 
 // windowsEnterpriseUserRegistrationListMax bounds how many connector/SID
@@ -507,6 +574,29 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	}
 }
 
+// windowsEnterpriseAmpMachineFolderProblems lists why %ProgramData%\ampcode
+// is not held for the administrator; replaceable in tests.
+var windowsEnterpriseAmpMachineFolderProblems = func() []string {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		return []string{"resolve ProgramData for the Amp machine folder: " + err.Error()}
+	}
+	return enterprisepolicy.InspectWindowsAmpMachineFolder(enterprisepolicy.Options{GOOS: "windows", WindowsProgramData: programData})
+}
+
+// applyWindowsEnterpriseAmpMachineFolder reports an Amp machine folder a
+// standard account created or can change: every account's Amp reads it.
+func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
+	for _, problem := range windowsEnterpriseAmpMachineFolderProblems() {
+		if result.Action == "verify" {
+			result.AddError("machine_folder_not_held", problem)
+		} else {
+			result.AddWarning("machine_folder_not_held", problem)
+		}
+		result.SecurityComplete = false
+	}
+}
+
 func windowsEnterpriseMachinePolicy(verified bool) enterprisestatus.MachinePolicyState {
 	state := enterprisestatus.MachinePolicyState{Ownership: "merge", Lock: "enforce"}
 	if verified {
@@ -604,6 +694,15 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	}
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
+	}
+	// Warnings name what an OK result still leaves undone, such as an
+	// installed agent the enumerator could not enroll. The internal
+	// security-descriptor detail of a lifecycle_diagnostic stays in --json.
+	for _, message := range result.Warnings {
+		if message.Code == "lifecycle_diagnostic" {
+			continue
+		}
+		fmt.Fprintf(output, "  warning %s: %s\n", message.Code, message.Message)
 	}
 	if result.LogPath != "" {
 		fmt.Fprintf(output, "  Log: %s\n", result.LogPath)
@@ -921,6 +1020,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
+	// A repair that recovers a pending transaction may be followed by an
+	// install or upgrade whose report replaces this one; keep its record of
+	// the gateway recovery ran.
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
 	if allowRetry && plan.Action == "install" && windowsEnterpriseInstallLostRace(report) {
 		result.AddWarning("concurrent_install", "another lifecycle installed this host while ensure waited for the lifecycle lock; ensure re-planned from a fresh status")
 		return true, nil
@@ -953,13 +1056,19 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
-	if plan.Action == "repair" && plan.Reason == "transaction_pending" &&
-		report.OK && report.Installed && !report.TransactionPending {
+	deferredActivation := report != nil && windowsEnterpriseRecoveryDeferredActivation(report.RecoveryGatewayRuns)
+	// A failed repair's report is the installer's failure document, which
+	// carries no installed state; the follow-up status probe below reads it.
+	if plan.Action == "repair" && plan.Reason == "transaction_pending" && !report.TransactionPending &&
+		((report.OK && report.Installed) || deferredActivation) {
 		// Repair finished an interrupted transaction on the payload already in
 		// place, typically an upgrade whose failed rollback had to be retained.
 		// That is not convergence: re-plan from a fresh status exactly as
 		// ensure does on a host without a pending transaction, so the upgrade
-		// the MDM asked for still runs in this invocation.
+		// the MDM asked for still runs in this invocation. A recovery that
+		// left the restored release stopped because it could not be
+		// reactivated fails its repair on purpose: only this
+		// Setup's newer release can bring the services back.
 		followStatus, _, statusErr := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		// A follow-up probe that cannot read the host leaves the completed
 		// repair as the result, exactly like a probe that failed to launch.
@@ -971,7 +1080,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 			}
 			if followPlan.Action == "upgrade" {
-				result.AddWarning("recovered_pending_transaction", "ensure finished a pending transaction with repair before it ran "+followPlan.Action+": "+followPlan.Reason)
+				if deferredActivation {
+					result.AddWarning("recovered_pending_transaction", "ensure recovered a pending transaction whose release could not be reactivated, then ran "+followPlan.Action+": "+followPlan.Reason)
+				} else {
+					result.AddWarning("recovered_pending_transaction", "ensure finished a pending transaction with repair before it ran "+followPlan.Action+": "+followPlan.Reason)
+				}
 				plan = followPlan
 				actionOpts = *opts
 				actionOpts.jsonOutput = true

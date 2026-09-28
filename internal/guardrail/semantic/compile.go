@@ -43,6 +43,7 @@ type Program struct {
 	program               cel.Program
 	staticCost            uint64
 	redirectReductionSafe bool
+	listReductionSafe     bool
 }
 
 // NewCompiler constructs an isolated compiler for one rulepack candidate.
@@ -145,6 +146,7 @@ func (c *Compiler) compile(expression string) (*Program, CompileCode) {
 		program:               evaluable,
 		staticCost:            estimate.Max,
 		redirectReductionSafe: redirectReductionSafe(checked),
+		listReductionSafe:     listReductionSafe(checked),
 	}, CompileOK
 }
 

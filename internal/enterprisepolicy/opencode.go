@@ -109,11 +109,22 @@ func (o Options) openCodeArtifact() (data []byte, installed bool, err error) {
 	if o.OpenCodePluginPath == "" {
 		return nil, false, nil
 	}
-	data, exists, err := readPolicyFile(o, o.openCodeArtifactFile())
+	data, exists, err := readPolicyFileWith(o, o.openCodeArtifactFile(), validateOpenCodePluginFile)
 	if err != nil || !exists {
 		return nil, false, err
 	}
 	return data, true, nil
+}
+
+// openCodeArtifactLoadable reports whether every account's OpenCode can
+// load the installed plugin (on Windows its descriptor must carry the
+// access OpenCode's runtime requests to read a module).
+func (o Options) openCodeArtifactLoadable() bool {
+	if o.SkipTrustChecks {
+		return true
+	}
+	loadable, err := openCodePluginLoadable(o, o.openCodeArtifactFile())
+	return err == nil && loadable
 }
 
 func (o Options) openCodeArtifactInstalled() bool {
@@ -145,10 +156,15 @@ func InstallOpenCodeManagedPlugin(opts Options) (bool, error) {
 		return false, fmt.Errorf("enterprise policy: %w", err)
 	}
 	current, installed, err := opts.openCodeArtifact()
-	if err == nil && installed && bytes.Equal(current, openCodeManagedPlugin) {
+	if err == nil && installed && bytes.Equal(current, openCodeManagedPlugin) && opts.openCodeArtifactLoadable() {
 		return false, nil
 	}
-	if _, err := writePolicyFile(opts, opts.openCodeArtifactFile(), openCodeManagedPlugin); err != nil {
+	if err := releaseOpenCodePluginName(opts, platformPath(opts, opts.openCodeArtifactFile())); err != nil {
+		return false, fmt.Errorf("enterprise policy: install the managed OpenCode plugin: %w", err)
+	}
+	if _, err := writePolicyFileWith(opts, opts.openCodeArtifactFile(), func(path string) error {
+		return atomicWriteOpenCodePlugin(opts, path, openCodeManagedPlugin)
+	}); err != nil {
 		return false, fmt.Errorf("enterprise policy: install the managed OpenCode plugin: %w", err)
 	}
 	return true, nil
@@ -161,6 +177,9 @@ func RemoveOpenCodeManagedPlugin(opts Options) error {
 		return nil
 	}
 	file := opts.openCodeArtifactFile()
+	if err := releaseOpenCodePluginName(opts, platformPath(opts, file)); err != nil {
+		return fmt.Errorf("enterprise policy: remove the managed OpenCode plugin: %w", err)
+	}
 	if err := removePolicyFile(opts, file); err != nil {
 		return fmt.Errorf("enterprise policy: remove the managed OpenCode plugin: %w", err)
 	}
@@ -274,6 +293,9 @@ func inspectOpenCode(opts Options, current []byte, state *State) error {
 	case !bytes.Equal(artifact, openCodeManagedPlugin):
 		state.conflict("managed OpenCode plugin %s does not match this release (sha256 %s, want %s)",
 			opts.OpenCodePluginPath, sha256Hex(artifact), sha256Hex(openCodeManagedPlugin))
+	case !opts.openCodeArtifactLoadable():
+		state.conflict("managed OpenCode plugin %s cannot be loaded by a standard account's OpenCode: Users lack the file access its runtime requests to read a module; repair rewrites it",
+			opts.OpenCodePluginPath)
 	}
 	state.detail("OpenCode ran the managed plugin after user and project plugins in live tests, but plugin order is not a documented contract; the foreign-plugin guard stays on")
 	state.detail("%s", openCodeManagedPluginVendorLimit)

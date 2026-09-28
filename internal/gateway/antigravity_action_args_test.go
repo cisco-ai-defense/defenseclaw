@@ -82,3 +82,29 @@ func TestAgentHookTrustedActionArgsLeavesOtherShapesUnchanged(t *testing.T) {
 		t.Fatal("an unreviewed argument must not acquire complete command facts")
 	}
 }
+
+// Kiro's shell tools as kiro-cli 2.24.1 sends them, with harmless marker
+// commands.
+func TestAgentHookTrustedActionArgsGivesLiveKiroCommandsCompleteFacts(t *testing.T) {
+	for _, tc := range []struct{ name, tool, args string }{
+		{"cli 2.x shell", "shell", `{"command":"echo dc-marker","__tool_use_purpose":"Running the exact command as requested"}`},
+		{"v3 execute_bash", "execute_bash", `{"command":"echo dc-marker","description":null,"cwd":null,"run_in_background":false,"timeout":null}`},
+	} {
+		raw := json.RawMessage(tc.args)
+		status := func(args json.RawMessage) actionfacts.ParseStatus {
+			return actionfacts.Analyze(actionfacts.Input{Tool: "shell", Args: args, CWD: "/Users/dev"}).Parse.Status
+		}
+		if got := status(raw); got == actionfacts.StatusComplete {
+			t.Fatalf("%s: fixture must reproduce the incomplete parse of the arguments as sent, got %s", tc.name, got)
+		}
+		projected, _ := agentHookTrustedActionArgs("kiro", tc.tool, raw)
+		if got := status(projected); got != actionfacts.StatusComplete {
+			t.Fatalf("%s: projected arguments %s parse as %s, want complete command facts", tc.name, projected, got)
+		}
+		// A duplicate key keeps the conservative parse.
+		duplicate := json.RawMessage(`{"command":"echo a","command":"echo b","__tool_use_purpose":"x"}`)
+		if got, _ := agentHookTrustedActionArgs("kiro", tc.tool, duplicate); string(got) != string(duplicate) {
+			t.Fatalf("%s: duplicate-key arguments changed to %s", tc.name, got)
+		}
+	}
+}

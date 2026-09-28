@@ -36,6 +36,9 @@ type claudeCodeSettingsSource struct {
 	name     string
 	path     string
 	settings map[string]interface{}
+	// origins names, for the merged file-based tier, the file whose value
+	// of each top-level key Claude Code applies (the last one to set it).
+	origins map[string]string
 }
 
 func (s *claudeCodeSettingsSource) active() bool {
@@ -479,6 +482,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 	}
 
 	merged := map[string]interface{}{}
+	origins := map[string]string{}
 	var loaded []string
 	for _, path := range paths {
 		source, err := readOptionalClaudeCodeSettings("file-based managed settings", path)
@@ -489,6 +493,9 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 			continue
 		}
 		merged = mergeClaudeCodeSettings(merged, source.settings)
+		for key := range source.settings {
+			origins[key] = path
+		}
 		loaded = append(loaded, path)
 	}
 	if len(loaded) == 0 {
@@ -498,7 +505,55 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 		name:     "file-based managed settings",
 		path:     strings.Join(loaded, ", "),
 		settings: merged,
+		origins:  origins,
 	}, nil
+}
+
+// ClaudeCodeManagedHooksOnlyOverride reports a file-based managed settings
+// file that Claude Code applies after DefenseClaw's drop-in ownDropIn and
+// that sets allowManagedHooksOnly to anything but true. Claude Code merges
+// managed-settings.json and then the managed-settings.d files in name order,
+// and a later file's scalar wins, so such a file turns the lock off although
+// DefenseClaw's drop-in carries it. A lock missing from the drop-in
+// itself is the drop-in's own check.
+func ClaudeCodeManagedHooksOnlyOverride(ownDropIn string) error {
+	source, err := readClaudeCodeManagedFileSettings()
+	if err != nil {
+		return err
+	}
+	return claudeCodeManagedHooksOnlyOverride(source, ownDropIn)
+}
+
+func claudeCodeManagedHooksOnlyOverride(source *claudeCodeSettingsSource, ownDropIn string) error {
+	if source == nil {
+		return nil
+	}
+	from := source.origins["allowManagedHooksOnly"]
+	if from == "" || !claudeCodeDropInAppliesAfter(from, ownDropIn) {
+		return nil
+	}
+	value := source.settings["allowManagedHooksOnly"]
+	if value == true {
+		return nil
+	}
+	shown, err := json.Marshal(value)
+	if err != nil {
+		shown = []byte(fmt.Sprintf("%v", value))
+	}
+	return fmt.Errorf(
+		"Claude Code managed settings %s set allowManagedHooksOnly to %s after DefenseClaw's drop-in %s, so user and project hooks can rewrite tool input after inspection; remove the setting from that file, or set managed_hooks_only: preserve for claudecode",
+		from, shown, filepath.Base(ownDropIn),
+	)
+}
+
+// claudeCodeDropInAppliesAfter reports whether Claude Code applies the
+// managed settings file path after ownDropIn: only a managed-settings.d file
+// whose name sorts after it does.
+func claudeCodeDropInAppliesAfter(path, ownDropIn string) bool {
+	if !strings.EqualFold(filepath.Base(filepath.Dir(path)), "managed-settings.d") {
+		return false
+	}
+	return strings.ToLower(filepath.Base(path)) > strings.ToLower(filepath.Base(ownDropIn))
 }
 
 func mergeClaudeCodeSettings(lower, higher map[string]interface{}) map[string]interface{} {

@@ -110,10 +110,19 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
 		},
 		{
-			// A chained command might not run, so it is not reduced either.
+			// A command after && might not run, so a match on it stays
+			// detection-only.
 			name:    "chained command",
 			command: "cd /tmp && echo " + redirectReductionMarker + " > ~/dc-x.txt",
 			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+		},
+		{
+			// The first command of an && or || list always runs, so rules
+			// decide on the list's unconditional commands. A rule that
+			// negates over commands does not: a left-out command might run.
+			name:    "first command of an && list",
+			command: "echo " + redirectReductionMarker + " && echo done",
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
 		},
 	}
 	for _, test := range tests {

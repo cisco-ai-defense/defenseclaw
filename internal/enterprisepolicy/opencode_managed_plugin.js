@@ -173,15 +173,23 @@ function defenseclawLastJSON(stdout) {
   }
 }
 
+// defenseclawForeignHookCheck runs the hook binary's foreign-plugin guard
+// for event; the gateway records each denial (connector, user and file). It
+// sends no session ID: a block belongs to the agent process, so a restarted
+// agent that resumes the session starts clean.
+function defenseclawForeignHookCheck(event, cwd) {
+  return defenseclawRunHook(
+    ["hook", "--connector", "opencode", "--foreign-hook-check"],
+    { hook_event_name: event, cwd: cwd || "" },
+  );
+}
+
 // defenseclawStartupGuard asks the hook binary for the foreign-plugin
 // guard's decision once at load: a foreign plugin present now keeps running
 // for this process even if its file is deleted later. It resolves to a block
 // reason or "".
 async function defenseclawStartupGuard(cwd) {
-  const result = await defenseclawRunHook(
-    ["hook", "--connector", "opencode", "--foreign-hook-check"],
-    { hook_event_name: "defenseclaw.plugin.loaded", cwd: cwd || "" },
-  );
+  const result = await defenseclawForeignHookCheck("defenseclaw.plugin.loaded", cwd);
   if (!result.ok || result.code !== 0) {
     if (await defenseclawDeploymentRemoved()) return "";
     // OpenCode loads plugins once, so this block holds for the life of the
@@ -218,13 +226,16 @@ function defenseclawBlock(client, reason) {
 
 // defenseclawConfirmNotice is the notice for a verdict that asks for the
 // user's confirmation (human-in-the-loop). This plugin cannot ask, so the
-// call runs; the notice keeps that from happening silently.
+// call runs; the notice keeps that from happening silently. A reason that
+// already comes from DefenseClaw (it names the rule) leads the notice.
 function defenseclawConfirmNotice(data) {
   if (!data || String(data.raw_action || "").toLowerCase() !== "confirm" || data.action === "block") return "";
+  const reason = String(data.reason || "").trim();
   const severity = data.severity && data.severity !== "NONE" ? " (" + data.severity + ")" : "";
-  const reason = data.reason ? ": " + data.reason : "";
-  return "DefenseClaw flagged this tool call for review" + severity + reason +
-    ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
+  const lead = /^DefenseClaw\b/.test(reason)
+    ? reason.replace(/\.$/, "")
+    : "DefenseClaw flagged this tool call for review" + severity + (reason ? ": " + reason : "");
+  return lead + ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
 }
 
 // defenseclawShowNotice shows a notice in the OpenCode TUI. It is best
@@ -341,7 +352,12 @@ export const DefenseClawManaged = async ({ client, directory, worktree }) => {
     // Throwing aborts the tool. The decision is resolved before the throw.
     "tool.execute.before": async (input, output) => {
       const blocked = await startupGuard;
-      if (blocked) throw defenseclawBlock(client, blocked);
+      if (blocked) {
+        // The load-time block holds for this process; checking again only
+        // lets the gateway record this denied call.
+        await defenseclawForeignHookCheck("tool.execute.before", cwd);
+        throw defenseclawBlock(client, blocked);
+      }
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawSend(
         "tool.execute.before",

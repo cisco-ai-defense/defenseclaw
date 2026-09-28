@@ -60,8 +60,8 @@ func TestRelaxStandalonePerUserDirectoryRestoresOwnerPrivateShape(t *testing.T) 
 	}
 
 	target := windowsGenericManagedTarget{home: home, sid: owner}
-	if err := relaxWindowsStandalonePerUserDirectory(target, dir); err != nil {
-		t.Fatalf("relax hardened directory: %v", err)
+	if changed, err := relaxWindowsStandalonePerUserDirectory(target, dir); err != nil || !changed {
+		t.Fatalf("relax hardened directory: changed=%v err=%v", changed, err)
 	}
 	after, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -72,11 +72,11 @@ func TestRelaxStandalonePerUserDirectoryRestoresOwnerPrivateShape(t *testing.T) 
 	}
 
 	// Missing directories are a no-op; paths outside the home are refused.
-	if err := relaxWindowsStandalonePerUserDirectory(target, filepath.Join(home, "absent")); err != nil {
-		t.Fatalf("missing directory: %v", err)
+	if changed, err := relaxWindowsStandalonePerUserDirectory(target, filepath.Join(home, "absent")); err != nil || changed {
+		t.Fatalf("missing directory: changed=%v err=%v", changed, err)
 	}
 	outside := t.TempDir()
-	if err := relaxWindowsStandalonePerUserDirectory(target, outside); err == nil {
+	if _, err := relaxWindowsStandalonePerUserDirectory(target, outside); err == nil {
 		t.Fatal("directory outside the user home was relaxed")
 	}
 }
@@ -97,8 +97,8 @@ func TestRelaxStandalonePerUserDirectoryLeavesForeignOwnedDirectories(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := relaxWindowsStandalonePerUserDirectory(windowsGenericManagedTarget{home: home, sid: system}, dir); err != nil {
-		t.Fatalf("foreign-owned directory: %v", err)
+	if changed, err := relaxWindowsStandalonePerUserDirectory(windowsGenericManagedTarget{home: home, sid: system}, dir); err != nil || changed {
+		t.Fatalf("foreign-owned directory: changed=%v err=%v", changed, err)
 	}
 	after, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -107,4 +107,73 @@ func TestRelaxStandalonePerUserDirectoryLeavesForeignOwnedDirectories(t *testing
 	if before.String() != after.String() {
 		t.Fatalf("foreign-owned directory DACL changed: %s -> %s", before, after)
 	}
+}
+
+// A connector home can hold the agent's whole install (Hermes keeps about
+// 130,000 objects under %LOCALAPPDATA%\hermes). The relax step must set the
+// directory's own DACL only: rewriting every descendant made one guardian
+// reconcile take minutes, so a lifecycle stopped the guardian halfway and left
+// the user's hooks directory owner-private.
+func TestRelaxStandalonePerUserDirectoryLeavesDescendantACLs(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "AppData", "Local", "hermes")
+	nested := filepath.Join(dir, "hermes-agent", "venv")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(nested, "python.exe")
+	if err := os.WriteFile(file, []byte("MZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownerDescriptor, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := ownerDescriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Harden the directory the way an earlier reconcile left it; this test
+	// setup propagates the hardened inheritance to the descendants.
+	hardened, err := windows.SecurityDescriptorFromString(
+		"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;RC;;;OW)(A;OICI;0x1301bf;;;" + owner.String() + ")",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hardenedDACL, _, err := hardened.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, hardenedDACL, nil); err != nil {
+		t.Fatal(err)
+	}
+	beforeNested := windowsRelaxTestDACL(t, nested)
+	beforeFile := windowsRelaxTestDACL(t, file)
+
+	changed, err := relaxWindowsStandalonePerUserDirectory(windowsGenericManagedTarget{home: home, sid: owner}, dir)
+	if err != nil || !changed {
+		t.Fatalf("relax hardened connector home: changed=%v err=%v", changed, err)
+	}
+	if got := windowsRelaxTestDACL(t, dir); !strings.HasPrefix(got, "D:P") ||
+		!strings.HasSuffix(got, "(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)") {
+		t.Fatalf("relaxed DACL = %s, want the owner-private shape", got)
+	}
+	if got := windowsRelaxTestDACL(t, nested); got != beforeNested {
+		t.Fatalf("relax rewrote a descendant directory ACL: %s -> %s", beforeNested, got)
+	}
+	if got := windowsRelaxTestDACL(t, file); got != beforeFile {
+		t.Fatalf("relax rewrote a descendant file ACL: %s -> %s", beforeFile, got)
+	}
+}
+
+func windowsRelaxTestDACL(t *testing.T, path string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("read DACL of %s: %v", path, err)
+	}
+	return sd.String()
 }

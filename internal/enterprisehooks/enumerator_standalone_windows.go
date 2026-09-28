@@ -64,8 +64,26 @@ func (c windowsStandaloneRowContext) unprotected(row *ManifestTarget, version, r
 	consequence := "it runs without DefenseClaw hooks"
 	if windowsStandaloneMachinePolicyConnector(row.Connector) {
 		consequence = "its machine-policy hooks refuse this user's tool calls until it is enrolled"
+		if strings.EqualFold(strings.TrimSpace(row.Connector), "cursor") && !windowsCursorMachinePolicyPublished() {
+			consequence = windowsCursorUnpublishedConsequence
+		}
 	}
 	c.reportAgent(row, version, reason, consequence)
+}
+
+// windowsCursorUnpublishedConsequence is the unprotected-agent consequence for
+// Cursor while its machine hooks file is not published.
+const windowsCursorUnpublishedConsequence = "no user is enrolled for Cursor, so the guardian has not published Cursor's machine hooks file and it runs without DefenseClaw hooks"
+
+// windowsCursorMachinePolicyPublished reports whether Cursor's machine hooks
+// file is in force. The guardian publishes it only while at least one user is
+// enrolled for Cursor (an empty target set deactivates it), so with no
+// enrolled Cursor user there is no machine hook to refuse anyone. A policy
+// that cannot be read or validated counts as published: its adapter refuses
+// unregistered users. Replaced in tests.
+var windowsCursorMachinePolicyPublished = func() bool {
+	_, active, err := ReadWindowsCursorManagedPolicyTargets()
+	return err != nil || active
 }
 
 // keptAt reports an installed version a known row does not follow: the row
@@ -231,10 +249,13 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 // standaloneWindowsAgentVersionExplain is the standalone profile's single
 // agent discovery: the per-user package-manager probes shared with the
 // Secure Client profile, then the Node version managers (nvm-windows, fnm,
-// Volta, pnpm and the .npmrc prefix), then the native per-user installers
-// and the native Claude installer (%USERPROFILE%\.local\bin\claude.exe),
-// then machine-scope WinGet packages. Every source is static filesystem or
-// registry inspection; no discovered binary is executed.
+// Volta, pnpm and the .npmrc prefix), then the native per-user installers,
+// the native Claude installer (%USERPROFILE%\.local\bin\claude.exe) and the
+// native Cursor Agent CLI (%LOCALAPPDATA%\cursor-agent\versions), then
+// machine-scope WinGet packages. Cursor Desktop's package.json comes first,
+// so a user with both Cursor Desktop and the Agent CLI is enrolled at the
+// Desktop version, as before. Every source is static filesystem or registry
+// inspection; no discovered binary is executed.
 func standaloneWindowsAgentVersionExplain(profileHome, connectorName string) (string, string) {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	version, reason := windowsAgentVersionExplain(profileHome, connectorName)
@@ -259,6 +280,13 @@ func standaloneWindowsAgentVersionExplain(profileHome, connectorName string) (st
 			return native, ""
 		}
 		reasons = append(reasons, nativeReason)
+	}
+	if connectorName == "cursor" && filepath.IsAbs(strings.TrimSpace(profileHome)) {
+		cli, cliReason := discoverWindowsCursorAgentCLIVersion(filepath.Clean(strings.TrimSpace(profileHome)))
+		if cli != "" {
+			return cli, ""
+		}
+		reasons = append(reasons, cliReason)
 	}
 	for _, packageID := range windowsWinGetPackageIDs[connectorName] {
 		machine, machineReason := windowsMachineWinGetPackageVersion(packageID)

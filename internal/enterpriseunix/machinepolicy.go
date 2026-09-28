@@ -30,6 +30,11 @@ const (
 	codeMachinePolicy           = "machine_policy_failed"
 	codeMachinePolicyIncomplete = "machine_policy_incomplete"
 	codePerUserHooks            = "per_user_hooks_remaining"
+	// codeClaudeVersionFloorMissing names DefenseClaw's Claude Code version
+	// floor drop-in as wanted but absent. It is a warning, not a verify
+	// failure: the hooks are in place, and the floor stops no build older
+	// than 2.1.163, which predates the setting.
+	codeClaudeVersionFloorMissing = "claude_version_floor_missing"
 )
 
 // MachinePolicyManager publishes, verifies and removes DefenseClaw's hooks
@@ -250,7 +255,19 @@ func (l *lifecycle) machinePolicyDrift(p *plan) bool {
 	if isCoded(err, codeMachinePolicy) {
 		return true
 	}
-	return !sameStrings(coveredMachinePolicy(p.machinePolicy, result), p.machinePolicy)
+	return !sameStrings(coveredMachinePolicy(p.machinePolicy, result), p.machinePolicy) ||
+		missingClaudeVersionFloor(result) != ""
+}
+
+// missingClaudeVersionFloor is DefenseClaw's Claude Code version floor
+// drop-in when the result reports it wanted and absent, otherwise "".
+func missingClaudeVersionFloor(result enterprisepolicy.Result) string {
+	for _, state := range result.States {
+		if state.Connector == enterprisepolicy.ConnectorClaudeCode && state.VersionFloor != nil && state.VersionFloor.Missing {
+			return state.VersionFloor.Path
+		}
+	}
+	return ""
 }
 
 // describeMachinePolicy reports the vendor machine policy of the installed
@@ -307,6 +324,11 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
 			"vendor machine policy for %s still carries DefenseClaw hooks, but the installed config.yaml no longer asks for them; run `%s` to apply the config",
 			machinePolicyLabel(name, result), env.lifecycleCommand("ensure")))
+	}
+	if path := missingClaudeVersionFloor(result); path != "" {
+		r.AddWarning(codeClaudeVersionFloorMissing, fmt.Sprintf(
+			"DefenseClaw's Claude Code version floor %s is missing; `%s` (or reconcile or repair) writes it back",
+			path, env.lifecycleCommand("ensure")))
 	}
 }
 

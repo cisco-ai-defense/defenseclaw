@@ -26,9 +26,10 @@ import (
 // Claude Code refuses to start when its version is below the managed
 // requiredMinimumVersion. The check runs at each new session start (running
 // sessions continue), an invalid value is ignored, and builds that predate
-// the setting ignore it. The standalone profile sets it to the lowest Claude
-// Code version with a verified DefenseClaw hook contract, so a build
-// DefenseClaw cannot govern does not start.
+// the setting ignore it: Claude Code reads it only from 2.1.163
+// (claudeFloorSettingVersion). The standalone profile sets it to the lowest
+// Claude Code version with a verified DefenseClaw hook contract; while that
+// is below 2.1.163 the floor stops no build (residual R15, issue #920).
 //
 // The floor lives in a drop-in of its own that holds nothing else, so the
 // hook drop-in (90-defenseclaw.json, and the Windows lifecycle's rendering of
@@ -62,6 +63,9 @@ const ClaudeVersionFloorDropInName = "00-defenseclaw-version-floor.json"
 
 const (
 	claudeVersionFloorKey = "requiredMinimumVersion"
+	// claudeFloorSettingVersion is the first Claude Code release that reads
+	// requiredMinimumVersion; every older build ignores it.
+	claudeFloorSettingVersion = "2.1.163"
 	// claudeVersionFloorRecord names the floor drop-in's ownership record.
 	claudeVersionFloorRecord = "claudecode-version-floor"
 )
@@ -105,6 +109,9 @@ type VersionFloorState struct {
 	// one that is not a version, in a file that merges before the drop-in.
 	Overridden       string `json:"overridden,omitempty"`
 	OverriddenSource string `json:"overridden_source,omitempty"`
+	// Missing marks DefenseClaw's drop-in as wanted but absent: the next
+	// publish writes it.
+	Missing bool `json:"missing,omitempty"`
 }
 
 // Summary is the one-line form `enterprise policy show` prints.
@@ -137,6 +144,15 @@ func (s VersionFloorState) Summary() string {
 	default:
 		return fmt.Sprintf("requiredMinimumVersion not set (DefenseClaw's floor is %s), version_floor=%s", dashIfBlank(s.Floor), s.Mode)
 	}
+}
+
+// claudeFloorReach says which Claude Code builds a requiredMinimumVersion of
+// value stops.
+func claudeFloorReach(value string) string {
+	if compareVersions(value, claudeFloorSettingVersion) <= 0 {
+		return fmt.Sprintf("Claude Code reads the setting only from %s, so this value stops no build: every build below %s predates it", claudeFloorSettingVersion, value)
+	}
+	return fmt.Sprintf("Claude Code builds from %s and below %s refuse to start from their next session; builds before %s predate the setting and ignore it", claudeFloorSettingVersion, value, claudeFloorSettingVersion)
 }
 
 func dashIfBlank(value string) string {
@@ -590,7 +606,7 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 		floor.Owner = VersionFloorOwnerDefenseClaw
 		floor.Source = plan.path
 		floor.Value = claudeVersionFloorFileValue(plan.current)
-		state.detail("Claude Code version floor: DefenseClaw's %s sets requiredMinimumVersion %s; Claude Code builds below it refuse to start from their next session (builds that predate the setting ignore it)", plan.path, floor.Value)
+		state.detail("Claude Code version floor: DefenseClaw's %s sets requiredMinimumVersion %s; %s", plan.path, floor.Value, claudeFloorReach(floor.Value))
 		if plan.admin != nil {
 			floor.Overridden = claudeFloorValueText(plan.admin.value)
 			floor.OverriddenSource = plan.admin.source
@@ -611,9 +627,14 @@ func inspectClaudeVersionFloor(opts Options, policy config.ResolvedConnectorPoli
 		case promised && plan.occupied():
 			state.conflict("Claude Code version floor: %s, and %s holds a file DefenseClaw did not write, which it never edits or replaces, so Claude Code builds below %s can start; add \"requiredMinimumVersion\": %q to that file, or move its settings to another drop-in and remove it so DefenseClaw can write its floor", unset, plan.path, plan.floor, plan.floor)
 		case promised:
-			state.conflict("Claude Code version floor: %s and DefenseClaw's %s is missing, so Claude Code builds below %s can start; the next reconcile writes it", unset, plan.path, plan.floor)
+			floor.Missing = true
+			restore := "the next lifecycle run that applies changes (ensure, repair or reconcile) writes it"
+			if opts.goos() == "windows" {
+				restore = "the guardian's next cycle writes it"
+			}
+			state.conflict("Claude Code version floor: %s and DefenseClaw's %s is missing, so Claude Code builds below %s can start; %s", unset, plan.path, plan.floor, restore)
 		case plan.mode == config.ClaudeVersionFloorEnforce:
-			state.detail("Claude Code version floor: %s; deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode --format version-floor` through your policy tool, or set the key yourself, so Claude Code builds below %s refuse to start", unset, plan.floor)
+			state.detail("Claude Code version floor: %s; deploy the output of `defenseclaw-gateway enterprise policy export --connector claudecode --format version-floor` through your policy tool, or set the key yourself (Claude Code reads it from %s)", unset, claudeFloorSettingVersion)
 		case plan.mode == config.ClaudeVersionFloorReport:
 			state.detail("Claude Code version floor: %s, so Claude Code builds below %s can start (version_floor: report)", unset, plan.floor)
 		default:

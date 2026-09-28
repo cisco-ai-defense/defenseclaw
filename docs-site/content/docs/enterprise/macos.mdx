@@ -61,7 +61,7 @@ The daemons:
 | Label | Runs as | What it does |
 | --- | --- | --- |
 | `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Binds `127.0.0.1:18970` and `run/hook.sock`. |
-| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. |
+| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
 | `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
 | `com.cisco.defenseclaw.apply` | root | Runs `ensure --reason path` when `etc/config.yaml`, `etc/secrets` or `etc/policies` changes |

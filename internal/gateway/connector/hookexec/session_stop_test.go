@@ -18,7 +18,7 @@ import (
 	"testing"
 )
 
-const foreignHookStopReason = ForeignHookBlockedReasonPrefix + " Earlier in this agent session DefenseClaw found the project file /repo/.claude/settings.local.json. Restart the agent."
+const foreignHookStopReason = ForeignHookBlockedReasonPrefix + " When this agent session started, the project file /repo/.claude/settings.local.json defined a hook. Restart the agent."
 
 // sessionStopCause is one way a managed hook denies without a gateway
 // verdict: a standalone outage that fails closed, or the foreign-hook guard.

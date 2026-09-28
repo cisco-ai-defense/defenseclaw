@@ -220,11 +220,9 @@ through `defenseclaw-gateway enterprise acp`. See [ACP guard](/docs/acp-guard).
 
 A vendor setting that makes the agent run only administrator-managed hooks and
 ignore user and project hooks: `allow_managed_hooks_only` for Codex and
-`allowManagedHooksOnly` for Claude Code. On Linux and macOS DefenseClaw sets
-both when `managed_hooks_only` is `enforce`, the default. On Windows it always
-sets the Codex lock and does not set the Claude Code lock; set
-`managed_hooks_only: preserve` for `claudecode` there so the foreign-hook guard
-covers Claude Code instead.
+`allowManagedHooksOnly` for Claude Code. DefenseClaw sets both when
+`managed_hooks_only` is `enforce`, the default. On Windows it sets the Codex
+lock whatever the setting says.
 [Machine policy](/docs/enterprise/machine-policy) has the details.
 
 ### Foreign hook

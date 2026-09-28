@@ -152,7 +152,9 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		// A standalone deployment renders the one machine-wide body from the
 		// contract chosen for the whole manifest, not from this row's own
 		// user-reported version; the per-user runtime keeps the row's contract.
-		policySetup = claudeMachinePolicySetup(setup, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess())
+		policySetup = withWindowsClaudeManagedHooksOnly(
+			claudeMachinePolicySetup(setup, opts.MachinePolicyContractID, windowsEnterpriseStandaloneProcess()),
+		)
 		policyBody, err = provider.ManagedHookPolicy(policySetup)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: build Claude Code managed policy: %w", err)

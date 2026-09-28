@@ -181,6 +181,10 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 	return false, nil
 }
 
+// kiroV2AgentReferencesHook reports whether the CLI 2.x agent holds
+// DefenseClaw's entry for every kiroV2HookSpecs event with the matcher this
+// build writes. An entry an earlier build rendered with another matcher does
+// not count, so verification fails and the guardian re-renders the agent.
 func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -193,7 +197,25 @@ func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return false, fmt.Errorf("parse kiro agent %s: %w", path, err)
 	}
-	return containsHookScript(cfg, hookScript), nil
+	if !containsHookScript(cfg, hookScript) {
+		return false, nil
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	for _, spec := range kiroV2HookSpecs {
+		list, _ := hooks[spec.event].([]interface{})
+		current := false
+		for _, item := range list {
+			entry, _ := item.(map[string]interface{})
+			if kiroV2EntryOwned(item, hookScript) && entry["matcher"] == spec.matcher {
+				current = true
+				break
+			}
+		}
+		if !current {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func kiroOwnedV3Hook(item interface{}, hookScript string) bool {

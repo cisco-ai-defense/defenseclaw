@@ -36,6 +36,12 @@ import (
 // (Cursor, Copilot) has no rows but can still add a rewriting hook. The
 // enumerator publishes the eligible accounts; the cleanup itself runs in
 // the per-user worker with the user's own credentials.
+//
+// The same worker removes the guardian's per-user registration of a
+// machine-policy connector (Codex, Claude Code, Cursor, Copilot) that the
+// manifest does not enroll the user for per user: one an earlier route
+// left, for example the per-user Claude Code hooks that ownership: "off"
+// used to write into every home.
 
 // enterpriseHookForeignCleanupInterval bounds how often the guardian spawns
 // the per-user cleanup workers (the reconcile loop runs every minute).
@@ -49,6 +55,10 @@ var enterpriseHookForeignCleanupState struct {
 	sync.Mutex
 	last        time.Time
 	fingerprint string
+	// leftoversClean records that the last pass removed or ruled out every
+	// leftover registration, so a pass with nothing but leftovers to check
+	// runs again only when the accounts or routes change.
+	leftoversClean bool
 }
 
 // enterpriseHookForeignCleanupConnectors resolves the connectors whose
@@ -78,17 +88,39 @@ func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignClea
 	return out, nil
 }
 
+// enterpriseHookPerUserEnrolled names, per user, the connectors the
+// manifest keeps on the per-user route (every row whose connector is not
+// published through machine policy, enabled or not): their registrations
+// are the guardian's to repair or the administrator's to leave, never
+// leftovers.
+func enterpriseHookPerUserEnrolled(manifest enterprisehooks.Manifest, machinePolicy map[string]struct{}) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, target := range manifest.Targets {
+		name := strings.ToLower(strings.TrimSpace(target.Connector))
+		if _, published := machinePolicy[name]; published || name == "" {
+			continue
+		}
+		user := strings.TrimSpace(target.User)
+		if out[user] == nil {
+			out[user] = map[string]bool{}
+		}
+		out[user][name] = true
+	}
+	return out
+}
+
 // runEnterpriseHookStandaloneForeignCleanup is called at the end of every
 // standalone reconcile; it does the work at most once per interval unless
 // the eligible accounts or policies changed. Cleanup is best effort: the
 // hook-side guard still denies tool calls while an unapproved hook remains.
-func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Writer, now time.Time) int {
+// perUser is enterpriseHookPerUserEnrolled for this pass.
+func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Writer, now time.Time, perUser map[string]map[string]bool) int {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return 0
+	}
 	cleanups, err := enterpriseHookForeignCleanupConnectors()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %v\n", err)
-		return 0
-	}
-	if len(cleanups) == 0 {
 		return 0
 	}
 	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(enterpriseHookManifest))
@@ -96,10 +128,24 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: eligible accounts: %v\n", err)
 		return 0
 	}
+	vendor := enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS)
+	leftovers := func(user string) []string {
+		out := []string{}
+		for _, name := range vendor {
+			if !perUser[user][name] {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
 	fingerprint := enterpriseHookForeignCleanupFingerprint(cleanups, accounts)
+	for _, account := range accounts {
+		fingerprint += account.User + "=" + strings.Join(leftovers(account.User), ",") + ";"
+	}
 	enterpriseHookForeignCleanupState.Lock()
-	due := now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval ||
-		fingerprint != enterpriseHookForeignCleanupState.fingerprint
+	due := fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
+		((len(cleanups) > 0 || !enterpriseHookForeignCleanupState.leftoversClean) &&
+			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
 		enterpriseHookForeignCleanupState.last = now
 		enterpriseHookForeignCleanupState.fingerprint = fingerprint
@@ -110,20 +156,40 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 
 	jobs := []enterpriseHookWorkerJob{}
+	clean := true
 	for _, account := range accounts {
 		check := enterpriseHookCheckHome(account.Home, account.UID)
 		if check.State != enterprisehooks.HomeAvailable {
+			clean = false
 			continue
 		}
 		if account.HomeInode != 0 && check.Inode != 0 && account.HomeInode != check.Inode {
 			// The home was recreated since enumeration; the next cycle
 			// re-publishes the account.
+			clean = false
 			continue
 		}
 		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true}
 		for _, cleanup := range cleanups {
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
+		}
+		names := leftovers(account.User)
+		if len(cleanups) == 0 && len(names) == 0 {
+			continue
+		}
+		for index, name := range names {
+			request.Targets = append(request.Targets, enterpriseHookWorkerTarget{
+				Index: index,
+				Mode:  enterpriseHookWorkerModeRemoveLeftover,
+				Options: enterpriseHookWorkerOptions{
+					ConnectorName: name,
+					UserHome:      account.Home,
+					OwnerUID:      account.UID,
+					OwnerGID:      account.GID,
+					DataDir:       filepath.Join(account.Home, ".defenseclaw"),
+				},
+			})
 		}
 		jobs = append(jobs, enterpriseHookWorkerJob{
 			Account: enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: account.Home},
@@ -134,8 +200,28 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	for _, outcome := range runEnterpriseHookWorkerPool(ctx, jobs, enterpriseHookWorkerParallelism) {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
+			clean = false
 			fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: cleanup for %s: %v\n", user, outcome.Err)
 			continue
+		}
+		answered := map[int]enterpriseHookWorkerTargetResult{}
+		for _, result := range outcome.Response.Targets {
+			answered[result.Index] = result
+		}
+		for _, target := range outcome.Job.Request.Targets {
+			name := target.Options.ConnectorName
+			result, ok := answered[target.Index]
+			switch {
+			case ok && result.Removed:
+				removed++
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: removed DefenseClaw's per-user %s hooks for %s, which the manifest does not enroll per user\n", name, user)
+			case ok && result.OK:
+			case ok && result.Pending:
+				clean = false
+			default:
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: could not remove DefenseClaw's per-user %s hooks for %s: %s\n", name, user, boundedString(firstNonEmpty(result.Error, errEnterpriseHookWorkerNoResult.Error()), 512))
+			}
 		}
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
 		for _, name := range sortedCleanupConnectors(outcome.Response.Cleanup) {
@@ -153,6 +239,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 	}
+	enterpriseHookForeignCleanupState.Lock()
+	enterpriseHookForeignCleanupState.leftoversClean = clean
+	enterpriseHookForeignCleanupState.Unlock()
 	return removed
 }
 

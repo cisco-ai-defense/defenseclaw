@@ -66,6 +66,31 @@ func TestDeletedAccountTargetDoesNotFailTheHost(t *testing.T) {
 	}
 }
 
+// A registration the hook guardian still has to remove from a user's home
+// (its per-user cleanup ledger) is reported by status and verify as a
+// warning that does not fail verify.
+func TestGuardianCleanupPendingIsReported(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	authDir := h.env.P(h.env.Layout.GuardianAuthDir)
+	ledger, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 0, "success_count": 0, "failure_count": 0})
+	cleanup, _ := json.Marshal(map[string]any{"version": 1, "pending": []map[string]any{
+		{"connector": "kiro", "sid": "", "uid": 1001, "user": "alice", "user_home": "/home/alice"},
+	}})
+	for name, data := range map[string][]byte{managed.HookGuardianAuthorizationFile: ledger, managed.HookGuardianUserCleanupFile: cleanup} {
+		if err := os.WriteFile(filepath.Join(authDir, name), data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		requireOK(t, result)
+		if got := messagesOf(result.Warnings, codeGuardianCleanupPending); !strings.Contains(got, "kiro") || !strings.Contains(got, "alice") {
+			t.Fatalf("%s does not report the pending cleanup: %+v", action, result.Warnings)
+		}
+	}
+}
+
 // The deleted-account warning must not hide a real failure. The guardian's
 // per-target error can quote text from a user's own files (a TOML parser
 // reports a duplicated quoted key verbatim), so a failure of an account that

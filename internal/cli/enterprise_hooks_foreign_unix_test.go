@@ -113,7 +113,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 			t.Errorf("worker spawned for %+v", account)
 		}
 		requests = append(requests, request)
+		var targets []enterpriseHookWorkerTargetResult
+		for _, target := range request.Targets {
+			targets = append(targets, enterpriseHookWorkerTargetResult{Index: target.Index, OK: true, Removed: target.Options.ConnectorName == "claudecode"})
+		}
 		return enterpriseHookWorkerResponse{
+			Targets: targets,
 			Cleanup: map[string]enterpriseHookWorkerCleanupReport{
 				"cursor": {Removed: []string{"/home/alice/.cursor/hooks.json"}, BackupDir: "/home/alice/.defenseclaw/foreign-hooks-backup/cursor/x"},
 			},
@@ -126,7 +131,9 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 
 	var log bytes.Buffer
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	if removed := runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now); removed != 1 {
+	// alice is enrolled per user for Codex only.
+	perUser := map[string]map[string]bool{"alice": {"codex": true}}
+	if removed := runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now, perUser); removed != 2 {
 		t.Fatalf("removed %d, log:\n%s", removed, log.String())
 	}
 	if loadedFrom != "/etc/defenseclaw/hook-guardian/"+enterprisehooks.UnixEligibleAccountsFileName {
@@ -149,6 +156,19 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	if !strings.Contains(log.String(), "removed a cursor hook for alice") {
 		t.Fatalf("log:\n%s", log.String())
 	}
+	// Per-user registrations of machine-policy connectors the manifest does
+	// not enroll per user are leftovers of an earlier route.
+	leftovers := []string{}
+	for _, target := range requests[0].Targets {
+		if target.Mode != enterpriseHookWorkerModeRemoveLeftover || target.Options.UserHome != "/home/alice" {
+			t.Fatalf("leftover target %+v", target)
+		}
+		leftovers = append(leftovers, target.Options.ConnectorName)
+	}
+	if strings.Join(leftovers, ",") != "claudecode,copilot,cursor" ||
+		!strings.Contains(log.String(), "removed DefenseClaw's per-user claudecode hooks for alice") {
+		t.Fatalf("leftover removal %v, log:\n%s", leftovers, log.String())
+	}
 	// A repository-hook block never reaches the gateway; the guardian log
 	// is where an administrator sees it, with user-written fields defanged.
 	if !strings.Contains(log.String(), "blocked cursor preToolUse 3 time(s)") || !strings.Contains(log.String(), "/home/alice/repo/.cursor/hooks.json forged line") ||
@@ -157,12 +177,12 @@ func TestStandaloneForeignCleanupCoversMachinePolicyOnlyUsers(t *testing.T) {
 	}
 
 	// Within the interval nothing runs again; a new account does.
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute))
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(time.Minute), perUser)
 	if len(requests) != 1 {
 		t.Fatal("cleanup must be throttled")
 	}
 	accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: "bob", UID: 4242, GID: 4242, Home: "/home/alice", HomeInode: 7})
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute))
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, now.Add(2*time.Minute), perUser)
 	if len(requests) != 3 {
 		t.Fatalf("a changed account list must run at once, got %d requests", len(requests))
 	}
@@ -194,7 +214,7 @@ func TestStandaloneForeignCleanupSkipsRecreatedHomes(t *testing.T) {
 		t.Fatal("no worker may run for a home recreated since enumeration")
 		return enterpriseHookWorkerResponse{}, nil
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now())
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, time.Now(), nil)
 }
 
 func TestRemoveAllGroupsManifestTargetsPerAccount(t *testing.T) {

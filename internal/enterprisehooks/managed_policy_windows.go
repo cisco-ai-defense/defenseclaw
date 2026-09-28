@@ -889,11 +889,11 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 	if !ok {
 		return errors.New("enterprise hooks: Claude Code connector has no managed policy verifier")
 	}
-	opts := connector.SetupOpts{
+	opts := withWindowsClaudeManagedHooksOnly(connector.SetupOpts{
 		DataDir:           target.dataDir,
 		ManagedEnterprise: true,
 		HookExecutable:    target.hookExecutable,
-	}
+	})
 	if err := provider.VerifyManagedHookPolicy(target.policyData, opts); err != nil {
 		return fmt.Errorf("enterprise hooks: current managed policy runtime identity is invalid: %w", err)
 	}

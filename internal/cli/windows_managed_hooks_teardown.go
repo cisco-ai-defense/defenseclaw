@@ -1119,6 +1119,11 @@ func finalizeWindowsManagedHooksTeardown(
 	if _, err := enterprisehooks.RemoveWindowsStandaloneHookRuntimeDirectories(); err != nil {
 		return collected, fmt.Errorf("finalize standalone hook runtime directories: %w", err)
 	}
+	// The garbage collection above was the last selector transaction, so the
+	// selector locks in the vendor machine-policy directories can go too.
+	if err := enterprisehooks.RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
+		return collected, fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
+	}
 	journal.Phase = "finalized"
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
 		return collected, err

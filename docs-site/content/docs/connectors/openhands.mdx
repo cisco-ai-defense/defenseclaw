@@ -142,7 +142,7 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="openhands" />
 
 <Callout>
-OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only.
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `PreToolUse` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
 </Callout>
 
 ## OpenShell sandbox

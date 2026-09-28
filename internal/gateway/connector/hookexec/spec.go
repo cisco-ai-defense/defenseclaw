@@ -178,8 +178,9 @@ var specs = map[string]spec{
 		unreachableStrict:  failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
 		responseClosed:     failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
 	},
-	// Kiro blocks PreToolUse (every surface) and UserPromptSubmit (Kiro IDE
-	// and kiro-cli --v3) with exit 2 and shows stderr; any other non-zero
+	// Kiro blocks PreToolUse (every surface) and, in Kiro IDE,
+	// UserPromptSubmit with exit 2 and shows stderr (kiro-cli 2.24.1 --v3
+	// attaches a prompt hook's result and calls the model); any other non-zero
 	// status is a failed hook Kiro proceeds past, so every closed failure
 	// here exits 2. Kiro appends hook stdout to the agent's context, so the
 	// hook never prints one.

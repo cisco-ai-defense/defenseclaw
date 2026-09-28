@@ -103,7 +103,8 @@ func fakeForeignHookGuard(t *testing.T, answers ...string) (string, string) {
 // The standalone OpenCode plugin calls the gateway directly, so it must run
 // the administrator-owned foreign-hook guard itself: a denial (at load or
 // per call) aborts the tool before any gateway contact, a denial at load
-// holds for the process, and a guard that cannot run fails closed.
+// holds for the process (each denied call still runs the guard, which the
+// gateway records), and a guard that cannot run fails closed.
 func TestOpenCodeBridgeRunsTheForeignHookGuard(t *testing.T) {
 	nodeForTest(t)
 	var mu sync.Mutex
@@ -155,9 +156,12 @@ for (const call of ["c1", "c2"]) {
 		t.Fatalf("guard invocation: args=%q request=%q", args, request)
 	}
 
-	sticky, _ := fakeForeignHookGuard(t, `{"deny":true,"reason":"blocked at load"}`, `{"deny":false}`)
+	sticky, stickyDir := fakeForeignHookGuard(t, `{"deny":true,"reason":"blocked at load"}`, `{"deny":false}`)
 	if got := run(sticky); strings.Count(got, "THREW:DefenseClaw blocked this tool call under policy, so it did not run: blocked at load") != 2 {
 		t.Fatalf("a denial at load must hold for the process: %q", got)
+	}
+	if count, _ := os.ReadFile(filepath.Join(stickyDir, "count")); strings.TrimSpace(string(count)) != "3" {
+		t.Fatalf("guard runs = %q, want the load check and one per denied call", count)
 	}
 
 	allow, _ := fakeForeignHookGuard(t, `{"deny":false}`)

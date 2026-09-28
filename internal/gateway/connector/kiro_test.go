@@ -540,6 +540,41 @@ func TestKiroSetupProducesEffectiveHookRegistration(t *testing.T) {
 			t.Fatalf("restore %s: %v", path, err)
 		}
 	}
+
+	// kiro-cli 2.x matches tool names, so an agent an earlier build rendered
+	// with the regular expression ".*" ran no preToolUse hook. Such an agent
+	// must fail the check (the guardian then repairs it), and Setup must
+	// render the "*" wildcard that matches every tool.
+	agentPath := conn.agentConfigPaths(opts)[0]
+	var agent map[string]interface{}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &agent) != nil {
+		t.Fatalf("read agent %s: %v", agentPath, err)
+	}
+	for _, list := range agent["hooks"].(map[string]interface{}) {
+		for _, item := range list.([]interface{}) {
+			item.(map[string]interface{})["matcher"] = ".*"
+		}
+	}
+	stale, _ := json.Marshal(agent)
+	if err := os.WriteFile(agentPath, stale, 0o600); err != nil {
+		t.Fatalf("write stale agent: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("agent with the regex matcher: present=%v err=%v, want not present", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after repair: present=%v err=%v", present, err)
+	}
+	if data, err := os.ReadFile(agentPath); err != nil || json.Unmarshal(data, &agent) != nil {
+		t.Fatalf("reread agent: %v", err)
+	}
+	entry := agent["hooks"].(map[string]interface{})["preToolUse"].([]interface{})[0].(map[string]interface{})
+	if entry["matcher"] != "*" {
+		t.Fatalf("preToolUse matcher = %#v, want \"*\"", entry["matcher"])
+	}
 }
 
 // containsHookScript is shared by every connector that stores hooks under

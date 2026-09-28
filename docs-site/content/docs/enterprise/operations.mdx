@@ -120,7 +120,7 @@ The MDM wrapper scripts print the same document.
 | `ok` | `true` only when `errors` is empty |
 | `exit_code` | The process exit code |
 | `installed`, `installed_version` | Whether a deployment is recorded, and its version |
-| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first |
+| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
 | `services[]` | Each managed service or unit, with its state |
 | `readiness` | `gateway`, `guardian`, `enumerator`, `sensor_helper`: each `true` when that component is ready |
 | `coverage_complete` | The core services are ready (definition per OS below) |

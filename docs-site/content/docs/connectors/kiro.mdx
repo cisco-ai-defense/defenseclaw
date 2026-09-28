@@ -28,12 +28,25 @@ would-block where it does not:
 
 | Surface | Reads | Blocks on |
 | --- | --- | --- |
-| Kiro IDE, `kiro-cli --v3` | `.kiro/hooks/*.json` | `PreToolUse` and `UserPromptSubmit` |
+| Kiro IDE | `.kiro/hooks/*.json` | `PreToolUse` and `UserPromptSubmit` |
+| `kiro-cli --v3` | `.kiro/hooks/*.json` | `PreToolUse` only (for prompts, see below) |
 | `kiro-cli` (2.x) | `~/.kiro/agents/defenseclaw.json` | `PreToolUse` only |
 
 Kiro CLI 2.x documents exit code 2 as a block for `preToolUse` only; on any
 other trigger a non-zero exit is a failed hook whose stderr becomes a warning.
 The v1 hook schema adds `UserPromptSubmit`.
+
+Kiro documents that prompt veto for `kiro-cli --v3` too, but kiro-cli 2.24.1
+does not apply it. Its v3 engine attaches each prompt hook's result to the
+prompt, as `Output:` with the hook's output followed by `Exit Code:` and its
+status, and then calls the model. A prompt DefenseClaw blocks still reaches
+the model with DefenseClaw's reason attached, and the audit log records the
+block. An allowed prompt carries an empty result (`Exit Code: 0`) from each
+DefenseClaw prompt hook: `--v3` also runs the `defenseclaw` agent's hooks, so
+each prompt carries two results and writes two `UserPromptSubmit` audit rows.
+Models sometimes take those results for injected text and decline the
+request. A hook cannot avoid this on that engine, because Kiro attaches the
+result even when the hook prints nothing.
 
 <Callout type="info">
 This is resolved per request, from the hook config that invoked the hook —

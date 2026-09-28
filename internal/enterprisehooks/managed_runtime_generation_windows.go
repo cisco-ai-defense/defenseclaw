@@ -944,7 +944,18 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			return err
 		}
 		if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
-			return err
+			// A guardian stopped between relaxing the hooks directory for a
+			// connector setup and hardening it again leaves the relaxed
+			// owner-private DACL behind. Restore the canonical DACL instead
+			// of refusing every lifecycle retire for this user; any other
+			// shape stays refused.
+			recovered, recoverErr := windowsRecoverSetupRelaxedHookDirectory(validated.DataDir, target)
+			if recoverErr != nil || !recovered {
+				return errors.Join(err, recoverErr)
+			}
+			if err := validateWindowsManagedRuntimeGenerationRoots(validated.DataDir, target); err != nil {
+				return err
+			}
 		}
 
 		entries, err := os.ReadDir(hookDir)

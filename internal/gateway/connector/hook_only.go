@@ -1479,27 +1479,22 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 	return filepath.Clean(marker)
 }
 
-// setupPluginArtifact renders the embedded bridge-plugin template
-// (APIAddr / stable token-sidecar path / FailMode substituted) and writes it
-// to the host agent's auto-load plugin directory at 0o600. The scoped token is
-// deliberately loaded from its owner-only sidecar at request time rather than
-// copied into this longer-lived artifact. The destination is
-// captured in the managed-file backup so Teardown can heal it: if the
-// plugin file is unchanged since setup it is removed (we created it);
-// if the operator hand-edited it, the backup restore leaves it alone.
-func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+// renderPluginArtifact is shared by Setup and standalone verification so
+// verification compares the agent's executable plugin with the bytes Setup
+// would install for the current options.
+func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error) {
 	asset := c.pluginArtifactAssetFor(opts)
 	tmpl, err := hookFS.ReadFile("hooks/" + asset)
 	if err != nil {
-		return fmt.Errorf("%s read plugin template %s: %w", c.name, asset, err)
+		return nil, fmt.Errorf("%s read plugin template %s: %w", c.name, asset, err)
 	}
 	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.name)
 	if err != nil {
-		return fmt.Errorf("%s resolve scoped hook credential: %w", c.name, err)
+		return nil, fmt.Errorf("%s resolve scoped hook credential: %w", c.name, err)
 	}
 	tokenPath, err = filepath.Abs(tokenPath)
 	if err != nil {
-		return fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
+		return nil, fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
@@ -1518,7 +1513,19 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		Managed:            opts.ManagedEnterprise,
 	})
 	if err != nil {
-		return fmt.Errorf("%s render plugin template: %w", c.name, err)
+		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
+	}
+	return []byte(rendered), nil
+}
+
+// setupPluginArtifact writes the rendered bridge plugin to the host agent's
+// auto-load directory at 0o600. Its scoped token stays in an owner-only
+// sidecar. The managed-file backup lets Teardown restore a prior file only
+// when it is unchanged since Setup.
+func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+	renderedBody, err := c.renderPluginArtifact(opts)
+	if err != nil {
+		return err
 	}
 	path := c.configPath(opts)
 	if err := prepareOpenCodePluginArtifactDestination(path); err != nil {
@@ -1547,7 +1554,6 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return rollback(fmt.Errorf("%s capture plugin backup: %w", c.name, err))
 	}
-	renderedBody := []byte(rendered)
 	// Finalize the custody receipt before the atomic plugin replacement. This
 	// ordering guarantees that a visible DefenseClaw plugin never precedes the
 	// backup/post-hash record needed to own and restore it.
@@ -4697,7 +4703,7 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 }
 
 func readYAMLObject(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil
@@ -4718,7 +4724,7 @@ func readYAMLObject(path string) (map[string]interface{}, error) {
 }
 
 func readJSONObject(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil

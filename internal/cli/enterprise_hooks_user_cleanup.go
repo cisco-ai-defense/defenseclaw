@@ -25,10 +25,12 @@ import (
 // guardian runs each connector's teardown as the user, which edits only
 // DefenseClaw-owned entries. A user who is signed out has no session token
 // to act under, so the cleanup is recorded in this protected ledger and
-// retried on every reconcile, including the one a sign-in triggers.
+// retried on every reconcile, including the one a sign-in triggers. The
+// standalone Unix guardian records its cleanups in the same ledger
+// (enterprise_hooks_user_cleanup_unix.go).
 
 const (
-	enterpriseHookUserCleanupFile     = "user-cleanup.json"
+	enterpriseHookUserCleanupFile     = managed.HookGuardianUserCleanupFile
 	enterpriseHookUserCleanupVersion  = 1
 	enterpriseHookUserCleanupMaxBytes = 4 << 20
 	enterpriseHookUserCleanupMax      = 4096
@@ -42,6 +44,7 @@ const (
 type enterpriseHookUserCleanup struct {
 	Connector     string `json:"connector"`
 	SID           string `json:"sid"`
+	UID           int    `json:"uid,omitempty"` // a standalone Unix entry has no SID
 	User          string `json:"user,omitempty"`
 	UserHome      string `json:"user_home"`
 	DataDir       string `json:"data_dir,omitempty"`
@@ -83,7 +86,14 @@ func enterpriseHookUserCleanupKey(connectorName, sid string) string {
 }
 
 func enterpriseHookUserCleanupLabel(entry enterpriseHookUserCleanup) string {
-	return strings.ToLower(strings.TrimSpace(entry.Connector)) + "/" + strings.TrimSpace(entry.SID)
+	account := strings.TrimSpace(entry.SID)
+	if account == "" {
+		// A standalone Unix entry names the account instead.
+		if account = strings.TrimSpace(entry.User); account == "" {
+			account = fmt.Sprintf("uid %d", entry.UID)
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(entry.Connector)) + "/" + account
 }
 
 func enterpriseHookUserCleanupPath(dataDir string) string {
@@ -299,7 +309,7 @@ func loadEnterpriseHookUserCleanups(dataDir string) ([]enterpriseHookUserCleanup
 		return nil, fmt.Errorf("per-user cleanup ledger %s has an invalid schema", path)
 	}
 	for _, entry := range ledger.Pending {
-		if strings.TrimSpace(entry.Connector) == "" || strings.TrimSpace(entry.SID) == "" ||
+		if strings.TrimSpace(entry.Connector) == "" || (strings.TrimSpace(entry.SID) == "" && entry.UID <= 0) ||
 			!filepath.IsAbs(strings.TrimSpace(entry.UserHome)) {
 			return nil, fmt.Errorf("per-user cleanup ledger %s contains an incomplete entry", path)
 		}

@@ -74,6 +74,10 @@ func pinStandaloneManagedEnv() error {
 }
 
 // enterprisePolicyTarget resolves a local account for per-user checks.
+// enterprisePolicyLiveAvailable: Linux and macOS run the live check as root
+// or as the target user.
+func enterprisePolicyLiveAvailable() error { return nil }
+
 func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, error) {
 	account, err := user.Lookup(name)
 	if err != nil {

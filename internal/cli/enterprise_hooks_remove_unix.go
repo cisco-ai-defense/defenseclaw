@@ -18,19 +18,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
 // The standalone Unix uninstall removes DefenseClaw's own per-user hook
 // registrations before the binaries they name disappear. Each user's
 // teardown runs in the per-user worker with that user's credentials; the
 // connectors edit only DefenseClaw-owned entries, so the user's own hooks
-// and settings stay.
+// and settings stay. The eligible accounts are checked too, for per-user
+// registrations of machine-policy connectors that no manifest row names
+// any more (ones an earlier route left).
 
 var enterpriseHooksRemoveAllManifest string
 
@@ -95,6 +99,11 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	jobs, pending, failed := enterpriseHookRemoveJobs(manifest)
 	report.Pending, report.Failed = pending, failed
+	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifestPath))
+	if err != nil {
+		report.Failed = append(report.Failed, "eligible accounts: "+boundedString(err.Error(), 256))
+	}
+	addEnterpriseHookLeftoverRemovals(jobs, manifest, accounts)
 	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
 		for _, result := range run.Response.Targets {
@@ -112,6 +121,8 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 				report.Pending = append(report.Pending, label)
 			case !result.OK:
 				report.Failed = append(report.Failed, label+": "+boundedString(result.Error, 256))
+			case target.Mode == enterpriseHookWorkerModeRemoveLeftover && !result.Removed:
+				// Nothing of DefenseClaw's was registered there.
 			default:
 				report.Removed++
 			}
@@ -180,4 +191,51 @@ func enterpriseHookRemoveJobs(manifest enterprisehooks.Manifest) (map[int]*enter
 		index++
 	}
 	return jobs, pending, failed
+}
+
+// addEnterpriseHookLeftoverRemovals adds to jobs, for every eligible
+// account with an available home, the removal of the guardian's per-user
+// registration of each machine-policy connector that no manifest row names
+// for that user. The worker changes nothing where the user's hook contract
+// lock records no such registration.
+func addEnterpriseHookLeftoverRemovals(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, accounts []enterprisehooks.UnixEligibleAccount) {
+	named := enterpriseHookPerUserEnrolled(manifest, nil)
+	index := len(manifest.Targets)
+	for _, account := range accounts {
+		home := filepath.Clean(account.Home)
+		var leftovers []string
+		for _, name := range enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS) {
+			if !named[account.User][name] {
+				leftovers = append(leftovers, name)
+			}
+		}
+		if len(leftovers) == 0 || account.UID <= 0 || enterpriseHookCheckHome(home, account.UID).State != enterprisehooks.HomeAvailable {
+			continue
+		}
+		job := jobs[account.UID]
+		if job == nil {
+			job = &enterpriseHookWorkerJob{
+				Account: enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home},
+				Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
+			}
+			jobs[account.UID] = job
+		}
+		if job.Account.Home != home || job.Account.GID != account.GID {
+			continue
+		}
+		for _, name := range leftovers {
+			job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{
+				Index: index,
+				Mode:  enterpriseHookWorkerModeRemoveLeftover,
+				Options: enterpriseHookWorkerOptions{
+					ConnectorName: name,
+					UserHome:      job.Account.Home,
+					OwnerUID:      account.UID,
+					OwnerGID:      account.GID,
+					DataDir:       filepath.Join(job.Account.Home, ".defenseclaw"),
+				},
+			})
+			index++
+		}
+	}
 }

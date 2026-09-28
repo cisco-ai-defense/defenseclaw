@@ -101,3 +101,34 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesIsStandaloneOnly(t *testin
 		t.Fatalf("a Secure Client process must not touch the standalone hook runtime directory: %v", err)
 	}
 }
+
+// A standalone uninstall drops the runtime selector lock from the vendor
+// machine-policy directories and keeps the lock of a selector that still
+// exists.
+func TestRemoveWindowsStandaloneMachinePolicySelectorLocks(t *testing.T) {
+	stubWindowsHookRuntimeRoot(t)
+	base := t.TempDir()
+	previous := windowsManagedRuntimeSelectorPathResolver
+	windowsManagedRuntimeSelectorPathResolver = func(name string) (string, error) {
+		return filepath.Join(base, name, windowsManagedRuntimeSelectorFile), nil
+	}
+	t.Cleanup(func() { windowsManagedRuntimeSelectorPathResolver = previous })
+	claudeLock := filepath.Join(base, "claudecode", windowsManagedRuntimeSelectorLockFile)
+	writeHookRuntimeFile(t, claudeLock)
+	codexLock := filepath.Join(base, "codex", windowsManagedRuntimeSelectorLockFile)
+	writeHookRuntimeFile(t, codexLock)
+	writeHookRuntimeFile(t, filepath.Join(base, "codex", windowsManagedRuntimeSelectorFile))
+
+	if err := RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Lstat(claudeLock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the lock of a removed selector must be dropped: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Dir(claudeLock)); err != nil {
+		t.Fatalf("the vendor directory must be left in place: %v", err)
+	}
+	if _, err := os.Lstat(codexLock); err != nil {
+		t.Fatalf("the lock of a selector that still exists must be kept: %v", err)
+	}
+}

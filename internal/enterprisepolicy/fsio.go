@@ -98,6 +98,12 @@ func takeBackPolicyPath(opts Options, path string, state *State) ([]string, erro
 // readPolicyFile returns (data, exists). The file must be a regular,
 // non-symlink file whose ancestors an unprivileged user cannot replace.
 func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
+	return readPolicyFileWith(opts, path, validateTrustedPolicyFile)
+}
+
+// readPolicyFileWith is readPolicyFile with the trust rule for the file
+// itself supplied by the caller (the managed OpenCode plugin has its own).
+func readPolicyFileWith(opts Options, path string, validate func(Options, string) error) ([]byte, bool, error) {
 	path = platformPath(opts, path)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -115,7 +121,7 @@ func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("%s is not a regular file", path)
 	}
 	if !opts.SkipTrustChecks {
-		if err := validateTrustedPolicyFile(opts, path); err != nil {
+		if err := validate(opts, path); err != nil {
 			return nil, false, &untrustedPolicyFileError{path: path, err: err}
 		}
 	}
@@ -143,6 +149,15 @@ func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
 // local user (agents must read machine policy) and writable only by
 // administrators. It returns the directories it created, deepest last.
 func writePolicyFile(opts Options, path string, data []byte) ([]string, error) {
+	return writePolicyFileWith(opts, path, func(path string) error {
+		return atomicWrite(opts, path, data, true)
+	})
+}
+
+// writePolicyFileWith is writePolicyFile with the final atomic write
+// supplied by the caller (the managed OpenCode plugin has its own
+// descriptor).
+func writePolicyFileWith(opts Options, path string, write func(path string) error) ([]string, error) {
 	path = platformPath(opts, path)
 	created, err := ensurePolicyDir(opts, dirFor(opts, path))
 	if err != nil {
@@ -151,7 +166,7 @@ func writePolicyFile(opts Options, path string, data []byte) ([]string, error) {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return created, fmt.Errorf("%s exists and is not a regular file", path)
 	}
-	return created, atomicWrite(opts, path, data, true)
+	return created, write(path)
 }
 
 // removePolicyFile deletes path if it is a regular file.

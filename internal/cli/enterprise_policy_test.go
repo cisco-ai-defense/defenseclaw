@@ -252,6 +252,25 @@ func TestEnterprisePolicyShowsTheClaudeVersionFloor(t *testing.T) {
 	if err == nil || !strings.Contains(out, "requiredMinimumVersion not set") || !strings.Contains(out, "DefenseClaw's "+floorPath+" is missing") {
 		t.Fatalf("a missing floor must fail verify: %v\n%s", err, out)
 	}
+
+	// ownership: "off" is the administrator's choice, not an unsupported
+	// agent.
+	ctx.opts.Policies = map[string]config.ResolvedConnectorPolicy{"claudecode": config.EnterpriseMachinePolicyConfig{
+		Connectors: map[string]config.EnterpriseConnectorPolicy{"claudecode": {Ownership: config.MachinePolicyOwnershipOff}},
+	}.PolicyFor("claudecode")}
+	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
+	out, err = runPolicyCommand(t, runEnterprisePolicyShow)
+	if err != nil || !strings.Contains(out, "claudecode   ownership off: machine policy not managed") || strings.Contains(out, "unsupported") {
+		t.Fatalf("show must say that ownership off leaves Claude Code unmanaged: %v\n%s", err, out)
+	}
+	// OpenCode keeps its per-user plugin under ownership: "off".
+	var opencode bytes.Buffer
+	report = enterprisePolicyReport{goos: "linux", Result: enterprisepolicy.Result{States: []enterprisepolicy.State{
+		{Connector: "opencode", Route: enterprisepolicy.RoutePerUser, Ownership: config.MachinePolicyOwnershipOff},
+	}}}
+	if err := writeEnterprisePolicyReport(&opencode, report); err != nil || strings.Contains(opencode.String(), "ownership off") {
+		t.Fatalf("OpenCode with ownership off is on its per-user plugin: %v\n%s", err, opencode.String())
+	}
 }
 
 // The --user section lists connectors in name order, so the output of two

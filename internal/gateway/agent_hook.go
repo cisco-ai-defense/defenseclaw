@@ -2408,6 +2408,9 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 			Caps:      caps,
 			Payload:   payload,
 		})
+		if out.Action == "alert" && confirmWithoutAskAgent(profile.Name, rawAction, mode, event) != "" {
+			return "block", false
+		}
 		return out.Action, out.WouldBlock
 	}
 	rawAction = normalizeCodexAction(rawAction)
@@ -2433,6 +2436,24 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 	}
 }
 
+// confirmWithoutAskAgent names the agent when the standalone enterprise
+// profile blocks a confirmation instead of downgrading it to an alert: a tool
+// call on Hermes or OpenHands, whose hooks can neither ask the user nor show
+// a notice while the call runs, so the call would run unseen although the
+// organization's rule asked for a person's approval. It returns "" otherwise.
+func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string {
+	if !standaloneEnterpriseActive.Load() || mode != "action" || normalizeCodexAction(rawAction) != "confirm" {
+		return ""
+	}
+	switch {
+	case connectorName == "hermes" && canonicalEvent(event) == "pretoolcall":
+		return "Hermes"
+	case connectorName == "openhands" && canonicalEvent(event) == "pretooluse":
+		return "OpenHands"
+	}
+	return ""
+}
+
 func agentHookResponseFor(req agentHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, caps connector.HookCapability, policy ...redaction.SinkPolicy) agentHookResponse {
 	return agentHookResponseForProfile(connector.HookProfile{}, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps, policy...)
 }
@@ -2448,8 +2469,15 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
-	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	verdictAction := action
+	if action == "alert" && rawAction == "confirm" {
+		verdictAction = agentReviewAction
+	}
+	safeReason = agentVerdictReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
 	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
+	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
+		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
+	}
 	resp := agentHookResponse{
 		Action:            action,
 		RawAction:         rawAction,

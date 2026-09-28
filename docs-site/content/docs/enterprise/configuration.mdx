@@ -61,7 +61,7 @@ refuses conflicting values:
 | `data_dir` | Exactly `/var/lib/defenseclaw`, or unset (the lifecycle then uses that path) | Exactly `/opt/cisco/defenseclaw/runtime`, or unset | Leave unset. The services set it. |
 | `gateway.api_bind` | `127.0.0.1`, or unset | `127.0.0.1`, or unset | `127.0.0.1`, or unset |
 | `gateway.api_port` | `18970`, or unset | `18970`, or unset | `18970`, or unset |
-| `guardrail.rule_pack_dir` | Unset, `""`, or a [custom pack](#custom-rule-packs) | Unset, `""`, or a [custom pack](#custom-rule-packs) | `""` (recommended) |
+| `guardrail.rule_pack_dir` | Unset, `""`, or a [custom pack](#custom-rule-packs) | Unset, `""`, or a [custom pack](#custom-rule-packs) | Unset, `""`, or a [custom pack](#custom-rule-packs) |
 
 - **`enterprise.profile`.** Always set it. When it is unset, Windows and
   macOS resolve to the Secure Client profile, and the `enterprise policy`
@@ -95,11 +95,11 @@ refuses conflicting values:
     effect. The lifecycle refuses a value that names a folder that does not
     exist, or one inside `data_dir`. See
     [Custom rule packs](#custom-rule-packs).
-  - Windows: if the named directory does not exist, the gateway uses the
-    built-in packs. When you leave the key out, the gateway uses
-    `<policy_dir>/guardrail/default` if `policy_dir` is set, and otherwise
-    `<data_dir>/policies/guardrail/default`, inside the gateway's own data
-    directory. Setting `""` avoids depending on either.
+  - Windows: when you leave the key out, the gateway uses
+    `<policy_dir>/guardrail/default` if you set `policy_dir` outside
+    `data_dir`, and otherwise the built-in packs. Setup loads every rule
+    pack the config names before it changes anything, and refuses with
+    `1639` a directory that does not exist or that the gateway cannot load.
 
 The whole `enterprise` block is refused unless `deployment_mode` is
 `managed_enterprise`. In the Secure Client profile the block may contain
@@ -185,7 +185,7 @@ default shown. "Linux and macOS" means the key has no effect on Windows.
 | `enrollment.home_roots` | List of absolute directories | Empty | Linux and macOS | Extra parents of home directories, beyond `/home` and `/var/home` (Linux) or `/Users` (macOS). |
 | `enrollment.agent_prefixes` | List of absolute directories outside homes and temporary directories | Empty | Linux and macOS | Extra administrator install prefixes (for example an npm `--prefix`) where the enumerator and guardian look for agent CLIs. |
 | `machine_policy.default.ownership` | `merge`, `verify_only`, `off` | `merge` | Linux and macOS; Copilot, OpenCode and the Claude Code version floor on Windows | Whether DefenseClaw writes its entries, only checks them, or leaves the agent's machine policy alone. |
-| `machine_policy.default.managed_hooks_only` | `enforce`, `preserve` | `enforce` | Linux and macOS (Codex, Claude Code); see note for Windows | Sets the vendor lock that stops user and project hooks. |
+| `machine_policy.default.managed_hooks_only` | `enforce`, `preserve` | `enforce` | Codex and Claude Code; see note for Windows | Sets the vendor lock that stops user and project hooks. |
 | `machine_policy.default.foreign_hooks` | `remove`, `report`, `allow` | `remove` | All | What the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) does with unapproved hooks. |
 | `machine_policy.default.higher_precedence_sources` | `fail`, `warn` | `fail` | macOS (Codex, Claude Code); Windows (Claude Code, in `policy show` and `verify` only) | Whether a policy source that outranks DefenseClaw's file counts as a coverage failure or only a warning. |
 | `machine_policy.default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:` | Empty | All | Hooks the foreign-hook guard approves. |
@@ -225,7 +225,8 @@ config:
 - **`mode: hash_pinned`**, like an unset mode, is the minimum: it admits the
   unsigned payload by its pins, and a signed payload is still verified by
   its signature. It does not refuse a signed Setup. Use it, or leave `mode`
-  unset, while you deploy unsigned builds.
+  unset, while you deploy unsigned builds. An empty `mode: ""` is the same
+  as an unset mode.
 - **`allowed_signers`** restricts signed payloads to the listed signer
   certificates, like `--allowed-signer`. When both are given they must list
   the same thumbprints, or the run stops with `1639`.
@@ -250,15 +251,11 @@ says. See [Per-user installs](/docs/enterprise/linux#per-user-installs).
 
 ### `managed_hooks_only` on Windows
 
-Windows does not use it to write policy: Codex always gets its lock, and
-Claude Code's Windows drop-in carries hooks only. The key still decides
-whether the foreign-hook guard covers Codex and Claude Code, on Windows as
-elsewhere. With the default `enforce`, nothing stops a user or project Claude
-Code hook on Windows from changing a tool call after DefenseClaw checked it.
-Set `enterprise.machine_policy.connectors.claudecode.managed_hooks_only:
-preserve` in your Windows config to turn the guard on for Claude Code, as the
-Windows sample below does. Keep Linux and macOS on `enforce`, where it sets
-Claude Code's own lock, so use separate configs per OS. See
+Codex always gets its lock on Windows, whatever the key says. Claude Code's
+Windows drop-in follows the key as on Linux and macOS: `enforce`, the
+default, sets `allowManagedHooksOnly: true`, and `preserve` leaves the lock
+out. The key also decides whether the foreign-hook guard covers Codex and
+Claude Code, on Windows as elsewhere. See
 [Machine policy](/docs/enterprise/machine-policy#windows-differences).
 
 ## Custom rule packs
@@ -476,9 +473,6 @@ enterprise:
   machine_policy:
     default:
       foreign_hooks: remove
-    connectors:
-      claudecode:
-        managed_hooks_only: preserve    # Windows: the guard covers Claude Code
   coexistence:
     disable_self_update: true
 ```

@@ -3126,9 +3126,42 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     return $sb.ToString()
 }
 
+function Add-DefenseClawLifecycleFailureEvidence {
+    <#
+        A failed standalone lifecycle attaches what it knows about recovery to
+        its exception: whether the transaction is still pending, each managed-
+        hook lifecycle step recovery ran with the Setup's verified gateway, and
+        why it declined to. Copy exactly those fields onto the failure
+        document. The Secure Client lifecycle attaches none of them, so its
+        failure document is unchanged.
+    #>
+    param(
+        [Parameter(Mandatory)][psobject]$Document,
+        [AllowNull()][Collections.IDictionary]$Evidence
+    )
+    if ($null -eq $Evidence) {
+        return
+    }
+    foreach ($field in @(
+        @('DefenseClaw.TransactionPending', 'transaction_pending'),
+        @('DefenseClaw.RecoveryGatewayRuns', 'recovery_gateway_runs'),
+        @('DefenseClaw.RecoveryGatewayRefusal', 'recovery_gateway_refusal')
+    )) {
+        if ($Evidence.Contains([string]$field[0])) {
+            Microsoft.PowerShell.Utility\Add-Member `
+                -InputObject $Document `
+                -MemberType NoteProperty `
+                -Name ([string]$field[1]) `
+                -Value $Evidence[[string]$field[0]] `
+                -Force
+        }
+    }
+}
+
 $bootstrapEnvironment = $null
 $result = $null
 $failureMessage = $null
+$failureEvidence = $null
 $exitCode = 0
 try {
     # Deferred installation cannot authenticate or precreate per-user target
@@ -3348,6 +3381,7 @@ try {
 }
 catch {
     $failureMessage = $_.Exception.Message
+    $failureEvidence = $_.Exception.Data
     $exitCode = 1
 }
 finally {
@@ -3394,13 +3428,17 @@ finally {
 
 if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
     if ($Json) {
-        [pscustomobject]@{
+        $failureDocument = [pscustomobject]@{
             schema_version = 1
             ok = $false
             action = $Action.ToLowerInvariant()
             error = $failureMessage
             errors = @($failureMessage)
-        } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
+        }
+        Add-DefenseClawLifecycleFailureEvidence `
+            -Document $failureDocument `
+            -Evidence $failureEvidence
+        $failureDocument | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
     }
     else {
         Microsoft.PowerShell.Utility\Write-Error `

@@ -156,6 +156,13 @@ config with no connectors protects nothing. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
+the rule packs built into it. A rule-pack directory you name must exist and
+be writable only by administrators. Setup checks the config with the
+gateway's own compiler, and loads every rule pack the gateway would load,
+before it changes anything. When the gateway could not load the file, Setup
+stops with exit code `1639` and names the line and the reason.
+
 Setup accepts the config only from an absolute local path that standard
 users cannot change. Stage it in a folder that only SYSTEM and
 Administrators can write:
@@ -190,9 +197,9 @@ The exit code follows Windows Installer conventions:
 | Code | Meaning |
 | --- | --- |
 | `0` | Success, or nothing to do |
-| `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. For `status` and `verify`, `1603` means the deployment is unhealthy. |
+| `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. When the rollback itself cannot finish, the transaction stays pending (see [Recover a pending transaction](#recover-a-pending-transaction)). For `status` and `verify`, `1603` means the deployment is unhealthy. |
 | `1618` | Another lifecycle run holds the lock. Retry later. |
-| `1639` | Invalid arguments: a malformed command line (such as a relative `CONFIG=` path or an unknown property), or arguments the lifecycle rejected (for example `/ensure` without `CONFIG=` on a computer with no deployment, or a run that `enterprise.trust` refuses). Retrying does not help. |
+| `1639` | Invalid arguments: a malformed command line (such as a relative `CONFIG=` path or an unknown property), or arguments the lifecycle rejected (for example `/ensure` without `CONFIG=` on a computer with no deployment, a config the gateway cannot load, or a run that `enterprise.trust` refuses). Retrying does not help. |
 | `3010` | Reserved. The lifecycle never requests a restart. |
 
 Setup properties use `NAME=value`. Names are case-insensitive and ignore
@@ -274,13 +281,16 @@ hooks on this computer:
 
 1. Install. `security_complete` is `false` at this point.
 2. Confirm that Claude Code runs DefenseClaw's hooks. In an enrolled user's
-   own session, run the live check with that user's Claude Code, as shown on
-   [Machine policy](/docs/enterprise/machine-policy#inspect-export-and-verify):
+   own session, start that user's Claude Code and have it make one tool
+   call, for example listing the current folder. Then, from an elevated
+   prompt, check that the gateway recorded the call:
 
    ```powershell
-   $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
-   & $Cli enterprise policy verify --live --user <user> --connector claudecode --agent-binary <path to claude.exe>
+   & $Cli audit export --connector claudecode -o C:\Temp\audit-claudecode.jsonl
    ```
+
+   `enterprise policy verify --live` is not available on Windows; see
+   [Inspect machine policy](#inspect-machine-policy).
 
 3. Record the attestation from an elevated PowerShell 7 session:
 
@@ -313,10 +323,169 @@ for the event IDs, and
 [Status and verify](/docs/enterprise/operations#status-and-verify) for
 monitoring.
 
+Any account can write Application-log entries under any source name,
+including `DefenseClaw Enterprise`. Each DefenseClaw event therefore ends
+with `record <id>`, and the matching line of `enterprise-lifecycle.log`, which
+only administrators and LocalSystem can write, holds the same id under
+`event.record` with the event ID (`event.id`) and the SHA-256 of the exact
+message (`event.sha256`). Check the entries from any prompt:
+
+```powershell title="Check the DefenseClaw Application-log entries"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
+```
+
+An entry is DefenseClaw's only when all of these hold:
+
+- its message ends with `record <id>` and the lifecycle log has a line with
+  that record;
+- the entry's event ID and the SHA-256 of its message (the UTF-8 bytes of the
+  event's insertion string, `$event.Properties[0].Value`) match that line;
+- it was written within two minutes of that line's `time`;
+- no earlier entry carried the same record. A later entry with the same
+  record is a copy.
+
+`events` exits 1 and names each entry that fails, and also when the newest
+lifecycle line's record has no DefenseClaw entry in the Application log.
+Entries older than the lifecycle log's first event record, such as those an
+earlier release wrote without records, show as unverifiable. Apply the same
+rules in a SIEM: matching a record alone is not enough, because anyone can
+copy a genuine entry.
+
 `status` and `verify` also name every agent the enumerator found installed
 but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
 [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
+The text output prints each one as a `warning <code>: <message>` line (status)
+or an `error` line (verify); `--json` lists them under `warnings` or `errors`.
+Cursor's machine hooks file is published only while a user is enrolled for
+Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
+
+## Review the audit log
+
+The gateway service owns the local audit database under
+`C:\ProgramData\Cisco\DefenseClaw\runtime`. Export it from an elevated
+Administrator prompt, or as LocalSystem from an MDM script:
+
+```powershell title="Elevated Administrator prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' audit export --connector claudecode -o C:\Temp\audit-claudecode.jsonl
+```
+
+On a standalone host, `audit export` run this way reads the managed
+deployment's configuration and audit database read-only beside the running
+gateway; it needs no environment variables. Standard accounts cannot read
+the managed audit log, and the command tells them to use an elevated prompt.
+Omit `--connector` to export every row. The output file must not exist
+yet; it takes the permissions of its folder, so write it to a folder only
+administrators can read. Treat it as sensitive: it can hold prompt and tool
+content.
+
+## Inspect machine policy
+
+Run the policy commands from an elevated Administrator prompt, or as
+LocalSystem from an MDM script. Like `audit export`, they read the managed
+deployment's configuration and need no environment variables:
+
+```powershell title="Elevated Administrator prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy verify
+```
+
+`show` lists each connector's route, lock and coverage; `verify` exits 1
+while coverage is incomplete. With `managed_hooks_only: enforce` (the
+default) the Claude Code drop-in
+`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` sets
+`allowManagedHooksOnly: true`, so user and project Claude Code hooks do not
+run. Claude Code applies the files in `managed-settings.d` in name order, so a
+file that sorts after `90-defenseclaw.json` and sets `allowManagedHooksOnly`
+to `false` turns the lock off; `enterprise policy verify` and `enterprise
+windows verify` report that file. Standard accounts are told to use an
+elevated prompt.
+
+`enterprise policy verify --live` is not available on Windows: Windows cannot
+start the client as another account, and a standard account cannot read the
+managed configuration. Use the static `verify` above, and to see the hooks
+run, make a tool call in the client from the user's own session, then read
+its record from the elevated prompt with `audit export`, as in
+[Review the audit log](#review-the-audit-log).
+
+## Recover a pending transaction
+
+A lifecycle that fails normally rolls back. If the rollback itself cannot
+finish, the transaction stays pending: the result reports
+`transaction_pending: true`, the DefenseClaw services stay stopped, and
+vendor machine policy the transaction had already published can still point
+at the stopped gateway. `status` shows the state; `verify` refuses until the
+transaction is recovered. The failed result names the command to run next.
+
+Recover by running DefenseClaw Setup as LocalSystem (Intune install behavior
+**System**, or another MDM's system context). `/ensure` recovers the pending
+transaction and then installs or upgrades; `/uninstall` recovers it and
+removes the deployment:
+
+```powershell title="As LocalSystem"
+DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
+DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1
+```
+
+`/repair` also recovers the transaction; after a failed first install it
+then stops with "run Install", so `/ensure` is the one-step command. Outside
+an MDM, a one-time scheduled task that runs as SYSTEM gives the same context.
+From a payload folder (see [Run the lifecycle CLI from a payload
+folder](#advanced-run-the-lifecycle-cli-from-a-payload-folder)),
+`"$Payload\defenseclaw.exe" enterprise windows ensure` (or `repair`,
+`uninstall`) with the same `--profile`, trust and `--config` options, run as
+LocalSystem, works the same way.
+
+Recovery first uses the gateway the pending transaction staged. When that
+gateway cannot restore or retire the transaction's managed-hook state, or
+cannot remove the per-user runtime roots the transaction created (the
+target-runtime rollback cleanup), for example a release whose defect caused
+the failure, the standalone lifecycle
+retries that step once with the `defenseclaw-gateway.exe` that ships in the
+running Setup's payload (or beside the staged `defenseclaw.exe`), and only
+when all of these hold:
+
+- the lifecycle runs as LocalSystem;
+- that gateway passes the same checks an install applies to its payload: an
+  administrator-owned source on a local NTFS volume and the deployment's
+  trust mode (a valid Authenticode signature, limited to the allowed signers
+  when any are set, or the SHA-256 the payload manifest pins);
+- it is not the gateway that already failed, and it is not inside the
+  install root;
+- it is the same release as the gateway that failed or a newer one, read
+  from each gateway's version resource (an older Setup never recovers a
+  newer release's transaction);
+- the run is not an `--allow-unsigned` certification run.
+
+The verified gateway is copied to `C:\Program Files\Cisco\DefenseClaw\bin`,
+where the hidden command must run, and the step runs again; the rollback
+then restores that file to its state before the transaction. The result and
+`enterprise-lifecycle.log` record a `recovery_gateway_fallback` warning with
+the binary, where it was copied from, its SHA-256, the trust basis, its
+release and the staged gateway's release, the account, and the staged
+gateway's failure. When recovery declines the
+fallback, a `recovery_gateway_not_used` warning gives the reason
+(`not_local_system`, `untrusted`, `same_binary`, `older_release`,
+`version_unknown`, `no_payload`, `inside_install_root`, `unsigned_scope`)
+and the staged gateway's error stands. A failure that concerns file permissions is reported in plain terms;
+the internal detail is kept in a `lifecycle_diagnostic` warning for support.
+Do not edit DefenseClaw files or permissions by hand to recover.
+
+Recovery then restarts the restored release, and its gateway starts only
+after that release's guardian publishes full coverage. When the restored
+release is the one that cannot (for example, its guardian cannot republish a
+user's lost per-user state), every recovery would fail the same way. Under
+the same conditions as above, the standalone lifecycle instead finishes the
+recovery with the restored release stopped and disabled and records a
+`recovery_activation_deferred` warning (the restored and the Setup's
+releases, the Setup gateway's SHA-256 and trust basis, and the coverage
+failure). `/ensure` then upgrades to the running Setup's release in the same
+run; its gateway also starts only after full coverage. `/repair` stops at
+that point with the next step, because it reapplies the installed release
+that could not start. With the same release, or from an elevated
+administrator prompt, recovery keeps the coverage failure and a
+`recovery_gateway_not_used` warning gives the reason.
 
 ## Per-user installs
 
@@ -475,7 +644,7 @@ so they need no manifest.
 | Connector | Route on Windows | Notes |
 | --- | --- | --- |
 | Codex | Machine policy | Codex requirements file. DefenseClaw always sets `allow_managed_hooks_only = true`, and an administrator value of `false` makes the run fail. |
-| Claude Code | Machine policy | Managed-settings drop-in with hooks only, no vendor lock. Set `managed_hooks_only: preserve` for `claudecode` so the foreign-hook guard covers it. Windows refuses a non-empty `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`. |
+| Claude Code | Machine policy | Managed-settings drop-in with DefenseClaw's hooks and, under the default `managed_hooks_only: enforce`, the `allowManagedHooksOnly` vendor lock. `preserve` leaves the lock out and turns the foreign-hook guard on for Claude Code. Windows refuses a non-empty `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`. |
 | Cursor | Machine policy | Cursor enterprise hooks |
 | GitHub Copilot | Machine policy | `%ProgramData%\GitHub\Copilot\policy.d`, plus a per-user hook runtime |
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |

@@ -162,6 +162,11 @@ type Options struct {
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
+	// ExplainUnenrolledAccount makes the refusal of an account absent from
+	// the protected target set (managedSIDUnregisteredReason) say so, not
+	// "gateway unreachable". The Windows standalone hook sets it; Secure
+	// Client keeps its message.
+	ExplainUnenrolledAccount bool
 	// ManagedGatewayServiceName is the administrator-protected SCM identity
 	// that must own the connected loopback listener before any HTTP bytes are
 	// written. It is ignored outside ManagedEnterprise mode.
@@ -240,6 +245,9 @@ func Run(ctx context.Context, opts Options) int {
 			return failForeignHookBlocked(opts, sp, reason)
 		}
 		resolveManagedStandaloneFailureEvent(&opts, sp)
+		if opts.ExplainUnenrolledAccount && reason == managedSIDUnregisteredReason && !sp.failOpenOnly {
+			return failUnenrolled(opts, sp, reason)
+		}
 		return failUnreachable(
 			opts,
 			sp,
@@ -953,6 +961,26 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
 	return emitHookResult(opts, sp, sp.openAllow)
+}
+
+// managedSIDUnregisteredReason is enterprisehooks'
+// WindowsManagedSIDUnregisteredReason: the account running the agent is not
+// in the administrator's protected target set.
+const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
+
+// failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
+// an account the administrator has not enrolled (yet) or excludes, and says
+// so: the gateway is up, and the refusal is the enrollment policy.
+func failUnenrolled(opts Options, sp spec, reason string) int {
+	logHookFailure(opts, sp, reason, "transport", "closed")
+	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
+	fmt.Fprintf(opts.Stderr,
+		"defenseclaw: blocking %s: this account is not enrolled in DefenseClaw on this computer; the administrator's "+
+			"policy has not enrolled it yet (enrollment runs while the account is signed in) or excludes it; ask your "+
+			"administrator if this continues (%s)\n", sp.subject, reason)
+	return emitHookResult(opts, sp, sp.unreachableStrict)
 }
 
 func rawString(fields map[string]json.RawMessage, key string) (string, bool) {

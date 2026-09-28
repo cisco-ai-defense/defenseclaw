@@ -75,7 +75,7 @@ func TestForeignHookGuardKeepsDenyingASessionThatStartedWithAForeignHook(t *test
 	if !later.ManagedEnterprise || !strings.HasPrefix(later.ManagedRuntimeFailure, hookexec.ForeignHookBlockedReasonPrefix) {
 		t.Fatalf("the session's tool calls must stay denied after the hook is deleted: %+v", later)
 	}
-	for _, want := range []string{"Earlier in this agent session", foreign, "restart the agent"} {
+	for _, want := range []string{"When this agent session started", foreign, "restart the agent"} {
 		if !strings.Contains(later.ManagedRuntimeFailure, want) {
 			t.Fatalf("the session denial must say %q: %q", want, later.ManagedRuntimeFailure)
 		}
@@ -153,7 +153,7 @@ func TestForeignHookGuardBlocksTheSessionOnlyForAHookPresentAtStart(t *testing.T
 			if err := os.Remove(foreign); err != nil {
 				t.Fatal(err)
 			}
-			if later := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-1"); !strings.Contains(later.ManagedRuntimeFailure, "Earlier in this agent session") {
+			if later := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-1"); !strings.Contains(later.ManagedRuntimeFailure, "When this agent session started") {
 				t.Fatalf("%s: the session must stay denied through %s: %q", tc.connector, tc.key, later.ManagedRuntimeFailure)
 			}
 			if other := fixture.runEvent(t, tc.connector, tc.call, tc.key, "c-2"); other.ManagedRuntimeFailure != "" {

@@ -199,6 +199,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 				rowSetup.HookContractID = connector.ResolveHookContract(name, setup.AgentVersion).Contract.ContractID
 				policySetup = claudeMachinePolicySetup(rowSetup, claudeMachineContract, standalone)
 			}
+			policySetup = withWindowsClaudeManagedHooksOnly(policySetup)
 			body, err := provider.ManagedHookPolicy(policySetup)
 			if err != nil {
 				return rollback(err)

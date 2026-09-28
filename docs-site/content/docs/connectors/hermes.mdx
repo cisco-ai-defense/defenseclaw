@@ -71,7 +71,10 @@ and third-party approval entries. **There is no proxy-enforcement path** for
 Hermes — blocking happens hook-side only when a valid synchronous
 `pre_tool_call` stdout response requests block. Hermes has no documented native
 human-approval or system-message response shape, so confirm verdicts remain
-audit/alert-only with `raw_action` preserved for audit.
+audit/alert-only with `raw_action` preserved for audit. In the standalone
+enterprise profile, a confirm verdict on a `pre_tool_call` is blocked instead,
+and the message says the organization's rule needs a confirmation that Hermes
+cannot ask for.
 
 Discovery keeps installation and contract compatibility distinct. A healthy
 older client such as v0.17.0 is reported as
@@ -202,7 +205,7 @@ Hermes's pre-tool-call hook blocks only when DefenseClaw returns valid
 synchronous Hermes block JSON. A `confirm` result is recorded and alerted but
 returns no hook output because Hermes has no native ask/approve or general
 message response; the TUI can review the audit event but cannot resume the
-call. A requested global/per-connector
+call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
 `fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
 output, auth failure, or gateway outage cannot create Hermes enforcement and
 remains fail-open.
@@ -269,7 +272,8 @@ answer and, from Hermes 0.21, on exit code 2. Other exit codes, a timeout,
 malformed output and auth or network failures let the call run in the
 releases DefenseClaw supports (DefenseClaw's entries do not set Hermes'
 `fail_closed`), and Hermes has no DefenseClaw ask surface.
-Confirm verdicts are audit/alert-only, with no synthesized hook output.
+Confirm verdicts are audit/alert-only, with no synthesized hook output, except
+in the standalone enterprise profile, which blocks a confirmed `pre_tool_call`.
 Registration is not claimed live until Hermes reload evidence exists; Doctor
 reports the staged state as unhealthy/pending reload.
 </Callout>

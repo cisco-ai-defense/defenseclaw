@@ -13,10 +13,13 @@
 package enterprisepolicy
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -56,13 +59,43 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 	if err != nil || again.Changed {
 		t.Fatalf("a second publish must be a no-op: changed=%v err=%v", again.Changed, err)
 	}
+	// OpenCode's runtime opens a module with FILE_WRITE_ATTRIBUTES, so a
+	// standard account loads the plugin only when Users hold that right.
+	// A copy with read and execute only, as 1.0.52 wrote it, is
+	// rewritten by the next publish.
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
+		t.Fatalf("the installed plugin must be loadable by Users: %v %v", loadable, err)
+	}
+	if err := applySDDL(opts.OpenCodePluginPath, publicFileSDDL); err != nil {
+		t.Fatal(err)
+	}
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || loadable {
+		t.Fatalf("a read-only plugin descriptor must be trusted but not loadable: %v %v", loadable, err)
+	}
+	if upgraded, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode}); err != nil || !upgraded.Changed {
+		t.Fatalf("publish must rewrite a plugin standard accounts cannot load: changed=%v err=%v", upgraded.Changed, err)
+	}
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
+		t.Fatalf("the rewritten plugin must be loadable by Users: %v %v", loadable, err)
+	}
 	if err := os.WriteFile(opts.OpenCodePluginPath, []byte("stale"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if repaired, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode}); err != nil || !repaired.Changed {
 		t.Fatalf("publish must repair a stale plugin: changed=%v err=%v", repaired.Changed, err)
 	}
+	// With that right a standard account can also set a reparse point on the
+	// plugin (no reader can open it) and mark it read-only (no rename
+	// replaces it); the next publish must still replace it.
+	markWindowsFileWithWriteAttributesOnly(t, opts.OpenCodePluginPath)
+	if healed, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode}); err != nil || !healed.Changed {
+		t.Fatalf("publish must replace a read-only reparse-point plugin: changed=%v err=%v", healed.Changed, err)
+	}
+	if data, err := os.ReadFile(opts.OpenCodePluginPath); err != nil || string(data) != string(OpenCodeManagedPlugin()) {
+		t.Fatalf("the replaced plugin must be the shipped one: %v", err)
+	}
 
+	markWindowsFileWithWriteAttributesOnly(t, opts.OpenCodePluginPath)
 	if _, err := RemoveWindowsGoOwned(opts); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +106,39 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 	}
 	if body, err := os.ReadFile(config); err == nil && strings.Contains(string(body), "defenseclaw.js") {
 		t.Fatalf("teardown must remove DefenseClaw's OpenCode entry:\n%s", body)
+	}
+}
+
+// markWindowsFileWithWriteAttributesOnly sets a non-Microsoft reparse point
+// and the read-only attribute on path through a handle that holds only
+// FILE_WRITE_ATTRIBUTES, the right Users hold on the managed plugin.
+func markWindowsFileWithWriteAttributesOnly(t *testing.T, path string) {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_WRITE_ATTRIBUTES|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	// REPARSE_GUID_DATA_BUFFER: tag, data length, reserved, GUID, data.
+	reparse := make([]byte, 28)
+	binary.LittleEndian.PutUint32(reparse[0:], 0x1234)
+	binary.LittleEndian.PutUint16(reparse[4:], 4)
+	reparse[8] = 1
+	var returned uint32
+	if err := windows.DeviceIoControl(handle, windows.FSCTL_SET_REPARSE_POINT, &reparse[0], uint32(len(reparse)), nil, 0, &returned, nil); err != nil {
+		t.Fatal(err)
+	}
+	// FILE_BASIC_INFO: four unchanged (zero) times, then the attributes.
+	basic := make([]byte, 40)
+	binary.LittleEndian.PutUint32(basic[32:], windows.FILE_ATTRIBUTE_READONLY)
+	if err := windows.SetFileInformationByHandle(handle, windows.FileBasicInfo, &basic[0], uint32(len(basic))); err != nil {
+		t.Fatal(err)
 	}
 }
 

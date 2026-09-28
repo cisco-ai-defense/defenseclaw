@@ -91,17 +91,18 @@ async function before(hooks, tool = "bash", args = { command: "ls" }) {
 
 // A gateway deny aborts the tool with its reason and says DefenseClaw blocked
 // it under the organization's policy; a confirm verdict, which this plugin
-// cannot ask about, shows a visible notice instead of running silently.
+// cannot ask about, shows a visible notice, led by the gateway's wording,
+// instead of running silently.
 {
   const toasts = [];
   const client = { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body : arg); return true; } } };
   const hooks = await load({ client });
   answer("event.json", JSON.stringify({ action: "block", mode: "action", hook_output: { decision: "deny", reason: "policy marker rule" } }));
   await assert.rejects(before(hooks), /under your organization's policy, so it did not run: policy marker rule/);
-  answer("event.json", JSON.stringify({ action: "alert", raw_action: "confirm", mode: "action", severity: "HIGH", reason: "review marker rule" }));
+  answer("event.json", JSON.stringify({ action: "alert", raw_action: "confirm", mode: "action", severity: "HIGH", reason: "DefenseClaw flagged this action for review under your organization's policy (rule TEST-MARKER)." }));
   await before(hooks);
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.ok(toasts.some((toast) => toast.variant === "warning" && /flagged this tool call for review/.test(toast.message)), JSON.stringify(toasts));
+  assert.ok(toasts.some((toast) => toast.variant === "warning" && /^DefenseClaw flagged this action for review .*\(rule TEST-MARKER\)\. OpenCode cannot ask/.test(toast.message)), JSON.stringify(toasts));
 }
 
 // Every failure of the hook blocks.
@@ -140,12 +141,19 @@ for (const [stdout, exit, pattern] of [
   await assert.rejects(before(hooks, "a_b_tool"), /ambiguous MCP server identity/);
 }
 
-// A foreign plugin found at load blocks every call for the process.
+// A foreign plugin found at load blocks every call for the process, also
+// after its file is removed; each denied call still runs the guard check,
+// which the gateway records.
 {
   const hooks = await load({ guard: JSON.stringify({ deny: true, reason: "enterprise_foreign_hook_blocked: rewrite.js" }) });
+  await assert.rejects(before(hooks), /rewrite\.js/);
+  answer("guard.json", JSON.stringify({ deny: false }));
   resetCalls();
   await assert.rejects(before(hooks), /rewrite\.js/);
-  assert.equal(eventCalls().length, 0, "a blocked process never forwards the call");
+  const [check, ...rest] = calls();
+  assert.equal(rest.length, 0, "a blocked process never forwards the call");
+  assert.ok(check && check.args.includes("--foreign-hook-check"), "a denied call runs the guard check");
+  assert.equal(JSON.parse(check.stdin).hook_event_name, "tool.execute.before");
 }
 {
   const hooks = await load({ guard: "garbage" });

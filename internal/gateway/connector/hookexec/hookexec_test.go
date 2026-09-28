@@ -1910,6 +1910,51 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if !strings.Contains(errb.String(), "enterprise_managed_sid_unregistered") {
 		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
 	}
+
+	// The Windows standalone hook says the account is not
+	// enrolled instead of "gateway unreachable", and still blocks.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "codex",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		FailMode:                 "open",
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != blockExit || rt.requests != 0 {
+		t.Fatalf("unenrolled account: code = %d requests = %d, want fail-closed without a gateway call", code, rt.requests)
+	}
+	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
+		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
+	}
+	// Hermes has no fail-closed contract: the same refusal allows, so the
+	// hook must not claim to block.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "hermes",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
+		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	}
 }
 
 func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {

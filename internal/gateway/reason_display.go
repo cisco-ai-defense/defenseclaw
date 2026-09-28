@@ -107,6 +107,11 @@ var agentRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
 // same result; the sentence tells it the block is final.
 const agentBlockNoRetry = "Do not retry it in another form."
 
+// agentReviewAction is the action agentVerdictReason words for a
+// confirmation the connector cannot ask for: the gateway answers it with an
+// alert, so the call runs.
+const agentReviewAction = "review"
+
 // agentVerdictReason words a block or a confirmation of a local policy rule
 // for the agent's user. The bare "matched: <rule-id>:<title>" reason, with a
 // custom rule's title replaced by a "<redacted len=N sha=...>" token, read
@@ -115,7 +120,9 @@ const agentBlockNoRetry = "Do not retry it in another form."
 // organization's policy (standalone enterprise) or DefenseClaw policy
 // (per-user), names the rules by ID (a compiled-in or rule-pack rule keeps
 // its title), and a block tells the agent not to retry the action in another
-// form. The audit record keeps the full source reason.
+// form. The audit record keeps the full source reason. A confirmation the
+// connector cannot ask for (agentReviewAction) says DefenseClaw flagged the
+// action for review.
 //
 // Other actions and any other reason (a configured block message, a
 // foreign-hook or AI Defense verdict) keep displayReason. Secure Client
@@ -123,7 +130,7 @@ const agentBlockNoRetry = "Do not retry it in another form."
 // redaction directive, or the managed agent-reason carve-out (which hands
 // the agent the raw reason) leave displayReason unchanged.
 func agentVerdictReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
-	if action != "block" && action != "confirm" {
+	if action != "block" && action != "confirm" && action != agentReviewAction {
 		return displayReason
 	}
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
@@ -143,6 +150,10 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 			agentBlockNoRetry + " Contact your administrator if you need it allowed."
 	case action == "block":
 		return "DefenseClaw policy blocked this action (" + rules + "). " + agentBlockNoRetry
+	case action == agentReviewAction && standalone:
+		return "DefenseClaw flagged this action for review under your organization's policy (" + rules + ")."
+	case action == agentReviewAction:
+		return "DefenseClaw policy flagged this action for review (" + rules + ")."
 	case standalone:
 		return "DefenseClaw needs your confirmation for this action under your organization's policy (" + rules + ")."
 	default:
@@ -241,4 +252,21 @@ func agentMatchedRules(reason string) string {
 		return "rule " + items[0]
 	}
 	return "rules " + strings.Join(items, ", ")
+}
+
+// agentConfirmUnavailableReason words the block the standalone enterprise
+// profile makes of a confirmation the agent cannot ask for
+// (confirmWithoutAskAgent), so the user learns that the rule wanted their
+// approval instead of reading an ordinary block. It names the rules where
+// agentVerdictReason would, and keeps the display reason otherwise.
+func agentConfirmUnavailableReason(agent, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	detail := displayReason
+	if agentVerdictReason("confirm", sourceReason, displayReason, policy) != displayReason {
+		detail = agentMatchedRules(sourceReason)
+	}
+	if detail != "" {
+		detail = " (" + detail + ")"
+	}
+	return "DefenseClaw blocked this action: your organization's policy needs your confirmation for it" + detail +
+		", and " + agent + " cannot ask for it. Contact your administrator if you need it allowed."
 }

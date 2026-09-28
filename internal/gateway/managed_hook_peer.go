@@ -404,7 +404,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		if route == "" {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
-		release := a.admitHookCaller(w, strconv.Itoa(peer.UID), route, r.URL.Path)
+		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
 			return
 		}

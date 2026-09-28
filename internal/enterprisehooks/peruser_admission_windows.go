@@ -19,6 +19,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,15 +88,56 @@ func windowsStandalonePerUserManagedExecutable(profileHome, connectorName string
 
 // windowsStandalonePlainExecutable returns candidate when it is a regular
 // file reached through a plain (reparse-free) directory chain.
+// A path this token cannot read is reported as such, never as missing: an
+// elevated administrator's verify is refused by a per-user folder whose
+// permissions leave Administrators out (an older release's owner-only
+// setup step), while the guardian, as LocalSystem, reads it.
 func windowsStandalonePlainExecutable(connectorName, candidate string) (string, string) {
 	if err := winpath.RejectReparseChain(filepath.Dir(candidate)); err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return "", windowsStandaloneUnreadableExecutable(candidate)
+		}
 		return "", fmt.Sprintf("the %s install path is not a plain directory chain: %v", connectorName, err)
 	}
 	info, err := os.Lstat(candidate)
 	if err != nil || !info.Mode().IsRegular() {
+		if windowsStandaloneExecutableUnreadable(candidate, err) {
+			return "", windowsStandaloneUnreadableExecutable(candidate)
+		}
 		return "", fmt.Sprintf("%s is not present", candidate)
 	}
 	return candidate, ""
+}
+
+// windowsStandaloneExecutableUnreadable reports whether this token cannot
+// see candidate: its Lstat was refused, or the deepest folder on its path
+// that exists cannot be listed (then an image elsewhere in that folder,
+// such as another Hermes launcher, is invisible too). Replaceable in tests:
+// an elevated test token may hold backup rights that read past any DACL.
+var windowsStandaloneExecutableUnreadable = func(candidate string, lstatErr error) bool {
+	if errors.Is(lstatErr, os.ErrPermission) {
+		return true
+	}
+	for dir := filepath.Dir(candidate); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(dir); err != nil {
+			if errors.Is(err, os.ErrPermission) {
+				return true
+			}
+			continue
+		}
+		folder, err := os.Open(dir)
+		if err == nil {
+			_, err = folder.Readdirnames(1)
+			_ = folder.Close()
+		}
+		return errors.Is(err, os.ErrPermission)
+	}
+	return false
+}
+
+func windowsStandaloneUnreadableExecutable(candidate string) string {
+	return fmt.Sprintf("%s cannot be read as this account (access denied: a folder on its path does not grant "+
+		"Administrators access); run verify as LocalSystem, which the guardian uses, or run repair", candidate)
 }
 
 // windowsStandaloneRowAdmission reports whether the guardian can manage one

@@ -87,6 +87,10 @@ rest also reach per-user installs.
   redirect target the shell expands (`> ~/out.txt`) made the parse partial,
   so a CRITICAL CEL match was only detected. CEL rules that cannot depend on
   that redirect now see the command with a static target (built-ins: #925).
+- **A command rule blocks the first command of an `&&` or `||` list.** Any
+  list made the parse partial, so a CRITICAL CEL match was only detected.
+  CEL rules that cannot depend on the left-out commands now also see the
+  commands certain to run; later commands stay detection-only (#923).
 - **Agents say that DefenseClaw policy made a block.** Rule verdicts reached
   the agent as `matched: <RULE-ID>:<redacted ...>`. They now say
   `DefenseClaw policy blocked this action (rule <RULE-ID>)` and not to retry
@@ -95,6 +99,11 @@ rest also reach per-user installs.
   reason or no text, so the model reported success. The plugin now fails it
   with an error that names DefenseClaw and shows an error notice; a confirm
   verdict runs with a warning notice.
+- **A confirmation the agent cannot ask about names the rule.** On a hook
+  that cannot ask, such as OpenCode's, a confirm verdict runs as an alert
+  whose reason read `matched: <RULE-ID>:...`. It now says DefenseClaw policy
+  flagged the action for review (rule <RULE-ID>), and OpenCode's notice
+  starts with it. The Secure Client wording is unchanged.
 - **OpenCode and Amp say to restart after a failed start-up check.** When
   the plugin's load-time check for unapproved plugins fails, its blocks say
   so and ask the user to restart the agent once DefenseClaw is available.
@@ -139,6 +148,14 @@ rest also reach per-user installs.
 - **Amp's `async_shell_command` is inspected like its bash tool.** Commands
   an Amp release ran through `async_shell_command` got no command facts, so
   a rule that needs them was recorded but did not block.
+- **Kiro CLI 2.x runs DefenseClaw's tool hooks.** The `defenseclaw` agent
+  used the matcher `.*`, which kiro-cli 2.x never matches, so its tool hooks
+  never ran. It now uses `*`, and an agent with the old matcher fails
+  verification and is rewritten.
+- **Kiro shell calls get command facts.** The `__tool_use_purpose` note
+  (2.x) and the unset `cwd`, `description` and `timeout` (v3) left every Kiro
+  command partly parsed, so a command rule was only detected. They are now
+  dropped from the analyzed copy.
 - **Audit rows name the account for per-user connector hooks.** Rejected
   connector-hook and inspect-tool rows now carry `user.id` and
   `defenseclaw.user.name` when the caller is known, like hook decision rows.
@@ -150,6 +167,10 @@ rest also reach per-user installs.
   and macOS guardian refused every repair after a kiro-cli update. It now
   follows updates at or above 2.24.1, the certified minimum, and in action
   mode refuses to enroll a new user below it.
+- **A named pipe in place of an agent's hook config no longer hangs.**
+  Setup, verify and the enterprise guardian's per-user worker waited for a
+  writer (`worker for uid N timed out`). The read now fails at once with
+  `<path> is a named pipe, not a regular file`.
 
 ### Added
 
@@ -163,6 +184,9 @@ rest also reach per-user installs.
   `requiredMinimumVersion` to 2.1.154 in its own `managed-settings.d`
   drop-in. An administrator's value wins; `enterprise policy show|verify`
   report the floor, and `connectors.claudecode.version_floor` controls it.
+  Claude Code reads the setting only from 2.1.163, so this floor stops no
+  build older than that
+  ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)).
 
 ### Changed
 

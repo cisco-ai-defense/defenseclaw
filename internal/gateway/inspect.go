@@ -377,6 +377,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if toolName != "" && toolName != "message" {
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
+	defer yieldHookRunSlot(ctx)()
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
@@ -1323,11 +1324,13 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 		toolName = ""
 	}
 	var v *ScanVerdict
+	resume := yieldHookRunSlot(ctx)
 	if strings.EqualFold(strategyDirection, "tool_call") {
 		v = a.hookJudge.RunToolJudge(jctx, toolName, content)
 	} else {
 		v = a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
 	}
+	resume()
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather

@@ -8,6 +8,7 @@ package enterprisehooks
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +50,61 @@ func deferredPendingProofFixture(t *testing.T, standalone bool) ManifestTarget {
 		AgentVersion: "2.1.230",
 		Enabled:      &enabled,
 		Deferred:     true,
+	}
+}
+
+// An account that ran an agent before it was enrolled has a
+// %USERPROFILE%\.defenseclaw the hook created with the profile's inherited
+// DACL. The pending proof must accept it, and enrollment in the account's
+// session must adopt it instead of failing every reconcile.
+func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDirectory(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	// A junction the account made there, to another folder it owns, is not one.
+	elsewhere := filepath.Join(target.UserHome, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, elsewhere, sid)
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", dataDir, elsewhere).CombinedOutput(); err != nil {
+		t.Fatalf("create junction: %v: %s", err, output)
+	}
+	setWindowsTestPathExactOwner(t, dataDir, sid)
+	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err == nil {
+		t.Fatal("the pending proof accepted a junctioned data directory")
+	}
+	if err := os.Remove(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	logs := filepath.Join(dataDir, "logs")
+	if err := os.MkdirAll(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(logs, "hook-failures.jsonl")
+	if err := os.WriteFile(record, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dataDir, logs, record} {
+		setWindowsTestPathExactOwner(t, path, sid)
+	}
+	if err := RequireWindowsEnterpriseDeferredTargetPending(target); err != nil {
+		t.Fatalf("pending proof for an account-created data directory failed: %v", err)
+	}
+	var creation windowsTargetOwnedDirectoryCreation
+	if err := runWindowsTestThreadImpersonatedAsSelf(func() error {
+		var err error
+		creation, err = ensureWindowsTargetOwnedDirectoryTree(target.UserHome, filepath.Join(dataDir, "hooks"), sid)
+		return err
+	}); err != nil {
+		t.Fatalf("enrollment did not adopt the account-created data directory: %v", err)
+	}
+	if creation.createdDataDir || !creation.createdHookDir {
+		t.Fatalf("adoption creation = %+v, want only the hook directory created", creation)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, sid)
+	if _, err := os.Lstat(record); err != nil {
+		t.Fatalf("adoption must keep the account's own files: %v", err)
 	}
 }
 

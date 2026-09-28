@@ -25,9 +25,11 @@ import (
 
 // RemoveUserHooks removes DefenseClaw's own per-user hook registration for
 // one Unix target (connector teardown, which edits only DefenseClaw-owned
-// entries) and clears the target's hook contract lock entry. The standalone
-// uninstall runs it in the per-user worker with the user's credentials,
-// never in a root process. A home that no longer exists is not an error.
+// entries), the connector's hook credential file and the target's hook
+// contract lock entry. The standalone uninstall, and the guardian for a
+// target the manifest no longer enrolls, run it in the per-user worker with
+// the user's credentials, never in a root process. A home that no longer
+// exists is not an error.
 func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 	if err := refuseStandaloneRootInProcess("remove"); err != nil {
 		return err
@@ -75,6 +77,12 @@ func RemoveUserHooks(ctx context.Context, opts InstallOptions) error {
 		return withOwnerCredentials(uid, gid, func() error {
 			if err := conn.Teardown(ctx, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s teardown failed: %w", conn.Name(), err)
+			}
+			// The connector's hook credential goes with its registration.
+			if tokenPath, err := connector.HookTokenFilePath(filepath.Join(dataDir, "hooks"), conn.Name()); err == nil {
+				if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("enterprise hooks: remove %s hook credential: %w", conn.Name(), err)
+				}
 			}
 			if err := connector.ClearHookContractLockEntry(dataDir, conn.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("enterprise hooks: clear hook contract lock for %s: %w", conn.Name(), err)

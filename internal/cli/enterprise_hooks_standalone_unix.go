@@ -530,6 +530,12 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	bindings := loadEnterpriseHookUnixBindings()
+	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
+	// Remove DefenseClaw's own registrations from the homes of targets the
+	// manifest no longer enrolls, as each user, before this run's state
+	// drops their rows. A ledger that cannot be written is reported with
+	// the state: the revoked rows must still leave the authorization.
+	cleanupErr := reconcileEnterpriseHookStandaloneUnixCleanups(ctx, enterpriseHookWorkerLog, manifest, bindings, machinePolicy, resolver, time.Now())
 	next := enterpriseHookUnixBindings{Bindings: map[string]enterpriseHookUnixBinding{}}
 	carryBinding := func(key string) {
 		if previous, ok := bindings.Bindings[key]; ok && key != "" {
@@ -537,7 +543,6 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 	}
 
-	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	jobs := map[int]*enterpriseHookWorkerJob{}
 	slots := map[int]enterpriseHookStandaloneSlot{}
@@ -782,6 +787,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
 	}
+	if stateErr == nil && cleanupErr != nil {
+		stateErr = fmt.Errorf("persist the per-user cleanup ledger: %w", cleanupErr)
+	}
 	run.Rows = rows
 	run.Failures = failures
 	run.Pending = pending
@@ -790,7 +798,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
-	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now())
+	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), enterpriseHookPerUserEnrolled(manifest, machinePolicy))
 	return run, nil
 }
 

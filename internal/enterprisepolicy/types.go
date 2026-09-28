@@ -326,3 +326,37 @@ func MachinePolicyConnectors(opts Options, connectors []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// VendorMachinePolicyConnectors are the connectors whose only standalone
+// route on goos is vendor machine policy (Codex, Claude Code, Cursor and
+// Copilot; OpenCode falls back to its per-user plugin), sorted. The Linux
+// and macOS guardian keeps a per-user registration for one of them only
+// while the target manifest enrolls that user for it per user.
+func VendorMachinePolicyConnectors(goos string) []string {
+	out := []string{}
+	for _, name := range targetNames() {
+		if RouteFor(name, goos) == RouteMachinePolicy {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// OwnershipOffConnectors returns the connectors cfg names whose route on
+// goos is vendor machine policy and whose machine policy the administrator
+// leaves alone (ownership: "off"), sorted. On Linux and macOS DefenseClaw
+// gives them no route: it writes no machine policy for them and does not
+// move them to per-user hooks either.
+func OwnershipOffConnectors(cfg *config.Config, goos string) []string {
+	out := []string{}
+	if cfg == nil {
+		return out
+	}
+	for _, name := range StandaloneConnectors(cfg) {
+		if RouteFor(name, goos) == RouteMachinePolicy &&
+			cfg.Enterprise.MachinePolicy.PolicyFor(name).Ownership == config.MachinePolicyOwnershipOff {
+			out = append(out, name)
+		}
+	}
+	return out
+}

@@ -15,6 +15,10 @@ import (
 	"fmt"
 )
 
+// connectorAmp has no machine policy target; on Windows the guardian holds
+// its machine folder (reserveWindowsAmpMachineDir).
+const connectorAmp = "amp"
+
 // windowsGoOwnedTargets are the machine policy targets the Go guardian owns
 // on the Windows standalone profile. The Windows lifecycle already owns the
 // Codex requirements, the Claude Code managed settings and the Cursor
@@ -54,6 +58,13 @@ func PublishWindowsGoOwned(opts Options, connectors []string) (Result, error) {
 			errs = append(errs, fmt.Errorf("%s: %w", ConnectorOpenCode, err))
 		}
 		result.Changed = result.Changed || changed
+	}
+	// Amp's machine folder is held whatever the Amp policy says: every
+	// account's Amp reads it.
+	if amp, err := reserveWindowsAmpMachineDir(opts); err != nil {
+		errs = append(errs, fmt.Errorf("%s machine folder: %w", connectorAmp, err))
+	} else {
+		result.Changed = result.Changed || amp.Changed
 	}
 	for _, name := range connectors {
 		if !windowsGoOwnedTargets[name] {

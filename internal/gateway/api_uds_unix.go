@@ -30,6 +30,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 )
 
+// heldAPIPortRetriedWithoutHookSocket is false on Linux and macOS: there the
+// standalone gateway keeps serving hooks on its unix socket while the TCP
+// bind is retried, and a gateway that could not take the socket gives up.
+// Replaceable in tests.
+var heldAPIPortRetriedWithoutHookSocket = false
+
 // inheritedHookListener is replaceable by tests.
 var inheritedHookListener = func() (net.Listener, bool, error) { return systemd.Listener("hook") }
 

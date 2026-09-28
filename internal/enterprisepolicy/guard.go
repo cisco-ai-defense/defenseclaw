@@ -1213,7 +1213,7 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 	}
 	first := blocking[0]
 	what := "defines a hook"
-	advice := fmt.Sprintf("Remove it, or ask your administrator to add the digest to enterprise.machine_policy.connectors.%s.allowed_hooks.", req.Connector)
+	advice := foreignHookAdvice(req.Connector, first.Reason)
 	switch {
 	case first.Reason == "plugin" || first.Reason == "plugin directory":
 		what = "adds a plugin"
@@ -1225,7 +1225,6 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 			what = "adds a plugin"
 		}
 		what += " that cannot be approved (" + strings.TrimPrefix(first.Reason, unapprovableReason) + ")"
-		advice = "Remove it: an approval must cover every file the entry runs, so it can name only readable regular files and variables DefenseClaw can resolve."
 	}
 	decision.Deny = true
 	decision.Reason = fmt.Sprintf(
@@ -1233,6 +1232,16 @@ func EvaluateForeignHooks(req GuardRequest) GuardDecision {
 		req.Connector, first.Scope, first.Path, what, first.Digest, moreFindings(len(blocking)-1, stopAtBlocking), advice,
 	)
 	return decision
+}
+
+// foreignHookAdvice tells the user how a blocked hook or plugin stops
+// blocking: remove it or have it approved by digest, unless it is one no
+// approval can cover.
+func foreignHookAdvice(connector, reason string) string {
+	if strings.HasPrefix(reason, unapprovableReason) {
+		return "Remove it: an approval must cover every file the entry runs, so it can name only readable regular files and variables DefenseClaw can resolve."
+	}
+	return fmt.Sprintf("Remove it, or ask your administrator to add the digest to enterprise.machine_policy.connectors.%s.allowed_hooks.", connector)
 }
 
 func moreFindings(n int, stoppedEarly bool) string {

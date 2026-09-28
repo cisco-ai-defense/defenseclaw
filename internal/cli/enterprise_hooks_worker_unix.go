@@ -62,6 +62,13 @@ const (
 	// enterpriseHookWorkerModeRemove tears down DefenseClaw's own per-user
 	// registration (standalone uninstall).
 	enterpriseHookWorkerModeRemove = "remove"
+	// enterpriseHookWorkerModeRemoveLeftover tears down the guardian's
+	// per-user registration of a machine-policy connector the user is not
+	// enrolled for per user (one an earlier route left, for example
+	// ownership: "off" before it kept Claude Code off every route). It
+	// changes nothing unless the user's hook contract lock records such a
+	// registration.
+	enterpriseHookWorkerModeRemoveLeftover = "remove_leftover"
 )
 
 // enterpriseHookWorkerTimeout bounds one worker process.
@@ -154,6 +161,7 @@ type enterpriseHookWorkerTargetResult struct {
 	Index    int                            `json:"index"`
 	OK       bool                           `json:"ok"`
 	Repaired bool                           `json:"repaired,omitempty"`
+	Removed  bool                           `json:"removed,omitempty"`
 	Pending  bool                           `json:"pending,omitempty"`
 	Error    string                         `json:"error,omitempty"`
 	Result   *enterprisehooks.InstallResult `json:"result,omitempty"`
@@ -261,8 +269,16 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		}
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
+		for _, target := range request.Targets {
+			if target.Mode != enterpriseHookWorkerModeRemoveLeftover {
+				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
+			}
+		}
 		now := time.Now()
 		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		if len(request.Targets) > 0 {
+			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
+		}
 		blocks, dropped, err := enterprisepolicy.CollectForeignHookBlocks(filepath.Clean(request.Home), now)
 		response.Blocks, response.BlocksDropped = blocks, dropped
 		if err != nil {
@@ -368,6 +384,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		case enterpriseHookWorkerModeRemove:
 			err = enterpriseHookWorkerRemover(ctx, opts)
+		case enterpriseHookWorkerModeRemoveLeftover:
+			var leftover bool
+			if leftover, err = enterpriseHookWorkerManagedRegistration(opts); err == nil && leftover {
+				err = enterpriseHookWorkerRemover(ctx, opts)
+				outcome.Removed = err == nil
+			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}
@@ -381,13 +403,30 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover {
 				outcome.Result = &result
 			}
 		}
 		results = append(results, outcome)
 	}
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// enterpriseHookWorkerManagedRegistration reports whether the user's hook
+// contract lock records the guardian's registration of the connector: one
+// rendered for the standalone hook socket. A personal DefenseClaw install
+// in the same home records none and is left alone.
+func enterpriseHookWorkerManagedRegistration(opts enterprisehooks.InstallOptions) (bool, error) {
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	entry, err := connector.LoadHookContractLockEntryForMode(dataDir, opts.ConnectorName, true)
+	if err != nil {
+		return false, err
+	}
+	posture := entry.RegistrationPosture
+	return posture != nil && posture.ManagedEnterprise && strings.TrimSpace(posture.HookSocket) != "", nil
 }
 
 // tightenEnterpriseHookWorkerHome removes group/other write from the

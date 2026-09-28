@@ -435,6 +435,63 @@ def test_generic_windows_wrapper_refuses_a_product_version_pin_for_a_staged_setu
     assert "-ProductVersion applies only to the installed CLI" in document["errors"][0]["message"], document
 
 
+_PUBLIC_TEXT_PROBE = r"""
+$ErrorActionPreference = 'Stop'
+__FUNCTION__
+$staged = 'C:\Windows\Temp\defenseclaw-mdm-0123456789abcdef0123456789abcdef\config.yaml'
+$doc = [ordered]@{
+    schema_version = 2
+    next_step = "Next step: run DefenseClaw Setup as LocalSystem: DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=$staged JSON=1."
+    config = $staged
+} | ConvertTo-Json -Compress
+[ordered]@{
+    plain = ConvertTo-WrapperPublicText -Text $doc -Staged $staged -Public 'C:\Staging\config.yaml'
+    spaced = ConvertTo-WrapperPublicText -Text $doc -Staged $staged -Public 'C:\Admin Configs\config.yaml'
+    stdin = ConvertTo-WrapperPublicText -Text $doc -Staged $staged -Public ''
+    raw = ConvertTo-WrapperPublicText -Text "failed; CONFIG=$staged JSON=1" -Staged $staged -Public 'C:\Staging\config.yaml'
+} | ConvertTo-Json -Compress
+"""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs PowerShell 7")
+def test_generic_windows_wrapper_names_the_administrators_config_in_its_result(tmp_path: Path) -> None:
+    engine = _pwsh7()
+    assert engine, "Windows CI must provide PowerShell 7"
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    start = text.index("function ConvertTo-WrapperPublicText {")
+    function = text[start : text.index("\nfunction Write-LifecycleResult", start)]
+    probe = tmp_path / "public-text-probe.ps1"
+    probe.write_text(_PUBLIC_TEXT_PROBE.replace("__FUNCTION__", function), encoding="utf-8")
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    plain = json.loads(out["plain"])
+    assert "/ensure CONFIG=C:\\Staging\\config.yaml JSON=1" in plain["next_step"], plain
+    assert plain["config"] == "C:\\Staging\\config.yaml", plain
+    assert "defenseclaw-mdm-" not in out["plain"], out["plain"]
+    spaced = json.loads(out["spaced"])
+    assert '/ensure CONFIG="C:\\Admin Configs\\config.yaml" JSON=1' in spaced["next_step"], spaced
+    stdin = json.loads(out["stdin"])
+    assert "/ensure CONFIG=<config.yaml> JSON=1" in stdin["next_step"], stdin
+    assert out["raw"] == "failed; CONFIG=C:\\Staging\\config.yaml JSON=1", out["raw"]
+
+
+def test_windows_scripts_never_concatenate_into_an_argument_list() -> None:
+    # PowerShell's comma operator binds tighter than +, so
+    # @('/' + $action, 'JSON=1') is the single argument "/ensure JSON=1". The
+    # generic wrapper built its Setup command line that way, and Setup refused
+    # every -SetupPath run with "unexpected positional argument" (exit 1639).
+    pattern = re.compile(r"@\(\s*'[^']*'\s*\+\s*\$\w+\s*,")
+    for path in sorted((MDM / "windows").glob("*.ps1")) + sorted((MDM / "intune" / "windows").glob("*.ps1")):
+        assert not pattern.search(_text(path)), path.name
+    assert "$arguments = @(('/' + $normalizedAction), 'JSON=1')" in _text(
+        MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1"
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the release jobs run the signing helpers with bash on Linux and macOS")
 def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
     sign = MDM / "signing" / "authenticode-sign.sh"

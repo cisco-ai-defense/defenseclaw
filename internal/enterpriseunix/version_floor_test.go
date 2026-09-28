@@ -41,6 +41,17 @@ func TestInstallWritesAndUninstallRemovesTheClaudeVersionFloor(t *testing.T) {
 			if noop := h.run(Options{Action: ActionEnsure}); !noop.Noop {
 				t.Fatalf("ensure after install must be a no-op: %+v", noop.Warnings)
 			}
+			// A floor that goes missing is reported by verify and put back
+			// by ensure.
+			if err := os.Remove(h.env.P(floor)); err != nil {
+				t.Fatal(err)
+			}
+			if r := h.run(Options{Action: ActionVerify}); !hasWarning(r, codeClaudeVersionFloorMissing) {
+				t.Fatalf("verify must warn about the missing floor: %+v", r.Warnings)
+			}
+			if r := h.run(Options{Action: ActionEnsure}); r.Noop || h.read(floor) != wantClaudeVersionFloor {
+				t.Fatalf("ensure must restore the missing floor: noop=%v %+v", r.Noop, r.Warnings)
+			}
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
 			if exists(h.env.P(floor)) {
 				t.Fatal("uninstall kept DefenseClaw's Claude Code version floor")

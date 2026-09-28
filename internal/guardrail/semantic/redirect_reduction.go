@@ -47,13 +47,47 @@ func (p *Program) RedirectReductionSafe() bool {
 	return p != nil && p.redirectReductionSafe
 }
 
+// ListReductionSafe reports whether a match of this expression on the view
+// returned by actionfacts.ShortCircuitListReduction also holds for the whole
+// action, whose commands after && or || the view left out.
+//
+// The view is the complete analysis of a twin of the action with only the
+// commands certain to run. Compared with the action it lacks commands and
+// every fact they own (paths, network, data flows, artifacts and archive
+// lineages), and it is complete where the action is not. An expression is
+// safe when it reads none of argv_complete, parse and authoritative, and
+// reads commands, paths, network, data_flows, artifacts and archive_lineages
+// only as the range of an exists() reached from the root through &&, || and
+// exists() or all() predicates alone: more of them can then only keep a
+// match. A kept command's own facts, such as its argv, operations and
+// wrappers, are those of a complete analysis, so negation over them is
+// unaffected, except for facts only a left-out command could add to it.
+func (p *Program) ListReductionSafe() bool {
+	return p != nil && p.listReductionSafe
+}
+
 func redirectReductionSafe(ast *cel.Ast) bool {
+	return reductionSafe(ast, map[string]bool{
+		"redirects": true, "paths": true, "artifacts": true, "archive_lineages": true,
+	})
+}
+
+func listReductionSafe(ast *cel.Ast) bool {
+	return reductionSafe(ast, map[string]bool{
+		"commands": true, "paths": true, "network": true, "data_flows": true,
+		"artifacts": true, "archive_lineages": true,
+	})
+}
+
+// reductionSafe reports whether ast reads none of parse, argv_complete and
+// authoritative, and reads each field in lacking, the facts a reduced view
+// may have fewer of, only where more of them can only keep a match.
+func reductionSafe(ast *cel.Ast, lacking map[string]bool) bool {
 	if ast == nil || ast.NativeRep() == nil {
 		return false
 	}
 	// monotone is true while every operator between the root and expr keeps
-	// a true result true when the action gains redirects, paths, artifacts
-	// or archive lineages.
+	// a true result true when the action gains facts in lacking.
 	var visit func(expr celast.Expr, monotone bool) bool
 	visit = func(expr celast.Expr, monotone bool) bool {
 		switch expr.Kind() {
@@ -61,13 +95,11 @@ func redirectReductionSafe(ast *cel.Ast) bool {
 			return true
 		case celast.SelectKind:
 			selected := expr.AsSelect()
-			switch selected.FieldName() {
-			case "parse", "argv_complete", "authoritative":
+			switch field := selected.FieldName(); {
+			case field == "parse", field == "argv_complete", field == "authoritative":
 				return false
-			case "redirects", "paths", "artifacts", "archive_lineages":
-				if !monotone {
-					return false
-				}
+			case lacking[field] && !monotone:
+				return false
 			}
 			return visit(selected.Operand(), false)
 		case celast.CallKind:
@@ -89,7 +121,7 @@ func redirectReductionSafe(ast *cel.Ast) bool {
 			exists := quantifierComprehension(loop, false, operators.LogicalOr)
 			all := quantifierComprehension(loop, true, operators.LogicalAnd)
 			// exists() only gains matches from a longer range; all() can
-			// lose them, so only an exists() range may read redirects.
+			// lose them, so only an exists() range may read a lacking field.
 			return visit(loop.IterRange(), monotone && exists) &&
 				visit(loop.AccuInit(), false) &&
 				visit(loop.LoopCondition(), false) &&

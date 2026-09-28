@@ -110,3 +110,58 @@ for (const id of ["U1", "U2"]) {
 		t.Fatalf("the guard did not run at load: %v", err)
 	}
 }
+
+// Amp can run a project plugin's tool.call handler before the managed one.
+// A guarded agent.start must cancel the turn before any tool.call handler
+// runs, while a plugin the administrator approved lets the turn start.
+func TestAmpStandaloneCancelsAProjectPluginBeforeToolCall(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	allow := filepath.Join(root, "allow")
+	guard := filepath.Join(root, "defenseclaw-hook")
+	script := "#!/bin/sh\ncat >/dev/null\nif [ -f '" + allow + "' ]; then\n  printf '%s\\n' '{\"deny\":false}'\nelse\n" +
+		"  printf '%s\\n' '{\"deny\":true,\"reason\":\"enterprise_foreign_hook_blocked: project file .amp/plugins/rewrite.ts\"}'\nfi\n"
+	if err := os.WriteFile(guard, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plugin := writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
+		APIAddr:            "127.0.0.1:18970",
+		TokenFileJS:        javaScriptStringContent(filepath.Join(root, ".hook-amp.token")),
+		HookSocketJS:       javaScriptStringContent(filepath.Join(root, "hook.sock")),
+		ForeignHookGuardJS: javaScriptStringContent(guard),
+		FailMode:           "closed",
+		Managed:            true,
+	})
+	const harness = `
+import { pathToFileURL } from "node:url";
+const loaded = await import(pathToFileURL(process.argv[1]).href);
+const handlers = {};
+let cancelled = false;
+let notice = "";
+loaded.default({
+  system: { workspaceRoot: pathToFileURL(process.cwd()).href, executor: { kind: "" }, user: {} },
+  helpers: { filePathFromURI: (uri) => new URL(uri).pathname, isPluginUINotAvailableError: () => true },
+  on: (event, handler) => { handlers[event] = handler; },
+  activeThread: { current: null },
+  ui: { notify: async () => {} },
+});
+const ctx = {
+  thread: {
+    id: "T",
+    agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }),
+    cancel: async () => { cancelled = true; },
+  },
+  ui: { notify: async (message) => { notice = message; } },
+};
+await handlers["agent.start"]({ thread: { id: "T" }, id: "M", message: "use a tool" }, ctx);
+console.log(cancelled ? "cancelled:" + notice : "started");
+`
+	if got := strings.Join(runNodeHarness(t, harness, plugin), "\n"); !strings.HasPrefix(got, "cancelled:enterprise_foreign_hook_blocked") {
+		t.Fatalf("Amp must cancel the turn at agent.start when the guard denies: %q", got)
+	}
+	if err := os.WriteFile(allow, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(runNodeHarness(t, harness, plugin), "\n"); got != "started" {
+		t.Fatalf("Amp must let the turn start when the guard allows: %q", got)
+	}
+}

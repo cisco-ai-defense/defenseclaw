@@ -63,7 +63,7 @@ the layouts of the common Node version managers and package managers:
 | OS | Also searched |
 | --- | --- |
 | Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes`. The extended search runs only in the worker that runs as the user, never as root. |
-| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. A Codex install from the Microsoft Store (MSIX) is not found. |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. A Codex install from the Microsoft Store (MSIX) is not found. |
 
 An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
 `XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
@@ -117,7 +117,10 @@ it with `security_complete: false`. `status` warns; `verify` fails.
 
 A per-user agent in this state runs without DefenseClaw hooks. A
 machine-policy agent refuses the unenrolled user on Windows, and on Linux
-and macOS with `unenrolled_users: deny`.
+and macOS with `unenrolled_users: deny`. Cursor on Windows is the exception while no
+user is enrolled for Cursor: its machine hooks file is published only while
+one is, so until then Cursor runs without DefenseClaw hooks, and the report
+says so (see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector)).
 
 On Linux and macOS a user who has never been enrolled and whose home is
 untrusted (group- or other-writable, a symlink, owned by another account, or
@@ -420,6 +423,25 @@ user who is enrolled again before then keeps the record until the guardian
 has reinstalled and protects them, so a second revocation before that still
 cleans them. Uninstall does the same for signed-in users; see
 [Remove](/docs/enterprise/windows#remove).
+
+### Cleanup when a user or agent is removed on Linux and macOS
+
+When a user's row leaves the manifest (the agent is disabled or removed
+from the config, or the user is excluded or deleted), the gateway stops
+accepting that user's hooks for the agent. The guardian then removes
+DefenseClaw's own registration from the user's home, running as the user,
+with the same teardown uninstall runs: DefenseClaw's hooks, agent and hook
+credential go, the settings DefenseClaw changed are put back (for Kiro,
+the default agent setting), and the user's own hooks and settings stay.
+
+A home that is not available (not mounted, or not created yet) and a
+removal that fails are recorded in an administrator-owned list and retried.
+`status` and `verify` report each one as the warning
+`guardian_cleanup_pending` and do not fail on it. A record is dropped
+without a cleanup only when the account no longer exists, and a user who is
+enrolled again keeps the record until the guardian protects them again.
+Uninstall removes the registrations of the users still in the manifest; see
+[Remove](/docs/enterprise/linux#remove).
 
 ## Supported agent versions
 

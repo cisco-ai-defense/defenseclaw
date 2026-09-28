@@ -52,6 +52,13 @@ and verify coverage statically or by running the real client as a user.
 These commands never write machine policy; the install and reconcile
 lifecycle does.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Refuse an unavailable live check before the elevation pin, so the
+		// caller gets its reason instead of a refusal that points elsewhere.
+		if enterprisePolicyLive && cmd.Name() == "verify" {
+			if err := enterprisePolicyLiveAvailable(); err != nil {
+				return err
+			}
+		}
 		if err := pinStandaloneManagedEnv(); err != nil {
 			return err
 		}
@@ -163,6 +170,8 @@ type enterprisePolicyReport struct {
 	Result     enterprisepolicy.Result                           `json:"result"`
 	Guard      map[string]enterprisepolicy.PublicConnectorPolicy `json:"guard"`
 	User       *enterprisePolicyUserReport                       `json:"user,omitempty"`
+	// goos is the host the report describes; it only changes wording.
+	goos string
 }
 
 func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []string, project string) (enterprisePolicyReport, error) {
@@ -174,6 +183,7 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		Complete:   err == nil && result.Complete(),
 		Result:     result,
 		Guard:      summary.Connectors,
+		goos:       ctx.opts.GOOS,
 	}
 	if strings.TrimSpace(enterprisePolicyUser) == "" {
 		return report, err
@@ -358,6 +368,15 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	fmt.Fprintf(out, "Standalone machine agent policy (hook binary %s)\n\n", report.HookBinary)
 	for _, state := range report.Result.States {
+		if state.Ownership == config.MachinePolicyOwnershipOff && report.goos != "windows" &&
+			enterprisepolicy.RouteFor(state.Connector, report.goos) == enterprisepolicy.RouteMachinePolicy {
+			// Not "unsupported": the administrator turned DefenseClaw's
+			// management of this agent off. OpenCode keeps its per-user
+			// plugin and its usual row.
+			fmt.Fprintf(out, "%-12s ownership off: machine policy not managed\n", state.Connector)
+			fmt.Fprintf(out, "    note:      DefenseClaw neither writes nor checks this agent's machine policy and installs no per-user hooks for it, so its sessions run without DefenseClaw's hooks; set ownership to merge or verify_only to protect it\n")
+			continue
+		}
 		status := "not covered"
 		switch {
 		case state.Route != enterprisepolicy.RouteMachinePolicy:

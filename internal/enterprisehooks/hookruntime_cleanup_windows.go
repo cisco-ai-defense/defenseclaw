@@ -85,6 +85,58 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 	return kept, errors.Join(errs...)
 }
 
+// windowsMachinePolicySelectorConnectors are the connectors whose runtime
+// selector sits in a vendor machine-policy directory instead of the hook
+// runtime root.
+var windowsMachinePolicySelectorConnectors = []string{"claudecode", "codex", "cursor"}
+
+// RemoveWindowsStandaloneMachinePolicySelectorLocks drops the runtime selector
+// lock that selector transactions leave in each machine-policy connector's
+// vendor directory (Claude Code's managed-settings.d, and the Codex and Cursor
+// machine folders), so a standalone uninstall leaves no DefenseClaw file
+// there. It runs after the teardown's last selector transaction. A lock whose
+// selector still exists is kept, since teardown verification owns that
+// selector, and the shared vendor directories are left as found.
+func RemoveWindowsStandaloneMachinePolicySelectorLocks() error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return nil
+	}
+	var errs []error
+	for _, name := range windowsMachinePolicySelectorConnectors {
+		selector, err := windowsManagedRuntimeSelectorPath(name)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := os.Lstat(selector); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", selector, err))
+			continue
+		}
+		lock := filepath.Join(filepath.Dir(selector), windowsManagedRuntimeSelectorLockFile)
+		info, err := os.Lstat(lock)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			err = fmt.Errorf("enterprise hooks: %s is not a regular file", lock)
+		}
+		if err == nil {
+			err = rejectWindowsReparseChain(lock)
+		}
+		if err == nil {
+			if err = os.Remove(lock); errors.Is(err, os.ErrNotExist) {
+				err = nil
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: remove the %s runtime selector lock: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // windowsHookRuntimePlainDirectory reports whether path is an existing plain
 // directory; a reparse point or a file in its place is an error.
 func windowsHookRuntimePlainDirectory(path string) (bool, error) {

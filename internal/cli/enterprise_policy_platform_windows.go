@@ -25,12 +25,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// pinStandaloneManagedEnv points an elevated administrator's (or
+// LocalSystem's) policy command at the standalone managed deployment, with
+// the same pins audit export uses, when the caller chose no config. Without
+// it `enterprise policy show|verify` read the administrator's own
+// %USERPROFILE%\.defenseclaw\config.yaml and exited 1. A standard
+// account is told to use an elevated prompt: the managed config is
+// administrator-only.
+func pinStandaloneManagedEnv() error {
+	return pinManagedAdministratorEnvironment(
+		"enterprise policy",
+		"this host has a managed DefenseClaw deployment; its machine policy can be inspected only from an elevated Administrator prompt or by the MDM agent",
+	)
+}
+
 // standaloneEnterprisePolicyLayout resolves the layout from the protected
 // HKLM machine roots, never from the caller's environment.
-// pinStandaloneManagedEnv is a no-op on Windows: the managed services and
-// the lifecycle pass the machine config explicitly.
-func pinStandaloneManagedEnv() error { return nil }
-
 func standaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
 	programFiles, err := trustedWindowsEnterpriseProgramFiles()
 	if err != nil {
@@ -56,6 +66,23 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 // directly when this process already is that user).
 func runAsEnterprisePolicyTarget(target enterprisehooks.TargetCredentials, fn func() error) error {
 	return enterprisehooks.RunAsTarget(target, fn)
+}
+
+// enterprisePolicyLiveAvailable refuses `enterprise policy verify --live` on
+// a managed Windows host up front. The live check starts the real client as
+// the target user and reads the gateway's audit database: Windows gives an
+// administrator no way to start a process as another account, and a
+// standard account cannot read the managed configuration or audit database,
+// so neither account can run it. Without this refusal an administrator was
+// told to run it from the user's own session and the user to use an
+// elevated prompt.
+func enterprisePolicyLiveAvailable() error {
+	if !auditExportManagedHost() {
+		return nil
+	}
+	return errors.New("enterprise policy verify --live is not available on a managed Windows host: Windows cannot start the client as another account, and a standard account cannot read the managed configuration. " +
+		"Run `defenseclaw enterprise policy verify` from an elevated Administrator prompt for the static check; to see the hooks run, make a tool call in the client from the user's own session, " +
+		"then read its record from the elevated prompt with `defenseclaw audit export --connector <connector> -o <file>`")
 }
 
 // enterprisePolicyLiveCredential: Windows has no setuid; the agent must be

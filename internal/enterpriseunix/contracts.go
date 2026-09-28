@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // codeHookContractUnverified names a guardian target whose agent version
@@ -190,6 +191,49 @@ func (l *lifecycle) describeUnprotectedAgents() {
 	}
 	if len(agents) > 0 {
 		r.SecurityComplete = false
+	}
+}
+
+// codeGuardianCleanupPending names a DefenseClaw hook registration the hook
+// guardian still has to remove from the home of a user the manifest no
+// longer enrolls for that connector (the connector was disabled or removed,
+// or the user is no longer enrolled). Until it is removed the gateway
+// refuses those hooks, so the user's agent can stop at them. It is a
+// warning: verify and security_complete do not fail on it.
+const codeGuardianCleanupPending = "guardian_cleanup_pending"
+
+// describeGuardianCleanups reports the entries of the guardian's per-user
+// cleanup ledger next to its authorization ledger.
+func (l *lifecycle) describeGuardianCleanups() {
+	env, r := l.env, l.result
+	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianUserCleanupFile)), 4<<20)
+	if err != nil {
+		return
+	}
+	var ledger struct {
+		Pending []struct {
+			Connector string `json:"connector"`
+			User      string `json:"user"`
+			UserHome  string `json:"user_home"`
+			LastError string `json:"last_error"`
+		} `json:"pending"`
+	}
+	if json.Unmarshal(data, &ledger) != nil {
+		return
+	}
+	for _, entry := range ledger.Pending {
+		account := strings.TrimSpace(entry.User)
+		if account == "" {
+			account = strings.TrimSpace(entry.UserHome)
+		}
+		message := fmt.Sprintf("%s for user %s is no longer enrolled, but DefenseClaw's hook registration is still in %s and the gateway refuses its hooks; ",
+			entry.Connector, account, entry.UserHome)
+		if reason := strings.TrimSpace(entry.LastError); reason != "" {
+			message += "the hook guardian's last attempt to remove it as that user failed and is retried: " + boundedGuardianReason(strings.TrimPrefix(reason, "enterprise hooks: "))
+		} else {
+			message += "the hook guardian removes it as that user once the home is available"
+		}
+		r.AddWarning(codeGuardianCleanupPending, message)
 	}
 }
 

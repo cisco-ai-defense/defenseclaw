@@ -92,6 +92,11 @@ type UnixEnumerateOptions struct {
 	// MachinePolicyConnectors come from the runtime descriptor; they get
 	// per-user rows only when enrollment.unenrolled_users is "deny".
 	MachinePolicyConnectors []string
+	// OwnershipOffConnectors are machine-policy connectors whose machine
+	// policy the administrator leaves alone (ownership: "off"). They get
+	// no DefenseClaw route, so no per-user rows either, not even with
+	// unenrolled_users: deny.
+	OwnershipOffConnectors []string
 	// SessionUIDs lists uids with a live login session.
 	SessionUIDs func() []int
 	Discover    UnixDiscoverFunc
@@ -221,8 +226,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for _, name := range opts.MachinePolicyConnectors {
 		machinePolicy[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
+	ownershipOff := map[string]struct{}{}
+	for _, name := range opts.OwnershipOffConnectors {
+		ownershipOff[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
 	var perUser []string
 	for _, name := range connectors {
+		if _, off := ownershipOff[name]; off {
+			continue
+		}
 		if _, isMachine := machinePolicy[name]; isMachine &&
 			!strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
 			continue

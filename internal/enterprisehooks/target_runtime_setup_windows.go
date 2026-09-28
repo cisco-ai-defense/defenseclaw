@@ -307,11 +307,19 @@ func CleanupWindowsManagedRuntimeRoots(
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(strings.TrimSpace(manifestSHA256), request.Plan.ManifestSHA256) {
-		return nil, fmt.Errorf("enterprise hooks: managed runtime manifest digest changed after planning")
-	}
-	claimsByRoot, err := validateWindowsManagedRuntimeRequest(request, manifest, false)
+	// The hook enumerator republishes targets.yaml whenever a row changes (an
+	// agent update, a newly discovered agent, a deferred row), including while
+	// a failed install waits for readiness. Rollback cleanup acts only on the
+	// plan's own roots, authenticated by their marker SIDs and journaled
+	// identities, so it accepts a republished manifest that keeps exactly the
+	// planned profile roots; stage and finalize still require the planned
+	// digest.
+	rowDrift := !strings.EqualFold(strings.TrimSpace(manifestSHA256), request.Plan.ManifestSHA256)
+	claimsByRoot, err := validateWindowsManagedRuntimeRequestRows(request, manifest, false, rowDrift)
 	if err != nil {
+		if rowDrift {
+			return nil, fmt.Errorf("enterprise hooks: managed runtime manifest digest changed after planning and the republished manifest does not keep the planned profile roots: %w", err)
+		}
 		return nil, err
 	}
 	cleanupSpecs, err := windowsManagedRuntimeCleanupSpecs(request.Plan, manifest)
@@ -1220,6 +1228,14 @@ func renameWindowsManagedRuntimeHandle(handle, parent windows.Handle, finalLeaf 
 }
 
 func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest Manifest) error {
+	return validateWindowsManagedRuntimePlanRows(plan, manifest, false)
+}
+
+// validateWindowsManagedRuntimePlanRows validates plan against manifest. With
+// allowRowDrift the manifest's enabled row count may differ from the plan's
+// (a republication that changed rows of the same users); the resolved profile
+// roots must still match the plan exactly, in order.
+func validateWindowsManagedRuntimePlanRows(plan WindowsManagedRuntimePlan, manifest Manifest, allowRowDrift bool) error {
 	if plan.SchemaVersion != WindowsManagedRuntimePlanSchemaVersion {
 		return fmt.Errorf("enterprise hooks: unsupported managed runtime plan schema %d", plan.SchemaVersion)
 	}
@@ -1239,7 +1255,7 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 			targetCount++
 		}
 	}
-	if plan.TargetCount != targetCount || targetCount > windowsManagedRuntimeMaxRoots*3 {
+	if (!allowRowDrift && plan.TargetCount != targetCount) || targetCount > windowsManagedRuntimeMaxRoots*3 {
 		return fmt.Errorf("enterprise hooks: managed runtime plan target count does not match manifest")
 	}
 	if len(plan.Roots) != len(targets) || len(plan.Roots) > windowsManagedRuntimeMaxRoots {
@@ -1272,10 +1288,14 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 }
 
 func validateWindowsManagedRuntimeRequest(request WindowsManagedRuntimeRequest, manifest Manifest, requireClaims bool) (map[string]WindowsManagedRuntimeClaim, error) {
+	return validateWindowsManagedRuntimeRequestRows(request, manifest, requireClaims, false)
+}
+
+func validateWindowsManagedRuntimeRequestRows(request WindowsManagedRuntimeRequest, manifest Manifest, requireClaims, allowRowDrift bool) (map[string]WindowsManagedRuntimeClaim, error) {
 	if request.SchemaVersion != WindowsManagedRuntimeRequestSchemaVersion {
 		return nil, fmt.Errorf("enterprise hooks: unsupported managed runtime request schema %d", request.SchemaVersion)
 	}
-	if err := validateWindowsManagedRuntimePlan(request.Plan, manifest); err != nil {
+	if err := validateWindowsManagedRuntimePlanRows(request.Plan, manifest, allowRowDrift); err != nil {
 		return nil, err
 	}
 	planRoots := make(map[string]WindowsManagedRuntimeRootPlan, len(request.Plan.Roots))

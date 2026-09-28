@@ -168,3 +168,95 @@ func TestWindowsEnterpriseEnsureUpgradesAfterFinishingAPendingTransaction(t *tes
 		t.Fatalf("result ok=%v installed=%q warnings=%v", result.OK, result.InstalledVersion, codes)
 	}
 }
+
+// A pending repair transaction whose restored release cannot be
+// reactivated. Recovery leaves it stopped and the repair fails on purpose;
+// ensure then upgrades to this Setup's release in the same invocation. A
+// repair that fails for any other reason is reported, not followed.
+func TestWindowsEnterpriseEnsureUpgradesAfterARecoveryDeferredActivation(t *testing.T) {
+	for _, deferred := range []bool{true, false} {
+		stubWindowsEnterpriseDeployments(t, nil)
+		originalRunner := windowsEnterpriseStandaloneRunner
+		originalObserver := windowsEnterpriseStandaloneObserver
+		originalDrift := windowsEnterpriseEnsureDriftDetector
+		originalInstalled := windowsEnterpriseInstalledProductVersion
+		windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+		windowsEnterpriseInstalledProductVersion = func(*windowsEnterpriseLifecycleOptions) (string, error) { return "1.0.48", nil }
+		windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+
+		var actions []string
+		statusCalls := 0
+		windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+			action := ""
+			for index := 0; index+1 < len(args); index++ {
+				if args[index] == "-Action" {
+					action = args[index+1]
+				}
+			}
+			actions = append(actions, action)
+			report := map[string]any{"schema_version": 1, "ok": true, "action": strings.ToLower(action), "installed": true, "errors": []string{}}
+			switch action {
+			case "Status":
+				statusCalls++
+				report["installed_version"] = "1.0.48"
+				report["transaction_pending"] = statusCalls == 1
+			case "Repair":
+				// The installer's failure document: no installed state.
+				report = map[string]any{
+					"schema_version": 1, "ok": false, "action": "repair", "transaction_pending": false,
+					"error":  "Repair recovered the pending transaction, but its restored release could not be reactivated, so the DefenseClaw services stay stopped.",
+					"errors": []string{"Repair recovered the pending transaction, but its restored release could not be reactivated, so the DefenseClaw services stay stopped."},
+				}
+				if deferred {
+					report["recovery_gateway_runs"] = []map[string]any{{
+						"action": "service-reactivation", "binary": `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`,
+						"source": `C:\p\defenseclaw-gateway.exe`, "sha256": "bb", "trust": "hash_pinned",
+						"product_version": "1.0.50", "identity": `NT AUTHORITY\SYSTEM`, "staged_version": "1.0.48",
+						"staged_error": "guardian did not publish fresh required coverage", "outcome": "deferred",
+					}}
+				}
+			case "Upgrade":
+				report["installed_version"] = "1.0.50"
+			default:
+				t.Errorf("unexpected installer action %q", action)
+			}
+			body, _ := json.Marshal(report)
+			return windowsEnterpriseStandaloneRun{Output: body}, nil
+		}
+
+		command := &cobra.Command{}
+		var stdout bytes.Buffer
+		command.SetOut(&stdout)
+		command.SetErr(&bytes.Buffer{})
+		opts := &windowsEnterpriseLifecycleOptions{
+			profile: "standalone", resolvedProfile: "standalone", productVersion: "1.0.50", jsonOutput: true, trustMode: "hash_pinned",
+			gatewayBinary: `C:\p\defenseclaw-gateway.exe`, acpBinary: `C:\p\defenseclaw-acp.exe`,
+			hookBinary: `C:\p\defenseclaw-hook.exe`, sensorHelperBinary: `C:\p\defenseclaw-sensor-helper.exe`,
+		}
+		err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\p\install-enterprise.ps1`)
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseEnsureDriftDetector = originalDrift
+		windowsEnterpriseInstalledProductVersion = originalInstalled
+
+		var result enterprisestatus.Result
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+			t.Fatalf("deferred=%v decode %q: %v", deferred, stdout.String(), decodeErr)
+		}
+		codes := []string{}
+		for _, warning := range result.Warnings {
+			codes = append(codes, warning.Code)
+		}
+		if deferred {
+			if err != nil || strings.Join(actions, ",") != "Status,Repair,Status,Upgrade" || !result.OK ||
+				result.InstalledVersion != "1.0.50" || !containsString(codes, "recovery_activation_deferred") ||
+				!containsString(codes, "recovered_pending_transaction") {
+				t.Fatalf("deferred: err=%v actions=%v ok=%v installed=%q warnings=%v", err, actions, result.OK, result.InstalledVersion, codes)
+			}
+			continue
+		}
+		if err == nil || strings.Join(actions, ",") != "Status,Repair" || result.OK {
+			t.Fatalf("plain repair failure: err=%v actions=%v ok=%v", err, actions, result.OK)
+		}
+	}
+}

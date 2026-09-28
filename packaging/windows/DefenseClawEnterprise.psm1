@@ -154,6 +154,17 @@ $script:DefenseClawAllowedSignerSHA256 = @()
 $script:DefenseClawTrustMode = 'Authenticode'
 # Standalone roots a standard user created and Install moved aside.
 $script:DefenseClawQuarantinedRoots = @()
+# Standalone pending-transaction recovery: the gateway of the running Setup
+# payload that recovery may fall back to, every managed-hook lifecycle step it
+# ran with that gateway, and why it declined one. Reset per lifecycle run.
+$script:DefenseClawRecoveryGatewayCandidate = $null
+$script:DefenseClawRecoveryGatewayRuns = @()
+$script:DefenseClawRecoveryGatewayRefusal = $null
+# Standalone pending-transaction recovery that may leave the restored release
+# stopped when it cannot be reactivated (Test-DefenseClawRecoveryActivationDeferral),
+# and whether this run did. Set per recovery; reset per lifecycle run.
+$script:DefenseClawRecoveryActivationDeferrable = $false
+$script:DefenseClawRecoveryActivationDeferred = $false
 
 function Set-DefenseClawEnterpriseProfile {
     param(
@@ -9452,8 +9463,11 @@ function Restore-DefenseClawTransaction {
             -PathType Leaf)) {
         # Restore the authenticated machine-policy preimage while the staged
         # gateway still implements this transaction's hidden command. Generic
-        # file rollback may replace that gateway with an older release.
-        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+        # file rollback may replace that gateway with an older release. A
+        # standalone recovery whose staged gateway fails this step may rerun
+        # it with the running Setup's verified gateway (see
+        # Invoke-DefenseClawManagedHooksLifecycleRecoveryStep).
+        [void](Invoke-DefenseClawManagedHooksLifecycleRecoveryStep `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
             -Action restore)
@@ -9461,7 +9475,7 @@ function Restore-DefenseClawTransaction {
         # Claude preimage is already exact and services remain disabled, so a
         # crash after retirement resumes safely through the generic pending
         # transaction without requiring this journal again.
-        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+        [void](Invoke-DefenseClawManagedHooksLifecycleRecoveryStep `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
             -Action retire)
@@ -9471,7 +9485,10 @@ function Restore-DefenseClawTransaction {
     # before generic file restoration can replace/delete the helper binary.
     # The cross-scope gate prevents cleanup of the shared user inode while a
     # production or another certification scope could still own it.
-    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+    # A standalone recovery whose staged gateway fails this cleanup may rerun
+    # it with the running Setup's verified gateway (see
+    # Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep).
+    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `
         -SnapshotPath $SnapshotPath `
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
@@ -9714,7 +9731,13 @@ function Restore-DefenseClawTransaction {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service)
-            if ($restartSensorHelper) {
+            if ([bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Complete-DefenseClawDeferredRecoveryActivation `
+                    -Snapshot $snapshot `
+                    -SnapshotPath $SnapshotPath `
+                    -SensorHelper $(if ($restartSensorHelper) { $standaloneSensorHelper } else { '' })
+            }
+            elseif ($restartSensorHelper) {
                 # Boot policy follows the restored gateway.
                 $gatewayStartMode = @(
                     $snapshot.services |
@@ -9837,10 +9860,33 @@ function Start-DefenseClawTransactionServices {
         # A running SCM state is insufficient. Require a newly published
         # successful LocalSystem reconciliation while gateway is still
         # disabled, so a queued gateway restart cannot beat auto-heal.
-        [void](Wait-DefenseClawFreshGuardianReconcile `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName)
+        try {
+            [void](Wait-DefenseClawFreshGuardianReconcile `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName)
+        }
+        catch {
+            if (-not (Test-DefenseClawRecoveryActivationDeferral `
+                    -Layout $Layout `
+                    -Failure $_)) {
+                throw
+            }
+            # Recovery leaves the restored release stopped and disabled: the
+            # requested lifecycle activates the Setup's own release under the
+            # same coverage gate. Nothing below may start the gateway.
+            foreach ($name in @($GuardianServiceName, $brokerServiceName)) {
+                if ([bool]$states[$name].existed) {
+                    Stop-DefenseClawService -Name $name
+                }
+            }
+            foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName)) {
+                if ([bool]$states[$name].existed) {
+                    Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+                }
+            }
+            return
+        }
     }
     if ([bool]$gateway.running) {
         Set-DefenseClawServiceStartMode `
@@ -9938,6 +9984,72 @@ function Start-DefenseClawTransactionServices {
             }
         }
     }
+}
+
+function Start-DefenseClawRestoredStandaloneSensorHelper {
+    <#
+        Standalone transaction snapshots do not record the sensor helper, and
+        Restore-DefenseClawTransaction quiesces it (disabled and stopped) with
+        the other services. The restored gateway depends on it, so a rollback
+        that restarts a pre-existing gateway must first make the helper
+        startable and start it. Returns the helper's service name when it was
+        started, '' when there is nothing to start.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return ''
+    }
+    $gatewayRestored = @(
+        $Snapshot.services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    [string]$Snapshot.gateway_service,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and [bool]$_.existed
+            }
+    ).Count -eq 1
+    if (-not $gatewayRestored) {
+        return ''
+    }
+    $name = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName ([string]$Snapshot.gateway_service)
+    if (-not (Test-DefenseClawServiceExists -Name $name)) {
+        return ''
+    }
+    Assert-DefenseClawStandaloneSensorHelperOwned -Name $name -Layout $Layout
+    Set-DefenseClawServiceStartMode -Name $name -StartMode 3
+    Start-DefenseClawService -Name $name
+    return $name
+}
+
+function Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy {
+    <#
+        After a rollback restarted the restored services, the sensor helper
+        takes the restored gateway's start mode (boot policy follows the
+        gateway), as in Restore-DefenseClawTransaction.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [AllowEmptyString()][string]$Name
+    )
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return
+    }
+    $gatewayStartMode = @(
+        $Snapshot.services |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$_.name,
+                    [string]$Snapshot.gateway_service,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )[0].start_mode
+    Set-DefenseClawServiceStartMode -Name $Name -StartMode ([int]$gatewayStartMode)
 }
 
 function Restore-DefenseClawTransactionWithManagedHooksRollback {
@@ -10046,6 +10158,14 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 -State $snapshot `
                 -Path $SnapshotPath `
                 -Phase activating
+            # The deferred restart must bring back the standalone sensor
+            # helper the restore quiesced, like the non-deferred restart in
+            # Restore-DefenseClawTransaction: the gateway depends on it and
+            # otherwise cannot start, which failed every standalone
+            # managed-hook rollback and left the deployment down.
+            $restoredSensorHelper = Start-DefenseClawRestoredStandaloneSensorHelper `
+                -Snapshot $snapshot `
+                -Layout $Layout
             Start-DefenseClawTransactionServices `
                 -Services $snapshot.services `
                 -Layout $Layout `
@@ -10053,6 +10173,17 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName ([string]$snapshot.gateway_service) `
                 -GuardianServiceName ([string]$snapshot.guardian_service)
+            if ([bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Complete-DefenseClawDeferredRecoveryActivation `
+                    -Snapshot $snapshot `
+                    -SnapshotPath $SnapshotPath `
+                    -SensorHelper $restoredSensorHelper
+            }
+            else {
+                Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy `
+                    -Snapshot $snapshot `
+                    -Name $restoredSensorHelper
+            }
         }
     }
     return $snapshot
@@ -12474,10 +12605,18 @@ function Recover-DefenseClawQuiescingIntent {
 }
 
 function Recover-DefenseClawPendingTransaction {
+    <#
+        -AllowDeferredActivation: the caller's lifecycle activates or removes
+        its own release next (Upgrade, Repair, Uninstall), so a standalone
+        recovery whose restored release cannot be reactivated may complete
+        with it stopped (Test-DefenseClawRecoveryActivationDeferral). The
+        result's activation_deferred says whether it did.
+    #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$AllowDeferredActivation
     )
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf)) {
         return [pscustomobject]@{
@@ -12517,9 +12656,16 @@ function Recover-DefenseClawPendingTransaction {
         }
     }
     $snapshotPath = [string]$pending.snapshot
-    $restored = Restore-DefenseClawTransactionWithManagedHooksRollback `
-        -SnapshotPath $snapshotPath `
-        -Layout $Layout
+    $script:DefenseClawRecoveryActivationDeferred = $false
+    $script:DefenseClawRecoveryActivationDeferrable = [bool]$AllowDeferredActivation
+    try {
+        $restored = Restore-DefenseClawTransactionWithManagedHooksRollback `
+            -SnapshotPath $snapshotPath `
+            -Layout $Layout
+    }
+    finally {
+        $script:DefenseClawRecoveryActivationDeferrable = $false
+    }
     $installRootCreated = (
         $null -ne $restored.PSObject.Properties['install_root_created'] -and
         [bool]$restored.install_root_created
@@ -12539,6 +12685,28 @@ function Recover-DefenseClawPendingTransaction {
         )
         install_root_created = [bool]$installRootCreated
         state_root_created = [bool]$stateRootCreated
+        activation_deferred = [bool]$script:DefenseClawRecoveryActivationDeferred
+    }
+}
+
+function Assert-DefenseClawRecoveryActivatedForAction {
+    <#
+        Repair reapplies the installed payload, which is the release recovery
+        just could not reactivate; running it would only repeat that failure.
+        Stop with the next step instead. Upgrade and Uninstall continue.
+    #>
+    param(
+        [Parameter(Mandatory)]$Recovery,
+        [Parameter(Mandatory)][string]$Action
+    )
+    $deferred = $Recovery.PSObject.Properties['activation_deferred']
+    if ($null -ne $deferred -and [bool]$deferred.Value -and $Action -eq 'Repair') {
+        throw (
+            'Repair recovered the pending transaction, but its restored release ' +
+            'could not be reactivated, so the DefenseClaw services stay stopped. ' +
+            'Next step: install this Setup''s release with upgrade (ensure does ' +
+            'this automatically).'
+        )
     }
 }
 
@@ -14396,6 +14564,699 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     return $report
 }
 
+function Test-DefenseClawLocalSystemToken {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        return [string]::Equals(
+            [string]$identity.User.Value,
+            $script:SystemSID,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    finally {
+        $identity.Dispose()
+    }
+}
+
+function Set-DefenseClawRecoveryGatewayCandidate {
+    <#
+        Standalone only. Names the gateway a pending transaction's recovery
+        may fall back to when the transaction's staged gateway fails its
+        managed-hook lifecycle restore or retire: the supplied -GatewayBinary,
+        or else the defenseclaw-gateway.exe beside the running installer, which
+        is the payload of the Setup (or protected stage) running this
+        lifecycle. Nothing is trusted here; the fallback verifies the file with
+        Get-DefenseClawRecoveryGatewayAdmission when it is needed.
+    #>
+    param(
+        [string]$GatewayBinary,
+        [string]$InstallerSource,
+        [switch]$AllowUnsigned
+    )
+    $script:DefenseClawRecoveryGatewayCandidate = $null
+    $script:DefenseClawRecoveryGatewayRuns = @()
+    $script:DefenseClawRecoveryGatewayRefusal = $null
+    $script:DefenseClawRecoveryActivationDeferrable = $false
+    $script:DefenseClawRecoveryActivationDeferred = $false
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $path = ''
+    if (-not [string]::IsNullOrWhiteSpace($GatewayBinary)) {
+        $path = [string]$GatewayBinary
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($InstallerSource)) {
+        try {
+            $beside = [IO.Path]::Combine(
+                [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($InstallerSource)),
+                'defenseclaw-gateway.exe'
+            )
+            if ([IO.File]::Exists($beside)) {
+                $path = $beside
+            }
+        }
+        catch {
+            $path = ''
+        }
+    }
+    $script:DefenseClawRecoveryGatewayCandidate = @{
+        path = $path
+        unsigned_scope = [bool]$AllowUnsigned
+    }
+}
+
+function New-DefenseClawRecoveryGatewayRefusal {
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Message
+    )
+    return [pscustomobject]@{
+        admitted = $false
+        code = $Code
+        message = $Message
+    }
+}
+
+function Get-DefenseClawRecoveryGatewayVersion {
+    <#
+        The release a gateway binary carries: the ProductVersion string of its
+        version resource, which every standalone build stamps with the release
+        (the Go lifecycle reads the installed release the same way). Empty
+        when the file is missing or has no version resource.
+    #>
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+    try {
+        if (-not [IO.File]::Exists($Path)) {
+            return ''
+        }
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion
+    }
+    catch {
+        return ''
+    }
+    if ($null -eq $version) {
+        return ''
+    }
+    return ([string]$version).Trim()
+}
+
+function ConvertTo-DefenseClawRecoveryGatewayRelease {
+    <#
+        Parses a release the way the Go lifecycle orders releases
+        (compareWindowsEnterpriseVersions): an optional leading v, one to four
+        dot-separated numbers, an optional -prerelease, and ignored +build
+        metadata. Returns $null for anything else.
+    #>
+    param([string]$Value)
+    $text = ([string]$Value).Trim()
+    if ($text.StartsWith('v', [StringComparison]::OrdinalIgnoreCase)) {
+        $text = $text.Substring(1)
+    }
+    $build = $text.IndexOf('+')
+    if ($build -ge 0) {
+        $text = $text.Substring(0, $build)
+    }
+    $prerelease = ''
+    $dash = $text.IndexOf('-')
+    if ($dash -ge 0) {
+        $prerelease = $text.Substring($dash + 1)
+        $text = $text.Substring(0, $dash)
+    }
+    $parts = $text.Split('.')
+    if ($parts.Count -lt 1 -or $parts.Count -gt 4) {
+        return $null
+    }
+    $numbers = @()
+    foreach ($part in $parts) {
+        if ($part -cnotmatch '^[0-9]{1,9}$') {
+            return $null
+        }
+        $numbers += [long]$part
+    }
+    return [pscustomobject]@{
+        numbers = $numbers
+        prerelease = $prerelease
+    }
+}
+
+function Compare-DefenseClawRecoveryGatewayRelease {
+    <#
+        Orders two parsed releases like compareWindowsEnterpriseVersions:
+        numerically with missing parts read as 0, then a prerelease before its
+        release, then prereleases by ordinal text. Returns -1, 0 or 1.
+    #>
+    param(
+        [Parameter(Mandatory)]$Left,
+        [Parameter(Mandatory)]$Right
+    )
+    $leftNumbers = @($Left.numbers)
+    $rightNumbers = @($Right.numbers)
+    $count = [Math]::Max($leftNumbers.Count, $rightNumbers.Count)
+    for ($index = 0; $index -lt $count; $index++) {
+        $a = [long]0
+        $b = [long]0
+        if ($index -lt $leftNumbers.Count) {
+            $a = [long]$leftNumbers[$index]
+        }
+        if ($index -lt $rightNumbers.Count) {
+            $b = [long]$rightNumbers[$index]
+        }
+        if ($a -lt $b) {
+            return -1
+        }
+        if ($a -gt $b) {
+            return 1
+        }
+    }
+    $leftPrerelease = [string]$Left.prerelease
+    $rightPrerelease = [string]$Right.prerelease
+    if ($leftPrerelease -ceq $rightPrerelease) {
+        return 0
+    }
+    if ($leftPrerelease -ceq '') {
+        return 1
+    }
+    if ($rightPrerelease -ceq '') {
+        return -1
+    }
+    return [Math]::Sign([string]::CompareOrdinal($leftPrerelease, $rightPrerelease))
+}
+
+function Test-DefenseClawRecoveryActivationDeferral {
+    <#
+        Standalone pending-transaction recovery only. Recovery restores the
+        release that wrote the transaction and reactivates it, which requires
+        that release's guardian to publish fresh full coverage. When the
+        restored release is itself the one that cannot (for example a guardian
+        that cannot republish one user's lost per-user state), every recovery
+        repeats the same failure and the deployment stays down with a pending
+        transaction. When the running Setup's gateway passes
+        Get-DefenseClawRecoveryGatewayAdmission (LocalSystem, a verified
+        payload, a different release that is not older), recovery instead
+        completes with the restored release stopped and disabled, and the
+        requested lifecycle activates the Setup's own release under the same
+        coverage gate. The decision is recorded like the gateway fallbacks;
+        a refused admission keeps the coverage failure.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Failure
+    )
+    if (-not [bool]$script:DefenseClawRecoveryActivationDeferrable -or
+        -not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $admission = Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout
+    if (-not [bool]$admission.admitted) {
+        $script:DefenseClawRecoveryGatewayRefusal = [ordered]@{
+            action = 'service-reactivation'
+            code = [string]$admission.code
+            message = [string]$admission.message
+        }
+        return $false
+    }
+    $source = [hashtable]$admission.source
+    $failureMessage = if ($Failure -is [Management.Automation.ErrorRecord]) {
+        [string]$Failure.Exception.Message
+    }
+    else {
+        [string]$Failure
+    }
+    $run = [ordered]@{
+        action = 'service-reactivation'
+        binary = [string]$Layout.GatewayPath
+        source = [string]$source.path
+        sha256 = [string]$admission.sha256
+        trust = [string]$admission.trust
+        signer_thumbprint = [string]$source.signer_thumbprint
+        product_version = [string]$admission.product_version
+        identity = 'NT AUTHORITY\SYSTEM'
+        replaced_sha256 = [string]$admission.replaced_sha256
+        staged_version = [string]$admission.staged_version
+        reason = 'restored_release_not_reactivated'
+        staged_error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $failureMessage `
+            -MaxLength 1024
+        outcome = 'deferred'
+        error = ''
+    }
+    $script:DefenseClawRecoveryGatewayRuns = @(
+        @($script:DefenseClawRecoveryGatewayRuns) + @($run)
+    )
+    $script:DefenseClawRecoveryActivationDeferred = $true
+    return $true
+}
+
+function Complete-DefenseClawDeferredRecoveryActivation {
+    <#
+        After Test-DefenseClawRecoveryActivationDeferral the restored release
+        stays stopped: stop and disable the sensor helper the restart had
+        started, and mark the snapshot quiesced again, so a crash before the
+        recovery completes cannot read it as an activation in progress.
+    #>
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [string]$SensorHelper
+    )
+    if (-not [string]::IsNullOrEmpty($SensorHelper)) {
+        Stop-DefenseClawService -Name $SensorHelper
+        Set-DefenseClawServiceStartMode -Name $SensorHelper -StartMode 4
+    }
+    Set-DefenseClawServiceActivationPhase `
+        -State $Snapshot `
+        -Path $SnapshotPath `
+        -Phase quiesced `
+        -ServicesQuiescedAt ([DateTime]::UtcNow.ToString('o'))
+}
+
+function Get-DefenseClawRecoveryGatewayAdmission {
+    <#
+        Decides whether a standalone recovery may rerun a managed-hook
+        lifecycle step with the running Setup's gateway after the staged
+        gateway failed it. The gateway must pass the checks an Install applies
+        to its payload (a protected administrator-owned source on a local NTFS
+        volume, and the standalone trust policy: a valid Authenticode
+        signature, pinned to the allowed signers when any are set, or in
+        hash_pinned mode the digest the payload manifest pins), and the
+        lifecycle must run as LocalSystem. Refusal codes:
+          no_payload           no gateway ships beside the running installer
+          unsigned_scope       an -AllowUnsigned certification run
+          not_local_system     the lifecycle does not run as LocalSystem
+          inside_install_root  the candidate is the installed payload
+          untrusted            the candidate fails the source or trust checks
+          same_binary          the candidate is the staged gateway that failed
+          version_unknown      the release of the candidate or of the staged
+                               gateway cannot be read
+          older_release        the candidate is an older release than the
+                               staged gateway
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $candidate = $script:DefenseClawRecoveryGatewayCandidate
+    if (-not (Test-DefenseClawStandaloneProfile) -or $null -eq $candidate) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code no_payload `
+            -Message 'this lifecycle has no Setup payload to recover with')
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$candidate.path)) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code no_payload `
+            -Message 'no DefenseClaw gateway ships beside the running installer')
+    }
+    if ([bool]$candidate.unsigned_scope) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code unsigned_scope `
+            -Message 'an -AllowUnsigned certification run does not verify payload trust')
+    }
+    if (-not (Test-DefenseClawLocalSystemToken)) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code not_local_system `
+            -Message 'recovery runs the Setup gateway only as LocalSystem')
+    }
+    try {
+        $candidatePath = Resolve-DefenseClawFullPath `
+            -Path ([string]$candidate.path) `
+            -MustExist `
+            -Leaf
+    }
+    catch {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code untrusted `
+            -Message (ConvertTo-DefenseClawBoundedDiagnostic `
+                -Value $_.Exception.Message `
+                -MaxLength 1024))
+    }
+    $installRoot = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+    if ([string]::Equals(
+            $candidatePath,
+            $installRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $candidatePath.StartsWith(
+            $installRoot + '\',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code inside_install_root `
+            -Message "the gateway beside the running installer is the installed payload: $candidatePath")
+    }
+    try {
+        # The same descriptor an Install builds for its gateway source:
+        # protected source path, standalone payload trust, and the digest and
+        # signer that every later use re-verifies.
+        $source = Get-DefenseClawSourceDescriptor `
+            -Path $candidatePath `
+            -Label 'recovery gateway executable' `
+            -Authenticode
+    }
+    catch {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code untrusted `
+            -Message (ConvertTo-DefenseClawBoundedDiagnostic `
+                -Value $_.Exception.Message `
+                -MaxLength 1024))
+    }
+    $sha256 = ([string]$source.sha256).ToLowerInvariant()
+    $stagedSHA256 = ''
+    if (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.GatewayPath `
+            -PathType Leaf) {
+        $stagedSHA256 = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $Layout.GatewayPath `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
+    if ($stagedSHA256 -ceq $sha256) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code same_binary `
+            -Message 'the running Setup gateway is the staged gateway that failed')
+    }
+    # Never run an older release over a newer release's transaction: the
+    # staged gateway is the release that wrote it, and within one journal
+    # schema an older release can still handle that state differently.
+    $version = Get-DefenseClawRecoveryGatewayVersion -Path $candidatePath
+    $stagedVersion = Get-DefenseClawRecoveryGatewayVersion `
+        -Path ([string]$Layout.GatewayPath)
+    $release = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $version
+    $stagedRelease = ConvertTo-DefenseClawRecoveryGatewayRelease -Value $stagedVersion
+    $shownVersion = ConvertTo-DefenseClawBoundedDiagnostic -Value $version -MaxLength 128
+    $shownStagedVersion = ConvertTo-DefenseClawBoundedDiagnostic -Value $stagedVersion -MaxLength 128
+    if ($null -eq $release -or $null -eq $stagedRelease) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code version_unknown `
+            -Message (
+                "the release of the running Setup gateway ($shownVersion) or of " +
+                "the staged gateway ($shownStagedVersion) is not a readable release " +
+                'version, so recovery cannot rule out running an older release'
+            ))
+    }
+    if ((Compare-DefenseClawRecoveryGatewayRelease `
+            -Left $release `
+            -Right $stagedRelease) -lt 0) {
+        return (New-DefenseClawRecoveryGatewayRefusal `
+            -Code older_release `
+            -Message "the running Setup gateway is release $shownVersion, older than the staged gateway's release $shownStagedVersion")
+    }
+    $trust = if ([string]$source.signature_status -ceq 'Valid') {
+        'authenticode'
+    }
+    else {
+        'hash_pinned'
+    }
+    return [pscustomobject]@{
+        admitted = $true
+        code = ''
+        message = ''
+        source = $source
+        sha256 = $sha256
+        trust = $trust
+        replaced_sha256 = $stagedSHA256
+        product_version = $version
+        staged_version = $stagedVersion
+    }
+}
+
+function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
+    <#
+        Runs one managed-hook lifecycle restore or retire of a pending
+        transaction's recovery. The step runs with the transaction's staged
+        gateway first. Secure Client stops there. In the standalone profile,
+        when the staged gateway fails the step (for example a release whose
+        retire refuses state it cannot repair) and the running Setup's own
+        gateway passes Get-DefenseClawRecoveryGatewayAdmission, that verified
+        gateway replaces the staged one at <InstallRoot>\bin, the only place
+        the hidden command runs from, and the step runs again. Generic file
+        rollback later restores the transaction's preimage of that path. Each
+        fallback, and why a fallback was declined, is recorded for the result
+        document and the lifecycle log; a declined fallback keeps the staged
+        gateway's error.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)]
+        [ValidateSet('restore', 'retire')]
+        [string]$Action
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return (Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $Action)
+    }
+    $stagedFailure = $null
+    try {
+        return (Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $Action)
+    }
+    catch {
+        $stagedFailure = $_
+    }
+    $admission = Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout
+    if (-not [bool]$admission.admitted) {
+        $script:DefenseClawRecoveryGatewayRefusal = [ordered]@{
+            action = $Action
+            code = [string]$admission.code
+            message = [string]$admission.message
+        }
+        throw $stagedFailure
+    }
+    $source = [hashtable]$admission.source
+    $run = [ordered]@{
+        action = $Action
+        binary = [string]$Layout.GatewayPath
+        source = [string]$source.path
+        sha256 = [string]$admission.sha256
+        trust = [string]$admission.trust
+        signer_thumbprint = [string]$source.signer_thumbprint
+        # The release of the gateway that runs the step. An ensure-driven
+        # repair records the staged release as the deployment's version.
+        product_version = [string]$admission.product_version
+        identity = 'NT AUTHORITY\SYSTEM'
+        replaced_sha256 = [string]$admission.replaced_sha256
+        staged_version = [string]$admission.staged_version
+        reason = 'staged_gateway_failed'
+        staged_error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $stagedFailure.Exception.Message `
+            -MaxLength 1024
+        outcome = 'started'
+        error = ''
+    }
+    $script:DefenseClawRecoveryGatewayRuns = @(
+        @($script:DefenseClawRecoveryGatewayRuns) + @($run)
+    )
+    try {
+        # Install-DefenseClawSourceDescriptor re-verifies the source (path,
+        # ACLs, digest, trust) immediately before the atomic copy, then the
+        # installed digest and signer.
+        Install-DefenseClawSourceDescriptor `
+            -Source $source `
+            -Destination $Layout.GatewayPath
+        # The copy carries the verified digest; it must also be the release
+        # that was admitted.
+        $installedVersion = Get-DefenseClawRecoveryGatewayVersion `
+            -Path ([string]$Layout.GatewayPath)
+        if ($installedVersion -cne [string]$admission.product_version) {
+            throw (
+                "the staged copy is release '$installedVersion', not the " +
+                "admitted release '$($admission.product_version)'"
+            )
+        }
+    }
+    catch {
+        $run.outcome = 'failed'
+        $run.error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 1024
+        throw (
+            "managed-hook lifecycle snapshot $Action failed with the staged " +
+            'gateway, and the verified Setup gateway could not be staged for ' +
+            "recovery: $($_.Exception.Message)"
+        )
+    }
+    try {
+        $report = Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $Action
+    }
+    catch {
+        $run.outcome = 'failed'
+        $run.error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 1024
+        throw (
+            "managed-hook lifecycle snapshot $Action failed with the staged " +
+            "gateway and again with the verified Setup gateway: $($_.Exception.Message)"
+        )
+    }
+    $run.outcome = 'succeeded'
+    return $report
+}
+
+function Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep {
+    <#
+        Runs the target-runtime rollback cleanup of a pending transaction's
+        recovery with the rule Invoke-DefenseClawManagedHooksLifecycleRecoveryStep
+        applies to managed-hook restore and retire: the transaction's staged
+        gateway runs it first, and Secure Client stops there. In the standalone
+        profile, when the staged gateway fails the cleanup (for example a
+        release whose cleanup refuses a targets.yaml the hook enumerator
+        republished after planning) and the running Setup's own gateway passes
+        Get-DefenseClawRecoveryGatewayAdmission, that verified gateway replaces
+        the staged one at <InstallRoot>\bin and the cleanup runs again. Generic
+        file rollback later restores the transaction's preimage of that path.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $invokeCleanup = {
+        Invoke-DefenseClawTargetRuntimeRollbackCleanup `
+            -SnapshotPath $SnapshotPath `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+    }
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return (& $invokeCleanup)
+    }
+    $stagedFailure = $null
+    try {
+        return (& $invokeCleanup)
+    }
+    catch {
+        $stagedFailure = $_
+    }
+    $action = 'target-runtime-cleanup'
+    $admission = Get-DefenseClawRecoveryGatewayAdmission -Layout $Layout
+    if (-not [bool]$admission.admitted) {
+        $script:DefenseClawRecoveryGatewayRefusal = [ordered]@{
+            action = $action
+            code = [string]$admission.code
+            message = [string]$admission.message
+        }
+        throw $stagedFailure
+    }
+    $source = [hashtable]$admission.source
+    $run = [ordered]@{
+        action = $action
+        binary = [string]$Layout.GatewayPath
+        source = [string]$source.path
+        sha256 = [string]$admission.sha256
+        trust = [string]$admission.trust
+        signer_thumbprint = [string]$source.signer_thumbprint
+        product_version = [string]$admission.product_version
+        identity = 'NT AUTHORITY\SYSTEM'
+        replaced_sha256 = [string]$admission.replaced_sha256
+        staged_version = [string]$admission.staged_version
+        reason = 'staged_gateway_failed'
+        staged_error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $stagedFailure.Exception.Message `
+            -MaxLength 1024
+        outcome = 'started'
+        error = ''
+    }
+    $script:DefenseClawRecoveryGatewayRuns = @(
+        @($script:DefenseClawRecoveryGatewayRuns) + @($run)
+    )
+    try {
+        Install-DefenseClawSourceDescriptor `
+            -Source $source `
+            -Destination $Layout.GatewayPath
+        $installedVersion = Get-DefenseClawRecoveryGatewayVersion `
+            -Path ([string]$Layout.GatewayPath)
+        if ($installedVersion -cne [string]$admission.product_version) {
+            throw (
+                "the staged copy is release '$installedVersion', not the " +
+                "admitted release '$($admission.product_version)'"
+            )
+        }
+    }
+    catch {
+        $run.outcome = 'failed'
+        $run.error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 1024
+        throw (
+            'target runtime rollback cleanup failed with the staged gateway, ' +
+            'and the verified Setup gateway could not be staged for recovery: ' +
+            $_.Exception.Message
+        )
+    }
+    try {
+        $result = & $invokeCleanup
+    }
+    catch {
+        $run.outcome = 'failed'
+        $run.error = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 1024
+        throw (
+            'target runtime rollback cleanup failed with the staged gateway ' +
+            "and again with the verified Setup gateway: $($_.Exception.Message)"
+        )
+    }
+    $run.outcome = 'succeeded'
+    return $result
+}
+
+function Add-DefenseClawRecoveryEvidenceToError {
+    <#
+        Standalone only. Attaches what a failed lifecycle knows about recovery
+        to its exception, for the installer's failure document: whether the
+        transaction is still pending, each fallback to the Setup gateway, and
+        why a fallback was declined. Best effort: it never replaces the
+        lifecycle error.
+    #>
+    param(
+        [Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    try {
+        $data = $ErrorRecord.Exception.Data
+        $data['DefenseClaw.TransactionPending'] = [bool](
+            Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.PendingPath `
+                -PathType Leaf
+        )
+        $runs = @(Get-DefenseClawRecoveryGatewayRunRecords)
+        if ($runs.Count -gt 0) {
+            $data['DefenseClaw.RecoveryGatewayRuns'] = $runs
+        }
+        if ($null -ne $script:DefenseClawRecoveryGatewayRefusal) {
+            $data['DefenseClaw.RecoveryGatewayRefusal'] = [pscustomobject](
+                $script:DefenseClawRecoveryGatewayRefusal
+            )
+        }
+    }
+    catch {
+        # The lifecycle error is the result; missing evidence only loses the
+        # recovery detail of the failure document.
+        return
+    }
+}
+
+function Get-DefenseClawRecoveryGatewayRunRecords {
+    return @(
+        @($script:DefenseClawRecoveryGatewayRuns) |
+            Microsoft.PowerShell.Core\ForEach-Object {
+                [pscustomobject]$_
+            }
+    )
+}
+
 function Get-DefenseClawManagedHooksLegacyActivationClassification {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -15524,6 +16385,249 @@ function New-DefenseClawRequiredRights {
     return $required
 }
 
+function Get-DefenseClawStandaloneManifestAdoption {
+    <#
+        Standalone only. The hook enumerator service republishes targets.yaml
+        whenever enrollment changes (a new user or agent, an agent update, a
+        deferred row), after the last lifecycle transaction bound the
+        deployment's managed-hook activation evidence to the manifest it
+        activated. The guardian then reconciles the new manifest and records
+        its SHA-256 in its protected activation record. When that record, the
+        guardian state and the protected authorization describe one complete,
+        failure-free reconcile of exactly the installed manifest, the drift is
+        the enumerator's own publication that the guardian already activated,
+        and the lifecycle may adopt it. Freshness is not required: a stopped
+        guardian (a quiesced or recovering transaction) still proves what it
+        last activated, and live readiness is probed separately. Anything else
+        keeps failing closed. Secure Client deployments never adopt.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)]$Activation,
+        [Parameter(Mandatory)][string]$InstalledManifestSHA256
+    )
+    $result = {
+        param([bool]$Ok, [string]$Reason, [int64]$TargetCount)
+        return [pscustomobject][ordered]@{
+            ok = $Ok
+            reason = $Reason
+            target_count = $TargetCount
+        }
+    }
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return & $result $false '' -1
+    }
+    if ([string]$Activation.state -cne 'activated') {
+        return & $result $false (
+            'the deployment was never activated, so no guardian record can ' +
+            'prove the republished manifest'
+        ) -1
+    }
+    $report = Get-DefenseClawGuardianStatusReport `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+    $retry = 'wait for the guardian''s next pass (about a minute) and retry'
+    $diagnostic = 'guardian status reported no records'
+    if ($null -ne $report -and
+        $null -ne $report.PSObject.Properties['errors']) {
+        $issues = @($report.errors | Microsoft.PowerShell.Core\Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_)
+        })
+        if ($issues.Count -gt 0) {
+            $diagnostic = ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
+        }
+    }
+    $records = @{}
+    foreach ($name in @('activation', 'state', 'authorization')) {
+        if ($null -eq $report -or
+            $null -eq $report.PSObject.Properties[$name] -or
+            $null -eq $report.$name) {
+            return & $result $false (
+                'the hook enumerator republished targets.yaml and the hook ' +
+                "guardian has no protected $name record for it ($diagnostic); $retry"
+            ) -1
+        }
+        $records[$name] = $report.$name
+    }
+    $field = {
+        param($Record, [string]$Name)
+        $property = $Record.PSObject.Properties[$Name]
+        if ($null -eq $property) {
+            return $null
+        }
+        return $property.Value
+    }
+    $count = {
+        param($Record, [string]$Name)
+        $value = & $field $Record $Name
+        if ($null -eq $value) {
+            # pending_count is omitted when zero.
+            if ($Name -ceq 'pending_count') {
+                return [int64]0
+            }
+            return [int64]-1
+        }
+        try {
+            return [Convert]::ToInt64($value)
+        }
+        catch {
+            return [int64]-1
+        }
+    }
+    $stamp = {
+        param($Record)
+        $value = & $field $Record 'updated_at'
+        if ($value -is [DateTime]) {
+            return ([DateTime]$value).ToUniversalTime().ToString('o')
+        }
+        return [string]$value
+    }
+    $guardianManifestSHA256 = [string](& $field $records.activation 'manifest_sha256')
+    if ($guardianManifestSHA256 -cne $InstalledManifestSHA256) {
+        return & $result $false (
+            'the hook enumerator republished targets.yaml and the hook guardian ' +
+            "last activated $guardianManifestSHA256, not the installed " +
+            "$InstalledManifestSHA256; $retry"
+        ) -1
+    }
+    $targetCount = & $count $records.activation 'target_count'
+    $activationStamp = & $stamp $records.activation
+    foreach ($name in @('activation', 'state', 'authorization')) {
+        $record = $records[$name]
+        $success = & $count $record 'success_count'
+        $failure = & $count $record 'failure_count'
+        $pending = & $count $record 'pending_count'
+        if (-not [bool](& $field $record 'ok') -or
+            $failure -ne 0 -or
+            $success -lt 0 -or
+            $pending -lt 0 -or
+            (& $count $record 'target_count') -ne $targetCount -or
+            $success + $pending -ne $targetCount -or
+            [string]::IsNullOrWhiteSpace($activationStamp) -or
+            (& $stamp $record) -cne $activationStamp) {
+            return & $result $false (
+                'the hook guardian has not completed one failure-free reconcile ' +
+                "of the republished targets.yaml ($name record; $diagnostic); $retry"
+            ) -1
+        }
+    }
+    if ($targetCount -lt 0 -or $targetCount -gt 384) {
+        return & $result $false 'guardian activation target count is outside its bound' -1
+    }
+    return & $result $true '' $targetCount
+}
+
+function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
+    <#
+        Standalone only. Runs under the lifecycle lock, after any pending
+        transaction was recovered and before Upgrade, Repair, Reconcile or
+        Uninstall opens its own transaction. When the enumerator republished
+        targets.yaml since the last transaction and the guardian has already
+        activated it (Get-DefenseClawStandaloneManifestAdoption), rebind the
+        committed activation evidence to that manifest, so every later exact
+        binding check of the transaction sees one manifest generation. Only
+        manifest_sha256 and target_count change; the state and the deployment
+        generation stay as recorded. Returns $true when it rebound.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    foreach ($path in @($Layout.PendingPath)) {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
+            return $false
+        }
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ManifestPath -PathType Leaf)) {
+        return $false
+    }
+    $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+        return $false
+    }
+    $activationProperty = $metadata.PSObject.Properties['managed_hooks_activation']
+    if ($null -eq $activationProperty -or $null -eq $activationProperty.Value) {
+        return $false
+    }
+    $activation = Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $activationProperty.Value
+    Assert-DefenseClawNoReparsePath -Path $Layout.ManifestPath
+    $installedManifestSHA256 = (
+        Microsoft.PowerShell.Utility\Get-FileHash `
+            -LiteralPath $Layout.ManifestPath `
+            -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ([string]$activation.manifest_sha256 -ceq $installedManifestSHA256) {
+        return $false
+    }
+    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Activation $activation `
+        -InstalledManifestSHA256 $installedManifestSHA256
+    if (-not [bool]$adoption.ok) {
+        throw (
+            'deployment managed-hook activation evidence does not bind installed targets.yaml' +
+            " ($([string]$adoption.reason))"
+        )
+    }
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        throw 'rebinding standalone managed-hook activation evidence requires PowerShell 7'
+    }
+    # Edit only the two binding fields of the exact committed JSON so every
+    # other recorded value keeps its type and text.
+    $raw = [IO.File]::ReadAllText($Layout.MetadataPath)
+    $document = [System.Text.Json.Nodes.JsonNode]::Parse($raw)
+    $record = $document['managed_hooks_activation']
+    if ($null -eq $record) {
+        throw 'deployment metadata lost its managed-hook activation record while rebinding'
+    }
+    $record['manifest_sha256'] =
+        [System.Text.Json.Nodes.JsonValue]::Create([string]$installedManifestSHA256)
+    $record['target_count'] =
+        [System.Text.Json.Nodes.JsonValue]::Create([int64]$adoption.target_count)
+    $options = [System.Text.Json.JsonSerializerOptions]::new()
+    $options.WriteIndented = $true
+    $options.Encoder = [System.Text.Encodings.Web.JavaScriptEncoder]::UnsafeRelaxedJsonEscaping
+    $json = $document.ToJsonString($options)
+    $temporary = "$($Layout.MetadataPath).new.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
+        Set-DefenseClawPathAcl `
+            -Path $temporary `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        Microsoft.PowerShell.Management\Move-Item `
+            -LiteralPath $temporary `
+            -Destination $Layout.MetadataPath `
+            -Force
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+    Set-DefenseClawPathAcl `
+        -Path $Layout.MetadataPath `
+        -Kind AdminFile `
+        -GatewayServiceSID $script:AdministratorsSID
+    $rebound = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
+    [void](Assert-DefenseClawManagedHooksActivationRecord `
+        -Record $rebound.managed_hooks_activation `
+        -ExpectedManifestSHA256 $installedManifestSHA256 `
+        -ExpectedTargetCount ([int64]$adoption.target_count) `
+        -ExpectedDeploymentGenerationID ([string]$activation.deployment_generation_id))
+    if ([string]$rebound.managed_hooks_activation.state -cne [string]$activation.state) {
+        throw 'rebinding changed the managed-hook activation state'
+    }
+    return $true
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -15573,7 +16677,20 @@ function Assert-DefenseClawEnterpriseDeployment {
     ).Hash.ToLowerInvariant()
     if ([string]$managedHooksActivation.manifest_sha256 -cne
         $installedManifestSHA256) {
-        throw 'deployment managed-hook activation evidence does not bind installed targets.yaml'
+        # Standalone: accept a manifest the enumerator republished after the
+        # last transaction once the guardian has activated it exactly.
+        $adoption = Get-DefenseClawStandaloneManifestAdoption `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Activation $managedHooksActivation `
+            -InstalledManifestSHA256 $installedManifestSHA256
+        if (-not [bool]$adoption.ok) {
+            $message = 'deployment managed-hook activation evidence does not bind installed targets.yaml'
+            if (-not [string]::IsNullOrWhiteSpace([string]$adoption.reason)) {
+                $message += " ($([string]$adoption.reason))"
+            }
+            throw $message
+        }
     }
     if ($RequireReadiness -and
         [string]$managedHooksActivation.state -cne 'activated') {
@@ -16740,6 +17857,16 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawQuarantinedRoots).Count -gt 0) {
             $status['quarantined_paths'] = @($script:DefenseClawQuarantinedRoots)
         }
+        # Which gateway this run's pending-transaction recovery ran, and why.
+        $recoveryRuns = @(Get-DefenseClawRecoveryGatewayRunRecords)
+        if ($recoveryRuns.Count -gt 0) {
+            $status['recovery_gateway_runs'] = $recoveryRuns
+        }
+        if ($null -ne $script:DefenseClawRecoveryGatewayRefusal) {
+            $status['recovery_gateway_refusal'] = [pscustomobject](
+                $script:DefenseClawRecoveryGatewayRefusal
+            )
+        }
         $status['claude_effective_policy_stale_reason'] = $(
             if ([string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
                 $null
@@ -17575,6 +18702,17 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\install-enterprise.ps1'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\DefenseClawEnterprise.psm1')
     )
+    if (Test-DefenseClawStandaloneProfile) {
+        # The standalone payload also installs the ACP bridge and the sensor
+        # helper under bin. Without them a committed standalone uninstall
+        # could never retire its InstallRoot ("committed InstallRoot contains
+        # unexpected content: ...\bin\defenseclaw-acp.exe"), and every retry
+        # failed the same way.
+        $files += @(
+            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-acp.exe'),
+            (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-sensor-helper.exe')
+        )
+    }
     return @{
         directories = @(
             $directories |
@@ -20501,10 +21639,14 @@ function Invoke-DefenseClawPreLayoutRecovery {
                 $pendingRecovery = Recover-DefenseClawPendingTransaction `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
-                    -GuardianServiceName $GuardianServiceName
+                    -GuardianServiceName $GuardianServiceName `
+                    -AllowDeferredActivation:($Action -in @('Upgrade', 'Repair', 'Uninstall'))
                 if (-not [bool]$pendingRecovery.recovered) {
                     throw 'authenticated pending transaction was not recovered before layout preparation'
                 }
+                Assert-DefenseClawRecoveryActivatedForAction `
+                    -Recovery $pendingRecovery `
+                    -Action $Action
                 if ([bool]$pendingRecovery.fresh_install_rollback) {
                     if ($Action -eq 'Uninstall' -and $Purge) {
                         $result = Get-DefenseClawLifecycleStatus `
@@ -21501,6 +22643,33 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     return $result
 }
 
+function Suspend-DefenseClawStandaloneSensorHelperForServicing {
+    <#
+        Standalone uninstall: New-DefenseClawTransaction disables and stops
+        the services it records (gateway, guardian, enumerator), not the
+        sensor helper, which a healthy deployment keeps automatic. The
+        servicing assertion before the services are deleted requires every
+        managed service disabled, so a standalone uninstall of a running
+        deployment failed there ("service DefenseClawSensorHelper startup
+        mode drift: 2, expected 4") and rolled back. Disable and stop the
+        helper once the gateway that depends on it is stopped. A rollback
+        brings it back with the restored gateway.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $name = [string]$Layout.SensorHelperServiceName
+    if ([string]::IsNullOrWhiteSpace($name) -or
+        -not (Test-DefenseClawServiceExists -Name $name)) {
+        return $false
+    }
+    Assert-DefenseClawStandaloneSensorHelperOwned -Name $name -Layout $Layout
+    Set-DefenseClawServiceStartMode -Name $name -StartMode 4
+    Stop-DefenseClawService -Name $name
+    return $true
+}
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -21587,6 +22756,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
             -PreserveManagedHooksTeardownJournal
+        [void](Suspend-DefenseClawStandaloneSensorHelperForServicing -Layout $Layout)
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -22593,6 +23763,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawAdministrator
     }
     $script:DefenseClawQuarantinedRoots = @()
+    Set-DefenseClawRecoveryGatewayCandidate `
+        -GatewayBinary $GatewayBinary `
+        -InstallerSource $InstallerSource `
+        -AllowUnsigned:$AllowUnsigned
     if ((Test-DefenseClawStandaloneProfile) -and
         $GatewayServiceName -ceq 'DefenseClawGateway' -and
         [string]::Equals($InstallRoot.TrimEnd('\'), [string]$entryProfileRoots.InstallRoot, [StringComparison]::OrdinalIgnoreCase) -and
@@ -22833,6 +24007,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     throw 'Reconcile recovered a failed initial install; run Install to create a deployment'
                 }
             }
+            [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName)
             return Invoke-DefenseClawReconcileLifecycle `
                 -Layout $layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -22913,7 +24090,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         $pendingRecovery = Recover-DefenseClawPendingTransaction `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AllowDeferredActivation:($Action -in @('Upgrade', 'Repair', 'Uninstall'))
+        Assert-DefenseClawRecoveryActivatedForAction `
+            -Recovery $pendingRecovery `
+            -Action $Action
         if ([bool]$pendingRecovery.fresh_install_rollback) {
             if ($Action -eq 'Uninstall' -and $Purge) {
                 $result = Get-DefenseClawLifecycleStatus `
@@ -22974,6 +24155,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             New-DefenseClawLayoutDirectories -Layout $layout
         }
 
+        if ($Action -in @('Upgrade', 'Repair', 'Uninstall')) {
+            [void](Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName)
+        }
         if ($Action -eq 'Uninstall') {
             return Invoke-DefenseClawUninstallLifecycle `
                 -Layout $layout `
@@ -22996,6 +24182,10 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -InstallRootCreatedForTransaction:$installRootCreatedForTransaction `
             -StateRootCreatedForTransaction:$stateRootCreatedForTransaction `
             -NoStart:($NoStart -or $DeferredConfig)
+    }
+    catch {
+        Add-DefenseClawRecoveryEvidenceToError -ErrorRecord $_ -Layout $layout
+        throw
     }
     finally {
         Exit-DefenseClawLifecycleLock -Lock $lifecycleLock

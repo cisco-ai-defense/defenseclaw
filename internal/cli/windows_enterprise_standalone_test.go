@@ -563,7 +563,7 @@ func TestWindowsEnterpriseLifecycleLogRotatesFiveGenerations(t *testing.T) {
 	for run := 0; run < 40; run++ {
 		result := enterprisestatus.New("status", "standalone", "windows", "1.4.0")
 		result.Finish("windows", 0)
-		path, err := writeWindowsEnterpriseLifecycleLog(directory, result)
+		path, err := writeWindowsEnterpriseLifecycleLog(directory, result, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1229,5 +1229,99 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if got := warnings(base + `,"user_registrations_pending":[` + strings.Join(many, ",") + `]}`); len(got) != 1 ||
 		!strings.Contains(got[0].Message, "25 user connector") || !strings.HasSuffix(got[0].Message, "; and 5 more") {
 		t.Fatalf("bounded list: %+v", got)
+	}
+}
+
+// A failed lifecycle that left its transaction pending names the exact
+// recovery command, states a permission failure plainly (the internal detail
+// stays in a lifecycle_diagnostic warning), and records which gateway the
+// recovery ran and why.
+func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
+	internalDetail := `managed Windows DACL on C:\Users\alice\.defenseclaw\hooks has 2 ACEs, expected 7`
+	failure := `managed-hook lifecycle snapshot retire failed: retire amp managed runtime generations for SID S-1-5-21-1-2-3-1017: ` + internalDetail
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": false, "action": "repair",
+		"error": failure, "errors": []string{failure},
+		"transaction_pending": true,
+		"recovery_gateway_refusal": map[string]string{
+			"action": "retire", "code": "not_local_system", "message": "recovery runs the Setup gateway only as LocalSystem",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+	opts := &windowsEnterpriseLifecycleOptions{configPath: `C:\Staging\config.yaml`}
+	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
+	if !result.TransactionPending || len(result.Errors) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	message := result.Errors[0].Message
+	for _, want := range []string{
+		`the permissions on C:\Users\alice\.defenseclaw\hooks are not the ones DefenseClaw set`,
+		"Next step: run the same Setup as LocalSystem",
+		`DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "ACEs") || strings.Contains(message, "DACL") {
+		t.Fatalf("error repeats internal detail: %q", message)
+	}
+	codes := map[string]string{}
+	for _, warning := range result.Warnings {
+		codes[warning.Code] = warning.Message
+	}
+	if !strings.Contains(codes["lifecycle_diagnostic"], internalDetail) || codes["recovery_gateway_not_used"] == "" {
+		t.Fatalf("warnings = %+v", result.Warnings)
+	}
+
+	// A successful recovery records the gateway it ran once, even when ensure
+	// applies the same report twice.
+	success, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "install", "installed": true, "transaction_pending": false,
+		"errors": []string{},
+		"recovery_gateway_runs": []map[string]string{{
+			"action": "retire", "binary": `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`,
+			"source": `C:\ProgramData\DefenseClaw-Enterprise-Setup-0f\defenseclaw-gateway.exe`,
+			"sha256": strings.Repeat("c", 64), "trust": "hash_pinned", "identity": `NT AUTHORITY\SYSTEM`,
+			"staged_error": failure, "outcome": "succeeded",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = parseWindowsEnterpriseInstallerReport(success)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result = enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{})
+	fallbacks := 0
+	for _, warning := range result.Warnings {
+		if warning.Code == "recovery_gateway_fallback" {
+			fallbacks++
+			if !strings.Contains(warning.Message, `binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`) ||
+				!strings.Contains(warning.Message, "trust hash_pinned") {
+				t.Fatalf("fallback warning %q", warning.Message)
+			}
+		}
+	}
+	if fallbacks != 1 || len(result.Errors) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+
+	// Status and verify keep their full detail and get no recovery step.
+	result = enterprisestatus.New("verify", "standalone", "windows", "1.0.42")
+	report, _ = parseWindowsEnterpriseInstallerReport(document)
+	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
+	if result.Errors[0].Message != failure {
+		t.Fatalf("verify error rewritten: %q", result.Errors[0].Message)
 	}
 }

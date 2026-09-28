@@ -96,6 +96,28 @@ func validateTrustedPolicyFile(opts Options, path string) error {
 	return validateTrustedAncestors(opts, path)
 }
 
+// The managed OpenCode plugin is an ordinary public policy file here:
+// OpenCode reads it with a read-only open.
+func validateOpenCodePluginFile(opts Options, path string) error {
+	return validateTrustedPolicyFile(opts, path)
+}
+
+func atomicWriteOpenCodePlugin(opts Options, path string, data []byte) error {
+	return atomicWrite(opts, path, data, true)
+}
+
+func openCodePluginLoadable(Options, string) (bool, error) { return true, nil }
+
+// Standard accounts hold no write right on the plugin here.
+func releaseOpenCodePluginName(Options, string) error { return nil }
+
+// The Amp machine folder is held on Windows only; /etc/ampcode and
+// /Library/Application Support/ampcode are already administrator-only.
+func reserveWindowsAmpMachineDir(Options) (State, error) { return State{}, nil }
+
+// InspectWindowsAmpMachineFolder reports nothing off Windows.
+func InspectWindowsAmpMachineFolder(Options) []string { return nil }
+
 func openNoFollow(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }

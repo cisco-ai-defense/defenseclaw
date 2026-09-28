@@ -78,7 +78,7 @@ The units:
 | `defenseclaw-gateway.service` | `defenseclaw`, no capabilities | Policy engine and hook API. `Type=notify` with a 60 s watchdog and `Restart=always`. Config, binaries and ledger are read-only to it. |
 | `defenseclaw-gateway-api.socket` | PID 1 | Listens on `127.0.0.1:18970` |
 | `defenseclaw-gateway-hook.socket` | PID 1 | Listens on `/run/defenseclaw-hook/hook.sock` |
-| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. |
+| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |

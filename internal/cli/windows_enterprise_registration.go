@@ -11,6 +11,8 @@
 package cli
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,8 +93,8 @@ func observeWindowsEnterpriseStandaloneResult(result *enterprisestatus.Result, o
 		result.AddWarning("registration_failed", err.Error())
 		// AddWarning does not change OK; restore the computed exit code.
 	}
-	writeWindowsEnterpriseEvent(result)
-	path, err := appendWindowsEnterpriseLifecycleLog(result)
+	event := writeWindowsEnterpriseEvent(result)
+	path, err := appendWindowsEnterpriseLifecycleLog(result, event)
 	if err != nil {
 		result.AddWarning("lifecycle_log_failed", err.Error())
 		return ""
@@ -385,27 +387,66 @@ func windowsEnterpriseEventFor(result *enterprisestatus.Result) (uint32, string,
 	return 0, "", false
 }
 
-func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) {
+// windowsEnterpriseEventRecord binds one Application-log event to the
+// lifecycle log line of the same run. Any account can write Application-log
+// entries under any source name, including "DefenseClaw Enterprise", so an
+// event alone proves nothing. Each DefenseClaw event therefore ends
+// with "record <id>", and the lifecycle log, which only administrators and
+// LocalSystem can write, stores the same id with the event ID and the
+// SHA-256 of the exact message: an entry without a record, or whose record
+// the log does not hold with the same digest, did not come from DefenseClaw.
+type windowsEnterpriseEventRecord struct {
+	ID     uint32 `json:"id"`
+	Record string `json:"record"`
+	SHA256 string `json:"sha256"`
+}
+
+// Seams for the event writer; tests replace them.
+var (
+	windowsEnterpriseEventRecordID = func() (string, error) {
+		value := make([]byte, 16)
+		if _, err := rand.Read(value); err != nil {
+			return "", err
+		}
+		return hex.EncodeToString(value), nil
+	}
+	windowsEnterpriseEventWriter = writeWindowsEnterpriseApplicationEvent
+)
+
+// writeWindowsEnterpriseEvent writes the run's Application-log event and
+// returns its record for the lifecycle log, or nil when no event was written.
+func writeWindowsEnterpriseEvent(result *enterprisestatus.Result) *windowsEnterpriseEventRecord {
 	id, severity, ok := windowsEnterpriseEventFor(result)
 	if !ok {
-		return
+		return nil
 	}
+	record, err := windowsEnterpriseEventRecordID()
+	if err != nil {
+		return nil
+	}
+	message := windowsEnterpriseEventMessage(result) + "\r\nrecord " + record
+	if err := windowsEnterpriseEventWriter(id, severity, message); err != nil {
+		return nil
+	}
+	return &windowsEnterpriseEventRecord{ID: id, Record: record, SHA256: windowsEnterpriseEventDigest(message)}
+}
+
+func writeWindowsEnterpriseApplicationEvent(id uint32, severity, message string) error {
 	// An existing source is the normal case; any other install error just
 	// means the event is written without a registered message file.
 	_ = eventlog.InstallAsEventCreate(windowsEnterpriseEventSrc, eventlog.Error|eventlog.Warning|eventlog.Info)
 	log, err := eventlog.Open(windowsEnterpriseEventSrc)
 	if err != nil {
-		return
+		return err
 	}
 	defer log.Close()
-	message := windowsEnterpriseEventMessage(result)
 	switch severity {
 	case "error":
-		_ = log.Error(id, message)
+		return log.Error(id, message)
 	case "warning":
-		_ = log.Warning(id, message)
+		return log.Warning(id, message)
 	default:
-		_ = log.Info(id, message)
+		return log.Info(id, message)
 	}
 }
 
@@ -479,7 +520,7 @@ func ensureWindowsEnterpriseLogDirectory(directory string) error {
 // appendWindowsEnterpriseLifecycleLog appends one JSON line per run, keeps
 // five 5 MiB generations, and replaces last-result.json with the full
 // result.
-func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result) (string, error) {
+func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result, event *windowsEnterpriseEventRecord) (string, error) {
 	directory, err := windowsEnterpriseLogDirectory()
 	if err != nil {
 		return "", err
@@ -487,10 +528,10 @@ func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result) (strin
 	if err := ensureWindowsEnterpriseLogDirectory(directory); err != nil {
 		return "", err
 	}
-	return writeWindowsEnterpriseLifecycleLog(directory, result)
+	return writeWindowsEnterpriseLifecycleLog(directory, result, event)
 }
 
-func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestatus.Result) (string, error) {
+func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestatus.Result, event *windowsEnterpriseEventRecord) (string, error) {
 	path := filepath.Join(directory, windowsEnterpriseLogName)
 	result.LogPath = path
 	document, err := json.Marshal(result)
@@ -498,9 +539,10 @@ func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestat
 		return "", err
 	}
 	line, err := json.Marshal(struct {
-		Time   string                   `json:"time"`
-		Result *enterprisestatus.Result `json:"result"`
-	}{Time: windowsEnterpriseNow().UTC().Format(time.RFC3339Nano), Result: result})
+		Time   string                        `json:"time"`
+		Event  *windowsEnterpriseEventRecord `json:"event,omitempty"`
+		Result *enterprisestatus.Result      `json:"result"`
+	}{Time: windowsEnterpriseNow().UTC().Format(time.RFC3339Nano), Event: event, Result: result})
 	if err != nil {
 		return "", err
 	}

@@ -139,6 +139,14 @@ type SetupOpts struct {
 	// standalone guardian sets it; per-user installs, the Secure Client
 	// profile and the unix hook socket leave it false.
 	ManagedListenerProof bool
+	// ClaudeAllowManagedHooksOnly adds "allowManagedHooksOnly": true to the
+	// Claude Code managed hook policy, so Claude Code runs only managed hooks
+	// and a user or project hook cannot rewrite tool input (updatedInput)
+	// after DefenseClaw inspected it. The Windows standalone lifecycle sets
+	// it when the claudecode machine policy is managed_hooks_only: enforce
+	// (the default), as the Unix drop-in does. The Secure Client profile and
+	// per-user installs leave it false, so their policy bytes are unchanged.
+	ClaudeAllowManagedHooksOnly bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,

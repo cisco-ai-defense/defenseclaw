@@ -219,13 +219,7 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view Facts, ok bo
 	commands := cloneCommands(twin.Commands)
 	for index := range commands {
 		command := &commands[index]
-		if command.Dialect != DialectPOSIX ||
-			command.Kind != CommandKindProcess ||
-			command.Effect != EffectExecute ||
-			command.ControlFlowUncertain || !command.ArgvComplete ||
-			len(command.Argv) == 0 || command.Argv[0] == "" ||
-			command.Executable == "" || command.Program == "" ||
-			len(command.Arguments) != len(command.Argv) {
+		if !plainPOSIXProcess(*command) {
 			return Facts{}, false
 		}
 		kept := make([]RedirectFact, 0, len(command.Redirects))
@@ -254,6 +248,18 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view Facts, ok bo
 		return Facts{}, false
 	}
 	return view, true
+}
+
+// plainPOSIXProcess reports whether command is a POSIX process with a static
+// argv and program that is certain to execute.
+func plainPOSIXProcess(command CommandFact) bool {
+	return command.Dialect == DialectPOSIX &&
+		command.Kind == CommandKindProcess &&
+		command.Effect == EffectExecute &&
+		!command.ControlFlowUncertain && command.ArgvComplete &&
+		len(command.Argv) != 0 && command.Argv[0] != "" &&
+		command.Executable != "" && command.Program != "" &&
+		len(command.Arguments) == len(command.Argv)
 }
 
 // mentionsString reports whether any string reachable from value contains
