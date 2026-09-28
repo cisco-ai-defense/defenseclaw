@@ -37,8 +37,6 @@ from defenseclaw.tui.services.policy_state import (
 )
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
-_HINT = "up/down move  1-9 jump  enter choose  esc close"
-
 _BLOCK_WORDS = {
     "CRITICAL": "Block CRITICAL findings only",
     "HIGH+": "Block HIGH and CRITICAL",
@@ -50,11 +48,11 @@ _ALERT_WORDS = {
     "LOW+": "Alert on everything down to LOW",
 }
 _HILT_WORDS = {
-    "off": "Never ask; findings are blocked, alerted or allowed",
-    "CRITICAL": "Ask a human for CRITICAL findings the block level lets through",
-    "HIGH+": "Ask a human for HIGH and above (below the block level)",
-    "MEDIUM+": "Ask a human for MEDIUM and above (below the block level)",
-    "LOW+": "Ask a human for every finding below the block level",
+    "off": "Never ask; findings block, alert or pass",
+    "CRITICAL": "Ask for CRITICAL if the block level lets it by",
+    "HIGH+": "Ask for HIGH and up, below the block level",
+    "MEDIUM+": "Ask for MEDIUM and up, below the block level",
+    "LOW+": "Ask for every finding below the block level",
 }
 
 
@@ -174,7 +172,7 @@ class LevelPickerScreen(ModalScreen[str | None]):
                 yield Static(rich_escape(self.subtitle), id="level-picker-subtitle")
             yield Static("", id="level-picker-list")
             yield Static("", id="level-picker-preview")
-            yield Static(_HINT, id="level-picker-hint")
+            yield Static(f"up/down move  1-{len(self.choices)} jump  enter choose  esc close", id="level-picker-hint")
 
     def on_mount(self) -> None:
         self._refresh()

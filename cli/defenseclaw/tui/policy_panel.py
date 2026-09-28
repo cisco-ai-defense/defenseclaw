@@ -105,8 +105,8 @@ POLICY_BUTTON_KEYS: dict[str, str] = {
     "policies-refresh": "r",
 }
 
-# Consequence modals list at most this many of a pack's rules.
-_MODAL_RULES = 5
+# Consequence modals list at most this many of a pack's rules (80x24).
+_MODAL_RULES = 3
 
 
 @dataclass
@@ -760,7 +760,7 @@ def mode_change_modal(model: PoliciesPanelModel, row: Any, new: str) -> Conseque
         if own:
             details.append("Connectors with their own mode keep it: " + ", ".join(own) + ".")
     details.append(_run_line(intent))
-    consequence = f"{scope} stops blocking: findings are only logged." if weaker else ""
+    consequence = f"This weakens protection: {scope} stops blocking; findings are only logged." if weaker else ""
     title = f"Switch {connector} to {new} mode?" if connector else f"Set the global guardrail mode to {new}?"
     return _modal(title, f"{old} → {new}", details, consequence, _confirm("mode", "s", f"Switch to {new}", weaker))
 
@@ -887,7 +887,11 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
         current_path = str(getattr(row, "pack_path", "") or "")
         base = str(getattr(row, "pack", "") or "-")
         target = composed_pack_path(model, row)
-        details.append(f"Builds {target} from {base} and the opt-in packs, checks it, then switches {where} to it.")
+        folder = os.path.join("guardrail", os.path.basename(target))
+        details.append(
+            f"Builds {folder} in your policy folder from {base} and the opt-in packs, "
+            f"checks it, then switches {where} to it."
+        )
         if not connector:
             own = model.own_setting("pack")
             if own:

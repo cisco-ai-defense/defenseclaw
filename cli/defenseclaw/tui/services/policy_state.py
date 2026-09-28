@@ -229,9 +229,10 @@ def posture_summary(scope: str, mode: str, block_at: str, alert_at: str, hilt: s
     if not parts:
         parts = ["allow every severity" if observe else "allows every severity"]
     clause = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+    subject = "The global default" if scope in {"", "global"} else scope
     if observe:
-        return f"{scope} logs only; in action mode it would {clause}."
-    return f"{scope} {clause}."
+        return f"{subject} logs only; in action mode it would {clause}."
+    return f"{subject} {clause}."
 
 
 def matrix_lines(mode: str, block_at: str, alert_at: str, hilt: str) -> tuple[str, ...]:
