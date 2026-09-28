@@ -36,6 +36,7 @@ struct SandboxModelTests {
         unblockedDestinationsAreNoLongerOffered()
         askTextIsTheDaemonsSentence()
         notificationUnblockNeedsAnUnlockedMac()
+        noAsksTextHoldsForEveryPackAndMatchesTheTUI()
         if failureCount > 0 {
             FileHandle.standardError.write("\(failureCount) failure(s)\n".data(using: .utf8)!)
             exit(1)
@@ -273,6 +274,32 @@ struct SandboxModelTests {
         expect(gone.recentBlocks.isEmpty, "a deleted sandbox's block is not offered")
         expect(SandboxFormat.hostMatches("*.example.com", "api.example.com"), "wildcard subdomain")
         expect(!SandboxFormat.hostMatches("*.example.com", "example.com"), "wildcard is subdomains only")
+    }
+
+    /// Doors into the machine ask in every pack; balanced also asks for hosts
+    /// off its allowlist and strict for every destination. The TUI's Asks view
+    /// says the same (sandbox_state.NO_ASKS_TEXT).
+    private static func noAsksTextHoldsForEveryPackAndMatchesTheTUI() {
+        let text = SandboxSnapshot.noAsksText
+        expect(!text.contains("Only") && text.contains("localhost ports") && text.contains("balanced")
+               && text.contains("strict"), "no-asks text covers every pack: \(text)")
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let python = (try? String(
+            contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/services/sandbox_state.py"),
+            encoding: .utf8
+        )) ?? ""
+        guard let start = python.range(of: "NO_ASKS_TEXT = ("),
+              let end = python.range(of: "\n)", range: start.upperBound..<python.endIndex)
+        else {
+            expect(false, "NO_ASKS_TEXT was not found in sandbox_state.py")
+            return
+        }
+        let body = String(python[start.upperBound..<end.lowerBound])
+        let literal = try! NSRegularExpression(pattern: #""([^"]*)""#)
+        let tui = literal.matches(in: body, range: NSRange(body.startIndex..., in: body)).compactMap { match in
+            Range(match.range(at: 1), in: body).map { String(body[$0]) }
+        }.joined()
+        expect(tui == text, "the app's no-asks text differs from the TUI's: \(tui)")
     }
 
     private static func askTextIsTheDaemonsSentence() {

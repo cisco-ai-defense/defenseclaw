@@ -194,6 +194,10 @@ struct SandboxNotification: Sendable, Hashable {
 struct SandboxSnapshot: Sendable {
     static let feedLimit = 200
     static let notifyWindow: TimeInterval = 60
+    /// The Asks card with nothing waiting, as the TUI says it (NO_ASKS_TEXT):
+    /// what asks depends on each sandbox's pack.
+    static let noAsksText = "No asks are waiting. Doors into your machine or network (localhost ports, private IPs) ask; "
+        + "so do hosts off the allowlist with the balanced pack, and every new destination with strict."
 
     var status = SandboxStatus()
     var sandboxes: [SandboxRow] = []

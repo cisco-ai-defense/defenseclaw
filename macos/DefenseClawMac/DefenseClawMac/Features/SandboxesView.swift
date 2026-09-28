@@ -205,7 +205,7 @@ struct SandboxesView: View {
     private var asksCard: some View {
         DCCard("Asks", systemImage: "questionmark.circle") {
             if snapshot.asks.isEmpty {
-                Text("No asks are waiting. Only doors into your machine or network (localhost ports, private IPs) ask.")
+                Text(SandboxSnapshot.noAsksText)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {

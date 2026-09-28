@@ -412,6 +412,17 @@ def test_no_asks() -> None:
     assert model.handle_key("a").hint == "No asks are waiting."
 
 
+def test_no_asks_text_holds_for_every_pack() -> None:
+    # Doors into the machine ask in every pack; balanced also asks for hosts
+    # off its allowlist and strict for every destination (packs approvals mode).
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [])
+    model.view = "asks"
+    text = model.empty_state()
+    assert text.startswith("No asks are waiting.") and "Only" not in text
+    assert "localhost ports" in text and "balanced" in text and "strict" in text
+
+
 @pytest.mark.parametrize(
     ("cursor", "key", "kind", "hint"),
     [

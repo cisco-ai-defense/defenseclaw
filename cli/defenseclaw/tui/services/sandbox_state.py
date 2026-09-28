@@ -38,6 +38,13 @@ TOAST_DEDUPE_SECONDS = 60.0
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
 # sandboxapi.HooksUnreachableWarning.
 HOOKS_UNREACHABLE_WARNING = "DefenseClaw hooks are not reaching the daemon; every tool call is being blocked"
+# The Asks view with nothing waiting: what asks depends on each sandbox's pack
+# (its approvals mode: open auto, balanced triage, strict manual). The macOS
+# app's Asks card says the same (SandboxSnapshot.noAsksText).
+NO_ASKS_TEXT = (
+    "No asks are waiting. Doors into your machine or network (localhost ports, private IPs) ask; "
+    "so do hosts off the allowlist with the balanced pack, and every new destination with strict."
+)
 
 _RUNNING_PHASES = frozenset({"ready", "running"})
 # Harness command names, for narrow tables.
@@ -1021,7 +1028,7 @@ class SandboxesPanelModel:
         if self.view == "activity":
             return "No activity yet. Destinations, blocks, tool blocks and findings appear here as they happen."
         if self.view == "asks":
-            return "No asks are waiting. Only doors into your machine or network (localhost ports, private IPs) ask."
+            return NO_ASKS_TEXT
         if self.state() == "ready":
             return "No sandboxes yet. Press n to start one, or run: cd <project> && defenseclaw sandbox run claude"
         return ""
