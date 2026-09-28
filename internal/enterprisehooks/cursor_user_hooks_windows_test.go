@@ -6,7 +6,6 @@
 package enterprisehooks
 
 import (
-	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -205,6 +204,33 @@ func TestRemoveWindowsCursorPerUserHookRegistrationsRefusesFilesItShouldNotRewri
 	assertWindowsCursorTestFileAbsent(t, f.backup)
 }
 
+// redirectWindowsCursorTestStderr points os.Stderr at a new file for the rest
+// of the test, the way the guardian service points it at hook-guardian.log
+// after this package is loaded. The returned function reads what was written
+// since its previous call.
+func redirectWindowsCursorTestStderr(t *testing.T) func() string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "hook-guardian.log")
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	os.Stderr = file
+	t.Cleanup(func() {
+		os.Stderr = original
+		_ = file.Close()
+	})
+	seen := 0
+	return func() string {
+		t.Helper()
+		all := readWindowsCursorTestFile(t, path)
+		fresh := all[seen:]
+		seen = len(all)
+		return fresh
+	}
+}
+
 func TestCleanupWindowsCursorPerUserHookRegistrationsRunsAsTheTargetAndLogs(t *testing.T) {
 	f := newWindowsCursorUserHooksFixture(t)
 	sid, err := windows.StringToSid("S-1-5-21-1000000001-1000000002-1000000003-1001")
@@ -213,17 +239,16 @@ func TestCleanupWindowsCursorPerUserHookRegistrationsRunsAsTheTargetAndLogs(t *t
 	}
 	var impersonated []string
 	originalImpersonation := windowsEnterpriseTargetImpersonation
-	originalLog := windowsCursorUserHookCleanupLog
-	var log bytes.Buffer
 	windowsEnterpriseTargetImpersonation = func(target *windows.SID, home string, fn func() error) error {
 		impersonated = append(impersonated, target.String()+"|"+home)
 		return fn()
 	}
-	windowsCursorUserHookCleanupLog = &log
 	t.Cleanup(func() {
 		windowsEnterpriseTargetImpersonation = originalImpersonation
-		windowsCursorUserHookCleanupLog = originalLog
 	})
+	// The lines must reach the file os.Stderr names when they are written,
+	// not the stderr the process started with.
+	logged := redirectWindowsCursorTestStderr(t)
 	target := windowsGenericManagedTarget{home: f.home, dataDir: f.dataDir, sid: sid}
 
 	f.write(t, f.hooks, `{"version":1,"hooks":{"preToolUse":[`+f.entry(t)+`]}}`)
@@ -234,31 +259,29 @@ func TestCleanupWindowsCursorPerUserHookRegistrationsRunsAsTheTargetAndLogs(t *t
 	if got := readWindowsCursorTestFile(t, f.hooks); got != `{"version":1,"hooks":{"preToolUse":[]}}` {
 		t.Fatalf("hooks.json after cleanup = %q", got)
 	}
-	line := log.String()
+	line := logged()
 	for _, want := range []string{"[enterprise-hooks] Cursor: removed 1 per-user DefenseClaw hook registration(s)", f.hooks, f.backup} {
 		if !strings.Contains(line, want) {
-			t.Fatalf("log %q does not contain %q", line, want)
+			t.Fatalf("guardian log %q does not contain %q", line, want)
 		}
 	}
 
 	// A file it cannot clean is left as it was, the install goes on, and
 	// the reason is logged.
-	log.Reset()
 	invalid := `{"version":1,"hooks":{"preToolUse":[` + f.entry(t) + `]}`
 	f.write(t, f.hooks, invalid)
 	cleanupWindowsCursorPerUserHookRegistrations(target)
 	if got := readWindowsCursorTestFile(t, f.hooks); got != invalid {
 		t.Fatalf("hooks.json = %q, want it unchanged", got)
 	}
-	if line := log.String(); !strings.Contains(line, "[enterprise-hooks] WARN: Cursor: per-user DefenseClaw hook registrations in "+f.hooks+" were not removed") {
-		t.Fatalf("log = %q, want a warning naming the file", line)
+	if line := logged(); !strings.Contains(line, "[enterprise-hooks] WARN: Cursor: per-user DefenseClaw hook registrations in "+f.hooks+" were not removed") {
+		t.Fatalf("guardian log = %q, want a warning naming the file", line)
 	}
 
 	// Nothing to remove: no log line.
-	log.Reset()
 	f.write(t, f.hooks, `{"version":1,"hooks":{}}`)
 	cleanupWindowsCursorPerUserHookRegistrations(target)
-	if log.Len() != 0 {
-		t.Fatalf("log = %q, want nothing for a file without DefenseClaw entries", log.String())
+	if line := logged(); line != "" {
+		t.Fatalf("guardian log = %q, want nothing for a file without DefenseClaw entries", line)
 	}
 }

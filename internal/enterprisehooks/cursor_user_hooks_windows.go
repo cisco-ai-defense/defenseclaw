@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,8 +28,6 @@ type windowsCursorUserHookCleanup struct {
 	backup  string
 	removed []connector.CursorUserHookRemoval
 }
-
-var windowsCursorUserHookCleanupLog io.Writer = os.Stderr
 
 // cleanupWindowsCursorPerUserHookRegistrations removes the registrations
 // that per-user DefenseClaw setup left in the target user's
@@ -57,10 +54,14 @@ func cleanupWindowsCursorPerUserHookRegistrations(target windowsGenericManagedTa
 	logWindowsCursorPerUserHookCleanup(target.home, cleanup, err)
 }
 
+// logWindowsCursorPerUserHookCleanup writes to os.Stderr as it is when the
+// line is written. The guardian service points os.Stderr at its log file
+// after this package is loaded, so a writer saved at package load would
+// still be the service's original stderr, which has no destination.
 func logWindowsCursorPerUserHookCleanup(home string, cleanup windowsCursorUserHookCleanup, err error) {
 	if err != nil {
 		fmt.Fprintf(
-			windowsCursorUserHookCleanupLog,
+			os.Stderr,
 			"[enterprise-hooks] WARN: Cursor: per-user DefenseClaw hook registrations in %s were not removed: %v; "+
 				"the managed Cursor hook denies tool calls until they are removed from that file\n",
 			filepath.Join(home, ".cursor", "hooks.json"),
@@ -81,7 +82,7 @@ func logWindowsCursorPerUserHookCleanup(home string, cleanup windowsCursorUserHo
 	}
 	sort.Strings(names)
 	fmt.Fprintf(
-		windowsCursorUserHookCleanupLog,
+		os.Stderr,
 		"[enterprise-hooks] Cursor: removed %d per-user DefenseClaw hook registration(s) running %s from %s; "+
 			"the previous file is kept at %s\n",
 		len(cleanup.removed),
