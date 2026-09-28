@@ -1170,6 +1170,17 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
 Running the installed CLI is still valid for a broker/gateway/hook-only upgrade when
 `--cli-binary` is omitted.
 
+Upgrade moves forward only. Do not run an earlier release's installer against a
+deployment this release installed or attested. The application-control
+evidence this release writes uses schema 3 and the Claude 2.1.154 client
+floor, which earlier releases such as 26.8.4 do not accept, so every lifecycle
+action of such a release, Uninstall included, stops before doing any work.
+Such a release also cannot remove the owned `DisableSelfUpdate` machine
+policy. To
+return to an earlier release, run `Uninstall` with this release's installer,
+then `Install` the earlier release and repeat its live Claude proof and
+attestations.
+
 Only an administrator can remove the service registration:
 
 ```powershell

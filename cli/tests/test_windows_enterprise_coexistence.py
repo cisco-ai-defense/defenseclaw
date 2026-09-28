@@ -83,6 +83,16 @@ def test_lifecycle_owns_the_self_update_policy_without_taking_over() -> None:
     assert remove_at < cleanup.index("Remove-DefenseClawManagedTree")
     assert "Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName" in cleanup
 
+    # Uninstall -Purge without a StateRoot never reaches the committed cleanup;
+    # the exact-scope recovery purge releases the owned value itself, only for
+    # the production scope and only after every exact service is gone.
+    purge = function_body(module, "Invoke-DefenseClawExactScopeRecoveryPurge")
+    release_at = purge.index("Remove-DefenseClawOwnedSelfUpdatePolicy")
+    assert purge.rindex("Remove-DefenseClawService -Name $name") < release_at
+    gate = purge.rindex("if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {", 0, release_at)
+    assert "refused to release the self-update policy while service exists" in purge[gate:release_at]
+    assert release_at < purge.index("exact_scope_recovery = $true")
+
 
 def test_every_per_user_gateway_start_path_refuses_beside_enterprise() -> None:
     daemon = read(DAEMON)
@@ -186,5 +196,6 @@ def test_self_update_policy_smoke_runs_on_every_engine(engine: str | None) -> No
         "changed_policy_relinquished",
         "unrelated_policy_preserved",
         "interrupted_transitions_completed",
+        "exact_scope_purge_releases_policy",
     ):
         assert report[field] is True, field

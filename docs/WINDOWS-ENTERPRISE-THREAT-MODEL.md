@@ -757,8 +757,11 @@ authority.
    foreground run all refuse. A production deployment also owns
    `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1`. It never
    changes a value that Group Policy or another administrator already set, and
-   Uninstall removes the value only if it still carries the deployment's owner
-   marker. Two availability residuals remain. A per-user install from an
+   Uninstall, including the `Uninstall -Purge` exact-scope recovery that runs
+   when StateRoot is gone, removes the value only if it still carries the
+   deployment's owner marker. An earlier enterprise release that predates the
+   policy cannot remove it, so returning to such a release means uninstalling
+   with the current release first. Two availability residuals remain. A per-user install from an
    earlier release has no coexistence check: its logon helper (the
    `DefenseClawGateway` value under
    `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and its hook

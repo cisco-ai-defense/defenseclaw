@@ -23297,6 +23297,26 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         $name = [string]$roleServiceNames[$role]
         Remove-DefenseClawService -Name $name
     }
+    # Every exact managed service is gone, so this scope no longer owns the
+    # per-user self-update policy. Only a value that still carries the
+    # deployment's owner marker is removed; a Group Policy or MDM value stays.
+    if (Test-DefenseClawProductionGatewayService -GatewayServiceName $GatewayServiceName) {
+        foreach ($name in $expectedServiceNames) {
+            if (Test-DefenseClawServiceExists -Name ([string]$name)) {
+                throw "exact-scope purge refused to release the self-update policy while service exists: $name"
+            }
+        }
+        try {
+            [void](Remove-DefenseClawOwnedSelfUpdatePolicy)
+        }
+        catch {
+            throw (
+                'Uninstall -Purge removed the managed services, but the owned ' +
+                'DisableSelfUpdate machine policy could not be removed; retry ' +
+                "Uninstall -Purge: $($_.Exception.Message)"
+            )
+        }
+    }
     foreach ($path in @($requestPath, $reportPath)) {
         if (Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $path `

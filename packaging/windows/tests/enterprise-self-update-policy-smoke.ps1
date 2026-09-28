@@ -190,14 +190,142 @@ finally {
     }
 }
 
+# Uninstall -Purge without a StateRoot takes the exact-scope recovery path,
+# which used to remove the services and InstallRoot but leave the owned policy
+# behind. Every service, SCM, IPC, native-cleanup, and registry operation is
+# stubbed; the purge only records what it would have done.
+if (-not ('DefenseClawSelfUpdateSmokeNoRoot' -as [type])) {
+    Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+public static class DefenseClawSelfUpdateSmokeNoRoot {
+    public static object GetDirectorySecuritySnapshotNoFollowIfExists(string path) { return null; }
+}
+'@
+}
+$purgeCases = & $module {
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+
+    $calls = [Collections.Generic.List[string]]::new()
+    $existing = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $releaseFailure = [Collections.Generic.List[string]]::new()
+    function Assert-DefenseClawSourceDescriptorCurrent { param($Source) return $Source }
+    function Assert-DefenseClawOwnedServiceOrAbsent {
+        param($Name, $ExpectedGatewayPath, $ExpectedManifestPath, [switch]$Guardian)
+    }
+    function Assert-DefenseClawExactScopeService {
+        param($Layout, $GatewayServiceName, $GuardianServiceName, $Role)
+    }
+    function Get-DefenseClawServiceSIDForRecovery { param($ServiceName) return 'S-1-5-80-1-2-3-4-5' }
+    function Initialize-DefenseClawNativeSecurity { return [DefenseClawSelfUpdateSmokeNoRoot] }
+    function Test-DefenseClawServiceExists { param($Name) return $existing.Contains([string]$Name) }
+    function Set-DefenseClawServiceStartMode { param($Name, $StartMode) }
+    function Stop-DefenseClawService { param($Name) }
+    function Invoke-DefenseClawNamespaceRootCleanup {
+        param($Source, $Request, $RequestPath, $ReportPath, $ExchangeDirectory, $ExpectedRootPresent)
+        $calls.Add('root-cleanup')
+    }
+    function Revoke-DefenseClawManagedIPCServiceAccess {
+        param($Layout, $GatewayServiceName, $GatewayServiceSID, [switch]$TransactionCreatedServicePresent)
+        $calls.Add('revoke-ipc')
+    }
+    function Remove-DefenseClawService {
+        param($Name)
+        [void]$existing.Remove([string]$Name)
+        $calls.Add("remove-service:$Name")
+    }
+    function Remove-DefenseClawOwnedSelfUpdatePolicy {
+        param($Root, $KeyPath)
+        if ($releaseFailure.Count -ne 0) {
+            throw $releaseFailure[0]
+        }
+        $calls.Add('release-self-update-policy')
+        return 'removed'
+    }
+
+    function Invoke-SmokePurge {
+        param([string]$Gateway, [string]$Guardian)
+        $calls.Clear()
+        $existing.Clear()
+        $names = @(Get-DefenseClawManagedServiceNames `
+            -GatewayServiceName $Gateway `
+            -GuardianServiceName $Guardian)
+        foreach ($name in $names) {
+            [void]$existing.Add([string]$name)
+        }
+        $layout = @{
+            InstallRoot = 'C:\Program Files\DefenseClawSelfUpdateSmoke\DefenseClaw'
+            GatewayPath = 'C:\Program Files\DefenseClawSelfUpdateSmoke\DefenseClaw\bin\defenseclaw-gateway.exe'
+            ManifestPath = 'C:\ProgramData\DefenseClawSelfUpdateSmoke\DefenseClaw\hook-guardian\targets.yaml'
+            BrokerServiceName = [string]$names[1]
+            SensorHelperServiceName = [string]$names[2]
+            LifecycleLockDirectory = [IO.Path]::Combine(
+                [IO.Path]::GetTempPath(),
+                ('dc-self-update-purge-' + [Guid]::NewGuid().ToString('N'))
+            )
+            PurgeScopeSHA256 = ('0' * 64)
+        }
+        $sources = @{
+            native_cleanup = @{
+                path = 'C:\ProgramData\DefenseClawSelfUpdateSmoke\Staging\defenseclaw-native-cleanup.exe'
+            }
+        }
+        return Invoke-DefenseClawExactScopeRecoveryPurge `
+            -Layout $layout `
+            -Sources $sources `
+            -GatewayServiceName $Gateway `
+            -GuardianServiceName $Guardian
+    }
+
+    $result = Invoke-SmokePurge -Gateway 'DefenseClawGateway' -Guardian 'DefenseClawHookGuardian'
+    if (-not [bool]$result.purged -or -not [bool]$result.exact_scope_recovery) {
+        throw 'production exact-scope purge did not report a purge'
+    }
+    $released = $calls.IndexOf('release-self-update-policy')
+    $lastService = -1
+    for ($index = 0; $index -lt $calls.Count; $index++) {
+        if ($calls[$index].StartsWith('remove-service:', [StringComparison]::Ordinal)) {
+            $lastService = $index
+        }
+    }
+    if ($released -lt 0) {
+        throw 'production exact-scope purge left the owned DisableSelfUpdate policy behind'
+    }
+    if ($lastService -lt 0 -or $released -lt $lastService) {
+        throw "exact-scope purge released the self-update policy before every service was removed: $($calls -join ',')"
+    }
+
+    [void](Invoke-SmokePurge `
+        -Gateway 'DefenseClawCertGateway_0123456789' `
+        -Guardian 'DefenseClawCertGuardian_0123456789')
+    if ($calls.Contains('release-self-update-policy')) {
+        throw 'a certification-scoped exact-scope purge touched the production self-update policy'
+    }
+
+    $releaseFailure.Add('registry unavailable')
+    try {
+        [void](Invoke-SmokePurge -Gateway 'DefenseClawGateway' -Guardian 'DefenseClawHookGuardian')
+        throw 'unexpected success'
+    }
+    catch {
+        if ($_.Exception.Message -notmatch 'owned DisableSelfUpdate machine policy could not be removed; retry Uninstall -Purge') {
+            throw "a failed policy release was not reported for retry: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        $releaseFailure.Clear()
+    }
+    return 3
+}
+
 [pscustomobject]@{
     schema_version = 1
     ok = $true
     engine = $PSVersionTable.PSVersion.ToString()
-    cases = [int]$report
+    cases = [int]$report + [int]$purgeCases
     absent_policy_owned = $true
     foreign_policy_untouched = $true
     changed_policy_relinquished = $true
     unrelated_policy_preserved = $true
     interrupted_transitions_completed = $true
+    exact_scope_purge_releases_policy = $true
 } | ConvertTo-Json -Compress

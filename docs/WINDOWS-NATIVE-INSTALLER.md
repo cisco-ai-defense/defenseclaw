@@ -308,8 +308,9 @@ Machine-scope state and the HKLM policy
 `SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate=1` disable self-update.
 Those installations must be serviced by the enterprise deployment channel.
 A production Windows managed-enterprise deployment sets this policy itself
-unless the value already exists, and removes it on uninstall only if it still
-carries the deployment's owner marker.
+unless the value already exists, and removes it on uninstall (including the
+`Uninstall -Purge` exact-scope recovery when StateRoot is gone) only if it
+still carries the deployment's owner marker.
 
 While a managed-enterprise deployment is installed (its `DefenseClawGateway`
 Windows service exists), per-user releases that include the enterprise
