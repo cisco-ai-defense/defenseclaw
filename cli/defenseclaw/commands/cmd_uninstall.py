@@ -148,6 +148,9 @@ class UninstallPlan:
     # providers, profiles and images go, the gateway config setup changed is
     # restored, and OpenShell itself stays installed.
     sandbox_teardown: bool = False
+    # sandbox_teardown_skipped is set when there is sandbox state but
+    # --skip-sandbox-teardown leaves it (Docker or OpenShell are gone, say).
+    sandbox_teardown_skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -194,12 +197,21 @@ class _WindowsProcessWaiter:
     is_flag=True,
     help="Do NOT revert OpenClaw config or remove its plugin; other connector teardown still runs.",
 )
+@click.option(
+    "--skip-sandbox-teardown",
+    is_flag=True,
+    help=(
+        "Leave DefenseClaw's OpenShell sandboxes, images and gateway change in place "
+        "(when Docker or OpenShell are gone or broken); 'defenseclaw-gateway sandbox teardown' removes them later."
+    ),
+)
 @click.option("--dry-run", is_flag=True, help="Show what would happen without touching the system.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def uninstall_cmd(
     wipe_data: bool,
     binaries: bool,
     keep_openclaw: bool,
+    skip_sandbox_teardown: bool,
     dry_run: bool,
     yes: bool,
 ) -> None:
@@ -216,6 +228,7 @@ def uninstall_cmd(
         binaries=binaries,
         revert_openclaw=not keep_openclaw,
         remove_plugin=not keep_openclaw,
+        skip_sandbox_teardown=skip_sandbox_teardown,
     )
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
@@ -289,8 +302,16 @@ def _dispatch_native_windows_uninstall(
 
 
 @click.command("reset")
+@click.option(
+    "--skip-sandbox-teardown",
+    is_flag=True,
+    help=(
+        "Leave DefenseClaw's OpenShell sandboxes, images and gateway change in place "
+        "(when Docker or OpenShell are gone or broken)."
+    ),
+)
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
-def reset_cmd(yes: bool) -> None:
+def reset_cmd(skip_sandbox_teardown: bool, yes: bool) -> None:
     """Wipe user state so 'defenseclaw quickstart' starts clean.
 
     Keeps a managed .venv runtime, binaries, and the OpenClaw plugin
@@ -303,6 +324,7 @@ def reset_cmd(yes: bool) -> None:
         revert_openclaw=True,
         remove_plugin=False,  # keep plugin around for quick re-enable
         preserve_data_entries=_RESET_PRESERVED_ENTRIES,
+        skip_sandbox_teardown=skip_sandbox_teardown,
     )
     ux.banner("DefenseClaw Reset")
     _render_plan(plan, dry_run=False)
@@ -379,6 +401,7 @@ def _build_plan(
     remove_plugin: bool,
     preserve_data_entries: tuple[str, ...] = (),
     platform_name: str | None = None,
+    skip_sandbox_teardown: bool = False,
 ) -> UninstallPlan:
     platform_name = platform_name or sys.platform
     data_dir = str(config_module.default_data_path())
@@ -430,8 +453,10 @@ def _build_plan(
     openclaw_config_file = openclaw_candidate if owns_openclaw else ""
     openclaw_home = openclaw_home_candidate if owns_openclaw else ""
 
+    sandbox_state = _sandbox_state_present(cfg, data_dir, platform_name)
     return UninstallPlan(
-        sandbox_teardown=_sandbox_state_present(cfg, data_dir, platform_name),
+        sandbox_teardown=sandbox_state and not skip_sandbox_teardown,
+        sandbox_teardown_skipped=sandbox_state and skip_sandbox_teardown,
         stop_gateway=True,
         revert_openclaw=revert_openclaw and owns_openclaw,
         remove_plugin=remove_plugin and owns_openclaw,
@@ -641,6 +666,22 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         click.echo(
             f"      {ux.dim('·')} work a copy-mode sandbox holds that was never pulled back is deleted with it "
             "(`defenseclaw sandbox teardown --dry-run` names it)"
+        )
+    elif plan.sandbox_teardown_skipped:
+        click.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
+        # What teardown needs to find DefenseClaw's sandboxes later lives in
+        # the data dir and runs with the gateway binary.
+        later = "`defenseclaw-gateway sandbox teardown` removes them later"
+        if plan.remove_data_dir:
+            later = (
+                f"{plan.data_dir} holds the records teardown finds them by and goes, "
+                "so remove them yourself (`openshell sandbox list`)"
+            )
+        elif plan.remove_binaries:
+            later = "reinstall DefenseClaw and run `defenseclaw-gateway sandbox teardown` to remove them"
+        click.echo(
+            f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
+            f"stay; {later}"
         )
     click.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
     if "openclaw" in display_connectors:
@@ -1150,13 +1191,21 @@ def _gateway_supports_sandbox_teardown(gateway_path: str) -> bool:
     return proc.returncode == 0 and "--keep-images" in (proc.stdout or "")
 
 
+# The exit status of a sandbox command where sandboxes are not supported
+# (sandboxcli.ErrUnsupported: the platform, or a managed_enterprise
+# deployment): none can have run, so there is nothing to tear down.
+_SANDBOX_UNSUPPORTED_EXIT = 3
+
+
 def _sandbox_teardown(plan: UninstallPlan) -> None:
     """Run ``defenseclaw-gateway sandbox teardown --yes``.
 
-    A gateway without the command predates OpenShell 0.1 sandboxes, so there
-    is nothing of them to remove. A failed teardown stops the uninstall: the
-    data directory still holds the receipt needed to restore the OpenShell
-    gateway configuration.
+    A gateway without the command predates OpenShell 0.1 sandboxes, and one
+    that reports sandboxes unsupported here never ran any, so there is
+    nothing of them to remove. Any other failed teardown stops the
+    uninstall: the data directory still holds the receipt needed to restore
+    the OpenShell gateway configuration. ``--skip-sandbox-teardown`` leaves
+    the sandboxes to a later teardown.
     """
     gw = plan.gateway_path
     if not gw or not os.path.isfile(gw):
@@ -1178,12 +1227,17 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
     for line in (proc.stdout or "").splitlines():
         if line.strip():
             click.echo(f"  {ux.dim('·')} {line.strip()}")
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
+        reason = detail[-1].lstrip("✗ ").strip() if detail else "OpenShell sandboxes are not supported here"
+        ux.subhead(f"sandbox teardown skipped: {reason}")
+        return
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "unknown error").strip().splitlines()
         raise click.ClickException(
             "aborting uninstall: sandbox teardown failed"
             + (f" ({detail[-1]})" if detail else "")
-            + "; fix it and rerun, or run `defenseclaw-gateway sandbox teardown` yourself first"
+            + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, "
+            + "or rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
         )
     ux.ok("sandbox teardown complete")
 

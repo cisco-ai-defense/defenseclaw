@@ -116,6 +116,81 @@ class SandboxTeardownTests(unittest.TestCase):
         self.assertIn("restart failed", ctx.exception.message)
         stop.assert_not_called()
 
+    def test_teardown_failure_names_the_way_on(self):
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
+
+        def fake_run(argv, **_kwargs):
+            if argv[-1] == "--help":
+                return _completed(stdout="--keep-images\n")
+            return _completed(returncode=1, stderr="✗ remove images: docker image rm: executable file not found\n")
+
+        with patch("subprocess.run", side_effect=fake_run), capture_click_output():
+            with self.assertRaises(click.ClickException) as ctx:
+                cmd_uninstall._sandbox_teardown(plan)
+        self.assertIn("--skip-sandbox-teardown", ctx.exception.message)
+
+    def test_unsupported_sandboxes_skip_the_teardown(self):
+        # A managed_enterprise deployment (or a platform without sandboxes):
+        # teardown exits 3 and the uninstall goes on.
+        plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway, stop_gateway=True)
+
+        def fake_run(argv, **_kwargs):
+            if argv[-1] == "--help":
+                return _completed(stdout="--keep-images\n")
+            return _completed(
+                returncode=3,
+                stderr="✗ OpenShell sandboxes are not supported here: sandboxes are not supported in managed_enterprise deployments\n",
+            )
+
+        with (
+            patch("subprocess.run", side_effect=fake_run),
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway") as stop,
+            capture_click_output() as buf,
+        ):
+            result = cmd_uninstall._execute_plan(plan)
+        self.assertTrue(result.succeeded)
+        stop.assert_called_once()
+        self.assertIn("sandbox teardown skipped: OpenShell sandboxes are not supported here", buf.getvalue())
+
+    def test_skip_sandbox_teardown(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            os.mkdir(os.path.join(data_dir, "sandboxes"))
+            with (
+                patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(data_dir)),
+                patch.object(
+                    cmd_uninstall.config_module, "config_path_for_data_dir", return_value=Path(data_dir) / "absent.yaml"
+                ),
+            ):
+                kept = cmd_uninstall._build_plan(
+                    wipe_data=False, binaries=False, revert_openclaw=False, remove_plugin=False, platform_name="linux"
+                )
+                skipped = cmd_uninstall._build_plan(
+                    wipe_data=False,
+                    binaries=False,
+                    revert_openclaw=False,
+                    remove_plugin=False,
+                    platform_name="linux",
+                    skip_sandbox_teardown=True,
+                )
+        self.assertTrue(kept.sandbox_teardown)
+        self.assertFalse(kept.sandbox_teardown_skipped)
+        self.assertFalse(skipped.sandbox_teardown)
+        self.assertTrue(skipped.sandbox_teardown_skipped)
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(skipped, dry_run=True)
+        self.assertIn("skipped (--skip-sandbox-teardown)", buf.getvalue())
+        self.assertIn("`defenseclaw-gateway sandbox teardown` removes them later", buf.getvalue())
+        order = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_sandbox_teardown", side_effect=lambda _: order.append("sandbox")),
+            patch.object(cmd_uninstall, "_stop_gateway", side_effect=lambda _: order.append("stop")),
+            capture_click_output(),
+        ):
+            cmd_uninstall._execute_plan(skipped)
+        self.assertEqual(order, ["stop"])
+
     def test_gateway_without_sandbox_support_is_skipped(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)
         with (

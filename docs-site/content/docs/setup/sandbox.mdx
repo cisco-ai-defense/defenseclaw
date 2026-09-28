@@ -1030,7 +1030,11 @@ Teardown takes these steps, in order:
 8. **config**: turns `openshell.enabled` off in `config.yaml`.
 
 OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
-and stops if teardown fails.
+and stops if teardown fails (where sandboxes are not supported, such as a
+`managed_enterprise` deployment, it skips it). When Docker or OpenShell are
+gone or broken, `defenseclaw uninstall --skip-sandbox-teardown` leaves the
+sandboxes in place; `defenseclaw sandbox teardown` removes them later, as
+long as the data directory is kept (no `--all`).
 
 When the DefenseClaw daemon isn't running (or has sandboxes off), teardown
 deletes the sandboxes on the OpenShell gateway itself. It then also removes
