@@ -10,8 +10,9 @@
 
 // OpenShell sandboxes: the Sandboxes panel, the menu-bar section and the
 // Overview card. All three render AppState.sandbox (pulse-refreshed from the
-// daemon's /api/v1/sandbox API). Unblock, ask decisions and stop go to the
-// daemon; review and undo run the CLI so their output lands in Activity.
+// daemon's /api/v1/sandbox API). Unblock and ask decisions go to the daemon;
+// stop, review and undo run the CLI so their output lands in Activity (stop
+// and undo also keep a detached run's log there for `sandbox logs`).
 // Harness sessions (run, connect) need a terminal, so the app offers the
 // command to copy rather than a window pretending to be one.
 
@@ -21,6 +22,7 @@ import SwiftUI
 struct SandboxesView: View {
     @Environment(AppState.self) private var appState
     @State private var selection: SandboxRow.ID?
+    @State private var confirmStop: SandboxRow?
     @State private var confirmUndo: SandboxRow?
     @State private var confirmAlways: SandboxAsk?
     @State private var confirmAlwaysUnblock: SandboxActivity?
@@ -56,13 +58,28 @@ struct SandboxesView: View {
         .padding(16)
         .task { await appState.refreshSandboxes() }
         .confirmationDialog(
+            "Stop \(confirmStop?.name ?? "")?",
+            isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } }),
+            presenting: confirmStop
+        ) { row in
+            // The CLI looks for a detached run first: it says so in Activity,
+            // marks the run interrupted and keeps its log for `sandbox logs`.
+            Button("Stop", role: .destructive) { runCLI("Stop \(row.name)", ["sandbox", "stop", row.name, "--yes"]) }
+        } message: { row in
+            Text("Ends the harness session running in \(row.name), and a detached run (sandbox run --detach) if one "
+                + "is still going; DefenseClaw keeps that run's log for: defenseclaw sandbox logs \(row.name). "
+                + "The sandbox is kept: resume it with defenseclaw sandbox connect \(row.name).")
+        }
+        .confirmationDialog(
             "Undo \(confirmUndo?.name ?? "")?",
             isPresented: Binding(get: { confirmUndo != nil }, set: { if !$0 { confirmUndo = nil } }),
             presenting: confirmUndo
         ) { row in
             Button("Undo everything", role: .destructive) { runCLI("Undo \(row.name)", ["sandbox", "undo", row.name, "--yes"]) }
         } message: { row in
-            Text("Puts \(row.project.isEmpty ? "the project folder" : row.project) back to its pre-session snapshot. The sandbox is stopped first.")
+            Text("Puts \(row.project.isEmpty ? "the project folder" : row.project) back to its pre-session snapshot. "
+                + "The sandbox is stopped first (a detached run still going ends; its log is kept). "
+                + "Activity lists what undo cannot restore.")
         }
         .confirmationDialog(
             "Always allow \(confirmAlways?.destination ?? "")?",
@@ -186,8 +203,8 @@ struct SandboxesView: View {
                     .foregroundStyle(Cisco.orange)
             }
             HStack {
-                Button("Stop") { Task { await appState.stopSandbox(row.name) } }
-                    .disabled(!row.running || appState.sandboxActionInFlight("stop|\(row.name)"))
+                Button("Stop…") { confirmStop = row }
+                    .disabled(!row.running)
                 Button("Review changes") {
                     runCLI("Review \(row.name)", ["sandbox", "review", row.name], mutation: false)
                 }

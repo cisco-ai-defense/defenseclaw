@@ -604,8 +604,8 @@ actor GatewayClient {
     // MARK: - OpenShell sandboxes (/api/v1/sandbox, internal/openshell/sandboxapi)
 
     static let sandboxPrefix = "/api/v1/sandbox/"
-    /// Lifecycle calls wait for OpenShell (stop).
-    static let sandboxLifecycleTimeout: TimeInterval = 180
+    // Stop and undo run the CLI (SandboxesView), which checks for a detached
+    // run and keeps its log before it asks the daemon to stop the sandbox.
 
     func sandboxStatus() async throws -> SandboxStatus {
         let json = try await getJSON("/api/v1/sandbox/status")
@@ -658,12 +658,6 @@ actor GatewayClient {
         let path = "/api/v1/sandbox/approvals/\(try encodedPathSegment(id))"
         let json = try await post(path, body, timeout: 30)
         return ((json as? [String: Any])?["message"] as? String) ?? (approve ? "Approved" : "Rejected")
-    }
-
-    /// Stop a sandbox; it is kept for `defenseclaw sandbox connect`.
-    func stopSandbox(name: String) async throws {
-        let path = "/api/v1/sandbox/sandboxes/\(try encodedPathSegment(name))/stop"
-        try await post(path, timeout: Self.sandboxLifecycleTimeout)
     }
 
     func aiComponents() async throws -> [AIComponent] {

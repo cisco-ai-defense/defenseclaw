@@ -971,17 +971,36 @@ async def test_a_private_ask_never_asks_to_confirm_always(fetch, monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_undo_previews_then_stops_and_restores(fetch, monkeypatch) -> None:
+async def test_undo_of_a_stopped_sandbox_previews_then_restores(fetch, monkeypatch) -> None:
     app = DefenseClawTUI(config=_config())
-    calls = _Calls({"result": {"changes": [{"path": "a.txt"}]}, "stopped": True})
+    calls = _Calls({"result": {"changes": [{"path": "a.txt"}]}})
     monkeypatch.setattr(app, "_sandbox_call", calls)
     monkeypatch.setattr(app, "push_screen_wait", _screen_answers("undo"))
     async with app.run_test(size=(160, 44)):
-        await app._sandbox_undo("myapp-claude-7f3a")  # noqa: SLF001
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_undo("docs")  # noqa: SLF001
+    # Never stop=True: a sandbox that started meanwhile is refused, not
+    # stopped past the command line's detached-run check.
     assert [(method, kwargs) for method, _args, kwargs in calls.calls] == [
         ("undo_sandbox", {"preview": True, "stop": False}),
-        ("undo_sandbox", {"stop": True}),
+        ("undo_sandbox", {"stop": False}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_undo_of_a_running_sandbox_runs_the_command_line(fetch, monkeypatch) -> None:
+    """Undo stops the sandbox first; the command line checks for a detached
+    run (asks, keeps its log for `sandbox logs`) before it stops it."""
+    app = DefenseClawTUI(config=_config())
+    calls = _Calls()
+    ran = _fake_terminal(monkeypatch, app)
+    monkeypatch.setattr(app, "_sandbox_call", calls)
+    monkeypatch.setattr(app, "push_screen_wait", lambda _screen: pytest.fail("the TUI asked instead of the CLI"))
+    async with app.run_test(size=(160, 44)):
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
+        await app._sandbox_undo("myapp-claude-7f3a")  # noqa: SLF001
+    assert calls.calls == []
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "undo", "myapp-claude-7f3a"], os.getcwd())]
 
 
 @pytest.mark.asyncio
@@ -1006,15 +1025,18 @@ def test_undo_is_empty_mirrors_go() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_needs_confirmation(fetch, monkeypatch) -> None:
+async def test_delete_runs_the_command_line_which_asks(fetch, monkeypatch) -> None:
+    """The command line looks for copy-mode work that never came back and
+    forgets its own state for the sandbox; the daemon does neither."""
     app = DefenseClawTUI(config=_config())
     calls = _Calls({"deleted": True})
+    ran = _fake_terminal(monkeypatch, app)
     monkeypatch.setattr(app, "_sandbox_call", calls)
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "delete"))
+    monkeypatch.setattr(app, "push_screen_wait", lambda _screen: pytest.fail("the TUI asked instead of the CLI"))
     async with app.run_test(size=(160, 44)):
-        await app._sandbox_delete("docs")  # noqa: SLF001
-        await app._sandbox_delete("docs")  # noqa: SLF001
-    assert calls.calls == [("delete_sandbox", ("docs",), {})]
+        await app._sandbox_delete("fix-tests")  # noqa: SLF001
+    assert calls.calls == []
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "delete", "fix-tests"], os.getcwd())]
 
 
 @pytest.mark.asyncio
@@ -1029,9 +1051,9 @@ async def test_api_refusals_become_plain_toasts(fetch, monkeypatch) -> None:
 
     monkeypatch.setattr(app, "_sandbox_call", refuse)
     monkeypatch.setattr(app, "notify_toast", lambda level, message: toasts.append((level, message)))
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers("stop"))
+    reject = SandboxPanelAction("reject", sandbox="docs", approval_id="ask-1")
     async with app.run_test(size=(160, 44)):
-        await app._guarded_sandbox_action(app._sandbox_stop("docs"))  # noqa: SLF001
+        await app._guarded_sandbox_action(app._sandbox_decide(reject, approve=False))  # noqa: SLF001
     assert toasts[-1] == ("warn", f"{ADMIN_MESSAGE}: unblocking is not allowed")
     assert app._sandbox_action_running is False  # noqa: SLF001
 
@@ -1535,16 +1557,20 @@ def test_review_puts_warnings_and_findings_before_the_files() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_asks_first(fetch, monkeypatch) -> None:
+async def test_stop_asks_first_then_runs_the_command_line(fetch, monkeypatch) -> None:
+    """The command line checks for a detached run the stop would end (asks,
+    marks it interrupted, keeps its log for `sandbox logs`)."""
     app = DefenseClawTUI(config=_config())
     calls = _Calls()
+    ran = _fake_terminal(monkeypatch, app)
     monkeypatch.setattr(app, "_sandbox_call", calls)
     monkeypatch.setattr(app, "push_screen_wait", _screen_answers("cancel", "stop"))
     async with app.run_test(size=(160, 44)):
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
-        assert calls.calls == []
+        assert ran == []
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
-    assert calls.calls == [("stop_sandbox", ("myapp-claude-7f3a",), {})]
+    assert calls.calls == []
+    assert ran == [(["/opt/dc/defenseclaw-gateway", "sandbox", "stop", "myapp-claude-7f3a"], os.getcwd())]
 
 
 @pytest.mark.asyncio
@@ -1692,6 +1718,7 @@ async def test_irreversible_confirmations_focus_cancel(fetch, monkeypatch) -> No
 
     monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
     monkeypatch.setattr(app, "_sandbox_call", _Calls({"result": {"changes": [{"path": "a.txt"}]}}))
+    ran = _fake_terminal(monkeypatch, app, returncode=1)
     async with app.run_test(size=(160, 44)):
         await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         await app._sandbox_unblock("myapp-claude-7f3a", "webhook.site")  # noqa: SLF001
@@ -1702,10 +1729,11 @@ async def test_irreversible_confirmations_focus_cancel(fetch, monkeypatch) -> No
         )
         await app._sandbox_stop("myapp-claude-7f3a")  # noqa: SLF001
     confirmations = {screen.title: screen for screen in screens[1:]}
+    # Delete, and the undo of a running sandbox, ask on the command line,
+    # whose questions default to no.
+    assert [tuple(argv[1:3]) for argv, _cwd in ran] == [("sandbox", "delete"), ("sandbox", "undo")]
     for title in (
         "Unblock webhook.site in every sandbox?",
-        "Delete docs?",
-        "Undo myapp-claude-7f3a?",
         "Always allow www.example.com?",
     ):
         screen = confirmations[title]
@@ -1875,15 +1903,26 @@ async def test_new_run_can_delete_the_sandbox_holding_the_folder(fetch, monkeypa
     _holder_fetch(fetch, project)
     app = DefenseClawTUI(config=_config())
     ran = _fake_terminal(monkeypatch, app)
+    fake_run = sandbox_panel.subprocess.run
+
+    def run(argv, cwd=None, check=False):
+        result = fake_run(argv, cwd=cwd, check=check)
+        if argv[1:3] == ["sandbox", "delete"]:  # the command line asked and deleted it
+            fetch.sandboxes = [RUNNING]
+        return result
+
+    monkeypatch.setattr(sandbox_panel.subprocess, "run", run)
     calls = _Calls({"deleted": True})
     monkeypatch.setattr(app, "_sandbox_call", calls)
     launch = SandboxLaunchValues(harness="claudecode", folder=str(project)).build()
-    monkeypatch.setattr(app, "push_screen_wait", _screen_answers(launch, "delete", "delete"))
+    monkeypatch.setattr(app, "push_screen_wait", _screen_answers(launch, "delete"))
     async with app.run_test(size=(160, 44)):
         await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001
         await app._sandbox_new_run()  # noqa: SLF001
-    assert calls.calls == [("delete_sandbox", ("docs",), {})]
-    assert [tuple(argv[1:]) for argv, _cwd in ran] == [("sandbox", "run", "claude")]
+    # The delete runs through the command line, which asks and looks for
+    # copy-mode work first; the daemon is not called directly.
+    assert calls.calls == []
+    assert [tuple(argv[1:]) for argv, _cwd in ran] == [("sandbox", "delete", "docs"), ("sandbox", "run", "claude")]
 
 
 def test_only_a_live_mount_of_the_same_or_a_nested_folder_holds_it(tmp_path: Path) -> None:

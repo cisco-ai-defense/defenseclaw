@@ -17,7 +17,10 @@ feed (server-sent events on a background thread, resumed by sequence number),
 toasts for blocked destinations and new asks, and the actions (unblock,
 approve/reject, undo, review, stop, delete). Connect and new runs hand the
 terminal to ``defenseclaw-gateway sandbox`` through ``App.suspend`` so the
-harness owns it, exactly as on the command line.
+harness owns it, exactly as on the command line. So do stop, delete and the
+undo of a running sandbox: the command line does work on this machine before
+it calls the daemon (a detached run's log, copy-mode work never pulled back,
+its own state for a deleted sandbox) and asks about it.
 
 The pure state lives in :mod:`defenseclaw.tui.services.sandbox_state`.
 """
@@ -794,28 +797,43 @@ class SandboxPanelMixin:
         self._set_status(message)  # type: ignore[attr-defined]
         self.notify_toast("success", message)  # type: ignore[attr-defined]
 
+    def _run_sandbox_cli(self, *argv: str) -> None:
+        """Run ``defenseclaw sandbox ...`` in the terminal, where it asks what it needs to.
+
+        Stop, delete and the undo of a running sandbox do work on this
+        machine before they call the daemon: they check for a detached run
+        (and keep its log for ``sandbox logs``), for copy-mode work that was
+        never pulled back, and forget what the command line kept for a
+        deleted sandbox. The command line is the one place that does it.
+        """
+        self._run_sandbox_terminal(SandboxLaunch(("sandbox", *argv), os.getcwd(), "sandbox " + " ".join(argv)))
+
     async def _sandbox_undo(self, name: str) -> None:
+        row = next((row for row in self.sandbox_model.rows if row.name == name), None)
+        if row is not None and row.running:
+            # Undo stops the sandbox first: the command line previews, says
+            # what the stop ends (a detached run too) and asks.
+            self._run_sandbox_cli("undo", name)
+            return
         preview = await self._sandbox_call("undo_sandbox", name, preview=True, stop=False)
         if undo_is_empty(preview):
             message = f"Nothing to undo: {name}'s folder matches its pre-session snapshot."
             self._set_status(message)  # type: ignore[attr-defined]
             self.notify_toast("info", message)  # type: ignore[attr-defined]
             return
-        row = next((row for row in self.sandbox_model.rows if row.name == name), None)
-        stops = " (it stops the sandbox first)" if row is not None and row.running else ""
         confirmed = await self._confirm(
             f"Undo {name}?",
-            f"Puts the project folder back to its pre-session snapshot{stops}. " + undo_preview_text(preview),
+            "Puts the project folder back to its pre-session snapshot. " + undo_preview_text(preview),
             MenuAction("undo", "Undo everything", variant="warning"),
             cancel_first=True,
         )
         if not confirmed:
             self._set_status("Undo cancelled; nothing changed.")  # type: ignore[attr-defined]
             return
-        result = await self._sandbox_call("undo_sandbox", name, stop=True)
+        # Not stop=True: a sandbox that started meanwhile is refused (stop it
+        # with s, which looks for a detached run first) rather than stopped here.
+        result = await self._sandbox_call("undo_sandbox", name, stop=False)
         message = str(result.get("summary") or f"{name}: the project folder is back to its snapshot")
-        if result.get("stopped"):
-            message += f"; {name} is stopped (c to resume)"
         self._set_status(message)  # type: ignore[attr-defined]
         self.notify_toast("success", message)  # type: ignore[attr-defined]
 
@@ -833,38 +851,30 @@ class SandboxPanelMixin:
     async def _sandbox_stop(self, name: str) -> None:
         confirmed = await self._confirm(
             f"Stop {name}?",
-            "Ends the harness session running in it. The sandbox is kept: connect (c) resumes it.",
+            "Ends the harness session running in it. A detached run (sandbox run --detach) still going ends "
+            "unfinished: `defenseclaw sandbox stop` runs in this terminal, asks first when one is, and keeps its "
+            "log for `defenseclaw sandbox logs`. The sandbox is kept: connect (c) resumes it.",
             MenuAction("stop", "Stop", variant="warning"),
         )
         if not confirmed:
             self._set_status("Stop cancelled.")  # type: ignore[attr-defined]
             return
-        self._set_status(f"Stopping {name}...")  # type: ignore[attr-defined]
-        await self._sandbox_call("stop_sandbox", name)
-        message = f"{name} stopped; it is kept for connect (c)"
-        self._set_status(message)  # type: ignore[attr-defined]
-        self.notify_toast("success", message)  # type: ignore[attr-defined]
+        self._run_sandbox_cli("stop", name)
 
     async def _sandbox_delete(self, name: str) -> bool:
-        """Delete ``name`` after asking; whether it was deleted."""
-        confirmed = await self._confirm(
-            f"Delete {name}?",
-            "Deletes the sandbox with its providers, credentials and snapshot (undo is no longer possible). "
-            "Your project folder keeps its current contents.",
-            MenuAction("delete", "Delete", variant="error"),
-            cancel_first=True,
+        """Delete ``name`` through the command line, which asks; whether it is gone.
+
+        For a copy-mode sandbox the command line first looks for work that
+        never came back to the folder (never pulled, or pulled and not
+        applied), which deleting it discards.
+        """
+        code = self._run_sandbox_terminal(
+            SandboxLaunch(("sandbox", "delete", name), os.getcwd(), f"sandbox delete {name}")
         )
-        if not confirmed:
-            self._set_status("Delete cancelled.")  # type: ignore[attr-defined]
+        if code != 0:
             return False
-        result = await self._sandbox_call("delete_sandbox", name)
-        message = f"{name} deleted"
-        warnings = [str(w) for w in result.get("warnings") or [] if w]
-        if warnings:
-            message += f" ({warnings[0]})"
-        self._set_status(message)  # type: ignore[attr-defined]
-        self.notify_toast("success", message)  # type: ignore[attr-defined]
-        return True
+        await self._refresh_sandbox_snapshot(render=False)
+        return all(row.name != name for row in self.sandbox_model.rows)
 
     async def _sandbox_wrappers_menu(self) -> None:
         model = self.sandbox_model

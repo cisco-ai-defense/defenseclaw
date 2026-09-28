@@ -245,7 +245,7 @@ final class AppState {
     /// Last sandbox action outcome (a plain sentence), shown where it ran.
     var sandboxActionMessage: String?
     var sandboxActionFailed = false
-    /// Unblock / decide / stop keys in flight (double-click guard).
+    /// Unblock / decide keys in flight (double-click guard).
     var sandboxActionsInFlight: Set<String> = []
     @ObservationIgnored private var sandboxRefreshInProgress = false
     /// The first activity read returns the daemon's buffer; it never notifies.
@@ -1014,14 +1014,6 @@ final class AppState {
             let message = try await self.gateway.decideSandboxApproval(id: ask.id, approve: approve, always: always)
             self.sandbox.asks.removeAll { $0.id == ask.id }
             return message
-        }
-    }
-
-    /// Stop a running sandbox; it is kept for `defenseclaw sandbox connect`.
-    func stopSandbox(_ name: String) async {
-        await runSandboxAction(key: "stop|\(name)") {
-            try await self.gateway.stopSandbox(name: name)
-            return "\(name) stopped; resume it with: defenseclaw sandbox connect \(name)"
         }
     }
 
