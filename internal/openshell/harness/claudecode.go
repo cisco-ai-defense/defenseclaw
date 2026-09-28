@@ -99,14 +99,28 @@ esac`,
 		{
 			ProfileID: profiles.ClaudeBedrockMantleID,
 			Hosts:     []string{bedrockHostToken},
+			// Mantle serves Claude models under anthropic.* ids only, so
+			// Claude Code's own default and every /model alias fail there
+			// ("There's an issue with the selected model"). The run's
+			// managed drop-in pins these variables (ClaudeCodeSandboxModelEnv),
+			// so every Claude Code the sandbox starts gets them;
+			// --model or /model picks another.
+			DefaultModel: ClaudeCodeMantleDefaultModel,
 			Env: map[string]string{
 				"ANTHROPIC_BASE_URL": "https://" + bedrockHostToken + "/anthropic",
 				// Mantle's Anthropic route rejects experimental beta headers.
 				"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+				"ANTHROPIC_MODEL":                        ClaudeCodeMantleDefaultModel,
+				"ANTHROPIC_DEFAULT_OPUS_MODEL":           "anthropic.claude-opus-4-8",
+				"ANTHROPIC_DEFAULT_SONNET_MODEL":         "anthropic.claude-sonnet-5",
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL":          "anthropic.claude-haiku-4-5",
+				"ANTHROPIC_SMALL_FAST_MODEL":             "anthropic.claude-haiku-4-5",
 			},
-			Note: "Bedrock API key sent as x-api-key to the Mantle Anthropic route",
+			Note: "Bedrock API key sent as x-api-key to the Mantle Anthropic route (default model " + ClaudeCodeMantleDefaultModel + "; the Opus, Sonnet and Haiku aliases map to Mantle's anthropic.* ids)",
 		},
 	},
+	modelArg:  claudeCodeModelArg,
+	modelFlag: "--model",
 	customization: []CustomizationPath{
 		{Host: ".claude/CLAUDE.md", Sandbox: "/sandbox/.claude/CLAUDE.md", Note: "user memory"},
 		{Host: ".claude/agents", Sandbox: "/sandbox/.claude/agents", Dir: true, Note: "user subagents"},
@@ -119,8 +133,34 @@ esac`,
 	},
 })
 
+// ClaudeCodeMantleDefaultModel is the model Claude Code runs on Amazon
+// Bedrock Mantle unless the caller picks another with --model.
+const ClaudeCodeMantleDefaultModel = "anthropic.claude-sonnet-5"
+
 // ClaudeCodeLauncherPath is the in-image Claude Code launcher.
 const ClaudeCodeLauncherPath = LauncherDir + "/claudecode-launch"
+
+// claudeCodeModelArg returns the model Claude Code's --model names (the last
+// one, as --model MODEL or --model=MODEL), which Claude applies above
+// ANTHROPIC_MODEL and every settings file. Arguments after "--" are never
+// flags; Claude Code has no configuration override that picks a model.
+func claudeCodeModelArg(args []string) (flag, override string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if value, ok := strings.CutPrefix(arg, "--model="); ok {
+			flag = strings.TrimSpace(value)
+			continue
+		}
+		if arg == "--model" && i+1 < len(args) {
+			i++
+			flag = strings.TrimSpace(args[i])
+		}
+	}
+	return flag, ""
+}
 
 var claudeCodeLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v2

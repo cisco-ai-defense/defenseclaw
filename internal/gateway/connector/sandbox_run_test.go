@@ -152,6 +152,49 @@ func TestClaudeCodeSandboxRunFiles(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeSandboxRunFilesPinTheRunModel pins that the model variables
+// a run sets (the Bedrock Mantle ids) reach the merged managed tier, and
+// that a run without them leaves the model to the user's settings.
+func TestClaudeCodeSandboxRunFilesPinTheRunModel(t *testing.T) {
+	models := map[string]string{
+		"ANTHROPIC_MODEL":                "anthropic.claude-sonnet-5",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL":   "anthropic.claude-opus-4-8",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL": "anthropic.claude-sonnet-5",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL":  "anthropic.claude-haiku-4-5",
+		"ANTHROPIC_SMALL_FAST_MODEL":     "anthropic.claude-haiku-4-5",
+	}
+	dropInEnv := func(t *testing.T, env map[string]string) map[string]interface{} {
+		t.Helper()
+		files, err := NewClaudeCodeConnector().SandboxRunFiles(claudeRunTarget, SandboxRunConfig{Env: env, Credentials: []string{"ANTHROPIC_API_KEY"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dropIn map[string]interface{}
+		if err := json.Unmarshal(runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath], &dropIn); err != nil {
+			t.Fatal(err)
+		}
+		return dropIn["env"].(map[string]interface{})
+	}
+	env := map[string]string{"ANTHROPIC_BASE_URL": "https://bedrock-mantle.us-east-1.api.aws/anthropic"}
+	for key, value := range models {
+		env[key] = value
+	}
+	pinned := dropInEnv(t, env)
+	for _, key := range ClaudeCodeSandboxModelEnv() {
+		if pinned[key] != models[key] {
+			t.Fatalf("%s = %#v, want %q", key, pinned[key], models[key])
+		}
+	}
+	for _, key := range ClaudeCodeSandboxModelEnv() {
+		if _, ok := dropInEnv(t, map[string]string{})[key]; ok {
+			t.Fatalf("a run without a model pinned %s", key)
+		}
+	}
+	if _, err := NewClaudeCodeConnector().SandboxRunFiles(claudeRunTarget, SandboxRunConfig{Env: map[string]string{"ANTHROPIC_MODEL": "a\nb"}}); err == nil {
+		t.Fatal("a model with a line break was accepted")
+	}
+}
+
 func TestClaudeCodeSandboxRunFilesKeepImageControls(t *testing.T) {
 	files, err := NewClaudeCodeConnector().SandboxRunFiles(claudeRunTarget, SandboxRunConfig{Safe: true})
 	if err != nil {

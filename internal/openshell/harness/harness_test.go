@@ -1076,14 +1076,20 @@ func TestSpecModel(t *testing.T) {
 		{"openai has no default", Codex, profiles.OpenAIID, nil, "", false},
 		{"openai with -m", Codex, profiles.OpenAIID, []string{"-m", "gpt-5"}, "gpt-5", false},
 		{"no profile", Codex, "", nil, "", false},
-		{"harness without a model parser", ClaudeCode, profiles.ClaudeBedrockMantleID, []string{"--model", "opus"}, "", false},
+		{"claude mantle default", ClaudeCode, profiles.ClaudeBedrockMantleID, nil, ClaudeCodeMantleDefaultModel, true},
+		{"claude --model", ClaudeCode, profiles.ClaudeBedrockMantleID, []string{"--model", "anthropic.claude-haiku-4-5"}, "anthropic.claude-haiku-4-5", false},
+		{"claude --model=", ClaudeCode, profiles.ClaudeBedrockMantleID, []string{"--model=a", "--model=b"}, "b", false},
+		{"claude after --", ClaudeCode, profiles.ClaudeBedrockMantleID, []string{"--", "--model", "x"}, ClaudeCodeMantleDefaultModel, true},
+		{"claude anthropic has no default", ClaudeCode, profiles.AnthropicID, nil, "", false},
+		{"claude anthropic with --model", ClaudeCode, profiles.AnthropicID, []string{"--model", "opus"}, "opus", false},
+		{"harness without a model parser", OpenCode, "", []string{"-m", "anthropic/claude-haiku-4-5"}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, isDefault, flag := tc.spec.Model(tc.profile, tc.args)
 			if got != tc.want || isDefault != tc.wantDefault {
 				t.Fatalf("Model = %q (default %t), want %q (default %t)", got, isDefault, tc.want, tc.wantDefault)
 			}
-			if tc.spec == Codex && flag != "-m" {
+			if tc.spec == Codex && flag != "-m" || tc.spec == ClaudeCode && flag != "--model" {
 				t.Fatalf("flag = %q", flag)
 			}
 		})
@@ -1097,6 +1103,20 @@ func TestSpecModel(t *testing.T) {
 	}
 	if cp, _ := Codex.CredentialProfile(profiles.OpenAIID, ""); cp.ModelProvider == nil || cp.ModelProvider.DefaultModel != "" {
 		t.Fatalf("the OpenAI provider pins a model: %#v", cp.ModelProvider)
+	}
+	// Claude Code on Mantle: the main model and every /model alias name an
+	// id Mantle serves, passed as the env the run's managed drop-in pins.
+	claude, _ := ClaudeCode.CredentialProfile(profiles.ClaudeBedrockMantleID, "eu-west-1")
+	for _, name := range connector.ClaudeCodeSandboxModelEnv() {
+		if !strings.HasPrefix(claude.Env[name], "anthropic.claude-") {
+			t.Fatalf("Claude Code Mantle profile %s = %q", name, claude.Env[name])
+		}
+	}
+	if claude.Env["ANTHROPIC_MODEL"] != ClaudeCodeMantleDefaultModel || claude.DefaultModel != ClaudeCodeMantleDefaultModel {
+		t.Fatalf("Claude Code Mantle default = %q / %q", claude.Env["ANTHROPIC_MODEL"], claude.DefaultModel)
+	}
+	if anthropic, _ := ClaudeCode.CredentialProfile(profiles.AnthropicID, ""); anthropic.Env["ANTHROPIC_MODEL"] != "" {
+		t.Fatalf("the Anthropic profile pins a model: %v", anthropic.Env)
 	}
 }
 

@@ -73,10 +73,32 @@ func ClaudeCodeSandboxProviderEnv() []string {
 	return append([]string(nil), claudeCodeSandboxProviderEnv...)
 }
 
+// claudeCodeSandboxModelEnv are the settings-env variables that choose
+// Claude Code 2.1.156's model: the main model and the models the Opus,
+// Sonnet and Haiku aliases (the /model picker) and background tasks resolve
+// to. The per-run drop-in pins each one the run sets (a provider that
+// serves the models under other ids, such as Bedrock Mantle), so a settings
+// file cannot pick a model that endpoint does not serve; --model and /model
+// still pick another. Variables the run leaves unset stay unpinned.
+var claudeCodeSandboxModelEnv = []string{
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"ANTHROPIC_DEFAULT_SONNET_MODEL",
+	"ANTHROPIC_MODEL",
+	"ANTHROPIC_SMALL_FAST_MODEL",
+}
+
+// ClaudeCodeSandboxModelEnv lists the model variables the per-run drop-in
+// pins when the run sets them.
+func ClaudeCodeSandboxModelEnv() []string {
+	return append([]string(nil), claudeCodeSandboxModelEnv...)
+}
+
 // SandboxRunFiles renders the per-run Claude Code files for the image target
 // describes:
 //
-//   - 60-defenseclaw-run.json (always): the model-provider env pins; in safe
+//   - 60-defenseclaw-run.json (always): the model-provider env pins and the
+//     model the run sets (claudeCodeSandboxModelEnv); in safe
 //     mode permissions.disableBypassPermissionsMode "disable" (Claude then
 //     refuses bypassPermissions from --dangerously-skip-permissions,
 //     --permission-mode or any settings defaultMode) and
@@ -146,6 +168,16 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 			continue
 		}
 		value := run.Env[key]
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return nil, fmt.Errorf("claudecode run config: %s contains NUL or a line break", key)
+		}
+		env[key] = value
+	}
+	for _, key := range claudeCodeSandboxModelEnv {
+		value := run.Env[key]
+		if value == "" || credentials[key] {
+			continue
+		}
 		if strings.ContainsAny(value, "\x00\r\n") {
 			return nil, fmt.Errorf("claudecode run config: %s contains NUL or a line break", key)
 		}
@@ -322,7 +354,7 @@ func verifyClaudeCodeSandboxRunDropIn(base, dropIn []byte, want map[string]inter
 		return fmt.Errorf("verify Claude Code run settings: %w", err)
 	}
 	baseEnv, _ := baseDoc["env"].(map[string]interface{})
-	for _, key := range claudeCodeSandboxProviderEnv {
+	for _, key := range append(ClaudeCodeSandboxProviderEnv(), claudeCodeSandboxModelEnv...) {
 		if _, clash := baseEnv[key]; clash {
 			return fmt.Errorf("verify Claude Code run settings: the image drop-in pins %s, which the run drop-in owns", key)
 		}
