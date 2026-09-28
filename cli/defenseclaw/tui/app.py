@@ -81,7 +81,7 @@ from defenseclaw.tui.panels.overview import (
     string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
-from defenseclaw.tui.panels.policy import PoliciesPanelModel
+from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_posture_text
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
@@ -8012,7 +8012,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "Redaction",
                     Text.from_markup(rich_escape(_v8_redaction_summary(self.overview_model.observability_status))),
                 ),
-                ("Policy posture", Text(_policy_posture(cfg))),
+                ("Policy posture", Text(_policy_posture(cfg, getattr(self.overview_model, "active_policy", None)))),
                 ("Enforcement", Text(_enforcement_label(cfg))),
                 (
                     "Human approval",
@@ -8972,7 +8972,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "Redaction",
                     _v8_redaction_summary(self.overview_model.observability_status),
                 ),
-                ("Policy posture", _policy_posture(cfg)),
+                ("Policy posture", _policy_posture(cfg, getattr(self.overview_model, "active_policy", None))),
                 ("Enforcement", _enforcement_label(cfg)),
                 ("Environment", (cfg.environment if cfg else "") or "unknown"),
                 ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
@@ -9483,7 +9483,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             redaction_on = True
             redaction_label = _v8_redaction_summary(self.overview_model.observability_status)
             mode = (cfg.guardrail_mode or "").strip().lower()
-            if mode:
+            active_policy = self.policy_model.active_policy()
+            if active_policy is not None:
+                policy_posture = f"policy {active_policy.name}" + (f" · {mode}" if mode else "")
+            elif mode:
                 policy_posture = f"policy {mode}"
 
         return StatusModel(
@@ -14410,7 +14413,25 @@ def _event_histogram(
     return tuple(counts)
 
 
-def _policy_posture(cfg: OverviewConfig | None) -> str:
+def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) -> str:
+    """Overview's "Policy posture": the active named policy's real thresholds.
+
+    ``active`` is the ``policy_catalog.PolicySummary`` the Policies loader read
+    (``strict · block MEDIUM+ · alert LOW+``). Until it arrives (or when the
+    catalog can't be read) the wording falls back to the guardrail mode and
+    rule pack. A multi-connector install whose connectors diverge says so.
+    """
+
+    if cfg is None and active is None:
+        return "unknown"
+    if active is not None:
+        posture = policy_posture_text(active)
+        if cfg is not None and len(cfg.connector_modes) > 1:
+            packs = {p for _conn, p in cfg.connector_packs if p}
+            modes = {m for _conn, m in cfg.connector_modes if m}
+            if len(packs) > 1 or len(modes) > 1:
+                posture += " · per-connector packs (see roster)"
+        return posture
     if cfg is None:
         return "unknown"
     mode = cfg.guardrail_mode or "observe"

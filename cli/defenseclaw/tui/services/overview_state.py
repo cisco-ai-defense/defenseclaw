@@ -514,6 +514,7 @@ class OverviewPanelModel:
     def __init__(self, cfg: OverviewConfig | None = None, *, version: str = "") -> None:
         self.cfg = cfg
         self.version = version
+        self.active_policy: object | None = None
         self.health: HealthSnapshot | None = None
         # Availability of the sidecar management endpoint is deliberately
         # tracked separately from ``health.gateway``.  That payload field is
@@ -597,6 +598,15 @@ class OverviewPanelModel:
         """Install bounded native OTLP evidence without treating absence as failure."""
 
         self.native_delivery_summary = summary
+
+    def set_active_policy(self, policy: object | None) -> None:
+        """Install the active named policy (a ``policy_catalog.PolicySummary``).
+
+        The Policies loader reads the catalog in a thread and hands the active
+        policy over so Overview's "Policy posture" names its real thresholds.
+        """
+
+        self.active_policy = policy
 
     def set_runtime_overview(self, runtime: RuntimeOverview | None) -> None:
         """Install the latest Runtime-plane summary used by Overview."""
