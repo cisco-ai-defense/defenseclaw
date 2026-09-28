@@ -295,6 +295,15 @@ You can keep working in the folder and running things on your machine while
 the agent works. The harness runs as it always does; DefenseClaw stays out
 of the way unless something needs you.
 
+`Ctrl+Z` doesn't suspend a sandboxed harness: there's no shell in the
+sandbox to bring it back with `fg`, so the harness comes straight back to
+your terminal and you carry on. Claude Code still prints
+``Claude Code has been suspended. Run `fg` to bring Claude Code back.``
+above its prompt; you can ignore it. `Ctrl+C` works as it does outside the
+sandbox. For other work, use a second terminal
+(`defenseclaw sandbox exec <name> -- <command>` runs a command in the
+sandbox).
+
 ### Watch the activity feed
 
 Every site the agent contacts, every block, ask and blocked tool call, and
