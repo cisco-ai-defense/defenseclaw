@@ -145,7 +145,6 @@ func TestContentHashCoversEveryInput(t *testing.T) {
 		"dc-version": func(s *BuildSpec) { s.DefenseClawVersion = "1.2.4" },
 		"owner":      func(s *BuildSpec) { s.Owner = "f0f0f0f0f0f0f0f0" },
 		"base":       func(s *BuildSpec) { s.BaseImage = "ghcr.io/example/base@sha256:" + strings.Repeat("a", 64) },
-		"harness":    func(s *BuildSpec) { s.HarnessVersion = "2.1.160" },
 	}
 	for name, mutate := range mutations {
 		spec := testSpec(harness.ClaudeCode)
@@ -154,6 +153,11 @@ func TestContentHashCoversEveryInput(t *testing.T) {
 		if c.ContentHash == base.ContentHash || c.Tag == base.Tag {
 			t.Errorf("%s does not change the content hash", name)
 		}
+	}
+	// Every harness has a single pinned release, so another version cannot
+	// render; the version is hashed all the same.
+	if bumped := withHarnessVersion(t, base, "2.1.160"); bumped.ContentHash == base.ContentHash || bumped.Tag == base.Tag {
+		t.Error("the harness version does not change the content hash")
 	}
 	same := testSpec(harness.ClaudeCode)
 	same.FailMode = "closed"

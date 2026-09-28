@@ -17,6 +17,7 @@
 package harness
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -26,7 +27,7 @@ import (
 
 // claudeCodeBaseVersion is the Claude Code release the digest-pinned
 // community base image ships (measured: /usr/local/bin/claude 2.1.156). That
-// pin is relocated from the base; any other pin is installed from npm.
+// pin is relocated from the base, and it is the only pinned release.
 const claudeCodeBaseVersion = "2.1.156"
 
 // ClaudeCode is the Claude Code harness.
@@ -53,27 +54,22 @@ case "$(head -c 2 "$p")" in
   *) printf '%s\n' "$p" ;;
 esac`,
 	},
+	// Only the base image's release is pinned: the digest-pinned base
+	// carries its bytes. Another release would come from the npm registry
+	// with no reviewed digest, so it is refused.
 	install: func(version string) ([]InstallStep, error) {
-		root := InstallRootBase + "/claudecode"
-		check := `got="$(DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 /usr/local/bin/claude --version 2>/dev/null | awk 'NR==1{print $1}')"; ` +
-			`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Claude Code '$got' is not the pinned ` + version + `" >&2; exit 1; }`
-		if version == claudeCodeBaseVersion {
-			return []InstallStep{{
-				Comment: "Relocate the base image's Claude Code " + version + " to a root-owned prefix and pin it",
-				Run: `set -eu; root=` + shellQuote(root) + `; ` +
-					`install -d -o root -g root -m 0755 "$root" "$root/bin"; ` +
-					`src="$(readlink -f /usr/local/bin/claude)"; ` +
-					`case "$src" in "$root"/*) ;; *) install -o root -g root -m 0755 "$src" "$root/bin/claude"; ln -sfn "$root/bin/claude" /usr/local/bin/claude ;; esac; ` +
-					check,
-			}}, nil
+		if version != claudeCodeBaseVersion {
+			return nil, fmt.Errorf("harness claudecode: %s has no pinned digests (DefenseClaw pins the base image's %s)", version, claudeCodeBaseVersion)
 		}
+		root := InstallRootBase + "/claudecode"
 		return []InstallStep{{
-			Comment: "Install Claude Code " + version + " from npm into a root-owned prefix",
+			Comment: "Relocate the base image's Claude Code " + version + " to a root-owned prefix and pin it",
 			Run: `set -eu; root=` + shellQuote(root) + `; ` +
-				`install -d -o root -g root -m 0755 "$root"; ` +
-				`npm install -g --no-fund --no-audit --prefix "$root" ` + shellQuote("@anthropic-ai/claude-code@"+version) + `; ` +
-				`ln -sfn "$root/bin/claude" /usr/local/bin/claude; ` +
-				check,
+				`install -d -o root -g root -m 0755 "$root" "$root/bin"; ` +
+				`src="$(readlink -f /usr/local/bin/claude)"; ` +
+				`case "$src" in "$root"/*) ;; *) install -o root -g root -m 0755 "$src" "$root/bin/claude"; ln -sfn "$root/bin/claude" /usr/local/bin/claude ;; esac; ` +
+				`got="$(DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 /usr/local/bin/claude --version 2>/dev/null | awk 'NR==1{print $1}')"; ` +
+				`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Claude Code '$got' is not the pinned ` + version + `" >&2; exit 1; }`,
 		}}, nil
 	},
 	launcher: claudeCodeLauncher,

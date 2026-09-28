@@ -566,6 +566,22 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 }
 
 // recordFor is the record Build writes for c.
+// withHarnessVersion is c for another pin of its harness, as a later
+// DefenseClaw release that pins it would render it: every harness has a
+// single pinned release today, so NewContext refuses any other version.
+func withHarnessVersion(t *testing.T, c *Context, version string) *Context {
+	t.Helper()
+	out := *c
+	out.HarnessVersion, out.Spec.HarnessVersion = version, version
+	hash, err := contentHash(&out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Tag = strings.Replace(c.Tag, c.ContentHash[:16], hash[:16], 1)
+	out.ContentHash = hash
+	return &out
+}
+
 func recordFor(c *Context, builtAt time.Time, verified bool) Record {
 	r := Record{
 		Tag: c.Tag, ImageID: "sha256:" + strings.Repeat("1", 64), ContentHash: c.ContentHash,
@@ -590,9 +606,8 @@ func TestStoreCurrentSelectsOnlyTheExactVerifiedImage(t *testing.T) {
 	oldSpec := testSpec(harness.ClaudeCode)
 	newSpec := testSpec(harness.ClaudeCode)
 	newSpec.DefenseClawVersion = "1.2.4"
-	newHarness := testSpec(harness.ClaudeCode)
-	newHarness.HarnessVersion = "2.1.160"
-	oldCtx, newCtx, harnessCtx := mustContext(t, oldSpec), mustContext(t, newSpec), mustContext(t, newHarness)
+	oldCtx, newCtx := mustContext(t, oldSpec), mustContext(t, newSpec)
+	harnessCtx := withHarnessVersion(t, oldCtx, "2.1.160")
 	for _, r := range []Record{
 		recordFor(oldCtx, t0, true),
 		recordFor(newCtx, t0.Add(time.Hour), false),

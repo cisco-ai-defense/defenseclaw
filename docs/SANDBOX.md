@@ -1158,10 +1158,14 @@ modes and owners are set in the tar headers) and streams it to
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
    (`/usr/bin:/bin:/usr/sbin:/sbin`).
 2. Installs the harness at a version whose Linux hook contract is known. Any
-   other version fails before the build starts. The default Claude Code pin,
-   2.1.156, is relocated from the base image (other pins install from npm);
-   Codex 0.146.0 replaces the base image's 0.117, which is outside every
-   reviewed contract. Binaries move to root-owned
+   other version fails before the build starts. Claude Code 2.1.156 is
+   relocated from the digest-pinned base image, and no other Claude Code
+   version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
+   outside every reviewed contract. An npm-installed harness (Codex,
+   OpenCode, Copilot CLI, Amp) is downloaded once with `npm pack`, installed
+   from that tarball only after its SHA-512 matches the pinned registry
+   integrity, and its native executable must match a pinned sha256 per
+   architecture. Binaries move to root-owned
    `/opt/defenseclaw-harness/<harness>`, so a native installer's copy under
    `$HOME` never becomes the pinned binary.
 3. Copies DefenseClaw's files root-owned and read-only under
@@ -1578,7 +1582,7 @@ images stay unverified, so they are never selected for a sandbox.
 | Connector | Pinned harness | Hook registration in the image | Tier | Yolo flag | Credential profiles | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | 2.1.156 (the base image's copy) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
-| Codex | 0.146.0 (npm) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
+| Codex | 0.146.0 (npm, native sha256 pinned) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
 | OpenCode | 1.18.31 (npm, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | verified |
 | GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |
 | Amp | 0.0.1785334225-g9abe75 (npm, native sha256 pinned) | User-owned plugin `~/.config/amp/plugins/defenseclaw.ts` | user | `--dangerously-allow-all` | Amp API key (endpoints unverified) | unverified |

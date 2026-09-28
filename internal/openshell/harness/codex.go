@@ -24,6 +24,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
+// codexPin is the reviewed Codex CLI release. The npm package is a Node
+// wrapper that spawns the native binary of its platform package
+// (optionalDependencies @openai/codex-linux-arm64 and -x64, which are
+// npm:@openai/codex@0.146.0-linux-<arch>); the digests below are the
+// registry integrity of @openai/codex@0.146.0 and the sha256 of
+// vendor/<triple>/bin/codex in each platform package.
+var codexPin = npmPin{
+	Package:   "@openai/codex",
+	Version:   "0.146.0",
+	Integrity: "sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==",
+	Native: map[string]npmNative{
+		"aarch64": {Path: "lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex", SHA256: "cb5e8cb8a333a408ce6adbe0d4fad1845c69772c2216af7c1f88c98a11460dc6"},
+		"x86_64":  {Path: "lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex", SHA256: "2e863156ed35ecc5253b1e2f907a9143077b9f7cb51942070c61996471ff6e04"},
+	},
+}
+
 // Codex is the Codex CLI harness. The base image's Codex 0.117 is outside
 // every reviewed hook contract, so the pinned release is always installed
 // from npm (and the base copy removed).
@@ -44,16 +60,15 @@ var Codex = register(&Spec{
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/codex"
+		run, err := codexPin.installRun(root, version, "codex", "@openai/codex")
+		if err != nil {
+			return nil, err
+		}
 		return []InstallStep{{
-			Comment: "Replace the base image's Codex with the pinned " + version + " in a root-owned prefix",
-			Run: `set -eu; root=` + shellQuote(root) + `; ` +
-				`npm uninstall -g @openai/codex >/dev/null 2>&1 || true; ` +
-				`install -d -o root -g root -m 0755 "$root"; ` +
-				`npm install -g --no-fund --no-audit --prefix "$root" ` + shellQuote("@openai/codex@"+version) + `; ` +
-				`ln -sfn "$root/bin/codex" /usr/local/bin/codex; ` +
+			Comment: "Replace the base image's Codex with the pinned " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
+			Run: run + "; " +
 				`got="$(/usr/local/bin/codex --version 2>/dev/null | awk 'NR==1{print $NF}')"; ` +
-				`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Codex '$got' is not the pinned ` + version + `" >&2; exit 1; }; ` +
-				`[ -n "$(find "$root" -type f -path '*/vendor/*/bin/codex' | head -n 1)" ] || { echo "Codex native binary missing" >&2; exit 1; }`,
+				`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Codex '$got' is not the pinned ` + version + `" >&2; exit 1; }`,
 		}}, nil
 	},
 	launcher: codexLauncher,

@@ -179,12 +179,15 @@ func TestInstallStepsPinContract(t *testing.T) {
 		wantErr error
 	}{
 		{"claude-base-relocate", ClaudeCode, "", "readlink -f /usr/local/bin/claude", nil},
-		{"claude-npm-pin", ClaudeCode, "2.1.160", "@anthropic-ai/claude-code@2.1.160", nil},
+		// Inside the contract, but only the base image's release is pinned.
+		{"claude-unpinned-digest", ClaudeCode, "2.1.160", "", nil},
 		{"claude-below-contract", ClaudeCode, "2.1.100", "", ErrUnknownContract},
 		{"codex-pin", Codex, "", "@openai/codex@0.146.0", nil},
 		{"codex-base-0.117", Codex, "0.117.0", "", ErrUnknownContract},
 		{"codex-not-exact", Codex, "latest", "", nil},
 		{"codex-range", Codex, ">=0.146", "", nil},
+		// Inside the contract, but DefenseClaw pinned no digests for it.
+		{"codex-unpinned-digest", Codex, "0.150.0", "", nil},
 		{"opencode-pin", OpenCode, "", "'opencode-ai@1.18.31'", nil},
 		{"opencode-base-1.2.18", OpenCode, "1.2.18", "", ErrUnknownContract},
 		{"opencode-above-range", OpenCode, "1.19.2", "", ErrUnknownContract},
@@ -245,6 +248,7 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 		pin  npmPin
 		base string
 	}{
+		{Codex, codexPin, "npm uninstall -g '@openai/codex'"},
 		{OpenCode, openCodePin, "npm uninstall -g 'opencode-ai'"},
 		{Copilot, copilotPin, "npm uninstall -g '@github/copilot'"},
 		{Amp, ampPin, ""},
