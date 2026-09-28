@@ -102,22 +102,13 @@ func TestSandboxCommandManifest(t *testing.T) {
 	}
 }
 
-// sandboxCommandPaths lists every sandbox subcommand path.
-func sandboxCommandPaths(cmd *cobra.Command, prefix string) []string {
-	var out []string
-	for _, c := range cmd.Commands() {
-		if c.Hidden || c.Name() == "help" {
-			continue
-		}
-		p := strings.TrimSpace(prefix + " " + c.Name())
-		out = append(out, p)
-		out = append(out, sandboxCommandPaths(c, p)...)
-	}
-	return out
-}
-
+// TestSandboxCommandTreeCoversThePlan guards the planned commands
+// independently of the regenerable golden manifest.
 func TestSandboxCommandTreeCoversThePlan(t *testing.T) {
-	paths := sandboxCommandPaths(sandboxCmd, "")
+	var paths []string
+	for _, m := range sandboxManifest(sandboxCmd) {
+		paths = append(paths, strings.TrimPrefix(m.Path, "sandbox "))
+	}
 	for _, want := range []string{
 		"setup", "doctor", "run", "list", "status", "connect", "exec", "stop", "start", "delete", "logs", "activity",
 		"undo", "review", "approvals", "approve", "reject", "unblock", "pull", "policy show", "policy explain",
@@ -141,18 +132,20 @@ func TestSandboxRunArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
+	for _, c := range []struct {
+		cmd     func() *cobra.Command
 		argv    []string
 		wantErr string
 		dashed  []string
 	}{
-		{[]string{"claude"}, "", nil},
-		{[]string{"claude", "--copy", "--", "-p", "fix it"}, "", []string{"-p", "fix it"}},
-		{[]string{}, "name the harness", nil},
-		{[]string{"claude", "extra"}, "pass harness arguments after --", nil},
-	}
-	for _, c := range cases {
-		cmd := newSandboxRunCmd()
+		{newSandboxRunCmd, []string{"claude"}, "", nil},
+		{newSandboxRunCmd, []string{"claude", "--copy", "--", "-p", "fix it"}, "", []string{"-p", "fix it"}},
+		{newSandboxRunCmd, []string{}, "name the harness", nil},
+		{newSandboxRunCmd, []string{"claude", "extra"}, "pass harness arguments after --", nil},
+		{newSandboxExecCmd, []string{"box", "--", "ls", "-la"}, "", []string{"ls", "-la"}},
+		{newSandboxExecCmd, []string{"box", "ls"}, "exec <name> -- <command>", nil},
+	} {
+		cmd := c.cmd()
 		if err := cmd.ParseFlags(c.argv); err != nil {
 			t.Fatalf("%v: %v", c.argv, err)
 		}
@@ -169,16 +162,6 @@ func TestSandboxRunArgs(t *testing.T) {
 	}
 	if run.Flags().Lookup("prompt").Shorthand != "p" || run.Flags().Lookup("detach").Shorthand != "d" {
 		t.Error("run lost its -p/-d shorthands")
-	}
-	cmd := newSandboxExecCmd()
-	_ = cmd.ParseFlags([]string{"box", "--", "ls", "-la"})
-	if err := cmd.Args(cmd, cmd.Flags().Args()); err != nil {
-		t.Errorf("exec box -- ls -la: %v", err)
-	}
-	cmd = newSandboxExecCmd()
-	_ = cmd.ParseFlags([]string{"box", "ls"})
-	if err := cmd.Args(cmd, cmd.Flags().Args()); err == nil {
-		t.Error("exec without -- accepted")
 	}
 }
 
