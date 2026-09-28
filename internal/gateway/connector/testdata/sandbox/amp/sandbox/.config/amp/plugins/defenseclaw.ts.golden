@@ -21,7 +21,11 @@
 // transport failure or relay 502/503/504.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
+import { execFile } from 'node:child_process'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { lstat } from 'node:fs/promises'
 import { userInfo } from 'node:os'
+import { dirname } from 'node:path'
 
 const DC_API_ADDR = "host.openshell.internal:18971"
 const DC_FAIL_MODE: string = "closed" // sandbox hooks always fail closed
@@ -30,6 +34,11 @@ const DC_RETRY_TIMEOUT_MS = 12000
 // OpenShell placeholders (openshell:resolve:env:v<revision>_<KEY>) and the
 // host token alphabet; anything else is never sent.
 const DC_TOKEN_PATTERN = /^[A-Za-z0-9:._-]{1,512}$/
+// The standalone managed-install hook socket, foreign-hook guard and install
+// marker never apply in a sandbox: the plugin always posts to the ingress.
+const DC_HOOK_SOCKET: string = ""
+const DC_FOREIGN_GUARD: string = ""
+const DC_INSTALL_MARKER: string = ""
 // Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
 // differences and future envelope fields.
 const DC_MAX_BODY_BYTES = 900 * 1024
@@ -153,6 +162,80 @@ function assistantResponse(messages: ThreadMessage[]): string {
 	return parts.join("\n")
 }
 
+// runForeignHookCheck asks the administrator-owned hook binary for the
+// foreign-hook guard's decision and resolves to a block reason, or "" when
+// no unapproved plugin or hook is present. A binary that cannot be run,
+// times out, or answers anything but {"deny": false} blocks, unless the
+// managed deployment was uninstalled (its install marker is gone): uninstall
+// removes the hook binary too, and this plugin then stops failing closed as
+// it does for the gateway call.
+function runForeignHookCheck(event: string, cwd: string): Promise<string> {
+	if (!DC_FOREIGN_GUARD) return Promise.resolve("")
+	return new Promise(resolve => {
+		const fail = (why: string) => {
+			void deploymentRemoved().then(removed => resolve(removed
+				? ""
+				: foreignCheckFailure(event, why)))
+		}
+		try {
+			const child = execFile(
+				DC_FOREIGN_GUARD,
+				["hook", "--connector", "amp", "--foreign-hook-check"],
+				{ timeout: DC_TIMEOUT_MS, maxBuffer: 65536, windowsHide: true },
+				(error, stdout) => {
+					if (error) {
+						fail(safeError(error))
+						return
+					}
+					let verdict: { deny?: unknown, reason?: unknown }
+					try {
+						verdict = JSON.parse(String(stdout))
+					} catch {
+						fail("invalid response")
+						return
+					}
+					if (verdict && verdict.deny === false) {
+						resolve("")
+						return
+					}
+					resolve(verdict && typeof verdict.reason === "string" && verdict.reason
+						? verdict.reason
+						: "DefenseClaw blocked this tool call because an unapproved plugin is present.")
+				},
+			)
+			child.stdin?.on("error", () => {})
+			child.stdin?.end(JSON.stringify({ hook_event_name: event, cwd }))
+		} catch (error) {
+			fail(safeError(error))
+		}
+	})
+}
+
+// foreignCheckFailure is the block reason when the foreign-plugin check
+// itself could not run. Amp loads plugins once, so a check that failed at
+// load keeps blocking for the life of this process; that reason says to
+// restart the agent.
+function foreignCheckFailure(event: string, why: string): string {
+	const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer"
+	if (event === "session.load") {
+		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Restart the agent once DefenseClaw is available.`
+	}
+	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
+}
+
+// deploymentRemoved reports whether the managed deployment that rendered this
+// plugin was uninstalled: its install marker is definitively absent. Any
+// other inspection result keeps the plugin enforcing.
+async function deploymentRemoved(): Promise<boolean> {
+	if (!DC_INSTALL_MARKER) return false
+	try {
+		await lstat(DC_INSTALL_MARKER)
+		return false
+	} catch (error) {
+		return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
+	}
+}
+
 function failureResponse(reason: string): GatewayResponse {
 	if (DC_FAIL_MODE === "closed") {
 		return { action: "block", reason: `DefenseClaw hook failed closed (${reason})` }
@@ -181,6 +264,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		? amp.helpers.filePathFromURI(amp.system.workspaceRoot)
 		: ""
 	const executorKind = amp.system.executor?.kind || ""
+	// Amp loads plugins once at startup: a foreign plugin present now keeps
+	// running for this process even if its file is deleted later, so a block
+	// found at load holds for the whole process.
+	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
+	const foreignHookCheck = async (event: string): Promise<string> =>
+		(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)
@@ -292,10 +381,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 		let token: string
 		try {
-			token = await scopedHookToken()
+			token = DC_HOOK_SOCKET ? "" : await scopedHookToken()
 		} catch {
 			// Credential failures are categorically unsafe at the two Amp policy
-			// boundaries, regardless of the operator's transport fail mode.
+			// boundaries, regardless of the operator's transport fail mode,
+			// unless the managed deployment itself was uninstalled.
+			if (await deploymentRemoved()) return { action: "allow" }
 			if (actionable) {
 				return { action: "block", reason: "DefenseClaw hook credential is unavailable." }
 			}
@@ -309,7 +400,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
 			...identityHeaders(),
 		}
-		headers.Authorization = `Bearer ${token}`
+		if (token) headers.Authorization = `Bearer ${token}`
 
 		try {
 			const response = await sandboxFetch(headers, body)
@@ -321,6 +412,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return data
 		} catch (error) {
+			if (await deploymentRemoved()) return { action: "allow" }
 			return failureResponse(safeError(error))
 		} finally {
 			clearTimeout(timer)
@@ -366,6 +458,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	})
 
 	amp.on("tool.call", async (event, ctx): Promise<ToolCallResult> => {
+		const blocked = await foreignHookCheck("tool.call")
+		if (blocked) return { action: "reject-and-continue", message: blocked }
 		const threadID = stringID(event.thread.id)
 		const toolUseID = stringID(event.toolUseID)
 		const verdict = await post({
