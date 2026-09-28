@@ -27,6 +27,7 @@ This command surfaces the common policy levers directly:
   defenseclaw guardrail status         # enabled? roster of active connectors + their modes
   defenseclaw guardrail enable         # turn on + connector setup
   defenseclaw guardrail disable        # turn off + connector teardown
+  defenseclaw guardrail mode           # observe (log only) vs action (enforce)
   defenseclaw guardrail fail-mode      # open vs closed on hook failures
   defenseclaw guardrail hilt           # human-in-the-loop prompting
   defenseclaw guardrail block-message  # message shown when an action is blocked
@@ -303,6 +304,7 @@ def guardrail() -> None:
     \b
       status         enabled state + roster (mode/fail/rule-pack/hilt/judge)
       enable/disable flip enforcement on/off
+      mode           observe (log only) vs action (enforce)
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
@@ -3156,6 +3158,214 @@ def _change_protection(
         not_covered=not_covered,
         gateway=outcome,
         warning=warning,
+        notes=notes,
+        message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# guardrail mode — observe vs action without re-running setup
+# ---------------------------------------------------------------------------
+
+
+@guardrail.command("mode")
+@click.argument("mode", required=False, type=click.Choice(["observe", "action"]))
+@click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help="Set only this connector's mode (writes its per-connector override).",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    help="With --connector: drop that connector's mode override so it follows the global mode.",
+)
+@_restart_option
+@click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
+@pass_ctx
+def mode_cmd(
+    app: AppContext, mode: str | None, connector: str | None, clear: bool, restart: bool, json_out: bool
+) -> None:
+    """Switch the guardrail between observe (log only) and action (enforce).
+
+    Sets only ``guardrail.mode``, or with ``--connector X`` only
+    ``guardrail.connectors.X.mode`` (creating that block if needed); ``--clear
+    --connector X`` removes X's override. The guardrail's on/off state, rule
+    pack and port are never touched. The running gateway applies a global
+    change live; a per-connector change (or one that flips a connector's
+    hook fail mode) restarts a running gateway (``--no-restart`` to skip).
+    """
+    from defenseclaw import policy_catalog
+
+    if clear and not connector:
+        raise click.UsageError("--clear needs --connector NAME (the global mode can't be cleared, only switched).")
+    if clear and mode:
+        raise click.UsageError("Pass either MODE or --clear, not both.")
+    if not clear and not mode:
+        raise click.UsageError("Missing MODE: observe or action.")
+
+    gc = app.cfg.guardrail
+    scope = "global"
+    connector_key: str | None = None
+
+    def _effective(key: str | None) -> str:
+        return policy_catalog.mode_label(gc.effective_mode(key) if key else gc.mode)
+
+    def _finish(
+        *,
+        ok: bool,
+        exit_code: int,
+        message: str,
+        new_mode: str = "",
+        previous: str = "",
+        source: str = "",
+        changed: bool = False,
+        not_covered: list[str] | None = None,
+        gateway: str | None = None,
+        notes: list[str] | None = None,
+        **_ignored: object,
+    ) -> None:
+        if json_out:
+            click.echo(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "ok": ok,
+                        "scope": scope,
+                        "mode": new_mode,
+                        "previous": previous,
+                        "mode_source": source,
+                        "changed": changed,
+                        "not_covered": list(not_covered or []),
+                        "gateway": gateway,
+                        "message": message,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            (ux.ok if ok else ux.err)(message, indent="  ")
+            for note in notes or []:
+                ux.subhead(note, indent="    ")
+        if exit_code:
+            raise SystemExit(exit_code)
+
+    if connector:
+        connector_key, problem = _resolve_scope_connector(app, connector)
+        scope = normalize_connector(connector_key)
+        if problem:
+            _finish(ok=False, exit_code=1, message=problem)
+
+    try:
+        actives = [str(c) for c in app.cfg.active_connectors()]
+    except Exception:  # noqa: BLE001 — treat an unreadable roster as empty.
+        actives = []
+
+    def _override(key: str) -> str:
+        block = gc._connector_override(key) if hasattr(gc, "_connector_override") else None
+        return (getattr(block, "mode", "") or "").strip() if block is not None else ""
+
+    affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
+    fail_before = {c: gc.effective_hook_fail_mode(c) for c in affected}
+    previous = _effective(connector_key)
+
+    if connector_key is None:
+        if (gc.mode or "").strip() == mode:
+            _finish(
+                ok=True,
+                exit_code=0,
+                new_mode=previous,
+                previous=previous,
+                source="global",
+                message=f"The global guardrail mode is already {mode}; nothing was changed.",
+            )
+            return
+    elif clear:
+        if not _override(connector_key):
+            _finish(
+                ok=True,
+                exit_code=0,
+                new_mode=previous,
+                previous=previous,
+                source="global",
+                message=(
+                    f"{_connector_label(scope)} has no mode override; it already follows the global mode ({previous})."
+                ),
+            )
+            return
+    elif _override(connector_key) == mode:
+        _finish(
+            ok=True,
+            exit_code=0,
+            new_mode=previous,
+            previous=previous,
+            source="override",
+            message=f"{_connector_label(scope)} is already in {mode} mode; nothing was changed.",
+        )
+        return
+
+    _preflight_config_write(app)
+    if connector_key is None:
+        gc.mode = mode
+    elif clear:
+        _connector_block_for_write(gc, connector_key).mode = ""
+    else:
+        _connector_block_for_write(gc, connector_key).mode = mode
+    new_mode = _effective(connector_key)
+    source = "override" if connector_key and not clear else "global"
+    fail_after = {c: gc.effective_hook_fail_mode(c) for c in affected}
+    fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
+    if fail_flips:
+        # Only hook connectors bake a fail mode into their registration; the
+        # gateway re-bakes it when it restarts.
+        from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+        fail_flips = {c: fm for c, fm in fail_flips.items() if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS}
+
+    try:
+        app.cfg.save()
+    except (OSError, ValueError) as exc:
+        _finish(ok=False, exit_code=1, new_mode=previous, previous=previous, message=f"Failed to save config: {exc}")
+    _log_guardrail_change(
+        app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
+    )
+    outcome = _apply_to_running_gateway(
+        app, needs_restart=connector_key is not None or bool(fail_flips), restart=restart, quiet=json_out
+    )
+
+    plain = {"action": "enforces the policy (blocks what it blocks)", "observe": "logs findings, blocks nothing"}
+    if connector_key is None:
+        message = f"The global guardrail mode is now {new_mode}: it {plain[new_mode]}."
+        not_covered = [c for c in actives if _override(c) and policy_catalog.mode_label(_override(c)) != new_mode]
+    elif clear:
+        message = f"{_connector_label(scope)} follows the global mode again ({new_mode}: it {plain[new_mode]})."
+        not_covered = []
+    else:
+        message = f"{_connector_label(scope)} is now in {new_mode} mode: it {plain[new_mode]}."
+        not_covered = []
+    consequence = {
+        "closed": "the action is blocked if the hook can't reach the gateway",
+        "open": "the action goes ahead if the hook can't reach the gateway",
+    }
+    notes = [
+        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
+        for c, fm in fail_flips.items()
+    ]
+    notes.extend(
+        f"{_connector_label(c)} keeps its own mode ({policy_catalog.mode_label(_override(c))}); "
+        f"change it with: defenseclaw guardrail mode {new_mode} --connector {c}"
+        for c in not_covered
+    )
+    _finish(
+        ok=outcome != "restart_failed",
+        exit_code=1 if outcome == "restart_failed" else 0,
+        new_mode=new_mode,
+        previous=previous,
+        source=source,
+        changed=True,
+        not_covered=not_covered,
+        gateway=outcome,
         notes=notes,
         message=f"{message} {_GATEWAY_OUTCOMES[outcome]}",
     )
