@@ -68,3 +68,21 @@ async def test_slash_on_a_catalog_types_into_its_filter(tmp_path) -> None:
         assert [row.name for row in app.skills_model.filtered] == ["alpha"]
         assert app.focused is app.query_one("#panel-table")
     assert ran == []
+
+
+def test_registries_move_with_j_and_k(tmp_path) -> None:
+    from defenseclaw.config import RegistrySource
+    from defenseclaw.tui.panels.registries import RegistriesPanelModel
+
+    model = RegistriesPanelModel(
+        data_dir=tmp_path,
+        sources=[
+            RegistrySource(id="one", kind="http_yaml", content="skill", enabled=True),
+            RegistrySource(id="two", kind="http_yaml", content="skill", enabled=True),
+        ],
+    )
+
+    assert model.handle_key("j").handled
+    assert model.selected_source().id == "two"
+    assert model.handle_key("k").handled
+    assert model.selected_source().id == "one"
