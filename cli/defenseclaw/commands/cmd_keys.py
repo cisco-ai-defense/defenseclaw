@@ -96,10 +96,29 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
 @keys_cmd.command("set")
 @click.argument("env_name")
 @click.option("--value", "value", default=None, help="Value to store; prompts if omitted.")
+@click.option(
+    "--value-stdin",
+    "value_stdin",
+    is_flag=True,
+    help="Read the value from the first line of stdin (not echoed); for scripts and the TUI.",
+)
 @pass_ctx
-def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
-    """Set a credential and persist it to ``~/.defenseclaw/.env``."""
+def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: bool) -> None:
+    """Set a credential and persist it to ``~/.defenseclaw/.env``.
+
+    The value comes from ``--value``, ``--value-stdin`` (first line of
+    standard input, trailing newline removed), or a hidden prompt.
+    """
     import os
+
+    if value_stdin and value is not None:
+        raise click.UsageError("--value and --value-stdin are mutually exclusive")
+    if value_stdin:
+        line = click.get_text_stream("stdin").readline()
+        value = line.rstrip("\r\n")
+        if not value:
+            ux.err("No value on stdin — nothing saved.")
+            raise SystemExit(1)
 
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
