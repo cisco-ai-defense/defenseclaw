@@ -319,8 +319,9 @@ that lifts the block; a finding such as an alert on a tool call or hook
 tamper; a quarantined nested repository; and a DefenseClaw daemon that
 does not answer (the hooks fail closed until it is back). The harness draws
 its own screen, so these notices go to the terminal's title and, where the
-terminal has them, a desktop notification (an ask also rings the bell)
-instead of lines written over it. The end-of-session summary repeats them.
+terminal has them, a desktop notification, and ring the bell, instead of
+lines written over it. A harness that sets the title itself (Claude Code
+does) takes it back at once, so the end-of-session summary repeats them.
 Without a terminal (`--prompt`), they are lines on standard error. A
 harness that sends its first hook only with your first prompt is not
 warned about while it waits for one.
