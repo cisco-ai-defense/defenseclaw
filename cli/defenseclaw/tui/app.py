@@ -89,6 +89,7 @@ from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPane
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
+    WIZARD_COMMAND_FAMILIES,
     WIZARD_DESCRIPTIONS,
     SetupPanelAction,
     SetupPanelModel,
@@ -4171,7 +4172,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     )
                     if event.exit_code == 0 and not event.cancelled:
                         await self._handle_successful_command(binary, args)
-                    elif binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+                    elif binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                         # A setup-family run failed (non-zero exit). Clear the
                         # "running..." badge so the Setup panel reflects the
                         # actual outcome and the user can retry without first
@@ -4203,7 +4204,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # The submit code optimistically flagged the wizard row as
             # "running..." before the executor rejected the new run; clear
             # it so the panel doesn't show two spinning wizards forever.
-            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+            if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
         except Exception as exc:  # noqa: BLE001
@@ -4224,7 +4225,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._strip_label = label
             self._strip_last_output = str(exc)
             self._strip_finished(exit_code=1, duration=0.0)
-            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+            if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
             return None
@@ -11968,7 +11969,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # by _derive_command_label, e.g. "defenseclaw setup claudecode".
         if cancelled_label.startswith("defenseclaw "):
             argv = tuple(cancelled_label.split()[1:])
-            if argv and argv[0] in {"setup", "sandbox", "registry", "keys"}:
+            if argv and argv[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(argv, success=False)
         self._refresh_hint()
 
@@ -11976,6 +11977,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if binary != "defenseclaw" or not args:
             return
         command = args[0]
+        if command in WIZARD_COMMAND_FAMILIES:
+            # Every family a Setup task runs, guardrail / agent / acp too:
+            # those tasks' rows otherwise kept spinning "running".
+            self.setup_model.mark_wizard_complete(args, success=True)
         if command == "init":
             self.first_run_model.active = False
             self.active_panel = "overview"
@@ -11983,13 +11988,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         elif command == "setup":
             self._refresh_cached_config()
             self.setup_model.clear_restart_queue()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "keys":
             await self._load_setup_credentials()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command in {"sandbox", "registry"}:
             self._refresh_cached_config()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "doctor":
             self._load_doctor_cache()
         elif command == "policy" or (

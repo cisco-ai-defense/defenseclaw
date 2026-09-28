@@ -212,6 +212,11 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
 
+# First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
+# …): a finished or failed command of one of these clears a task's
+# "running" badge (``mark_wizard_complete``).
+WIZARD_COMMAND_FAMILIES: frozenset[str] = frozenset(command[0] for command in WIZARD_COMMANDS.values() if command)
+
 # The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
 ADMIN_POLICY_MESSAGE = "blocked by your organization's DefenseClaw policy"
 # Choice value for pack-governed openshell keys left unset.

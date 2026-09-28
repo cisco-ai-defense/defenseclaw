@@ -115,3 +115,21 @@ async def test_keys_walk_tasks_across_groups_with_the_table_focused(app) -> None
         await pilot.pause()
         assert app.setup_model.mode == "config"
         assert app.setup_model.active_wizard is SetupWizard(last_of_first)
+
+
+@pytest.mark.parametrize(
+    ("wizard_name", "args"),
+    [
+        ("GUARDRAIL_ACTIONS", ("guardrail", "block-message", "Blocked here", "--yes")),
+        ("AI_DISCOVERY", ("agent", "discovery", "disable")),
+        ("ACP_GUARD", ("acp", "setup", "--client", "zed")),
+    ],
+)
+async def test_a_finished_task_command_clears_its_running_badge(app, wizard_name: str, args) -> None:  # type: ignore[no-untyped-def]
+    from defenseclaw.tui.panels.setup import SetupWizard
+
+    wizard = SetupWizard[wizard_name]
+    async with app.run_test(size=(80, 24)):
+        app.setup_model.wizard_status[wizard] = "running..."
+        await app._handle_successful_command("defenseclaw", args)
+        assert app.setup_model.wizard_status[wizard] == "done"
