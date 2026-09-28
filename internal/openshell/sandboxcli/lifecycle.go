@@ -342,18 +342,29 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 		started = true
 	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell}
+	// fail stops the sandbox this command started for a session that never
+	// began: the probe, the refresh or the harness's start failed.
+	fail := func(err error) error {
+		if started {
+			a.warn("stopping " + sb.Name + " after the failure")
+			if _, serr := api.Stop(context.WithoutCancel(ctx), sb.Name); serr != nil {
+				a.warn("could not stop " + sb.Name + ": " + apiError(serr).Error())
+			}
+		}
+		return err
+	}
 	if o.Refresh && sb.WorkdirMode == config.OpenShellWorkdirCopy {
 		// The refresh replaces the copy, workdir included (a failed refresh
 		// may have left none): probe outside it, and the refresh's baseline
 		// checks the new workdir.
 		if err := s.probe(ctx, ""); err != nil {
-			return err
+			return fail(err)
 		}
 		if err := a.refreshCopy(ctx, s); err != nil {
-			return err
+			return fail(err)
 		}
 	} else if err := s.probe(ctx, sb.Workdir); err != nil {
-		return err
+		return fail(err)
 	}
 	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept})
 	var code int
@@ -361,7 +372,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 		// A shell in the project, reviewed at its end like a harness
 		// session: what it changed is kept or undone the same way.
 		if code, err = s.attachShell(ctx); err != nil {
-			return err
+			return fail(err)
 		}
 		code = 0
 	} else {
@@ -372,7 +383,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) error {
 			opts.Mode, opts.Prompt = harness.Headless, o.Prompt
 		}
 		if code, err = s.attach(ctx, opts, headless); err != nil {
-			return err
+			return fail(err)
 		}
 	}
 	if err := s.end(ctx); err != nil {

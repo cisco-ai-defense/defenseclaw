@@ -492,7 +492,11 @@ with the summary and the keep-or-undo question (a `--shell` session exits
 `0`). Needs a terminal, except with `--prompt TEXT` (or the harness's own
 print flag after `--`), which runs one prompt headless. A session stops the
 sandbox at its end only when it started it, and leaves one whose detached
-run is still going running. To continue the harness's last conversation,
+run is still going, or that another session is attached to, running. Two
+sessions can share a sandbox (a second `claude` in the folder offers to
+resume it): neither one's end stops it, undoes the folder or deletes it
+(`--rm`) under the other, and the one that ends first names the review and
+undo commands for later. To continue the harness's last conversation,
 pass its own flag: `-- --continue` for Claude Code, `-- resume --last` for
 Codex.
 

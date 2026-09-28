@@ -312,7 +312,9 @@ func newSandboxConnectCmd() *cobra.Command {
 		Long: `Resumes a sandbox: starts it when it is stopped and attaches the harness to your
 terminal, or with --prompt (or the harness's own print flag after --) runs one prompt
 headless, which needs no terminal. A sandbox this command started is stopped again when
-the session ends; one that was already running (a detached run) keeps running.`,
+the session ends; one that was already running, whose detached run is still going, or
+that another session is attached to keeps running. --shell opens a login shell instead,
+reviewed at its end like a harness session.`,
 		Example: `  defenseclaw sandbox connect myapp-7f3a
   defenseclaw sandbox connect myapp-7f3a --prompt "now add the tests"
   defenseclaw sandbox connect myapp-7f3a --shell`,

@@ -448,6 +448,27 @@ func TestConnectRunsOnePromptHeadless(t *testing.T) {
 	}
 }
 
+// A connect that started the sandbox for a session that never began (the
+// probe failed) stops it again.
+func TestConnectStopsWhatItStartedWhenTheSessionFails(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := sampleSandbox("m1-a")
+	sb.Phase = "stopped"
+	ta.daemon.add(sb)
+	ta.stream.answer = func(argv []string) (int, string) {
+		if cmd := sandboxCommand(argv); len(cmd) == 1 && cmd[0] == "true" {
+			return 1, "no answer"
+		}
+		return 0, ""
+	}
+	if err := ta.Connect(context.Background(), ConnectOptions{Name: "m1-a"}); err == nil || !strings.Contains(err.Error(), "does not answer") {
+		t.Fatalf("Connect = %v", err)
+	}
+	if n := len(ta.daemon.callsTo("POST", "/api/v1/sandbox/sandboxes/m1-a/stop")); n != 1 {
+		t.Fatalf("stop calls = %d; the sandbox this connect started must be stopped again", n)
+	}
+}
+
 // A headless run on a terminal offers this folder's sandbox too (the
 // wrapper's `claude -p ...` created a new sandbox every time).
 func TestRunHeadlessOnATerminalOffersResume(t *testing.T) {

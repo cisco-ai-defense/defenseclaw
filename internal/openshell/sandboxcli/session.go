@@ -183,6 +183,9 @@ var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then 
 // attachShell runs a login shell in the project folder with the terminal
 // (`connect --shell`).
 func (s *session) attachShell(ctx context.Context) (int, error) {
+	// While the shell runs, other sessions' ends leave the sandbox alone.
+	release := s.app.holdSession(s.sb.Name)
+	defer release()
 	stop := s.beginSession(ctx)
 	defer stop()
 	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
