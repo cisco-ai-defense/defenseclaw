@@ -273,8 +273,14 @@ def _prune_scope_dir(parent: str) -> None:
             pass
 
 
-def install_pack(staged: str, final: str) -> None:
-    """Move *staged* to *final*, replacing a previously composed pack."""
+def install_pack(staged: str, final: str) -> str:
+    """Move *staged* to *final*; return where the pack it replaced was kept ("" if none).
+
+    The config may already point at *final*, so the replacement is only
+    provisional: once the config that uses it is saved, call
+    :func:`commit_install`; if the save fails, :func:`rollback_install` puts
+    the previous pack back.
+    """
     check_target(final)
     backup = ""
     try:
@@ -291,8 +297,24 @@ def install_pack(staged: str, final: str) -> None:
     except OSError as exc:
         discard(staged)
         raise ComposeError(f"Couldn't put the composed pack at {final}: {exc}") from exc
+    return backup
+
+
+def commit_install(backup: str) -> None:
+    """Drop the pack :func:`install_pack` replaced, once the new one is in use."""
     if backup:
         shutil.rmtree(backup, ignore_errors=True)
+
+
+def rollback_install(final: str, backup: str) -> None:
+    """Undo :func:`install_pack`: put the replaced pack back, or remove the new one."""
+    if backup:
+        new = f"{backup}.new"
+        os.replace(final, new)
+        os.replace(backup, final)
+        shutil.rmtree(new, ignore_errors=True)
+    else:
+        remove_pack(final)
 
 
 def remove_pack(path: str) -> bool:
@@ -314,6 +336,7 @@ def remove_pack(path: str) -> bool:
 __all__ = [
     "ComposeError",
     "check_target",
+    "commit_install",
     "discard",
     "install_pack",
     "is_composed",
@@ -321,5 +344,6 @@ __all__ = [
     "protected_scope_name",
     "remove_pack",
     "resolve_base",
+    "rollback_install",
     "stage_pack",
 ]

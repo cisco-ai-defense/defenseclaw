@@ -161,6 +161,22 @@ def test_second_pack_recomposes_from_the_recorded_base(env) -> None:
     assert [p.name for p in final.parent.iterdir() if p.name.startswith(".")] == []  # no staging leftovers
 
 
+def test_a_failed_save_puts_the_previous_composed_pack_back(env) -> None:
+    app, root, _validator = env
+    assert _run(app, "enable", CLOUD).exit_code == 0
+    final = root / "protected-global" / "default"
+    before = {path.relative_to(final): path.read_bytes() for path in final.rglob("*") if path.is_file()}
+    # The saved config already points at `final`: a failed save must not
+    # leave the recomposed pack there for the next gateway start.
+    app.cfg.save.side_effect = OSError("disk full")
+    result = _run(app, "enable", PRIVACY)
+    assert result.exit_code == 1 and "disk full" in result.output
+    after = {path.relative_to(final): path.read_bytes() for path in final.rglob("*") if path.is_file()}
+    assert after == before
+    assert pc.enabled_protection(str(final)) == (CLOUD,)
+    assert [p.name for p in final.parent.iterdir() if p.name.startswith(".")] == []
+
+
 def test_disable_keeps_the_rest_then_returns_to_the_base(env) -> None:
     app, root, _validator = env
     _run(app, "enable", DB)

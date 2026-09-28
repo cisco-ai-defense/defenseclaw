@@ -3144,15 +3144,23 @@ def _change_protection(
                         validation=validation,
                     )
         try:
-            rulepack_compose.install_pack(staged, final)
+            replaced = rulepack_compose.install_pack(staged, final)
         except rulepack_compose.ComposeError as exc:
             _refuse(str(exc))
         target = final
     else:
-        target = base_path
+        replaced, target = "", base_path
 
     _assign_rule_pack(app, connector_key, target, clear_overrides=False)
-    _save_use_pack(app, _finish, scope)
+    try:
+        _save_use_pack(app, _finish, scope)
+    except BaseException:
+        # The saved config may already point at `final`, so a failed save must
+        # not leave the recomposed pack in place for the next gateway start.
+        if layer:
+            rulepack_compose.rollback_install(final, replaced)
+        raise
+    rulepack_compose.commit_install(replaced)
     if not layer and os.path.isdir(final) and not _pack_dir_in_use(cfg, final):
         rulepack_compose.remove_pack(final)
     _log_guardrail_change(

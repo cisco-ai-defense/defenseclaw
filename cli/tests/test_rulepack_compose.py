@@ -131,7 +131,7 @@ def test_stage_copies_only_pack_components_and_writes_the_manifest(tmp_path: Pat
     assert not staged.exists() and pc.enabled_protection(str(final)) == ("database-destruction-protection",)
     # Replacing an earlier composition goes through the same swap.
     again = rc.stage_pack(base_dir=str(base), base_name="default", protection=[], layer=[], final=str(final))
-    rc.install_pack(again, str(final))
+    rc.commit_install(rc.install_pack(again, str(final)))  # the config now uses it
     assert pc.enabled_protection(str(final)) == ()
     assert [p.name for p in final.parent.iterdir()] == ["protected-global"]  # no backups left behind
 
