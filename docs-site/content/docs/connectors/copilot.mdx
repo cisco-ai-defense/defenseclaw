@@ -284,6 +284,12 @@ replaces that list, so name every harness you want:
   choice and were not tested live.
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
   and Codex sandboxes only.
+- **Ctrl-Z.** Copilot CLI suspends itself by signalling its process group,
+  which the OpenShell sandbox refuses, and no shell in the sandbox could
+  resume a stopped job either. DefenseClaw resumes Copilot at once and prints
+  `defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox`,
+  also at a `sandbox connect --shell` prompt; Copilot itself still reports
+  `kill EPERM` and its own "has been suspended" line.
 - **Image and verification.** The image installs Copilot CLI 1.0.88,
   replacing the base image's 1.0.16, which no hook contract covers. Verified
   end to end: against a mock model

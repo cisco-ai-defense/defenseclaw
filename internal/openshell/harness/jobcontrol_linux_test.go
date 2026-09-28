@@ -223,20 +223,30 @@ func requireBash(t *testing.T) {
 	}
 }
 
-// checkResumed reports whether out is exactly the stub's four lines, the
-// stub ran in a process group of its own, not as the launcher (pid), and it
-// was the terminal's foreground group every time it came back.
+// supervisorNotice starts the line the supervisor shows each time it
+// resumes a harness that stopped or tried to.
+const supervisorNotice = "defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox"
+
+// checkResumed reports whether out is exactly the stub's four lines and the
+// supervisor's notice for each of its three stops, the stub ran in a
+// process group of its own, not as the launcher (pid), and it was the
+// terminal's foreground group every time it came back.
 func checkResumed(t *testing.T, out string, launcherPID int) {
 	t.Helper()
 	var lines []string
+	notices := 0
 	for _, l := range strings.Split(out, "\n") {
-		if l = strings.TrimSpace(l); l != "" {
+		switch l = strings.TrimSpace(l); {
+		case l == "":
+		case strings.HasPrefix(l, supervisorNotice):
+			notices++
+		default:
 			lines = append(lines, l)
 		}
 	}
 	want := []string{"start", "resumed TSTP", "resumed TTIN", "resumed STOP"}
-	if len(lines) != len(want) {
-		t.Fatalf("the terminal showed %d lines, want the stub's %d (nothing from the launcher):\n%s", len(lines), len(want), out)
+	if len(lines) != len(want) || notices != len(want)-1 {
+		t.Fatalf("the terminal showed %d lines and %d notices, want the stub's %d and a notice per stop (nothing else from the launcher):\n%s", len(lines), notices, len(want), out)
 	}
 	for i, l := range lines {
 		m := stubLine.FindStringSubmatch(l)
@@ -434,9 +444,11 @@ func TestLauncherJobControl(t *testing.T) {
 		}
 	})
 
-	t.Run("under a job-control shell the launcher execs the harness", func(t *testing.T) {
+	t.Run("under a job-control shell the launcher supervises the harness", func(t *testing.T) {
 		// The shell (a `sandbox connect --shell` prompt) runs the launcher
-		// as a foreground job and sees it stop.
+		// as a foreground job. In a sandbox its fg could not resume a
+		// stopped job (killpg is refused), so the supervisor resumes the
+		// harness and the shell never sees it stop.
 		launcher, dir := launcherFixture(t, ClaudeCode, stubState+`echo "stub parent=$PPID $(st)"; kill -TSTP 0; echo stub-resumed; exit 6`+"\n")
 		shell := filepath.Join(dir, "shell")
 		script := `set -m
@@ -452,11 +464,33 @@ exit $rc
 		}
 		r := startPTY(t, dir, nil, "/bin/bash", shell)
 		code, out := r.wait()
-		if code != 6 || !strings.Contains(out, "shell: job stopped") || !strings.Contains(out, "stub-resumed") {
-			t.Fatalf("exit %d, want the stop to reach the shell and the stub's 6:\n%s", code, out)
+		if code != 6 || strings.Contains(out, "shell: job stopped") || !strings.Contains(out, "stub-resumed") ||
+			!strings.Contains(out, supervisorNotice) {
+			t.Fatalf("exit %d, want the supervisor to resume the stub, say so, and the stub's 6:\n%s", code, out)
 		}
-		if want := fmt.Sprintf("stub parent=%d ", r.cmd.Process.Pid); !strings.Contains(out, want) {
-			t.Errorf("the harness is not the shell's own job (want %q): the launcher supervised it\n%s", want, out)
+		if unwanted := fmt.Sprintf("stub parent=%d ", r.cmd.Process.Pid); strings.Contains(out, unwanted) {
+			t.Errorf("the harness is the shell's own job: nothing supervises it\n%s", out)
+		}
+	})
+
+	t.Run("a harness in the background of a shell is left alone", func(t *testing.T) {
+		// The supervisor would take the terminal from the shell.
+		launcher, dir := launcherFixture(t, ClaudeCode, stubState+`echo "stub parent=$PPID $(st)"; exit 4`+"\n")
+		shell := filepath.Join(dir, "shell")
+		script := `set -m
+` + shellQuote(launcher) + ` &
+wait $!
+rc=$?
+echo "shell pid=$$"
+exit $rc
+`
+		if err := os.WriteFile(shell, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r := startPTY(t, dir, nil, "/bin/bash", shell)
+		code, out := r.wait()
+		if want := fmt.Sprintf("stub parent=%d ", r.cmd.Process.Pid); code != 4 || !strings.Contains(out, want) {
+			t.Fatalf("exit %d, want the stub's 4 as the shell's own background job (%q):\n%s", code, want, out)
 		}
 	})
 }
@@ -484,7 +518,7 @@ func TestLauncherResumesAHarnessWhoseSuspendFailed(t *testing.T) {
 	launcher, dir := launcherFixture(t, ClaudeCode, stubCannotStop)
 	r := startPTY(t, dir, nil, launcher)
 	code, out := r.wait()
-	if code != 5 || !strings.Contains(out, "stub resumed CONT") {
-		t.Fatalf("exit %d, want the stub's 5 after a SIGCONT:\n%s", code, out)
+	if code != 5 || !strings.Contains(out, "stub resumed CONT") || !strings.Contains(out, supervisorNotice) {
+		t.Fatalf("exit %d, want the stub's 5 after the supervisor's notice and a SIGCONT:\n%s", code, out)
 	}
 }

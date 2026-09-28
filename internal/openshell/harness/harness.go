@@ -91,62 +91,54 @@ export NODE_DISABLE_COMPILE_CACHE
 ` + egressEnvScript + launcherJobControl
 
 // launcherJobControl defines dc_launch COMMAND..., which every launcher
-// ends with: it execs COMMAND, except in a terminal session where nothing
+// ends with: it execs COMMAND, except in a terminal session, where nothing
 // could resume a harness that stops itself.
 //
 // A harness TUI handles Ctrl-Z itself: it restores the terminal and stops
 // its process group (Claude Code and OpenCode send SIGTSTP to it and redraw
-// only on SIGCONT; Codex carries on once the signal returns). In an
-// OpenShell sandbox that stop never happens: the seccomp filter refuses any
-// kill() aimed at a process group, and `openshell sandbox exec --tty`
-// starts the launcher as the leader of a new session whose parent, the
-// sandbox supervisor, is outside it, so the harness's process group is
-// orphaned and the kernel would discard the stop too. A harness waiting for
-// SIGCONT then hangs with the terminal in cooked mode (measured on OpenShell
-// 0.1.1 with Claude Code 2.1.156 and OpenCode 1.18.31).
+// only on SIGCONT; Codex carries on once the signal returns; Copilot CLI
+// 1.0.88 stops its renderer, prints that it was suspended and calls
+// kill(0, SIGTSTP)). In an OpenShell sandbox that stop never happens: the
+// seccomp filter refuses any kill() aimed at a process group. A harness
+// waiting for SIGCONT then hangs with the terminal in cooked mode (measured
+// on OpenShell 0.1.1 with Claude Code 2.1.156 and OpenCode 1.18.31). A
+// job-control shell cannot help either, under `openshell sandbox exec --tty`
+// or at a `sandbox connect --shell` prompt: its fg sends SIGCONT with
+// killpg(), which the filter refuses as well, so even a harness the
+// terminal's Ctrl-Z did stop could never be resumed (with Copilot CLI the
+// prompt then never came back).
 //
-// When stdin, stdout and stderr are a terminal whose foreground process
-// group is the launcher's, and no ancestor outside that group shares its
-// session (dc_orphaned: the group is orphaned, so no job-control shell is
-// above it), dc_launch execs the root-owned dc_supervisor.py, which forks
-// the harness into its own process group, makes it the terminal's foreground
-// group (tcsetpgrp on fd 0), and loops on waitpid(WUNTRACED). When the
-// harness stops (SIGTSTP, SIGTTIN, SIGTTOU or SIGSTOP), the supervisor
-// re-asserts tcsetpgrp and sends SIGCONT to the child and every member of
-// its process group (scanning /proc/*/stat, individual kill() calls, never
-// killpg, because the sandbox's seccomp filter blocks kill() aimed at a
-// process group). Because the harness's own suspend fails in the sandbox,
-// the supervisor also watches the terminal: when the harness left raw mode
-// for canonical mode and stays there for half a second, it is treated as
-// suspended and sent SIGCONT. The supervisor forwards SIGHUP and SIGTERM it
-// receives and exits with the harness's status (128+n for signals). Ctrl-C
-// (SIGINT) and resizes (SIGWINCH) reach the harness as usual.
+// So when stdin, stdout and stderr are a terminal whose foreground process
+// group is the launcher's (dc_foreground; a harness started in the
+// background of a shell is left alone), dc_launch execs the root-owned
+// dc_supervisor.py, which forks the harness into its own process group,
+// makes it the terminal's foreground group (tcsetpgrp on fd 0), and loops on
+// waitpid(WUNTRACED). When the harness stops (SIGTSTP, SIGTTIN, SIGTTOU or
+// SIGSTOP), the supervisor re-asserts tcsetpgrp and sends SIGCONT to the
+// child and every member of its process group (scanning /proc/*/stat,
+// individual kill() calls, never killpg). Because the harness's own suspend
+// fails in the sandbox, the supervisor also watches the terminal: when the
+// harness left raw mode for canonical mode and stays there for half a
+// second, it is treated as suspended and sent SIGCONT. Either way it first
+// tells the user that suspending is not available in the sandbox. The
+// supervisor forwards SIGHUP and SIGTERM it receives and exits with the
+// harness's status (128+n for signals). Ctrl-C (SIGINT) and resizes
+// (SIGWINCH) reach the harness as usual.
 //
-// Under a job-control shell (a `sandbox connect --shell` prompt) Ctrl-Z
-// suspends the harness to that shell as usual, so dc_launch execs COMMAND
-// directly, as it does without a terminal: headless and detached runs keep
-// the launcher's pid for the harness. Without /proc, or when the supervisor
-// is absent, it execs COMMAND too.
-const launcherJobControl = `# A harness TUI stops itself on Ctrl-Z. With no job-control shell above
-# the launcher (openshell sandbox exec --tty), run it under dc_supervisor.py,
-# which resumes it whenever it stops.
-dc_orphaned() {
-  local stat ppid pgrp sid tpgid own_pgrp own_sid rest
+// Without a terminal dc_launch execs COMMAND directly: headless and detached
+// runs keep the launcher's pid for the harness. Without /proc, or when the
+// supervisor is absent, it execs COMMAND too.
+const launcherJobControl = `# A harness TUI stops itself on Ctrl-Z, which the sandbox refuses, and no
+# shell in the sandbox can resume a stopped job either: run a terminal session
+# under dc_supervisor.py, which resumes the harness whenever it stops.
+dc_foreground() {
+  local stat own_pgrp tpgid rest
   read -r stat 2>/dev/null </proc/$$/stat || return 1
-  read -r rest ppid own_pgrp own_sid rest tpgid rest <<<"${stat##*) }"
-  [ "$tpgid" = "$own_pgrp" ] || return 1
-  while [ "$ppid" -gt 0 ] 2>/dev/null; do
-    read -r stat 2>/dev/null </proc/$ppid/stat || return 0
-    read -r rest ppid pgrp sid rest <<<"${stat##*) }"
-    if [ "$pgrp" != "$own_pgrp" ]; then
-      [ "$sid" != "$own_sid" ]
-      return
-    fi
-  done
-  return 0
+  read -r rest rest own_pgrp rest rest tpgid rest <<<"${stat##*) }"
+  [ "$tpgid" = "$own_pgrp" ]
 }
 dc_launch() {
-  if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_orphaned && [ -x ` + SupervisorPath + ` ]; then
+  if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_foreground && [ -x ` + SupervisorPath + ` ]; then
     exec /usr/bin/python3 -I -S ` + SupervisorPath + ` "$@"
   fi
   exec "$@"

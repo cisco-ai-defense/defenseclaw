@@ -126,22 +126,21 @@ fi
 // supervisorScript is the Python supervisor that resumes a stopped harness.
 // See launcherJobControl for when it runs.
 const supervisorScript = `#!/usr/bin/python3 -I -S
-"""DefenseClaw sandbox harness supervisor for orphaned process groups.
-
-When openshell sandbox exec --tty starts a launcher as a session leader whose
-parent is outside the session (orphaned process group), the kernel discards
-SIGTSTP sent by a TUI that suspends itself. This supervisor forks the harness
-into its own process group, makes it the terminal's foreground group, and
-resumes it when it stops.
-
-This supervisor is invoked only when stdin/stdout/stderr are a terminal and
-the launcher's process group is orphaned (checked in the launcher shell code).
-For headless runs and sessions under a job-control shell, the launcher execs
-the harness directly.
+"""DefenseClaw sandbox harness supervisor for terminal sessions.
 
 The sandbox's seccomp filter (OpenShell 0.1.1) blocks kill() when the target
-is a process group (negative pid or zero), so this supervisor finds group
-members by scanning /proc and signals each pid individually.
+is a process group (negative pid or zero): a TUI that suspends itself on
+Ctrl-Z cannot stop, and a job-control shell in the sandbox cannot resume a
+stopped job (its fg uses killpg). This supervisor forks the harness into its
+own process group, makes it the terminal's foreground group, and resumes it
+when it stops or when its suspend failed, after telling the user that
+suspending is not available.
+
+This supervisor is invoked only when stdin/stdout/stderr are a terminal whose
+foreground process group is the launcher's (checked in the launcher shell
+code). For headless runs the launcher execs the harness directly.
+
+It finds group members by scanning /proc and signals each pid individually.
 """
 
 import os
@@ -275,6 +274,20 @@ def harness_owns_terminal():
         return False
 
 
+# NOTICE is what the terminal shows when a suspend is turned into a resume.
+NOTICE = (b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
+          b"(the sandbox refuses the signal); it keeps running.\r\n")
+
+
+def resume():
+    """Tell the user the harness was not suspended, then resume it."""
+    try:
+        os.write(2, NOTICE)
+    except OSError:
+        pass
+    send_signal_to_group(child_pgrp, signal.SIGCONT)
+
+
 def finish(status):
     """Exit with the harness's status once it ended."""
     # What it left in its group gets the SIGHUP a session leader's exit
@@ -313,7 +326,7 @@ while True:
         except OSError:
             pass
         # Send SIGCONT to the child and all members of its process group.
-        send_signal_to_group(child_pgrp, signal.SIGCONT)
+        resume()
         armed, cooked_since = False, None
         continue
 
@@ -325,7 +338,7 @@ while True:
         if cooked_since is None:
             cooked_since = now
         elif now - cooked_since >= SUSPEND_WAIT:
-            send_signal_to_group(child_pgrp, signal.SIGCONT)
+            resume()
             armed, cooked_since = False, None
     time.sleep(POLL)
 `

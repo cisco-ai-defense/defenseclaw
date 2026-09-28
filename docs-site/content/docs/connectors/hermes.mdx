@@ -329,6 +329,10 @@ only in the image; nothing on your host changes.
   drops `--yolo` and every prefix Hermes accepts for it. A headless run is
   `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`
   for a detached run.
+- **Ctrl-Z.** Hermes suspends itself by signalling its process group, which
+  the OpenShell sandbox refuses. The image answers that call with
+  `defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox`, and
+  Hermes keeps running, after its own "has been suspended" line.
 - **Other traffic.** Apart from the model, a daemon run on a mock model
   reached only `pypi.org` (Hermes' update check). The image turns off the
   Tirith scanner download and runtime installs, which reached `github.com`

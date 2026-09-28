@@ -17,6 +17,7 @@
 package harness
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 
@@ -33,7 +34,52 @@ var hermesTool = uvTool{
 	dist:         "hermes-agent",
 	commands:     []string{"hermes"},
 	versionCheck: `/usr/local/bin/hermes --version | awk 'NR==1{sub(/^v/,"",$3); print $3}'`,
+	// The Ctrl-Z shim (hermesSuspendModule, base64 so the Dockerfile RUN
+	// stays one line) goes into the tool environment's site-packages with a
+	// .pth file that imports it at every interpreter start.
+	extra: `site="$(` + shellQuote(InstallRootBase+"/hermes/tools/hermes-agent/bin/python") + ` -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; ` +
+		`case "$site" in ` + InstallRootBase + `/hermes/*) ;; *) echo "Hermes site-packages $site is outside the install root" >&2; exit 1 ;; esac; ` +
+		`printf '%s' ` + shellQuote(base64.StdEncoding.EncodeToString([]byte(hermesSuspendModule))) + ` | base64 -d >"$site/` + hermesSuspendModuleName + `.py"; ` +
+		`printf 'import ` + hermesSuspendModuleName + `\n' >"$site/` + hermesSuspendModuleName + `.pth"; ` +
+		`chown root:root "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
+		`chmod 0644 "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"`,
 }
+
+// hermesSuspendModuleName is the root-owned module the Hermes tool
+// environment imports at start.
+const hermesSuspendModuleName = "defenseclaw_hermes_suspend"
+
+// hermesSuspendModule turns Hermes' Ctrl-Z into a notice. Hermes 0.19.0
+// binds Ctrl-Z to os.kill(0, SIGTSTP) (cli.py handle_ctrl_z), which the
+// OpenShell sandbox refuses (EPERM for a kill() aimed at a process group):
+// the exception reached prompt_toolkit's event loop, which printed a
+// traceback and waited for Enter. The shim answers that one call, and no
+// other, with the notice the launcher's supervisor shows for every harness,
+// so Hermes keeps running.
+const hermesSuspendModule = `"""DefenseClaw: Ctrl-Z cannot suspend Hermes in an OpenShell sandbox.
+
+The sandbox refuses a kill() aimed at a process group, which is how Hermes
+suspends itself; say so instead of failing inside Hermes' event loop.
+"""
+import os as _os
+import signal as _signal
+
+_kill = _os.kill
+
+
+def _defenseclaw_kill(pid, sig):
+    if pid == 0 and sig == _signal.SIGTSTP:
+        try:
+            _os.write(2, b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
+                         b"(the sandbox refuses the signal); it keeps running.\r\n")
+        except OSError:
+            pass
+        return None
+    return _kill(pid, sig)
+
+
+_os.kill = _defenseclaw_kill
+`
 
 // Hermes is the Hermes Agent harness.
 var Hermes = register(&Spec{
