@@ -557,6 +557,18 @@ rights must be administrator-controlled, the module leaf must have no
 untrusted write-like ACE, and Authenticode must be valid unless a disposable
 test run explicitly uses `-AllowUnsigned`.
 
+A valid signature is not sufficient on its own. The module, the installer, and
+every payload executable and library must be signed by a certificate whose
+subject name is exactly `Cisco Systems, Inc.`. An organization that re-signs
+the payload with its own code-signing certificate names that certificate with
+`-AdditionalTrustedSignerSha256 <sha256>[,<sha256>...]` (CLI:
+`--additional-trusted-signer-sha256`, repeatable) on every lifecycle action for
+that deployment, including `Status`, `Repair`, and `Uninstall`. Each value is
+the SHA-256 of the DER-encoded signing certificate, for example
+`(Get-FileHash -Algorithm SHA256 .\signer.cer).Hash`. A 40-character SHA-1
+thumbprint is rejected, and the parameter cannot be combined with
+`-AllowUnsigned`.
+
 The unsigned exception is itself fail-closed before module import. It is valid
 only for the seven lifecycle actions (`Install`, `Upgrade`, `Repair`,
 `Reconcile`, `Status`, `Verify`, `Uninstall`), and only when the service names

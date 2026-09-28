@@ -66,6 +66,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	noStart                       bool
 	purge                         bool
 	allowUnsigned                 bool
+	// additionalTrustedSignerSHA256 names approved re-signing certificate
+	// fingerprints, in addition to the Cisco publisher.
+	additionalTrustedSignerSHA256 []string
 	// deferredConfig requests the UCB-friendly install path (spec 003
 	// / Workstream B). When true: --config and --manifest are
 	// optional at install time; the installer provisions the
@@ -246,6 +249,8 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
 	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries (authenticated purge or fail-closed exact-scope recovery)")
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
+	flags.StringSliceVar(&opts.additionalTrustedSignerSHA256, "additional-trusted-signer-sha256", nil,
+		"SHA-256 fingerprint of an additional code-signing certificate trusted to sign a re-signed payload (repeatable)")
 	// Spec 003 Workstream B: UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
 	// installer, not here (this flag is a passthrough).
@@ -635,6 +640,10 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	}
 	if opts.allowUnsigned {
 		args = append(args, "-AllowUnsigned")
+	}
+	if len(opts.additionalTrustedSignerSHA256) != 0 {
+		// -File binds one string; the installer splits it on commas.
+		args = append(args, "-AdditionalTrustedSignerSha256", strings.Join(opts.additionalTrustedSignerSHA256, ","))
 	}
 	if opts.deferredConfig {
 		args = append(args, "-DeferredConfig")
