@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -65,6 +66,8 @@ func TestPlanMountGitRepoProtectsHostExecutableState(t *testing.T) {
 		"/work/myapp/.git/commondir":       {MountProtect, true},
 		"/work/myapp/.env":                 {MountMask, true},
 		"/work/myapp/certs/dev.pem":        {MountMask, true},
+		// The folder of a mask is pinned so it cannot be renamed away.
+		"/work/myapp/certs": {MountPin, false},
 	}
 	for target, w := range want {
 		m, ok := mountByTarget(plan, target)
@@ -396,6 +399,62 @@ func TestPlanMountHooksPathIncludesSubmodulesAndWorktrees(t *testing.T) {
 	}
 	if pathExists(filepath.Join(e.data, "sandboxes", "s1", "workspace", "mount.json")) {
 		t.Fatal("mount state not removed")
+	}
+}
+
+// TestPlanMountPinsAncestorsOfProtectedAndMaskedPaths: a bind follows the
+// directory entry it was made on, and a directory that is not itself a
+// mount point can be renamed with mounts below it. So every directory
+// between the project and a protected or masked path is bound onto
+// itself: otherwise the agent could rename .git/modules (or the folder of
+// a masked .env) away and plant a replacement that host git reads, or
+// that the next start of the sandbox masks while the secret sits unmasked
+// under its new name.
+func TestPlanMountPinsAncestorsOfProtectedAndMaskedPaths(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	mustMkdir(t, filepath.Join(e.project, "tools", "git"))
+	e.git(e.project, "config", "include.path", "../tools/git/project.inc")
+	// A submodule named with a slash nests below .git/modules.
+	for _, sub := range []string{"lib", "vendor/deep"} {
+		dir := filepath.Join(e.project, ".git", "modules", filepath.FromSlash(sub))
+		mustMkdir(t, filepath.Join(dir, "objects"))
+		mustMkdir(t, filepath.Join(dir, "refs"))
+		writeFile(t, dir, "HEAD", "ref: refs/heads/main\n")
+		writeFile(t, dir, "config", "[core]\n")
+	}
+	writeFile(t, e.project, "services/api/.env", "API_KEY=inert-marker\n")
+
+	plan, err := PlanMount(bg, e.mountOpts("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{".git/modules", ".git/modules/vendor", "services", "services/api", "tools", "tools/git"} {
+		m, ok := mountByTarget(plan, "/work/myapp/"+rel)
+		if !ok || m.Kind != MountPin || m.ReadOnly || m.Source != filepath.Join(e.project, filepath.FromSlash(rel)) {
+			t.Fatalf("%s is not pinned onto itself: %+v (found %v)", rel, m, ok)
+		}
+	}
+	// Every mount inside the project sits in a directory that is mounted
+	// itself, up to the project.
+	for _, m := range plan.Mounts {
+		if !strings.HasPrefix(m.Target, plan.Target+"/") {
+			continue
+		}
+		if parent := path.Dir(m.Target); parent != plan.Target {
+			if _, ok := mountByTarget(plan, parent); !ok {
+				t.Errorf("%s: its folder %s is not pinned", m.Target, parent)
+			}
+		}
+	}
+	// Pins create nothing on the host, so there is nothing more to release.
+	if err := ReleaseMount(e.data, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{".git/modules/vendor/deep/config", "services/api/.env", "tools/git"} {
+		if !pathExists(filepath.Join(e.project, filepath.FromSlash(rel))) {
+			t.Fatalf("release removed %s", rel)
+		}
 	}
 }
 

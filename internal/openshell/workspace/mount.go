@@ -36,8 +36,10 @@ type MountKind string
 const (
 	// MountProject is the project folder itself, read-write.
 	MountProject MountKind = "project"
-	// MountPin re-binds a git directory onto itself (read-write) so the
-	// agent cannot rename it away and plant a replacement.
+	// MountPin re-binds a directory onto itself (read-write) so the agent
+	// cannot rename it away and plant a replacement: a git directory, and
+	// every directory between the project and a protected or masked path
+	// (see pinAncestors).
 	MountPin MountKind = "pin"
 	// MountProtect is read-only git state that would run code on the host
 	// (hooks, config, include files, commondir, worktree admin dirs).
@@ -260,6 +262,9 @@ func PlanMount(ctx context.Context, opts MountOptions) (*MountPlan, error) {
 	}
 	for _, c := range plan.Contexts {
 		plan.Mounts = append(plan.Mounts, Mount{Kind: MountContext, Source: c.Source, Target: c.Target, ReadOnly: true})
+	}
+	if err := pinAncestors(plan); err != nil {
+		return nil, err
 	}
 	sortMounts(plan.Mounts)
 	for _, m := range plan.Mounts {
@@ -587,6 +592,47 @@ func maskMount(m MaskedPath, root, emptyFile, emptyDir string) Mount {
 		src = emptyDir
 	}
 	return Mount{Kind: MountMask, Source: src, Target: path.Join(root, m.Rel), ReadOnly: true}
+}
+
+// pinAncestors self-binds (MountPin) every directory between the project
+// and a mount inside it: a protected git file, a submodule git directory,
+// a mask. A bind follows the directory entry it was made on, and a
+// directory that is not itself a mount point can be renamed even with
+// mounts below it. Without these pins the agent could rename .git/modules,
+// or the folder holding a masked .env, and create a replacement at the old
+// path: host git would read a planted submodule config, and the next start
+// of the sandbox would bind the mask onto the fresh path while the real
+// secret sat unmasked under its new name. A mount point itself cannot be
+// renamed or removed (EBUSY).
+func pinAncestors(plan *MountPlan) error {
+	under := plan.Target + "/"
+	taken := make(map[string]bool, len(plan.Mounts))
+	for _, m := range plan.Mounts {
+		taken[m.Target] = true
+	}
+	var pins []Mount
+	for _, m := range plan.Mounts {
+		if m.Kind == MountProject || m.Kind == MountContext || !strings.HasPrefix(m.Target, under) {
+			continue
+		}
+		for dir := path.Dir(m.Target); strings.HasPrefix(dir, under); dir = path.Dir(dir) {
+			if taken[dir] {
+				continue
+			}
+			host := filepath.Join(plan.Project, filepath.FromSlash(strings.TrimPrefix(dir, under)))
+			info, err := os.Lstat(host)
+			if err != nil {
+				return fmt.Errorf("workspace: pin %s: %w", host, err)
+			}
+			if !info.IsDir() {
+				return &NeedsCopyError{Path: plan.Project, Reason: host + " is not a directory"}
+			}
+			taken[dir] = true
+			pins = append(pins, Mount{Kind: MountPin, Source: host, Target: dir})
+		}
+	}
+	plan.Mounts = append(plan.Mounts, pins...)
+	return nil
 }
 
 // sortMounts orders parents before children so every over-mount lands on

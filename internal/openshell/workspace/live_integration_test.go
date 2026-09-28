@@ -180,6 +180,11 @@ func TestLiveMountPlanMasksAndProtects(t *testing.T) {
 	e.initRepo()
 	writeFile(t, e.project, ".env", "API_KEY=live-secret\n")
 	writeFile(t, e.project, "certs/dev.pem", "-----fake-----\n")
+	sub := filepath.Join(e.project, ".git", "modules", "lib")
+	mustMkdir(t, filepath.Join(sub, "objects"))
+	mustMkdir(t, filepath.Join(sub, "refs"))
+	writeFile(t, sub, "HEAD", "ref: refs/heads/main\n")
+	writeFile(t, sub, "config", "[core]\n")
 	name := fmt.Sprintf("f1-live-mount-%d", time.Now().Unix()%100000)
 
 	plan, err := PlanMount(bg, e.mountOpts(name))
@@ -213,6 +218,11 @@ func TestLiveMountPlanMasksAndProtects(t *testing.T) {
 		{"config is read-only", "git -C " + w + " config user.name agent", -1, ""},
 		{"git dir cannot be renamed", "mv " + w + "/.git " + w + "/.git-old", -1, ""},
 		{"commondir pin holds", "echo ../evil > " + w + "/.git/commondir", -1, ""},
+		// Renaming a folder that holds protected or masked paths away
+		// would let the agent plant a replacement at the old path.
+		{"submodule git dirs cannot be renamed", "mv " + w + "/.git/modules " + w + "/.git/modules-old", -1, ""},
+		{"submodule config is read-only", "echo '[core]' >> " + w + "/.git/modules/lib/config", -1, ""},
+		{"a mask's folder cannot be renamed", "mv " + w + "/certs " + w + "/certs-old", -1, ""},
 		{"git works inside", "git -C " + w + " -c user.name=a -c user.email=a@a commit -q --allow-empty -m agent && git -C " + w + " log --oneline | wc -l", 0, "2"},
 		{"project is writable", "echo agent > " + w + "/README.md && echo '{\"scripts\":{\"postinstall\":\"x\"}}' > " + w + "/package.json && echo ok", 0, "ok"},
 		{"the host home is not visible", "test -e " + e.home, -1, ""},
@@ -233,6 +243,9 @@ func TestLiveMountPlanMasksAndProtects(t *testing.T) {
 	}
 	if readFile(t, e.project, ".env") != "API_KEY=live-secret\n" {
 		t.Fatal("host secret changed")
+	}
+	if readFile(t, e.project, "certs/dev.pem") != "-----fake-----\n" || readFile(t, e.project, ".git/modules/lib/config") != "[core]\n" {
+		t.Fatal("a masked or protected file moved or changed on the host")
 	}
 	if readFile(t, e.project, "README.md") != "agent\n" {
 		t.Fatal("live edit not visible on the host")
