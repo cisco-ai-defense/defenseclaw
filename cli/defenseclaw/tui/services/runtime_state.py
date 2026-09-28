@@ -52,6 +52,8 @@ class RuntimePanelAction(Enum):
     CLOSE_DETAIL = "close_detail"
     TOGGLE_PLANES = "toggle_planes"
     START_FILTER = "start_filter"
+    # The cursor or the filter text changed: redraw the table.
+    MOVE = "move"
 
 
 @dataclass(frozen=True)
@@ -596,6 +598,8 @@ class RuntimePanelModel:
         return "\n".join(lines)
 
     def handle_key(self, key: str) -> RuntimePanelAction:
+        if self.filtering:
+            return self._handle_filter_key(key)
         if self.detail_open:
             if key in {"escape", "enter", "q"}:
                 self.detail_open = False
@@ -619,11 +623,39 @@ class RuntimePanelModel:
         if key in {"down", "j"}:
             if self.filtered:
                 self.cursor = min(self.cursor + 1, len(self.filtered) - 1)
-            return RuntimePanelAction.NONE
+            return RuntimePanelAction.MOVE
         if key in {"up", "k"}:
             self.cursor = max(self.cursor - 1, 0)
-            return RuntimePanelAction.NONE
+            return RuntimePanelAction.MOVE
+        if key in {"escape", "esc"} and self.filter_text:
+            self.clear_filter()
+            return RuntimePanelAction.MOVE
         return RuntimePanelAction.NONE
+
+    def _handle_filter_key(self, key: str) -> RuntimePanelAction:
+        """Typing after ``/`` edits the filter; it never runs panel keys.
+
+        Without this branch the letters went to the shortcuts, so typing
+        ``/se`` polled the planes (``s``) and then enabled them (``e``).
+        """
+
+        if key == "enter":
+            self.filtering = False
+            return RuntimePanelAction.MOVE
+        if key in {"escape", "esc"}:
+            self.clear_filter()
+            return RuntimePanelAction.MOVE
+        if key == "backspace":
+            self.set_filter(self.filter_text[:-1])
+            return RuntimePanelAction.MOVE
+        if key == "space":
+            self.set_filter(self.filter_text + " ")
+            return RuntimePanelAction.MOVE
+        if len(key) == 1 and key.isprintable():
+            self.set_filter(self.filter_text + key)
+            return RuntimePanelAction.MOVE
+        # Swallow everything else while filtering (arrows, ctrl keys).
+        return RuntimePanelAction.MOVE
 
     def command_for(self, action: RuntimePanelAction) -> RuntimeCommandIntent | None:
         if action is RuntimePanelAction.SCAN:

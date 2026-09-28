@@ -2007,6 +2007,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.focused is table and event.key in {"up", "down"} and not self._active_overlay_blocks_table():
             return
 
+        # Enter, Esc or Down in a catalog filter box hands the keyboard back
+        # to the list without clearing the filter, so row keys work on the
+        # filtered rows.
+        focused = self.focused
+        if (
+            isinstance(focused, Input)
+            and focused.id == f"{self.active_panel}-filter"
+            and self.active_panel in self.catalog_models
+            and event.key in {"escape", "down", "enter"}
+        ):
+            table.focus()
+            event.stop()
+            event.prevent_default()
+            return
+
         if self._handle_active_panel_key(event):
             # The active panel fully consumed this key, so suppress the
             # focused DataTable's built-in bindings too. Without
@@ -3523,6 +3538,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     @on(Input.Changed, "#tools-filter")
     def _on_tools_filter_changed(self, event: Input.Changed) -> None:
         self._on_catalog_filter_input_changed("tools", event.value)
+
+    def _focus_catalog_filter(self, panel: str) -> bool:
+        """``/`` on a catalog puts the cursor in its filter box.
+
+        The key used to fall through unhandled, so the letters typed next
+        ran row actions (``/al`` opened "skill allow alpha").
+        """
+
+        try:
+            self.query_one(f"#{panel}-filter", Input).focus()
+        except NoMatches:
+            return False
+        self._set_status("Type to filter. Enter or Esc goes back to the list.")
+        return True
 
     @on(DataTable.RowSelected, "#command-palette")
     def _on_command_palette_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -10043,6 +10072,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.sandbox_model.cursor
         if self.active_panel == "policies":
             return self.policy_model.cursor
+        if self.active_panel == "runtime":
+            return self.runtime_model.cursor
         if self.active_panel == "setup":
             return self._setup_cursor()
         return 0
@@ -10084,6 +10115,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if key == "m" and len(self._active_connector_names()) > 1:
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
+            if key == "/":
+                return self._focus_catalog_filter(self.active_panel)
             catalog_key = _catalog_key(key)
             if catalog_key not in {"j", "k", "up", "down", "esc", "r"}:
                 self._sync_catalog_cursor_from_table(self.active_panel)

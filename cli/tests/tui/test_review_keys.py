@@ -1,0 +1,70 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Search keys never fall through to row actions, and cursors stay visible."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from defenseclaw.tui.services.runtime_state import RuntimePanelAction, RuntimePanelModel
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from fixtures import snapshot_app  # noqa: E402
+
+_SNAPSHOT = {
+    "enabled": True,
+    "findings": [
+        {"finding_id": "f1", "pid": 42, "process": "python", "severity": "high", "score": 80},
+        {"finding_id": "f2", "pid": 43, "process": "node", "severity": "low", "score": 10},
+    ],
+}
+
+
+def test_runtime_filter_takes_typed_letters_instead_of_running_commands() -> None:
+    model = RuntimePanelModel()
+    model.set_snapshot(_SNAPSHOT)
+
+    model.handle_key("/")
+    actions = [model.handle_key(key) for key in ("n", "o", "d", "e")]
+
+    assert RuntimePanelAction.SCAN not in actions and RuntimePanelAction.ENABLE not in actions
+    assert model.filter_text == "node"
+    assert [row.process for row in model.filtered] == ["node"]
+    model.handle_key("enter")
+    assert not model.filtering and model.filter_text == "node"
+    model.handle_key("escape")
+    assert model.filter_text == "" and len(model.filtered) == 2
+
+
+def test_runtime_row_moves_ask_for_a_redraw() -> None:
+    model = RuntimePanelModel()
+    model.set_snapshot(_SNAPSHOT)
+
+    assert model.handle_key("j") is RuntimePanelAction.MOVE
+    assert model.cursor == 1
+
+
+async def test_slash_on_a_catalog_types_into_its_filter(tmp_path) -> None:
+    app = snapshot_app(tmp_path)
+    ran: list[object] = []
+    app._confirm_and_run_intent = lambda intent: ran.append(intent)  # type: ignore[method-assign]
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("skills")
+        await pilot.pause()
+        await pilot.press("slash", "a", "l", "enter")
+        await pilot.pause()
+        assert app.skills_model.filter_text == "al"
+        assert [row.name for row in app.skills_model.filtered] == ["alpha"]
+        assert app.focused is app.query_one("#panel-table")
+    assert ran == []
