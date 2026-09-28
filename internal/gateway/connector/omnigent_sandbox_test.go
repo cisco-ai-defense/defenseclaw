@@ -91,6 +91,11 @@ func TestOmnigentSandboxArtifacts(t *testing.T) {
 	if modules := cfg["policy_modules"].([]interface{}); len(modules) != 1 || modules[0] != omnigentPolicyModuleName {
 		t.Fatalf("policy_modules = %v", cfg["policy_modules"])
 	}
+	// The TUI reads its theme from this root-owned file; without one its
+	// first-launch picker crashes writing it (R2-79).
+	if tui, _ := cfg["tui"].(map[string]interface{}); tui["theme"] != "dark" {
+		t.Fatalf("tui = %v, want a pinned theme", cfg["tui"])
+	}
 	for _, bad := range []string{"policy_modules: []\n", "policy_modules: [x]\npolicies: {}\n", "{"} {
 		if err := verifyOmnigentSandboxConfig([]byte(bad)); err == nil {
 			t.Fatalf("verify accepted %q", bad)

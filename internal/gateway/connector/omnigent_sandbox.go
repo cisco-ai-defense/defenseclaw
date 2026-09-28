@@ -136,6 +136,13 @@ func renderOmnigentSandboxPolicy(rt resolvedSandboxTarget) ([]byte, error) {
 // bare `omnigent run` start the sandbox agent: without it OmniGent falls
 // back to its first-run plan (polly, Codex or Pi), which needs native CLIs
 // and a bubblewrap sandbox the image does not have.
+//
+// The TUI keeps its user preferences (tui.theme) in the same file. Without
+// a theme its first-launch picker runs whenever a terminal is attached and
+// then fails writing this root-owned file, which ends the session before
+// the REPL starts (omnigent-ui-sdk 0.13.0 _config.update_user_config), so
+// the image pins OmniGent's dark theme; /theme cannot change it inside a
+// sandbox.
 func omnigentSandboxConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"default_agent":  OmnigentSandboxAgentPath,
@@ -143,6 +150,7 @@ func omnigentSandboxConfig() map[string]interface{} {
 		"policies": map[string]interface{}{
 			omnigentPolicyConfigKey: map[string]interface{}{"type": "function", "handler": omnigentPolicyHandler},
 		},
+		"tui": map[string]interface{}{"theme": "dark"},
 	}
 }
 
@@ -157,7 +165,8 @@ func renderOmnigentSandboxConfig(rt resolvedSandboxTarget) ([]byte, error) {
 }
 
 // verifyOmnigentSandboxConfig reads the configuration back and requires the
-// DefenseClaw module and its server-wide policy, and nothing else.
+// DefenseClaw module, its server-wide policy and the pinned TUI theme, and
+// nothing else.
 func verifyOmnigentSandboxConfig(data []byte) error {
 	var cfg map[string]interface{}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

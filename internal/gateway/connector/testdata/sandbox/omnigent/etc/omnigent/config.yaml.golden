@@ -7,3 +7,5 @@ policies:
         type: function
 policy_modules:
     - defenseclaw_omnigent_policy
+tui:
+    theme: dark

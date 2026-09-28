@@ -199,6 +199,10 @@ exist only in the image; nothing on your host changes.
   policy module and attaches the server-wide `defenseclaw_guardrail` policy.
   A user `~/.omnigent/config.yaml` has no effect on it. The policy bridge
   itself is root-owned under `/usr/local/lib/defenseclaw/omnigent/`.
+- **TUI theme.** OmniGent's TUI keeps its theme in the same file, so the image
+  sets the dark theme there: the first-launch theme picker would otherwise
+  fail writing the root-owned file. `/theme` cannot change the theme inside a
+  sandbox.
 - **Fail closed.** The sandbox bridge presents only the per-sandbox binding
   token and retries a dropped request once. Every failure becomes a DENY:
   missing token, ingress down, a bad status or a bad reply.
@@ -271,7 +275,8 @@ exist only in the image; nothing on your host changes.
     a sandbox-scoped unblock then let through.
 
   The image also passes the hook-fire probe with the request, llm_request,
-  tool_call, tool_result and response policy events. In that probe a hostile
+  tool_call, tool_result and response policy events, both headless and with
+  the TUI started on a terminal and a prompt typed into it. In that probe a hostile
   user `~/.omnigent/config.yaml` and a planted `sitecustomize` module in the
   launch environment change nothing, and the launcher refuses a project
   configuration that names another server. The curated provider profiles

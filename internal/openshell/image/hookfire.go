@@ -453,7 +453,103 @@ const (
 	ScenarioAllow           = "allow"
 	ScenarioBlock           = "block"
 	ScenarioHostileSettings = "hostile-settings"
+	// ScenarioInteractive starts the harness TUI on a terminal, types the
+	// allow prompt and quits (interactiveLaunches).
+	ScenarioInteractive = "interactive"
 )
+
+// interactiveLaunch is how the probe drives a harness TUI on a pseudo
+// terminal: it waits for the TUI to settle, types the scenario prompt, waits
+// for the mock's closing text and types quit.
+type interactiveLaunch struct {
+	quit string
+}
+
+// interactiveLaunches are the harnesses the probe also starts on a
+// terminal, because their TUI does what their headless mode never does:
+// OmniGent's first-launch theme picker runs only when a terminal is attached
+// and wrote the image's root-owned configuration, which ended every session
+// before the REPL started.
+var interactiveLaunches = map[string]interactiveLaunch{
+	"omnigent": {quit: "/exit"},
+}
+
+// interactiveDoneText is the part of the built-in mock's closing text for
+// the allow prompt the pty driver waits for.
+const interactiveDoneText = "marker file was written"
+
+// ptyDriver runs argv[5:] on a pseudo terminal (120x40), logging everything
+// it prints to /tmp/dc-hookfire.out: it waits (up to 45 s) until the TUI is
+// quiet for two seconds, types argv[2] and Enter, waits up to argv[1]
+// seconds for argv[3] (escape sequences and line breaks removed), types
+// argv[4] and Enter, and exits with the harness's status (128+n for a
+// signal), ending it if it does not quit. It answers cursor-position
+// requests as a terminal would.
+const ptyDriver = `import fcntl, os, pty, re, select, signal, struct, sys, termios, time
+limit, keys, done, quit = float(sys.argv[1]), sys.argv[2], sys.argv[3].encode(), sys.argv[4]
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        os.execv(sys.argv[5], sys.argv[5:])
+    finally:
+        os._exit(127)
+log = open(os.environ.get("DC_HOOKFIRE_OUT", "/tmp/dc-hookfire.out"), "wb")
+seen = b""
+ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]|[\r\n]")
+def pump(seconds, until=None, quiet=None):
+    global seen
+    end, last = time.time() + seconds, time.time()
+    while time.time() < end:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if not ready:
+            if quiet and seen and time.time() - last >= quiet:
+                return True
+            continue
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            return False
+        if not data:
+            return False
+        log.write(data)
+        log.flush()
+        seen += data
+        last = time.time()
+        if b"\x1b[6n" in data:
+            os.write(fd, b"\x1b[1;1R")
+        if until and until in ansi.sub(b"", seen):
+            return True
+    return True
+def send(text):
+    os.write(fd, text.encode())
+    time.sleep(0.5)
+    os.write(fd, b"\r")
+if pump(45, quiet=2.0):
+    send(keys)
+    if pump(limit, until=done):
+        pump(5, quiet=1.5)
+        send(quit)
+        pump(20)
+code = 125
+for sig in (None, signal.SIGTERM, signal.SIGKILL):
+    if sig:
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+    got = 0
+    for _ in range(50):
+        got, status = os.waitpid(pid, os.WNOHANG)
+        if got:
+            code = os.waitstatus_to_exitcode(status)
+            break
+        pump(0.1)
+    if got:
+        break
+log.close()
+sys.exit(128 - code if code < 0 else code)
+`
 
 // hookFireScenario is one harness run of the probe.
 type hookFireScenario struct {
@@ -486,6 +582,9 @@ type hookFireScenario struct {
 	mounts []RunFile
 	// mockScript, for a scripted-mock harness, is written before the run.
 	mockScript *scriptedMockFile
+	// interactive starts the harness TUI on a pseudo terminal and types
+	// the prompt, in place of a headless run.
+	interactive *interactiveLaunch
 }
 
 // HookFireResult is the outcome of HookFireProbe.
@@ -776,6 +875,21 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		}
 		problems = append(problems, refusalProblems(plan.refusals, hostile.Refusals)...)
 	}
+	if il, ok := interactiveLaunches[c.Spec.Harness.Name]; ok && builtin {
+		ttySc := hookFireScenario{name: ScenarioInteractive, prompt: opts.Prompt, sideEffect: opts.AllowSideEffect, wantSideEffect: true, interactive: &il}
+		tty, err := run(ttySc)
+		if err != nil {
+			return result, err
+		}
+		const prefix = "in the interactive (terminal) launch, "
+		if tty.ExitCode != 0 {
+			problems = append(problems, fmt.Sprintf("%sthe harness exited %d", prefix, tty.ExitCode))
+		}
+		for _, problem := range requiredHookProblems(tty, required) {
+			problems = append(problems, prefix+problem)
+		}
+		sideEffect(tty, ttySc, prefix)
+	}
 	if len(problems) > 0 {
 		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %w: %s", c.Tag, ErrHooksNotFired, strings.Join(problems, "; "))
 	}
@@ -832,7 +946,12 @@ func (b *Builder) hookFireRun(
 	ctx context.Context, c *Context, ref string, opts HookFireOptions, netw hookFireNet, sink *hookSink, sc hookFireScenario,
 ) (HookFireRun, error) {
 	run := HookFireRun{Scenario: sc.name}
-	argv, err := c.Spec.Harness.LaunchArgv(harness.LaunchOptions{Mode: harness.Headless, Yolo: !sc.safe, Prompt: sc.prompt, Args: opts.Args})
+	launch := harness.LaunchOptions{Mode: harness.Headless, Yolo: !sc.safe, Prompt: sc.prompt, Args: opts.Args}
+	if sc.interactive != nil {
+		// The prompt is typed into the TUI instead.
+		launch.Mode, launch.Prompt = harness.Interactive, ""
+	}
+	argv, err := c.Spec.Harness.LaunchArgv(launch)
 	if err != nil {
 		return run, err
 	}
@@ -904,8 +1023,18 @@ func (b *Builder) hookFireRun(
 	if sc.sideEffect != "" {
 		script += "rm -f " + shQuote(sc.sideEffect) + "\n"
 	}
-	script += harnessCmd + " </dev/null >/tmp/dc-hookfire.out 2>&1\n" +
-		"echo \"::rc=$?\"\n"
+	if sc.interactive != nil {
+		// The driver owns the terminal and logs it to /tmp/dc-hookfire.out.
+		script += "/usr/bin/python3 -I -S -c " + shQuote(ptyDriver) + " 75 " + shQuote(sc.prompt) + " " +
+			shQuote(interactiveDoneText) + " " + shQuote(sc.interactive.quit) + " " +
+			harnessCmd + " </dev/null >/tmp/dc-hookfire.driver 2>&1\n"
+	} else {
+		script += harnessCmd + " </dev/null >/tmp/dc-hookfire.out 2>&1\n"
+	}
+	script += "echo \"::rc=$?\"\n"
+	if sc.interactive != nil {
+		script += "if [ -s /tmp/dc-hookfire.driver ]; then echo '::driver-begin'; tail -c 1000 /tmp/dc-hookfire.driver; echo; echo '::driver-end'; fi\n"
+	}
 	script += sc.post
 	for _, marker := range sc.markers {
 		script += "if [ -e " + shQuote(marker) + " ]; then echo " + shQuote("::marker="+marker+"=present") +
