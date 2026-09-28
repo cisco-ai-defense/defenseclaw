@@ -26,8 +26,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
 // mountsOn is a gateway that already allows bind mounts, so setup asks
@@ -247,5 +249,86 @@ func TestSetupNamesKiroAsTyped(t *testing.T) {
 		if got, err := ResolveHarness(HarnessArg(spec)); err != nil || got != spec {
 			t.Errorf("HarnessArg(%s) = %q resolves to %v, %v", h, HarnessArg(spec), got, err)
 		}
+	}
+}
+
+// TestTeardownDryRunListsEveryStep pins the dry run a newcomer reads: every
+// step, "none" and "nothing to restore" included, the provider profiles
+// labeled by whose they are, and a closing "nothing was changed" (manual
+// test R2-40). A teardown with only openshell.enabled left turns it off.
+func TestTeardownDryRunListsEveryStep(t *testing.T) {
+	ctx := context.Background()
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	fake := openshelltest.New()
+	client := fake.Client(openshell.ClientOptions{})
+	ownPort := ta.Cfg.OpenShellIngressPort()
+	imports := []struct {
+		id string
+		in profiles.Input
+	}{
+		{profiles.IngressID, profiles.Input{IngressPort: ownPort}},
+		{profiles.IngressID, profiles.Input{IngressPort: ownPort + 1000}},
+		{profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}},
+	}
+	for _, im := range imports {
+		p, err := profiles.Render(im.id, im.in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: p.Spec, Source: "test"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"dc-cred-0001", "dc-cred-0002", "dc-cred-0003", "dc-cred-0004"} {
+		p, err := profiles.Render(profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Spec.ID = id
+		if _, err := client.ImportProfiles(ctx, []openshell.ProfileImportItem{{Profile: p.Spec, Source: "test"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+		return noCloseClient{client}, &openshell.Registration{Name: "openshell"}, nil
+	}
+	ta.daemon.add(sampleSandbox("dc-claude-live"))
+	ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-1"}}
+
+	if err := ta.Teardown(ctx, TeardownOptions{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	out := ta.output()
+	for _, want := range []string{
+		"  sandboxes         dc-claude-live\n",
+		"  providers         none\n",
+		"  provider profiles " + profiles.IngressProfileID(ownPort) + " (this install's hook ingress)\n" +
+			"                    " + profiles.AnthropicID + ", 4 --credential profiles (dc-cred-…) (shared by every DefenseClaw install on this gateway and unused now; an install that needs one imports it again)\n",
+		"  images            defenseclaw/sandbox:claudecode-1\n",
+		"  gateway config    nothing to restore (setup recorded no change to it)\n",
+		"  shell wrappers    none\n",
+		"  config            turn openshell.enabled off in " + ta.ConfigPath + "\n",
+		"dry run: nothing was changed\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry run lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, profiles.IngressProfileID(ownPort+1000)) {
+		t.Errorf("the dry run removes another install's ingress profile:\n%s", out)
+	}
+	if !loadConfig(t, ta).OpenShell.Enabled {
+		t.Fatal("the dry run changed the config")
+	}
+
+	// Only openshell.enabled is left: teardown still turns it off.
+	ta = newTestApp(t, "")
+	writeConfig(t, ta, "")
+	if err := ta.Teardown(ctx, TeardownOptions{Yes: true}); err != nil {
+		t.Fatalf("Teardown: %v\n%s", err, ta.output())
+	}
+	if strings.Contains(ta.output(), "nothing to tear down") || loadConfig(t, ta).OpenShell.Enabled {
+		t.Fatalf("teardown left openshell.enabled on:\n%s", ta.output())
 	}
 }

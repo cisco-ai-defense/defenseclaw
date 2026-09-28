@@ -71,6 +71,9 @@ type teardownPlan struct {
 	wrappers []wrapper.Installed
 	gwErr    error
 	client   openshell.Client
+	// disable is set when config.yaml turns sandboxes on
+	// (openshell.enabled), which teardown turns off last.
+	disable bool
 	// unhanded says, per copy-mode sandbox, the work it holds that never
 	// came back to the folder (see unhandedWork).
 	unhanded []string
@@ -102,6 +105,8 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 		return nil
 	}
 	if o.DryRun {
+		a.println()
+		a.note("dry run: nothing was changed")
 		return nil
 	}
 	question := "Remove all of it? (OpenShell itself stays installed)"
@@ -121,7 +126,18 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 
 func (p *teardownPlan) empty() bool {
 	return len(p.sandboxes) == 0 && len(p.providers) == 0 && len(p.profiles) == 0 && len(p.images) == 0 &&
-		len(p.orphans) == 0 && len(p.stale) == 0 && len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0
+		len(p.orphans) == 0 && len(p.stale) == 0 && len(p.gateway) == 0 && len(p.changed) == 0 && len(p.wrappers) == 0 &&
+		!p.disable
+}
+
+// sandboxesOn reports whether config.yaml turns sandboxes on, which the
+// teardown's last step turns off.
+func (a *App) sandboxesOn() bool {
+	if a.Cfg == nil || !a.Cfg.OpenShell.Enabled {
+		return false
+	}
+	_, err := os.Stat(a.ConfigPath)
+	return err == nil
 }
 
 // owner is this data dir's sandbox owner label, "" when it never had one
@@ -219,6 +235,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		}
 	}
 	p.wrappers = a.wrapperFiles()
+	p.disable = a.sandboxesOn()
 	return p, nil
 }
 
@@ -277,18 +294,38 @@ func (a *App) unusedProfiles(ctx context.Context, c openshell.Client, ours []str
 	return out
 }
 
+// printTeardown prints the plan, one step per line. A plan with something
+// to remove lists every step, "none" included, so a dry run shows all of
+// what a teardown does.
 func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
+	full := !p.empty()
+	row := func(label, text string) { a.line(fmt.Sprintf("%-18s%s", label, text)) }
 	list := func(label string, items []string) {
-		if len(items) > 0 {
-			a.line(fmt.Sprintf("%-18s%s", label, strings.Join(items, ", ")))
+		switch {
+		case len(items) > 0:
+			row(label, strings.Join(items, ", "))
+		case full:
+			row(label, "none")
 		}
 	}
 	a.println(a.bold("Sandbox teardown"))
 	list("sandboxes", p.sandboxes)
 	list("providers", p.providers)
-	list("provider profiles", p.profiles)
-	list("images", p.images)
-	list("leftover data", p.orphans)
+	for i, r := range a.profileRows(p) {
+		if i == 0 {
+			row("provider profiles", r)
+		} else {
+			row("", r)
+		}
+	}
+	if o.KeepImages {
+		row("images", "kept (--keep-images)")
+	} else {
+		list("images", p.images)
+	}
+	if len(p.orphans) > 0 {
+		list("leftover data", p.orphans)
+	}
 	var stale []string
 	for _, name := range p.stale {
 		if p.recorded[name].Retained {
@@ -296,13 +333,21 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		}
 		stale = append(stale, name)
 	}
-	list("gone sandboxes", stale)
+	if len(stale) > 0 {
+		list("gone sandboxes", stale)
+	}
 	for _, f := range p.gateway {
-		how := "restore the backup " + f.Backup
+		how := "restore the backup " + a.tildePath(f.Backup)
 		if f.Backup == "" {
 			how = "remove it (DefenseClaw created it)"
 		}
-		a.line(fmt.Sprintf("%-18s%s: %s", "gateway config", f.Path, how))
+		row("gateway config", a.tildePath(f.Path)+": "+how)
+	}
+	switch {
+	case len(p.gateway) > 0:
+		row("", "then restart the OpenShell gateway, which drops the connections of every sandbox on it")
+	case len(p.changed) == 0 && full:
+		row("gateway config", "nothing to restore (setup recorded no change to it)")
 	}
 	for _, f := range p.changed {
 		a.warn(f.Path + " changed after DefenseClaw edited it; it is left alone (DefenseClaw's backup: " + firstNonEmpty(f.Backup, "none") + ")")
@@ -311,14 +356,60 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		a.warn(u + "; teardown deletes it")
 	}
 	for _, w := range p.wrappers {
-		a.line(fmt.Sprintf("%-18s%s in %s", "shell wrappers", strings.Join(w.Block.Commands(), ", "), a.tildePath(w.Path)))
+		row("shell wrappers", strings.Join(w.Block.Commands(), ", ")+" in "+a.tildePath(w.Path))
+	}
+	if len(p.wrappers) == 0 && full {
+		row("shell wrappers", "none")
+	}
+	switch {
+	case p.disable:
+		row("config", "turn openshell.enabled off in "+a.tildePath(a.ConfigPath))
+	case full && a.Cfg != nil:
+		row("config", "openshell.enabled is already off")
 	}
 	if p.gwErr != nil {
 		a.warn("the OpenShell gateway is not reachable (" + truncate(p.gwErr.Error(), 120) + "); only what DefenseClaw can see locally is removed")
 	}
-	if o.KeepImages {
-		a.note("images are kept (--keep-images)")
+}
+
+// profileRows labels the provider profiles teardown removes: this install's
+// own ingress profiles, the gateway-wide one of an earlier release, and the
+// model and credential profiles every install on the gateway shares, which
+// no provider uses now (an install that needs one imports it again).
+func (a *App) profileRows(p *teardownPlan) []string {
+	var own, legacy, shared, creds []string
+	for _, id := range p.profiles {
+		switch {
+		case p.ownIngress[id]:
+			own = append(own, id)
+		case id == profiles.LegacyIngressID:
+			legacy = append(legacy, id)
+		case strings.HasPrefix(id, "dc-cred-"):
+			creds = append(creds, id)
+		default:
+			shared = append(shared, id)
+		}
 	}
+	// Credential profile names are hashes: past a few, a count says more.
+	if len(creds) > 3 {
+		shared = append(shared, fmt.Sprintf("%d --credential profiles (dc-cred-…)", len(creds)))
+	} else {
+		shared = append(shared, creds...)
+	}
+	var rows []string
+	if len(own) > 0 {
+		rows = append(rows, strings.Join(own, ", ")+" (this install's hook ingress)")
+	}
+	if len(legacy) > 0 {
+		rows = append(rows, strings.Join(legacy, ", ")+" (from an earlier DefenseClaw release)")
+	}
+	if len(shared) > 0 {
+		rows = append(rows, strings.Join(shared, ", ")+" (shared by every DefenseClaw install on this gateway and unused now; an install that needs one imports it again)")
+	}
+	if len(rows) == 0 && !p.empty() {
+		rows = append(rows, "none")
+	}
+	return rows
 }
 
 // removeSandboxState removes what a recorded sandbox left on this machine
@@ -448,13 +539,11 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		a.ok("removed the shell wrappers from " + a.tildePath(w.Path))
 	}
 	a.pruneWrapperFiles()
-	if a.Cfg != nil && a.Cfg.OpenShell.Enabled {
-		if _, err := os.Stat(a.ConfigPath); err == nil {
-			if err := a.patchConfig(map[string]any{"openshell.enabled": false, "openshell.wrappers": []string{}}); err != nil {
-				a.warn("could not turn openshell.enabled off: " + err.Error())
-			} else {
-				a.ok("openshell.enabled is off")
-			}
+	if p.disable {
+		if err := a.patchConfig(map[string]any{"openshell.enabled": false, "openshell.wrappers": []string{}}); err != nil {
+			a.warn("could not turn openshell.enabled off: " + err.Error())
+		} else {
+			a.ok("openshell.enabled is off")
 		}
 	}
 	if len(errs) > 0 {

@@ -488,9 +488,12 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if !strings.Contains(ta.output(), "dc-claude-live, dc-claude-orphan") || strings.Contains(ta.output(), "dc-claude-theirs") {
 		t.Fatalf("dry run plan:\n%s", ta.output())
 	}
-	wantProfiles := strings.Join([]string{profiles.LegacyIngressID, profiles.IngressProfileID(ownPort), profiles.IngressProfileID(oldPort)}, ", ")
-	if !strings.Contains(ta.output(), "provider profiles "+wantProfiles+"\n") {
-		t.Fatalf("dry run plan does not remove exactly %s:\n%s", wantProfiles, ta.output())
+	// The profiles, each labeled: this install's ingress ones, then the
+	// earlier release's gateway-wide one.
+	wantProfiles := "provider profiles " + profiles.IngressProfileID(ownPort) + ", " + profiles.IngressProfileID(oldPort) + " (this install's hook ingress)\n" +
+		"                    " + profiles.LegacyIngressID + " (from an earlier DefenseClaw release)\n  images "
+	if !strings.Contains(ta.output(), wantProfiles) {
+		t.Fatalf("dry run plan does not remove exactly these profiles:\n%s\ngot:\n%s", wantProfiles, ta.output())
 	}
 	if len(ta.daemon.callsTo("DELETE", "/api/v1/sandbox/sandboxes/dc-claude-live")) != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
