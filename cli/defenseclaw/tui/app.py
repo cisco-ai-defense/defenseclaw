@@ -378,6 +378,9 @@ PANELS = (
 
 PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
 
+# How long a successful command's progress strip stays before hiding itself.
+STRIP_SUCCESS_SECONDS = 8.0
+
 
 def _panel_label(panel: str) -> str:
     """The tab label for ``panel`` ("MCPs", not ``"mcps".title()`` = "Mcps")."""
@@ -7895,7 +7898,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _strip_finished(
         self, exit_code: int, duration: float, *, cancelled: bool = False
     ) -> None:
-        """Move running → success/failure. Strip stays until dismissed."""
+        """Move running → success/failure. A success hides itself after
+        ``STRIP_SUCCESS_SECONDS``; a failure stays until dismissed."""
 
         self._strip_state = (
             "cancelled" if cancelled else ("success" if exit_code == 0 else "failure")
@@ -7938,6 +7942,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 failure_msg = f"{failure_msg} · next: {hint}"
             self.notify_toast("error", failure_msg)
         self._render_command_strip()
+        if self._strip_state == "success":
+            # The toast already announced the success; don't leave the receipt
+            # over the next screen (it hides about five rows at 80x24).
+            # Failures and cancellations stay until dismissed.
+            token = object()
+            self._strip_auto_hide_token = token
+            try:
+                self.set_timer(STRIP_SUCCESS_SECONDS, lambda: self._auto_hide_success_strip(token))
+            except Exception:  # noqa: BLE001 - no timer before mount; the strip just stays.
+                pass
+
+    def _auto_hide_success_strip(self, token: object) -> None:
+        if self._strip_state == "success" and getattr(self, "_strip_auto_hide_token", None) is token:
+            self._strip_clear()
 
     def _strip_rejected(self, reason: str) -> None:
         """Strip enters rejected state for parse errors or busy-executor."""
