@@ -498,8 +498,9 @@ exit $rc
 // stubCannotStop is a TUI whose own suspend cannot stop it, as in an
 // OpenShell sandbox, which refuses a kill() aimed at a process group: it
 // takes the terminal into raw mode, gives it back in canonical mode as a
-// suspending TUI does, and waits for the SIGCONT that ends a suspend.
-const stubCannotStop = `trap 'echo "stub resumed CONT"; exit 5' CONT
+// suspending TUI does, waits for the SIGCONT that ends a suspend, and takes
+// the terminal back into raw mode, as a resumed TUI redraws, before it exits.
+const stubCannotStop = `trap 'echo "stub resumed CONT"; stty raw -echo; sleep 0.6; stty sane; exit 5' CONT
 stty raw -echo
 sleep 0.5
 stty sane
@@ -507,9 +508,21 @@ echo "stub suspended"
 while :; do sleep 0.1; done
 `
 
+// stubShutsDown is a TUI that gives the terminal back in canonical mode to
+// shut down, which takes it longer than a suspend is waited for.
+const stubShutsDown = `stty raw -echo
+sleep 0.5
+stty sane
+echo "stub shutting down"
+sleep 1.5
+exit 0
+`
+
 // TestLauncherResumesAHarnessWhoseSuspendFailed: a harness that gave the
 // terminal back and waits for SIGCONT without having stopped gets it from
-// the supervisor, so its TUI comes back instead of hanging.
+// the supervisor, so its TUI comes back instead of hanging, and once it
+// exits the terminal says why it was not suspended. A TUI that gives the
+// terminal back to shut down gets no such notice.
 func TestLauncherResumesAHarnessWhoseSuspendFailed(t *testing.T) {
 	requireBash(t)
 	if _, err := exec.LookPath("stty"); err != nil {
@@ -518,7 +531,15 @@ func TestLauncherResumesAHarnessWhoseSuspendFailed(t *testing.T) {
 	launcher, dir := launcherFixture(t, ClaudeCode, stubCannotStop)
 	r := startPTY(t, dir, nil, launcher)
 	code, out := r.wait()
-	if code != 5 || !strings.Contains(out, "stub resumed CONT") || !strings.Contains(out, supervisorNotice) {
-		t.Fatalf("exit %d, want the stub's 5 after the supervisor's notice and a SIGCONT:\n%s", code, out)
+	resumed := strings.Index(out, "stub resumed CONT")
+	if code != 5 || resumed < 0 || strings.LastIndex(out, supervisorNotice) < resumed {
+		t.Fatalf("exit %d, want the stub's 5 after a SIGCONT, then the supervisor's notice:\n%s", code, out)
+	}
+
+	launcher, dir = launcherFixture(t, ClaudeCode, stubShutsDown)
+	r = startPTY(t, dir, nil, launcher)
+	code, out = r.wait()
+	if code != 0 || !strings.Contains(out, "stub shutting down") || strings.Contains(out, supervisorNotice) {
+		t.Fatalf("exit %d, want the stub's 0 without a suspend notice:\n%s", code, out)
 	}
 }

@@ -133,7 +133,7 @@ is a process group (negative pid or zero): a TUI that suspends itself on
 Ctrl-Z cannot stop, and a job-control shell in the sandbox cannot resume a
 stopped job (its fg uses killpg). This supervisor forks the harness into its
 own process group, makes it the terminal's foreground group, and resumes it
-when it stops or when its suspend failed, after telling the user that
+when it stops or when its suspend failed, and tells the user that
 suspending is not available.
 
 This supervisor is invoked only when stdin/stdout/stderr are a terminal whose
@@ -274,18 +274,23 @@ def harness_owns_terminal():
         return False
 
 
-# NOTICE is what the terminal shows when a suspend is turned into a resume.
+# NOTICE is what the terminal shows when a suspend was turned into a resume.
 NOTICE = (b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
           b"(the sandbox refuses the signal); it keeps running.\r\n")
 
+# explain_at_exit: a harness whose own suspend failed took the terminal back
+# after the supervisor's SIGCONT, so it had been waiting to be resumed; the
+# notice follows its exit, when its TUI no longer owns the screen. A TUI
+# that restores the terminal only to shut down never takes it back, and
+# gets no notice.
+explain_at_exit = False
 
-def resume():
-    """Tell the user the harness was not suspended, then resume it."""
+
+def notice():
     try:
         os.write(2, NOTICE)
     except OSError:
         pass
-    send_signal_to_group(child_pgrp, signal.SIGCONT)
 
 
 def finish(status):
@@ -299,6 +304,8 @@ def finish(status):
         os.tcsetpgrp(0, os.getpgrp())
     except OSError:
         pass
+    if explain_at_exit:
+        notice()
     if os.WIFEXITED(status):
         sys.exit(os.WEXITSTATUS(status))
     sys.exit(128 + os.WTERMSIG(status))
@@ -306,6 +313,7 @@ def finish(status):
 
 armed = False       # the harness had the terminal in raw mode
 cooked_since = None  # when it went back to canonical mode
+woken = False        # a SIGCONT went to a harness that seemed suspended
 
 # Main loop: wait for the child to stop or exit, and watch the terminal.
 while True:
@@ -325,21 +333,25 @@ while True:
             os.tcsetpgrp(0, child_pgrp)
         except OSError:
             pass
-        # Send SIGCONT to the child and all members of its process group.
-        resume()
+        # Say why it keeps running, then send SIGCONT to the child and all
+        # members of its process group.
+        notice()
+        send_signal_to_group(child_pgrp, signal.SIGCONT)
         armed, cooked_since = False, None
         continue
 
     canonical = terminal_canonical()
     if canonical is False and harness_owns_terminal():
+        if woken:
+            explain_at_exit, woken = True, False
         armed, cooked_since = True, None
     elif canonical and armed and harness_owns_terminal():
         now = time.monotonic()
         if cooked_since is None:
             cooked_since = now
         elif now - cooked_since >= SUSPEND_WAIT:
-            resume()
-            armed, cooked_since = False, None
+            send_signal_to_group(child_pgrp, signal.SIGCONT)
+            armed, cooked_since, woken = False, None, True
     time.sleep(POLL)
 `
 

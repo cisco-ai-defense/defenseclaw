@@ -119,11 +119,14 @@ export NODE_DISABLE_COMPILE_CACHE
 // individual kill() calls, never killpg). Because the harness's own suspend
 // fails in the sandbox, the supervisor also watches the terminal: when the
 // harness left raw mode for canonical mode and stays there for half a
-// second, it is treated as suspended and sent SIGCONT. Either way it first
-// tells the user that suspending is not available in the sandbox. The
-// supervisor forwards SIGHUP and SIGTERM it receives and exits with the
-// harness's status (128+n for signals). Ctrl-C (SIGINT) and resizes
-// (SIGWINCH) reach the harness as usual.
+// second, it is treated as suspended and sent SIGCONT. The supervisor tells
+// the user that suspending is not available in the sandbox: at once for a
+// harness that did stop, and after the harness exits for one whose own
+// suspend failed and that then took the terminal back (its TUI owns the
+// screen until then; a TUI that only restored the terminal to shut down
+// gets no notice). The supervisor forwards SIGHUP and SIGTERM it receives
+// and exits with the harness's status (128+n for signals). Ctrl-C (SIGINT)
+// and resizes (SIGWINCH) reach the harness as usual.
 //
 // Without a terminal dc_launch execs COMMAND directly: headless and detached
 // runs keep the launcher's pid for the harness. Without /proc, or when the
