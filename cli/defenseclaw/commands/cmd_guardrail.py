@@ -1624,12 +1624,25 @@ def _set_connector_hilt(
             indent="  ",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-hilt",
-            "config",
-            f"connector={key} scope=per-connector "
-            f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+    _log_hilt(
+        app,
+        f"connector={key} scope=per-connector "
+        f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+    )
+
+
+def _log_hilt(app: AppContext, details: str) -> None:
+    """Audit a saved HILT change; a stopped gateway only skips the audit event."""
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    if not app.logger:
+        return
+    try:
+        app.logger.log_action("guardrail-hilt", "config", details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+            err=True,
         )
 
 
@@ -1860,17 +1873,15 @@ def hilt_cmd(
             indent="  ",
         )
 
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-hilt",
-            "config",
-            (
-                f"scope=active-connectors count={len(hilt_targets)} "
-                f"state={state or 'preserve'} min_severity={min_severity or 'preserve'} restart={restart}"
-                if hilt_targets
-                else f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}"
-            ),
-        )
+    _log_hilt(
+        app,
+        (
+            f"scope=active-connectors count={len(hilt_targets)} "
+            f"state={state or 'preserve'} min_severity={min_severity or 'preserve'} restart={restart}"
+            if hilt_targets
+            else f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}"
+        ),
+    )
 
 
 def _set_connector_block_message(
