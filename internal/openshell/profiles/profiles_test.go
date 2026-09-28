@@ -82,69 +82,34 @@ func TestRenderGolden(t *testing.T) {
 				}
 				return
 			}
-			want, err := os.ReadFile(golden)
-			if err != nil {
-				t.Fatalf("read golden (regenerate with DEFENSECLAW_UPDATE_GOLDEN=1): %v", err)
-			}
-			if !bytes.Equal(want, p.YAML) {
-				t.Fatalf("%s drifted:\n%s", golden, p.YAML)
+			if want, err := os.ReadFile(golden); err != nil || !bytes.Equal(want, p.YAML) {
+				t.Fatalf("%s drifted (%v; regenerate with DEFENSECLAW_UPDATE_GOLDEN=1):\n%s", golden, err, p.YAML)
 			}
 		})
 	}
 }
 
+// TestRenderSpecs covers what the golden files do not show: each ingress
+// listener and each Bedrock region gets its own profile id while the others
+// keep the template id, the default region, de-duplicated binaries and
+// the SDK categories.
 func TestRenderSpecs(t *testing.T) {
-	ingress, err := Render(IngressID, Input{IngressPort: 18971})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := ingress.Spec
-	if ingress.ID != "defenseclaw-ingress-18971" || ingress.Template != IngressID || s.ID != ingress.ID {
-		t.Fatalf("ingress id %q (template %q, spec %q), want the listener's own profile", ingress.ID, ingress.Template, s.ID)
-	}
-	if s.InferenceCapable || len(s.Credentials) != 1 || s.Credentials[0].EnvVars[0] != "DEFENSECLAW_SANDBOX_TOKEN" ||
-		s.Credentials[0].AuthStyle != "bearer" || s.Endpoints[0].Host != "host.openshell.internal" || s.Endpoints[0].Port != 18971 ||
-		s.Binaries[0].Path != "/**" {
-		t.Fatalf("ingress spec = %#v", s)
-	}
-
-	claude, err := Render(ClaudeBedrockMantleID, Input{Binaries: []string{claudeRealpath, claudeRealpath}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := claude.Spec.Endpoints[0].Host; got != "bedrock-mantle.us-east-1.api.aws" {
-		t.Fatalf("default region host = %s", got)
-	}
-	if c := claude.Spec.Credentials[0]; c.AuthStyle != "header" || c.HeaderName != "x-api-key" || c.EnvVars[0] != "ANTHROPIC_API_KEY" {
-		t.Fatalf("Claude Mantle credential = %#v", c)
-	}
-	if len(claude.Spec.Binaries) != 1 || claude.Spec.Binaries[0].Path != claudeRealpath {
-		t.Fatalf("binaries not de-duplicated: %#v", claude.Spec.Binaries)
-	}
-	if !strings.Contains(claude.Spec.Description, "https://bedrock-mantle.us-east-1.api.aws/anthropic") {
-		t.Fatalf("description does not name the base URL: %s", claude.Spec.Description)
-	}
-
-	codex, err := Render(CodexBedrockMantleID, Input{Binaries: []string{codexRealpath}, BedrockRegion: "eu-central-1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c := codex.Spec.Credentials[0]; c.AuthStyle != "bearer" || c.EnvVars[0] != "BEDROCK_MANTLE_API_KEY" || codex.Spec.Endpoints[0].Host != "bedrock-mantle.eu-central-1.api.aws" {
-		t.Fatalf("Codex Mantle spec = %#v", codex.Spec)
-	}
-	if string(codex.Spec.Category) != "Inference" || string(ingress.Spec.Category) != "Other" {
-		t.Fatal("categories do not map to the SDK values")
-	}
-	if claude.ID != "defenseclaw-claude-bedrock-mantle-us-east-1" || codex.ID != "defenseclaw-codex-bedrock-mantle-eu-central-1" ||
-		claude.Template != ClaudeBedrockMantleID || codex.Template != CodexBedrockMantleID {
-		t.Fatalf("Mantle ids %q (%q), %q (%q), want one profile per region", claude.ID, claude.Template, codex.ID, codex.Template)
-	}
-	anthropic, err := Render(AnthropicID, Input{Binaries: []string{claudeRealpath}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if anthropic.ID != AnthropicID || anthropic.Template != AnthropicID {
-		t.Fatalf("anthropic id %q (%q), want the template id", anthropic.ID, anthropic.Template)
+	for _, tc := range []struct {
+		id               string
+		in               Input
+		wantID, wantHost string
+		category         string
+	}{
+		{IngressID, Input{IngressPort: 18971}, "defenseclaw-ingress-18971", "host.openshell.internal", "Other"},
+		{ClaudeBedrockMantleID, Input{Binaries: []string{claudeRealpath, claudeRealpath}}, "defenseclaw-claude-bedrock-mantle-us-east-1", "bedrock-mantle.us-east-1.api.aws", "Inference"},
+		{CodexBedrockMantleID, Input{Binaries: []string{codexRealpath}, BedrockRegion: "eu-central-1"}, "defenseclaw-codex-bedrock-mantle-eu-central-1", "bedrock-mantle.eu-central-1.api.aws", "Inference"},
+		{AnthropicID, Input{Binaries: []string{claudeRealpath}}, AnthropicID, "api.anthropic.com", "Inference"},
+	} {
+		p, err := Render(tc.id, tc.in)
+		if err != nil || p.ID != tc.wantID || p.Spec.ID != p.ID || p.Template != tc.id || p.Spec.Endpoints[0].Host != tc.wantHost ||
+			string(p.Spec.Category) != tc.category || len(p.Spec.Binaries) != 1 {
+			t.Fatalf("Render(%s) = %q (template %q), %#v, %v", tc.id, p.ID, p.Template, p.Spec, err)
+		}
 	}
 }
 
@@ -188,11 +153,8 @@ func TestProfileIDsNameTheirEndpoints(t *testing.T) {
 }
 
 func TestProfileIDHelpers(t *testing.T) {
-	if got := IngressProfileID(29001); got != "defenseclaw-ingress-29001" {
-		t.Fatalf("IngressProfileID = %s", got)
-	}
-	if got := BedrockProfileID(ClaudeBedrockMantleID, " "); got != "defenseclaw-claude-bedrock-mantle-us-east-1" {
-		t.Fatalf("BedrockProfileID default region = %s", got)
+	if got, mantle := IngressProfileID(29001), BedrockProfileID(ClaudeBedrockMantleID, " "); got != "defenseclaw-ingress-29001" || mantle != "defenseclaw-claude-bedrock-mantle-us-east-1" {
+		t.Fatalf("IngressProfileID = %s, BedrockProfileID default region = %s", got, mantle)
 	}
 	for id, want := range map[string]int{
 		"defenseclaw-ingress-29001": 29001, "defenseclaw-ingress-1": 1, "defenseclaw-ingress-65535": 65535,
@@ -223,74 +185,26 @@ func TestProfileIDHelpers(t *testing.T) {
 		}
 	}
 	for _, id := range IDs() {
-		in := goldenInputs()[id]
-		p, err := Render(id, in)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !IsDefenseClaw(p.ID) {
-			t.Errorf("rendered %s is not recognised as DefenseClaw's", p.ID)
+		if p, err := Render(id, goldenInputs()[id]); err != nil || !IsDefenseClaw(p.ID) {
+			t.Errorf("rendered %s (%v) is not recognised as DefenseClaw's", p.ID, err)
 		}
 	}
 }
 
-// TestRenderHookOnlyHarnessProfiles pins the credential, endpoints and
-// binaries of the OpenCode, Copilot CLI and Amp profiles.
-func TestRenderHookOnlyHarnessProfiles(t *testing.T) {
-	copilot := []string{copilotRealpath, copilotRuntimeRealpath}
-	cases := []struct {
-		id       string
-		in       Input
-		env      string
-		style    string
-		header   string
-		hosts    []string
-		binaries []string
-	}{
-		{OpenCodeAnthropicID, Input{Binaries: []string{openCodeRealpath}}, "ANTHROPIC_API_KEY", "header", "x-api-key", []string{"api.anthropic.com"}, []string{openCodeRealpath}},
-		{OpenCodeOpenAIID, Input{Binaries: []string{openCodeRealpath}}, "OPENAI_API_KEY", "bearer", "authorization", []string{"api.openai.com"}, []string{openCodeRealpath}},
-		{OpenCodeBedrockMantleID, Input{Binaries: []string{openCodeRealpath}, BedrockRegion: "us-west-2"}, "BEDROCK_MANTLE_API_KEY", "header", "x-api-key", []string{"bedrock-mantle.us-west-2.api.aws"}, []string{openCodeRealpath}},
-		{CopilotGitHubID, Input{Binaries: copilot}, "COPILOT_GITHUB_TOKEN", "bearer", "authorization",
-			[]string{"api.github.com", "api.githubcopilot.com", "api.individual.githubcopilot.com", "api.business.githubcopilot.com", "api.enterprise.githubcopilot.com"}, []string{copilotRuntimeRealpath, copilotRealpath}},
-		{CopilotAnthropicID, Input{Binaries: copilot}, "COPILOT_PROVIDER_API_KEY", "header", "x-api-key", []string{"api.anthropic.com"}, []string{copilotRuntimeRealpath, copilotRealpath}},
-		{CopilotBedrockMantleID, Input{Binaries: copilot}, "COPILOT_PROVIDER_API_KEY", "header", "x-api-key", []string{"bedrock-mantle.us-east-1.api.aws"}, []string{copilotRuntimeRealpath, copilotRealpath}},
-		{AmpID, Input{Binaries: []string{ampRealpath}}, "AMP_API_KEY", "bearer", "authorization", []string{"ampcode.com"}, []string{ampRealpath}},
-		{CursorID, Input{Binaries: []string{cursorRealpath}}, "CURSOR_API_KEY", "bearer", "authorization",
-			[]string{"api2.cursor.sh", "api3.cursor.sh", "repo42.cursor.sh"}, []string{cursorRealpath}},
-		{KiroID, Input{Binaries: []string{kiroRealpath, kiroChatRealpath}}, "KIRO_API_KEY", "bearer", "authorization",
-			[]string{"q.us-east-1.amazonaws.com", "runtime.us-east-1.kiro.dev", "management.us-east-1.kiro.dev", "prod.us-east-1.auth.desktop.kiro.dev"},
-			[]string{kiroRealpath, kiroChatRealpath}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.id, func(t *testing.T) {
-			p, err := Render(tc.id, tc.in)
-			if err != nil {
-				t.Fatal(err)
-			}
-			s := p.Spec
-			if !s.InferenceCapable || len(s.Credentials) != 1 {
-				t.Fatalf("spec = %#v", s)
-			}
-			if c := s.Credentials[0]; len(c.EnvVars) != 1 || c.EnvVars[0] != tc.env || c.AuthStyle != tc.style || c.HeaderName != tc.header {
-				t.Fatalf("credential = %#v", c)
-			}
-			var hosts, binaries []string
-			for _, ep := range s.Endpoints {
-				if ep.Port != 443 || ep.Protocol != "rest" {
-					t.Fatalf("endpoint %#v", ep)
-				}
-				hosts = append(hosts, ep.Host)
-			}
-			for _, b := range s.Binaries {
-				binaries = append(binaries, b.Path)
-			}
-			if strings.Join(hosts, ",") != strings.Join(tc.hosts, ",") || strings.Join(binaries, ",") != strings.Join(tc.binaries, ",") {
-				t.Fatalf("hosts %v binaries %v", hosts, binaries)
-			}
-			if _, err := Render(tc.id, Input{Binaries: []string{"/**"}}); err == nil {
-				t.Fatal("an inference credential rendered for every binary")
-			}
-		})
+// TestInferenceProfilesBindTheirBinaries pins that every inference
+// profile carries one credential and is never rendered for every binary.
+func TestInferenceProfilesBindTheirBinaries(t *testing.T) {
+	for _, id := range IDs() {
+		if id == IngressID {
+			continue
+		}
+		p, err := Render(id, goldenInputs()[id])
+		if err != nil || !p.Spec.InferenceCapable || len(p.Spec.Credentials) != 1 {
+			t.Fatalf("Render(%s) = %#v, %v", id, p.Spec, err)
+		}
+		if _, err := Render(id, Input{Binaries: []string{"/**"}}); err == nil {
+			t.Fatalf("%s: an inference credential rendered for every binary", id)
+		}
 	}
 }
 
