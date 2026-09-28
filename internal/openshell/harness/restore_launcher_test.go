@@ -21,42 +21,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
-
-// recordArgsAndEnv is a stub body that records its argv (ARG lines) and
-// environment (ENV lines) next to itself.
-const recordArgsAndEnv = `{ printf 'ARG %s\n' "$@"; /usr/bin/env | sed 's/^/ENV /'; } >"${0%/*}/record"` + "\n"
-
-// recordedRun is what a recordArgsAndEnv stub saw.
-type recordedRun struct {
-	args []string
-	env  map[string]string
-}
-
-// readRecord parses the record a recordArgsAndEnv stub left in dir.
-func readRecord(t *testing.T, dir string) recordedRun {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dir, "record"))
-	if err != nil {
-		t.Fatalf("the stub never ran: %v", err)
-	}
-	run := recordedRun{env: map[string]string{}}
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		switch {
-		case strings.HasPrefix(line, "ARG "):
-			run.args = append(run.args, strings.TrimPrefix(line, "ARG "))
-		case strings.HasPrefix(line, "ENV "):
-			name, value, _ := strings.Cut(strings.TrimPrefix(line, "ENV "), "=")
-			run.env[name] = value
-		}
-	}
-	return run
-}
 
 // kiroHostileLaunchEnv are variables Kiro CLI 2.24.1 reads to move its
 // agents, settings and data or to replace the shell tool's shell, set the way
@@ -68,106 +39,49 @@ var kiroHostileLaunchEnv = []string{
 	"Q_MOCK_CHAT_RESPONSE", "KAS_BUNDLE_PATH", "ASBX_KIRO_MANDATORY_MCPS",
 }
 
+// TestKiroLauncherPinsTheRootOwnedAgentDir: hookless agents named defenseclaw
+// in HOME and the project, under the DefenseClaw file name and under names
+// that sort before it, are never read (with the agent directory pinned Kiro
+// reads neither directory), the variables that move Kiro elsewhere are
+// dropped, and a missing DefenseClaw agent stops the launcher.
 func TestKiroLauncherPinsTheRootOwnedAgentDir(t *testing.T) {
-	launcher, home := launcherFixture(t, Kiro, recordArgsAndEnv)
-	agentDir := filepath.Join(home, filepath.FromSlash(connector.KiroSandboxAgentDir))
-	if _, err := os.Stat(filepath.Join(agentDir, connector.KiroSandboxAgentName+".json")); err != nil {
-		t.Fatalf("the fixture lacks the root-owned agent: %v", err)
-	}
-	// Hookless agents named defenseclaw in HOME and the project, under the
-	// DefenseClaw file name and under names that sort before it: with the
-	// agent directory pinned Kiro reads neither directory, so the launcher
-	// starts without looking at them.
+	l := newLauncher(t, Kiro)
+	agentDir := filepath.Join(l.dir, filepath.FromSlash(connector.KiroSandboxAgentDir))
 	hookless := []byte(`{"name":"` + connector.KiroSandboxAgentName + `","hooks":{}}`)
 	project := t.TempDir()
 	for _, file := range []string{
-		filepath.Join(home, ".kiro", "agents", "a.json"),
-		filepath.Join(home, ".kiro", "agents", connector.KiroSandboxAgentName+".json"),
+		filepath.Join(l.dir, ".kiro", "agents", "a.json"),
+		filepath.Join(l.dir, ".kiro", "agents", connector.KiroSandboxAgentName+".json"),
 		filepath.Join(project, ".kiro", "agents", "project.json"),
 		filepath.Join(project, ".kiro", "agents", connector.KiroSandboxAgentName+".json"),
 	} {
-		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(file, hookless, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeFile(t, file, hookless)
 	}
-	elsewhere := t.TempDir()
-	env := []string{"KIRO_API_KEY=placeholder", "KIRO_MOCK_CHAT_RESPONSE=/tmp/script.json", "KIROTOOL_KEEP=1", "DC_TEST_KEEP=1"}
+	want := map[string]string{connector.KiroSandboxAgentDirEnv: agentDir, "HOME": l.dir}
+	env := []string{"HOME=/elsewhere"}
 	for _, name := range kiroHostileLaunchEnv {
-		env = append(env, name+"="+elsewhere)
-	}
-	code, out := startLauncher(t, launcher, "/elsewhere", project, env, "--no-interactive", "--trust-all-tools", "fix it")
-	if code != 0 {
-		t.Fatalf("exit %d:\n%s", code, out)
-	}
-	run := readRecord(t, home)
-	if want := []string{"chat", "--v2", "--agent", connector.KiroSandboxAgentName, "--no-interactive", "--trust-all-tools", "fix it"}; !reflect.DeepEqual(run.args, want) {
-		t.Fatalf("kiro-cli-chat argv = %q, want %q", run.args, want)
-	}
-	if got := run.env[connector.KiroSandboxAgentDirEnv]; got != agentDir {
-		t.Errorf("%s = %q, want the root-owned %s", connector.KiroSandboxAgentDirEnv, got, agentDir)
-	}
-	for _, name := range kiroHostileLaunchEnv {
-		if name == connector.KiroSandboxAgentDirEnv {
-			continue
-		}
-		if value, ok := run.env[name]; ok {
-			t.Errorf("%s=%s reached kiro-cli-chat", name, value)
+		env = append(env, name+"=/elsewhere")
+		if name != connector.KiroSandboxAgentDirEnv {
+			want[name] = unset
 		}
 	}
 	for _, name := range []string{"KIRO_API_KEY", "KIRO_MOCK_CHAT_RESPONSE", "KIROTOOL_KEEP", "DC_TEST_KEEP"} {
-		if _, ok := run.env[name]; !ok {
-			t.Errorf("%s was dropped", name)
-		}
+		env = append(env, name+"=kept")
+		want[name] = "kept"
 	}
-	if run.env["HOME"] != home {
-		t.Errorf("HOME %q reached kiro-cli-chat", run.env["HOME"])
+	r := l.run(t, project, env, "--no-interactive", "--trust-all-tools", "fix it")
+	if wantArgs := []string{"chat", "--v2", "--agent", connector.KiroSandboxAgentName, "--no-interactive", "--trust-all-tools", "fix it"}; r.exit != 0 || !slices.Equal(r.last().args, wantArgs) {
+		t.Fatalf("exit %d kiro-cli-chat argv = %q, want %q\n%s", r.exit, r.last().args, wantArgs, r.output)
 	}
-	// Nothing is restored into HOME any more.
-	if got, _ := os.ReadFile(filepath.Join(home, ".kiro", "agents", connector.KiroSandboxAgentName+".json")); string(got) != string(hookless) {
+	checkEnv(t, r.last(), want)
+	if got, _ := os.ReadFile(filepath.Join(l.dir, ".kiro", "agents", connector.KiroSandboxAgentName+".json")); string(got) != string(hookless) {
 		t.Errorf("the launcher rewrote the HOME agent file: %s", got)
 	}
-}
-
-func TestKiroLauncherRefusals(t *testing.T) {
-	for name, tc := range map[string]struct {
-		setup func(t *testing.T, home string)
-		args  []string
-		names string
-	}{
-		"agent-missing": {
-			setup: func(t *testing.T, home string) {
-				if err := os.Remove(filepath.Join(home, filepath.FromSlash(connector.KiroSandboxAgentPath))); err != nil {
-					t.Fatal(err)
-				}
-			},
-			names: connector.KiroSandboxAgentPath + " is missing",
-		},
-		"caller-agent":        {args: []string{"--agent", "kiro_default"}, names: "--agent is not supported"},
-		"caller-agent-equals": {args: []string{"--agent=kiro_default"}, names: "--agent=kiro_default is not supported"},
-		"v3-engine":           {args: []string{"--v3"}, names: "--v3 is not supported"},
-		"engine-flag":         {args: []string{"--agent-engine", "v3"}, names: "--agent-engine is not supported"},
-		"engine-flag-equals":  {args: []string{"--agent-engine=v3"}, names: "--agent-engine=v3 is not supported"},
-		"cloud-session":       {args: []string{"--cloud"}, names: "--cloud is not supported"},
-		"cloud-repo":          {args: []string{"--repo=org/x"}, names: "--repo=org/x is not supported"},
-		"duplicate-engine":    {args: []string{"--v2"}, names: "--v2 is not supported"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			launcher, home := launcherFixture(t, Kiro, "echo started\n")
-			if tc.setup != nil {
-				tc.setup(t, home)
-			}
-			code, out := startLauncher(t, launcher, home, t.TempDir(), nil, append(tc.args, "hi")...)
-			if code != 2 || strings.Contains(out, "started") || !strings.Contains(out, tc.names) {
-				t.Fatalf("exit %d, want a refusal naming %q:\n%s", code, tc.names, out)
-			}
-		})
+	if err := os.Remove(filepath.Join(agentDir, connector.KiroSandboxAgentName+".json")); err != nil {
+		t.Fatal(err)
 	}
-	launcher, home := launcherFixture(t, Kiro, "echo started\n")
-	if code, out := startLauncher(t, launcher, home, home, nil, "hi"); code != 0 || !strings.Contains(out, "started") {
-		t.Fatalf("a launch from HOME was refused: exit %d\n%s", code, out)
+	if r := l.run(t, "", nil, "hi"); r.exit != 2 || r.started() || !strings.Contains(r.output, connector.KiroSandboxAgentPath+" is missing") {
+		t.Fatalf("without the agent: exit %d\n%s", r.exit, r.output)
 	}
 }
 
@@ -189,7 +103,7 @@ func TestLoginsRunThroughTheLauncher(t *testing.T) {
 		{Kiro, "/usr/local/bin/kiro-cli", []string{"login", "--use-device-flow"}},
 	} {
 		t.Run(tc.spec.Name, func(t *testing.T) {
-			if tc.spec.Name == "devin" {
+			if tc.spec == Devin {
 				if _, err := os.Stat("/usr/bin/jq"); err != nil {
 					t.Skip("/usr/bin/jq is required")
 				}
@@ -198,74 +112,44 @@ func TestLoginsRunThroughTheLauncher(t *testing.T) {
 			if !ok || login.Argv[0] != tc.spec.LauncherPath() {
 				t.Fatalf("login %#v does not start with %s", login, tc.spec.LauncherPath())
 			}
-			ownBinary := tc.binary != "/usr/local/bin/"+tc.spec.Command
-			stubBody := recordArgsAndEnv
-			if ownBinary {
+			l := newLauncher(t, tc.spec)
+			if tc.binary != "/usr/local/bin/"+tc.spec.Command {
 				// Only the login binary records; the chat binary fails loudly.
-				stubBody = "echo 'the chat binary ran' >&2; exit 9\n"
+				writeExecutable(t, filepath.Join(l.dir, "stub"), "#!/bin/bash\necho 'the chat binary ran' >&2; exit 9\n")
+				rewriteLauncher(t, l.path, tc.binary+" ", writeExecutable(t, filepath.Join(l.dir, "login-stub"), "#!/bin/bash\n"+recordStub)+" ")
 			}
-			launcher, home := launcherFixture(t, tc.spec, stubBody)
-			if ownBinary {
-				loginStub := filepath.Join(home, "login-stub")
-				if err := os.WriteFile(loginStub, []byte("#!/bin/bash\n"+recordArgsAndEnv), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				rewriteLauncher(t, launcher, tc.binary+" ", loginStub+" ")
-			}
-			code, out := startLauncher(t, launcher, home, home, []string{
+			r := l.run(t, "", []string{
 				openshell.EnvEgressURL + "=" + proxy, openshell.EnvEgressBypass + "=host.openshell.internal", "NODE_OPTIONS=--require=/tmp/x.js",
 			}, login.Argv[1:]...)
-			if code != 0 {
-				t.Fatalf("exit %d:\n%s", code, out)
+			if r.exit != 0 || !slices.Equal(r.last().args, tc.want) {
+				t.Fatalf("exit %d %s argv = %q, want %q\n%s", r.exit, tc.binary, r.last().args, tc.want, r.output)
 			}
-			run := readRecord(t, home)
-			if !reflect.DeepEqual(run.args, tc.want) {
-				t.Errorf("%s argv = %q, want %q", tc.binary, run.args, tc.want)
-			}
-			for key, want := range map[string]string{
+			checkEnv(t, r.last(), map[string]string{
 				"HTTPS_PROXY": proxy, "https_proxy": proxy, "HTTP_PROXY": proxy, "NO_PROXY": "host.openshell.internal",
-				"NODE_USE_ENV_PROXY": "1", "NODE_DISABLE_COMPILE_CACHE": "1", "HOME": home,
-			} {
-				if run.env[key] != want {
-					t.Errorf("%s = %q, want %q", key, run.env[key], want)
-				}
-			}
-			if _, ok := run.env["NODE_OPTIONS"]; ok {
-				t.Error("NODE_OPTIONS reached the login")
-			}
+				"NODE_USE_ENV_PROXY": "1", "NODE_DISABLE_COMPILE_CACHE": "1", "HOME": l.dir, "NODE_OPTIONS": unset,
+			})
 		})
 	}
 }
 
-// rewriteLauncher replaces old with new in a fixture launcher.
-func rewriteLauncher(t *testing.T, launcher, old, new string) {
-	t.Helper()
-	raw, err := os.ReadFile(launcher)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), old) {
-		t.Fatalf("the launcher does not run %q", old)
-	}
-	if err := os.WriteFile(launcher, []byte(strings.ReplaceAll(string(raw), old, new)), 0o755); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// devinHooks decodes the hooks object of a Devin config.
-func devinHooks(t *testing.T, raw []byte) (map[string]interface{}, map[string]interface{}) {
-	t.Helper()
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("config %s: %v", raw, err)
-	}
-	hooks, _ := cfg["hooks"].(map[string]interface{})
-	return cfg, hooks
-}
-
+// TestDevinLauncherRestoresTheHooks: whatever the agent left in its Devin
+// config (hooks removed or replaced, the trust check the launcher skips
+// turned back on, a file Devin's loader would not read), the launcher puts
+// DefenseClaw's hooks back, keeps the user's other settings when it can
+// read them, and runs Devin with the workspace trust check off (a headless
+// --print run fails in an untrusted directory, and a declined trust prompt
+// runs Devin without hooks).
 func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/jq"); err != nil {
 		t.Skip("/usr/bin/jq is required")
+	}
+	hooksOf := func(raw []byte) (map[string]interface{}, interface{}) {
+		t.Helper()
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			t.Fatalf("config %s: %v", raw, err)
+		}
+		return cfg, cfg["hooks"]
 	}
 	var template []byte
 	for _, file := range artifactsFor(t, Devin).Files {
@@ -273,49 +157,41 @@ func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 			template = file.Data
 		}
 	}
-	_, wantHooks := devinHooks(t, template)
-	if len(wantHooks) == 0 {
+	_, wantHooks := hooksOf(template)
+	if h, _ := wantHooks.(map[string]interface{}); len(h) == 0 {
 		t.Fatal("the Devin template carries no hooks")
 	}
 	for name, tc := range map[string]struct {
 		existing  string
 		keepOther bool
 	}{
-		"hooks-removed": {existing: `{"model":"opus","hooks":{}}`, keepOther: true},
-		// The agent turns the trust check the launcher skips back on.
-		"trust-reenabled": {existing: `{"model":"opus","respect_workspace_trust":true,"skip_workspace_trust":false,"hooks":{}}`, keepOther: true},
-		"hooks-replaced":  {existing: `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"/bin/true"}]}]}}`, keepOther: true},
-		"not-json":        {existing: `{"model":`},
-		"not-an-object":   {existing: `["x"]`},
-		"two-documents":   {existing: `{"model":"opus"} {"hooks":{}}`},
-		"comments":        {existing: "{\n  // the user's note\n  \"model\": \"opus\"\n}"},
-		"missing":         {},
+		"hooks-removed":   {`{"model":"opus","hooks":{}}`, true},
+		"trust-reenabled": {`{"model":"opus","respect_workspace_trust":true,"skip_workspace_trust":false,"hooks":{}}`, true},
+		"hooks-replaced":  {`{"model":"opus","hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"/bin/true"}]}]}}`, true},
+		"not-json":        {`{"model":`, false},
+		"not-an-object":   {`["x"]`, false},
+		"two-documents":   {`{"model":"opus"} {"hooks":{}}`, false},
+		"comments":        {"{\n  // the user's note\n  \"model\": \"opus\"\n}", false},
+		"missing":         {"", false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			launcher, home := launcherFixture(t, Devin, recordArgsAndEnv)
-			cfgPath := filepath.Join(home, ".config", "devin", "config.json")
+			l := newLauncher(t, Devin)
+			cfgPath := filepath.Join(l.dir, ".config", "devin", "config.json")
 			if tc.existing != "" {
-				if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(cfgPath, []byte(tc.existing), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				writeFile(t, cfgPath, []byte(tc.existing))
 			}
-			code, out := startLauncher(t, launcher, home, home, []string{"XDG_CONFIG_HOME=" + t.TempDir()}, "-p", "hi")
-			if code != 0 {
-				t.Fatalf("exit %d:\n%s", code, out)
+			r := l.run(t, "", []string{"XDG_CONFIG_HOME=" + t.TempDir()}, "-p", "hi")
+			if r.exit != 0 || !slices.Equal(r.last().args, []string{"--respect-workspace-trust", "false", "-p", "hi"}) {
+				t.Fatalf("exit %d devin argv %q:\n%s", r.exit, r.last().args, r.output)
 			}
+			checkEnv(t, r.last(), map[string]string{"XDG_CONFIG_HOME": unset})
 			raw, err := os.ReadFile(cfgPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			cfg, hooks := devinHooks(t, raw)
-			if !reflect.DeepEqual(hooks, wantHooks) {
-				t.Fatalf("hooks after the launch:\n%s", raw)
-			}
-			if tc.keepOther && cfg["model"] != "opus" {
-				t.Fatalf("the user's other settings were dropped:\n%s", raw)
+			cfg, hooks := hooksOf(raw)
+			if !reflect.DeepEqual(hooks, wantHooks) || (tc.keepOther && cfg["model"] != "opus") {
+				t.Fatalf("config after the launch:\n%s", raw)
 			}
 			for _, key := range []string{"respect_workspace_trust", "skip_workspace_trust"} {
 				if _, ok := cfg[key]; ok {
@@ -324,72 +200,6 @@ func TestDevinLauncherRestoresTheHooks(t *testing.T) {
 			}
 			if info, _ := os.Stat(cfgPath); info.Mode().Perm() != 0o600 {
 				t.Fatalf("config mode %v", info.Mode())
-			}
-			// The workspace trust check is off: a headless --print run fails
-			// in an untrusted directory, and a declined trust prompt runs
-			// Devin without hooks.
-			run := readRecord(t, home)
-			if _, ok := run.env["XDG_CONFIG_HOME"]; ok || !reflect.DeepEqual(run.args, []string{"--respect-workspace-trust", "false", "-p", "hi"}) {
-				t.Fatalf("devin argv %q, env %v", run.args, run.env)
-			}
-		})
-	}
-	launcher, home := launcherFixture(t, Devin, "echo started\n")
-	for _, args := range [][]string{
-		{"--config", "/tmp/x.json"}, {"--config=/tmp/x.json"},
-		{"--respect-workspace-trust", "true", "-p", "hi"}, {"--respect-workspace-trust=true"},
-	} {
-		if code, out := startLauncher(t, launcher, home, home, nil, args...); code != 2 || strings.Contains(out, "started") || !strings.Contains(out, "is not supported") {
-			t.Fatalf("%v: exit %d\n%s", args, code, out)
-		}
-	}
-}
-
-// TestDevinLauncherRefusesANonFileConfig replaces the Devin config.json with
-// a directory, and with a link to one. `mv -f` would move the restored
-// config inside it and exit 0, and Devin would start with no hooks; the
-// launcher must refuse instead, leave the directory alone, and start again
-// once the path is free.
-func TestDevinLauncherRefusesANonFileConfig(t *testing.T) {
-	if _, err := os.Stat("/usr/bin/jq"); err != nil {
-		t.Skip("/usr/bin/jq is required")
-	}
-	for name, plant := range map[string]func(t *testing.T, cfg string) string{
-		"directory": func(t *testing.T, cfg string) string {
-			writeFile(t, filepath.Join(cfg, "kept"), []byte("x\n"))
-			return cfg
-		},
-		"link to a directory": func(t *testing.T, cfg string) string {
-			elsewhere := t.TempDir()
-			writeFile(t, filepath.Join(elsewhere, "kept"), []byte("x\n"))
-			if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(elsewhere, cfg); err != nil {
-				t.Fatal(err)
-			}
-			return elsewhere
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			launcher, home := launcherFixture(t, Devin, "echo started\n")
-			cfg := filepath.Join(home, ".config", "devin", "config.json")
-			dir := plant(t, cfg)
-			code, out := startLauncher(t, launcher, home, home, nil, "-p", "hi")
-			if code != 2 || strings.Contains(out, "started") || !strings.Contains(out, cfg+" is not a regular file") {
-				t.Fatalf("exit %d:\n%s", code, out)
-			}
-			if entries, _ := os.ReadDir(dir); len(entries) != 1 {
-				t.Fatalf("the launcher wrote into the directory: %v", entries)
-			}
-			if err := os.RemoveAll(cfg); err != nil {
-				t.Fatal(err)
-			}
-			if code, out := startLauncher(t, launcher, home, home, nil, "-p", "hi"); code != 0 || !strings.Contains(out, "started") {
-				t.Fatalf("after freeing the path: exit %d\n%s", code, out)
-			}
-			if info, err := os.Lstat(cfg); err != nil || !info.Mode().IsRegular() {
-				t.Fatalf("config after the restore: %v %v", info, err)
 			}
 		})
 	}

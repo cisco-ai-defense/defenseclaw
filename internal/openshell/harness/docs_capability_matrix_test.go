@@ -18,8 +18,6 @@ package harness
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -43,15 +41,6 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
 	}
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("resolve test source path")
-	}
-	path := filepath.Join(filepath.Dir(filename), "..", "..", "..", "docs-site", "data", "capability-matrix.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var documented struct {
 		Connectors []struct {
 			ID      string `json:"id"`
@@ -68,8 +57,8 @@ func TestDocsCapabilityMatrixSandboxColumn(t *testing.T) {
 			} `json:"sandbox"`
 		} `json:"connectors"`
 	}
-	if err := json.Unmarshal(raw, &documented); err != nil {
-		t.Fatalf("decode %s: %v", path, err)
+	if err := json.Unmarshal([]byte(docsFile(t, "docs-site", "data", "capability-matrix.json")), &documented); err != nil {
+		t.Fatalf("decode the capability matrix: %v", err)
 	}
 
 	seen := map[string]bool{}

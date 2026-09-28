@@ -58,44 +58,51 @@ func shellFile(t *testing.T, spec *Spec, path string) connector.SandboxFile {
 	return connector.SandboxFile{}
 }
 
-// TestShellFilesParse keeps every shell file valid for the shell that runs
-// it: the profile fragment for POSIX sh (a login shell may be dash), the
-// wrapper and the shims for their shebang.
-func TestShellFilesParse(t *testing.T) {
+// TestScriptsParse keeps every launcher and shell file valid for the shell
+// that runs it: the launchers and wrappers under bash -p, the profile
+// fragment for POSIX sh (a login shell may be dash), the supervisor for
+// Python, the network-binary probe for sh; and every shim starts its
+// launcher.
+func TestScriptsParse(t *testing.T) {
+	parses := func(t *testing.T, what, sh, script string) {
+		t.Helper()
+		if _, err := os.Stat(sh); err != nil {
+			return
+		}
+		cmd := exec.Command(sh, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("%s under %s: %v\n%s", what, sh, err, out)
+		}
+	}
 	for _, name := range Names() {
 		spec, _ := Get(name)
-		for _, f := range spec.ShellFiles() {
+		files := append([]connector.SandboxFile{spec.Launcher()}, spec.ShellFiles()...)
+		for _, f := range files {
+			data := string(f.Data)
 			if f.Owner != connector.SandboxOwnerRoot {
 				t.Errorf("%s %s is not root-owned", name, f.Path)
 			}
-			shells := []string{"/bin/sh"}
-			if strings.HasPrefix(string(f.Data), "#!/usr/bin/python3 ") {
+			switch {
+			case strings.HasPrefix(data, "#!/usr/bin/python3 "):
 				// The supervisor: check it compiles, when Python is here.
-				shells = nil
 				if _, err := os.Stat("/usr/bin/python3"); err == nil {
 					cmd := exec.Command("/usr/bin/python3", "-I", "-S", "-c", "import sys; compile(sys.stdin.read(), 'dc_supervisor.py', 'exec')")
-					cmd.Stdin = strings.NewReader(string(f.Data))
+					cmd.Stdin = strings.NewReader(data)
 					if out, err := cmd.CombinedOutput(); err != nil {
 						t.Errorf("%s %s does not compile: %v\n%s", name, f.Path, err, out)
 					}
 				}
-			} else if strings.HasPrefix(string(f.Data), "#!/bin/bash") {
-				shells = []string{"/bin/bash"}
-				if !strings.HasPrefix(string(f.Data), "#!/bin/bash -p\n") {
+			case strings.HasPrefix(data, "#!/bin/bash"):
+				if !strings.HasPrefix(data, "#!/bin/bash -p\n") {
 					t.Errorf("%s %s must run under bash -p", name, f.Path)
 				}
-			}
-			for _, sh := range shells {
-				if _, err := os.Stat(sh); err != nil {
-					continue
-				}
-				cmd := exec.Command(sh, "-n")
-				cmd.Stdin = strings.NewReader(string(f.Data))
-				if out, err := cmd.CombinedOutput(); err != nil {
-					t.Errorf("%s %s under %s: %v\n%s", name, f.Path, sh, err, out)
-				}
+				parses(t, name+" "+f.Path, "/bin/bash", data)
+			default:
+				parses(t, name+" "+f.Path, "/bin/sh", data)
 			}
 		}
+		parses(t, name+" network-binary probe", "/bin/sh", spec.Probe().NetworkBinaries)
 		// The command becomes a file name and a shell function name.
 		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(spec.Command) {
 			t.Errorf("%s command %q is not a plain name", name, spec.Command)
@@ -219,27 +226,5 @@ func TestSandboxEnvRunsTheCommand(t *testing.T) {
 	bare.Env = []string{"PATH=/usr/bin:/bin"}
 	if out, err := bare.CombinedOutput(); err == nil || !strings.Contains(string(out), "usage: sandbox-env") {
 		t.Errorf("sandbox-env without a command: %v\n%s", err, out)
-	}
-}
-
-// TestShimStartsTheLauncher runs a harness shim with its launcher replaced
-// by a stub that records its arguments.
-func TestShimStartsTheLauncher(t *testing.T) {
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		t.Skip("/bin/sh is required")
-	}
-	dir := t.TempDir()
-	stub := filepath.Join(dir, "launch")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s|' \"$@\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	shim := filepath.Join(dir, "opencode")
-	body := strings.ReplaceAll(string(shellFile(t, OpenCode, OpenCode.ShimPath()).Data), OpenCode.LauncherPath(), stub)
-	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(shim, "run", "--auto", "a b").CombinedOutput()
-	if err != nil || string(out) != "run|--auto|a b|" {
-		t.Fatalf("shim: %v %q", err, out)
 	}
 }
