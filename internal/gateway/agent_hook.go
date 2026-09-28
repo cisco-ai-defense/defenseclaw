@@ -629,7 +629,7 @@ func (a *APIServer) finalizeAgentHook(
 	})
 
 	safeSection("health", func() {
-		if a.health == nil {
+		if !a.recordsConnectorHealth(ctx) {
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
@@ -909,7 +909,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		enrichAgentHookSpanPanic(ctx)
 	}
 
-	if a.health != nil {
+	if a.recordsConnectorHealth(ctx) {
 		a.health.RecordConnectorRequestFor(connectorName)
 		if resp.Action == "block" {
 			a.health.RecordToolBlockFor(connectorName)

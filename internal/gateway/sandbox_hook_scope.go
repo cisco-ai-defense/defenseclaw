@@ -133,6 +133,17 @@ func sandboxHookCWD(view *sandboxauth.FSView, cwd string) string {
 	return host
 }
 
+// recordsConnectorHealth reports whether a hook request counts toward its
+// connector's /health row (requests, last activity, load heartbeat,
+// inspections, blocks). A sandbox request does not: the row describes the
+// host's connector, and a sandbox runs its own harness from its image, so
+// its hooks made a host connector look active (or added a running row for
+// one the host does not use). Sandbox hook activity is reported per sandbox
+// (observeSandboxHookDecision).
+func (a *APIServer) recordsConnectorHealth(ctx context.Context) bool {
+	return a.health != nil && !isSandboxHookRequest(ctx)
+}
+
 // sandboxToolResultUntrusted reports whether a tool result must skip the
 // source-scope proofs and stay in the untrusted detector scope. Those proofs
 // (codexToolResultContentScope, codexObserveWorkspaceSourceProofForRequest

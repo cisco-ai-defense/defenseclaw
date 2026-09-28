@@ -984,3 +984,45 @@ func TestSandboxInMemorySessionStateIsPerBinding(t *testing.T) {
 		t.Fatal("step index shared between the host and a sandbox")
 	}
 }
+
+// TestSandboxHooksAreNotHostConnectorActivity pins that a sandbox's hooks
+// do not count toward the host connector's /health row: the row describes
+// the host's connector, and counted there a sandboxed Hermes made the
+// host's Hermes look active, or added a running row for it when the host
+// does not use Hermes at all. A host hook still counts.
+func TestSandboxHooksAreNotHostConnectorActivity(t *testing.T) {
+	installSandboxMarkerRules(t)
+	f := newSandboxIngressFixture(t)
+	_, token, err := f.store.Mint(sandboxauth.Spec{
+		SandboxName: "dc-hermes-health", Connector: "hermes", AgentVersion: "0.19.0", HookContractID: "hermes-hooks-v1",
+		PolicyProfile: "open", Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+		HostUser: sandboxauth.HostUser{UID: "1000", Name: "dev"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, command := range []string{"echo DCE2E-BLOCK-MARKER > /tmp/dce2e-blocked.txt", "ls"} {
+		body := `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"` + command + `"},` +
+			`"session_id":"20260927_1","cwd":"/work/app","extra":{"tool_call_id":"call_` + string(rune('1'+i)) + `","task_id":"t1"}}`
+		if rec := f.do(t, http.MethodPost, "/api/v1/hermes/hook", token, body); rec.Code != http.StatusOK {
+			t.Fatalf("hook: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	hermes := func() *ConnectorHealth {
+		for _, c := range f.api.health.Snapshot().Connectors {
+			if c.Name == "hermes" {
+				return &c
+			}
+		}
+		return nil
+	}
+	if c := hermes(); c != nil {
+		t.Fatalf("sandbox hooks counted as the host connector's: %+v", *c)
+	}
+	req := agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call", ToolName: "terminal", SuppressCorrelationEmit: true}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Mode: "action"}
+	f.api.finalizeAgentHook(context.Background(), "hermes", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+	if c := hermes(); c == nil || c.Requests != 1 || c.ToolBlocks != 1 || c.LastActivityAt == nil {
+		t.Fatalf("host hook health = %+v", c)
+	}
+}
