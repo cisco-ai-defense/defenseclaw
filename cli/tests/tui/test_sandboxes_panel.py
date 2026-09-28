@@ -541,6 +541,9 @@ def test_ask_keys() -> None:
     assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1")
     assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-1")
     model.set_snapshot(STATUS, [RUNNING], [PUBLIC_ASK])
+    # The selected ask went away with the refresh: the first key says so,
+    # the next acts on the ask now selected.
+    assert "no longer waiting" in model.handle_key("A").hint
     assert model.handle_key("A").always is True
     # r refreshes in every view, as in every other panel; it never rejects.
     assert model.handle_key("r").kind == "refresh"
@@ -1709,6 +1712,62 @@ def _holder_fetch(fetch, project: Path) -> None:
     fetch.sandboxes = [RUNNING, {**STOPPED, "project": str(project), "harness_name": "Claude Code"}]
 
 
+# --- the selection follows its item through refreshes -------------------------
+
+
+def _ask(ask_id: str, minute: int) -> dict[str, Any]:
+    return {**ASK, "id": ask_id, "created_at": f"2026-09-27T12:{minute:02d}:00Z"}
+
+
+def test_the_selection_follows_its_ask_through_a_refresh() -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1), _ask("ask-2", 2)])
+    model.view = "asks"
+    model.cursor = 1
+    # An older ask arrives: every index moves, the selection does not.
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-0", 0), _ask("ask-1", 1), _ask("ask-2", 2)])
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-2")
+
+
+def test_a_key_is_refused_once_when_its_ask_went_away() -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1), _ask("ask-2", 2), _ask("ask-3", 3)])
+    model.view = "asks"
+    model.cursor = 1
+    # ask-2 was decided elsewhere; the cursor now sits on ask-3, which the
+    # operator never picked.
+    model.add_events([{"seq": 3, "kind": "approval.resolved", "approval_id": "ask-2"}])
+    refused = model.handle_key("a")
+    assert refused.kind == "hint" and "no longer waiting" in refused.hint
+    assert model.handle_key("a") == SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-3")
+    # The operator's own decision is not a surprise.
+    model.cursor = 0
+    model.remove_ask("ask-1")
+    assert model.handle_key("x") == SandboxPanelAction("reject", sandbox="myapp-claude-7f3a", approval_id="ask-3")
+
+
+def test_the_activity_selection_follows_its_event() -> None:
+    model = _model()
+    model.add_events([BLOCKED])
+    model.view = "activity"
+    model.cursor = 0
+    # The feed shows the newest first: a new block moves every row down.
+    model.add_events([{**BLOCKED, "seq": 7, "host": "paste.example"}])
+    assert model.handle_key("u") == SandboxPanelAction("unblock", sandbox="myapp-claude-7f3a", host="webhook.site")
+
+
+def test_the_sandbox_selection_follows_its_row() -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [RUNNING, STOPPED], [])
+    model.cursor = 1  # docs
+    # fix-tests starts and sorts before both.
+    model.set_snapshot(STATUS, [RUNNING, STOPPED, COPY], [])
+    assert model.handle_key("d") == SandboxPanelAction("delete", sandbox="docs")
+    model.set_snapshot(STATUS, [RUNNING, COPY], [])
+    refused = model.handle_key("d")
+    assert refused.kind == "hint" and "is gone" in refused.hint
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answer", "expected"),
@@ -1866,3 +1925,42 @@ def test_an_ask_row_names_what_is_asked() -> None:
         ]
     )
     assert model.feed[0].summary == "asks to reach www.example.com (approvals are manual for the strict profile)"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("asks_during_detail", "expected"),
+    [
+        # An older ask arrives while the detail is open: the key still acts
+        # on the ask the detail showed.
+        (
+            [_ask("ask-0", 0), _ask("ask-1", 1)],
+            SandboxPanelAction("approve", sandbox="myapp-claude-7f3a", approval_id="ask-1"),
+        ),
+        # The ask the detail showed is gone: nothing is approved.
+        ([_ask("ask-0", 0)], None),
+    ],
+)
+async def test_a_detail_key_acts_on_the_item_the_detail_showed(fetch, monkeypatch, asks_during_detail, expected) -> None:
+    app = DefenseClawTUI(config=_config())
+    seen: list[SandboxPanelAction] = []
+    async with app.run_test(size=(160, 44)) as pilot:
+        await app._refresh_sandbox_snapshot(render=False)  # noqa: SLF001 - settle the mount's poll
+        await pilot.pause()
+        model = app.sandbox_model
+        model.set_snapshot(STATUS, [RUNNING], [_ask("ask-1", 1)])
+        model.view = "asks"
+        model.cursor = 0
+        assert model.handle_key("enter").kind == "detail"
+
+        async def push_screen_wait(_screen: Any) -> Any:
+            model.set_snapshot(STATUS, [RUNNING], asks_during_detail)  # the 5 s poll
+            return "a"
+
+        monkeypatch.setattr(app, "push_screen_wait", push_screen_wait)
+        monkeypatch.setattr(app, "_apply_sandbox_action", lambda action: seen.append(action) or True)
+        await app._open_sandbox_detail()  # noqa: SLF001
+    if expected is None:
+        assert len(seen) == 1 and seen[0].kind == "hint" and "no longer waiting" in seen[0].hint
+    else:
+        assert seen == [expected]

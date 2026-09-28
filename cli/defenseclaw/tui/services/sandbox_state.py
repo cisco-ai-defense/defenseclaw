@@ -32,6 +32,9 @@ from typing import Any
 
 SANDBOX_VIEWS: tuple[str, ...] = ("sandboxes", "activity", "asks")
 VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
+# Keys that act on the selected row in every view (a, A and x act on the
+# selected ask in the Asks view).
+_SELECTION_KEYS = frozenset({"u", "U", "R", "s", "d", "c"})
 
 # The feed keeps this many events; the daemon's own buffer is the history.
 FEED_LIMIT = 500
@@ -484,6 +487,11 @@ class ActivityRow:
     lifted_by: str = ""
 
     @property
+    def key(self) -> tuple[Any, ...]:
+        """What tells this event apart from every other, across daemon restarts too."""
+        return (self.seq, self.time, self.kind, self.sandbox, self.host, self.port)
+
+    @property
     def blocked_destination(self) -> bool:
         return self.kind == "egress.blocked" and bool(self.host)
 
@@ -844,6 +852,10 @@ class SandboxesPanelModel:
     # openshell.egress.unblocked: the hosts every sandbox may reach.
     saved_unblocks: tuple[str, ...] = ()
     _toasted: dict[tuple[str, str], float] = field(default_factory=dict)
+    # Views whose selected item went away in a refresh. The cursor moved to
+    # another item the operator did not pick, so the next action key there
+    # is refused once.
+    _selection_lost: set[str] = field(default_factory=set)
 
     # ---- snapshot ---------------------------------------------------------
 
@@ -856,6 +868,7 @@ class SandboxesPanelModel:
         now: datetime | None = None,
     ) -> None:
         """Replace the snapshot with a successful fetch."""
+        selection = self._selection()
         self.status = decode_status(status)
         if sandboxes is not None:
             rows = [row for row in (decode_sandbox(raw) for raw in _list(sandboxes)) if row is not None]
@@ -868,7 +881,7 @@ class SandboxesPanelModel:
             self.asks = tuple(asks)
         self.error = ""
         self.fetched_at = now or datetime.now(timezone.utc)
-        self._clamp()
+        self._follow_selection(selection)
 
     def set_error(self, message: str) -> None:
         """Record a failed refresh; the previous snapshot stays."""
@@ -902,6 +915,7 @@ class SandboxesPanelModel:
         restarted (its counter starts over), and the resume point follows it.
         """
         notices: list[SandboxNotice] = []
+        selection = self._selection()
         for raw in _list(events):
             row = decode_activity(raw)
             if row is None:
@@ -929,7 +943,7 @@ class SandboxesPanelModel:
                     notices.append(notice)
             if row.kind in {"approval.requested", "approval.resolved"}:
                 self._apply_ask_event(row)
-        self._clamp()
+        self._follow_selection(selection)
         return notices
 
     def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False, lifted_by: str = "unblocked") -> None:
@@ -960,6 +974,15 @@ class SandboxesPanelModel:
     def _apply_ask_event(self, row: ActivityRow) -> None:
         if row.kind == "approval.resolved" and row.approval_id:
             self.asks = tuple(ask for ask in self.asks if ask.id != row.approval_id)
+
+    def remove_ask(self, ask_id: str) -> None:
+        """Drop an ask the operator just decided; the cursor stays on the ask it was on."""
+        selection = self._selection()
+        self.asks = tuple(ask for ask in self.asks if ask.id != ask_id)
+        if selection.get("asks") == ask_id:
+            # The operator's own decision took it away: nothing to warn about.
+            del selection["asks"]
+        self._follow_selection(selection)
 
     def _notice_for(self, row: ActivityRow, *, now: float | None) -> SandboxNotice | None:
         clock = time.monotonic() if now is None else now
@@ -1001,6 +1024,52 @@ class SandboxesPanelModel:
             size = self._view_len(view)
             self.cursors[view] = max(0, min(self.cursors.get(view, 0), max(0, size - 1)))
 
+    def _item_keys(self, view: str) -> list[Any]:
+        """Each row's identity, in display order: sandbox name, ask id, event key."""
+        if view == "sandboxes":
+            return [row.name for row in self.rows]
+        if view == "asks":
+            return [ask.id for ask in self.asks]
+        return [row.key for row in self.feed_rows()]
+
+    def _selection(self) -> dict[str, Any]:
+        """The item each view's cursor is on (views with no rows are left out)."""
+        out: dict[str, Any] = {}
+        for view in SANDBOX_VIEWS:
+            keys = self._item_keys(view)
+            index = self.cursors.get(view, 0)
+            if 0 <= index < len(keys):
+                out[view] = keys[index]
+        return out
+
+    def _follow_selection(self, before: dict[str, Any]) -> None:
+        """Keep each cursor on the item it was on before rows changed.
+
+        Rows come and go (the poll replaces the lists, the feed shows the
+        newest event first), so an index alone would point at another item
+        after a refresh. When the item itself is gone, the view is marked so
+        its next action key is refused rather than applied to a neighbour.
+        """
+        for view, key in before.items():
+            keys = self._item_keys(view)
+            if key in keys:
+                self.cursors[view] = keys.index(key)
+            else:
+                self._selection_lost.add(view)
+        self._clamp()
+
+    def _take_lost_selection(self) -> str:
+        """The refusal for an action key whose selected item went away, once."""
+        if self.view not in self._selection_lost:
+            return ""
+        self._selection_lost.discard(self.view)
+        gone = {
+            "sandboxes": "The sandbox you selected is gone",
+            "asks": "The ask you selected is no longer waiting",
+            "activity": "The event you selected has left the feed",
+        }[self.view]
+        return f"{gone}; nothing was done. Check the selection, then press the key again."
+
     @property
     def cursor(self) -> int:
         return self.cursors.get(self.view, 0)
@@ -1008,6 +1077,8 @@ class SandboxesPanelModel:
     @cursor.setter
     def cursor(self, value: int) -> None:
         self.cursors[self.view] = max(0, min(int(value), max(0, self._view_len(self.view) - 1)))
+        # The operator picked the row: it is the selection now.
+        self._selection_lost.discard(self.view)
 
     def feed_rows(self) -> tuple[ActivityRow, ...]:
         """The feed, newest first."""
@@ -1131,8 +1202,14 @@ class SandboxesPanelModel:
         if key == "enter":
             if self._view_len(self.view):
                 self.detail_open = True
+                # The detail names its item: that is the selection now.
+                self._selection_lost.discard(self.view)
                 return SandboxPanelAction("detail")
             return SandboxPanelAction()
+        if key in _SELECTION_KEYS or (key in {"a", "A", "x"} and self.view == "asks"):
+            lost = self._take_lost_selection()
+            if lost:
+                return SandboxPanelAction("hint", hint=lost)
         if key == "u":
             return self._unblock_action()
         if key in {"a", "A"} or (key == "x" and self.view == "asks"):

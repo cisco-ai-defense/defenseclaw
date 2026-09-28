@@ -687,7 +687,9 @@ class SandboxPanelMixin:
             model.detail_open = False
             self._render_chrome()  # type: ignore[attr-defined]
         if key:
-            # The detail's row is still the selection, so the key acts on it.
+            # The selection follows its item through the refreshes that ran
+            # while the detail was open, so the key acts on the item shown;
+            # the model refuses it when that item went away meanwhile.
             self._apply_sandbox_action(model.handle_key(key))
 
     async def _sandbox_unblock(self, sandbox: str, host: str) -> None:
@@ -771,7 +773,7 @@ class SandboxPanelMixin:
         elif not message:
             verb = "approved" if approve else "rejected"
             message = f"{target} {verb}" + (" (applies when the agent is idle)" if approve else "")
-        self.sandbox_model.asks = tuple(a for a in self.sandbox_model.asks if a.id != action.approval_id)
+        self.sandbox_model.remove_ask(action.approval_id)
         self._set_status(message)  # type: ignore[attr-defined]
         self.notify_toast("success", message)  # type: ignore[attr-defined]
 
