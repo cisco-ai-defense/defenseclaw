@@ -231,6 +231,9 @@ class AuditPanelModel:
         # by the app from the active connector count; single-connector
         # installs leave them at the defaults so the table is unchanged.
         self.connector_filter = ""
+        # Routine rows the default view leaves out, counted by the store (None:
+        # count the loaded rows instead).
+        self._routine_count: int | None = None
         self.show_connector_column = False
         self._detail_cache: AuditDetailInfo | None = None
         self._detail_cache_cursor = -1
@@ -356,10 +359,12 @@ class AuditPanelModel:
         if self.store is None:
             return
         try:
+            self._routine_count = None
             if not self.show_all_events and not self.filter_text and not self.common_filter and hasattr(
                 self.store, "list_actionable_event_summaries"
             ):
                 self.items = list(self.store.list_actionable_event_summaries(500))  # type: ignore[attr-defined]
+                self._count_routine()
             elif hasattr(self.store, "list_event_summaries"):
                 self.items = list(self.store.list_event_summaries(500))  # type: ignore[attr-defined]
             else:
@@ -388,6 +393,8 @@ class AuditPanelModel:
         if connector == self.connector_filter:
             return
         self.connector_filter = connector
+        if self._routine_count is not None:
+            self._count_routine()
         self.apply_filter()
 
     def apply_filter(self) -> None:
@@ -518,13 +525,29 @@ class AuditPanelModel:
     def filtered_count(self) -> int:
         return len(self.filtered)
 
+    def _count_routine(self) -> None:
+        # The actionable query already leaves the routine rows out, so the
+        # store counts them for the "N routine hidden" hint.
+        counter = getattr(self.store, "count_routine_events", None)
+        try:
+            self._routine_count = int(counter(self.connector_filter)) if callable(counter) else None
+        except Exception:  # noqa: BLE001 - the hint is best-effort
+            self._routine_count = None
+
     def hidden_routine_count(self) -> int:
         """Events the default view leaves out as routine (0 once any filter or "all" is on)."""
         if self.show_all_events or self.common_filter or self.filter_text:
             return 0
         if self.correlation_target or self.correlation_run_id:
             return 0
-        return sum(1 for event in self.items if _is_low_signal_event(event))
+        if self._routine_count is not None:
+            return self._routine_count
+        return sum(
+            1
+            for event in self.items
+            if _is_low_signal_event(event)
+            and (not self.connector_filter or self.connector_filter in event_connector(event).lower())
+        )
 
     def get_detail_info(self) -> AuditDetailInfo | None:
         selected = self.selected()

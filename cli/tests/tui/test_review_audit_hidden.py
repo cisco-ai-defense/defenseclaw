@@ -33,3 +33,30 @@ def test_hidden_routine_events_are_counted_and_explained() -> None:
     assert len(model.filtered) == 2
     assert model.hidden_routine_count() == 0
     assert "routine hidden" not in model.toolbar_state().summary_label
+
+
+def test_a_store_backed_view_counts_the_routine_rows_it_left_out(tmp_path) -> None:
+    from defenseclaw.db import Store
+
+    store = Store(str(tmp_path / "audit.db"))
+    store.init()
+    try:
+        for index, connector in enumerate(("codex", "codex", "claudecode")):
+            store.log_event(
+                Event(
+                    action="gateway-start",
+                    target=f"gateway-{index}",
+                    severity="INFO",
+                    details=f"connector={connector} started",
+                )
+            )
+        store.log_event(Event(action="guardrail-block", target="tool", severity="HIGH", details="connector=codex"))
+        model = AuditPanelModel(store)
+        model.refresh()
+        # The actionable query returns only the HIGH row; the store counts the rest.
+        assert [event.severity for event in model.items] == ["HIGH"]
+        assert model.hidden_routine_count() == 3
+        model.set_connector_filter("codex")
+        assert model.hidden_routine_count() == 2
+    finally:
+        store.close()
