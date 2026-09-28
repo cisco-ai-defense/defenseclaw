@@ -88,7 +88,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if a.Cfg == nil {
 		return errors.New("DefenseClaw is not set up yet; run `defenseclaw init` first")
 	}
-	assume := o.Yes || o.NonInteractive || !a.IO.TTY
+	// Setup asks before it changes the OpenShell gateway (and restarts it),
+	// the configuration and the shell rc files. Without a terminal nothing
+	// answers, and a question further on would fail with the earlier steps
+	// done: the user says up front which answers to take.
+	if !a.IO.TTY && !o.Yes && !o.NonInteractive {
+		return errors.New("`sandbox setup` asks before it changes the OpenShell gateway, the configuration and your shell, and there is no terminal; " +
+			"pass --yes to accept the defaults, or --non-interactive to skip what needs an answer")
+	}
+	assume := o.Yes || o.NonInteractive
 	a.println()
 	a.println(a.bold("DefenseClaw sandbox setup"))
 

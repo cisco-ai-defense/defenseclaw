@@ -201,6 +201,10 @@ What setup does, in order:
 | `--non-interactive` | Never prompt: take the defaults and skip steps that need consent. |
 | `--yes`, `-y` | Answer every question with its default. |
 
+Without a terminal (in a script, or with its output piped), setup needs
+`--yes` or `--non-interactive`: otherwise it stops before it changes
+anything, since nothing could answer its questions.
+
 Setup is safe to run again: an installed OpenShell, a gateway that is
 already configured and up-to-date images are left as they are.
 `defenseclaw sandbox teardown` undoes it (see

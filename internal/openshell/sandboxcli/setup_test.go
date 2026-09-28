@@ -189,6 +189,36 @@ func TestSetupLeavesTheGatewayRunningSandboxes(t *testing.T) {
 	}
 }
 
+// Without a terminal nothing answers setup's questions, so setup refuses
+// before it changes anything unless --yes or --non-interactive says which
+// answers to take. It used to take yes for the bind mounts, edit and
+// restart the gateway, turn sandboxes on, and then fail at the wrapper
+// question.
+func TestSetupWithoutATerminalNeedsYesOrNonInteractive(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.TTY = false
+	writeConfig(t, ta, "")
+	before, err := os.ReadFile(ta.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ta.HostDoctor = hostReport(nil)
+	idle := openshelltest.New().Client(openshell.ClientOptions{})
+	ta.OpenShell = func(context.Context) (openshell.Client, *openshell.Registration, error) {
+		return noCloseClient{idle}, &openshell.Registration{Name: "openshell"}, nil
+	}
+	err = ta.Setup(context.Background(), SetupOptions{SkipImages: true})
+	if err == nil || !strings.Contains(err.Error(), "there is no terminal; pass --yes to accept the defaults, or --non-interactive") {
+		t.Fatalf("Setup without a terminal = %v\n%s", err, ta.output())
+	}
+	if len(ta.gateway.planned) != 0 || ta.gateway.applied != 0 {
+		t.Fatalf("gateway plans = %+v, applied %d; want none", ta.gateway.planned, ta.gateway.applied)
+	}
+	if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
+		t.Fatalf("the configuration changed:\n%s", after)
+	}
+}
+
 func TestSetupNeedsConsentToInstall(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.IO.TTY = false
