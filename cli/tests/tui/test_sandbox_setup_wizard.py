@@ -306,12 +306,70 @@ async def test_opening_the_wizard_checks_the_machine_once(monkeypatch) -> None:
 
 def test_credential_summary_names_sources_never_values(tmp_path: Path) -> None:
     (tmp_path / ".codex").mkdir()
-    (tmp_path / ".codex" / "auth.json").write_text("{}", encoding="utf-8")
+    (tmp_path / ".codex" / "auth.json").write_text('{"OPENAI_API_KEY": "sk-openai-secret-value"}', encoding="utf-8")
     summary = _sandbox_credential_summary({"ANTHROPIC_API_KEY": "sk-ant-secret-value"}, str(tmp_path))
     assert "ANTHROPIC_API_KEY found" in summary and "~/.codex/auth.json found" in summary
-    assert "sk-ant-secret-value" not in summary
+    assert "secret-value" not in summary
     none = _sandbox_credential_summary({}, str(tmp_path / "nothing"))
     assert none.count("none found") == 2
+
+
+def _codex_summary(home: Path, auth: str | None, env: dict[str, str] | None = None) -> str:
+    if auth is not None:
+        (home / ".codex").mkdir(exist_ok=True)
+        (home / ".codex" / "auth.json").write_text(auth, encoding="utf-8")
+    return _sandbox_credential_summary(env or {}, str(home)).split(" · ")[1]
+
+
+_NO_CODEX = "Codex: none found (log in inside the sandbox)"
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        "{}",
+        '{"OPENAI_API_KEY": null, "tokens": {"id_token": "t"}}',  # a ChatGPT login is not shared
+        '{"OPENAI_API_KEY": "  "}',
+        '{"OPENAI_API_KEY": 7}',
+        "[]",
+        "not json",
+    ],
+)
+def test_credential_summary_counts_only_an_auth_json_api_key(tmp_path: Path, auth: str) -> None:
+    # sandboxcli.codexAuthKey shares only the key `codex login --with-api-key` stored.
+    assert _codex_summary(tmp_path, auth) == _NO_CODEX
+
+
+def test_credential_summary_reads_codex_home_like_the_run(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-x"}', encoding="utf-8")
+    env = {"CODEX_HOME": str(codex_home)}
+    assert _codex_summary(home, None, env) == "Codex: $CODEX_HOME/auth.json found"
+    # A relative CODEX_HOME is ignored: ~/.codex, which has no key yet.
+    assert _codex_summary(home, None, {"CODEX_HOME": "codex-home"}) == _NO_CODEX
+    # CODEX_HOME replaces ~/.codex: a key only there is not counted.
+    (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+    assert _codex_summary(home, '{"OPENAI_API_KEY": "sk-y"}', env) == _NO_CODEX
+
+
+def test_credential_summary_skips_a_symlinked_auth_json(tmp_path: Path) -> None:
+    real = tmp_path / "real.json"
+    real.write_text('{"OPENAI_API_KEY": "sk-x"}', encoding="utf-8")
+    (tmp_path / ".codex").mkdir()
+    try:
+        (tmp_path / ".codex" / "auth.json").symlink_to(real)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    assert _codex_summary(tmp_path, None) == _NO_CODEX
+
+
+def test_credential_summary_does_not_count_a_bedrock_key(tmp_path: Path) -> None:
+    # `sandbox run` shares a Bedrock key only with --llm bedrock.
+    summary = _sandbox_credential_summary({"AWS_BEARER_TOKEN_BEDROCK": "bedrock-secret"}, str(tmp_path))
+    assert summary.count("none found") == 2 and "AWS_BEARER_TOKEN_BEDROCK" not in summary
 
 
 # --- the config editor ----------------------------------------------------------

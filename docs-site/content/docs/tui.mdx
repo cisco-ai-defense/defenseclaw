@@ -182,7 +182,7 @@ with `defenseclaw sandbox doctor` instead.
 | Field | Flag | Default |
 | --- | --- | --- |
 | Claude Code, Codex | `--harness claudecode`, `--harness codex` | Both, or the ones in `openshell.harnesses`; only harnesses `openshell.admin.allowed_harnesses` allows are listed |
-| Credentials | none | Names the model keys it finds for each harness, never their values. It also counts `AWS_BEARER_TOKEN_BEDROCK` and any `~/.codex/auth.json`, but `defenseclaw sandbox run` shares a Bedrock key only with `--llm bedrock`, and from `auth.json` only an API key (a ChatGPT login is not shared) |
+| Credentials | none | Names the model key `defenseclaw sandbox run` would share with each harness, never its value: `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code; `OPENAI_API_KEY`, `CODEX_API_KEY` or the API key a `codex login --with-api-key` stored in `auth.json` (in `$CODEX_HOME`, else `~/.codex`) for Codex. A ChatGPT login is not shared, and neither is `AWS_BEARER_TOKEN_BEDROCK` unless you run with `--llm bedrock`, so neither is counted |
 | This machine | none | Docker, Landlock (Linux), OpenShell and bind-mount status, from a `sandbox doctor` check that runs when the form opens |
 | Install OpenShell | `--install-openshell` | On when OpenShell is missing or its gateway needs attention: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` |
 | Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy |

@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -4493,11 +4495,42 @@ SANDBOX_WIZARD_HARNESSES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# The largest auth.json sandboxcli.codexAuthKey reads.
+_CODEX_AUTH_MAX_BYTES = 1 << 20
+
+
+def _codex_auth_key_source(env: Mapping[str, str], home: str) -> str:
+    """Where ``codex login --with-api-key`` stored an API key, or "".
+
+    Mirrors ``sandboxcli.codexAuthKey``: $CODEX_HOME (when absolute, else
+    ~/.codex)/auth.json, a regular file of at most 1 MiB whose
+    ``OPENAI_API_KEY`` is a non-empty string. A ChatGPT login (tokens only)
+    is not shared.
+    """
+
+    codex_home = str(env.get("CODEX_HOME", "")).strip()
+    label = "$CODEX_HOME/auth.json"
+    if not codex_home or not os.path.isabs(codex_home):
+        codex_home, label = os.path.join(home, ".codex"), "~/.codex/auth.json"
+    path = os.path.join(codex_home, "auth.json")
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CODEX_AUTH_MAX_BYTES:
+            return ""
+        with open(path, encoding="utf-8") as handle:
+            auth = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    key = auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None
+    return label if isinstance(key, str) and key.strip() else ""
+
+
 def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str | None = None) -> str:
     """Which model credential each harness would share (names only, never values).
 
-    Mirrors ``sandboxcli.detectLLM``: environment variables, and for Codex
-    ~/.codex/auth.json.
+    Mirrors ``sandboxcli.detectLLM`` with the default ``--llm auto``:
+    environment variables, and for Codex the API key in auth.json. A Bedrock
+    key is shared only with ``--llm bedrock``, so it is not counted.
     """
 
     env = os.environ if env is None else env
@@ -4506,12 +4539,8 @@ def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str 
     def first(*names: str) -> str:
         return next((name for name in names if str(env.get(name, "")).strip()), "")
 
-    claude = first("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK")
-    codex = first("OPENAI_API_KEY", "CODEX_API_KEY")
-    if not codex and os.path.isfile(os.path.join(home, ".codex", "auth.json")):
-        codex = "~/.codex/auth.json"
-    if not codex:
-        codex = first("AWS_BEARER_TOKEN_BEDROCK")
+    claude = first("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+    codex = first("OPENAI_API_KEY", "CODEX_API_KEY") or _codex_auth_key_source(env, home)
     parts = [
         f"Claude Code: {claude} found" if claude else "Claude Code: none found (log in inside the sandbox)",
         f"Codex: {codex} found" if codex else "Codex: none found (log in inside the sandbox)",
