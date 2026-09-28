@@ -18,6 +18,8 @@ package connector
 
 import (
 	"encoding/json"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -90,13 +92,18 @@ func TestOpenHandsTrustedShellArgs(t *testing.T) {
 
 func TestAntigravityTrustedShellArgs(t *testing.T) {
 	const want = `{"CommandLine":"echo hi > /tmp/x"}`
+	// agy's Cwd must be absolute on the host: /work/app is not on Windows.
+	cwdArg, wantCwd := `"/work/app"`, "/work/app"
+	if runtime.GOOS == "windows" {
+		cwdArg, wantCwd = `"C:\\work\\app"`, `C:\work\app`
+	}
 	project := func(tool string, args json.RawMessage) (json.RawMessage, bool) {
-		out, cwd, ok := AntigravityTrustedShellArgs(tool, args)
+		out, cwd, ok := AntigravityTrustedShellArgs(tool, json.RawMessage(strings.ReplaceAll(string(args), `"/work/app"`, cwdArg)))
 		// A refused projection, and text sent to a running command, name no
 		// directory.
 		want := ""
 		if ok && tool == "run_command" {
-			want = "/work/app"
+			want = wantCwd
 		}
 		if cwd != want {
 			t.Errorf("%s cwd = %q (ok %t), want %q", tool, cwd, ok, want)
