@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -623,6 +624,7 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 		if b != nil && applied {
 			b.rulesAdded++
 		}
+		saveRules := b != nil && applied && a != nil && noteApprovedRule(b, a.proposal.RuleName, a.actor)
 		retryApply := false
 		if a != nil {
 			a.resolvedAt = m.now().UTC()
@@ -651,6 +653,11 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			}
 		}
 		m.mu.Unlock()
+		if saveRules {
+			if err := m.saveRecord(b); err != nil {
+				m.logf("record the approved rule %s of %s: %v", a.proposal.RuleName, a.sandbox, err)
+			}
+		}
 		if retryApply {
 			m.retryApply(a, r.Item)
 			continue
@@ -729,6 +736,30 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: a.decision.Host, Port: a.decision.Port, Reason: a.actor, Message: msg})
 	}
+}
+
+// noteApprovedRule records who approved a triaged rule that was applied
+// (record.ApprovedRules): the user's approval of a rule stays with it,
+// whatever approves the rule later. It reports whether the record changed.
+// Callers hold Manager.mu and save the record after releasing it.
+func noteApprovedRule(b *box, rule, actor string) bool {
+	if rule == "" {
+		return false
+	}
+	origin := actorAutomatic
+	if actor == actorOperator {
+		origin = actorOperator
+	}
+	if cur := b.rec.ApprovedRules[rule]; cur == origin || cur == actorOperator {
+		return false
+	}
+	next := maps.Clone(b.rec.ApprovedRules)
+	if next == nil {
+		next = map[string]string{}
+	}
+	next[rule] = origin
+	b.rec.ApprovedRules = next
+	return true
 }
 
 // maxApplyDeferrals bounds the apply attempts of an operator approval whose

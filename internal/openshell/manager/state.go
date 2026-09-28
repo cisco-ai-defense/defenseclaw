@@ -118,6 +118,13 @@ type record struct {
 	Cursor string `json:"cursor,omitempty"`
 	// Unblocks are sandbox-scoped egress unblock patterns.
 	Unblocks []string `json:"unblocks,omitempty"`
+	// ApprovedRules are the triaged OpenShell rules (allow_*) approvals
+	// applied, each with who approved it: automatic (triage, on its own) or
+	// operator (the user, whose approval stays with the rule). A rule only
+	// DefenseClaw approved is removed once the policy would no longer
+	// approve it on its own (enforceApprovedRules). The map is replaced,
+	// never changed in place.
+	ApprovedRules map[string]string `json:"approved_rules,omitempty"`
 
 	Workspace  *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
 	MCP        *sandboxapi.MCPSummary       `json:"mcp,omitempty"`

@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -259,16 +261,22 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 // the administrator closed, what DefenseClaw never opens, destinations the
 // sandbox's egress decider now refuses by a block list or the blocklist
 // feed with no unblock lifting it (the user's or the pack's block list, a
-// new feed entry, an "always" unblock taken back), and names that now
-// resolve to this machine (the proxy's dial-time guard, re-applied on
-// every reconcile). Approved rules bypass the egress proxy, so an
-// administrator change or a changed DNS answer must reach them too. Only
-// triaged rules (allow_*) are judged; DefenseClaw renders its own and the
-// provider rules. A nil eff means no policy binds the sandbox at all (not
-// even the organization's, see enforceAll): every triaged rule is removed.
+// new feed entry, an "always" unblock taken back), rules DefenseClaw
+// approved on its own that the policy now leaves to the user (a stricter
+// approvals or network mode, such as an administrator's required strict
+// pack, a destination off the allow list, an unblock taken back; see
+// triage.ApprovesAutomatically), and names that now resolve to this
+// machine (the proxy's dial-time guard, re-applied on every reconcile).
+// Approved rules bypass the egress proxy, so an administrator change or a
+// changed DNS answer must reach them too. Only triaged rules (allow_*) are
+// judged; DefenseClaw renders its own and the provider rules. The user's
+// own approvals keep what the policy still lets the user approve. A nil
+// eff means no policy binds the sandbox at all (not even the
+// organization's, see enforceAll): every triaged rule is removed.
 func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
 	m.mu.Lock()
 	name, ready := b.rec.Name, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
+	origins := b.rec.ApprovedRules
 	m.mu.Unlock()
 	if !ready {
 		return
@@ -277,8 +285,17 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	if err != nil || cfg == nil || cfg.Policy == nil {
 		return
 	}
+	// A rule no longer in the policy (removed outside DefenseClaw) loses
+	// its recorded approver: a rule of that name added later is not the
+	// one that was approved.
+	var gone []string
+	for rule := range origins {
+		if _, ok := cfg.Policy.NetworkPolicies[rule]; !ok {
+			gone = append(gone, rule)
+		}
+	}
 	var ops []openshell.PolicyMergeOperation
-	var removed, blocked, rebound, unbound []string
+	var removed, blocked, unapproved, rebound, unbound []string
 	var pol triage.Policy
 	var decider *egress.Decider
 	if eff != nil {
@@ -303,6 +320,8 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			removed = append(removed, ruleName)
 		case blocklisted(decider, pol.Principal, p):
 			blocked = append(blocked, ruleName)
+		case origins[ruleName] == actorAutomatic && !triage.ApprovesAutomatically(ctx, p, pol):
+			unapproved = append(unapproved, ruleName)
 		case triage.ResolvesToHost(dnsCtx, p, pol):
 			rebound = append(rebound, ruleName)
 		default:
@@ -311,18 +330,22 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: ruleName}})
 	}
 	if len(ops) == 0 {
+		m.forgetApprovedRules(b, gone)
 		return
 	}
 	sort.Strings(removed)
 	sort.Strings(blocked)
+	sort.Strings(unapproved)
 	sort.Strings(rebound)
 	sort.Strings(unbound)
-	all := append(append(append(append([]string{}, removed...), blocked...), rebound...), unbound...)
+	all := slices.Concat(removed, blocked, unapproved, rebound, unbound)
 	reason, code := "admin-policy", string(gatewaylog.ErrCodeOpenShellAdminViolation)
 	switch {
 	case len(removed) > 0:
 	case len(blocked) > 0:
 		reason, code = "blocklist", "SANDBOX_RULE_BLOCKLISTED"
+	case len(unapproved) > 0:
+		reason, code = "approval-required", "SANDBOX_RULE_NEEDS_APPROVAL"
 	case len(rebound) > 0:
 		reason, code = "resolves-to-host", "SANDBOX_RULE_RESOLVES_TO_HOST"
 	default:
@@ -333,9 +356,11 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	})
 	if err != nil {
 		m.logf("%s: sandbox %s: remove rules the policy now refuses (%s): %v", code, name, strings.Join(all, ", "), err)
+		m.forgetApprovedRules(b, gone)
 		return
 	}
 	m.logf("%s: sandbox %s: removed approved rules the policy now refuses: %s", code, name, strings.Join(all, ", "))
+	m.forgetApprovedRules(b, append(gone, all...))
 	m.mu.Lock()
 	id := b.identity()
 	if b.sb != nil && res != nil && res.Version != 0 {
@@ -348,7 +373,8 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 	for _, list := range []struct {
 		rules  []string
 		reason string
-	}{{removed, policyReasonAdmin}, {blocked, policyReasonBlocklist}, {rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}} {
+	}{{removed, policyReasonAdmin}, {blocked, policyReasonBlocklist}, {unapproved, policyReasonApprovalRequired},
+		{rebound, policyReasonResolvesToHost}, {unbound, policyReasonUnresolved}} {
 		for _, rule := range list.rules {
 			ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
 				Target: rule, Reason: list.reason, ChangeCount: 1, Timestamp: m.now()}
@@ -369,6 +395,12 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			Reason: string(triage.ReasonBlocklisted), Message: fmt.Sprintf(
 				"removed %d approved rule(s) to destinations now on the egress block list: %s", len(blocked), strings.Join(blocked, ", "))})
 	}
+	if len(unapproved) > 0 {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
+			Reason: policyReasonApprovalRequired, Message: fmt.Sprintf(
+				"removed %d rule(s) DefenseClaw approved on its own that the sandbox policy now leaves to you: %s; "+
+					"the agent asks again if it needs them", len(unapproved), strings.Join(unapproved, ", "))})
+	}
 	if len(rebound) > 0 {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: string(triage.ReasonResolvesToHost), Message: fmt.Sprintf(
@@ -378,6 +410,33 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceOpenShell,
 			Reason: policyUnresolvedReason, Message: fmt.Sprintf(
 				"removed %d approved rule(s): neither the sandbox's nor your organization's policy can be resolved", len(unbound))})
+	}
+}
+
+// forgetApprovedRules drops rules from the sandbox's recorded approvers
+// (record.ApprovedRules): they were removed.
+func (m *Manager) forgetApprovedRules(b *box, rules []string) {
+	m.mu.Lock()
+	var next map[string]string
+	for _, rule := range rules {
+		if _, ok := b.rec.ApprovedRules[rule]; !ok {
+			continue
+		}
+		if next == nil {
+			next = maps.Clone(b.rec.ApprovedRules)
+		}
+		delete(next, rule)
+	}
+	if next != nil {
+		b.rec.ApprovedRules = next
+	}
+	name := b.rec.Name
+	m.mu.Unlock()
+	if next == nil {
+		return
+	}
+	if err := m.saveRecord(b); err != nil {
+		m.logf("record the removed rules of %s: %v", name, err)
 	}
 }
 

@@ -539,6 +539,9 @@ const (
 	// policyReasonUnresolved: an approved rule was removed because no
 	// policy, not even the organization's, can be resolved for the sandbox.
 	policyReasonUnresolved = "policy_unresolved"
+	// policyReasonApprovalRequired: a rule DefenseClaw approved on its own
+	// was removed because the policy now leaves it to the user.
+	policyReasonApprovalRequired = "approval_required"
 )
 
 // listenersReady refuses a create or start while this process does not

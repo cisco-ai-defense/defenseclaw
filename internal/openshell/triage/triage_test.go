@@ -533,6 +533,49 @@ func TestClassifyUnblockable(t *testing.T) {
 	}
 }
 
+// TestApprovesAutomatically pins the check a rule DefenseClaw approved on
+// its own must keep passing: what the policy approves without asking, judged
+// as named (no lookup), so a stricter approvals or network mode, a
+// destination off the allow list or a closed port takes the approval away.
+func TestApprovesAutomatically(t *testing.T) {
+	open := effective(t, nil, packs.Flags{})
+	balanced := effective(t, nil, packs.Flags{Profile: "balanced"})
+	strict := effective(t, nil, packs.Flags{Profile: "strict"})
+	requiredStrict := effective(t, func(o *config.OpenShellConfig) { o.Admin.RequiredPack = "strict" }, packs.Flags{})
+	for _, tc := range []struct {
+		name string
+		eff  *packs.Effective
+		p    Proposal
+		want bool
+	}{
+		{"open network", open, proposal("registry.example.org", 443), true},
+		{"balanced, curated allowlist", balanced, proposal("pypi.org", 443), true},
+		{"balanced, not allowlisted", balanced, proposal("registry.example.org", 443), false},
+		{"strict profile", strict, proposal("registry.example.org", 443), false},
+		{"required strict pack", requiredStrict, proposal("registry.example.org", 443), false},
+		{"a port the policy no longer relays", strict, proposal("pypi.org", 80), false},
+		{"a host port always asks", open, proposal("host.openshell.internal", 5432), false},
+		{"a private network asks", open, proposal("10.1.2.3", 443), false},
+		{"blocklisted", open, proposal("webhook.site", 443), false},
+		{"no endpoints", open, Proposal{RuleName: "allow_x_443"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := newResolver()
+			pol := testPolicy(tc.eff)
+			pol.Resolver = res
+			if got := ApprovesAutomatically(context.Background(), tc.p, pol); got != tc.want {
+				t.Fatalf("ApprovesAutomatically = %v, want %v", got, tc.want)
+			}
+			if len(res.lookups) > 0 {
+				t.Fatalf("looked up %v; the check judges names as named", res.lookups)
+			}
+		})
+	}
+	if ApprovesAutomatically(context.Background(), proposal("registry.example.org", 443), Policy{}) {
+		t.Fatal("approved without a policy")
+	}
+}
+
 // TestClassifyResolvesNames: a direct rule reaches whatever its name
 // resolves to without the proxy's guard, so triage resolves every name and
 // holds the answers to the proxy's dial-time rules.

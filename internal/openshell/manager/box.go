@@ -18,6 +18,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -291,6 +293,31 @@ func displaySafe(v *sandboxapi.Sandbox) {
 	}
 }
 
+// postureDrift explains how the policy a sandbox runs under now (eff)
+// differs from the one it was created with (rec): the configuration
+// changed since, an administrator's required pack or minimum profile, say.
+// A live mount the policy now wants as a copy cannot become one; it keeps
+// running until the sandbox stops, and checkStart refuses the next start.
+func postureDrift(rec record, eff *packs.Effective) []string {
+	var out []string
+	pack := ""
+	if eff.Pack != nil {
+		pack = eff.Pack.Name
+	}
+	if (rec.Pack != "" && pack != rec.Pack) || (rec.Profile != "" && eff.Profile != rec.Profile) ||
+		(rec.NetworkMode != "" && eff.NetworkMode != rec.NetworkMode) || (rec.Approvals != "" && eff.Approvals != rec.Approvals) {
+		out = append(out, fmt.Sprintf("the sandbox policy changed since this sandbox was created (pack %s, profile %s, network %s, approvals %s); "+
+			"it now runs under pack %s, profile %s, network %s, approvals %s",
+			firstNonEmpty(rec.Pack, "-"), firstNonEmpty(rec.Profile, "-"), firstNonEmpty(rec.NetworkMode, "-"), firstNonEmpty(rec.Approvals, "-"),
+			firstNonEmpty(pack, "-"), eff.Profile, eff.NetworkMode, eff.Approvals))
+	}
+	if rec.WorkdirMode == config.OpenShellWorkdirMount && eff.Workspace.Mode != config.OpenShellWorkdirMount {
+		out = append(out, "the sandbox policy now works on a copy of this project, but this sandbox mounts it live; "+
+			"the mount stays until the sandbox stops, and it cannot start again: delete it and run it again")
+	}
+	return out
+}
+
 // viewOf renders the API form of a box.
 func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	m.mu.Lock()
@@ -382,6 +409,16 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 	}
 	v.Egress.Blocked = b.blocked
+	if e := b.eff; e != nil {
+		// The policy the sandbox runs under now: every configuration change
+		// re-resolves it (refreshEgress), so an administrator's change
+		// applies to it; the record keeps what it was created with.
+		v.Profile, v.NetworkMode, v.Approvals = e.Profile, e.NetworkMode, e.Approvals
+		if e.Pack != nil {
+			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
+		}
+		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
+	}
 	displaySafe(&v)
 	if b.unrecorded {
 		v.Warnings = append(slices.Clip(v.Warnings),

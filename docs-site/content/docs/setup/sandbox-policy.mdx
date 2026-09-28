@@ -639,6 +639,14 @@ make these settings stricter, never looser:
 The required pack's allow entries always apply, even when `allow_unblock` is
 `false`.
 
+A new `required_pack` or `min_profile` also reaches sandboxes that are already
+running. Connections DefenseClaw approved on its own that the stricter policy
+would leave to the user are closed, so the agent asks the next time it needs
+them. Connections the user approved stay. `sandbox status` shows the policy
+the sandbox runs under now. A sandbox that mounts its project live while the
+policy now asks for a copy keeps its mount until it stops. After that it
+can't start again, so delete it and run it again.
+
 `required_pack_digest` pins the pack's content. If the pack's
 [digest](#pack-digest) differs, no sandbox starts. The key needs
 `required_pack` and must be `sha256:` followed by 64 lowercase hex digits.

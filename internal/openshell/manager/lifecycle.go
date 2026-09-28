@@ -703,6 +703,7 @@ func (m *Manager) retire(b *box) {
 	b.sb, b.eff, b.decider, b.cred = nil, nil, nil, egress.Credential{}
 	b.rec.Retained = true
 	b.rec.BindingID, b.rec.Providers, b.rec.EgressUser, b.rec.Cursor, b.rec.Unblocks = "", nil, "", "", nil
+	b.rec.ApprovedRules = nil
 	name := b.rec.Name
 	m.mu.Unlock()
 	if err := m.saveRecord(b); err != nil {

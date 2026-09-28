@@ -145,9 +145,13 @@ no-op.
 
 The sandbox manager's reason codes are `approval` (a rule added by an
 approved proposal), `egress_unblock` (an unblock), `admin_policy` (an
-approved rule removed because the administrator's policy now refuses it) and
-`rule_resolves_to_host` (an approved rule removed because its destination
-now resolves to this machine). A pass that removes several rules writes one
+approved rule removed because the administrator's policy now refuses it),
+`egress_blocklist` (an approved rule removed because a block list or the
+blocklist feed now refuses its destination), `approval_required` (a rule
+DefenseClaw approved on its own removed because the policy now leaves it to
+the user), `policy_unresolved` (an approved rule removed because no policy
+can be resolved for the sandbox) and `rule_resolves_to_host` (an approved
+rule removed because its destination now resolves to this machine). A pass that removes several rules writes one
 record per rule, with the rule name as the target.
 
 ### Health

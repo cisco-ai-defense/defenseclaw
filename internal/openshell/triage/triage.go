@@ -384,6 +384,10 @@ type Policy struct {
 	// HarnessFetches are requests the sandbox's harness binary makes around
 	// the proxy that it does without; their proposals are rejected.
 	HarnessFetches []HarnessFetch
+
+	// asNamed judges destination names as named, without looking them up
+	// (ApprovesAutomatically).
+	asNamed bool
 }
 
 // HarnessFetch is a destination the sandbox's pinned harness binary (a path
@@ -696,7 +700,7 @@ func judgeEndpoint(ctx context.Context, ep Endpoint, allowedIPs []string, pol Po
 	case dec.Allowed && dec.Source != egress.SourceDefault:
 		verdict = approve(d, ReasonAllowed, host+" is on the allow list")
 	}
-	if isIP {
+	if isIP || pol.asNamed {
 		return verdict
 	}
 	return checkResolved(ctx, verdict, pol, decider, dec)
@@ -841,6 +845,27 @@ func ResolvesToHost(ctx context.Context, p Proposal, pol Policy) bool {
 		}
 	}
 	return false
+}
+
+// ApprovesAutomatically reports whether pol approves the destinations of p
+// on its own (Classify's Approve for its endpoints and allowed_ips), judged
+// as named: no name is looked up, what names resolve to is ResolvesToHost's
+// to re-check. A rule DefenseClaw approved on its own keeps no authority
+// once this no longer holds: the approvals mode or the network mode became
+// stricter (an administrator's required pack or minimum profile), the
+// destination left an allow list, an unblock was taken back, or its port
+// is no longer an egress port. The rule's shape (Classify's rule and
+// harness checks) is not judged again.
+func ApprovesAutomatically(ctx context.Context, p Proposal, pol Policy) bool {
+	if pol.Effective == nil || len(p.Endpoints) == 0 {
+		return false
+	}
+	decider, err := pol.decider()
+	if err != nil {
+		return false
+	}
+	pol.asNamed = true
+	return classifyEndpoints(ctx, p, pol, decider).Verdict == Approve
 }
 
 // resolvedWhat names the refused address kind from a dial-time refusal.

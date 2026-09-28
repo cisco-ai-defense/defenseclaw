@@ -96,6 +96,91 @@ func TestBlockListRemovesApprovedRules(t *testing.T) {
 	}
 }
 
+// TestStricterPolicyRemovesAutomaticApprovals pins that a rule DefenseClaw
+// approved on its own goes once the policy would no longer approve it on
+// its own, here an administrator's required strict pack (manual approvals,
+// no web egress), while the rule the user approved stays: the user may
+// still approve it under the new policy. The sandbox shows the posture it
+// runs under now, with the change and the live mount the policy no longer
+// wants.
+func TestStricterPolicyRemovesAutomaticApprovals(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	ctx := context.Background()
+	auto := approvedRule(t, e, "stricter", "auto.example.org")
+	const own = "allow_wiki_corp_443"
+	id := addChunk(e, "stricter", chunk(own, "wiki.corp", 443))
+	e.watch.push(t, "stricter", stream.Event{Kind: stream.KindDraft})
+	var ask string
+	eventually(t, "the intranet ask", func() bool {
+		asks, _ := e.m.Approvals(ctx, "stricter")
+		if len(asks) == 1 {
+			ask = asks[0].ID
+		}
+		return ask != ""
+	})
+	if _, err := e.m.DecideApproval(ctx, ask, sandboxapi.ApprovalDecision{Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the user's approval applied", func() bool { return chunkStatus(e, "stricter", id) == "approved" })
+	eventually(t, "both approvers recorded", func() bool {
+		e.m.mu.Lock()
+		defer e.m.mu.Unlock()
+		got := e.m.boxes["stricter"].rec.ApprovedRules
+		return got[auto] == actorAutomatic && got[own] == actorOperator
+	})
+
+	// A pass under the same policy keeps both.
+	e.m.enforceAll(ctx)
+	if !hasRule(e, "stricter", auto) || !hasRule(e, "stricter", own) {
+		t.Fatal("a pass under an unchanged policy removed an approved rule")
+	}
+
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.RequiredPack = "strict" })
+	e.m.refreshEgress()
+	e.m.enforceAll(ctx)
+	if hasRule(e, "stricter", auto) {
+		t.Fatal("the rule DefenseClaw approved on its own survived the required strict pack")
+	}
+	if !hasRule(e, "stricter", own) {
+		t.Fatal("the rule the user approved was removed")
+	}
+	var recorded bool
+	e.tel.mu.Lock()
+	for _, p := range e.tel.policy {
+		recorded = recorded || (p.Operation == audit.SandboxPolicyRuleRemove && p.Target == auto && p.Reason == policyReasonApprovalRequired)
+	}
+	e.tel.mu.Unlock()
+	if !recorded {
+		t.Fatal("no rule_remove record for the automatic approval")
+	}
+	e.m.mu.Lock()
+	rules := e.m.boxes["stricter"].rec.ApprovedRules
+	e.m.mu.Unlock()
+	if _, ok := rules[auto]; ok || rules[own] != actorOperator {
+		t.Fatalf("recorded approvers after the removal = %v", rules)
+	}
+	saved, err := newRecordStore(e.dataDir).loadAll()
+	if len(err) > 0 || len(saved) != 1 || len(saved[0].ApprovedRules) != 1 {
+		t.Fatalf("saved record = %+v, %v", saved, err)
+	}
+
+	sb, gerr := e.m.Get(ctx, "stricter")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	if sb.Pack != "strict" || sb.Profile != "strict" || sb.NetworkMode != "deny" || sb.Approvals != "manual" {
+		t.Fatalf("posture = pack %s profile %s network %s approvals %s, want the strict pack's", sb.Pack, sb.Profile, sb.NetworkMode, sb.Approvals)
+	}
+	joined := strings.Join(sb.Warnings, "\n")
+	if !strings.Contains(joined, "the sandbox policy changed since this sandbox was created (pack open") {
+		t.Fatalf("warnings = %q, want the posture change", sb.Warnings)
+	}
+	if sb.WorkdirMode == config.OpenShellWorkdirMount && !strings.Contains(joined, "works on a copy of this project, but this sandbox mounts it live") {
+		t.Fatalf("warnings = %q, want the live mount the policy no longer wants", sb.Warnings)
+	}
+}
+
 // hold opens a CONNECT tunnel for sandbox's credential and keeps it open.
 func (lp *liveProxy) hold(t *testing.T, e *harnessEnv, sandbox, target string) (net.Conn, *bufio.Reader) {
 	t.Helper()

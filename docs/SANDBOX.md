@@ -246,6 +246,18 @@ approving one adds a direct OpenShell rule that bypasses the proxy:
   an allow-only list, and destinations a block list (yours or the pack's) or
   the blocklist feed now refuses with no unblock lifting it. Rules to host
   ports and private networks you approved stay.
+- The daemon records who approved each rule (`approved_rules` in the
+  sandbox record). A rule DefenseClaw approved on its own is removed once
+  the policy would no longer approve it without asking
+  (`triage.ApprovesAutomatically`): a stricter approvals or network mode (an
+  administrator's `required_pack: strict` or `min_profile`), a destination
+  taken off the allow list, an unblock taken back, or a port that is no
+  longer an egress port. The agent's next direct connection asks you. Rules
+  you approved yourself stay while the policy still lets you approve them.
+  `sandbox status` shows the posture the sandbox runs under now, and warns
+  when it differs from the one it was created with, or when the policy now
+  wants a copy of a project the sandbox mounts live (the mount stays until
+  the sandbox stops; it cannot start again).
 - A proposal's `allowed_ips` are judged as whole ranges against the same
   guard (`packs.Effective.AllowedIPReach`), because with `allowed_ips` set
   OpenShell skips its own private-address check for the rule and the name
