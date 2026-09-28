@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,54 +34,42 @@ var _ Transport = (*CLI)(nil)
 
 func TestCLIArgv(t *testing.T) {
 	c := &CLI{Binary: "/usr/bin/openshell", Gateway: "openshell", Workspace: "default"}
-	argv, err := c.UploadArgv("f1-x", "/stage/myapp", "/sandbox/work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(argv, " "); got !=
-		"/usr/bin/openshell sandbox upload -g openshell --workspace default --color never --no-git-ignore -- f1-x /stage/myapp /sandbox/work" {
-		t.Fatalf("upload argv = %s", got)
-	}
-	argv, err = c.DownloadArgv("f1-x", "/sandbox/.dc/result.bundle", "/tmp/pull")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(argv, " "); got !=
-		"/usr/bin/openshell sandbox download -g openshell --workspace default --color never -- f1-x /sandbox/.dc/result.bundle /tmp/pull" {
-		t.Fatalf("download argv = %s", got)
-	}
-	argv, err = c.ExecArgv("f1-x", ExecRequest{
-		Argv: []string{"sh", "-c", "echo hi"}, Workdir: "/sandbox", Timeout: 1500 * time.Millisecond,
-		Env: map[string]string{"B": "2", "A": "1"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(argv, " "); got !=
-		"/usr/bin/openshell sandbox exec -g openshell --workspace default --color never --name f1-x --workdir /sandbox --timeout 12 --no-tty --no-login-shell --env A=1 --env B=2 -- timeout -k 5 1.5 sh -c echo hi" {
-		t.Fatalf("exec argv = %s", got)
-	}
 	// The workspace defaults to openshell's; the binary to the one on PATH.
 	bare := &CLI{Gateway: "gw"}
-	if argv, err := bare.UploadArgv("s", "/a", "/b"); err != nil || strings.Join(argv, " ") !=
-		"openshell sandbox upload -g gw --workspace default --color never --no-git-ignore -- s /a /b" {
-		t.Fatalf("default binary argv = %q, %v", argv, err)
-	}
-	for _, env := range []map[string]string{{"BAD-KEY": "x"}, {"K": "line\nbreak"}, {"K": "cr\rhere"}} {
-		if _, err := c.ExecArgv("s", ExecRequest{Argv: []string{"true"}, Env: env}); err == nil {
-			t.Fatalf("env %v accepted", env)
+	for _, tc := range []struct {
+		argv func() ([]string, error)
+		want string
+	}{
+		{func() ([]string, error) { return c.UploadArgv("f1-x", "/stage/myapp", "/sandbox/work") },
+			"/usr/bin/openshell sandbox upload -g openshell --workspace default --color never --no-git-ignore -- f1-x /stage/myapp /sandbox/work"},
+		{func() ([]string, error) { return c.DownloadArgv("f1-x", "/sandbox/.dc/result.bundle", "/tmp/pull") },
+			"/usr/bin/openshell sandbox download -g openshell --workspace default --color never -- f1-x /sandbox/.dc/result.bundle /tmp/pull"},
+		{func() ([]string, error) {
+			return c.ExecArgv("f1-x", ExecRequest{Argv: []string{"sh", "-c", "echo hi"}, Workdir: "/sandbox", Timeout: 1500 * time.Millisecond,
+				Env: map[string]string{"B": "2", "A": "1"}})
+		}, "/usr/bin/openshell sandbox exec -g openshell --workspace default --color never --name f1-x --workdir /sandbox --timeout 12 --no-tty --no-login-shell --env A=1 --env B=2 -- timeout -k 5 1.5 sh -c echo hi"},
+		{func() ([]string, error) { return bare.UploadArgv("s", "/a", "/b") },
+			"openshell sandbox upload -g gw --workspace default --color never --no-git-ignore -- s /a /b"},
+	} {
+		if argv, err := tc.argv(); err != nil || strings.Join(argv, " ") != tc.want {
+			t.Errorf("argv = %q, %v\nwant %s", argv, err, tc.want)
 		}
 	}
-	if _, err := c.ExecArgv("s", ExecRequest{}); err == nil {
-		t.Fatal("empty command accepted")
-	}
-	if _, err := c.ExecArgv("s", ExecRequest{Argv: []string{"true"}, Workdir: "relative"}); err == nil {
-		t.Fatal("relative workdir accepted")
+	for _, req := range []ExecRequest{
+		{Argv: []string{"true"}, Env: map[string]string{"BAD-KEY": "x"}},
+		{Argv: []string{"true"}, Env: map[string]string{"K": "line\nbreak"}},
+		{Argv: []string{"true"}, Env: map[string]string{"K": "cr\rhere"}},
+		{},
+		{Argv: []string{"true"}, Workdir: "relative"},
+	} {
+		if _, err := c.ExecArgv("s", req); err == nil {
+			t.Errorf("exec request %+v accepted", req)
+		}
 	}
 	// Names that are not DNS labels never reach the binary as positionals.
 	for _, bad := range []string{"-g", "Upper", "a b", ""} {
 		if _, err := c.UploadArgv(bad, "/a", "/b"); err == nil {
-			t.Fatalf("sandbox %q accepted", bad)
+			t.Errorf("sandbox %q accepted", bad)
 		}
 	}
 }
@@ -94,25 +84,18 @@ func TestCLIRequiresAnExplicitGateway(t *testing.T) {
 			ran++
 			return nil, nil, 0, nil
 		})
-		if err := c.Upload(bg, "s", "/a", "/b"); err == nil {
-			t.Errorf("%+v: upload accepted", c)
-		}
-		if err := c.Download(bg, "s", "/a", "/b"); err == nil {
-			t.Errorf("%+v: download accepted", c)
-		}
-		if _, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}}); err == nil {
-			t.Errorf("%+v: exec accepted", c)
-		}
-		if ran != 0 {
-			t.Errorf("%+v: ran the binary %d times", c, ran)
+		_, execErr := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}})
+		if c.Upload(bg, "s", "/a", "/b") == nil || c.Download(bg, "s", "/a", "/b") == nil || execErr == nil || ran != 0 {
+			t.Errorf("%+v: a transfer or exec was accepted, or the binary ran %d times", c, ran)
 		}
 	}
 }
 
-// TestRunProcessScrubsGatewayEnvironment: the variables that would point
-// the openshell binary at another gateway, or turn off TLS verification,
-// never reach it.
-func TestRunProcessScrubsGatewayEnvironment(t *testing.T) {
+// TestRunProcess: the variables that would point the openshell binary at
+// another gateway, or turn off TLS verification, never reach it; stdin is
+// /dev/null (the binary hangs on an open pipe) and the exit status comes
+// back.
+func TestRunProcess(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh")
 	}
@@ -122,22 +105,24 @@ func TestRunProcessScrubsGatewayEnvironment(t *testing.T) {
 	t.Setenv("DC_WORKSPACE_TEST_KEEP", "kept")
 	ctx, cancel := context.WithTimeout(bg, 10*time.Second)
 	defer cancel()
-	script := `for k in OPENSHELL_GATEWAY OPENSHELL_GATEWAY_ENDPOINT OPENSHELL_GATEWAY_INSECURE OPENSHELL_WORKSPACE; do ` +
-		`eval "v=\${$k-unset}"; printf '%s=%s\n' "$k" "$v"; done; printf 'keep=%s\n' "$DC_WORKSPACE_TEST_KEEP"`
+	script := `cat; for k in OPENSHELL_GATEWAY OPENSHELL_GATEWAY_ENDPOINT OPENSHELL_GATEWAY_INSECURE OPENSHELL_WORKSPACE; do ` +
+		`eval "v=\${$k-unset}"; printf '%s=%s\n' "$k" "$v"; done; printf 'keep=%s\n' "$DC_WORKSPACE_TEST_KEEP"; exit 3`
 	var stdout strings.Builder
 	stderr, code, err := runProcess(ctx, []string{"sh", "-c", script}, &stdout)
-	if err != nil || code != 0 {
-		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr)
-	}
 	want := "OPENSHELL_GATEWAY=unset\nOPENSHELL_GATEWAY_ENDPOINT=unset\nOPENSHELL_GATEWAY_INSECURE=unset\nOPENSHELL_WORKSPACE=unset\nkeep=kept\n"
-	if stdout.String() != want {
-		t.Fatalf("child environment:\n%s", stdout.String())
+	if err != nil || code != 3 || stdout.String() != want {
+		t.Fatalf("code=%d err=%v stderr=%s child environment:\n%s", code, err, stderr, stdout.String())
+	}
+	if _, code, err := runProcess(ctx, []string{"true"}, io.Discard); err != nil || code != 0 {
+		t.Fatalf("true: code=%d err=%v", code, err)
 	}
 }
 
+type scriptedAnswer = func(ctx context.Context) ([]byte, []byte, int, error)
+
 // scriptedCLI answers exec attempts in order; the last answer repeats.
 type scriptedCLI struct {
-	answers []func(ctx context.Context) ([]byte, []byte, int, error)
+	answers []scriptedAnswer
 	argv    [][]string
 }
 
@@ -161,14 +146,14 @@ func fakeRun(f func(ctx context.Context, argv []string) ([]byte, []byte, int, er
 	}
 }
 
-func answer(stdout, stderr string, code int) func(context.Context) ([]byte, []byte, int, error) {
+func answer(stdout, stderr string, code int) scriptedAnswer {
 	return func(context.Context) ([]byte, []byte, int, error) { return []byte(stdout), []byte(stderr), code, nil }
 }
 
 // late is answer after the attempt outlived a one-nanosecond timeout: two
 // clock reads in a row can be equal, so an instant answer may not count as
 // having come after it.
-func late(stdout, stderr string, code int) func(context.Context) ([]byte, []byte, int, error) {
+func late(stdout, stderr string, code int) scriptedAnswer {
 	return func(context.Context) ([]byte, []byte, int, error) {
 		time.Sleep(time.Millisecond)
 		return []byte(stdout), []byte(stderr), code, nil
@@ -176,20 +161,16 @@ func late(stdout, stderr string, code int) func(context.Context) ([]byte, []byte
 }
 
 func TestCLIExecWrapsTheCommandInTimeout(t *testing.T) {
-	s := &scriptedCLI{answers: []func(context.Context) ([]byte, []byte, int, error){answer("ok\n", "", 0)}}
+	s := &scriptedCLI{answers: []scriptedAnswer{answer("ok\n", "", 0)}}
 	if _, err := s.cli().Exec(bg, "s", ExecRequest{Argv: []string{"git", "status"}, Timeout: 90 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	argv := s.argv[0]
-	sep := -1
-	for i, a := range argv {
-		if a == "--" {
-			sep = i
-			break
-		}
+	sep := slices.Index(argv, "--")
+	if sep < 0 {
+		t.Fatalf("argv = %q", argv)
 	}
-	cmd, limit, ok := openshell.ParseSandboxTimeoutArgv(argv[sep+1:])
-	if sep < 0 || !ok || limit != 90*time.Second || strings.Join(cmd, " ") != "git status" {
+	if cmd, limit, ok := openshell.ParseSandboxTimeoutArgv(argv[sep+1:]); !ok || limit != 90*time.Second || strings.Join(cmd, " ") != "git status" {
 		t.Fatalf("argv = %q", argv)
 	}
 	// The binary's own --timeout (which leaves the command running) comes
@@ -200,7 +181,7 @@ func TestCLIExecWrapsTheCommandInTimeout(t *testing.T) {
 }
 
 func TestCLIExecRetriesOnlyIdempotentSilence(t *testing.T) {
-	type answers = []func(context.Context) ([]byte, []byte, int, error)
+	type answers = []scriptedAnswer
 	cases := []struct {
 		name       string
 		idempotent bool
@@ -254,39 +235,30 @@ func TestCLIExecRetriesOnlyIdempotentSilence(t *testing.T) {
 // answered is only rerun for an idempotent command, and only when it
 // printed nothing.
 func TestCLIExecDeadlineIsNotRetriedUnlessIdempotent(t *testing.T) {
-	hang := func(ctx context.Context) ([]byte, []byte, int, error) {
-		<-ctx.Done()
-		return nil, nil, -1, ctx.Err()
-	}
-	talkThenHang := func(ctx context.Context) ([]byte, []byte, int, error) {
-		<-ctx.Done()
-		return []byte("partial"), nil, -1, ctx.Err()
+	hang := func(printed string) scriptedAnswer {
+		return func(ctx context.Context) ([]byte, []byte, int, error) {
+			<-ctx.Done()
+			return []byte(printed), nil, -1, ctx.Err()
+		}
 	}
 	for _, tc := range []struct {
 		name       string
 		idempotent bool
-		first      func(context.Context) ([]byte, []byte, int, error)
+		printed    string
 		wantCalls  int
 	}{
-		{"not idempotent", false, hang, 1},
-		{"idempotent and silent", true, hang, 2},
-		{"idempotent but it printed", true, talkThenHang, 1},
+		{"not idempotent", false, "", 1},
+		{"idempotent and silent", true, "", 2},
+		{"idempotent but it printed", true, "partial", 1},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := &scriptedCLI{answers: []func(context.Context) ([]byte, []byte, int, error){tc.first, answer("ok\n", "", 0)}}
-			c := s.cli()
-			c.attemptLimit = 20 * time.Millisecond
-			res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}, Idempotent: tc.idempotent})
-			if len(s.argv) != tc.wantCalls {
-				t.Fatalf("ran %d times, want %d", len(s.argv), tc.wantCalls)
-			}
-			if tc.wantCalls == 1 && !errors.Is(err, openshell.ErrExecTimeout) {
-				t.Fatalf("res=%+v err=%v, want a timeout", res, err)
-			}
-			if tc.wantCalls == 2 && (err != nil || string(res.Stdout) != "ok\n") {
-				t.Fatalf("res=%+v err=%v", res, err)
-			}
-		})
+		s := &scriptedCLI{answers: []scriptedAnswer{hang(tc.printed), answer("ok\n", "", 0)}}
+		c := s.cli()
+		c.attemptLimit = 20 * time.Millisecond
+		res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"true"}, Idempotent: tc.idempotent})
+		if len(s.argv) != tc.wantCalls || (tc.wantCalls == 1 && !errors.Is(err, openshell.ErrExecTimeout)) ||
+			(tc.wantCalls == 2 && (err != nil || string(res.Stdout) != "ok\n")) {
+			t.Errorf("%s: ran %d times (want %d), res=%+v err=%v", tc.name, len(s.argv), tc.wantCalls, res, err)
+		}
 	}
 }
 
@@ -321,13 +293,11 @@ func TestCLIExecStreamsStdout(t *testing.T) {
 		return nil, 0, nil
 	}}
 	w := &failAfter{limit: 1 << 10}
-	res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"cat", "f"}, Stdout: w})
-	if err != nil || len(res.Stdout) != 0 || w.got.String() != strings.Repeat("marker", 4) {
+	if res, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"cat", "f"}, Stdout: w}); err != nil || len(res.Stdout) != 0 || w.got.String() != strings.Repeat("marker", 4) {
 		t.Fatalf("res=%+v err=%v streamed=%q", res, err, w.got.String())
 	}
 	calls = 0
-	_, err = c.Exec(bg, "s", ExecRequest{Argv: []string{"cat", "f"}, Stdout: &failAfter{limit: 10}, Idempotent: true})
-	if !errors.Is(err, errWriterFull) || calls != 1 {
+	if _, err := c.Exec(bg, "s", ExecRequest{Argv: []string{"cat", "f"}, Stdout: &failAfter{limit: 10}, Idempotent: true}); !errors.Is(err, errWriterFull) || calls != 1 {
 		t.Fatalf("err=%v calls=%d, want the writer's error from one attempt", err, calls)
 	}
 }
@@ -340,11 +310,8 @@ func TestCLIExecTimesOutAndRespectsCancel(t *testing.T) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(bg, 50*time.Millisecond)
 	defer cancel()
-	if _, err := c.Exec(ctx, "s", ExecRequest{Argv: []string{"sleep", "100"}}); err == nil {
-		t.Fatal("expected an error")
-	}
-	if time.Since(start) > 5*time.Second {
-		t.Fatal("exec did not stop at the context deadline")
+	if _, err := c.Exec(ctx, "s", ExecRequest{Argv: []string{"sleep", "100"}}); err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("err = %v after %v; want an error at the context deadline", err, time.Since(start))
 	}
 }
 
@@ -352,8 +319,7 @@ func TestCLITransferErrors(t *testing.T) {
 	c := &CLI{Gateway: "gw", run: fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
 		return nil, []byte("line1\nError: × ssh tar extract exited with status 2\n"), 1, nil
 	})}
-	err := c.Upload(bg, "s", "/a", "/work")
-	if err == nil || !strings.Contains(err.Error(), "tar extract") {
+	if err := c.Upload(bg, "s", "/a", "/work"); err == nil || !strings.Contains(err.Error(), "tar extract") {
 		t.Fatalf("err = %v", err)
 	}
 	c.run = fakeRun(func(ctx context.Context, argv []string) ([]byte, []byte, int, error) {
@@ -361,19 +327,6 @@ func TestCLITransferErrors(t *testing.T) {
 	})
 	if err := c.Download(bg, "s", "/a", "/tmp"); err == nil {
 		t.Fatal("start failure ignored")
-	}
-}
-
-func TestRunProcessReadsStdinFromDevNull(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("no sh")
-	}
-	ctx, cancel := context.WithTimeout(bg, 10*time.Second)
-	defer cancel()
-	var stdout strings.Builder
-	_, code, err := runProcess(ctx, []string{"sh", "-c", "cat; echo done; exit 3"}, &stdout)
-	if err != nil || code != 3 || stdout.String() != "done\n" {
-		t.Fatalf("stdout=%q code=%d err=%v", stdout.String(), code, err)
 	}
 }
 
@@ -399,9 +352,49 @@ func TestShellQuoteAndParseKV(t *testing.T) {
 		"file:///srv/repo.git":             "",
 		"ext::sh -c evil":                  "",
 	} {
-		got, ok := sanitizeRemoteURL(raw)
-		if (want == "") == ok || got != want {
+		if got, ok := sanitizeRemoteURL(raw); (want == "") == ok || got != want {
 			t.Errorf("sanitizeRemoteURL(%q) = %q,%v want %q", raw, got, ok, want)
 		}
+	}
+}
+
+// TestGitVersionCacheKeepsOnlySuccessfulProbes: a probe cut short by the
+// caller's context, a missing git (it can be installed while we run) and
+// output that is not a git version are not kept; a success is, for later
+// callers cancelled or not. The real probe reports a cancelled caller as
+// context.Canceled and still works afterwards.
+func TestGitVersionCacheKeepsOnlySuccessfulProbes(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	fail := errors.New("exec: git not found")
+	var c gitVersionCache
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.get(cancelled, func(ctx context.Context) ([]byte, error) { calls++; return nil, ctx.Err() }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled probe: %v", err)
+	}
+	if _, err := c.get(bg, func(context.Context) ([]byte, error) { calls++; return nil, fail }); !errors.Is(err, fail) {
+		t.Fatalf("missing git: %v", err)
+	}
+	if _, err := c.get(bg, func(context.Context) ([]byte, error) { calls++; return []byte("hg 6.0\n"), nil }); err == nil {
+		t.Fatal("unrecognized output accepted")
+	}
+	if v, err := c.get(bg, func(context.Context) ([]byte, error) { calls++; return []byte("git version 2.43.1\n"), nil }); err != nil || v != (gitVersion{2, 43, 1}) {
+		t.Fatalf("version = %v, %v", v, err)
+	}
+	if v, err := c.get(cancelled, func(context.Context) ([]byte, error) { calls++; return nil, fail }); err != nil || v != (gitVersion{2, 43, 1}) || calls != 4 {
+		t.Fatalf("cached version = %v, %v after %d probes", v, err, calls)
+	}
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	var real gitVersionCache
+	probe := func(ctx context.Context) ([]byte, error) { return gitCmd{dir: os.TempDir()}.strict(ctx, "version") }
+	if _, err := real.get(cancelled, probe); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled real probe: %v", err)
+	}
+	if v, err := real.get(bg, probe); err != nil || !v.atLeast(minGitMajor, minGitMinor) {
+		t.Fatalf("git unusable after a cancelled first probe: %v, %v", v, err)
 	}
 }

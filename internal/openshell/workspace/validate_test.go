@@ -30,20 +30,15 @@ func TestValidateSourceRefusalMatrix(t *testing.T) {
 	e := newEnv(t)
 	protected := filepath.Join(e.root, "vault")
 	mustMkdir(t, filepath.Join(protected, "inner"))
-	mustMkdir(t, filepath.Join(e.home, ".ssh", "keys"))
-	mustMkdir(t, filepath.Join(e.home, ".aws"))
-	mustMkdir(t, filepath.Join(e.home, ".config", "nvim"))
-	mustMkdir(t, filepath.Join(e.data, "sandboxes"))
-	for _, h := range []string{".claude/skills", ".codex", ".cursor", ".copilot", ".gemini/antigravity", ".agents", ".local/share/opencode"} {
+	for _, h := range []string{".ssh/keys", ".aws", ".config/nvim", ".defenseclaw/sandboxes",
+		".claude/skills", ".codex", ".cursor", ".copilot", ".gemini/antigravity", ".agents", ".local/share/opencode"} {
 		mustMkdir(t, filepath.Join(e.home, filepath.FromSlash(h)))
 	}
 	link := filepath.Join(e.home, "code", "link")
-	if err := os.Symlink(e.project, link); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, e.project, link)
 	writeFile(t, e.home, "code/file.txt", "x")
 
-	cases := []struct {
+	for _, tc := range []struct {
 		name   string
 		path   string
 		reason string
@@ -76,26 +71,13 @@ func TestValidateSourceRefusalMatrix(t *testing.T) {
 		{"file", filepath.Join(e.home, "code", "file.txt"), "not a directory"},
 		{"empty", "  ", "no folder"},
 		{"control chars", e.project + "\n", "control"},
+	} {
+		_, err := ValidateSource(bg, tc.path, SourceOptions{Home: e.home, DataDir: e.data, Protected: []string{protected}})
+		if !errors.Is(err, ErrUnsafeSource) || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("%s: ValidateSource(%q) = %v, want ErrUnsafeSource mentioning %q", tc.name, tc.path, err, tc.reason)
+		}
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ValidateSource(bg, tc.path, SourceOptions{Home: e.home, DataDir: e.data, Protected: []string{protected}})
-			if !errors.Is(err, ErrUnsafeSource) {
-				t.Fatalf("ValidateSource(%q) = %v, want ErrUnsafeSource", tc.path, err)
-			}
-			if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
-				t.Fatalf("error %q does not mention %q", err, tc.reason)
-			}
-		})
-	}
-}
-
-func TestValidateSourceSymlinkHintNamesRealPath(t *testing.T) {
-	e := newEnv(t)
-	link := filepath.Join(e.home, "proj-link")
-	if err := os.Symlink(e.project, link); err != nil {
-		t.Fatal(err)
-	}
+	// The hint for a symlinked folder names the real path.
 	_, err := ValidateSource(bg, link, SourceOptions{Home: e.home})
 	var se *SourceError
 	if !errors.As(err, &se) || !strings.Contains(se.Hint, e.project) {
@@ -103,38 +85,39 @@ func TestValidateSourceSymlinkHintNamesRealPath(t *testing.T) {
 	}
 }
 
-func TestValidateSourceAcceptsPlainAndGitProjects(t *testing.T) {
+// TestValidateSourceAccepts: a plain folder, a git project with the host
+// executable git state it has to protect (hooks path, config includes,
+// submodule git dirs) and a leftover commondir pin, and a subfolder of a
+// repository, which is taken as a plain folder with a warning naming the
+// repository.
+func TestValidateSourceAccepts(t *testing.T) {
 	e := newEnv(t)
-	src, err := ValidateSource(bg, e.project, SourceOptions{Home: e.home, DataDir: e.data})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if src.Path != e.project || src.Git != nil {
-		t.Fatalf("plain folder: %+v", src)
+	opts := SourceOptions{Home: e.home, DataDir: e.data}
+	if src, err := ValidateSource(bg, e.project, opts); err != nil || src.Path != e.project || src.Git != nil {
+		t.Fatalf("plain folder: %+v, %v", src, err)
 	}
 	e.initRepo()
-	src, err = ValidateSource(bg, e.project, SourceOptions{Home: e.home, DataDir: e.data})
+	e.git(e.project, "config", "core.hooksPath", ".husky/_")
+	e.git(e.project, "config", "include.path", "../.gitconfig.project")
+	writeFile(t, e.project, ".gitconfig.project", "[include]\n\tpath = .git/extra.inc\n")
+	mustMkdir(t, filepath.Join(e.project, ".git", "modules", "lib", "objects"))
+	mustMkdir(t, filepath.Join(e.project, ".git", "modules", "lib", "refs"))
+	writeFile(t, e.project, ".git/modules/lib/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, e.project, ".git/modules/lib/config", "[core]\n")
+	writeFile(t, e.project, ".git/commondir", commondirPin)
+	src, err := ValidateSource(bg, e.project, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if src.Git == nil || src.Git.GitDir != filepath.Join(e.project, ".git") || src.Git.DotGitFile {
+	if g := src.Git; g == nil || g.GitDir != filepath.Join(e.project, ".git") || g.DotGitFile || !g.StaleCommondirPin ||
+		g.HooksPath != filepath.Join(e.project, ".husky", "_") ||
+		len(g.IncludeFiles) < 1 || g.IncludeFiles[0] != filepath.Join(e.project, ".gitconfig.project") ||
+		len(g.Submodules) != 1 || g.Submodules[0] != filepath.Join(e.project, ".git", "modules", "lib") {
 		t.Fatalf("git layout: %+v", src.Git)
 	}
-}
-
-func TestValidateSourceSubfolderOfRepoIsPlainWithWarning(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	sub := filepath.Join(e.project, "src")
-	src, err := ValidateSource(bg, sub, SourceOptions{Home: e.home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if src.Git != nil {
-		t.Fatal("a subfolder must be treated as a plain folder")
-	}
-	if len(src.Warnings) == 0 || !strings.Contains(src.Warnings[0], e.project) {
-		t.Fatalf("warnings = %v, want the enclosing repository named", src.Warnings)
+	src, err = ValidateSource(bg, filepath.Join(e.project, "src"), opts)
+	if err != nil || src.Git != nil || len(src.Warnings) == 0 || !strings.Contains(src.Warnings[0], e.project) {
+		t.Fatalf("subfolder: %+v, %v; want a plain folder with the enclosing repository named", src, err)
 	}
 }
 
@@ -152,14 +135,10 @@ func TestValidateSourceGitLayoutsThatNeedCopyMode(t *testing.T) {
 		}, "outside the folder"},
 		{"dot git symlink", func(e *env) string {
 			e.initRepo()
-			other := filepath.Join(e.home, "code", "other")
 			if err := os.Rename(filepath.Join(e.project, ".git"), filepath.Join(e.home, "code", "gitdir")); err != nil {
 				e.t.Fatal(err)
 			}
-			mustMkdir(e.t, other)
-			if err := os.Symlink(filepath.Join(e.home, "code", "gitdir"), filepath.Join(e.project, ".git")); err != nil {
-				e.t.Fatal(err)
-			}
+			mustSymlink(e.t, filepath.Join(e.home, "code", "gitdir"), filepath.Join(e.project, ".git"))
 			return e.project
 		}, "symbolic link"},
 		{"foreign commondir", func(e *env) string {
@@ -180,62 +159,16 @@ func TestValidateSourceGitLayoutsThatNeedCopyMode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
-			p := tc.setup(e)
-			_, err := ValidateSource(bg, p, SourceOptions{Home: e.home})
-			if !errors.Is(err, ErrNeedsCopy) {
-				t.Fatalf("err = %v, want ErrNeedsCopy", err)
-			}
-			if !strings.Contains(err.Error(), tc.reason) || !strings.Contains(err.Error(), "--copy") {
-				t.Fatalf("error %q should mention %q and --copy", err, tc.reason)
+			_, err := ValidateSource(bg, tc.setup(e), SourceOptions{Home: e.home})
+			if !errors.Is(err, ErrNeedsCopy) || !strings.Contains(err.Error(), tc.reason) || !strings.Contains(err.Error(), "--copy") {
+				t.Fatalf("err = %v, want ErrNeedsCopy mentioning %q and --copy", err, tc.reason)
 			}
 		})
 	}
 }
 
-func TestValidateSourceDetectsHostExecutableGitState(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	e.git(e.project, "config", "core.hooksPath", ".husky/_")
-	e.git(e.project, "config", "include.path", "../.gitconfig.project")
-	writeFile(t, e.project, ".gitconfig.project", "[include]\n\tpath = .git/extra.inc\n")
-	// A submodule git dir the agent could otherwise rewrite.
-	mustMkdir(t, filepath.Join(e.project, ".git", "modules", "lib", "objects"))
-	mustMkdir(t, filepath.Join(e.project, ".git", "modules", "lib", "refs"))
-	writeFile(t, e.project, ".git/modules/lib/HEAD", "ref: refs/heads/main\n")
-	writeFile(t, e.project, ".git/modules/lib/config", "[core]\n")
-
-	src, err := ValidateSource(bg, e.project, SourceOptions{Home: e.home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	g := src.Git
-	if g.HooksPath != filepath.Join(e.project, ".husky", "_") {
-		t.Fatalf("HooksPath = %q", g.HooksPath)
-	}
-	wantIncludes := []string{filepath.Join(e.project, ".gitconfig.project")}
-	if len(g.IncludeFiles) < 1 || g.IncludeFiles[0] != wantIncludes[0] {
-		t.Fatalf("IncludeFiles = %v, want %v first", g.IncludeFiles, wantIncludes)
-	}
-	if len(g.Submodules) != 1 || g.Submodules[0] != filepath.Join(e.project, ".git", "modules", "lib") {
-		t.Fatalf("Submodules = %v", g.Submodules)
-	}
-}
-
-func TestValidateSourceAcceptsStaleCommondirPin(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	writeFile(t, e.project, ".git/commondir", commondirPin)
-	src, err := ValidateSource(bg, e.project, SourceOptions{Home: e.home})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !src.Git.StaleCommondirPin {
-		t.Fatal("a leftover commondir pin should be recognized")
-	}
-}
-
 func TestMatchGlob(t *testing.T) {
-	cases := []struct {
+	for _, tc := range []struct {
 		pattern, rel string
 		want         bool
 	}{
@@ -254,8 +187,7 @@ func TestMatchGlob(t *testing.T) {
 		{".idea/**", ".idea/workspace.xml", true},
 		{"/secrets.yaml", "secrets.yaml", true},
 		{"", "x", false},
-	}
-	for _, tc := range cases {
+	} {
 		if got := matchGlob(tc.pattern, tc.rel); got != tc.want {
 			t.Errorf("matchGlob(%q, %q) = %v, want %v", tc.pattern, tc.rel, got, tc.want)
 		}
@@ -274,47 +206,37 @@ func TestSecretNames(t *testing.T) {
 	}
 }
 
+// TestNamesAndLabels keeps the workspace name rule and the one OpenShell
+// calls use identical, apart from the reserved layout names ("git" is the
+// shared shadow directory under <data>/snapshots): a name one accepts and
+// the other refuses would write host state for a sandbox that can never
+// be created or addressed. Refusals are openshell.ErrInvalidName, and no
+// refused name reaches a host path.
 func TestNamesAndLabels(t *testing.T) {
-	for _, bad := range []string{
-		"", ".hidden", "-x", "x-", "a/b", "a..b", "x.lock", "x.", strings.Repeat("a", 64), "sp ace",
-		// OpenShell refuses these, so no host state may be written for them.
-		"A.b_c-1", "Upper", "under_score", "dot.ted",
-		// "git" is the shared shadow directory under <data>/snapshots.
-		"git",
-	} {
-		if err := ValidateName(bad); err == nil {
-			t.Errorf("ValidateName(%q) accepted", bad)
-		} else if !errors.Is(err, openshell.ErrInvalidName) {
-			t.Errorf("ValidateName(%q) = %v, want openshell.ErrInvalidName", bad, err)
+	bad := []string{"", ".hidden", "-x", "x-", "a/b", "a..b", "x.lock", "x.", strings.Repeat("a", 64), "sp ace",
+		"A.b_c-1", "Upper", "under_score", "dot.ted", "git"}
+	good := []string{"dc-claude-myapp-7f3a", "fix-tests", "a", "0", "gitx", "my-git", strings.Repeat("a", 63)}
+	for _, n := range bad {
+		if err := ValidateName(n); !errors.Is(err, openshell.ErrInvalidName) {
+			t.Errorf("ValidateName(%q) = %v, want openshell.ErrInvalidName", n, err)
 		}
 	}
-	for _, good := range []string{"dc-claude-myapp-7f3a", "fix-tests", "a", "0", "gitx", "my-git", strings.Repeat("a", 63)} {
-		if err := ValidateName(good); err != nil {
-			t.Errorf("ValidateName(%q): %v", good, err)
+	for _, n := range good {
+		if err := ValidateName(n); err != nil {
+			t.Errorf("ValidateName(%q): %v", n, err)
 		}
 	}
-	k, v := ProjectLabel("/home/u/code/myapp")
-	if k != ProjectLabelKey || len(v) != 32 || v != ProjectKey("/home/u/code/myapp/") {
+	for _, n := range append(append(bad, good...), "z9", "a--b", "ab.c", "AB", "gits", "é", strings.Repeat("x", 62), "0-0", "dc-copy-1") {
+		_, reserved := reservedNames[n]
+		if got, want := ValidateName(n) == nil, openshell.ValidSandboxName(n) && !reserved; got != want {
+			t.Errorf("ValidateName(%q) accepted=%v, openshell.ValidSandboxName=%v reserved=%v", n, got, openshell.ValidSandboxName(n), reserved)
+		}
+	}
+	if k, v := ProjectLabel("/home/u/code/myapp"); k != ProjectLabelKey || len(v) != 32 || v != ProjectKey("/home/u/code/myapp/") {
 		t.Fatalf("ProjectLabel = %s=%s", k, v)
 	}
 	if RepoName("/x/My App!") != "My-App" || RepoName("/x/...") != "project" {
 		t.Fatalf("RepoName sanitization: %q %q", RepoName("/x/My App!"), RepoName("/x/..."))
-	}
-}
-
-// TestValidateNameMatchesOpenShell keeps the workspace rule and the one
-// OpenShell calls use identical, apart from the reserved layout names:
-// a name one accepts and the other refuses would write host state for a
-// sandbox that can never be created or addressed.
-func TestValidateNameMatchesOpenShell(t *testing.T) {
-	names := []string{"", "a", "z9", "-a", "a-", "a--b", "ab.c", "a_b", "AB", "git", "gits", "a b", "a/b", "é",
-		strings.Repeat("x", 62), strings.Repeat("x", 63), strings.Repeat("x", 64), "0-0", "dc-copy-1"}
-	for _, n := range names {
-		_, reserved := reservedNames[n]
-		want := openshell.ValidSandboxName(n) && !reserved
-		if got := ValidateName(n) == nil; got != want {
-			t.Errorf("ValidateName(%q) accepted=%v, openshell.ValidSandboxName=%v reserved=%v", n, got, openshell.ValidSandboxName(n), reserved)
-		}
 	}
 }
 
@@ -335,9 +257,7 @@ func TestValidateSourceRefusesXDGAndLinkedConfigDirs(t *testing.T) {
 	dotfiles := filepath.Join(home, "dotfiles")
 	mustMkdir(t, filepath.Join(dotfiles, "config", "nvim"))
 	mustMkdir(t, filepath.Join(dotfiles, "notes"))
-	if err := os.Symlink(filepath.Join(dotfiles, "config"), filepath.Join(home, ".config")); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, filepath.Join(dotfiles, "config"), filepath.Join(home, ".config"))
 	xdgConfig, xdgData, xdgState := filepath.Join(root, "xdg", "config"), filepath.Join(root, "xdg-data"), filepath.Join(root, "xdg-state")
 	for _, d := range []string{
 		filepath.Join(xdgConfig, "openshell"), filepath.Join(xdgConfig, "app"),
@@ -374,7 +294,6 @@ func TestValidateSourceRefusesXDGAndLinkedConfigDirs(t *testing.T) {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-
 	// Relative XDG values are ignored, as the XDG spec says.
 	t.Setenv("XDG_CONFIG_HOME", "relative")
 	if _, _, err := validateShareable(filepath.Join(home, "code", "app"), SourceOptions{Home: home}); err != nil {
@@ -389,32 +308,22 @@ func TestOverlaps(t *testing.T) {
 	root := t.TempDir()
 	project := filepath.Join(root, "project")
 	packs := filepath.Join(root, "packs")
-	for _, dir := range []string{filepath.Join(project, ".defenseclaw"), packs} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	mustMkdir(t, filepath.Join(project, ".defenseclaw"))
+	mustMkdir(t, packs)
 	link := filepath.Join(root, "link")
-	if err := os.Symlink(filepath.Join(project, ".defenseclaw"), link); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name, protected string
-		want            bool
-	}{
-		{"a pack file inside the project", filepath.Join(project, ".defenseclaw", "pack.yaml"), true},
-		{"a pack file not created yet", filepath.Join(project, "later", "pack.yaml"), true},
-		{"the project itself", project, true},
-		{"a folder holding the project", root, true},
-		{"a pack reached through a symbolic link into the project", filepath.Join(link, "pack.yaml"), true},
-		{"a sibling folder", filepath.Join(packs, "team", "pack.yaml"), false},
-		{"a name that only shares a prefix", project + "-other", false},
-		{"no path", "", false},
+	mustSymlink(t, filepath.Join(project, ".defenseclaw"), link)
+	for protected, want := range map[string]bool{
+		filepath.Join(project, ".defenseclaw", "pack.yaml"): true, // a pack file inside the project
+		filepath.Join(project, "later", "pack.yaml"):        true, // one not created yet
+		project:                          true, // the project itself
+		root:                             true, // a folder holding the project
+		filepath.Join(link, "pack.yaml"): true, // a pack reached through a symbolic link into the project
+		filepath.Join(packs, "team", "pack.yaml"): false, // a sibling folder
+		project + "-other":                        false, // a name that only shares a prefix
+		"":                                        false,
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := Overlaps(project, tc.protected); got != tc.want {
-				t.Fatalf("Overlaps(%s, %s) = %v, want %v", project, tc.protected, got, tc.want)
-			}
-		})
+		if got := Overlaps(project, protected); got != want {
+			t.Errorf("Overlaps(%s, %s) = %v, want %v", project, protected, got, want)
+		}
 	}
 }

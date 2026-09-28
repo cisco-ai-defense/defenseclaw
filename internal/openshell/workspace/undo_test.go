@@ -54,6 +54,20 @@ func mustUndo(t *testing.T, e *env, name string, preview bool) *UndoResult {
 	return res
 }
 
+// savedRefsID returns the undo id of the refs/defenseclaw/post-refs/<name>/
+// namespace the undo's recovery hint names.
+func savedRefsID(t *testing.T, res *UndoResult, name string) string {
+	t.Helper()
+	prefix := "refs/defenseclaw/post-refs/" + name + "/"
+	for _, w := range res.Warnings {
+		if _, rest, ok := strings.Cut(w, prefix); ok && strings.Contains(w, "git branch <new-name>") {
+			return strings.Split(rest, "/")[0]
+		}
+	}
+	t.Fatalf("no recovery hint for %s in %v", prefix, res.Warnings)
+	return ""
+}
+
 func TestSnapshotUndoRestoresTrackedAndUntrackedFiles(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
@@ -61,79 +75,67 @@ func TestSnapshotUndoRestoresTrackedAndUntrackedFiles(t *testing.T) {
 	writeFile(t, e.project, "src/app.go", "package main // uncommitted edit\n")
 	writeFile(t, e.project, "build/cache.bin", "ignored before\n")
 	rec := mustSnapshot(t, e, "s1")
-	if rec.Kind != SnapshotGit || rec.Git.Head == "" || rec.Git.Branch != "refs/heads/main" {
+	if rec.Kind != SnapshotGit || rec.Git.Head == "" || rec.Git.Branch != "refs/heads/main" ||
+		!rec.Git.ProjectRef || e.git(e.project, "rev-parse", "refs/defenseclaw/pre/s1") != rec.Git.Commit {
 		t.Fatalf("record: %+v", rec.Git)
-	}
-	if !rec.Git.ProjectRef || e.git(e.project, "rev-parse", "refs/defenseclaw/pre/s1") != rec.Git.Commit {
-		t.Fatal("snapshot ref missing from the project repository")
 	}
 
 	// The session.
 	writeFile(t, e.project, "README.md", "rewritten by the agent\n")
-	if err := os.Remove(filepath.Join(e.project, "notes.txt")); err != nil {
-		t.Fatal(err)
-	}
+	mustRemove(t, e.project, "notes.txt")
 	writeFile(t, e.project, "src/new.go", "package main\n")
 	writeFileMode(t, e.project, "run.sh", "#!/bin/sh\n", 0o755)
 	writeFile(t, e.project, "build/out.log", "ignored output\n")
-	if err := os.Chmod(filepath.Join(e.project, "src", "app.go"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	mustChmod(t, filepath.Join(e.project, "src", "app.go"), 0o755)
 
 	preview := mustUndo(t, e, "s1", true)
 	if got := changePaths(preview.Changes); got != "A:run.sh A:src/new.go D:notes.txt M:README.md M:src/app.go" {
 		t.Fatalf("preview changes = %s", got)
 	}
-	if readFile(t, e.project, "README.md") != "rewritten by the agent\n" {
-		t.Fatal("preview changed the folder")
-	}
-
+	wantFiles(t, e.project, "README.md", "rewritten by the agent\n")
 	res := mustUndo(t, e, "s1", false)
-	if res.PostCommit == "" {
-		t.Fatal("the session's state was not kept")
-	}
-	if readFile(t, e.project, "README.md") != "hello\n" || readFile(t, e.project, "notes.txt") != "untracked before the session\n" ||
-		readFile(t, e.project, "src/app.go") != "package main // uncommitted edit\n" {
-		t.Fatal("files not restored")
-	}
-	if info, _ := os.Stat(filepath.Join(e.project, "src", "app.go")); info.Mode().Perm()&0o111 != 0 {
-		t.Fatal("mode change not reverted")
-	}
-	for _, gone := range []string{"src/new.go", "run.sh"} {
-		if pathExists(filepath.Join(e.project, gone)) {
-			t.Fatalf("%s created during the session survived undo", gone)
-		}
-	}
-	if readFile(t, e.project, "build/out.log") != "ignored output\n" || readFile(t, e.project, "build/cache.bin") != "ignored before\n" {
-		t.Fatal("ignored files must be left alone")
-	}
+	wantFiles(t, e.project, "README.md", "hello\n", "notes.txt", "untracked before the session\n",
+		"src/app.go", "package main // uncommitted edit\n", "src/new.go", absent, "run.sh", absent,
+		// Ignored files are left alone.
+		"build/out.log", "ignored output\n", "build/cache.bin", "ignored before\n")
+	wantMode(t, e.project, "src/app.go", 0o644)
 	// The session's version is recoverable from the project repository.
-	if got := e.git(e.project, "show", "refs/defenseclaw/post/s1:README.md"); got != "rewritten by the agent" {
-		t.Fatalf("post-session state = %q", got)
+	if res.PostCommit == "" || e.git(e.project, "show", "refs/defenseclaw/post/s1:README.md") != "rewritten by the agent" {
+		t.Fatalf("post-session state not kept: %+v", res)
 	}
 	// A second undo is a no-op and keeps the saved session state.
-	again := mustUndo(t, e, "s1", false)
-	if !again.Empty() || again.PostCommit != res.PostCommit {
+	if again := mustUndo(t, e, "s1", false); !again.Empty() || again.PostCommit != res.PostCommit {
 		t.Fatalf("second undo: %+v", again)
 	}
 }
 
-func TestUndoRestoresBranchHeadRefsAndStagingArea(t *testing.T) {
+// TestUndoRestoresBranchesTagsAndStagingArea: undo puts HEAD, branches,
+// tags and the staging area back, and first saves the tips the session
+// left under refs/defenseclaw/post-refs/<name>/<undo-id>/, so its branch
+// work stays recoverable.
+func TestUndoRestoresBranchesTagsAndStagingArea(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
 	e.git(e.project, "tag", "v1")
+	e.git(e.project, "branch", "topic")
 	writeFile(t, e.project, "staged.txt", "staged\n")
 	e.git(e.project, "add", "staged.txt")
 	before := e.git(e.project, "rev-parse", "HEAD")
 	mustSnapshot(t, e, "s1")
 
 	e.git(e.project, "commit", "-q", "-m", "agent commit on main")
+	tips := map[string]string{"refs/heads/main": e.git(e.project, "rev-parse", "HEAD")}
+	e.git(e.project, "checkout", "-q", "topic")
+	writeFile(t, e.project, "topic.txt", "agent marker topic\n")
+	e.commit("agent topic commit")
+	tips["refs/heads/topic"] = e.git(e.project, "rev-parse", "HEAD")
 	e.git(e.project, "checkout", "-q", "-b", "feature")
 	writeFile(t, e.project, "feature.txt", "x\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "feature")
+	e.commit("feature")
+	tips["refs/heads/feature"] = e.git(e.project, "rev-parse", "HEAD")
 	e.git(e.project, "tag", "-d", "v1")
 	e.git(e.project, "tag", "agent-tag")
+	tips["refs/tags/agent-tag"] = tips["refs/heads/feature"]
 
 	preview := mustUndo(t, e, "s1", true)
 	if preview.BranchBefore != "refs/heads/main" || preview.BranchAfter != "refs/heads/feature" || preview.HeadBefore != before {
@@ -143,50 +145,98 @@ func TestUndoRestoresBranchHeadRefsAndStagingArea(t *testing.T) {
 	for _, c := range preview.RefChanges {
 		refs = append(refs, c.Ref)
 	}
-	if strings.Join(refs, ",") != "refs/heads/feature,refs/heads/main,refs/tags/agent-tag,refs/tags/v1" {
+	if strings.Join(refs, ",") != "refs/heads/feature,refs/heads/main,refs/heads/topic,refs/tags/agent-tag,refs/tags/v1" {
 		t.Fatalf("ref changes = %v", refs)
 	}
 
 	res := mustUndo(t, e, "s1", false)
-	if got := e.git(e.project, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
-		t.Fatalf("HEAD = %s", got)
+	if e.git(e.project, "symbolic-ref", "HEAD") != "refs/heads/main" || e.git(e.project, "rev-parse", "HEAD") != before ||
+		e.git(e.project, "rev-parse", "topic") != before {
+		t.Fatal("HEAD, main or topic not restored")
 	}
-	if got := e.git(e.project, "rev-parse", "HEAD"); got != before {
-		t.Fatalf("main = %s, want %s", got, before)
+	if out := e.git(e.project, "branch", "--list", "feature"); out != "" || e.git(e.project, "tag", "--list") != "v1" {
+		t.Fatalf("feature branch %q or tags %q survived", out, e.git(e.project, "tag", "--list"))
 	}
-	if out := e.git(e.project, "branch", "--list", "feature"); out != "" {
-		t.Fatalf("feature branch survived: %q", out)
+	if st := e.git(e.project, "status", "--porcelain"); !res.IndexRestored || st != "A  staged.txt" {
+		t.Fatalf("staging area not restored (restored=%v, status %q)", res.IndexRestored, st)
 	}
-	if e.git(e.project, "tag", "--list") != "v1" {
-		t.Fatalf("tags = %q", e.git(e.project, "tag", "--list"))
-	}
-	if !res.IndexRestored || e.git(e.project, "diff", "--cached", "--name-only") != "staged.txt" {
-		t.Fatalf("staging area not restored (restored=%v, cached=%q)", res.IndexRestored, e.git(e.project, "diff", "--cached", "--name-only"))
-	}
-	if pathExists(filepath.Join(e.project, "feature.txt")) {
-		t.Fatal("feature.txt survived")
-	}
-	if st := e.git(e.project, "status", "--porcelain"); st != "A  staged.txt" {
-		t.Fatalf("status after undo = %q", st)
+	wantFiles(t, e.project, "feature.txt", absent, "topic.txt", absent)
+	prefix := "refs/defenseclaw/post-refs/s1/" + savedRefsID(t, res, "s1") + "/"
+	for ref, tip := range tips {
+		if got := e.git(e.project, "rev-parse", prefix+ref); got != tip {
+			t.Errorf("the session's %s tip is not saved: got %s, want %s", ref, got, tip)
+		}
 	}
 }
 
-func TestUndoKeepRefsLeavesBranches(t *testing.T) {
+// TestSnapshotLifecycle: two undos of one name save the session tips under
+// different namespaces, and KeepRefs restores the files alone. A second
+// snapshot of a name is refused unless it replaces the first, which keeps
+// the saved tips (the only copy of an earlier session's branch work) and
+// is what undo then restores. Deleting a snapshot removes its project ref
+// and saved tips, but neither those of a sandbox whose name starts the
+// same nor the shadow another snapshot still uses.
+func TestSnapshotLifecycle(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
+	initial := e.git(e.project, "rev-parse", "HEAD")
 	mustSnapshot(t, e, "s1")
+	other := mustSnapshot(t, e, "b")
+	var ids []string
+	for _, f := range []string{"v1.txt", "v2.txt"} {
+		writeFile(t, e.project, f, f+"\n")
+		e.commit(f)
+		tip := e.git(e.project, "rev-parse", "HEAD")
+		res := mustUndo(t, e, "s1", false)
+		id := savedRefsID(t, res, "s1")
+		if e.git(e.project, "rev-parse", "HEAD") != initial || e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/"+id+"/refs/heads/main") != tip {
+			t.Fatalf("undo %s: HEAD not restored or session tip not saved", f)
+		}
+		ids = append(ids, id)
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("both undos used the same id %s", ids[0])
+	}
 	writeFile(t, e.project, "x.txt", "x\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "agent")
+	e.commit("agent")
 	head := e.git(e.project, "rev-parse", "HEAD")
-	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1", KeepRefs: true}); err != nil {
-		t.Fatal(err)
+	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1", KeepRefs: true}); err != nil || e.git(e.project, "rev-parse", "HEAD") != head {
+		t.Fatalf("KeepRefs undo = %v, or it moved the branch", err)
 	}
-	if e.git(e.project, "rev-parse", "HEAD") != head {
-		t.Fatal("KeepRefs moved the branch")
+	wantFiles(t, e.project, "x.txt", absent)
+
+	if _, err := Snapshot(bg, e.snapOpts("s1")); !errors.Is(err, ErrSnapshotExists) {
+		t.Fatalf("err = %v", err)
 	}
-	if pathExists(filepath.Join(e.project, "x.txt")) {
-		t.Fatal("working tree not restored")
+	saved := func(name string) string {
+		return e.git(e.project, "for-each-ref", "--format=%(refname)", "refs/defenseclaw/post-refs/"+name+"/")
+	}
+	writeFile(t, e.project, "README.md", "kept\n")
+	opts := e.snapOpts("s1")
+	opts.Replace = true
+	if _, err := Snapshot(bg, opts); err != nil || saved("s1") == "" {
+		t.Fatalf("replacing the snapshot (%v) dropped the saved branch tips", err)
+	}
+	writeFile(t, e.project, "README.md", "agent\n")
+	mustUndo(t, e, "s1", false)
+	wantFiles(t, e.project, "README.md", "kept\n")
+	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "nope"}); !errors.Is(err, ErrSnapshotNotFound) {
+		t.Fatalf("err = %v", err)
+	}
+
+	e.git(e.project, "update-ref", "refs/defenseclaw/post-refs/s10/x/refs/heads/main", "HEAD")
+	must(t, DeleteSnapshot(bg, e.data, "s1"))
+	if _, err := runGitMaybe(e, "rev-parse", "-q", "--verify", "refs/defenseclaw/pre/s1"); err == nil || saved("s1") != "" || saved("s10") == "" {
+		t.Fatalf("after deleting s1: pre ref kept (%v), s1 refs %q, s10 refs %q", err, saved("s1"), saved("s10"))
+	}
+	if !pathExists(other.Git.Shadow) {
+		t.Fatal("the shadow went while b still uses it")
+	}
+	if err := DeleteSnapshot(bg, e.data, "b"); err != nil || pathExists(other.Git.Shadow) {
+		t.Fatalf("delete b = %v; the shadow must go with its last snapshot", err)
+	}
+	if recs, err := ListSnapshots(e.data); err != nil || len(recs) != 0 {
+		t.Fatalf("ListSnapshots = %v, %v", recs, err)
 	}
 }
 
@@ -199,8 +249,7 @@ func TestUndoDetachedAndUnbornHead(t *testing.T) {
 		mustSnapshot(t, e, "s1")
 		e.git(e.project, "checkout", "-q", "main")
 		writeFile(t, e.project, "y", "y")
-		e.git(e.project, "add", "-A")
-		e.git(e.project, "commit", "-q", "-m", "y")
+		e.commit("y")
 		mustUndo(t, e, "s1", false)
 		if out, err := runGitMaybe(e, "symbolic-ref", "-q", "HEAD"); err == nil {
 			t.Fatalf("HEAD should be detached, is %s", out)
@@ -213,79 +262,30 @@ func TestUndoDetachedAndUnbornHead(t *testing.T) {
 		e := newEnv(t)
 		e.git(e.project, "init", "-q", "-b", "main")
 		writeFile(t, e.project, "draft.txt", "draft\n")
-		rec := mustSnapshot(t, e, "s1")
-		if rec.Git.Head != "" || rec.Git.Branch != "refs/heads/main" {
+		if rec := mustSnapshot(t, e, "s1"); rec.Git.Head != "" || rec.Git.Branch != "refs/heads/main" {
 			t.Fatalf("unborn record: %+v", rec.Git)
 		}
 		writeFile(t, e.project, "draft.txt", "agent\n")
-		e.git(e.project, "add", "-A")
-		e.git(e.project, "commit", "-q", "-m", "first")
+		e.commit("first")
 		mustUndo(t, e, "s1", false)
 		if _, err := runGitMaybe(e, "rev-parse", "-q", "--verify", "HEAD"); err == nil {
 			t.Fatal("branch should be unborn again")
 		}
-		if readFile(t, e.project, "draft.txt") != "draft\n" {
-			t.Fatal("draft not restored")
-		}
+		wantFiles(t, e.project, "draft.txt", "draft\n")
 	})
 }
 
 func runGitMaybe(e *env, args ...string) (string, error) {
 	e.t.Helper()
-	cmd := gitCmd{dir: e.project}
-	out, err := cmd.strict(bg, args...)
+	out, err := gitCmd{dir: e.project}.strict(bg, args...)
 	return strings.TrimSpace(string(out)), err
-}
-
-func TestUndoRestoresControlFilesAndRemovesNestedRepos(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	mustMkdir(t, filepath.Join(e.project, "vendor", "lib"))
-	writeFile(t, e.project, "vendor/lib/keep.txt", "keep\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "vendor")
-	mustSnapshot(t, e, "s1")
-
-	// Planted git state.
-	writeFile(t, e.project, ".git/info/attributes", "* filter=evil\n")
-	evil := filepath.Join(e.project, "evil")
-	e.git(e.project, "init", "-q", evil)
-	writeFile(t, evil, "e.txt", "e")
-	e.git(evil, "add", "-A")
-	e.git(evil, "commit", "-q", "-m", "e")
-	e.git(evil, "config", "core.fsmonitor", "touch "+filepath.Join(e.root, "PWNED"))
-	e.git(e.project, "add", "evil")
-	e.git(filepath.Join(e.project, "vendor", "lib"), "init", "-q")
-
-	preview := mustUndo(t, e, "s1", true)
-	if strings.Join(preview.ControlChanges, ",") != "info/attributes" {
-		t.Fatalf("control changes = %v", preview.ControlChanges)
-	}
-	if strings.Join(preview.NestedRepos, ",") != "evil,vendor/lib" {
-		t.Fatalf("nested repos = %v", preview.NestedRepos)
-	}
-	mustUndo(t, e, "s1", false)
-	if pathExists(filepath.Join(e.project, ".git", "info", "attributes")) {
-		t.Fatal("planted info/attributes survived")
-	}
-	if pathExists(evil) {
-		t.Fatal("nested repository created during the session survived")
-	}
-	if pathExists(filepath.Join(e.project, "vendor", "lib", ".git")) || !pathExists(filepath.Join(e.project, "vendor", "lib", "keep.txt")) {
-		t.Fatal("a pre-existing directory must keep its files and lose only the planted .git")
-	}
-	if pathExists(filepath.Join(e.root, "PWNED")) {
-		t.Fatal("DefenseClaw's own git commands ran the planted fsmonitor")
-	}
 }
 
 // chmodT sets a test folder's mode and puts it back to 0755 at cleanup, so
 // the temporary directory can be removed.
 func chmodT(t *testing.T, dir string, mode os.FileMode) {
 	t.Helper()
-	if err := os.Chmod(dir, mode); err != nil {
-		t.Fatal(err)
-	}
+	mustChmod(t, dir, mode)
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 }
 
@@ -301,143 +301,47 @@ func TestReviewAndUndoSeeFoldersMadeUnreadable(t *testing.T) {
 	}
 	for _, git := range []bool{true, false} {
 		t.Run(map[bool]string{true: "git", false: "plain"}[git], func(t *testing.T) {
-			testFoldersMadeUnreadable(t, git)
+			e := newEnv(t)
+			if git {
+				e.initRepo()
+			} else {
+				writeFile(t, e.project, "README.md", "hello\n")
+			}
+			mustMkdir(t, filepath.Join(e.project, "locked-before"))
+			chmodT(t, filepath.Join(e.project, "locked-before"), 0o311)
+			if rec := mustSnapshot(t, e, "s1"); strings.Join(rec.Unreadable, " ") != "locked-before" {
+				t.Fatalf("snapshot unreadable = %v", rec.Unreadable)
+			}
+
+			// Session: a repository in a folder left with search and write
+			// permission but no read permission.
+			writeFile(t, e.project, "tools/.git/HEAD", "ref: refs/heads/main\n")
+			writeFile(t, e.project, "tools/.git/config", "[core]\n")
+			writeFile(t, e.project, "tools/notes.txt", "agent marker\n")
+			chmodT(t, filepath.Join(e.project, "tools"), 0o311)
+
+			rep := review(t, e, "s1", nil)
+			if f, ok := flagByLabel(rep, "tools/"); !ok || f.Kind != RiskUnreadable || f.Severity != SeverityHigh {
+				t.Fatalf("unreadable folder not flagged: %+v", rep.Flags)
+			}
+			if f, ok := flagByLabel(rep, "tools/.git"); !ok || f.Kind != RiskNestedRepo {
+				t.Fatalf("repository in the unreadable folder not flagged: %+v", rep.Flags)
+			}
+			if _, ok := flagByLabel(rep, "locked-before/"); ok || !rep.Sensitive() {
+				t.Fatalf("flags = %+v, sensitive %v", rep.Flags, rep.Sensitive())
+			}
+			for _, preview := range []bool{true, false} {
+				_, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1", Preview: preview})
+				var ue *UnreadableError
+				if !errors.Is(err, ErrUnreadableFolders) || !errors.As(err, &ue) || strings.Join(ue.Dirs, " ") != "tools" {
+					t.Fatalf("preview=%v: undo = %v, want it refused for tools", preview, err)
+				}
+			}
+			// Readable again, undo takes out what the session put there.
+			mustChmod(t, filepath.Join(e.project, "tools"), 0o755)
+			mustUndo(t, e, "s1", false)
+			wantFiles(t, e.project, "tools/.git", absent, "tools/notes.txt", absent)
 		})
-	}
-}
-
-func testFoldersMadeUnreadable(t *testing.T, git bool) {
-	e := newEnv(t)
-	if git {
-		e.initRepo()
-	} else {
-		writeFile(t, e.project, "README.md", "hello\n")
-	}
-	mustMkdir(t, filepath.Join(e.project, "locked-before"))
-	chmodT(t, filepath.Join(e.project, "locked-before"), 0o311)
-	if rec := mustSnapshot(t, e, "s1"); strings.Join(rec.Unreadable, " ") != "locked-before" {
-		t.Fatalf("git=%v: snapshot unreadable = %v", git, rec.Unreadable)
-	}
-
-	// Session: a repository in a folder left with search and write
-	// permission but no read permission.
-	writeFile(t, e.project, "tools/.git/HEAD", "ref: refs/heads/main\n")
-	writeFile(t, e.project, "tools/.git/config", "[core]\n")
-	writeFile(t, e.project, "tools/notes.txt", "agent marker\n")
-	chmodT(t, filepath.Join(e.project, "tools"), 0o311)
-
-	rep, err := Review(bg, ReviewOptions{DataDir: e.data, Name: "s1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f, ok := flagByLabel(rep, "tools/"); !ok || f.Kind != RiskUnreadable || f.Severity != SeverityHigh {
-		t.Fatalf("git=%v: unreadable folder not flagged: %+v", git, rep.Flags)
-	}
-	if f, ok := flagByLabel(rep, "tools/.git"); !ok || f.Kind != RiskNestedRepo {
-		t.Fatalf("git=%v: repository in the unreadable folder not flagged: %+v", git, rep.Flags)
-	}
-	if _, ok := flagByLabel(rep, "locked-before/"); ok || !rep.Sensitive() {
-		t.Fatalf("git=%v: flags = %+v, sensitive %v", git, rep.Flags, rep.Sensitive())
-	}
-
-	for _, preview := range []bool{true, false} {
-		_, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1", Preview: preview})
-		var ue *UnreadableError
-		if !errors.Is(err, ErrUnreadableFolders) || !errors.As(err, &ue) || strings.Join(ue.Dirs, " ") != "tools" {
-			t.Fatalf("git=%v preview=%v: undo = %v, want it refused for tools", git, preview, err)
-		}
-	}
-	// Readable again, undo takes out what the session put there.
-	if err := os.Chmod(filepath.Join(e.project, "tools"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mustUndo(t, e, "s1", false)
-	for _, rel := range []string{"tools/.git", "tools/notes.txt"} {
-		if pathExists(filepath.Join(e.project, rel)) {
-			t.Fatalf("git=%v: undo left %s", git, rel)
-		}
-	}
-}
-
-func TestUndoRemovesTopLevelGitInPlainFolder(t *testing.T) {
-	// p1a-20: a top-level .git planted in a non-git folder must be removed by undo.
-	e := newEnv(t)
-	writeFile(t, e.project, "README.md", "plain folder\n")
-	writeFile(t, e.project, "data.txt", "user data\n")
-	mustSnapshot(t, e, "p3")
-
-	// Agent creates a top-level .git directory with hostile config
-	e.git(e.project, "init", "-q", e.project)
-	writeFile(t, e.project, ".git/config", "[core]\n\tfsmonitor = /tmp/evil\n")
-	e.git(e.project, "add", "*.txt", "*.md")
-	e.git(e.project, "commit", "-q", "-m", "initial")
-
-	preview := mustUndo(t, e, "p3", true)
-	if len(preview.NestedRepos) != 1 || preview.NestedRepos[0] != "." {
-		t.Fatalf("nested repos = %v, want [.]", preview.NestedRepos)
-	}
-
-	mustUndo(t, e, "p3", false)
-	if pathExists(filepath.Join(e.project, ".git")) {
-		t.Fatal("top-level .git created during the session survived undo")
-	}
-	if !pathExists(filepath.Join(e.project, "README.md")) || !pathExists(filepath.Join(e.project, "data.txt")) {
-		t.Fatal("user files were removed by undo")
-	}
-}
-
-func TestUndoRemovesFilesHiddenByChangedIgnoreRules(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	writeFile(t, e.project, "build/keep.o", "ignored before the session\n")
-	mustSnapshot(t, e, "s1")
-	// The agent drops a payload and hides it from git.
-	writeFileMode(t, e.project, "tools/evil.sh", "#!/bin/sh\n", 0o755)
-	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\ntools/\n")
-	writeFile(t, e.project, "out.log", "ignored output\n")
-
-	res := mustUndo(t, e, "s1", false)
-	if strings.Join(res.HiddenRemoved, ",") != "tools/evil.sh" {
-		t.Fatalf("HiddenRemoved = %v", res.HiddenRemoved)
-	}
-	if pathExists(filepath.Join(e.project, "tools")) {
-		t.Fatal("hidden payload survived undo")
-	}
-	if readFile(t, e.project, ".gitignore") != "*.log\nbuild/\n.env\n" {
-		t.Fatal(".gitignore not restored")
-	}
-	if !pathExists(filepath.Join(e.project, "out.log")) || !pathExists(filepath.Join(e.project, "build", "keep.o")) {
-		t.Fatal("files ignored under the pre-session rules must stay")
-	}
-}
-
-func TestUndoRecoversDeletedObjects(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	e.git(e.project, "gc", "-q")
-	head := e.git(e.project, "rev-parse", "HEAD")
-	rec := mustSnapshot(t, e, "s1")
-	if !rec.Git.ObjectsCopied {
-		t.Fatalf("the snapshot did not copy the project's objects: %v", rec.Warnings)
-	}
-	// The agent wipes the object store.
-	for _, dir := range []string{"pack"} {
-		entries, _ := os.ReadDir(filepath.Join(e.project, ".git", "objects", dir))
-		for _, en := range entries {
-			_ = os.Remove(filepath.Join(e.project, ".git", "objects", dir, en.Name()))
-		}
-	}
-	writeFile(t, e.project, "README.md", "changed\n")
-	preview := mustUndo(t, e, "s1", true)
-	if len(preview.LostObjects) == 0 {
-		t.Fatal("lost objects not detected")
-	}
-	mustUndo(t, e, "s1", false)
-	if e.git(e.project, "rev-parse", "HEAD^{commit}") != head || e.git(e.project, "cat-file", "-p", "HEAD:README.md") != "hello" {
-		t.Fatal("history not recovered")
-	}
-	if readFile(t, e.project, "README.md") != "hello\n" {
-		t.Fatal("working tree not restored")
 	}
 }
 
@@ -445,150 +349,13 @@ func TestUndoRefusesReplacedGitDir(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
 	mustSnapshot(t, e, "s1")
-	if err := os.Rename(filepath.Join(e.project, ".git"), filepath.Join(e.project, ".git-old")); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Rename(filepath.Join(e.project, ".git"), filepath.Join(e.project, ".git-old")))
 	e.git(e.project, "init", "-q")
-	_, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1"})
-	if !errors.Is(err, ErrGitDirReplaced) {
+	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1"}); !errors.Is(err, ErrGitDirReplaced) {
 		t.Fatalf("err = %v, want ErrGitDirReplaced", err)
 	}
-	rep, err := Review(bg, ReviewOptions{DataDir: e.data, Name: "s1", Scanners: []ContentScanner{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rep.Flags) == 0 || rep.Flags[0].Kind != RiskGitControl || rep.Flags[0].Severity != SeverityCritical {
+	if rep := review(t, e, "s1", []ContentScanner{}); len(rep.Flags) == 0 || rep.Flags[0].Kind != RiskGitControl || rep.Flags[0].Severity != SeverityCritical {
 		t.Fatalf("review flags = %+v", rep.Flags)
-	}
-}
-
-func TestUndoDoesNotFollowPlantedSymlinks(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	outside := filepath.Join(e.root, "outside")
-	mustMkdir(t, outside)
-	mustSnapshot(t, e, "s1")
-	if err := os.RemoveAll(filepath.Join(e.project, "src")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(e.project, "src")); err != nil {
-		t.Fatal(err)
-	}
-	// Also plant a symlinked .git/info so control-file restores cannot be
-	// redirected either.
-	writeFile(t, e.project, ".git/info/grafts", "")
-	mustUndo(t, e, "s1", false)
-	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
-		t.Fatalf("undo wrote outside the project: %v", entries)
-	}
-	info, err := os.Lstat(filepath.Join(e.project, "src"))
-	if err != nil || !info.IsDir() || readFile(t, e.project, "src/app.go") != "package main\n" {
-		t.Fatal("src not restored as a directory")
-	}
-}
-
-func TestSnapshotExistsAndReplace(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	mustSnapshot(t, e, "s1")
-	if _, err := Snapshot(bg, e.snapOpts("s1")); !errors.Is(err, ErrSnapshotExists) {
-		t.Fatalf("err = %v", err)
-	}
-	writeFile(t, e.project, "README.md", "kept\n")
-	opts := e.snapOpts("s1")
-	opts.Replace = true
-	if _, err := Snapshot(bg, opts); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, e.project, "README.md", "agent\n")
-	mustUndo(t, e, "s1", false)
-	if readFile(t, e.project, "README.md") != "kept\n" {
-		t.Fatal("replaced snapshot not used")
-	}
-	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "nope"}); !errors.Is(err, ErrSnapshotNotFound) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestDeleteSnapshotRemovesRefsAndShadow(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	a := mustSnapshot(t, e, "a")
-	mustSnapshot(t, e, "b")
-	if err := DeleteSnapshot(bg, e.data, "a"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runGitMaybe(e, "rev-parse", "-q", "--verify", "refs/defenseclaw/pre/a"); err == nil {
-		t.Fatal("project ref for a survived")
-	}
-	if !pathExists(a.Git.Shadow) {
-		t.Fatal("shadow removed while b still uses it")
-	}
-	if err := DeleteSnapshot(bg, e.data, "b"); err != nil {
-		t.Fatal(err)
-	}
-	if pathExists(a.Git.Shadow) {
-		t.Fatal("shadow survived its last snapshot")
-	}
-	recs, err := ListSnapshots(e.data)
-	if err != nil || len(recs) != 0 {
-		t.Fatalf("ListSnapshots = %v, %v", recs, err)
-	}
-}
-
-func TestDeleteSnapshotRemovesSavedRefTips(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	mustSnapshot(t, e, "s1")
-	writeFile(t, e.project, "agent.txt", "agent\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "agent commit")
-	mustUndo(t, e, "s1", false)
-	// Another sandbox whose name starts the same keeps its saved tips.
-	e.git(e.project, "update-ref", "refs/defenseclaw/post-refs/s10/x/refs/heads/main", "HEAD")
-	saved := func(name string) string {
-		return e.git(e.project, "for-each-ref", "--format=%(refname)", "refs/defenseclaw/post-refs/"+name+"/")
-	}
-	if saved("s1") == "" {
-		t.Fatal("undo saved no branch tips")
-	}
-	// A new session (the snapshot replaced) keeps them: they are the only
-	// copy of the earlier session's branch work.
-	opts := e.snapOpts("s1")
-	opts.Replace = true
-	if _, err := Snapshot(bg, opts); err != nil {
-		t.Fatal(err)
-	}
-	if saved("s1") == "" {
-		t.Fatal("replacing the snapshot dropped the saved branch tips")
-	}
-	if err := DeleteSnapshot(bg, e.data, "s1"); err != nil {
-		t.Fatal(err)
-	}
-	if got := saved("s1"); got != "" {
-		t.Fatalf("deleting the snapshot left %s", got)
-	}
-	if saved("s10") == "" {
-		t.Fatal("deleting s1 removed s10's saved branch tips")
-	}
-}
-
-func TestReleaseMountRemovesItsDirectory(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	writeFile(t, e.project, ".env", "SECRET=1\n")
-	if _, err := PlanMount(bg, e.mountOpts("m1")); err != nil {
-		t.Fatal(err)
-	}
-	lay, _ := newLayout(e.data)
-	if !pathExists(lay.workspaceDir("m1")) {
-		t.Fatal("PlanMount wrote no mount state")
-	}
-	if err := ReleaseMount(e.data, "m1"); err != nil {
-		t.Fatal(err)
-	}
-	if pathExists(lay.workspaceDir("m1")) {
-		t.Fatal("ReleaseMount left the workspace directory")
 	}
 }
 
@@ -599,41 +366,23 @@ func TestPlainSnapshotUndo(t *testing.T) {
 	writeFile(t, e.project, "docs/guide.md", "guide\n")
 	writeFile(t, e.project, ".env", "SECRET=1\n")
 	writeFile(t, e.project, "node_modules/x/index.js", "x\n")
-	if err := os.Symlink("doc.md", filepath.Join(e.project, "link")); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, "doc.md", filepath.Join(e.project, "link"))
 	outside := filepath.Join(e.root, "outside")
 	mustMkdir(t, outside)
 	opts := e.snapOpts("p1")
 	opts.Skip = []string{".env"}
 	rec, err := Snapshot(bg, opts)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || rec.Kind != SnapshotCopy || rec.Copy.Files != 3 || strings.Join(rec.Copy.Opaque, ",") != "node_modules" {
+		t.Fatalf("record: %+v, %v", rec, err)
 	}
-	if rec.Kind != SnapshotCopy || rec.Copy.Files != 3 || strings.Join(rec.Copy.Opaque, ",") != "node_modules" {
-		t.Fatalf("record: %+v", rec.Copy)
-	}
-	if pathExists(filepath.Join(rec.Copy.Dir, ".env")) {
-		t.Fatal("masked secret copied into the snapshot")
-	}
+	wantFiles(t, rec.Copy.Dir, ".env", absent) // a masked secret is not copied
 
 	writeFile(t, e.project, "doc.md", "one\nthree\nfour\n")
-	if err := os.Chmod(filepath.Join(e.project, "bin", "tool"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	mustChmod(t, filepath.Join(e.project, "bin", "tool"), 0o644)
 	writeFile(t, e.project, "new/deep/file.txt", "n\n")
-	if err := os.Remove(filepath.Join(e.project, "link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("/etc/passwd", filepath.Join(e.project, "link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.RemoveAll(filepath.Join(e.project, "docs")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(e.project, "docs")); err != nil {
-		t.Fatal(err)
-	}
+	mustRemove(t, e.project, "link", "docs")
+	mustSymlink(t, "/etc/passwd", filepath.Join(e.project, "link"))
+	mustSymlink(t, outside, filepath.Join(e.project, "docs"))
 	writeFile(t, e.project, "node_modules/x/index.js", "changed\n")
 
 	preview := mustUndo(t, e, "p1", true)
@@ -646,56 +395,44 @@ func TestPlainSnapshotUndo(t *testing.T) {
 		}
 	}
 	mustUndo(t, e, "p1", false)
-	if readFile(t, e.project, "doc.md") != "one\ntwo\n" || readFile(t, e.project, "docs/guide.md") != "guide\n" {
-		t.Fatal("files not restored")
-	}
-	if info, _ := os.Stat(filepath.Join(e.project, "bin", "tool")); info.Mode().Perm() != 0o755 {
-		t.Fatalf("mode = %v", info.Mode())
-	}
+	// Skipped and opaque paths are left alone.
+	wantFiles(t, e.project, "doc.md", "one\ntwo\n", "docs/guide.md", "guide\n", "new", absent,
+		".env", "SECRET=1\n", "node_modules/x/index.js", "changed\n")
+	wantMode(t, e.project, "bin/tool", 0o755)
 	if target, _ := os.Readlink(filepath.Join(e.project, "link")); target != "doc.md" {
 		t.Fatalf("link -> %s", target)
-	}
-	if pathExists(filepath.Join(e.project, "new")) {
-		t.Fatal("created tree survived")
 	}
 	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
 		t.Fatal("restore followed the planted docs symlink")
 	}
-	if readFile(t, e.project, ".env") != "SECRET=1\n" || readFile(t, e.project, "node_modules/x/index.js") != "changed\n" {
-		t.Fatal("skipped and opaque paths must be left alone")
-	}
 }
 
-func TestPlainSnapshotEntryLimit(t *testing.T) {
+// TestPlainSnapshotLimits: a plain folder past the size or entry limit is
+// refused (nothing is left behind), not snapshotted in part; review and
+// undo refuse a folder the session grew past the snapshot's entry limit
+// instead of comparing a partial listing, which would call the unread
+// files deleted and keep what was created among them.
+func TestPlainSnapshotLimits(t *testing.T) {
 	e := newEnv(t)
 	for _, rel := range []string{"a.txt", "b.txt", "c.txt", "d/e.txt", "d/f.txt"} {
 		writeFile(t, e.project, rel, rel+"\n")
 	}
-	// Six entries (five files, one directory): a walk that stops at five
-	// must not become a snapshot of part of the folder.
-	opts := e.snapOpts("p1")
-	opts.MaxWalkEntries = 5
-	_, err := Snapshot(bg, opts)
 	var tl *TooLargeError
-	if !errors.As(err, &tl) || !errors.Is(err, ErrTooLarge) || !tl.Entries || tl.Limit != 5 {
-		t.Fatalf("err = %v", err)
+	opts := e.snapOpts("p1")
+	opts.MaxCopyBytes = 10
+	if _, err := Snapshot(bg, opts); !errors.As(err, &tl) || !errors.Is(err, ErrTooLarge) || tl.Size <= 10 {
+		t.Fatalf("size limit: %v", err)
 	}
-	if pathExists(filepath.Join(e.data, "snapshots", "p1")) {
-		t.Fatal("refused snapshot left data behind")
+	// Six entries (five files, one directory).
+	opts.MaxCopyBytes, opts.MaxWalkEntries = 0, 5
+	if _, err := Snapshot(bg, opts); !errors.As(err, &tl) || !errors.Is(err, ErrTooLarge) || !tl.Entries || tl.Limit != 5 {
+		t.Fatalf("entry limit: %v", err)
 	}
-
+	wantFiles(t, e.data, "snapshots/p1", absent)
 	opts.MaxWalkEntries = 8
-	rec, err := Snapshot(bg, opts)
-	if err != nil {
-		t.Fatal(err)
+	if rec, err := Snapshot(bg, opts); err != nil || rec.Copy.Files != 5 || rec.Copy.MaxEntries != 8 {
+		t.Fatalf("record: %+v, %v", rec, err)
 	}
-	if rec.Copy.Files != 5 || rec.Copy.MaxEntries != 8 {
-		t.Fatalf("record: %+v", rec.Copy)
-	}
-	// Review and Undo read the folder under the snapshot's limit. Once the
-	// session grows it past that, they refuse instead of comparing a
-	// partial listing (which would call the unread files deleted and keep
-	// what was created among them).
 	for _, rel := range []string{"g.txt", "h.txt", "i.txt"} {
 		writeFile(t, e.project, rel, "created in the session\n")
 	}
@@ -705,500 +442,112 @@ func TestPlainSnapshotEntryLimit(t *testing.T) {
 	if _, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "p1"}); !errors.As(err, &tl) || !tl.Entries {
 		t.Fatalf("undo: %v", err)
 	}
-	for _, rel := range []string{"a.txt", "d/f.txt", "g.txt", "i.txt"} {
-		if !pathExists(filepath.Join(e.project, filepath.FromSlash(rel))) {
-			t.Fatalf("refused undo changed the folder: %s is gone", rel)
-		}
-	}
+	wantFiles(t, e.project, "a.txt", present, "d/f.txt", present, "g.txt", present, "i.txt", present)
 	// Back under the limit, undo works again.
-	if err := os.Remove(filepath.Join(e.project, "i.txt")); err != nil {
-		t.Fatal(err)
-	}
+	mustRemove(t, e.project, "i.txt")
 	if got := changePaths(mustUndo(t, e, "p1", false).Changes); got != "A:g.txt A:h.txt" {
 		t.Fatalf("undo changes = %s", got)
 	}
-	if pathExists(filepath.Join(e.project, "g.txt")) || readFile(t, e.project, "d/f.txt") != "d/f.txt\n" {
-		t.Fatal("undo did not restore the folder")
-	}
+	wantFiles(t, e.project, "g.txt", absent, "d/f.txt", "d/f.txt\n")
 }
 
-func TestPlainSnapshotSizeCap(t *testing.T) {
-	e := newEnv(t)
-	writeFile(t, e.project, "big.bin", strings.Repeat("x", 4096))
-	opts := e.snapOpts("p1")
-	opts.MaxCopyBytes = 1024
-	_, err := Snapshot(bg, opts)
-	var tl *TooLargeError
-	if !errors.As(err, &tl) || !errors.Is(err, ErrTooLarge) || tl.Size <= 1024 {
-		t.Fatalf("err = %v", err)
-	}
-	if pathExists(filepath.Join(e.data, "snapshots", "p1")) {
-		t.Fatal("failed snapshot left data behind")
-	}
-}
-
-// TestUndoPreservesIgnoredDirectoryWithNestedRepo tests p1a-19: when the
-// agent plants a .git marker inside an ignored directory that existed before
-// the session, undo must only remove the .git entry, not the whole directory.
-func TestUndoPreservesIgnoredDirectoryWithNestedRepo(t *testing.T) {
+// TestUndoKeepsFilesIgnoredBeforeTheSession: files git ignored before the
+// session stay exactly as they are (content, mode, size, modification
+// time; a large one is never read into memory) when the agent removes
+// their ignore rules. Git's own matching decides what was ignored (nested
+// .gitignore files, negation, directory and anchored patterns). One the
+// agent rewrote after dropping its rule is listed as a change undo cannot
+// put back, and a .git planted in an ignored folder goes alone.
+func TestUndoKeepsFilesIgnoredBeforeTheSession(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
-	// Pre-session: an ignored directory with operator files.
-	writeFile(t, e.project, "build/data.json", "operator marker data\n")
-	writeFile(t, e.project, "build/cache.bin", "operator marker cache\n")
+	writeFile(t, e.project, ".gitignore", "*.log\n!important.log\n/secret.txt\ntmp/\nbuild/\n.env\nexecutable.sh\nlarge.dat\n")
+	writeFile(t, e.project, "src/.gitignore", "*.bak\n!keep.bak\n/local-config.json\n")
+	ignored := map[string]string{
+		"debug.log": "operator marker log\n", "quiet.log": "operator marker untouched\n",
+		"secret.txt": "operator marker secret\n", "tmp/cache.dat": "operator marker cache\n",
+		"src/old.bak": "operator marker old\n", "src/local-config.json": "operator marker config\n",
+		".env": "SECRET=operator marker value\n", "build/data.json": "operator marker data\n",
+	}
+	for rel, content := range ignored {
+		writeFile(t, e.project, rel, content)
+	}
+	writeFileMode(t, e.project, "executable.sh", "#!/bin/sh\necho marker\n", 0o755)
+	notIgnored := []string{"important.log", "data/secret.txt", "src/keep.bak", "src/sub/local-config.json"}
+	for _, rel := range notIgnored {
+		writeFile(t, e.project, rel, "tracked marker\n")
+	}
+	e.commit("tracked")
+	// A sparse file above the old 128 MiB cap, marked at both ends.
+	const size = 200 << 20
+	large := filepath.Join(e.project, "large.dat")
+	f, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err1 := f.WriteAt([]byte("START"), 0)
+	_, err2 := f.WriteAt([]byte("END"), size-3)
+	must(t, errors.Join(err1, err2, f.Close()))
+	mtime := time.Now().Add(-time.Hour).Truncate(time.Second)
+	must(t, os.Chtimes(large, mtime, mtime))
 	mustSnapshot(t, e, "s1")
-
-	// Session: agent creates .git inside the ignored directory.
-	writeFile(t, e.project, "build/.git/config", "[core]\n")
-	writeFile(t, e.project, "build/.git/HEAD", "ref: refs/heads/main\n")
-
-	preview := mustUndo(t, e, "s1", true)
-	if len(preview.NestedRepos) != 1 || preview.NestedRepos[0] != "build" {
-		t.Fatalf("nested repos = %v", preview.NestedRepos)
-	}
-
-	mustUndo(t, e, "s1", false)
-	// The .git entry should be removed, but operator files kept.
-	if pathExists(filepath.Join(e.project, "build/.git")) {
-		t.Fatal("nested .git survived undo")
-	}
-	if readFile(t, e.project, "build/data.json") != "operator marker data\n" {
-		t.Fatal("pre-existing ignored file was lost")
-	}
-	if readFile(t, e.project, "build/cache.bin") != "operator marker cache\n" {
-		t.Fatal("pre-existing ignored file was lost")
-	}
-}
-
-// TestUndoPreservesIgnoredFilesWhenIgnoreRuleRemoved tests p1a-21: when a
-// file was ignored before the session and the agent removes its ignore rule,
-// undo must keep the pre-existing file.
-func TestUndoPreservesIgnoredFilesWhenIgnoreRuleRemoved(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	// Pre-session: ignored files exist.
-	writeFile(t, e.project, ".env", "SECRET=operator marker value\n")
-	writeFile(t, e.project, "debug.log", "operator marker log\n")
-	writeFile(t, e.project, "build/output.bin", "operator marker output\n")
-	mustSnapshot(t, e, "s1")
-
-	// Session: agent removes .env and *.log from .gitignore.
-	writeFile(t, e.project, ".gitignore", "build/\n")
-
-	preview := mustUndo(t, e, "s1", true)
-	// The ignored files should not appear as "A" (added).
-	for _, c := range preview.Changes {
-		if c.Path == ".env" || c.Path == "debug.log" {
-			t.Fatalf("pre-session ignored file %s reported as %s", c.Path, c.Status)
+	for _, rel := range notIgnored {
+		if wasIgnored(rel, e.lastSnapshot.Git.Ignored) {
+			t.Errorf("%s was not ignored before the session but is in the snapshot's ignored list", rel)
 		}
 	}
 
-	mustUndo(t, e, "s1", false)
-	// The pre-session ignored files must survive.
-	if readFile(t, e.project, ".env") != "SECRET=operator marker value\n" {
-		t.Fatal("pre-existing .env was removed")
-	}
-	if readFile(t, e.project, "debug.log") != "operator marker log\n" {
-		t.Fatal("pre-existing debug.log was removed")
-	}
-	if readFile(t, e.project, "build/output.bin") != "operator marker output\n" {
-		t.Fatal("pre-existing build/output.bin was removed")
-	}
-}
-
-// TestUndoReportsChangedFileWhoseIgnoreRuleWasRemoved: a file ignored
-// before the session that the agent rewrote after removing its ignore rule
-// is kept as it is (the snapshot has no copy of it), so undo must list it
-// among the changes it cannot put back rather than leave it out of both
-// Changes and Unrestored.
-func TestUndoReportsChangedFileWhoseIgnoreRuleWasRemoved(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	writeFile(t, e.project, "debug.log", "operator marker log\n")
-	writeFile(t, e.project, "quiet.log", "operator marker untouched\n")
-	mustSnapshot(t, e, "s1")
-
-	// Session: the agent drops the *.log rule and rewrites one of the logs.
-	writeFile(t, e.project, ".gitignore", "build/\n.env\n")
+	// Session: the agent drops every rule but build/, rewrites one log and
+	// plants a repository in the ignored build folder.
+	writeFile(t, e.project, ".gitignore", "build/\n")
+	writeFile(t, e.project, "src/.gitignore", "")
 	writeFile(t, e.project, "debug.log", "agent marker rewritten content\n")
+	writeFile(t, e.project, "build/.git/HEAD", "ref: refs/heads/main\n")
+	writeFile(t, e.project, "build/.git/config", "[core]\n")
 
 	check := func(res *UndoResult, when string) {
 		t.Helper()
 		for _, c := range res.Changes {
-			if c.Path == "debug.log" || c.Path == "quiet.log" {
+			if _, ok := ignored[c.Path]; ok || c.Path == "executable.sh" || c.Path == "large.dat" {
 				t.Fatalf("%s: pre-session ignored file %s reported as %s", when, c.Path, c.Status)
 			}
 		}
-		un := res.Unrestored()
-		if len(un) != 1 || un[0].Path != "debug.log" || un[0].Modified != 1 {
+		if un := res.Unrestored(); len(un) != 1 || un[0].Path != "debug.log" || un[0].Modified != 1 {
 			t.Fatalf("%s: unrestored = %+v, want debug.log modified", when, un)
+		}
+		if strings.Join(res.NestedRepos, ",") != "build" {
+			t.Fatalf("%s: nested repos = %v", when, res.NestedRepos)
+		}
+		for _, w := range res.Warnings {
+			if strings.Contains(w, "large.dat") || strings.Contains(w, "MB") {
+				t.Fatalf("%s: unexpected warning: %s", when, w)
+			}
 		}
 	}
 	check(mustUndo(t, e, "s1", true), "preview")
 	check(mustUndo(t, e, "s1", false), "undo")
-	if readFile(t, e.project, ".gitignore") != "*.log\nbuild/\n.env\n" {
-		t.Fatal("undo did not restore .gitignore")
+	ignored["debug.log"] = "agent marker rewritten content\n"
+	for rel, content := range ignored {
+		wantFiles(t, e.project, rel, content)
 	}
-	if readFile(t, e.project, "quiet.log") != "operator marker untouched\n" {
-		t.Fatal("undo changed a pre-session ignored file")
+	wantFiles(t, e.project, ".gitignore", "*.log\n!important.log\n/secret.txt\ntmp/\nbuild/\n.env\nexecutable.sh\nlarge.dat\n",
+		"src/.gitignore", "*.bak\n!keep.bak\n/local-config.json\n", "build/.git", absent)
+	wantMode(t, e.project, "executable.sh", 0o755)
+	wantMode(t, e.project, "secret.txt", 0o644)
+	info, err := os.Stat(large)
+	if err != nil || info.Size() != size || info.ModTime().Sub(mtime).Abs() > time.Second {
+		t.Fatalf("large.dat = %v, %v; want %d bytes from %v", info, err, size, mtime)
 	}
-}
-
-// TestUndoSavesPostSessionRefTips tests p1a-22: before resetting branches
-// and tags, undo must save the post-session tips so they are recoverable.
-func TestUndoSavesPostSessionRefTips(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	e.git(e.project, "tag", "v1")
-	hostBranch := e.git(e.project, "rev-parse", "HEAD")
-	e.git(e.project, "branch", "feature")
-	mustSnapshot(t, e, "s1")
-
-	// Session: agent creates commits, moves branches and tags.
-	writeFile(t, e.project, "agent.txt", "agent marker commit\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "agent commit on main")
-	agentMainTip := e.git(e.project, "rev-parse", "HEAD")
-	e.git(e.project, "checkout", "-q", "feature")
-	writeFile(t, e.project, "feature.txt", "agent marker feature\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "agent feature commit")
-	agentFeatureTip := e.git(e.project, "rev-parse", "HEAD")
-	e.git(e.project, "tag", "-d", "v1")
-	e.git(e.project, "tag", "agent-tag")
-	agentTagTip := e.git(e.project, "rev-parse", "agent-tag")
-
-	res := mustUndo(t, e, "s1", false)
-	// The pre-session state should be restored.
-	if e.git(e.project, "rev-parse", "HEAD") != hostBranch {
-		t.Fatal("HEAD not restored")
-	}
-	if e.git(e.project, "rev-parse", "refs/tags/v1") != hostBranch {
-		t.Fatal("v1 tag not restored")
-	}
-	// The agent's work must be saved under refs/defenseclaw/post-refs/s1/<undo-id>/.
-	// Extract the undo-id from the saved refs list or the warning hint.
-	var undoID string
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "refs/defenseclaw/post-refs/s1/") {
-			// Extract undo-id from the hint: "...refs/defenseclaw/post-refs/s1/<undo-id>/..."
-			parts := strings.Split(w, "refs/defenseclaw/post-refs/s1/")
-			if len(parts) > 1 {
-				idParts := strings.Split(parts[1], "/")
-				if len(idParts) > 0 {
-					undoID = idParts[0]
-				}
-			}
-			break
-		}
-	}
-	if undoID == "" {
-		t.Fatalf("could not find undo-id in warnings: %v", res.Warnings)
-	}
-	// Verify refs are saved under the undo-id namespace.
-	prefix := "refs/defenseclaw/post-refs/s1/" + undoID + "/"
-	if got := e.git(e.project, "rev-parse", prefix+"refs/heads/main"); got != agentMainTip {
-		t.Fatalf("agent's main tip not saved: got %s, want %s", got, agentMainTip)
-	}
-	if got := e.git(e.project, "rev-parse", prefix+"refs/heads/feature"); got != agentFeatureTip {
-		t.Fatalf("agent's feature tip not saved: got %s, want %s", got, agentFeatureTip)
-	}
-	if got := e.git(e.project, "rev-parse", prefix+"refs/tags/agent-tag"); got != agentTagTip {
-		t.Fatalf("agent's tag not saved: got %s, want %s", got, agentTagTip)
-	}
-}
-
-// TestUndoTwoUndosOfSameNameSaveToDifferentNamespaces tests that multiple
-// undos of the same snapshot name save refs to unique namespaces.
-func TestUndoTwoUndosOfSameNameSaveToDifferentNamespaces(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	initial := e.git(e.project, "rev-parse", "HEAD")
-	mustSnapshot(t, e, "s1")
-
-	// First session: create a commit.
-	writeFile(t, e.project, "v1.txt", "version 1\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "v1")
-	firstTip := e.git(e.project, "rev-parse", "HEAD")
-
-	// First undo.
-	res1 := mustUndo(t, e, "s1", false)
-	if e.git(e.project, "rev-parse", "HEAD") != initial {
-		t.Fatal("first undo did not restore")
-	}
-
-	// Second session: create a different commit.
-	writeFile(t, e.project, "v2.txt", "version 2\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "v2")
-	secondTip := e.git(e.project, "rev-parse", "HEAD")
-
-	// Second undo of the same name.
-	res2 := mustUndo(t, e, "s1", false)
-	if e.git(e.project, "rev-parse", "HEAD") != initial {
-		t.Fatal("second undo did not restore")
-	}
-
-	// Both undos should succeed and save to different namespaces.
-	var id1, id2 string
-	for _, w := range res1.Warnings {
-		if strings.Contains(w, "refs/defenseclaw/post-refs/s1/") {
-			parts := strings.Split(w, "refs/defenseclaw/post-refs/s1/")
-			if len(parts) > 1 {
-				id1 = strings.Split(parts[1], "/")[0]
-			}
-			break
-		}
-	}
-	for _, w := range res2.Warnings {
-		if strings.Contains(w, "refs/defenseclaw/post-refs/s1/") {
-			parts := strings.Split(w, "refs/defenseclaw/post-refs/s1/")
-			if len(parts) > 1 {
-				id2 = strings.Split(parts[1], "/")[0]
-			}
-			break
-		}
-	}
-	if id1 == "" || id2 == "" {
-		t.Fatalf("could not extract undo IDs from warnings: %v, %v", res1.Warnings, res2.Warnings)
-	}
-	if id1 == id2 {
-		t.Fatalf("both undos used the same ID: %s", id1)
-	}
-
-	// Both session tips should be recoverable from their respective namespaces.
-	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/"+id1+"/refs/heads/main"); got != firstTip {
-		t.Fatalf("first session tip not saved: got %s, want %s", got, firstTip)
-	}
-	if got := e.git(e.project, "rev-parse", "refs/defenseclaw/post-refs/s1/"+id2+"/refs/heads/main"); got != secondTip {
-		t.Fatalf("second session tip not saved: got %s, want %s", got, secondTip)
-	}
-}
-
-// TestUndoIgnoredFilesComplexPatterns tests git's ignore matching with nested
-// .gitignore files, negation, directory patterns, and anchored patterns.
-func TestUndoIgnoredFilesComplexPatterns(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-
-	// Pre-session: Set up complex .gitignore hierarchy.
-	// Root .gitignore with directory pattern, negation, and anchored pattern.
-	writeFile(t, e.project, ".gitignore", "*.log\n!important.log\n/secret.txt\ntmp/\n")
-	// Nested .gitignore in src/ subdirectory.
-	writeFile(t, e.project, "src/.gitignore", "*.bak\n!keep.bak\n/local-config.json\n")
-
-	// Create ignored files according to these rules.
-	writeFile(t, e.project, "debug.log", "operator marker log\n")                 // ignored by *.log
-	writeFile(t, e.project, "important.log", "operator marker important\n")       // NOT ignored (negation)
-	writeFile(t, e.project, "secret.txt", "operator marker secret\n")             // ignored by /secret.txt (anchored)
-	writeFile(t, e.project, "data/secret.txt", "operator marker data\n")          // NOT ignored (anchored pattern)
-	writeFile(t, e.project, "tmp/cache.dat", "operator marker cache\n")           // ignored by tmp/ (directory pattern)
-	writeFile(t, e.project, "src/old.bak", "operator marker old\n")               // ignored by src/.gitignore *.bak
-	writeFile(t, e.project, "src/keep.bak", "operator marker keep\n")             // NOT ignored (nested negation)
-	writeFile(t, e.project, "src/local-config.json", "operator marker config\n")  // ignored by anchored in nested
-	writeFile(t, e.project, "src/sub/local-config.json", "operator marker sub\n") // NOT ignored (anchored in src/)
-
-	// Commit the tracked files.
-	e.git(e.project, "add", ".")
-	e.git(e.project, "commit", "-q", "-m", "initial")
-
-	mustSnapshot(t, e, "s1")
-
-	// Session: agent clears all .gitignore rules, making previously ignored files visible.
-	writeFile(t, e.project, ".gitignore", "")
-	writeFile(t, e.project, "src/.gitignore", "")
-
-	preview := mustUndo(t, e, "s1", true)
-
-	// The files that were ignored pre-session should not appear as "A" (added).
-	ignoredPreSession := []string{"debug.log", "secret.txt", "tmp/cache.dat", "src/old.bak", "src/local-config.json"}
-	for _, c := range preview.Changes {
-		for _, ignored := range ignoredPreSession {
-			if c.Path == ignored && c.Status == "A" {
-				t.Errorf("pre-session ignored file %s incorrectly reported as %s", c.Path, c.Status)
-			}
-		}
-	}
-
-	// Files that were NOT ignored should not be in the snapshot's Ignored list.
-	notIgnored := []string{"important.log", "data/secret.txt", "src/keep.bak", "src/sub/local-config.json"}
-	for _, path := range notIgnored {
-		if wasIgnored(path, e.lastSnapshot.Git.Ignored) {
-			t.Errorf("file %s was not ignored pre-session but appears in snapshot.Ignored", path)
-		}
-	}
-
-	mustUndo(t, e, "s1", false)
-
-	// Verify that pre-session ignored files survive undo.
-	for _, path := range ignoredPreSession {
-		if !fileExists(filepath.Join(e.project, filepath.FromSlash(path))) {
-			t.Errorf("pre-session ignored file %s was removed by undo", path)
-		}
-	}
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// TestUndoPreservesIgnoredFileMode tests that undo preserves the original file
-// mode of pre-existing ignored files.
-func TestUndoPreservesIgnoredFileMode(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-
-	// Pre-session: create ignored files with specific modes.
-	writeFile(t, e.project, ".gitignore", "secret.txt\nexecutable.sh\n")
-	writeFile(t, e.project, "secret.txt", "operator marker secret\n")
-	writeFileMode(t, e.project, "executable.sh", "#!/bin/sh\necho marker\n", 0o755)
-
-	mustSnapshot(t, e, "s1")
-
-	// Session: agent clears .gitignore, making files visible.
-	writeFile(t, e.project, ".gitignore", "")
-
-	mustUndo(t, e, "s1", false)
-
-	// Verify modes are preserved.
-	secretInfo, err := os.Stat(filepath.Join(e.project, "secret.txt"))
-	if err != nil {
-		t.Fatal("secret.txt was not restored")
-	}
-	if secretInfo.Mode().Perm() != 0o644 {
-		t.Errorf("secret.txt mode = %o, want 0644", secretInfo.Mode().Perm())
-	}
-
-	execInfo, err := os.Stat(filepath.Join(e.project, "executable.sh"))
-	if err != nil {
-		t.Fatal("executable.sh was not restored")
-	}
-	if execInfo.Mode().Perm() != 0o755 {
-		t.Errorf("executable.sh mode = %o, want 0755", execInfo.Mode().Perm())
-	}
-}
-
-// TestUndoRefusesSymlinkedParent tests that undo refuses to restore ignored
-// files if a parent directory is replaced with a symlink pointing outside.
-func TestUndoRefusesSymlinkedParent(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-
-	// Pre-session: ignored file in subdirectory.
-	writeFile(t, e.project, ".gitignore", "data/secret.txt\n")
-	writeFile(t, e.project, "data/secret.txt", "operator marker\n")
-
-	mustSnapshot(t, e, "s1")
-
-	// Session: agent clears .gitignore and replaces data/ with a symlink,
-	// but keeps the file accessible through the symlink to simulate an attack.
-	outsideDir := filepath.Join(e.root, "outside")
-	mustMkdir(t, outsideDir)
-	// Copy the file to outside first so it's accessible through the symlink.
-	writeFile(t, e.root, "outside/secret.txt", "operator marker\n")
-	if err := os.RemoveAll(filepath.Join(e.project, "data")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outsideDir, filepath.Join(e.project, "data")); err != nil {
-		t.Fatal(err)
-	}
-	// Clear .gitignore to make the file visible.
-	writeFile(t, e.project, ".gitignore", "")
-
-	res := mustUndo(t, e, "s1", false)
-
-	_ = res
-	// Git records the planted symlink as a single entry and never lists paths
-	// below it, so undo removes the symlink and never reads through it.
-	// Nothing outside the project changed, and nothing new appeared there.
-	entries, err := os.ReadDir(outsideDir)
+	f, err = os.Open(large)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "secret.txt" {
-		t.Errorf("outside directory entries = %v, want only secret.txt", entries)
-	}
-	if got := readFile(t, e.root, "outside/secret.txt"); got != "operator marker\n" {
-		t.Errorf("outside file changed to %q", got)
-	}
-
-	// The session-created symlink is gone, and no copy of the outside file
-	// was placed in the project.
-	if info, err := os.Lstat(filepath.Join(e.project, "data")); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		t.Error("undo left the session-created symlink in place")
-	}
-	if _, err := os.Lstat(filepath.Join(e.project, "data", "secret.txt")); err == nil {
-		t.Error("undo copied a file from outside the project into it")
-	}
-}
-
-// TestUndoPreservesLargeIgnoredFiles tests that undo preserves large
-// pre-existing ignored files without reading them into memory (no byte cap).
-func TestUndoPreservesLargeIgnoredFiles(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-
-	// Pre-session: create a large ignored file using a sparse file.
-	writeFile(t, e.project, ".gitignore", "large.dat\n")
-	largePath := filepath.Join(e.project, "large.dat")
-	// Create a sparse file (200 MiB nominal, above the old 128 MiB cap, with minimal disk use).
-	f, err := os.Create(largePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Truncate(200 << 20); err != nil {
-		f.Close()
-		t.Fatal(err)
-	}
-	// Write a marker at the beginning and end.
-	f.WriteString("START")
-	f.Seek(200<<20-3, 0)
-	f.WriteString("END")
-	origMtime := time.Now().Add(-1 * time.Hour)
-	f.Close()
-	os.Chtimes(largePath, origMtime, origMtime)
-
-	origInfo, _ := os.Stat(largePath)
-
-	mustSnapshot(t, e, "s1")
-
-	// Session: agent clears .gitignore, making the file visible.
-	writeFile(t, e.project, ".gitignore", "")
-
-	res := mustUndo(t, e, "s1", false)
-
-	// The file should survive with no warning about size.
-	for _, w := range res.Warnings {
-		if strings.Contains(w, "large.dat") || strings.Contains(w, "MB") {
-			t.Errorf("unexpected warning: %s", w)
-		}
-	}
-	newInfo, err := os.Stat(largePath)
-	if err != nil {
-		t.Fatal("large.dat was not preserved")
-	}
-	if newInfo.Size() != origInfo.Size() {
-		t.Errorf("large.dat size changed from %d to %d", origInfo.Size(), newInfo.Size())
-	}
-	// Verify content is intact.
-	f, _ = os.Open(largePath)
 	defer f.Close()
-	start := make([]byte, 5)
-	f.Read(start)
-	if string(start) != "START" {
-		t.Errorf("large.dat content start = %q", start)
-	}
-	f.Seek(200<<20-3, 0)
-	end := make([]byte, 3)
-	f.Read(end)
-	if string(end) != "END" {
-		t.Errorf("large.dat content end = %q", end)
-	}
-	// Verify mtime is preserved (within 1 second tolerance).
-	if newInfo.ModTime().Sub(origInfo.ModTime()).Abs() > time.Second {
-		t.Errorf("mtime changed from %v to %v", origInfo.ModTime(), newInfo.ModTime())
+	start, end := make([]byte, 5), make([]byte, 3)
+	_, err1 = f.ReadAt(start, 0)
+	_, err2 = f.ReadAt(end, size-3)
+	if err1 != nil || err2 != nil || string(start) != "START" || string(end) != "END" {
+		t.Fatalf("large.dat content = %q...%q (%v, %v)", start, end, err1, err2)
 	}
 }
 
@@ -1210,12 +559,8 @@ func TestRootFSRefusesSymlinkedParents(t *testing.T) {
 	outside := t.TempDir()
 	writeFile(t, outside, "secret.txt", "operator marker\n")
 	writeFile(t, root, "real/keep.txt", "marker\n")
-	if err := os.Symlink(outside, filepath.Join(root, "out")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "in")); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, outside, filepath.Join(root, "out"))
+	mustSymlink(t, filepath.Join(root, "real"), filepath.Join(root, "in"))
 	r, err := openRootFS(root)
 	if err != nil {
 		t.Fatal(err)
@@ -1232,11 +577,88 @@ func TestRootFSRefusesSymlinkedParents(t *testing.T) {
 	if err := r.realParents("real/keep.txt"); err != nil {
 		t.Errorf("realParents(real/keep.txt) = %v", err)
 	}
-	data, err := r.readRegular("real/keep.txt", 1<<20)
-	if err != nil || string(data) != "marker\n" {
+	if data, err := r.readRegular("real/keep.txt", 1<<20); err != nil || string(data) != "marker\n" {
 		t.Errorf("readRegular(real/keep.txt) = %q, %v", data, err)
 	}
 	if _, err := r.readRegular("real/keep.txt", 3); err == nil {
 		t.Error("readRegular ignored its size limit")
 	}
+}
+
+// TestUndoRemovesPlantedGitStateAndHiddenFiles: undo restores the git
+// control files and removes the repositories the session created (a
+// folder that existed keeps its files and loses only the planted .git)
+// without running the fsmonitor they carry, and removes files the agent
+// hid behind new ignore rules while keeping those ignored under the
+// pre-session rules.
+func TestUndoRemovesPlantedGitStateAndHiddenFiles(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, "vendor/lib/keep.txt", "keep\n")
+	e.commit("vendor")
+	writeFile(t, e.project, "build/keep.o", "ignored before the session\n")
+	mustSnapshot(t, e, "s1")
+
+	writeFile(t, e.project, ".git/info/attributes", "* filter=evil\n")
+	evil := filepath.Join(e.project, "evil")
+	e.git(e.project, "init", "-q", evil)
+	writeFile(t, evil, "e.txt", "e")
+	e.git(evil, "add", "-A")
+	e.git(evil, "commit", "-q", "-m", "e")
+	e.git(evil, "config", "core.fsmonitor", "touch "+filepath.Join(e.root, "PWNED"))
+	e.git(e.project, "add", "evil")
+	e.git(filepath.Join(e.project, "vendor", "lib"), "init", "-q")
+	writeFileMode(t, e.project, "tools/evil.sh", "#!/bin/sh\n", 0o755)
+	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\ntools/\n")
+	writeFile(t, e.project, "out.log", "ignored output\n")
+
+	preview := mustUndo(t, e, "s1", true)
+	if strings.Join(preview.ControlChanges, ",") != "info/attributes" || strings.Join(preview.NestedRepos, ",") != "evil,vendor/lib" {
+		t.Fatalf("control changes = %v, nested repos = %v", preview.ControlChanges, preview.NestedRepos)
+	}
+	// The nested repository's files are hidden from the project's git too.
+	if res := mustUndo(t, e, "s1", false); strings.Join(res.HiddenRemoved, ",") != "evil/e.txt,tools/evil.sh" {
+		t.Fatalf("HiddenRemoved = %v", res.HiddenRemoved)
+	}
+	wantFiles(t, e.project, ".git/info/attributes", absent, "evil", absent, "vendor/lib/.git", absent, "vendor/lib/keep.txt", "keep\n",
+		"tools", absent, ".gitignore", "*.log\nbuild/\n.env\n", "out.log", present, "build/keep.o", present)
+	wantFiles(t, e.root, "PWNED", absent)
+}
+
+// TestUndoDoesNotFollowPlantedSymlinks: a folder the agent swapped for a
+// symlink to a folder outside is put back as a folder without writing
+// through the link. Git records a symlink that replaced the folder of an
+// ignored file as a single entry and never lists paths below it, so undo
+// removes that one without reading through it either: nothing outside the
+// project changes, and nothing from there is copied in.
+func TestUndoDoesNotFollowPlantedSymlinks(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".gitignore", "data/secret.txt\n")
+	writeFile(t, e.project, "data/secret.txt", "operator marker\n")
+	mustSnapshot(t, e, "s1")
+	empty, full := filepath.Join(e.root, "outside"), filepath.Join(e.root, "outside-data")
+	mustMkdir(t, empty)
+	writeFile(t, full, "secret.txt", "operator marker\n")
+	mustRemove(t, e.project, "src", "data")
+	mustSymlink(t, empty, filepath.Join(e.project, "src"))
+	mustSymlink(t, full, filepath.Join(e.project, "data"))
+	writeFile(t, e.project, ".git/info/grafts", "")
+	writeFile(t, e.project, ".gitignore", "")
+	mustUndo(t, e, "s1", false)
+
+	if entries, _ := os.ReadDir(empty); len(entries) != 0 {
+		t.Fatalf("undo wrote outside the project: %v", entries)
+	}
+	if entries, err := os.ReadDir(full); err != nil || len(entries) != 1 || entries[0].Name() != "secret.txt" {
+		t.Errorf("outside directory entries = %v, %v; want only secret.txt", entries, err)
+	}
+	wantFiles(t, full, "secret.txt", "operator marker\n")
+	if info, err := os.Lstat(filepath.Join(e.project, "src")); err != nil || !info.IsDir() {
+		t.Fatal("src not restored as a directory")
+	}
+	if info, err := os.Lstat(filepath.Join(e.project, "data")); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		t.Error("undo left the session-created symlink in place")
+	}
+	wantFiles(t, e.project, "src/app.go", "package main\n", "data/secret.txt", absent)
 }

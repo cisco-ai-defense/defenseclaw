@@ -19,6 +19,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,14 +42,23 @@ func review(t *testing.T, e *env, name string, scanners []ContentScanner) *Revie
 	return rep
 }
 
+// wantFlags checks the kind and severity of flags by label.
+func wantFlags(t *testing.T, rep *ReviewReport, want map[string]Flag) {
+	t.Helper()
+	for label, w := range want {
+		if f, ok := flagByLabel(rep, label); !ok || f.Kind != w.Kind || f.Severity != w.Severity {
+			t.Errorf("flag %s = %+v, %v; want %s/%s (flags: %+v)", label, f, ok, w.Kind, w.Severity, rep.Flags)
+		}
+	}
+}
+
 func TestReviewFlagsHostExecutableChanges(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
 	writeFile(t, e.project, "package.json", `{"name":"app","scripts":{"test":"go test"}}`)
 	writeFile(t, e.project, ".gitmodules", "[submodule \"lib\"]\n\tpath = lib\n\turl = https://github.com/acme/lib\n")
 	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\n.envrc\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "pkg")
+	e.commit("pkg")
 	mustMkdir(t, filepath.Join(e.project, "node_modules", "left-pad"))
 	mustSnapshot(t, e, "s1")
 
@@ -64,57 +74,36 @@ func TestReviewFlagsHostExecutableChanges(t *testing.T) {
 	writeFile(t, e.project, "deploy/prod.yaml", "x: 1\n")
 	writeFile(t, e.project, "config/keys.txt", "aws_access_key_id=AKIA"+strings.Repeat("Q", 16)+"\n")
 	writeFile(t, e.project, "node_modules/left-pad/index.js", "module.exports = 1\n")
-	if err := os.Symlink("/etc/passwd", filepath.Join(e.project, "passwd")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("src/app.go", filepath.Join(e.project, "inner-link")); err != nil {
-		t.Fatal(err)
-	}
+	mustSymlink(t, "/etc/passwd", filepath.Join(e.project, "passwd"))
+	mustSymlink(t, "src/app.go", filepath.Join(e.project, "inner-link"))
 
 	rep := review(t, e, "s1", []ContentScanner{SecretsScanner()})
-	want := map[string]struct {
-		kind RiskKind
-		sev  Severity
-	}{
-		"package.json#scripts.postinstall": {RiskPackageScripts, SeverityHigh},
-		"package.json#scripts.test":        {RiskPackageScripts, SeverityMedium},
-		"package.json#dependencies.evil":   {RiskDependencies, SeverityMedium},
-		".envrc":                           {RiskAutoExec, SeverityHigh},
-		"Makefile":                         {RiskBuild, SeverityHigh},
-		"run.sh":                           {RiskExecutable, SeverityHigh},
-		".github/workflows/ci.yml":         {RiskCI, SeverityMedium},
-		".gitattributes":                   {RiskGitAttributes, SeverityHigh},
-		".gitmodules#lib":                  {RiskSubmodule, SeverityCritical},
-		".vscode/tasks.json":               {RiskAutoExec, SeverityHigh},
-		"deploy/prod.yaml":                 {RiskPolicy, SeverityHigh},
-		"passwd":                           {RiskSymlink, SeverityCritical},
-		"inner-link":                       {RiskSymlink, SeverityInfo},
-		"node_modules/":                    {RiskDependencies, SeverityMedium},
-	}
-	for label, w := range want {
-		f, ok := flagByLabel(rep, label)
-		if !ok {
-			t.Errorf("missing flag %s; flags: %+v", label, rep.Flags)
-			continue
-		}
-		if f.Kind != w.kind || f.Severity != w.sev {
-			t.Errorf("%s = %s/%s, want %s/%s", label, f.Kind, f.Severity, w.kind, w.sev)
-		}
-	}
+	wantFlags(t, rep, map[string]Flag{
+		"package.json#scripts.postinstall": {Kind: RiskPackageScripts, Severity: SeverityHigh},
+		"package.json#scripts.test":        {Kind: RiskPackageScripts, Severity: SeverityMedium},
+		"package.json#dependencies.evil":   {Kind: RiskDependencies, Severity: SeverityMedium},
+		".envrc":                           {Kind: RiskAutoExec, Severity: SeverityHigh},
+		"Makefile":                         {Kind: RiskBuild, Severity: SeverityHigh},
+		"run.sh":                           {Kind: RiskExecutable, Severity: SeverityHigh},
+		".github/workflows/ci.yml":         {Kind: RiskCI, Severity: SeverityMedium},
+		".gitattributes":                   {Kind: RiskGitAttributes, Severity: SeverityHigh},
+		".gitmodules#lib":                  {Kind: RiskSubmodule, Severity: SeverityCritical},
+		".vscode/tasks.json":               {Kind: RiskAutoExec, Severity: SeverityHigh},
+		"deploy/prod.yaml":                 {Kind: RiskPolicy, Severity: SeverityHigh},
+		"passwd":                           {Kind: RiskSymlink, Severity: SeverityCritical},
+		"inner-link":                       {Kind: RiskSymlink, Severity: SeverityInfo},
+		"node_modules/":                    {Kind: RiskDependencies, Severity: SeverityMedium},
+	})
+	// .envrc is ignored by git and must be found by the sentinel walk.
 	if f, _ := flagByLabel(rep, ".envrc"); !strings.Contains(f.Detail, "git ignores") {
-		t.Errorf(".envrc is ignored by git and must be found by the sentinel walk: %q", f.Detail)
+		t.Errorf(".envrc detail = %q", f.Detail)
 	}
-	if rep.Flags[0].Severity != SeverityCritical {
-		t.Errorf("flags not sorted by severity: %+v", rep.Flags[0])
-	}
-	if !rep.Sensitive() {
-		t.Error("report should be sensitive")
+	if rep.Flags[0].Severity != SeverityCritical || !rep.Sensitive() {
+		t.Errorf("flags not sorted by severity, or report not sensitive: %+v", rep.Flags[0])
 	}
 	found := false
 	for _, f := range rep.Findings {
-		if f.Path == "config/keys.txt" && f.RuleID == "CS-SEC-AWS-KEY" {
-			found = true
-		}
+		found = found || f.Path == "config/keys.txt" && f.RuleID == "CS-SEC-AWS-KEY"
 	}
 	if !found {
 		t.Errorf("secret scanner finding missing: %+v", rep.Findings)
@@ -130,102 +119,119 @@ func TestReviewFlagsHostExecutableChanges(t *testing.T) {
 	}
 }
 
-func TestReviewNestedRepoControlFilesRefsAndIgnoreRules(t *testing.T) {
+// TestReviewNestedRepositoriesAndGitControl: the review reports a new
+// nested repository, the session's changes to the project's git control
+// files, ignore rules and branch, and what it changed in the git control
+// files and .git pointer of a nested repository that existed before
+// (writable through the mount like the rest of the folder, and left alone
+// by the guard); an unchanged one, and a clean session, report nothing. On
+// a case-insensitive filesystem git finds sub/.GIT as sub/.git; on a
+// case-sensitive one that is an ordinary folder. Review changes nothing.
+func TestReviewNestedRepositoriesAndGitControl(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
-	mustSnapshot(t, e, "s1")
-	evil := filepath.Join(e.project, "tools")
-	e.git(e.project, "init", "-q", evil)
+	e.git(e.project, "init", "-q", filepath.Join(e.project, "vendor", "lib"))
+	e.git(e.project, "init", "-q", filepath.Join(e.project, "vendor", "quiet"))
+	writeFile(t, e.project, "wt/.git", "gitdir: ../vendor/lib/.git\n")
+	if _, ok := mustSnapshot(t, e, "s1").NestedControl["vendor/lib/.git/config"]; !ok {
+		t.Fatalf("snapshot nested control = %v", e.lastSnapshot.NestedControl)
+	}
+	if rep := review(t, e, "s1", nil); len(rep.Changes) != 0 || len(rep.Flags) != 0 || rep.Sensitive() || rep.RiskLine() != "" {
+		t.Fatalf("clean session report: %+v", rep)
+	}
+
+	// The session: an inert marker stands in for a hostile setting.
+	e.git(e.project, "init", "-q", filepath.Join(e.project, "tools"))
 	writeFile(t, e.project, ".git/info/attributes", "* diff=x\n")
 	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\nhidden.sh\n")
 	writeFileMode(t, e.project, "hidden.sh", "#!/bin/sh\n", 0o755)
+	writeFile(t, e.project, "README.md", "hello\nworld\n")
+	writeFile(t, e.project, "sub/.GIT/config", "[core]\n")
+	_, err := os.Lstat(filepath.Join(e.project, "sub", ".git"))
+	insensitive := err == nil
 	e.git(e.project, "checkout", "-q", "-b", "agent")
+	writeFile(t, e.project, "vendor/lib/.git/config", readFile(t, e.project, "vendor/lib/.git/config")+"[core]\n\tpager = DCMARKER\n")
+	writeFileMode(t, e.project, "vendor/lib/.git/hooks/post-checkout", "#!/bin/sh\necho DCMARKER\n", 0o755)
+	writeFile(t, e.project, "vendor/lib/.git/info/attributes", "* filter=dcmarker\n")
+	writeFile(t, e.project, "wt/.git", "gitdir: ../elsewhere\n")
 
 	rep := review(t, e, "s1", []ContentScanner{})
-	if f, ok := flagByLabel(rep, "tools/.git"); !ok || f.Severity != SeverityCritical || f.Kind != RiskNestedRepo {
-		t.Fatalf("nested repo flag: %+v", rep.Flags)
+	critical := Flag{Kind: RiskGitControl, Severity: SeverityCritical}
+	wantFlags(t, rep, map[string]Flag{"tools/.git": {Kind: RiskNestedRepo, Severity: SeverityCritical}, ".git/info/attributes": critical,
+		"vendor/lib/.git/config": critical, "vendor/lib/.git/hooks": critical, "vendor/lib/.git/info/attributes": critical, "wt/.git": critical})
+	for _, f := range rep.Flags {
+		if strings.HasPrefix(f.Path, "vendor/quiet") {
+			t.Errorf("unchanged repository flagged: %+v", f)
+		}
 	}
-	if f, ok := flagByLabel(rep, ".git/info/attributes"); !ok || f.Kind != RiskGitControl {
-		t.Fatalf("control flag: %+v", rep.Flags)
+	if !rep.Sensitive() || !slices.Contains(rep.HostExecLabels(), "vendor/lib/.git/config") {
+		t.Errorf("host exec labels = %v", rep.HostExecLabels())
 	}
-	if len(rep.NewIgnored) != 1 || rep.NewIgnored[0] != "hidden.sh" {
-		t.Fatalf("NewIgnored = %v", rep.NewIgnored)
+	if _, ok := flagByLabel(rep, ".gitignore"); !ok || strings.Join(rep.NewIgnored, ",") != "hidden.sh" {
+		t.Fatalf("ignore-rule change: NewIgnored = %v, flags %+v", rep.NewIgnored, rep.Flags)
 	}
-	if _, ok := flagByLabel(rep, ".gitignore"); !ok {
-		t.Fatal("ignore-rule change not flagged")
+	if f, ok := flagByLabel(rep, "sub/.git"); insensitive != (ok && f.Kind == RiskNestedRepo) {
+		t.Fatalf("case-insensitive filesystem %v: sub/.GIT flag = %+v, %v", insensitive, f, ok)
 	}
 	if rep.BranchAfter != "refs/heads/agent" || rep.BranchBefore != "refs/heads/main" || len(rep.RefChanges) != 1 {
 		t.Fatalf("branch/refs: %s → %s %+v", rep.BranchBefore, rep.BranchAfter, rep.RefChanges)
 	}
-	// Review does not change the folder.
-	if !pathExists(filepath.Join(evil, ".git")) || !pathExists(filepath.Join(e.project, ".git", "info", "attributes")) {
-		t.Fatal("Review modified the folder")
+	wantFiles(t, e.project, "tools/.git", present, ".git/info/attributes", present)
+	if diff, err := ReviewDiff(bg, e.data, "s1"); err != nil || !strings.Contains(string(diff), "+world") || !strings.Contains(string(diff), "README.md") {
+		t.Fatalf("diff = %s, %v", diff, err)
 	}
 }
 
-func TestReviewDiffAndCleanSession(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	mustSnapshot(t, e, "s1")
-	rep := review(t, e, "s1", nil)
-	if len(rep.Changes) != 0 || len(rep.Flags) != 0 || rep.Sensitive() || rep.RiskLine() != "" {
-		t.Fatalf("clean session report: %+v", rep)
-	}
-	writeFile(t, e.project, "README.md", "hello\nworld\n")
-	diff, err := ReviewDiff(bg, e.data, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(diff), "+world") || !strings.Contains(string(diff), "README.md") {
-		t.Fatalf("diff = %s", diff)
-	}
-}
-
-func TestReviewPlainFolder(t *testing.T) {
+// TestReviewAndUndoPlainFolder: in a folder that is not a git repository
+// the review flags package scripts, new executables, nested repositories,
+// a top-level .git (critical), a dependency folder the snapshot does not
+// copy and a bytecode cache; undo removes the planted repositories and the
+// changed bytecode, keeps the user's files, and names the dependency
+// folder it cannot restore.
+func TestReviewAndUndoPlainFolder(t *testing.T) {
 	e := newEnv(t)
 	writeFile(t, e.project, "notes.md", "a\n")
 	writeFile(t, e.project, "package.json", `{"scripts":{}}`)
+	writeFile(t, e.project, "data.txt", "user data\n")
+	writeFileMode(t, e.project, "node_modules/.bin/tool", "#!/bin/sh\n", 0o755)
+	writeFile(t, e.project, "pkg/__pycache__/main.cpython-312.pyc", "v1")
 	mustSnapshot(t, e, "p1")
+	if p := mustUndo(t, e, "p1", true); len(p.Warnings) != 0 || len(p.Ignored) != 0 {
+		t.Fatalf("clean plain preview: %+v", p)
+	}
 	writeFile(t, e.project, "package.json", `{"scripts":{"preinstall":"node x.js"}}`)
 	writeFileMode(t, e.project, "tools/run", "#!/bin/sh\n", 0o755)
 	writeFile(t, e.project, "notes.md", "a\nb\n")
 	e.git(e.project, "init", "-q", filepath.Join(e.project, "sub"))
+	writeFile(t, e.project, "node_modules/evil/index.js", "x\n")
+	writeFile(t, e.project, "pkg/__pycache__/main.cpython-312.pyc", "v2")
+	e.git(e.project, "init", "-q", e.project)
+	writeFile(t, e.project, ".git/config", "[core]\n\tfsmonitor = /tmp/evil\n")
 
 	rep := review(t, e, "p1", nil)
-	for _, label := range []string{"package.json#scripts.preinstall", "tools/run", "sub/.git"} {
+	for _, label := range []string{"package.json#scripts.preinstall", "tools/run", "sub/.git", "pkg/__pycache__/"} {
 		if _, ok := flagByLabel(rep, label); !ok {
 			t.Errorf("missing %s: %+v", label, rep.Flags)
 		}
 	}
+	if f := flagWith(t, rep, ".git", SeverityCritical, "non-git folder"); f.Kind != RiskNestedRepo {
+		t.Errorf("top-level .git flag = %+v", f)
+	}
+	flagWith(t, rep, "node_modules/", SeverityMedium, "does not copy")
 	if rep.Kind != SnapshotCopy || rep.Insertions < 2 {
 		t.Errorf("plain report: %+v", rep)
 	}
-	diff, err := ReviewDiff(bg, e.data, "p1")
-	if err != nil {
-		t.Fatal(err)
+	if diff, err := ReviewDiff(bg, e.data, "p1"); err != nil || !strings.Contains(string(diff), "+b") {
+		t.Fatalf("diff = %s, %v", diff, err)
 	}
-	if !strings.Contains(string(diff), "+b") {
-		t.Fatalf("diff = %s", diff)
+	if preview := mustUndo(t, e, "p1", true); !slices.Contains(preview.NestedRepos, ".") {
+		t.Fatalf("nested repos = %v, want the top-level .git", preview.NestedRepos)
 	}
-}
-
-func TestReviewPlainFolderTopLevelGit(t *testing.T) {
-	// p1a-20: a top-level .git planted by the agent in a non-git folder must
-	// be detected and flagged as critical.
-	e := newEnv(t)
-	writeFile(t, e.project, "README.md", "plain folder\n")
-	mustSnapshot(t, e, "p2")
-	// Agent creates a .git directory at the top level
-	e.git(e.project, "init", "-q", e.project)
-	writeFile(t, e.project, ".git/config", "[core]\n\tfsmonitor = /tmp/evil\n")
-
-	rep := review(t, e, "p2", nil)
-	f, ok := flagByLabel(rep, ".git")
-	if !ok || f.Severity != SeverityCritical || f.Kind != RiskNestedRepo {
-		t.Fatalf("top-level .git flag: %+v", rep.Flags)
-	}
-	if !strings.Contains(f.Detail, "non-git folder") {
-		t.Errorf("detail missing non-git context: %s", f.Detail)
+	res := mustUndo(t, e, "p1", false)
+	wantFiles(t, e.project, ".git", absent, "sub/.git", absent, "pkg/__pycache__/main.cpython-312.pyc", absent,
+		"notes.md", "a\n", "data.txt", "user data\n")
+	if len(res.Unrestored()) != 1 || res.Unrestored()[0].Path != "node_modules/" {
+		t.Errorf("Unrestored = %+v", res.Unrestored())
 	}
 }
 
@@ -273,9 +279,7 @@ func TestClassifyChangesUnits(t *testing.T) {
 func TestReviewIgnoresMountPinsInBothOrders(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
-	if err := os.RemoveAll(filepath.Join(e.project, ".git", "hooks")); err != nil {
-		t.Fatal(err)
-	}
+	mustRemove(t, e.project, ".git/hooks")
 	// Snapshot first, then the plan creates .git/hooks and the commondir pin.
 	mustSnapshot(t, e, "s1")
 	if _, err := PlanMount(bg, e.mountOpts("s1")); err != nil {
@@ -284,81 +288,16 @@ func TestReviewIgnoresMountPinsInBothOrders(t *testing.T) {
 	// Plan first for a second session: pins exist at snapshot time and are
 	// released before review.
 	mustSnapshot(t, e, "s2")
-	if err := ReleaseMount(e.data, "s1"); err != nil {
-		t.Fatal(err)
-	}
+	must(t, ReleaseMount(e.data, "s1"))
 	for _, name := range []string{"s1", "s2"} {
-		rep := review(t, e, name, []ContentScanner{})
-		if len(rep.Flags) != 0 {
+		if rep := review(t, e, name, []ContentScanner{}); len(rep.Flags) != 0 {
 			t.Fatalf("%s: mount pins reported as changes: %+v", name, rep.Flags)
 		}
 	}
 	// A real host-side hook is still reported.
 	writeFileMode(t, e.project, ".git/hooks/pre-commit", "#!/bin/sh\n", 0o755)
-	rep := review(t, e, "s2", []ContentScanner{})
-	if f, ok := flagByLabel(rep, ".git/hooks"); !ok || f.Kind != RiskGitControl {
-		t.Fatalf("hook change not reported: %+v", rep.Flags)
-	}
-}
-
-// TestReviewFlagsNestedRepositoryControlChanges: a nested repository that
-// existed before the session is writable through the mount like the rest
-// of the folder, and the guard leaves it alone; the review reports what
-// the session changed in its git control files and its .git pointer.
-func TestReviewFlagsNestedRepositoryControlChanges(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	e.git(e.project, "init", "-q", filepath.Join(e.project, "vendor", "lib"))
-	e.git(e.project, "init", "-q", filepath.Join(e.project, "vendor", "quiet"))
-	writeFile(t, e.project, "wt/.git", "gitdir: ../vendor/lib/.git\n")
-	rec := mustSnapshot(t, e, "s1")
-	if _, ok := rec.NestedControl["vendor/lib/.git/config"]; !ok {
-		t.Fatalf("snapshot nested control = %v", rec.NestedControl)
-	}
-	if rep := review(t, e, "s1", []ContentScanner{}); len(rep.Flags) != 0 {
-		t.Fatalf("untouched nested repositories flagged: %+v", rep.Flags)
-	}
-
-	// The session: an inert marker stands in for a hostile setting.
-	writeFile(t, e.project, "vendor/lib/.git/config", readFile(t, e.project, "vendor/lib/.git/config")+"[core]\n\tpager = DCMARKER\n")
-	writeFileMode(t, e.project, "vendor/lib/.git/hooks/post-checkout", "#!/bin/sh\necho DCMARKER\n", 0o755)
-	writeFile(t, e.project, "vendor/lib/.git/info/attributes", "* filter=dcmarker\n")
-	writeFile(t, e.project, "wt/.git", "gitdir: ../elsewhere\n")
-
-	rep := review(t, e, "s1", []ContentScanner{})
-	for _, label := range []string{"vendor/lib/.git/config", "vendor/lib/.git/hooks", "vendor/lib/.git/info/attributes", "wt/.git"} {
-		f, ok := flagByLabel(rep, label)
-		if !ok || f.Kind != RiskGitControl || f.Severity != SeverityCritical {
-			t.Errorf("flag %s = %+v, %v; flags: %+v", label, f, ok, rep.Flags)
-		}
-	}
-	for _, f := range rep.Flags {
-		if strings.HasPrefix(f.Path, "vendor/quiet") {
-			t.Errorf("unchanged repository flagged: %+v", f)
-		}
-	}
-	if !rep.Sensitive() || !strings.Contains(rep.RiskLine(), "vendor/lib/.git/config") {
-		t.Errorf("risk line = %q", rep.RiskLine())
-	}
-}
-
-// TestReviewCaseVariantOfGitEntry: on a case-insensitive filesystem git
-// finds sub/.GIT as sub/.git, so the review reports it as a new nested
-// repository; on a case-sensitive one it is an ordinary folder.
-func TestReviewCaseVariantOfGitEntry(t *testing.T) {
-	e := newEnv(t)
-	e.initRepo()
-	mustSnapshot(t, e, "s1")
-	writeFile(t, e.project, "sub/.GIT/config", "[core]\n")
-	_, err := os.Lstat(filepath.Join(e.project, "sub", ".git"))
-	insensitive := err == nil
-	rep := review(t, e, "s1", []ContentScanner{})
-	f, ok := flagByLabel(rep, "sub/.git")
-	if insensitive && (!ok || f.Kind != RiskNestedRepo) {
-		t.Fatalf("case-insensitive filesystem: flags = %+v", rep.Flags)
-	}
-	if !insensitive && ok {
-		t.Fatalf("case-sensitive filesystem: sub/.GIT flagged as a repository: %+v", f)
+	if f, ok := flagByLabel(review(t, e, "s2", []ContentScanner{}), ".git/hooks"); !ok || f.Kind != RiskGitControl {
+		t.Fatalf("hook change not reported: %+v", f)
 	}
 }
 
@@ -370,8 +309,7 @@ func TestReviewFlagsIgnoredHarnessConfig(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
 	writeFile(t, e.project, ".gitignore", "*.log\nbuild/\n.env\n.claude/settings.local.json\nCLAUDE.local.md\ndist/\n")
-	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "ignore")
+	e.commit("ignore")
 	writeFile(t, e.project, "dist/keep.txt", "x\n")
 	mustSnapshot(t, e, "s1")
 
@@ -385,8 +323,7 @@ func TestReviewFlagsIgnoredHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, label := range []string{".claude/settings.local.json", "CLAUDE.local.md"} {
-		f, ok := flagByLabel(rep, label)
-		if !ok || f.Kind != RiskPolicy || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
+		if f, ok := flagByLabel(rep, label); !ok || f.Kind != RiskPolicy || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
 			t.Errorf("flag %s = %+v, %v; flags: %+v", label, f, ok, rep.Flags)
 		}
 	}

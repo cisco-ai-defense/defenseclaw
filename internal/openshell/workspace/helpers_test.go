@@ -130,8 +130,79 @@ func (e *env) initRepo() {
 	writeFile(e.t, e.project, "README.md", "hello\n")
 	writeFile(e.t, e.project, ".gitignore", "*.log\nbuild/\n.env\n")
 	writeFile(e.t, e.project, "src/app.go", "package main\n")
+	e.commit("init")
+}
+
+// commit stages every change in e.project and commits it.
+func (e *env) commit(msg string) {
+	e.t.Helper()
 	e.git(e.project, "add", "-A")
-	e.git(e.project, "commit", "-q", "-m", "init")
+	e.git(e.project, "commit", "-q", "-m", msg)
+}
+
+// Special contents for wantFiles.
+const (
+	absent  = "\x00absent"
+	present = "\x00present"
+)
+
+// wantFiles checks pairs of a root-relative path and its content (or
+// absent, or present for any entry).
+func wantFiles(t *testing.T, root string, pairs ...string) {
+	t.Helper()
+	for i := 0; i+1 < len(pairs); i += 2 {
+		rel, want := pairs[i], pairs[i+1]
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		switch want {
+		case absent, present:
+			if pathExists(p) != (want == present) {
+				t.Fatalf("%s: exists = %v, want %v", rel, pathExists(p), want == present)
+			}
+		default:
+			if got, err := os.ReadFile(p); err != nil || string(got) != want {
+				t.Fatalf("%s = %q, %v; want %q", rel, got, err, want)
+			}
+		}
+	}
+}
+
+// wantMode checks the permission bits of a root-relative path.
+func wantMode(t *testing.T, root, rel string, want os.FileMode) {
+	t.Helper()
+	if info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel))); err != nil || info.Mode().Perm() != want {
+		t.Fatalf("%s mode = %v, %v; want %v", rel, info, err, want)
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mustRemove removes root-relative paths and everything below them.
+func mustRemove(t *testing.T, root string, rels ...string) {
+	t.Helper()
+	for _, rel := range rels {
+		if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func mustChmod(t *testing.T, p string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (e *env) mountOpts(name string) MountOptions {

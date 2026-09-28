@@ -23,19 +23,6 @@ import (
 	"testing"
 )
 
-func packFiles(t *testing.T, dir string) []string {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []string
-	for _, en := range entries {
-		out = append(out, en.Name())
-	}
-	return out
-}
-
 // The shadow's object files must be its own: a hard link shares the inode
 // the agent can rewrite through the mount, which would silently change the
 // snapshot too.
@@ -48,60 +35,46 @@ func TestSnapshotKeepsPrivateCopyOfObjects(t *testing.T) {
 		t.Fatalf("objects not copied: %v", rec.Warnings)
 	}
 	packDir := filepath.Join(e.project, ".git", "objects", "pack")
-	var pack string
-	for _, n := range packFiles(t, packDir) {
-		if strings.HasSuffix(n, ".pack") {
-			pack = n
-		}
-	}
-	if pack == "" {
+	matches, _ := filepath.Glob(filepath.Join(packDir, "*.pack"))
+	if len(matches) == 0 {
 		t.Fatal("gc wrote no pack")
 	}
-	projPack := filepath.Join(packDir, pack)
-	shadowRel := "objects/pack/" + pack
-	pi, err := os.Stat(projPack)
-	if err != nil {
-		t.Fatal(err)
+	projPack := matches[0]
+	shadowPack := filepath.Join(rec.Git.Shadow, "objects", "pack", filepath.Base(projPack))
+	sameInode := func() bool {
+		t.Helper()
+		pi, err1 := os.Stat(projPack)
+		si, err2 := os.Stat(shadowPack)
+		if err1 != nil || err2 != nil {
+			t.Fatal(err1, err2)
+		}
+		return os.SameFile(pi, si)
 	}
-	si, err := os.Stat(filepath.Join(rec.Git.Shadow, filepath.FromSlash(shadowRel)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if os.SameFile(pi, si) {
+	if sameInode() {
 		t.Fatal("the snapshot shares the project's pack file inode")
 	}
-	original := readFile(t, rec.Git.Shadow, shadowRel)
+	original := readFile(t, shadowPack, "")
 
-	// The session rewrites the pack in place (same inode).
-	if err := os.Chmod(projPack, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(projPack, []byte("marker"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if readFile(t, rec.Git.Shadow, shadowRel) != original {
+	// The session rewrites the pack in place (same inode) and deletes its
+	// index.
+	mustChmod(t, projPack, 0o644)
+	must(t, os.WriteFile(projPack, []byte("marker"), 0o644))
+	if readFile(t, shadowPack, "") != original {
 		t.Fatal("rewriting the project's pack changed the snapshot")
 	}
+	idx := strings.TrimSuffix(projPack, ".pack") + ".idx"
+	must(t, os.Remove(idx))
 	writeFile(t, e.project, "README.md", "changed\n")
-
-	preview := mustUndo(t, e, "s1", true)
-	if len(preview.LostObjects) == 0 {
+	if preview := mustUndo(t, e, "s1", true); len(preview.LostObjects) == 0 {
 		t.Fatal("the damaged pack was not noticed")
 	}
 	mustUndo(t, e, "s1", false)
-	if readFile(t, e.project, "README.md") != "hello\n" {
-		t.Fatal("working tree not restored from the snapshot's own objects")
-	}
-	if readFile(t, packDir, pack) != original {
-		t.Fatal("the damaged pack was not replaced with the snapshot's copy")
-	}
-	if got := e.git(e.project, "cat-file", "-p", "HEAD:README.md"); got != "hello" {
-		t.Fatalf("committed history not readable after undo: %q", got)
-	}
-	pi, _ = os.Stat(projPack)
-	si, _ = os.Stat(filepath.Join(rec.Git.Shadow, filepath.FromSlash(shadowRel)))
-	if os.SameFile(pi, si) {
-		t.Fatal("the repaired pack shares an inode with the snapshot")
+	// The working tree comes back from the snapshot's own objects, and the
+	// damaged pack is replaced with the snapshot's copy, not linked to it,
+	// along with the index it lost.
+	wantFiles(t, e.project, "README.md", "hello\n")
+	if readFile(t, projPack, "") != original || !pathExists(idx) || e.git(e.project, "cat-file", "-p", "HEAD:README.md") != "hello" || sameInode() {
+		t.Fatal("the damaged pack was not repaired with a private copy")
 	}
 }
 
@@ -118,35 +91,47 @@ func TestSnapshotObjectCopyLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !rec.Git.ObjectsCopied {
-		found := false
-		for _, w := range rec.Warnings {
-			if strings.Contains(w, "shares the rest with the project") {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("no warning about the copy limit: %v", rec.Warnings)
-		}
+	if !rec.Git.ObjectsCopied && !strings.Contains(strings.Join(rec.Warnings, "\n"), "shares the rest with the project") {
+		t.Fatalf("no warning about the copy limit: %v", rec.Warnings)
 	}
-	shadowPacks := filepath.Join(rec.Git.Shadow, "objects", "pack")
-	if names, err := os.ReadDir(shadowPacks); err == nil {
-		have := map[string]bool{}
-		for _, n := range names {
-			if strings.HasPrefix(n.Name(), ".dc-copy-") {
-				t.Fatalf("temporary copy left behind: %s", n.Name())
-			}
-			have[n.Name()] = true
+	names, _ := os.ReadDir(filepath.Join(rec.Git.Shadow, "objects", "pack"))
+	have := map[string]bool{}
+	for _, n := range names {
+		if strings.HasPrefix(n.Name(), ".dc-copy-") {
+			t.Fatalf("temporary copy left behind: %s", n.Name())
 		}
-		for n := range have {
-			if strings.HasSuffix(n, ".pack") && !have[strings.TrimSuffix(n, ".pack")+".idx"] {
-				t.Fatalf("pack %s kept without its index", n)
-			}
+		have[n.Name()] = true
+	}
+	for n := range have {
+		if strings.HasSuffix(n, ".pack") && !have[strings.TrimSuffix(n, ".pack")+".idx"] {
+			t.Fatalf("pack %s kept without its index", n)
 		}
 	}
 	writeFile(t, e.project, "README.md", "changed\n")
 	mustUndo(t, e, "s1", false)
-	if readFile(t, e.project, "README.md") != "hello\n" {
-		t.Fatal("working tree not restored")
+	wantFiles(t, e.project, "README.md", "hello\n")
+}
+
+// TestShadowStorageStaysOutOfSnapshotDirs: shadows live under <data>/shadows,
+// apart from the per-name snapshot directories, and a snapshot directory
+// that holds anything Snapshot does not write (such as the shared shadow
+// root older builds kept at snapshots/git) is neither reused nor deleted.
+func TestShadowStorageStaysOutOfSnapshotDirs(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	if a := mustSnapshot(t, e, "a"); filepath.Dir(a.Git.Shadow) != filepath.Join(e.data, "shadows") {
+		t.Fatalf("shadow lives in %s, want %s", filepath.Dir(a.Git.Shadow), filepath.Join(e.data, "shadows"))
+	}
+	writeFile(t, e.data, "snapshots/dc-old/0123abcd.git/defenseclaw-project.json", "marker")
+	if _, err := Snapshot(bg, e.snapOpts("dc-old")); err == nil {
+		t.Fatal("Snapshot reused a directory holding other data")
+	}
+	if err := DeleteSnapshot(bg, e.data, "dc-old"); err == nil {
+		t.Fatal("DeleteSnapshot removed a directory holding other data")
+	}
+	wantFiles(t, e.data, "snapshots/dc-old/0123abcd.git/defenseclaw-project.json", "marker")
+	// "git" names no sandbox: it was the shared shadow root.
+	if _, err := Snapshot(bg, e.snapOpts("git")); err == nil || DeleteSnapshot(bg, e.data, "git") == nil {
+		t.Fatalf("a snapshot named git was accepted: %v", err)
 	}
 }

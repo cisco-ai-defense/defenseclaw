@@ -17,7 +17,6 @@
 package workspace
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -65,11 +64,9 @@ func TestReviewCollapsesQuarantinedRepositories(t *testing.T) {
 		}
 	}
 	if len(quarantined) != 1 || quarantined[0].Severity != SeverityCritical || quarantined[0].Kind != RiskNestedRepo ||
-		quarantined[0].Label != "vendor/tool/.git (quarantined)" || !strings.Contains(quarantined[0].Detail, "5 file(s)") {
-		t.Fatalf("quarantine flags = %+v (all %+v)", quarantined, rep.Flags)
-	}
-	if rep.Flags[0].Label != quarantined[0].Label {
-		t.Fatalf("the quarantined repository is not first: %+v", rep.Flags)
+		quarantined[0].Label != "vendor/tool/.git (quarantined)" || !strings.Contains(quarantined[0].Detail, "5 file(s)") ||
+		rep.Flags[0].Label != quarantined[0].Label {
+		t.Fatalf("quarantine flags = %+v, want one, first (all %+v)", quarantined, rep.Flags)
 	}
 	if _, ok := flagByLabel(rep, "package.json#scripts.postinstall"); !ok {
 		t.Fatalf("the postinstall is not flagged: %+v", rep.Flags)
@@ -84,26 +81,20 @@ func TestReviewCollapsesQuarantinedRepositories(t *testing.T) {
 			t.Fatalf("a quarantined file was scanned: %+v", f)
 		}
 	}
-	if rep.FilesChanged != 1 {
-		t.Fatalf("files changed = %d, want the package.json only", rep.FilesChanged)
+	if labels := rep.HostExecLabels(); rep.FilesChanged != 1 || !slices.Contains(labels, "vendor/tool/.git (quarantined)") || len(labels) != 2 {
+		t.Fatalf("files changed = %d (want the package.json only), host exec labels = %v", rep.FilesChanged, labels)
 	}
-	if labels := rep.HostExecLabels(); !slices.Contains(labels, "vendor/tool/.git (quarantined)") || len(labels) != 2 {
-		t.Fatalf("host exec labels = %v", labels)
-	}
-
 	diff, err := ReviewDiff(bg, e.data, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(diff), "sample") || !strings.Contains(string(diff), "postinstall") ||
+	if err != nil || strings.Contains(string(diff), "sample") || !strings.Contains(string(diff), "postinstall") ||
 		!strings.Contains(string(diff), "file(s) of quarantined git repositories are left out: "+testQuarantine) {
-		t.Fatalf("diff = %s", diff)
+		t.Fatalf("diff = %s, %v", diff, err)
 	}
 }
 
 // Undo left the quarantines' empty directory trees in the project; it
-// removes each quarantined .git of the session now, and keeps one that
-// still holds a file the restore did not take.
+// removes each quarantined .git of the session now. What undo was not told
+// about stays, and so does a path that is not a quarantine or escapes the
+// project.
 func TestUndoRemovesQuarantineSkeletons(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
@@ -114,35 +105,19 @@ func TestUndoRemovesQuarantineSkeletons(t *testing.T) {
 
 	res, err := Undo(bg, UndoOptions{DataDir: e.data, Name: "s1",
 		Quarantined: []string{testQuarantine, testQuarantineAgain, "../escape/" + nestguard.QuarantinePrefix + "x", "README.md"}})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !slices.Equal(res.QuarantineRemoved, []string{testQuarantine, testQuarantineAgain}) {
+		t.Fatalf("removed = %+v, %v", res, err)
 	}
-	if !slices.Equal(res.QuarantineRemoved, []string{testQuarantine, testQuarantineAgain}) {
-		t.Fatalf("removed = %v, warnings %v", res.QuarantineRemoved, res.Warnings)
-	}
-	for _, rel := range []string{testQuarantine, testQuarantineAgain} {
-		if _, err := os.Lstat(filepath.Join(e.project, filepath.FromSlash(rel))); !os.IsNotExist(err) {
-			t.Fatalf("%s is still there: %v", rel, err)
-		}
-	}
-	// What undo was not told about stays, and so does the project.
-	if _, err := os.Stat(filepath.Join(e.project, filepath.FromSlash(outside))); err != nil {
-		t.Fatalf("an unlisted quarantine went: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(e.project, "README.md")); err != nil {
-		t.Fatalf("README.md: %v", err)
-	}
+	wantFiles(t, e.project, testQuarantine, absent, testQuarantineAgain, absent, outside, present, "README.md", present)
 }
 
-// A quarantined tree that still holds a file is kept, with a warning.
+// A quarantined tree that still holds a file the restore did not take is
+// kept, with a warning.
 func TestRemoveQuarantinedKeepsFiles(t *testing.T) {
 	e := newEnv(t)
 	writeFile(t, e.project, testQuarantine+"/keep.txt", "x\n")
-	removed, warnings := removeQuarantined(e.project, []string{testQuarantine})
-	if len(removed) != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], "keep.txt") {
+	if removed, warnings := removeQuarantined(e.project, []string{testQuarantine}); len(removed) != 0 || len(warnings) != 1 || !strings.Contains(warnings[0], "keep.txt") {
 		t.Fatalf("removed %v, warnings %v", removed, warnings)
 	}
-	if _, err := os.Stat(filepath.Join(e.project, filepath.FromSlash(testQuarantine), "keep.txt")); err != nil {
-		t.Fatal(err)
-	}
+	wantFiles(t, e.project, testQuarantine+"/keep.txt", "x\n")
 }

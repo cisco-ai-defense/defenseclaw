@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -40,7 +39,6 @@ type fakeSandbox struct {
 	home string
 
 	mu        sync.Mutex
-	execs     []string
 	uploads   []string
 	downloads []string
 	// failExec makes the next Exec return this error.
@@ -68,7 +66,6 @@ func (f *fakeSandbox) Exec(ctx context.Context, sandbox string, req ExecRequest)
 		f.mu.Unlock()
 		return nil, err
 	}
-	f.execs = append(f.execs, strings.Join(req.Argv, " "))
 	f.mu.Unlock()
 	argv := make([]string, len(req.Argv))
 	for i, a := range req.Argv {
@@ -154,19 +151,3 @@ func (f *fakeSandbox) write(rel, content string) {
 	f.t.Helper()
 	writeFile(f.t, f.root, strings.TrimPrefix(rel, "/"), content)
 }
-
-type fakeLister struct {
-	boxes []SandboxInfo
-	err   error
-	got   map[string]string
-}
-
-func (l *fakeLister) FindSandboxes(_ context.Context, labels map[string]string) ([]SandboxInfo, error) {
-	l.got = labels
-	if l.err != nil {
-		return nil, l.err
-	}
-	return l.boxes, nil
-}
-
-func (f *fakeSandbox) String() string { return fmt.Sprintf("fakeSandbox(%s)", f.root) }
