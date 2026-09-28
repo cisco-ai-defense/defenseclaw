@@ -247,10 +247,6 @@ func guardrailActionForRank(rank, blockThreshold, alertThreshold int, confirm bo
 	}
 }
 
-func guardrailThresholds(gc *config.GuardrailConfig) (blockThreshold int, alertThreshold int) {
-	return guardrailThresholdsForConnector(gc, "")
-}
-
 // guardrailThresholdsForConnector returns the block and alert severity ranks
 // of the connector's rule-pack profile, from a bare GuardrailConfig.
 func guardrailThresholdsForConnector(gc *config.GuardrailConfig, connector string) (blockThreshold int, alertThreshold int) {
