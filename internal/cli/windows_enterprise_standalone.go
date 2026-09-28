@@ -724,12 +724,18 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 		return
 	}
 	for _, account := range accounts {
-		if _, err := os.Lstat(account.Home); err != nil {
-			continue
-		}
 		label := account.SID
 		if strings.TrimSpace(account.User) != "" {
 			label = fmt.Sprintf("%s (%s)", account.User, account.SID)
+		}
+		if _, err := os.Lstat(account.Home); err != nil {
+			if errors.Is(err, os.ErrNotExist) && windowsEnterpriseAccountDeleted(account.SID) {
+				result.AddWarning("deleted_account_rows", fmt.Sprintf(
+					"the account %s no longer exists and its profile folder %s was removed; the enumerator drops its %d enrollment row(s) "+
+						"at its next pass, and until then the guardian reports them for this account only",
+					label, account.Home, account.Rows))
+			}
+			continue
 		}
 		switch {
 		case windowsEnterpriseAccountDeleted(account.SID):

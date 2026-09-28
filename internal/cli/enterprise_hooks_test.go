@@ -571,6 +571,47 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	if report.OK || len(report.Errors) == 0 {
 		t.Fatalf("mismatched Guardian/authorization status = %+v, want unhealthy", report)
 	}
+
+	// Until the enumerator drops them, the rows of a deleted account whose
+	// profile folder was removed fail each reconcile. Status warns for that
+	// account and stays healthy; any other failed row still fails it.
+	removed := enterpriseHookReconcileRow{
+		SID: "S-1-5-21-111-222-333-1022", UserHome: filepath.Join(scope, "removed-profile"), Connector: "codex",
+		Error: "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable",
+	}
+	withRemoved := append(append([]enterpriseHookReconcileRow(nil), rows...), removed)
+	state.OK, state.TargetCount, state.FailureCount, state.Results = false, len(withRemoved), 1, withRemoved
+	authorization.OK, authorization.TargetCount, authorization.SuccessCount, authorization.FailureCount = false, len(withRemoved), len(rows), 1
+	activation.OK, activation.TargetCount, activation.FailureCount = false, len(withRemoved), 1
+	for path, value := range map[string]any{
+		filepath.Join(dataDir, hookGuardianStateFile):                  state,
+		filepath.Join(authorizationDir, hookGuardianAuthorizationFile): authorization,
+		filepath.Join(authorizationDir, hookGuardianActivationFile):    activation,
+	} {
+		body, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousRemoved := enterpriseHookRemovedAccountRow
+	t.Cleanup(func() { enterpriseHookRemovedAccountRow = previousRemoved })
+	for _, deleted := range []bool{true, false} {
+		enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
+			return deleted && row.SID == removed.SID
+		}
+		stdout.Reset()
+		err := runEnterpriseHooksStatus(cmd, nil)
+		report = enterpriseHookStatusReport{}
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &report); decodeErr != nil {
+			t.Fatalf("decode status report: %v", decodeErr)
+		}
+		if deleted != (err == nil && report.OK && len(report.Errors) == 0 && len(report.Warnings) == 1) {
+			t.Fatalf("deleted account=%t: status err=%v report=%+v", deleted, err, report)
+		}
+	}
 }
 
 func TestCompareEnterpriseHookGuardianRecordsRejectsStaleOrFutureReconcile(t *testing.T) {
