@@ -332,6 +332,118 @@ func TestOmniGentLauncherKeepsTheLocalServer(t *testing.T) {
 	}
 }
 
+// yamlInterpreter returns a system Python with PyYAML to stand in for a
+// harness's pinned interpreter, so the launchers' YAML checks run for real.
+func yamlInterpreter(t *testing.T) string {
+	t.Helper()
+	const py = "/usr/bin/python3"
+	if err := exec.Command(py, "-I", "-c", "import yaml").Run(); err != nil {
+		t.Skipf("%s with PyYAML is required: %v", py, err)
+	}
+	return py
+}
+
+// yamlKeyCases are YAML documents for the key key, as the harnesses' loaders
+// read them: the key spelled plainly, with an escape in a double-quoted key
+// and folded across lines in an explicit one (every one decodes to key), a
+// document the loaders cannot parse, one that is not UTF-8, and documents
+// that must start (value is what the key carries in the refused ones).
+func yamlKeyCases(key, value string) map[string]struct {
+	data    string
+	refusal string
+} {
+	escaped := `"\x` + fmt.Sprintf("%02x", key[0]) + key[1:] + `"`
+	half := len(key) / 2
+	folded := "? \"" + key[:half] + "\\\n  " + key[half:] + "\"\n: " + value + "\n"
+	return map[string]struct {
+		data    string
+		refusal string
+	}{
+		"plain key":     {data: key + ": " + value + "\n", refusal: "set"},
+		"escaped key":   {data: escaped + ": " + value + "\n", refusal: "set"},
+		"folded key":    {data: folded, refusal: "set"},
+		"not yaml":      {data: key + ": [\n", refusal: "not a YAML file"},
+		"not utf-8":     {data: "model: \xff\xfe\n", refusal: "not a YAML file"},
+		"other keys":    {data: "model: m\n"},
+		"comments only": {data: "# " + key + ": " + value + "\n"},
+		"empty":         {data: ""},
+	}
+}
+
+// TestOmniGentLauncherReadsTheProjectServerAsOmniGentDoes runs the project
+// config check with a real YAML loader: a server key the loader decodes from
+// escapes or folded lines must be refused like a plain one, and a file it
+// cannot parse must be refused rather than let through unchecked.
+func TestOmniGentLauncherReadsTheProjectServerAsOmniGentDoes(t *testing.T) {
+	py := yamlInterpreter(t)
+	l := newHookOnlyLauncherWith(t, OmniGent, map[string]string{shellQuote(omnigentTool.interpreter()): py})
+	for name, tc := range yamlKeyCases("server", "http://127.0.0.1:7000") {
+		t.Run(name, func(t *testing.T) {
+			home, project := t.TempDir(), t.TempDir()
+			cfg := filepath.Join(project, ".omnigent", "config.yaml")
+			writeFile(t, cfg, []byte(tc.data))
+			got := l.run(t, project, []string{"HOME=" + home}, "run")
+			if tc.refusal == "" {
+				if got.exit != 0 || got.record == "" {
+					t.Fatalf("refused: exit %d %s", got.exit, got.output)
+				}
+				return
+			}
+			want := cfg + " sets server"
+			if tc.refusal != "set" {
+				want = cfg + " is " + tc.refusal
+			}
+			if got.exit != 2 || got.record != "" || !strings.Contains(got.output, want) {
+				t.Fatalf("exit %d record %q output %q, want a refusal saying %q", got.exit, got.record, got.output, want)
+			}
+		})
+	}
+	t.Run("local server", func(t *testing.T) {
+		home, project := t.TempDir(), t.TempDir()
+		writeFile(t, filepath.Join(project, ".omnigent", "config.yaml"), []byte(`"\x73erver": local`+"\n"))
+		if got := l.run(t, project, []string{"HOME=" + home}, "run"); got.exit != 0 || got.record == "" {
+			t.Fatalf("refused: exit %d %s", got.exit, got.output)
+		}
+	})
+}
+
+// TestHermesLauncherReadsSecretsAsHermesDoes runs the secrets check with a
+// real YAML loader, in the Hermes home and in a profile.
+func TestHermesLauncherReadsSecretsAsHermesDoes(t *testing.T) {
+	py := yamlInterpreter(t)
+	l := newHookOnlyLauncherWith(t, Hermes, map[string]string{shellQuote(hermesTool.interpreter()): py})
+	for name, tc := range yamlKeyCases("secrets", "{onepassword: {map: {HERMES_MANAGED_DIR: op://v/i/f}}}") {
+		for _, rel := range []string{"config.yaml", "profiles/work/config.yaml"} {
+			t.Run(name+" "+rel, func(t *testing.T) {
+				home := t.TempDir()
+				cfg := filepath.Join(home, ".hermes", filepath.FromSlash(rel))
+				writeFile(t, cfg, []byte(tc.data))
+				got := l.run(t, home, []string{"HOME=" + home}, "chat", "-q", "hi")
+				if tc.refusal == "" {
+					if got.exit != 0 || got.record == "" {
+						t.Fatalf("refused: exit %d %s", got.exit, got.output)
+					}
+					return
+				}
+				want := cfg + " has a secrets section"
+				if tc.refusal != "set" {
+					want = cfg + " is " + tc.refusal
+				}
+				if got.exit != 2 || got.record != "" || !strings.Contains(got.output, "refusing to start Hermes: "+want) {
+					t.Fatalf("exit %d record %q output %q, want a refusal saying %q", got.exit, got.record, got.output, want)
+				}
+			})
+		}
+	}
+	t.Run("empty secrets section", func(t *testing.T) {
+		home := t.TempDir()
+		writeFile(t, filepath.Join(home, ".hermes", "config.yaml"), []byte(`"\x73ecrets": {}`+"\n"))
+		if got := l.run(t, home, []string{"HOME=" + home}, "chat", "-q", "hi"); got.exit != 0 || got.record == "" {
+			t.Fatalf("refused: exit %d %s", got.exit, got.output)
+		}
+	})
+}
+
 // TestOmniGentLauncherReusesOnlyItsOwnServer records processes the way
 // OmniGent does in ~/.omnigent and requires the launcher to stop, and stop
 // reusing, every one that is not the pinned OmniGent started with the

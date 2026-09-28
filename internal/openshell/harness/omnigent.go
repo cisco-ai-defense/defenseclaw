@@ -103,7 +103,7 @@ var OmniGent = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"point OMNIGENT_CONFIG_HOME at the root-owned " + connector.OmnigentSandboxConfigHome + " (policy_modules, the server-wide DefenseClaw policy and the sandbox agent as default_agent) and drop OMNIGENT_CONFIG, OMNIGENT_DATA_DIR and every PYTHON* variable",
-		"refuse --server with a URL and a project .omnigent/config.yaml that sets server (sessions stay on the local server, which loads DefenseClaw's policy)",
+		"refuse --server with a URL and a project .omnigent/config.yaml that sets server, as OmniGent's YAML loader reads it, or that the loader cannot parse (sessions stay on the local server, which loads DefenseClaw's policy)",
 		"stop, and stop reusing, any OmniGent server or host daemon its records in ~/.omnigent name that is not the pinned OmniGent started with that configuration (OmniGent reuses a live one whatever configuration it started with)",
 		"copy BEDROCK_MANTLE_API_KEY into OPENAI_API_KEY for the Mantle profile",
 		"set OMNIGENT_NO_UPDATE_CHECK=1 (the pinned install cannot upgrade itself)",
@@ -174,6 +174,13 @@ fi
 // that loads DefenseClaw's policy: --server with a URL, or a server key in
 // the project's .omnigent/config.yaml (which wins over the global
 // configuration), would run them on a server the image does not configure.
+//
+// OmniGent reads the project file from its working directory with
+// yaml.safe_load, so the guard parses every one that exists with the same
+// loader in the pinned interpreter: a byte search for the key would miss one
+// spelled with escapes in a double-quoted key ("\x73erver") or folded across
+// lines, which the loader decodes to server. A file the loader cannot parse
+// is refused rather than let through unchecked.
 var omnigentServerGuard = `og_refuse() {
   echo "defenseclaw: refusing to start OmniGent: $1. A DefenseClaw sandbox runs OmniGent sessions on its local server, which loads DefenseClaw's policy." >&2
   exit 2
@@ -189,17 +196,19 @@ for og_arg in "$@"; do
   og_prev="$og_arg"
 done
 og_project="$(pwd -P 2>/dev/null)/.omnigent/config.yaml"
-if [ -e "$og_project" ] && /usr/bin/grep -aq server "$og_project" 2>/dev/null; then
+if [ -e "$og_project" ]; then
   ` + shellQuote(omnigentTool.interpreter()) + ` -I -c 'import sys, yaml
 try:
-    d = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = yaml.safe_load(f)
 except Exception:
-    sys.exit(0)
+    sys.exit(4)
 s = d.get("server") if isinstance(d, dict) else None
 sys.exit(0 if s in (None, "", "local") else 3)' "$og_project" 2>/dev/null
   case $? in
     0) ;;
     3) og_refuse "$og_project sets server" ;;
+    4) og_refuse "$og_project is not a YAML file OmniGent's loader can read, so its server setting cannot be checked" ;;
     *) og_refuse "$og_project could not be checked for a server setting" ;;
   esac
 fi

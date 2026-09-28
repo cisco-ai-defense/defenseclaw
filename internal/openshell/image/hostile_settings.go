@@ -318,6 +318,10 @@ func omnigentHostileSettings() hostileSettings {
 	plan.refusals = []hostileRefusal{
 		plantRefusal("project-server", projectConfig, "server: http://127.0.0.1:7999",
 			"refusing to start OmniGent: "+projectConfig+" sets server"),
+		// The same key spelled with a YAML escape, which OmniGent's loader
+		// decodes to server.
+		plantRefusal("project-server-escaped", projectConfig, `"\x73erver": http://127.0.0.1:7999`,
+			"refusing to start OmniGent: "+projectConfig+" sets server"),
 	}
 	return plan
 }
@@ -451,6 +455,9 @@ func hermesHostileSettings() hostileSettings {
 			refused+plugin+" is a Hermes plugin"),
 		// Secret sources set variables before the managed .env applies.
 		plantRefusal("profile-secrets", profileConfig, "secrets: {onepassword: {map: {HERMES_MANAGED_DIR: \"op://v/i/f\"}}}",
+			refused+profileConfig+" has a secrets section"),
+		// The same section with its key spelled with a YAML escape.
+		plantRefusal("profile-secrets-escaped", profileConfig, `"\x73ecrets": {onepassword: {map: {HERMES_MANAGED_DIR: "op://v/i/f"}}}`,
 			refused+profileConfig+" has a secrets section"),
 	}
 	return plan

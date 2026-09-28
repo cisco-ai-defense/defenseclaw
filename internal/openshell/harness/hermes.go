@@ -152,7 +152,7 @@ var Hermes = register(&Spec{
 		"pin HOME and HERMES_HOME to the image home, and drop the variables that move the managed scope, the Hermes home or the code Hermes runs (HERMES_MANAGED_DIR, HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS)",
 		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them (Hermes loads ~/.hermes/.env over the process environment at start)",
 		"refuse to start while the Hermes home or a profile holds Python code under plugins/ (model-provider plugins are imported whatever plugins.enabled says; memory and cron providers load when the user config names them)",
-		"refuse to start while a user config.yaml has a secrets section (its secret sources set environment variables before the managed .env applies)",
+		"refuse to start while a user config.yaml has a secrets section, as Hermes' YAML loader reads it, or is a file the loader cannot parse (its secret sources set environment variables before the managed .env applies)",
 		"export HERMES_ACCEPT_HOOKS=1 so the managed hooks register without the first-use consent prompt (the managed layer pins hooks_auto_accept as well)",
 		"copy the provider profile's credential placeholder (BEDROCK_MANTLE_API_KEY or OPENAI_API_KEY) into HERMES_DEFENSECLAW_API_KEY for the managed defenseclaw provider",
 	},
@@ -227,17 +227,22 @@ check_home() {
     hit="$(/usr/bin/find -L "$h/plugins" -name '*.py' -print -quit 2>/dev/null)"
     [ -z "$hit" ] || refuse "$hit is a Hermes plugin" "Hermes imports plugins into the process that runs DefenseClaw's hooks; remove it and start Hermes again."
   fi
+  # Parsed with the loader Hermes reads the secrets section with (libyaml's
+  # safe loader when it is there), whatever bytes spell the key: a key in
+  # double quotes can spell secrets with escapes or fold it across lines.
   f="$h/config.yaml"
-  if [ -e "$f" ] && /usr/bin/grep -aq secrets "$f" 2>/dev/null; then
+  if [ -e "$f" ]; then
     ` + shellQuote(hermesTool.interpreter()) + ` -I -c 'import sys, yaml
 try:
-    d = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = yaml.load(f, Loader=getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader)
 except Exception:
-    sys.exit(0)
+    sys.exit(4)
 sys.exit(3 if isinstance(d, dict) and d.get("secrets") else 0)' "$f" 2>/dev/null
     case $? in
       0) ;;
       3) refuse "$f has a secrets section" "Hermes' secret sources set environment variables before DefenseClaw's managed settings apply; remove it and start Hermes again." ;;
+      4) refuse "$f is not a YAML file Hermes' loader can read, so it cannot be checked for a secrets section" "Fix or remove it and start Hermes again." ;;
       *) refuse "$f could not be checked for a secrets section" "Start Hermes again." ;;
     esac
   fi
