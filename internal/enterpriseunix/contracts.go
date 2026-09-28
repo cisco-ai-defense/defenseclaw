@@ -43,6 +43,15 @@ const codeGuardianTargetFailed = "guardian_target_failed"
 // warning: verify, MDM detection and security_complete do not fail on it.
 const codeGuardianTargetAccountRemoved = "guardian_target_account_removed"
 
+// codeGuardianTargetUserPath names a guardian target the guardian refused
+// because of a path in that account's own home: a symbolic link, a file
+// where a folder belongs (or a folder where a file belongs), or a folder the
+// account made unreadable. Only that account is affected, and it could have
+// made the change itself, so it is a warning: verify, MDM detection and
+// security_complete do not fail on it. The guardian protects the target
+// again at its next reconcile after the path is fixed.
+const codeGuardianTargetUserPath = "guardian_target_user_path"
+
 // guardianStateFile is the guardian state the gateway reads in DataDir.
 const guardianStateFile = "hook_guardian_state.json"
 
@@ -51,7 +60,9 @@ var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
 // describeHookContracts reports every guardian target the guardian could
 // not protect (an unverified hook contract gets its own code) and marks the
 // deployment security-incomplete: an unprotected agent must never look like
-// a healthy deployment.
+// a healthy deployment. A target refused only because of a path in its
+// account's own home is reported for that account without marking the
+// deployment incomplete.
 func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20)
@@ -61,6 +72,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	var state struct {
 		Results []struct {
 			User      string `json:"user"`
+			UserHome  string `json:"user_home"`
 			Connector string `json:"connector"`
 			OK        bool   `json:"ok"`
 			Error     string `json:"error"`
@@ -69,7 +81,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	if json.Unmarshal(data, &state) != nil {
 		return
 	}
-	var unverified, failed, removed []string
+	var unverified, failed, removed, userPaths []string
 	for _, result := range state.Results {
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
@@ -81,8 +93,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			continue
 		}
 		if !unverifiedHookContractError(result.Error) {
-			reason := boundedGuardianReason(strings.TrimSpace(strings.TrimPrefix(result.Error, "enterprise hooks: ")))
-			failed = append(failed, fmt.Sprintf("%s for user %s is not protected: %s", result.Connector, result.User, reason))
+			reason := strings.TrimSpace(strings.TrimPrefix(result.Error, "enterprise hooks: "))
+			message := fmt.Sprintf("%s for user %s is not protected: %s", result.Connector, result.User, boundedGuardianReason(reason))
+			if userHomePathRefusal(reason, result.UserHome) {
+				userPaths = append(userPaths, message+"; the path is in that account's own home, so only that account is affected; the guardian protects it again once the path is fixed")
+				continue
+			}
+			failed = append(failed, message)
 			continue
 		}
 		version := "unknown"
@@ -96,6 +113,10 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	sort.Strings(removed)
 	for _, message := range removed {
 		r.AddWarning(codeGuardianTargetAccountRemoved, message)
+	}
+	sort.Strings(userPaths)
+	for _, message := range userPaths {
+		r.AddWarning(codeGuardianTargetUserPath, message)
 	}
 	if len(unverified)+len(failed) == 0 {
 		return
@@ -277,6 +298,39 @@ var targetAccountMissingPattern = regexp.MustCompile(`^enterprise hooks: target 
 // error, which stays a guardian_target_failed.
 func targetAccountMissingError(message string) bool {
 	return targetAccountMissingPattern.MatchString(strings.TrimSpace(message))
+}
+
+// userHomePathRefusalPatterns are the whole of the per-user worker's
+// refusals of one path, without the "enterprise hooks: " prefix: a symbolic
+// link ("refusing symlink in hook config path: <path>"), a file where a
+// folder belongs or a folder where a file belongs ("hook config parent is
+// not a directory: <path>", "hook config path is a directory: <path>"), and
+// a folder the worker, which runs as the account, cannot search ("inspect
+// hook config parent <path>: lstat <path>: permission denied"). The last
+// group is the refused path.
+var userHomePathRefusalPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^refusing symlink (?:in )?[a-z][a-z ]*: (/.+)$`),
+	regexp.MustCompile(`^[a-z][a-z ]* (?:is not a directory|path is a directory): (/.+)$`),
+	regexp.MustCompile(`^inspect [a-z][a-z ]* /.+: lstat (/.+): (?:permission denied|not a directory)$`),
+}
+
+// userHomePathRefusal reports whether reason is one of those refusals for a
+// path strictly inside home, the target account's own home. The match is on
+// the whole reason, because other guardian errors can quote text from a
+// user's own files. A refusal of the home itself or of a path outside it,
+// and every other error, stays a guardian_target_failed.
+func userHomePathRefusal(reason, home string) bool {
+	home = filepath.Clean(strings.TrimSpace(home))
+	if !filepath.IsAbs(home) || home == "/" {
+		return false
+	}
+	for _, pattern := range userHomePathRefusalPatterns {
+		if match := pattern.FindStringSubmatch(reason); match != nil {
+			path := match[len(match)-1]
+			return filepath.Clean(path) == path && strings.HasPrefix(path, home+"/")
+		}
+	}
+	return false
 }
 
 // accountAbsent reports whether the host's own account lookup also finds no
