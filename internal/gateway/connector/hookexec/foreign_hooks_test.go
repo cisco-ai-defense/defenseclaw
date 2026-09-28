@@ -53,6 +53,13 @@ func newForeignHookFixture(t *testing.T) foreignHookFixture {
 	return fixture
 }
 
+// withGateway returns the fixture with a fresh gateway stub, so a run that
+// reaches the gateway cannot change the request count another run sees.
+func (f foreignHookFixture) withGateway() foreignHookFixture {
+	f.rt = ok(`{"action":"allow"}`)
+	return f
+}
+
 func writeForeignHookJSON(t *testing.T, path string, value interface{}) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -250,8 +257,8 @@ func TestCursorForeignHookGuardAllowsApprovedDigestAndNonRewritingHooks(t *testi
 
 // An approval covers one registration in one scope: the same handler text in
 // a project file, under a broader Claude-format matcher, or under another
-// event name is a different registration and still denies.
-func TestCursorForeignHookApprovalIsBoundToScopeAndMatcher(t *testing.T) {
+// event is a different registration and still denies.
+func TestCursorForeignHookApprovalIsBoundToScopeEventAndMatcher(t *testing.T) {
 	handler := map[string]interface{}{"type": "command", "command": ".cursor/hooks/format.sh"}
 	claudeGroup := func(matcher string) map[string]interface{} {
 		return map[string]interface{}{"matcher": matcher, "hooks": []interface{}{handler}}
@@ -304,6 +311,26 @@ func TestCursorForeignHookApprovalIsBoundToScopeAndMatcher(t *testing.T) {
 	fixture.rt = ok(`{"action":"allow"}`)
 	if result := fixture.run(t, "preToolUse", approve); result.rt.requests != 1 {
 		t.Fatalf("approved registration under the canonical event name denied: %s", result.stdout)
+	}
+
+	// The event is part of the registration: the preToolUse approval does not
+	// cover the same handler registered for workspaceOpen.
+	userHooks := filepath.Join(fixture.profile, ".cursor", "hooks.json")
+	writeForeignHookJSON(t, userHooks, map[string]interface{}{
+		"hooks": map[string]interface{}{"workspaceOpen": []interface{}{handler}},
+	})
+	fixture.rt = ok(`{"action":"allow"}`)
+	result := fixture.run(t, "preToolUse", approve)
+	assertForeignHookDenied(t, result, userHooks)
+	if !strings.Contains(result.stdout, "registers a workspaceOpen hook") {
+		t.Fatalf("denial does not name the workspaceOpen registration: %s", result.stdout)
+	}
+	openDigest, err := foreignHookApprovalDigest(foreignHookScopeUser, "workspaceOpen", handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if openDigest == userDigest {
+		t.Fatal("the approval digest does not depend on the event")
 	}
 }
 
@@ -388,6 +415,72 @@ func TestCursorForeignHookGuardScansPluginHooks(t *testing.T) {
 			}})
 			return path
 		},
+		"entry with a command and an empty hooks array": func(t *testing.T, plugins string) string {
+			plugin := filepath.Join(plugins, "local", "p")
+			writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p"})
+			path := filepath.Join(plugin, "hooks", "hooks.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{"hooks": map[string]interface{}{
+				"preToolUse": []interface{}{map[string]interface{}{"command": "./rewrite.sh", "hooks": []interface{}{}}},
+			}})
+			return path
+		},
+		"plugin nested in a marketplace checkout that is a plugin": func(t *testing.T, plugins string) string {
+			marketplace := filepath.Join(plugins, "marketplaces", "acme")
+			writeCursorPluginManifest(t, marketplace, map[string]interface{}{"name": "acme"})
+			writeForeignHookJSON(t, filepath.Join(marketplace, ".cursor-plugin", "marketplace.json"), map[string]interface{}{
+				"name":    "acme",
+				"plugins": []interface{}{map[string]interface{}{"name": "foo", "source": "plugins/foo"}},
+			})
+			nested := filepath.Join(marketplace, "plugins", "foo")
+			writeCursorPluginManifest(t, nested, map[string]interface{}{"name": "foo"})
+			path := filepath.Join(nested, "hooks", "hooks.json")
+			writeForeignHookJSON(t, path, rewritingCursorHooks("./rewrite.sh"))
+			return path
+		},
+		"hooks folder nested in a plugin": func(t *testing.T, plugins string) string {
+			plugin := filepath.Join(plugins, "local", "p")
+			writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p"})
+			path := filepath.Join(plugin, "plugins", "bar", "hooks", "hooks.json")
+			writeForeignHookJSON(t, path, rewritingCursorHooks("./rewrite.sh"))
+			return path
+		},
+		"marketplace entry hooks path": func(t *testing.T, plugins string) string {
+			marketplace := filepath.Join(plugins, "marketplaces", "acme")
+			writeForeignHookJSON(t, filepath.Join(marketplace, ".cursor-plugin", "marketplace.json"), map[string]interface{}{
+				"name": "acme",
+				"plugins": []interface{}{map[string]interface{}{
+					"name": "foo", "source": "plugins/foo", "hooks": "./config/hooks.json",
+				}},
+			})
+			path := filepath.Join(marketplace, "plugins", "foo", "config", "hooks.json")
+			writeForeignHookJSON(t, path, rewritingCursorHooks("./rewrite.sh"))
+			return path
+		},
+		"marketplace entry hooks path under pluginRoot": func(t *testing.T, plugins string) string {
+			marketplace := filepath.Join(plugins, "marketplaces", "acme")
+			writeForeignHookJSON(t, filepath.Join(marketplace, ".cursor-plugin", "marketplace.json"), map[string]interface{}{
+				"name":     "acme",
+				"metadata": map[string]interface{}{"pluginRoot": "./plugins"},
+				"plugins": []interface{}{map[string]interface{}{
+					"name": "foo", "source": map[string]interface{}{"path": "foo"}, "hooks": "cfg/h.json",
+				}},
+			})
+			path := filepath.Join(marketplace, "plugins", "foo", "cfg", "h.json")
+			writeForeignHookJSON(t, path, rewritingClaudeHooks("./rewrite.sh"))
+			return path
+		},
+		"marketplace entry inline hooks": func(t *testing.T, plugins string) string {
+			marketplace := filepath.Join(plugins, "marketplaces", "acme")
+			path := filepath.Join(marketplace, ".cursor-plugin", "marketplace.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{
+				"name": "acme",
+				"plugins": []interface{}{
+					map[string]interface{}{"name": "quiet", "source": "quiet"},
+					map[string]interface{}{"name": "foo", "source": "foo", "hooks": rewritingCursorHooks("./rewrite.sh")},
+				},
+			})
+			return path
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newForeignHookFixture(t)
@@ -398,6 +491,73 @@ func TestCursorForeignHookGuardScansPluginHooks(t *testing.T) {
 				t.Fatalf("plugin denial does not name the plugin scope: %s", result.stdout)
 			}
 		})
+	}
+}
+
+// An entry that carries its own command next to a hooks array runs that
+// command when it is read in the Cursor layout, so grouping only the trusted
+// DefenseClaw registration under it does not hide the command.
+func TestCursorForeignHookGuardGatesTheCommandOfAGroupedEntry(t *testing.T) {
+	trusted := filepath.Join(t.TempDir(), "DefenseClaw", "defenseclaw-hook")
+	owned := map[string]interface{}{
+		"type": "command", "command": trusted, "args": []interface{}{"hook", "--connector", "cursor", "--enterprise-managed"},
+	}
+	mixed := map[string]interface{}{"matcher": "*", "command": "./rewrite.sh", "hooks": []interface{}{owned}}
+	events := map[string]interface{}{"preToolUse": []interface{}{mixed}}
+	withTrusted := func(approved ...string) func(*Options) {
+		return func(opts *Options) {
+			opts.ForeignHookTrustedExecutable = trusted
+			opts.ApprovedForeignHooks = approved
+		}
+	}
+	for name, build := range map[string]func(t *testing.T, f foreignHookFixture) (string, string){
+		"plugin hooks file": func(t *testing.T, f foreignHookFixture) (string, string) {
+			plugin := filepath.Join(f.profile, ".cursor", "plugins", "local", "p")
+			writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p"})
+			path := filepath.Join(plugin, "hooks", "hooks.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{"hooks": events})
+			return path, foreignHookScopePlugin
+		},
+		"plugin manifest inline hooks": func(t *testing.T, f foreignHookFixture) (string, string) {
+			plugin := filepath.Join(f.profile, ".cursor", "plugins", "local", "p")
+			writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p", "hooks": events})
+			return filepath.Join(plugin, ".cursor-plugin", "plugin.json"), foreignHookScopePlugin
+		},
+		"claude-format settings": func(t *testing.T, f foreignHookFixture) (string, string) {
+			path := filepath.Join(f.workspace, ".claude", "settings.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{"hooks": events})
+			return path, foreignHookScopeProject
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newForeignHookFixture(t)
+			path, scope := build(t, fixture)
+			result := fixture.run(t, "preToolUse", withTrusted())
+			assertForeignHookDenied(t, result, path)
+			user, _ := cursorDenyMessages(t, result.stdout)
+			if !strings.Contains(user, `that runs command "./rewrite.sh"`) {
+				t.Fatalf("denial does not name the entry's own command: %s", user)
+			}
+			// The entry's approval covers the whole registration.
+			digest, err := foreignHookApprovalDigest(scope, "preToolUse", mixed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.rt = ok(`{"action":"allow"}`)
+			if result := fixture.run(t, "preToolUse", withTrusted(digest)); result.rt.requests != 1 {
+				t.Fatalf("approved entry denied: %s", result.stdout)
+			}
+		})
+	}
+
+	// A matcher group that holds only the trusted registration is not foreign.
+	fixture := newForeignHookFixture(t)
+	writeForeignHookJSON(t, filepath.Join(fixture.profile, ".cursor", "plugins", "local", "p", "hooks", "hooks.json"),
+		map[string]interface{}{"hooks": map[string]interface{}{"preToolUse": []interface{}{
+			map[string]interface{}{"matcher": "*", "hooks": []interface{}{owned}},
+		}}})
+	if result := fixture.run(t, "preToolUse", withTrusted()); result.rt.requests != 1 {
+		t.Fatalf("trusted matcher group denied: %s", result.stdout)
 	}
 }
 
@@ -413,11 +573,25 @@ func TestCursorForeignHookGuardAllowsPluginsWithoutGatedHooks(t *testing.T) {
 	// A marketplace checkout: its root metadata is not a plugin manifest, and
 	// version-control folders are not plugin sources.
 	marketplace := filepath.Join(plugins, "marketplaces", "acme")
-	writeForeignHookJSON(t, filepath.Join(marketplace, ".cursor-plugin", "marketplace.json"), map[string]interface{}{"name": "acme"})
+	writeForeignHookJSON(t, filepath.Join(marketplace, ".cursor-plugin", "marketplace.json"), map[string]interface{}{
+		"name": "acme",
+		"plugins": []interface{}{
+			"not an entry",
+			map[string]interface{}{"name": "approved", "source": "approved"},
+			map[string]interface{}{"name": "remote", "source": map[string]interface{}{"source": "github", "repo": "acme/remote"}},
+			map[string]interface{}{"name": "formatting", "source": "formatting", "hooks": "hooks/format.json"},
+		},
+	})
+	writeForeignHookJSON(t, filepath.Join(marketplace, "formatting", "hooks", "format.json"), map[string]interface{}{
+		"hooks": map[string]interface{}{"afterFileEdit": []interface{}{map[string]interface{}{"command": "./format.sh"}}},
+	})
 	writeForeignHookJSON(t, filepath.Join(marketplace, ".git", "hooks", "hooks.json"), rewritingCursorHooks("ignored"))
 	writeForeignHookJSON(t, filepath.Join(marketplace, "node_modules", "x", "hooks", "hooks.json"), rewritingCursorHooks("ignored"))
 	approvedPlugin := filepath.Join(marketplace, "approved")
 	writeCursorPluginManifest(t, approvedPlugin, map[string]interface{}{"name": "approved"})
+	// Version-control and package folders inside a plugin are skipped too.
+	writeForeignHookJSON(t, filepath.Join(approvedPlugin, ".git", "hooks", "hooks.json"), rewritingCursorHooks("ignored"))
+	writeForeignHookJSON(t, filepath.Join(approvedPlugin, "node_modules", "y", "hooks", "hooks.json"), rewritingCursorHooks("ignored"))
 	handler := map[string]interface{}{"command": "./approved.sh"}
 	writeForeignHookJSON(t, filepath.Join(approvedPlugin, "hooks", "hooks.json"), map[string]interface{}{
 		"hooks": map[string]interface{}{"preToolUse": []interface{}{handler}},
@@ -458,6 +632,52 @@ func TestCursorForeignHookGuardFailsClosedOnUnverifiablePluginTrees(t *testing.T
 			plugin := filepath.Join(plugins, "local", "p")
 			writeCursorPluginManifest(t, plugin, map[string]interface{}{"name": "p", "hooks": 7})
 			return filepath.Join(plugin, ".cursor-plugin", "plugin.json"), "not a path or an object"
+		},
+		"invalid marketplace manifest": func(t *testing.T, plugins string) (string, string) {
+			path := filepath.Join(plugins, "marketplaces", "acme", ".cursor-plugin", "marketplace.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"name": "acme", "plugins": [`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return path, "not valid JSON"
+		},
+		"marketplace plugins of another type": func(t *testing.T, plugins string) (string, string) {
+			path := filepath.Join(plugins, "marketplaces", "acme", ".cursor-plugin", "marketplace.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{
+				"name":    "acme",
+				"plugins": map[string]interface{}{"foo": map[string]interface{}{"hooks": "hooks.json"}},
+			})
+			return path, "plugins value is not an array"
+		},
+		"marketplace entry hooks of another type": func(t *testing.T, plugins string) (string, string) {
+			path := filepath.Join(plugins, "marketplaces", "acme", ".cursor-plugin", "marketplace.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{
+				"name":    "acme",
+				"plugins": []interface{}{map[string]interface{}{"name": "foo", "source": "foo", "hooks": true}},
+			})
+			return path, `plugin entry \"foo\" hooks value is not a path or an object`
+		},
+		"marketplace hooks path for a remote source": func(t *testing.T, plugins string) (string, string) {
+			path := filepath.Join(plugins, "marketplaces", "acme", ".cursor-plugin", "marketplace.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{
+				"name": "acme",
+				"plugins": []interface{}{map[string]interface{}{
+					"name": "foo", "source": map[string]interface{}{"source": "github", "repo": "acme/foo"}, "hooks": "hooks.json",
+				}},
+			})
+			return path, "source is not a local folder"
+		},
+		"marketplace inline hooks that cannot be read": func(t *testing.T, plugins string) (string, string) {
+			path := filepath.Join(plugins, "marketplaces", "acme", ".cursor-plugin", "marketplace.json")
+			writeForeignHookJSON(t, path, map[string]interface{}{
+				"name": "acme",
+				"plugins": []interface{}{map[string]interface{}{
+					"name": "foo", "source": "foo", "hooks": map[string]interface{}{"preToolUse": "not a list"},
+				}},
+			})
+			return path, "inline hooks"
 		},
 		"nested too deep": func(t *testing.T, plugins string) (string, string) {
 			parts := []string{plugins}
@@ -749,8 +969,16 @@ func TestCursorPayloadWorkspaceRootsNormalization(t *testing.T) {
 	if len(roots) != 2 || roots[0] != absolute || roots[1] != other {
 		t.Fatalf("roots = %v, want the de-duplicated [%s %s]", roots, absolute, other)
 	}
-	if roots, problem := cursorPayloadWorkspaceRoots([]byte(`{"workspace_roots":null,"cwd":null}`)); problem != "" || len(roots) != 0 {
-		t.Fatalf("null roots = (%v, %q), want none and no problem", roots, problem)
+	// No folder open: Cursor reports an empty list.
+	if roots, problem := cursorPayloadWorkspaceRoots([]byte(`{"workspace_roots":[],"cwd":null}`)); problem != "" || len(roots) != 0 {
+		t.Fatalf("empty roots = (%v, %q), want none and no problem", roots, problem)
+	}
+	// workspace_roots is a base field of every Cursor hook call; without it
+	// the project hooks that apply are unknown.
+	for _, payload := range []string{`{"workspace_roots":null,"cwd":null}`, `{}`, `null`, `{"cwd":"/repo"}`} {
+		if roots, problem := cursorPayloadWorkspaceRoots([]byte(payload)); !strings.Contains(problem, "workspace_roots") || roots != nil {
+			t.Fatalf("payload %s = (%v, %q), want a workspace_roots problem", payload, roots, problem)
+		}
 	}
 	for _, payload := range []string{`[1]`, `"x"`, `{"workspace_roots":`} {
 		if _, problem := cursorPayloadWorkspaceRoots([]byte(payload)); problem == "" {
@@ -818,12 +1046,16 @@ func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
 		"roots not an array":            {"workspace_roots": fixture.workspace},
 		"relative cwd":                  {"workspace_roots": []interface{}{fixture.workspace}, "cwd": "repo"},
 		"remote host file URI on POSIX": {"workspace_roots": []interface{}{"file://build01/share/repo"}},
+		// Cursor sends workspace_roots with every hook call.
+		"missing workspace_roots":             {"cwd": rewriter},
+		"null workspace_roots":                {"workspace_roots": nil, "cwd": rewriter},
+		"neither workspace_roots nor cwd set": {},
 	} {
 		if name == "remote host file URI on POSIX" && runtime.GOOS == "windows" {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
-			result := fixture.run(t, "preToolUse", func(opts *Options) {
+			result := fixture.withGateway().run(t, "preToolUse", func(opts *Options) {
 				opts.Stdin = bytes.NewReader(cursorPayloadForTest(body))
 			})
 			assertForeignHookDenied(t, result, "")
@@ -833,7 +1065,7 @@ func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
 		})
 	}
 	// The rewriter is found when it is inside the bound.
-	result := fixture.run(t, "preToolUse", func(opts *Options) {
+	result := fixture.withGateway().run(t, "preToolUse", func(opts *Options) {
 		opts.Stdin = bytes.NewReader(cursorPayloadForTest(map[string]interface{}{
 			"workspace_roots": withRewriter[1:],
 		}))
@@ -844,7 +1076,7 @@ func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
 	for index := range duplicates {
 		duplicates[index] = roots[0]
 	}
-	result = fixture.run(t, "preToolUse", func(opts *Options) {
+	result = fixture.withGateway().run(t, "preToolUse", func(opts *Options) {
 		opts.Stdin = bytes.NewReader(cursorPayloadForTest(map[string]interface{}{
 			"workspace_roots": duplicates,
 			"cwd":             roots[0],
@@ -852,6 +1084,14 @@ func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
 	})
 	if result.rt.requests != 1 {
 		t.Fatalf("duplicate roots: gateway requests = %d, want 1; stdout=%s", result.rt.requests, result.stdout)
+	}
+	// With no folder open Cursor reports an empty list, and only the user and
+	// plugin hooks apply.
+	result = fixture.withGateway().run(t, "preToolUse", func(opts *Options) {
+		opts.Stdin = bytes.NewReader(cursorPayloadForTest(map[string]interface{}{"workspace_roots": []interface{}{}}))
+	})
+	if result.rt.requests != 1 {
+		t.Fatalf("empty workspace: gateway requests = %d, want 1; stdout=%s", result.rt.requests, result.stdout)
 	}
 }
 

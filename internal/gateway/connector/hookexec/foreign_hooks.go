@@ -71,8 +71,10 @@ const (
 	foreignHookFormatCursor = "cursor"      // {"hooks":{event:[handler]}}
 	foreignHookFormatClaude = "claude-code" // {"hooks":{event:[{matcher,hooks:[handler]}]}}
 	// foreignHookFormatPlugin reads plugin hook configs in either layout: an
-	// entry with a hooks array is a Claude-format matcher group and any other
-	// entry is a Cursor handler. The event map may also be the document root.
+	// entry with a hooks array is a Claude-format matcher group, any other
+	// entry is a Cursor handler, and an entry with both a hooks array and its
+	// own handler fields is gated both ways. The event map may also be the
+	// document root.
 	foreignHookFormatPlugin = "plugin"
 
 	foreignHookBlockedReason = "enterprise_foreign_hook_blocked"
@@ -280,12 +282,15 @@ func (o Options) getenv(key string) string {
 }
 
 // scanCursorPluginTree adds the hook sources of the Cursor plugins under tree
-// (<home>/.cursor/plugins): local plugins, marketplace installs and any other
-// layout Cursor keeps there. A folder holding .cursor-plugin/plugin.json is a
-// plugin; any other hooks/hooks.json in the tree is scanned as well. The walk
-// never follows links or reparse points, skips version-control and package
-// folders, and stops at a bounded depth and size. Anything it cannot verify
-// is reported as a problem so the guard denies.
+// (<home>/.cursor/plugins): local plugins, marketplace checkouts and installs,
+// and any other layout Cursor keeps there. Every folder is visited, including
+// the folders inside a plugin, because a marketplace checkout can itself be a
+// plugin that holds further plugins. Each .cursor-plugin folder adds the hook
+// configs its plugin.json and marketplace.json declare, and every
+// hooks/hooks.json in the tree is scanned. The walk never follows links or
+// reparse points, skips version-control and package folders that are not
+// plugins themselves, and stops at a bounded depth and size. Anything it
+// cannot verify is reported as a problem so the guard denies.
 func scanCursorPluginTree(
 	tree string,
 	addSource func(foreignHookSource),
@@ -326,9 +331,7 @@ func scanCursorPluginTree(
 			folderProblem(current.dir, fmt.Sprintf("cannot list the folder: %v", err))
 			continue
 		}
-		if scanCursorPluginRoot(current.dir, entries, addSource, problem) {
-			continue
-		}
+		scanCursorPluginMetadata(current.dir, entries, addSource, problem)
 		for _, entry := range entries {
 			name := entry.Name()
 			path := filepath.Join(current.dir, name)
@@ -337,7 +340,7 @@ func scanCursorPluginTree(
 			case foreignHookLinkMode(mode):
 				folderProblem(path, "the entry is a link or reparse point")
 			case mode.IsDir() && foreignHookNameIs(name, ".cursor-plugin"):
-				// Marketplace metadata; a plugin manifest here was handled above.
+				// Plugin and marketplace manifests, read above.
 			case mode.IsDir() && (foreignHookNameIs(name, ".git") || foreignHookNameIs(name, "node_modules")) &&
 				!foreignHookHoldsPluginMetadata(path):
 				// Version-control and package folders are not plugin sources
@@ -355,98 +358,181 @@ func scanCursorPluginTree(
 	}
 }
 
-// scanCursorPluginRoot adds the hook sources of dir when it is a Cursor plugin
-// and reports whether it is one. A plugin's hooks come from its manifest's
-// hooks field (a path, an inline config, or a list of either) and from the
-// default hooks/hooks.json, which is scanned even when the manifest names
-// another file.
-func scanCursorPluginRoot(
+// scanCursorPluginMetadata adds the hook configs that dir's .cursor-plugin
+// folder declares in plugin.json and marketplace.json. The plugin's default
+// hooks/hooks.json, and a link in place of the .cursor-plugin folder, are
+// handled by the walk.
+func scanCursorPluginMetadata(
 	dir string,
 	entries []fs.DirEntry,
 	addSource func(foreignHookSource),
 	problem func(foreignHookFinding),
-) bool {
-	folderProblem := func(path, text string) {
-		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: path, Directory: true, Problem: text})
-	}
+) {
 	metadata, ok := foreignHookDirEntry(entries, ".cursor-plugin")
-	if !ok {
-		return false
+	if !ok || foreignHookLinkMode(metadata.Type()) || !metadata.IsDir() {
+		return
 	}
 	metadataPath := filepath.Join(dir, metadata.Name())
-	if foreignHookLinkMode(metadata.Type()) {
-		folderProblem(metadataPath, "the folder is a link or reparse point")
-		return true
-	}
-	if !metadata.IsDir() {
-		return false
-	}
-	manifestPath := filepath.Join(metadataPath, "plugin.json")
-	data, exists, err := readForeignHookFile(manifestPath)
-	if err != nil {
-		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: manifestPath, Problem: err.Error()})
-		return true
-	}
-	if !exists {
-		// A marketplace root keeps marketplace.json here and its plugins in
-		// subfolders.
-		return false
-	}
-	paths, inline, manifestProblem := cursorPluginManifestHooks(data)
-	if manifestProblem != "" {
-		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: manifestPath, Problem: manifestProblem})
-		return true
-	}
-	for _, declared := range paths {
-		declared = filepath.FromSlash(strings.TrimSpace(declared))
-		if filepath.IsAbs(declared) {
-			addSource(foreignHookSource{scope: foreignHookScopePlugin, path: declared, format: foreignHookFormatPlugin})
-			continue
-		}
-		// Resolve relative paths against the plugin folder and, in case a
-		// client resolves them next to the manifest, against .cursor-plugin.
-		for _, base := range []string{dir, metadataPath} {
-			addSource(foreignHookSource{
-				scope:  foreignHookScopePlugin,
-				path:   filepath.Join(base, declared),
-				format: foreignHookFormatPlugin,
-			})
-		}
-	}
-	if len(inline) > 0 {
-		result := parseForeignHookInline(inline)
-		addSource(foreignHookSource{
-			scope:  foreignHookScopePlugin,
-			path:   manifestPath,
-			format: foreignHookFormatPlugin,
-			inline: &result,
-		})
-	}
-	if hooks, ok := foreignHookDirEntry(entries, "hooks"); ok {
-		hooksPath := filepath.Join(dir, hooks.Name())
-		switch {
-		case foreignHookLinkMode(hooks.Type()):
-			folderProblem(hooksPath, "the folder is a link or reparse point")
-		case hooks.IsDir():
-			addSource(foreignHookSource{
-				scope:  foreignHookScopePlugin,
-				path:   filepath.Join(hooksPath, "hooks.json"),
-				format: foreignHookFormatPlugin,
-			})
-		}
-	}
-	return true
+	scanCursorPluginManifest(dir, metadataPath, addSource, problem)
+	scanCursorMarketplaceManifest(dir, metadataPath, addSource, problem)
 }
 
-// cursorPluginManifestHooks returns the hook config paths and inline configs a
-// plugin manifest declares in its hooks field.
-func cursorPluginManifestHooks(data []byte) ([]string, []map[string]interface{}, string) {
-	manifest, problem := decodeForeignHookJSONObject(data)
-	if problem != "" {
-		return nil, nil, problem
+// scanCursorPluginManifest adds the hook configs named by the hooks field (a
+// path, an inline config, or a list of either) of dir's plugin.json. The
+// default hooks/hooks.json is scanned even when the manifest names another
+// file.
+func scanCursorPluginManifest(
+	dir, metadataPath string,
+	addSource func(foreignHookSource),
+	problem func(foreignHookFinding),
+) {
+	manifestPath := filepath.Join(metadataPath, "plugin.json")
+	report := func(text string) {
+		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: manifestPath, Problem: text})
 	}
-	raw, exists := manifest["hooks"]
-	if !exists || raw == nil {
+	data, exists, err := readForeignHookFile(manifestPath)
+	if err != nil {
+		report(err.Error())
+		return
+	}
+	if !exists {
+		return
+	}
+	manifest, decodeProblem := decodeForeignHookJSONObject(data)
+	if decodeProblem != "" {
+		report(decodeProblem)
+		return
+	}
+	paths, inline, declaredProblem := foreignHookDeclaredHooks("the manifest", manifest["hooks"])
+	if declaredProblem != "" {
+		report(declaredProblem)
+		return
+	}
+	for _, declared := range paths {
+		// Resolve relative paths against the plugin folder and, in case a
+		// client resolves them next to the manifest, against .cursor-plugin.
+		addDeclaredPluginHooks(addSource, declared, dir, metadataPath)
+	}
+	addInlinePluginHooks(addSource, manifestPath, inline)
+}
+
+// scanCursorMarketplaceManifest adds the hook configs that the plugin entries
+// of dir's marketplace.json declare. Cursor merges a marketplace entry with
+// the plugin's own manifest, and the manifest wins only where both set a
+// field, so an entry's hooks take effect for a plugin whose manifest names
+// none. An entry's hooks path is resolved against the plugin folder its source
+// names (under metadata.pluginRoot when set) and, in case a client resolves it
+// there, against the marketplace folder and its .cursor-plugin folder. An
+// entry that declares a hooks path for a source that is not a local folder
+// cannot be verified.
+func scanCursorMarketplaceManifest(
+	dir, metadataPath string,
+	addSource func(foreignHookSource),
+	problem func(foreignHookFinding),
+) {
+	manifestPath := filepath.Join(metadataPath, "marketplace.json")
+	report := func(text string) {
+		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: manifestPath, Problem: text})
+	}
+	data, exists, err := readForeignHookFile(manifestPath)
+	if err != nil {
+		report(err.Error())
+		return
+	}
+	if !exists {
+		return
+	}
+	manifest, decodeProblem := decodeForeignHookJSONObject(data)
+	if decodeProblem != "" {
+		report(decodeProblem)
+		return
+	}
+	rawPlugins := manifest["plugins"]
+	if rawPlugins == nil {
+		return
+	}
+	plugins, ok := rawPlugins.([]interface{})
+	if !ok {
+		report("the marketplace plugins value is not an array")
+		return
+	}
+	var inline []map[string]interface{}
+	for index, rawPlugin := range plugins {
+		plugin, ok := rawPlugin.(map[string]interface{})
+		if !ok {
+			// An entry that is not an object declares no hooks.
+			continue
+		}
+		label := fmt.Sprintf("the plugin entry %d", index+1)
+		if name, ok := plugin["name"].(string); ok && strings.TrimSpace(name) != "" {
+			label = "the plugin entry " + quoteForeignHookText(name)
+		}
+		paths, entryInline, declaredProblem := foreignHookDeclaredHooks(label, plugin["hooks"])
+		if declaredProblem != "" {
+			report(declaredProblem)
+			return
+		}
+		inline = append(inline, entryInline...)
+		if len(paths) == 0 {
+			continue
+		}
+		pluginDirs, sourceProblem := cursorMarketplacePluginDirs(dir, manifest["metadata"], plugin["source"])
+		if sourceProblem != "" {
+			report(label + " declares a hooks path, but " + sourceProblem)
+			return
+		}
+		bases := append(pluginDirs, dir, metadataPath)
+		for _, declared := range paths {
+			addDeclaredPluginHooks(addSource, declared, bases...)
+		}
+	}
+	addInlinePluginHooks(addSource, manifestPath, inline)
+}
+
+// cursorMarketplacePluginDirs returns the plugin folder a marketplace entry's
+// source names: a path (or an object with a path) relative to the marketplace
+// folder, and the same path under metadata.pluginRoot when that is set.
+// Cursor fetches other sources into folders the entry does not name.
+func cursorMarketplacePluginDirs(dir string, rawMetadata, rawSource interface{}) ([]string, string) {
+	source, ok := rawSource.(string)
+	if object, isObject := rawSource.(map[string]interface{}); isObject {
+		source, ok = object["path"].(string)
+	}
+	if !ok || strings.ContainsRune(source, 0) {
+		return nil, "its source is not a local folder"
+	}
+	source = filepath.FromSlash(strings.TrimSpace(source))
+	if filepath.IsAbs(source) {
+		return []string{filepath.Clean(source)}, ""
+	}
+	dirs := []string{filepath.Join(dir, source)}
+	if rawMetadata == nil {
+		return dirs, ""
+	}
+	metadata, ok := rawMetadata.(map[string]interface{})
+	if !ok {
+		return nil, "the marketplace metadata is not an object"
+	}
+	rawRoot := metadata["pluginRoot"]
+	if rawRoot == nil {
+		return dirs, ""
+	}
+	root, ok := rawRoot.(string)
+	if !ok || strings.ContainsRune(root, 0) {
+		return nil, "the marketplace pluginRoot is not a path"
+	}
+	root = filepath.FromSlash(strings.TrimSpace(root))
+	if !filepath.IsAbs(root) {
+		root = filepath.Join(dir, root)
+	}
+	return append(dirs, filepath.Join(root, source)), ""
+}
+
+// foreignHookDeclaredHooks splits a manifest's hooks value (a path, an inline
+// config, or a list of either) into paths and inline configs. label names the
+// manifest or entry in a problem.
+func foreignHookDeclaredHooks(label string, raw interface{}) ([]string, []map[string]interface{}, string) {
+	if raw == nil {
 		return nil, nil, ""
 	}
 	values := []interface{}{raw}
@@ -461,16 +547,47 @@ func cursorPluginManifestHooks(data []byte) ([]string, []map[string]interface{},
 			continue
 		case string:
 			if strings.TrimSpace(typed) == "" || strings.ContainsRune(typed, 0) {
-				return nil, nil, "the manifest hooks path is empty or invalid"
+				return nil, nil, label + " hooks path is empty or invalid"
 			}
 			paths = append(paths, typed)
 		case map[string]interface{}:
 			inline = append(inline, typed)
 		default:
-			return nil, nil, "the manifest hooks value is not a path or an object"
+			return nil, nil, label + " hooks value is not a path or an object"
 		}
 	}
 	return paths, inline, ""
+}
+
+// addDeclaredPluginHooks adds a plugin hook config path that a manifest
+// declares, resolving a relative path against each base folder.
+func addDeclaredPluginHooks(addSource func(foreignHookSource), declared string, bases ...string) {
+	declared = filepath.FromSlash(strings.TrimSpace(declared))
+	if filepath.IsAbs(declared) {
+		bases = []string{""}
+	}
+	for _, base := range bases {
+		addSource(foreignHookSource{
+			scope:  foreignHookScopePlugin,
+			path:   filepath.Join(base, declared),
+			format: foreignHookFormatPlugin,
+		})
+	}
+}
+
+// addInlinePluginHooks adds the inline hook configs a manifest at path
+// declares as one source.
+func addInlinePluginHooks(addSource func(foreignHookSource), path string, inline []map[string]interface{}) {
+	if len(inline) == 0 {
+		return
+	}
+	result := parseForeignHookInline(inline)
+	addSource(foreignHookSource{
+		scope:  foreignHookScopePlugin,
+		path:   path,
+		format: foreignHookFormatPlugin,
+		inline: &result,
+	})
 }
 
 func parseForeignHookInline(configs []map[string]interface{}) foreignHookParseResult {
@@ -513,19 +630,24 @@ func foreignHookLinkMode(mode fs.FileMode) bool {
 
 // cursorPayloadWorkspaceRoots returns the distinct absolute workspace roots
 // Cursor reports for this invocation (workspace_roots plus cwd when
-// present). A payload whose roots cannot all be resolved to local absolute
-// paths, or that reports more than foreignHookMaxRoots distinct roots,
-// returns a problem so the guard denies instead of scanning a subset.
+// present). Cursor sends workspace_roots with every hook call, as an empty
+// array when no folder is open, so a payload without it (or with null) does
+// not say which project hooks apply and returns a problem, as does a payload
+// whose roots cannot all be resolved to local absolute paths or that reports
+// more than foreignHookMaxRoots distinct roots. The guard then denies instead
+// of scanning a subset.
 func cursorPayloadWorkspaceRoots(payload []byte) ([]string, string) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return nil, "the hook payload is not a JSON object"
 	}
+	value, ok := envelope["workspace_roots"]
+	if !ok || isJSONNull(value) {
+		return nil, "the hook payload does not report workspace_roots"
+	}
 	var raw []json.RawMessage
-	if value, ok := envelope["workspace_roots"]; ok && !isJSONNull(value) {
-		if err := json.Unmarshal(value, &raw); err != nil {
-			return nil, "workspace_roots is not an array"
-		}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return nil, "workspace_roots is not an array"
 	}
 	if value, ok := envelope["cwd"]; ok && !isJSONNull(value) {
 		raw = append(raw, value)
@@ -758,31 +880,36 @@ func foreignHookGatedEvent(event string) (string, bool) {
 	return "", false
 }
 
+// foreignHookEntryHandlers returns the handlers one event entry registers. In
+// Claude-format and plugin configs an entry with a hooks array is a matcher
+// group. An entry that also carries handler fields (type, command, url or
+// prompt) is gated as a handler too: a consumer that reads it in the Cursor
+// layout runs its own command and ignores the hooks array, so checking only
+// the grouped handlers would let the entry's command run unchecked.
 func foreignHookEntryHandlers(format string, entry interface{}) ([]foreignHookParsedHandler, string) {
 	object, ok := entry.(map[string]interface{})
 	if !ok {
 		return nil, "is not an object"
 	}
+	self := []foreignHookParsedHandler{{entry: object, handler: object}}
 	rawHandlers, grouped := object["hooks"]
 	if format == foreignHookFormatCursor || (format == foreignHookFormatPlugin && !grouped) {
-		return []foreignHookParsedHandler{{entry: object, handler: object}}, ""
+		return self, ""
+	}
+	var handlers []foreignHookParsedHandler
+	if foreignHookHasHandlerFields(object) {
+		handlers = self
 	}
 	if !grouped {
-		// A matcher group without handlers runs nothing. Treat an object that
-		// carries handler fields as a bare handler rather than assuming the
-		// consumer ignores it.
-		for _, key := range []string{"type", "command", "url", "prompt"} {
-			if _, ok := object[key]; ok {
-				return []foreignHookParsedHandler{{entry: object, handler: object}}, ""
-			}
-		}
-		return nil, ""
+		// A Claude-format matcher group without handlers runs nothing. An
+		// object that carries handler fields is a bare handler rather than
+		// something the consumer is assumed to ignore.
+		return handlers, ""
 	}
 	list, ok := rawHandlers.([]interface{})
 	if !ok {
 		return nil, "has a hooks value that is not an array"
 	}
-	handlers := make([]foreignHookParsedHandler, 0, len(list))
 	for _, raw := range list {
 		handler, ok := raw.(map[string]interface{})
 		if !ok {
@@ -798,6 +925,16 @@ func foreignHookEntryHandlers(format string, entry interface{}) ([]foreignHookPa
 		handlers = append(handlers, foreignHookParsedHandler{entry: group, handler: handler})
 	}
 	return handlers, ""
+}
+
+// foreignHookHasHandlerFields reports whether an entry names something to run.
+func foreignHookHasHandlerFields(object map[string]interface{}) bool {
+	for _, key := range []string{"type", "command", "url", "prompt"} {
+		if _, ok := object[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // foreignHookApprovalDigest is the sha256 of the canonical JSON (sorted keys,
