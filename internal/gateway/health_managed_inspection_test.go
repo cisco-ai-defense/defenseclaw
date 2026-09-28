@@ -406,7 +406,6 @@ func TestManagedProxyBootRewiresAnUnwiredHookLane(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var buildable atomic.Bool
-	setCMIDDirectLaneRefused(t, false)
 	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
 		if !buildable.Load() {
 			return nil, errors.New("managed cloud auth library not trusted yet")
@@ -475,7 +474,6 @@ func TestManagedProxyBootRewiresAnUnwiredProxyLane(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var buildable atomic.Bool
-	setCMIDDirectLaneRefused(t, false)
 	cloudreg.Register(func(cloudreg.Config) (cloudreg.Provider, error) {
 		if !buildable.Load() {
 			return nil, errors.New("managed cloud auth library not trusted yet")
