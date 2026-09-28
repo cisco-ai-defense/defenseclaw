@@ -10129,8 +10129,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return ""
 
     def _ai_discovery_detail_text(self) -> str:
+        # Product, signal and detector text come from the scanned host.
         lines = [self.ai_discovery_model.detail_header(), *self.ai_discovery_model.detail_lines(limit=8)]
-        return "\n".join(line for line in lines if line)
+        return "\n".join(rich_escape(line) for line in lines if line)
 
     def _update_body_only(self) -> None:
         body_widget = self.query_one("#body", Static)

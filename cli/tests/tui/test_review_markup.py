@@ -93,3 +93,18 @@ async def test_mcp_form_shows_a_markup_like_validation_error_instead_of_crashing
         status = app.screen.query_one("#mcp-set-status", Static)
         assert isinstance(app.screen, MCPSetFormScreen)
         assert "[/]" in str(status.render())
+
+
+def test_runtime_snapshot_with_non_numeric_fields_does_not_raise() -> None:
+    from defenseclaw.tui.services.runtime_state import decode_runtime_snapshot
+
+    snapshot = decode_runtime_snapshot(
+        {
+            "enabled": True,
+            "processes_observed": "n/a",
+            "findings": [{"finding_id": "f1", "pid": "abc", "score": "high", "signals": [{"weight": "x"}]}],
+        }
+    )
+
+    assert snapshot.processes_observed == 0
+    assert snapshot.rows[0].pid == 0 and snapshot.rows[0].score == 0

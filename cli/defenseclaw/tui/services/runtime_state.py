@@ -41,6 +41,15 @@ def _selected_plane_gap(plane: PlaneRow) -> bool:
     return True
 
 
+
+def _int(value: object) -> int:
+    """Tolerant int: a non-numeric pid or count must not crash the poll."""
+
+    try:
+        return int(value or 0)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return 0
+
 class RuntimePanelAction(Enum):
     """What a keypress asked the panel to do."""
 
@@ -218,7 +227,7 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
         if not isinstance(raw, dict):
             continue
         signals = tuple(
-            (str(s.get("id") or ""), str(s.get("detail") or s.get("title") or ""), int(s.get("weight") or 0))
+            (str(s.get("id") or ""), str(s.get("detail") or s.get("title") or ""), _int(s.get("weight")))
             for s in (raw.get("signals") or []) if isinstance(s, dict)
         )
         providers = tuple(
@@ -228,12 +237,12 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
         correlation = raw.get("correlation") or {}
         rows.append(RuntimeRow(
             finding_id=str(raw.get("finding_id") or ""),
-            pid=int(raw.get("pid") or 0),
+            pid=_int(raw.get("pid")),
             process=str(raw.get("process") or ""),
             cmdline=str(raw.get("cmdline") or ""),
             user=str(raw.get("user") or ""),
             agent_name=str(raw.get("agent_name") or ""),
-            score=int(raw.get("score") or 0),
+            score=_int(raw.get("score")),
             severity=str(raw.get("severity") or "info"),
             signals=signals,
             providers=providers,
@@ -249,12 +258,12 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
         scanned_at=str(payload.get("scanned_at") or ""),
         rows=tuple(rows),
         planes=tuple(planes),
-        processes_observed=int(payload.get("processes_observed") or 0),
-        processes_skipped=int(payload.get("processes_skipped") or 0),
-        connections_observed=int(payload.get("connections_observed") or 0),
-        connections_unattributed=int(payload.get("connections_unattributed") or 0),
-        host_plane_observations=int(payload.get("host_plane_observations") or 0),
-        host_plane_gated=int(payload.get("host_plane_gated") or 0),
+        processes_observed=_int(payload.get("processes_observed")),
+        processes_skipped=_int(payload.get("processes_skipped")),
+        connections_observed=_int(payload.get("connections_observed")),
+        connections_unattributed=_int(payload.get("connections_unattributed")),
+        host_plane_observations=_int(payload.get("host_plane_observations")),
+        host_plane_gated=_int(payload.get("host_plane_gated")),
         degraded=bool(payload.get("degraded")),
         degraded_reasons=tuple(str(reason) for reason in (payload.get("degraded_reasons") or [])),
     )
