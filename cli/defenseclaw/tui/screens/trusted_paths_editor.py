@@ -66,7 +66,9 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
 
     #trusted-editor-dialog {{
         width: 116;
+        max-width: 96%;
         height: 32;
+        max-height: 100%;
         padding: 1 2;
         border: round {TOKENS.border_active};
         background: {TOKENS.surface_panel};
@@ -81,7 +83,8 @@ class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
     }}
 
     #trusted-editor-table {{
-        height: 16;
+        height: 1fr;
+        min-height: 3;
         margin-bottom: 1;
     }}
 

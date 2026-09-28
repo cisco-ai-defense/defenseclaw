@@ -67,7 +67,9 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
 
     #resource-editor-dialog {{
         width: 116;
+        max-width: 96%;
         height: 30;
+        max-height: 100%;
         padding: 1 2;
         border: round {TOKENS.border_active};
         background: {TOKENS.surface_panel};
@@ -82,7 +84,8 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
     }}
 
     #resource-editor-table {{
-        height: 18;
+        height: 1fr;
+        min-height: 3;
         margin-bottom: 1;
     }}
 
@@ -98,6 +101,8 @@ class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
 
     #resource-editor-buttons Button {{
         margin-left: 1;
+        /* Seven buttons fit in an 80-column terminal only below the 16-cell default. */
+        min-width: 8;
     }}
     """
 
