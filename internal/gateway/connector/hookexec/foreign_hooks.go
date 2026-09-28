@@ -30,8 +30,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Cursor has no managed-hooks-only setting: it runs every matching hook from
@@ -46,10 +48,13 @@ const (
 	// foreignHookFileLimit bounds every user or project hook file the guard
 	// reads. Larger files cannot be verified and deny.
 	foreignHookFileLimit int64 = 1 << 20
-	// foreignHookMaxRoots bounds workspace roots taken from the payload.
+	// foreignHookMaxRoots bounds the distinct workspace roots taken from the
+	// payload. A payload that reports more cannot be verified and denies.
 	foreignHookMaxRoots = 32
 	// foreignHookCacheLimit bounds the in-process parse cache.
 	foreignHookCacheLimit = 64
+	// foreignHookDescribeLimit bounds the payload text shown in a denial.
+	foreignHookDescribeLimit = 200
 
 	foreignHookScopeUser    = "user"
 	foreignHookScopeProject = "project"
@@ -63,7 +68,9 @@ const (
 // foreignHookFinding is one input-rewriting handler (or an unverifiable file)
 // found outside the administrator-managed hook source.
 type foreignHookFinding struct {
-	Scope   string
+	Scope string
+	// Path is the hook file. It is empty for a problem with the workspace
+	// roots in the payload.
 	Path    string
 	Event   string
 	Digest  string
@@ -128,8 +135,8 @@ func evaluateCursorForeignHooks(opts Options, payload []byte) []foreignHookFindi
 }
 
 func scanCursorForeignHooks(opts Options, payload []byte) []foreignHookFinding {
-	var findings []foreignHookFinding
-	for _, source := range cursorForeignHookSources(opts, payload) {
+	sources, findings := cursorForeignHookSources(opts, payload)
+	for _, source := range sources {
 		result := readForeignHookSource(source)
 		if result.problem != "" {
 			findings = append(findings, foreignHookFinding{
@@ -154,8 +161,11 @@ func scanCursorForeignHooks(opts Options, payload []byte) []foreignHookFinding {
 	return findings
 }
 
-func cursorForeignHookSources(opts Options, payload []byte) []foreignHookSource {
+// cursorForeignHookSources lists the hook sources to scan and the problems
+// that already make this invocation unverifiable.
+func cursorForeignHookSources(opts Options, payload []byte) ([]foreignHookSource, []foreignHookFinding) {
 	var sources []foreignHookSource
+	var problems []foreignHookFinding
 	seen := map[string]struct{}{}
 	add := func(scope, format string, parts ...string) {
 		path := filepath.Clean(filepath.Join(parts...))
@@ -187,12 +197,16 @@ func cursorForeignHookSources(opts Options, payload []byte) []foreignHookSource 
 		add(foreignHookScopeUser, foreignHookFormatClaude, dir, "settings.json")
 		add(foreignHookScopeUser, foreignHookFormatClaude, dir, "settings.local.json")
 	}
-	for _, root := range cursorPayloadWorkspaceRoots(payload) {
+	roots, rootProblem := cursorPayloadWorkspaceRoots(payload)
+	if rootProblem != "" {
+		problems = append(problems, foreignHookFinding{Scope: foreignHookScopeProject, Problem: rootProblem})
+	}
+	for _, root := range roots {
 		add(foreignHookScopeProject, foreignHookFormatCursor, root, ".cursor", "hooks.json")
 		add(foreignHookScopeProject, foreignHookFormatClaude, root, ".claude", "settings.json")
 		add(foreignHookScopeProject, foreignHookFormatClaude, root, ".claude", "settings.local.json")
 	}
-	return sources
+	return sources, problems
 }
 
 func (o Options) getenv(key string) string {
@@ -202,36 +216,54 @@ func (o Options) getenv(key string) string {
 	return os.Getenv(key)
 }
 
-// cursorPayloadWorkspaceRoots returns the absolute workspace roots Cursor
-// reports for this invocation (workspace_roots plus cwd when present).
-func cursorPayloadWorkspaceRoots(payload []byte) []string {
-	var envelope struct {
-		WorkspaceRoots []json.RawMessage `json:"workspace_roots"`
-		Cwd            json.RawMessage   `json:"cwd"`
-	}
+// cursorPayloadWorkspaceRoots returns the distinct absolute workspace roots
+// Cursor reports for this invocation (workspace_roots plus cwd when
+// present). A payload whose roots cannot all be resolved to local absolute
+// paths, or that reports more than foreignHookMaxRoots distinct roots,
+// returns a problem so the guard denies instead of scanning a subset.
+func cursorPayloadWorkspaceRoots(payload []byte) ([]string, string) {
+	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return nil
+		return nil, "the hook payload is not a JSON object"
 	}
-	raw := append([]json.RawMessage(nil), envelope.WorkspaceRoots...)
-	if len(envelope.Cwd) != 0 {
-		raw = append(raw, envelope.Cwd)
+	var raw []json.RawMessage
+	if value, ok := envelope["workspace_roots"]; ok && !isJSONNull(value) {
+		if err := json.Unmarshal(value, &raw); err != nil {
+			return nil, "workspace_roots is not an array"
+		}
+	}
+	if value, ok := envelope["cwd"]; ok && !isJSONNull(value) {
+		raw = append(raw, value)
 	}
 	var roots []string
+	seen := map[string]struct{}{}
 	for _, item := range raw {
 		var value string
 		if err := json.Unmarshal(item, &value); err != nil {
+			return nil, "a workspace root is not a string"
+		}
+		if strings.TrimSpace(value) == "" {
 			continue
 		}
 		root, ok := normalizeCursorWorkspaceRoot(value)
 		if !ok {
+			return nil, fmt.Sprintf("the workspace folder %s is not a local absolute path", quoteForeignHookText(value))
+		}
+		key := foreignHookPathKey(root)
+		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
-		roots = append(roots, root)
 		if len(roots) == foreignHookMaxRoots {
-			break
+			return nil, fmt.Sprintf("the workspace has more than %d folders", foreignHookMaxRoots)
 		}
+		seen[key] = struct{}{}
+		roots = append(roots, root)
 	}
-	return roots
+	return roots, ""
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 func normalizeCursorWorkspaceRoot(value string) (string, bool) {
@@ -241,10 +273,18 @@ func normalizeCursorWorkspaceRoot(value string) (string, bool) {
 	}
 	if strings.HasPrefix(strings.ToLower(value), "file://") {
 		parsed, err := url.Parse(value)
-		if err != nil || (parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost")) {
+		if err != nil {
 			return "", false
 		}
 		value = parsed.Path
+		if parsed.Host != "" && !strings.EqualFold(parsed.Host, "localhost") {
+			// file://server/share/path names a UNC path, which only Windows
+			// opens directly.
+			if runtime.GOOS != "windows" || parsed.Port() != "" || strings.Trim(parsed.Path, `/\`) == "" {
+				return "", false
+			}
+			value = `\\` + parsed.Host + filepath.FromSlash(parsed.Path)
+		}
 	}
 	// Cursor on Windows can report URI-style paths such as /c:/Users/x.
 	if len(value) >= 3 && (value[0] == '/' || value[0] == '\\') && isDriveLetter(value[1]) && value[2] == ':' {
@@ -259,6 +299,17 @@ func normalizeCursorWorkspaceRoot(value string) (string, bool) {
 
 func isDriveLetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func quoteForeignHookText(value string) string {
+	if len(value) <= foreignHookDescribeLimit {
+		return strconv.Quote(value)
+	}
+	cut := foreignHookDescribeLimit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return strconv.Quote(value[:cut]) + "..."
 }
 
 func readForeignHookSource(source foreignHookSource) foreignHookParseResult {
@@ -528,6 +579,13 @@ func foreignHookConnectorToken(value string) bool {
 	return true
 }
 
+func (f foreignHookFinding) subject() string {
+	if f.Path == "" {
+		return "the workspace folders Cursor reported"
+	}
+	return fmt.Sprintf("the %s-level hook file %s", f.Scope, f.Path)
+}
+
 // cursorForeignHookDenyMessage names the first blocking file so the user or
 // administrator can act on it without reading logs.
 func cursorForeignHookDenyMessage(findings []foreignHookFinding) string {
@@ -537,17 +595,23 @@ func cursorForeignHookDenyMessage(findings []foreignHookFinding) string {
 		more = fmt.Sprintf(" (%d more unapproved hook entries found)", len(findings)-1)
 	}
 	if first.Problem != "" {
+		action := "Fix or remove the file so DefenseClaw can check the hooks it registers."
+		if first.Path == "" {
+			action = fmt.Sprintf(
+				"Open local folders, at most %d in one workspace, so DefenseClaw can check their hooks.",
+				foreignHookMaxRoots,
+			)
+		}
 		return fmt.Sprintf(
-			"DefenseClaw blocked this tool call: the %s-level hook file %s cannot be verified (%s)%s. "+
-				"Fix or remove the file so DefenseClaw can check the hooks it registers.",
-			first.Scope, first.Path, first.Problem, more,
+			"DefenseClaw blocked this tool call: %s cannot be verified (%s)%s. %s",
+			first.subject(), first.Problem, more, action,
 		)
 	}
 	return fmt.Sprintf(
-		"DefenseClaw blocked this tool call: the %s-level hook file %s registers a %s hook "+
+		"DefenseClaw blocked this tool call: %s registers a %s hook "+
 			"(sha256:%s) that the administrator has not approved%s. Remove it, or ask "+
 			"your administrator to approve it in connector_hooks.cursor.approved_foreign_hooks.",
-		first.Scope, first.Path, first.Event, first.Digest, more,
+		first.subject(), first.Event, first.Digest, more,
 	)
 }
 

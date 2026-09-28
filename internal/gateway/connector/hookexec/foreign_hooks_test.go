@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -361,33 +362,145 @@ func TestCursorForeignHookGuardRecognizesOnlyTrustedExecutableRegistrations(t *t
 	}
 }
 
+func fileURIForTest(path string) string {
+	slashed := filepath.ToSlash(path)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed
+	}
+	return "file://" + slashed
+}
+
+func cursorPayloadForTest(body map[string]interface{}) []byte {
+	payload := map[string]interface{}{
+		"hook_event_name": "preToolUse",
+		"cursor_version":  "3.9.0",
+		"tool_name":       "Shell",
+		"tool_input":      map[string]interface{}{"command": "echo ORIGINAL"},
+	}
+	for key, value := range body {
+		payload[key] = value
+	}
+	encoded, _ := json.Marshal(payload)
+	return encoded
+}
+
 func TestCursorPayloadWorkspaceRootsNormalization(t *testing.T) {
 	absolute := filepath.Join(t.TempDir(), "repo")
+	other := filepath.Join(filepath.Dir(absolute), "other")
 	payload, _ := json.Marshal(map[string]interface{}{
-		"workspace_roots": []interface{}{absolute, "relative/path", "", 7, "file://" + filepath.ToSlash(absolute)},
-		"cwd":             absolute,
+		"workspace_roots": []interface{}{absolute, "", fileURIForTest(absolute), nil, other},
+		"cwd":             other,
 	})
-	roots := cursorPayloadWorkspaceRoots(payload)
-	for _, root := range roots {
-		if !filepath.IsAbs(root) {
-			t.Fatalf("non-absolute root kept: %q", root)
-		}
+	roots, problem := cursorPayloadWorkspaceRoots(payload)
+	if problem != "" {
+		t.Fatalf("valid roots reported a problem: %s", problem)
 	}
-	if len(roots) == 0 || roots[0] != absolute {
-		t.Fatalf("roots = %v, want %s first", roots, absolute)
+	if len(roots) != 2 || roots[0] != absolute || roots[1] != other {
+		t.Fatalf("roots = %v, want the de-duplicated [%s %s]", roots, absolute, other)
+	}
+	if roots, problem := cursorPayloadWorkspaceRoots([]byte(`{"workspace_roots":null,"cwd":null}`)); problem != "" || len(roots) != 0 {
+		t.Fatalf("null roots = (%v, %q), want none and no problem", roots, problem)
+	}
+	for _, payload := range []string{`[1]`, `"x"`, `{"workspace_roots":`} {
+		if _, problem := cursorPayloadWorkspaceRoots([]byte(payload)); problem == "" {
+			t.Fatalf("payload %s is not an object but reported no problem", payload)
+		}
 	}
 	if runtime.GOOS == "windows" {
 		if root, ok := normalizeCursorWorkspaceRoot("/c:/Users/dev/repo"); !ok || root != `c:\Users\dev\repo` {
 			t.Fatalf("URI-style Windows root = (%q, %v)", root, ok)
 		}
+		if root, ok := normalizeCursorWorkspaceRoot("file://build01/share/repo"); !ok || root != `\\build01\share\repo` {
+			t.Fatalf("UNC file URI root = (%q, %v)", root, ok)
+		}
+		if _, ok := normalizeCursorWorkspaceRoot("/share/repo"); ok {
+			t.Fatal("drive-less rooted Windows path accepted as a local absolute root")
+		}
+	} else if _, ok := normalizeCursorWorkspaceRoot("file://build01/share/repo"); ok {
+		t.Fatal("file URI with a remote host accepted")
 	}
-	many := make([]string, foreignHookMaxRoots+5)
-	for index := range many {
-		many[index] = filepath.Join(absolute, "r", string(rune('a'+index%26)), strings.Repeat("x", index))
+
+	// Duplicates count once toward the bound.
+	duplicates := make([]string, 3*foreignHookMaxRoots)
+	for index := range duplicates {
+		duplicates[index] = absolute
 	}
-	payload, _ = json.Marshal(map[string]interface{}{"workspace_roots": many})
-	if got := len(cursorPayloadWorkspaceRoots(payload)); got != foreignHookMaxRoots {
-		t.Fatalf("workspace roots = %d, want bounded %d", got, foreignHookMaxRoots)
+	payload, _ = json.Marshal(map[string]interface{}{"workspace_roots": duplicates, "cwd": absolute})
+	if roots, problem := cursorPayloadWorkspaceRoots(payload); problem != "" || len(roots) != 1 {
+		t.Fatalf("duplicate roots = (%v, %q), want one root", roots, problem)
+	}
+	distinct := make([]string, foreignHookMaxRoots)
+	for index := range distinct {
+		distinct[index] = filepath.Join(absolute, "r", strconv.Itoa(index))
+	}
+	payload, _ = json.Marshal(map[string]interface{}{"workspace_roots": distinct})
+	if roots, problem := cursorPayloadWorkspaceRoots(payload); problem != "" || len(roots) != foreignHookMaxRoots {
+		t.Fatalf("%d distinct roots = (%d roots, %q), want all of them", foreignHookMaxRoots, len(roots), problem)
+	}
+	payload, _ = json.Marshal(map[string]interface{}{"workspace_roots": distinct, "cwd": other})
+	if roots, problem := cursorPayloadWorkspaceRoots(payload); problem == "" || roots != nil {
+		t.Fatalf("roots past the bound = (%d roots, %q), want a problem instead of a truncated list", len(roots), problem)
+	}
+}
+
+// Roots the guard cannot scan must deny instead of narrowing the scan: a
+// 33rd folder (or cwd past the bound) may hold the rewriting hook.
+func TestCursorForeignHookGuardDeniesUnverifiableWorkspaceRoots(t *testing.T) {
+	fixture := newForeignHookFixture(t)
+	roots := make([]string, 0, foreignHookMaxRoots)
+	for index := 0; index < foreignHookMaxRoots; index++ {
+		dir := filepath.Join(fixture.workspace, "empty", strconv.Itoa(index))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		roots = append(roots, dir)
+	}
+	rewriter := filepath.Join(fixture.workspace, "rewriter")
+	writeForeignHookJSON(t, filepath.Join(rewriter, ".cursor", "hooks.json"), rewritingCursorHooks("rewrite"))
+	withRewriter := append(append([]string(nil), roots...), rewriter)
+	for name, body := range map[string]map[string]interface{}{
+		"more roots than the bound":     {"workspace_roots": withRewriter},
+		"cwd past the bound":            {"workspace_roots": roots, "cwd": rewriter},
+		"relative root":                 {"workspace_roots": []interface{}{"relative/repo"}},
+		"remote root":                   {"workspace_roots": []interface{}{"vscode-remote://ssh-remote+build01/home/dev/repo"}},
+		"non-string root":               {"workspace_roots": []interface{}{fixture.workspace, 7}},
+		"roots not an array":            {"workspace_roots": fixture.workspace},
+		"relative cwd":                  {"workspace_roots": []interface{}{fixture.workspace}, "cwd": "repo"},
+		"remote host file URI on POSIX": {"workspace_roots": []interface{}{"file://build01/share/repo"}},
+	} {
+		if name == "remote host file URI on POSIX" && runtime.GOOS == "windows" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			result := fixture.run(t, "preToolUse", func(opts *Options) {
+				opts.Stdin = bytes.NewReader(cursorPayloadForTest(body))
+			})
+			assertForeignHookDenied(t, result, "")
+			if !strings.Contains(result.stdout, "workspace folders Cursor reported cannot be verified") {
+				t.Fatalf("root problem message = %s", result.stdout)
+			}
+		})
+	}
+	// The rewriter is found when it is inside the bound.
+	result := fixture.run(t, "preToolUse", func(opts *Options) {
+		opts.Stdin = bytes.NewReader(cursorPayloadForTest(map[string]interface{}{
+			"workspace_roots": withRewriter[1:],
+		}))
+	})
+	assertForeignHookDenied(t, result, filepath.Join(rewriter, ".cursor", "hooks.json"))
+	// Repeated roots are one folder.
+	duplicates := make([]string, 3*foreignHookMaxRoots)
+	for index := range duplicates {
+		duplicates[index] = roots[0]
+	}
+	result = fixture.run(t, "preToolUse", func(opts *Options) {
+		opts.Stdin = bytes.NewReader(cursorPayloadForTest(map[string]interface{}{
+			"workspace_roots": duplicates,
+			"cwd":             roots[0],
+		}))
+	})
+	if result.rt.requests != 1 {
+		t.Fatalf("duplicate roots: gateway requests = %d, want 1; stdout=%s", result.rt.requests, result.stdout)
 	}
 }
 
