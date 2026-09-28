@@ -44,6 +44,10 @@ import (
 type ClaudeCodeConnector struct {
 	gatewayToken string
 	masterKey    string
+	// hybridProxy is true when guardrail.proxy_mode=hybrid. Claude Code then
+	// sends Anthropic Messages traffic to the local proxy without X-DC-Auth,
+	// so loopback callers must be trusted even when a gateway token exists.
+	hybridProxy bool
 }
 
 // NewClaudeCodeConnector creates a new Claude Code connector.
@@ -67,6 +71,7 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	c.hybridProxy = opts.HybridProxyMode
 	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 	if err != nil {
 		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
@@ -244,6 +249,13 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
 			return true
 		}
+	}
+
+	// Hybrid proxy: Claude Code's SDK cannot send X-DC-Auth. Trust loopback
+	// so ANTHROPIC_BASE_URL traffic reaches the guardrail. Non-loopback
+	// callers still need X-DC-Auth or the master key.
+	if c.hybridProxy && isLoopback {
+		return true
 	}
 
 	// No gateway token configured: trust loopback callers. The masterKey is
@@ -1487,8 +1499,15 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	if err != nil {
 		return map[string]string{}
 	}
-	if opts.HybridProxyMode && opts.ProxyAddr != "" {
-		env["ANTHROPIC_BASE_URL"] = "http://" + opts.ProxyAddr + "/c/claudecode"
+	if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
+		proxyBase := "http://" + opts.ProxyAddr + "/c/claudecode"
+		// Route Claude Code traffic through the DefenseClaw proxy for
+		// semantic routing, model selection, and/or full inspection.
+		// Uses Bedrock wire format because the Anthropic-native
+		// /anthropic/v1/messages route 404s for Claude Opus 4.6.
+		env["ANTHROPIC_BEDROCK_BASE_URL"] = proxyBase
+		env["CLAUDE_CODE_USE_BEDROCK"] = "1"
+		env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] = "1"
 	}
 	return env
 }
