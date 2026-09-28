@@ -544,6 +544,25 @@ func (s *Sidecar) currentConfig() *config.Config {
 	return s.cfg
 }
 
+// overlayResolvedGuardrailLLM copies ResolveLLM("guardrail") onto the
+// proxy's GuardrailConfig so top-level llm.base_url / llm.model /
+// llm.api_key_env hydrate hybrid Claude Code passthrough.
+func overlayResolvedGuardrailLLM(gc *config.GuardrailConfig, resolved config.LLMConfig) {
+	if gc == nil {
+		return
+	}
+	gc.LLM = resolved
+	if strings.TrimSpace(gc.Model) == "" {
+		gc.Model = resolved.Model
+	}
+	if strings.TrimSpace(gc.APIKeyEnv) == "" {
+		gc.APIKeyEnv = resolved.APIKeyEnv
+	}
+	if strings.TrimSpace(gc.APIBase) == "" {
+		gc.APIBase = resolved.BaseURL
+	}
+}
+
 func (s *Sidecar) sharedJudge() *LLMJudge {
 	if s == nil {
 		return nil
@@ -580,9 +599,24 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	}
 
 	rcfg := cfg.Routing
+	mmBertPath := ""
+	qwen3Path := ""
+	if rcfg.Embeddings.MMBertModelPath != "" {
+		mmBertPath = rcfg.Embeddings.MMBertModelPath
+	} else if dir := filepath.Join(cfg.DataDir, "models", "mmbert-embed-32k-2d-matryoshka"); dirExists(dir) {
+		mmBertPath = "models/mmbert-embed-32k-2d-matryoshka"
+	}
+	if rcfg.Embeddings.Qwen3ModelPath != "" {
+		qwen3Path = rcfg.Embeddings.Qwen3ModelPath
+	} else if dir := filepath.Join(cfg.DataDir, "models", "mom-embedding-pro"); dirExists(dir) {
+		qwen3Path = "models/mom-embedding-pro"
+	}
 	input := routing.TranslateInput{
-		Port:      rcfg.Port,
-		Algorithm: rcfg.Algorithm,
+		Port:            rcfg.Port,
+		Algorithm:       rcfg.Algorithm,
+		ModelSelection:  rcfg.ModelSelection,
+		MMBertModelPath: mmBertPath,
+		Qwen3ModelPath:  qwen3Path,
 	}
 
 	// Models
@@ -597,12 +631,38 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		})
 	}
 
-	// Signals
+	// Signals — keywords
 	for _, k := range rcfg.Signals.Keywords {
 		input.Signals.Keywords = append(input.Signals.Keywords, routing.TranslateKeyword{
 			Name:     k.Name,
 			Keywords: k.Keywords,
 			Operator: k.Operator,
+		})
+	}
+	// Signals — embeddings
+	for _, e := range rcfg.Signals.Embeddings {
+		input.Signals.Embeddings = append(input.Signals.Embeddings, routing.TranslateEmbedding{
+			Name:        e.Name,
+			Description: e.Description,
+			Examples:    e.Examples,
+		})
+	}
+	// Signals — domains
+	for _, d := range rcfg.Signals.Domains {
+		input.Signals.Domains = append(input.Signals.Domains, routing.TranslateDomain{
+			Name:       d.Name,
+			Categories: d.Categories,
+		})
+	}
+	// Signals — complexity
+	for _, c := range rcfg.Signals.Complexity {
+		input.Signals.Complexity = append(input.Signals.Complexity, routing.TranslateComplexity{
+			Name:             c.Name,
+			MinMessageLength: c.MinMessageLength,
+			MaxMessageLength: c.MaxMessageLength,
+			MinToolCount:     c.MinToolCount,
+			MaxToolCount:     c.MaxToolCount,
+			Indicators:       c.Indicators,
 		})
 	}
 
@@ -618,7 +678,7 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		for _, c := range d.Conditions {
 			dec.Conditions = append(dec.Conditions, routing.TranslateCondition{
 				Signal:        c.Type,
-				MinConfidence: 0.0,
+				MinConfidence: c.MinConfidence,
 				Value:         c.Name,
 			})
 		}
@@ -635,14 +695,61 @@ func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
 	backends := make([]ModelRouterBackend, 0, len(cfg.Routing.Models))
 	for _, model := range cfg.Routing.Models {
 		backends = append(backends, ModelRouterBackend{
-			Name:      model.Name,
-			Provider:  model.Provider,
-			Model:     model.Model,
-			BaseURL:   model.BaseURL,
-			APIKeyEnv: model.APIKeyEnv,
+			Name:       model.Name,
+			Provider:   model.Provider,
+			Model:      model.Model,
+			BaseURL:    model.BaseURL,
+			HostHeader: model.HostHeader,
+			APIKeyEnv:  model.APIKeyEnv,
 		})
 	}
 	return backends
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func buildLocalKeywordSignals(cfg *config.Config) []LocalKeywordSignal {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]LocalKeywordSignal, 0, len(cfg.Routing.Signals.Keywords))
+	for _, k := range cfg.Routing.Signals.Keywords {
+		out = append(out, LocalKeywordSignal{
+			Name:     k.Name,
+			Keywords: k.Keywords,
+			Operator: k.Operator,
+		})
+	}
+	return out
+}
+
+func buildLocalKeywordDecisions(cfg *config.Config) []LocalKeywordDecision {
+	if cfg == nil {
+		return nil
+	}
+	out := make([]LocalKeywordDecision, 0, len(cfg.Routing.Decisions))
+	for _, d := range cfg.Routing.Decisions {
+		signal := ""
+		for _, c := range d.Conditions {
+			if c.Type == "keyword" {
+				signal = c.Name
+				break
+			}
+		}
+		if signal == "" || len(d.ModelRefs) == 0 {
+			continue
+		}
+		out = append(out, LocalKeywordDecision{
+			Name:     d.Name,
+			Priority: d.Priority,
+			Signal:   signal,
+			ModelRef: d.ModelRefs[0],
+		})
+	}
+	return out
 }
 
 func effectiveRoutingHealthDetails(cfg config.RoutingConfig) map[string]interface{} {
@@ -902,6 +1009,10 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 				timeoutMs,
 				buildModelRouterBackends(s.currentConfig()),
 				filepath.Join(s.currentConfig().DataDir, ".env"),
+			)
+			client.SetLocalKeywords(
+				buildLocalKeywordSignals(s.currentConfig()),
+				buildLocalKeywordDecisions(s.currentConfig()),
 			)
 			if !client.Healthy(runCtx) {
 				err := errors.New(modelRouterHealthProbeError)
@@ -1300,7 +1411,11 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 	runGuardrailFn := s.runGuardrail
-	if len(s.currentConfig().ActiveConnectors()) > 1 {
+	// Hybrid proxy mode requires the single-connector path so the proxy
+	// can bind alongside hooks. The connectors map still provides
+	// per-connector mode overrides; only the primary connector boots.
+	if len(s.currentConfig().ActiveConnectors()) > 1 &&
+		!strings.EqualFold(strings.TrimSpace(s.currentConfig().Guardrail.ProxyMode), "hybrid") {
 		runGuardrailFn = s.runGuardrailMulti
 	}
 	err := runGuardrailFn(ctx)
@@ -1889,7 +2004,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	if !guardrailRestart {
 		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.ApplyGuardrailConfig(&appliedCfg.Guardrail)
+			gc := appliedCfg.Guardrail
+			overlayResolvedGuardrailLLM(&gc, appliedCfg.ResolveLLM("guardrail"))
+			proxy.ApplyGuardrailConfig(&gc)
 			proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
 			proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 		}
@@ -3602,8 +3719,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
+	guardrailCfg := s.currentConfig().Guardrail
+	overlayResolvedGuardrailLLM(&guardrailCfg, s.currentConfig().ResolveLLM("guardrail"))
 	proxy, err := NewGuardrailProxy(
-		&s.currentConfig().Guardrail,
+		&guardrailCfg,
 		&s.currentConfig().CiscoAIDefense,
 		s.logger,
 		s.health,
