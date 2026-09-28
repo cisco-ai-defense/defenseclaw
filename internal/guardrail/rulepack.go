@@ -51,6 +51,7 @@ type RulePack struct {
 	Suppressions   *SuppressionsConfig
 	JudgeConfigs   map[string]*JudgeYAML
 	SensitiveTools *SensitiveToolsConfig
+	Compaction     *CompactionConfig
 	RuleFiles      []*RulesFileYAML
 	// LocalPatterns is the operator-tunable pattern list parsed from
 	// rules/local-patterns.yaml. The bundled defaults mirror the
@@ -120,6 +121,33 @@ type LocalPatterns struct {
 	PIIDataRegexes   []string `yaml:"pii_data_regexes,omitempty"`
 	Secrets          []string `yaml:"secrets,omitempty"`
 	Exfiltration     []string `yaml:"exfiltration,omitempty"`
+}
+
+// CompactionConfig maps to compaction.yaml. The patterns recognize forged
+// role boundaries and bounded warning claims in the compaction hook path.
+// The three exact-action proof patterns are pinned to the embedded baseline;
+// runtime command and authenticated approval matching remain code-owned.
+type CompactionConfig struct {
+	Version            int    `yaml:"version"`
+	Enabled            bool   `yaml:"enabled"`
+	NextRole           string `yaml:"next_role,omitempty"`
+	RoleHeader         string `yaml:"role_header,omitempty"`
+	Avoidance          string `yaml:"avoidance,omitempty"`
+	Exfiltration       string `yaml:"exfiltration,omitempty"`
+	Memory             string `yaml:"memory,omitempty"`
+	MemoryVerb         string `yaml:"memory_verb,omitempty"`
+	FalseFact          string `yaml:"false_fact,omitempty"`
+	NewTask            string `yaml:"new_task,omitempty"`
+	Override           string `yaml:"override,omitempty"`
+	SummaryApproval    string `yaml:"summary_approval,omitempty"`
+	SummaryInstruction string `yaml:"summary_instruction,omitempty"`
+	SummaryDisavowal   string `yaml:"summary_disavowal,omitempty"`
+	Approval           string `yaml:"approval,omitempty"`
+	NoAsk              string `yaml:"no_ask,omitempty"`
+	CurlPipe           string `yaml:"curl_pipe,omitempty"`
+
+	decoded    bool `yaml:"-"`
+	enabledSet bool `yaml:"-"`
 }
 
 // SuppressionsConfig maps to suppressions.yaml.
@@ -329,6 +357,13 @@ func LoadRulePack(dir string) (*RulePack, error) {
 		}
 		rp.SensitiveTools = &cfg
 	}
+	if _, ok := inventory.files["compaction.yaml"]; ok {
+		var cfg CompactionConfig
+		if err := decode("compaction.yaml", &cfg); err != nil {
+			return nil, err
+		}
+		rp.Compaction = &cfg
+	}
 	for _, name := range knownJudgeNames {
 		rel := path.Join("judge", name+".yaml")
 		if _, ok := inventory.files[rel]; !ok {
@@ -383,6 +418,12 @@ func loadEmbeddedRulePack() (*RulePack, error) {
 		return nil, err
 	}
 	rp.SensitiveTools = tools
+
+	compaction, err := decodeEmbeddedYAML[CompactionConfig]("compaction.yaml")
+	if err != nil {
+		return nil, err
+	}
+	rp.Compaction = compaction
 
 	for _, name := range knownJudgeNames {
 		rel := path.Join("judge", name+".yaml")
@@ -495,7 +536,7 @@ func isRecognizedRulePackYAML(rel string) bool {
 		return false
 	}
 	switch rel {
-	case "suppressions.yaml", "sensitive-tools.yaml", "rules/local-patterns.yaml":
+	case "suppressions.yaml", "sensitive-tools.yaml", "compaction.yaml", "rules/local-patterns.yaml":
 		return true
 	}
 	for _, name := range knownJudgeNames {
@@ -646,6 +687,9 @@ func markDecodedPresence(out any, document *yaml.Node) {
 		typed.findingSuppressionsSet = yamlMappingHas(root, "finding_suppressions")
 		typed.toolSuppressionsSet = yamlMappingHas(root, "tool_suppressions")
 	case *JudgeYAML:
+		typed.decoded = true
+		typed.enabledSet = yamlMappingHas(root, "enabled")
+	case *CompactionConfig:
 		typed.decoded = true
 		typed.enabledSet = yamlMappingHas(root, "enabled")
 	case *RulesFileYAML:
@@ -825,6 +869,9 @@ func (rp *RulePack) Validate() error {
 		return err
 	}
 	if err := rp.validateLocalPatterns(); err != nil {
+		return err
+	}
+	if err := rp.validateCompaction(); err != nil {
 		return err
 	}
 	if err := rp.validateSuppressions(); err != nil {
@@ -1105,6 +1152,57 @@ func (rp *RulePack) validateLocalPatterns() error {
 	return nil
 }
 
+func (rp *RulePack) validateCompaction() error {
+	const rel = "compaction.yaml"
+	if rp.Compaction == nil {
+		return rulePackErr(rel, "validation", "compaction configuration is required")
+	}
+	cfg := rp.Compaction
+	if cfg.Version != 1 {
+		return rulePackErr(rel, "version", "version must be 1")
+	}
+	if cfg.decoded && !cfg.enabledSet {
+		return rulePackErr(rel, "validation", "enabled is required")
+	}
+	fields := []struct {
+		name    string
+		pattern string
+	}{
+		{"next_role", cfg.NextRole},
+		{"role_header", cfg.RoleHeader},
+		{"avoidance", cfg.Avoidance},
+		{"exfiltration", cfg.Exfiltration},
+		{"memory", cfg.Memory},
+		{"memory_verb", cfg.MemoryVerb},
+		{"false_fact", cfg.FalseFact},
+		{"new_task", cfg.NewTask},
+		{"override", cfg.Override},
+		{"summary_approval", cfg.SummaryApproval},
+		{"summary_instruction", cfg.SummaryInstruction},
+		{"summary_disavowal", cfg.SummaryDisavowal},
+		{"approval", cfg.Approval},
+		{"no_ask", cfg.NoAsk},
+		{"curl_pipe", cfg.CurlPipe},
+	}
+	for _, field := range fields {
+		if cfg.Enabled || field.pattern != "" {
+			if err := validateRequiredRegex(rel, field.name, field.pattern); err != nil {
+				return err
+			}
+		}
+	}
+	if cfg.Enabled {
+		canonical, err := decodeEmbeddedYAML[CompactionConfig](rel)
+		if err != nil {
+			return err
+		}
+		if cfg.Approval != canonical.Approval || cfg.NoAsk != canonical.NoAsk || cfg.CurlPipe != canonical.CurlPipe {
+			return rulePackErr(rel, "validation", "exact-action proof patterns must match the embedded baseline")
+		}
+	}
+	return nil
+}
+
 func (rp *RulePack) validateSuppressions() error {
 	const rel = "suppressions.yaml"
 	if rp.Suppressions == nil {
@@ -1328,12 +1426,14 @@ func (rp *RulePack) Summary() RulePackSummary {
 		Suppressions   *SuppressionsConfig
 		JudgeConfigs   map[string]*JudgeYAML
 		SensitiveTools *SensitiveToolsConfig
+		Compaction     *CompactionConfig
 		RuleFiles      []RulesFileYAML
 		LocalPatterns  *LocalPatterns
 	}{
 		Suppressions:   rp.Suppressions,
 		JudgeConfigs:   rp.JudgeConfigs,
 		SensitiveTools: rp.SensitiveTools,
+		Compaction:     rp.Compaction,
 		RuleFiles:      ruleFiles,
 		LocalPatterns:  rp.LocalPatterns,
 	}

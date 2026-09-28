@@ -41,6 +41,8 @@ this against the scanner-flip — see session notes):
   Flipping this on is a one-line change if a 1:1 traffic match is later wanted.
 * ``suppressions.yaml`` / ``sensitive-tools.yaml`` / ``judge/*.yaml`` are
   traffic- and LLM-oriented and are not applied to static artifacts here.
+* ``compaction.yaml`` is hook-runtime-only and is not applied to static
+  artifact scans, even when the same directory supplies their regex overlay.
 
 The overlay is wired into the scan commands via :func:`maybe_wrap`, which wraps
 the underlying scanner so every ``scan()`` call site picks up the overlay with

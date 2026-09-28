@@ -68,6 +68,14 @@ The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, ju
 | `default` | same eight families; balanced variants where profiles differ | injection, pii, tool-injection | private/loopback IPs, platform IDs, expected system metadata | same six sensitive tool definitions as the other packs |
 | `strict` | same eight families; stricter variants where profiles differ | injection, pii, tool-injection (lower judge thresholds) | minimal structural suppressions; no tool suppressions | same six sensitive tool definitions as the other packs |
 
+All three profiles also ship a root-level `compaction.yaml` with
+`enabled: true` for the Codex and Claude Code compaction hooks. In a partial
+custom pack, omitting that file inherits the enabled embedded detector. To
+disable both its warning and exact-action lanes, add `compaction.yaml`
+containing `version: 1` and `enabled: false`, then
+[validate the pack](/docs/policies/rulepack-validation) and restart the gateway.
+This hook-only toggle does not change install-time artifact scanning.
+
 All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
 
 ## What `setup guardrail` actually writes

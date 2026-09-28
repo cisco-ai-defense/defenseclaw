@@ -1,34 +1,75 @@
 # Compaction forged-user virtual patch
 
-The static detector has two separate lanes:
+## Rule-pack configuration
 
-1. The warning lane recognizes the survey's five exact forged-user
-   delimiter shapes in either Codex or Claude Code tool output: `[User]:`
-   (pi/OpenCode/Cline), lowercase `[user]:` (Goose), `# USER` (Aider), the
-   complete `</EVENT>`/`<EVENT>`/`MessageEvent (user)`/`user:` sequence
-   (OpenHands), and `## Message N`/`Role: user`/`Content:` (the Python
-   Kimi CLI compaction path surveyed in the study). Goose's ordinary `[user]: tool_response:`
-   wrapper is excluded.
+The runtime guardrail rule pack owns this detector's bounded role-boundary,
+claim, summary, and exact-action proof regular expressions in its root-level
+`compaction.yaml`. The bundled `default`, `permissive`, and `strict` packs
+enable it. A custom partial pack that omits `compaction.yaml` inherits the
+enabled embedded defaults. To turn off both the warning and exact-action
+lanes for a connector, select a rule pack containing:
+
+```yaml
+version: 1
+enabled: false
+```
+
+For a custom enabled detector, copy a bundled `compaction.yaml` and retain all
+15 required regex fields: `next_role`, `role_header`, `avoidance`,
+`exfiltration`, `memory`, `memory_verb`, `false_fact`, `new_task`, `override`,
+`summary_approval`, `summary_instruction`, `summary_disavowal`, `approval`,
+`no_ask`, and `curl_pipe`. The last three exact-action proof fields must match
+their embedded canonical values exactly; the other 12 can be tuned. The Go
+rule-pack validator checks the complete component, its RE2 patterns, and those
+canonical pins. Validate the edited pack with
+`defenseclaw guardrail validate-pack PATH`, then restart the gateway. Editing
+an active pack does not hot-reload it. Select the effective global or
+per-connector `guardrail.rule_pack_dir`; one connector can disable the
+component without disabling it for another.
+
+The effective pack's `role_header`, `next_role`, claim, and summary patterns
+control warning candidates and summary-evidence reporting. The exact-action
+lane instead uses the canonical `role_header` and `next_role` patterns from the
+embedded `compaction.yaml`, even when a custom pack replaces those fields. Its
+YAML-owned `approval`, `no_ask`, and `curl_pipe` proof regexes are also pinned
+to the embedded values by validation. The Go gateway retains per-session
+correlation, authenticated approval, exact-command matching, and the logic
+requiring all proof signals together. An operator override cannot broaden
+which forged turns arm a later command guard. The general `rules/*.yaml`
+regex path and the Python install-time scanner rule pack do not control this
+hook-level detector. A raw regex match alone never authorizes a command block.
+
+When enabled, the static detector has two separate lanes:
+
+1. With the bundled patterns, the warning lane recognizes the survey's five
+   exact forged-user delimiter shapes in either Codex or Claude Code tool
+   output: `[User]:` (pi/OpenCode/Cline), lowercase `[user]:` (Goose),
+   `# USER` (Aider), the complete
+   `</EVENT>`/`<EVENT>`/`MessageEvent (user)`/`user:` sequence (OpenHands),
+   and `## Message N`/`Role: user`/`Content:` (the Python Kimi CLI compaction
+   path surveyed in the study). Goose's ordinary
+   `[user]: tool_response:` wrapper is excluded.
    These are cross-connector indicators of an attempted role forgery, not
    proof that Codex or Claude Code uses a matching flattening serializer.
    The study found Codex role-typed and did not pin Claude Code's serializer.
-   The warning lane requires a bounded, study-derived claim after the
-   delimiter: fake
-   approval with no-reprompt language, a don't-touch constraint, a false
-   environment fact, a fake next task, a workflow override, a request to POST
-   findings to a URL, or a compaction-memory instruction. It never changes a
-   later tool decision on its own.
-2. The exact-action lane requires one of those five forged-user turns containing a prior
-   approval claim, a don't-ask-again instruction, and a literal
-   `curl ... | sh` or `curl ... | bash` command. Only this lane can guard a
-   subsequent exactly matching shell command.
+   The bundled warning patterns require a bounded, study-derived claim after
+   the delimiter: fake approval with no-reprompt language, a don't-touch
+   constraint, a false environment fact, a fake next task, a workflow
+   override, a request to POST findings to a URL, or a compaction-memory
+   instruction. It never changes a later tool decision on its own.
+2. The exact-action lane requires one of those five forged-user turns, under
+   the embedded marker patterns, containing a prior approval claim, a
+   don't-ask-again instruction, and a literal `curl ... | sh` or
+   `curl ... | bash` command. Only this lane can guard a subsequent exactly
+   matching shell command.
 
 Both lanes are bounded, per-session, and make no LLM calls. They do not alter
-tool output, interrupt compaction, or rewrite its summary. A delimiter alone,
-a near miss like `[User]`, and plain tool text without a forged role boundary
-do not enter the warning lane. A quoted example with a matching delimiter and
-payload can still cause an advisory warning; no static scanner can guarantee
-zero false positives while also detecting declarative forged-user cases.
+tool output, interrupt compaction, or rewrite its summary. With the bundled
+patterns, a delimiter alone, a near miss like `[User]`, and plain tool text
+without a forged role boundary do not enter the warning lane. A quoted
+example with a matching delimiter and payload can still cause an advisory
+warning; no static scanner can guarantee zero false positives while also
+detecting declarative forged-user cases.
 
 Claude Code's `PostToolUse` block feedback is advisory for already-produced
 tool output; it is not treated as proof that those bytes were removed from
@@ -89,6 +130,27 @@ clear the in-memory candidate cache. A signed central
 rule registry and agent-version vulnerability ranges are future work; the
 current hook contracts establish product compatibility, not that a particular
 Codex or Claude Code release is vulnerable.
+
+## Benign-trace noise check
+
+The opt-in `TestCompactionHFTraceCandidateBenchmark` replays normalized
+Hugging Face agent-trace `tool_result` records through the two compaction
+candidate detectors. Point it at a directory of JSONL trace files:
+
+```bash
+DEFENSECLAW_HF_COMPACTION_CORPUS_DIR=/path/to/corpus \
+  go test ./internal/gateway -run '^TestCompactionHFTraceCandidateBenchmark$' -count=1 -v
+```
+
+In a local run over nine public trace datasets (20,529 eligible tool results:
+11,162 Codex and 9,367 Claude Code), neither the strict nor the warning-only
+detector matched. This is a useful noise check, **not a guarantee of zero false
+positives**: the trace converter's `is_attack: false` value is assigned
+automatically, not independently adjudicated. These normalized records also
+contain no real `PreCompact`, `PostCompact`, or exposed summaries. The test's
+immediate-compaction replay is explicitly a synthetic upper bound, not an
+observed post-compaction warning or block rate. Review any future positive
+record in its source context before calling it a false positive.
 
 ## Manual test in a disposable workspace
 

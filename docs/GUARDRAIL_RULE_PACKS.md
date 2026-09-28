@@ -40,8 +40,35 @@ that separation explicit in code and tests.
 - Opt-in high-assurance use cases:
   [`../policies/guardrail-use-cases/`](../policies/guardrail-use-cases/).
 
-Any format or precedence change must update both language implementations and
-their focused tests.
+Any shared scanner format or precedence change must update both language
+implementations and their focused tests.
+
+## Compaction virtual-patch component
+
+`compaction.yaml` at the rule-pack root is a dedicated hook-level component,
+not a generic `rules/*.yaml` category. Its `version: 1` and required
+`enabled` switch control both detector lanes for Codex and Claude Code
+compaction hooks. All three bundled profiles enable it. A partial operator
+pack that omits the file inherits the embedded enabled defaults; an explicit
+`enabled: false` disables both the warning and exact-action lanes across those
+hooks. An enabled replacement must provide all 15 regex fields and pass
+strict Go/RE2 validation. Its `approval`, `no_ask`, and `curl_pipe` regexes
+must match the embedded canonical values; the other 12 are tunable. Select
+the effective global or per-connector `guardrail.rule_pack_dir`, validate the
+pack, and restart the gateway to apply a change.
+
+The Python [`rulepack.py`](../cli/defenseclaw/scanner/rulepack.py) overlay is
+for install-time artifact scanning and does not control these live hooks.
+Custom `role_header` and `next_role` regexes can tune warning candidates, as
+can the pack's claim and summary patterns. The exact-action lane always uses
+the canonical marker regexes from the embedded `compaction.yaml`; operator
+overrides cannot broaden its role-boundary proof. The three YAML-owned
+approval/no-reprompt/curl-to-shell proof regexes are likewise pinned by
+validation. The gateway retains session/compaction state, digest matching,
+genuine-prompt approval, and the code-owned combination of these signals. A
+custom regex match does not itself authorize a later command block. See the
+[compaction virtual-patch contract](compaction-virtual-patch.md) for the
+precision limits and manual test.
 
 ## Trusted tool-call boundary
 

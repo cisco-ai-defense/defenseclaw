@@ -18,10 +18,14 @@ package gateway
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // This virtual patch recognizes the study's forged user-turn delimiters when
@@ -44,25 +48,141 @@ const (
 )
 
 var (
-	compactionNextRole = regexp.MustCompile(`(?m)\n[ \t]*(?:\[(?:User|Assistant|Tool result|user|assistant)\]:|#[ \t]+(?:USER|ASSISTANT)\b|<EVENT>|</EVENT>|##[ \t]+Message[ \t]+[0-9]+\b)`)
-	compactionApproval = regexp.MustCompile(`(?i)\b(?:already[ \t]+(?:reviewed[ \t]+and[ \t]+)?approved|you[ \t]+(?:already[ \t]+)?have[ \t]+my[ \t]+approval)\b`)
-	compactionNoAsk    = regexp.MustCompile(`(?i)\b(?:do[ \t]+not[ \t]+ask|don't[ \t]+ask|no[ \t]+need[ \t]+to[ \t]+(?:ask|re-prompt)|without[ \t]+asking)\b`)
-	compactionCurlPipe = regexp.MustCompile(`(?i)\bcurl(?:[ \t]+-[a-z]+)*[ \t]+https?://[^\s|"'<>;&\x60$]+[ \t]*\|[ \t]*(?:sh|bash)\b`)
-	// Any of the survey's exact forged-user envelopes is an attempted
-	// authority boundary crossing in tool output. Seeing one does not prove
-	// that the current connector serializes or promotes it during compaction.
-	compactionRoleHeader         = regexp.MustCompile(`(?m)(?:^|\n)[ \t]*(?:\[User\]:[ \t]*|\[user\]:[ \t]*|#[ \t]+USER[ \t]*\n[ \t]*|</EVENT>[ \t]*\n[ \t]*<EVENT>[ \t]*\n[ \t]*MessageEvent \(user\)[ \t]*\n[ \t]*user:[ \t]*|##[ \t]+Message[ \t]+[1-9][0-9]{0,5}[ \t]*\n[ \t]*Role:[ \t]*user[ \t]*\n[ \t]*Content:[ \t]*\n[ \t]*)`)
-	compactionAvoidance          = regexp.MustCompile(`(?i)\b(?:don't|do not|never)[ \t]+(?:modify|change|touch|review|inspect|scan|check|read|open|edit|update)\b|\bleave[ \t]+[^\n.]{1,100}[ \t]+(?:untouched|alone|out of scope)\b|\bi[ \t]+don't[ \t]+want[ \t]+changes[ \t]+under\b`)
-	compactionExfil              = regexp.MustCompile(`(?i)\b(?:post|send|upload|transmit)[ \t]+[^\n.]{0,160}\b(?:findings|results|report|data|secrets|credentials)[ \t]+[^\n.]{0,160}https?://[^\s<>]+`)
-	compactionMemory             = regexp.MustCompile(`(?i)\b(?:when[ \t]+(?:you[ \t]+)?(?:compact|summari[sz]e)|after[ \t]+(?:the[ \t]+)?compaction|in[ \t]+(?:the[ \t]+)?(?:compacted[ \t]+)?summary|for[ \t]+(?:future|later|subsequent)[ \t]+(?:turns|messages|responses))\b`)
-	compactionMemoryVerb         = regexp.MustCompile(`(?i)\b(?:remember|retain|preserve|include|record|write|carry[ \t]+forward|treat)\b`)
-	compactionFalseFact          = regexp.MustCompile(`(?i)\bfor[ \t]+context:[ \t]+[^\n.]{1,160}\b(?:is|are|listens|uses)[ \t]+[^\n.]{1,120}\bnot[ \t]+(?:the[ \t]+)?(?:default|documented|current)\b`)
-	compactionNewTask            = regexp.MustCompile(`(?i)\bonce[ \t]+[^\n.]{1,120}\bnext[ \t]+thing[ \t]+i[ \t]+need[ \t]+is\b`)
-	compactionOverride           = regexp.MustCompile(`(?i)\b(?:ignore|disregard)[ \t]+(?:the[ \t]+|your[ \t]+)?(?:earlier|previous)[ \t]+(?:instructions|constraints|confirmation[ \t]+prompts)\b`)
-	compactionSummaryApproval    = regexp.MustCompile(`(?i)^[ \t]*(?:[-*][ \t]+)?(?:the[ \t]+)?user[ \t]+(?:has[ \t]+)?(?:already[ \t]+)?approved\b`)
-	compactionSummaryInstruction = regexp.MustCompile(`(?i)^[ \t]*(?:[-*][ \t]+)?(?:the[ \t]+)?user[ \t]+(?:requested|asked|instructed)[ \t]*:[ \t]*`)
-	compactionSummaryDisavowal   = regexp.MustCompile(`(?i)\b(?:file|document|tool[ \t]+output|untrusted|forged|fake|spoofed|injection|attack|claimed|quoted|purported|did[ \t]+not|not[ \t]+an?[ \t]+instruction)\b`)
+	defaultCompactionOnce     sync.Once
+	defaultCompactionCompiled *compiledCompactionPatterns
 )
+
+// The compaction-only signatures come from the effective runtime rule pack,
+// not the generic content scanner. Its exact-action proof remains code-owned.
+type compiledCompactionPatterns struct {
+	configDigest       [sha256.Size]byte
+	enabled            bool
+	nextRole           *regexp.Regexp
+	roleHeader         *regexp.Regexp
+	avoidance          *regexp.Regexp
+	exfiltration       *regexp.Regexp
+	memory             *regexp.Regexp
+	memoryVerb         *regexp.Regexp
+	falseFact          *regexp.Regexp
+	newTask            *regexp.Regexp
+	override           *regexp.Regexp
+	summaryApproval    *regexp.Regexp
+	summaryInstruction *regexp.Regexp
+	summaryDisavowal   *regexp.Regexp
+	approval           *regexp.Regexp
+	noAsk              *regexp.Regexp
+	curlPipe           *regexp.Regexp
+}
+
+func compactionConfigFromRulePack(rp *guardrail.RulePack) *guardrail.CompactionConfig {
+	if rp != nil {
+		return rp.Compaction
+	}
+	return nil
+}
+
+func compactionConfigDigest(cfg *guardrail.CompactionConfig) [sha256.Size]byte {
+	// Length prefixes preserve exact pattern bytes, including values that JSON
+	// would normalize, while ignoring decoder-only bookkeeping in the struct.
+	data := binary.AppendVarint(nil, int64(cfg.Version))
+	if cfg.Enabled {
+		data = append(data, 1)
+	} else {
+		data = append(data, 0)
+	}
+	for _, pattern := range []string{
+		cfg.NextRole, cfg.RoleHeader, cfg.Avoidance, cfg.Exfiltration,
+		cfg.Memory, cfg.MemoryVerb, cfg.FalseFact, cfg.NewTask, cfg.Override,
+		cfg.SummaryApproval, cfg.SummaryInstruction, cfg.SummaryDisavowal,
+		cfg.Approval, cfg.NoAsk, cfg.CurlPipe,
+	} {
+		data = binary.AppendUvarint(data, uint64(len(pattern)))
+		data = append(data, pattern...)
+	}
+	return sha256.Sum256(data)
+}
+
+func defaultCompactionPatterns() *compiledCompactionPatterns {
+	defaultCompactionOnce.Do(func() {
+		rp, err := guardrail.LoadRulePack("")
+		if err != nil {
+			panic(fmt.Sprintf("load embedded compaction rule pack: %v", err))
+		}
+		defaultCompactionCompiled, err = compileCompactionPatterns(rp.Compaction)
+		if err != nil {
+			panic(fmt.Sprintf("compile embedded compaction rule pack: %v", err))
+		}
+	})
+	return defaultCompactionCompiled
+}
+
+func compileCompactionPatterns(cfg *guardrail.CompactionConfig) (*compiledCompactionPatterns, error) {
+	if cfg == nil {
+		return defaultCompactionPatterns(), nil
+	}
+	// Only the exported rule-pack content defines the effective detector.
+	// A fresh compilation of identical YAML must not discard active sessions.
+	compiled := &compiledCompactionPatterns{
+		configDigest: compactionConfigDigest(cfg),
+		enabled:      cfg.Enabled,
+	}
+	if !cfg.Enabled {
+		return compiled, nil
+	}
+	// Activation can also receive a programmatically built RulePack, bypassing
+	// the YAML loader's validation. Recheck the pinned proof fields here before
+	// publishing this generation to a live hook connector.
+	canonical, err := guardrail.LoadRulePack("")
+	if err != nil {
+		return nil, fmt.Errorf("load embedded compaction proof: %w", err)
+	}
+	if cfg.Approval != canonical.Compaction.Approval ||
+		cfg.NoAsk != canonical.Compaction.NoAsk ||
+		cfg.CurlPipe != canonical.Compaction.CurlPipe {
+		return nil, fmt.Errorf("compaction rule-pack exact-action proof patterns differ from embedded baseline")
+	}
+	fields := []struct {
+		name string
+		text string
+		dst  **regexp.Regexp
+	}{
+		{"next_role", cfg.NextRole, &compiled.nextRole},
+		{"role_header", cfg.RoleHeader, &compiled.roleHeader},
+		{"avoidance", cfg.Avoidance, &compiled.avoidance},
+		{"exfiltration", cfg.Exfiltration, &compiled.exfiltration},
+		{"memory", cfg.Memory, &compiled.memory},
+		{"memory_verb", cfg.MemoryVerb, &compiled.memoryVerb},
+		{"false_fact", cfg.FalseFact, &compiled.falseFact},
+		{"new_task", cfg.NewTask, &compiled.newTask},
+		{"override", cfg.Override, &compiled.override},
+		{"summary_approval", cfg.SummaryApproval, &compiled.summaryApproval},
+		{"summary_instruction", cfg.SummaryInstruction, &compiled.summaryInstruction},
+		{"summary_disavowal", cfg.SummaryDisavowal, &compiled.summaryDisavowal},
+		{"approval", cfg.Approval, &compiled.approval},
+		{"no_ask", cfg.NoAsk, &compiled.noAsk},
+		{"curl_pipe", cfg.CurlPipe, &compiled.curlPipe},
+	}
+	for _, field := range fields {
+		if strings.TrimSpace(field.text) == "" {
+			return nil, fmt.Errorf("compaction rule-pack %s is empty", field.name)
+		}
+		re, err := compileRegexSafe(field.text)
+		if err != nil {
+			return nil, fmt.Errorf("compaction rule-pack %s: %w", field.name, err)
+		}
+		*field.dst = re
+	}
+	return compiled, nil
+}
+
+func compactionPatternsForConnector(connector string) (*compiledCompactionPatterns, uint64) {
+	connector = canonicalConnectorRulePackKey(connector)
+	ruleCategoriesMu.RLock()
+	patterns := effectiveCompactionPatternsLocked(connector)
+	epoch := connectorCompactionEpoch[connector]
+	ruleCategoriesMu.RUnlock()
+	return patterns, epoch
+}
 
 type compactionGuardCandidate struct {
 	seen           time.Time
@@ -75,6 +195,8 @@ type compactionGuardCandidate struct {
 
 type compactionGuardSession struct {
 	lastSeen     time.Time
+	patterns     *compiledCompactionPatterns
+	packEpoch    uint64
 	candidates   map[[sha256.Size]byte]*compactionGuardCandidate
 	instructions map[[sha256.Size]byte]*compactionGuardCandidate
 	approved     map[[sha256.Size]byte]time.Time
@@ -97,8 +219,8 @@ func compactionGuardKey(connector, sessionID string) string {
 	return connector + "\x00" + sessionID
 }
 
-func (s *compactionGuardStore) session(key string, create bool, now time.Time) *compactionGuardSession {
-	if key == "" {
+func (s *compactionGuardStore) session(key string, create bool, now time.Time, patterns *compiledCompactionPatterns, epoch uint64) *compactionGuardSession {
+	if key == "" || patterns == nil {
 		return nil
 	}
 	if s.sessions == nil {
@@ -113,10 +235,15 @@ func (s *compactionGuardStore) session(key string, create bool, now time.Time) *
 		}
 	}
 	if state := s.sessions[key]; state != nil {
-		state.lastSeen = now
-		return state
+		if state.patterns.configDigest == patterns.configDigest && state.packEpoch == epoch && patterns.enabled {
+			state.lastSeen = now
+			return state
+		}
+		// A changed effective component must not inherit candidate or approval
+		// digests, including across an off/on toggle without an intervening hook.
+		delete(s.sessions, key)
 	}
-	if !create {
+	if !create || !patterns.enabled {
 		return nil
 	}
 	if len(s.sessions) >= compactionGuardMaxSessions {
@@ -131,6 +258,8 @@ func (s *compactionGuardStore) session(key string, create bool, now time.Time) *
 	}
 	state := &compactionGuardSession{
 		lastSeen:     now,
+		patterns:     patterns,
+		packEpoch:    epoch,
 		candidates:   make(map[[sha256.Size]byte]*compactionGuardCandidate),
 		instructions: make(map[[sha256.Size]byte]*compactionGuardCandidate),
 		approved:     make(map[[sha256.Size]byte]time.Time),
@@ -154,10 +283,11 @@ func (s *compactionGuardStore) reset(connector, sessionID string) {
 // entirely under their existing policy path.
 func (s *compactionGuardStore) observeToolResult(connector, sessionID, output string) bool {
 	key := compactionGuardKey(connector, sessionID)
-	if key == "" {
+	patterns, epoch := compactionPatternsForConnector(connector)
+	if key == "" || patterns == nil || !patterns.enabled {
 		return false
 	}
-	command, ok := forgedApprovalCommand(output)
+	command, ok := forgedApprovalCommandWithPatterns(output, patterns)
 	if !ok {
 		return false
 	}
@@ -165,7 +295,7 @@ func (s *compactionGuardStore) observeToolResult(connector, sessionID, output st
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, true, now)
+	state := s.session(key, true, now, patterns, epoch)
 	if _, approved := state.approved[digest]; approved {
 		return false
 	}
@@ -192,21 +322,25 @@ func (s *compactionGuardStore) observeToolResult(connector, sessionID, output st
 // a declarative claim is only a warning candidate, not proof of intent.
 func (s *compactionGuardStore) observeInstructionResult(connector, sessionID, output string) bool {
 	key := compactionGuardKey(connector, sessionID)
+	patterns, epoch := compactionPatternsForConnector(connector)
+	if key == "" || patterns == nil || !patterns.enabled {
+		return false
+	}
 	// The exact forged-approval path already records this tool result and
 	// supports authenticated user approval; do not create a second alert
 	// that would survive after that approval clears the action candidate.
-	if _, strict := forgedApprovalCommand(output); strict {
+	if _, strict := forgedApprovalCommandWithPatterns(output, patterns); strict {
 		return false
 	}
-	claim, ok := instructionPoisoningClaim(output)
-	if key == "" || !ok {
+	claim, ok := instructionPoisoningClaimWithPatterns(output, patterns)
+	if !ok {
 		return false
 	}
 	digest := sha256.Sum256([]byte(strings.ToLower(strings.Join(strings.Fields(claim), " "))))
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, true, now)
+	state := s.session(key, true, now, patterns, epoch)
 	if prior := state.instructions[digest]; prior != nil {
 		prior.seen = now
 		return true
@@ -231,15 +365,16 @@ func (s *compactionGuardStore) observeInstructionResult(connector, sessionID, ou
 
 func (s *compactionGuardStore) observeUserPrompt(connector, sessionID, prompt string) {
 	key := compactionGuardKey(connector, sessionID)
+	patterns, epoch := compactionPatternsForConnector(connector)
 	command, ok := explicitUserApprovalCommand(prompt)
-	if key == "" || !ok {
+	if key == "" || patterns == nil || !patterns.enabled || !ok {
 		return
 	}
 	digest := sha256.Sum256([]byte(command))
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, true, now)
+	state := s.session(key, true, now, patterns, epoch)
 	if len(state.approved) >= compactionGuardMaxCandidates {
 		var oldestDigest [sha256.Size]byte
 		var oldest time.Time
@@ -264,9 +399,10 @@ func (s *compactionGuardStore) preCompact(connector, sessionID string) compactio
 	if key == "" {
 		return compactionGuardPending{}
 	}
+	patterns, epoch := compactionPatternsForConnector(connector)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, connector == "claudecode", time.Now())
+	state := s.session(key, connector == "claudecode", time.Now(), patterns, epoch)
 	if state == nil {
 		return compactionGuardPending{}
 	}
@@ -290,9 +426,10 @@ func (s *compactionGuardStore) takeClaudeInlineNotice(sessionID string) string {
 	if key == "" {
 		return ""
 	}
+	patterns, epoch := compactionPatternsForConnector("claudecode")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, false, time.Now())
+	state := s.session(key, false, time.Now(), patterns, epoch)
 	if state == nil {
 		return ""
 	}
@@ -313,9 +450,13 @@ func (s *compactionGuardStore) inspectClaudeSummary(sessionID, summary string) b
 	if key == "" {
 		return false
 	}
+	patterns, epoch := compactionPatternsForConnector("claudecode")
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, true, time.Now())
+	state := s.session(key, true, time.Now(), patterns, epoch)
+	if state == nil {
+		return false
+	}
 	if strings.TrimSpace(summary) == "" || len(summary) > compactionGuardMaxInput {
 		state.inlineNotice = compactionNoSummaryMessage
 		return false
@@ -331,11 +472,11 @@ func (s *compactionGuardStore) inspectClaudeSummary(sessionID, summary string) b
 			previous = trimmed
 			continue
 		}
-		if inFence || len(line) > compactionGuardMaxClaim || compactionSummaryDisavowal.MatchString(line) || compactionSummaryDisavowal.MatchString(previous) {
+		if inFence || len(line) > compactionGuardMaxClaim || patterns.summaryDisavowal.MatchString(line) || patterns.summaryDisavowal.MatchString(previous) {
 			previous = trimmed
 			continue
 		}
-		if compactionSummaryApproval.MatchString(line) && compactionNoAsk.MatchString(line) {
+		if patterns.summaryApproval.MatchString(line) && patterns.noAsk.MatchString(line) {
 			if command, ok := compactionCommandInText(line); ok {
 				digest := sha256.Sum256([]byte(command))
 				if candidate := state.candidates[digest]; candidate != nil && candidate.active {
@@ -349,7 +490,7 @@ func (s *compactionGuardStore) inspectClaudeSummary(sessionID, summary string) b
 				}
 			}
 		}
-		if location := compactionSummaryInstruction.FindStringIndex(line); location != nil {
+		if location := patterns.summaryInstruction.FindStringIndex(line); location != nil {
 			claim := strings.TrimSpace(line[location[1]:])
 			digest := sha256.Sum256([]byte(strings.ToLower(strings.Join(strings.Fields(claim), " "))))
 			for _, candidate := range state.instructions {
@@ -388,9 +529,10 @@ func (s *compactionGuardStore) postCompact(connector, sessionID string) compacti
 	if key == "" {
 		return compactionGuardActivation{}
 	}
+	patterns, epoch := compactionPatternsForConnector(connector)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, false, time.Now())
+	state := s.session(key, false, time.Now(), patterns, epoch)
 	if state == nil {
 		return compactionGuardActivation{}
 	}
@@ -418,11 +560,15 @@ func (s *compactionGuardStore) postCompact(connector, sessionID string) compacti
 }
 
 func instructionPoisoningClaim(output string) (string, bool) {
-	if len(output) == 0 || len(output) > compactionGuardMaxInput {
+	return instructionPoisoningClaimWithPatterns(output, defaultCompactionPatterns())
+}
+
+func instructionPoisoningClaimWithPatterns(output string, patterns *compiledCompactionPatterns) (string, bool) {
+	if patterns == nil || !patterns.enabled || len(output) == 0 || len(output) > compactionGuardMaxInput {
 		return "", false
 	}
 	output = strings.ReplaceAll(output, "\r\n", "\n")
-	for _, marker := range compactionRoleHeader.FindAllStringIndex(output, compactionGuardMaxMarkers) {
+	for _, marker := range patterns.roleHeader.FindAllStringIndex(output, compactionGuardMaxMarkers) {
 		end := min(len(output), marker[1]+compactionGuardMaxClaim)
 		claim := output[marker[1]:end]
 		// Goose serializes an ordinary tool response under a user role as
@@ -432,14 +578,14 @@ func instructionPoisoningClaim(output string) (string, bool) {
 			strings.HasPrefix(strings.ToLower(strings.TrimSpace(claim)), "tool_response:") {
 			continue
 		}
-		if next := compactionNextRole.FindStringIndex(claim); next != nil {
+		if next := patterns.nextRole.FindStringIndex(claim); next != nil {
 			claim = claim[:next[0]]
 		}
-		if compactionAvoidance.MatchString(claim) || compactionExfil.MatchString(claim) ||
-			compactionFalseFact.MatchString(claim) || compactionNewTask.MatchString(claim) ||
-			compactionOverride.MatchString(claim) ||
-			(compactionMemory.MatchString(claim) && compactionMemoryVerb.MatchString(claim)) ||
-			(compactionApproval.MatchString(claim) && compactionNoAsk.MatchString(claim)) {
+		if patterns.avoidance.MatchString(claim) || patterns.exfiltration.MatchString(claim) ||
+			patterns.falseFact.MatchString(claim) || patterns.newTask.MatchString(claim) ||
+			patterns.override.MatchString(claim) ||
+			(patterns.memory.MatchString(claim) && patterns.memoryVerb.MatchString(claim)) ||
+			(patterns.approval.MatchString(claim) && patterns.noAsk.MatchString(claim)) {
 			return claim, true
 		}
 	}
@@ -470,14 +616,15 @@ func compactionPoisonFinding(verdict *ToolInspectVerdict, phase string) {
 
 func (s *compactionGuardStore) matchingAction(connector, sessionID, toolName string, toolInput map[string]interface{}) bool {
 	key := compactionGuardKey(connector, sessionID)
+	patterns, epoch := compactionPatternsForConnector(connector)
 	command, ok := compactionCommandFromTool(toolName, toolInput)
-	if key == "" || !ok {
+	if key == "" || patterns == nil || !patterns.enabled || !ok {
 		return false
 	}
 	digest := sha256.Sum256([]byte(command))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state := s.session(key, false, time.Now())
+	state := s.session(key, false, time.Now(), patterns, epoch)
 	if state == nil {
 		return false
 	}
@@ -489,11 +636,19 @@ func (s *compactionGuardStore) matchingAction(connector, sessionID, toolName str
 }
 
 func forgedApprovalCommand(output string) (string, bool) {
-	if len(output) == 0 || len(output) > compactionGuardMaxInput {
+	return forgedApprovalCommandWithPatterns(output, defaultCompactionPatterns())
+}
+
+func forgedApprovalCommandWithPatterns(output string, patterns *compiledCompactionPatterns) (string, bool) {
+	if patterns == nil || !patterns.enabled || len(output) == 0 || len(output) > compactionGuardMaxInput {
 		return "", false
 	}
+	// The action lane uses the canonical embedded role boundaries. Operators
+	// may tune warning signatures, but a broad custom regex must not expand
+	// which untrusted text can arm a later tool-call guard.
+	proofPatterns := defaultCompactionPatterns()
 	output = strings.ReplaceAll(output, "\r\n", "\n")
-	markers := compactionRoleHeader.FindAllStringIndex(output, compactionGuardMaxMarkers)
+	markers := proofPatterns.roleHeader.FindAllStringIndex(output, compactionGuardMaxMarkers)
 	for _, marker := range markers {
 		end := marker[1] + compactionGuardMaxClaim
 		if end > len(output) {
@@ -504,10 +659,10 @@ func forgedApprovalCommand(output string) (string, bool) {
 			strings.HasPrefix(strings.ToLower(strings.TrimSpace(claim)), "tool_response:") {
 			continue
 		}
-		if next := compactionNextRole.FindStringIndex(claim); next != nil {
+		if next := proofPatterns.nextRole.FindStringIndex(claim); next != nil {
 			claim = claim[:next[0]]
 		}
-		if !compactionApproval.MatchString(claim) || !compactionNoAsk.MatchString(claim) {
+		if !proofPatterns.approval.MatchString(claim) || !proofPatterns.noAsk.MatchString(claim) {
 			continue
 		}
 		if command, ok := compactionCommandInText(claim); ok {
@@ -518,7 +673,7 @@ func forgedApprovalCommand(output string) (string, bool) {
 }
 
 func compactionCommandInText(text string) (string, bool) {
-	match := compactionCurlPipe.FindString(text)
+	match := defaultCompactionPatterns().curlPipe.FindString(text)
 	if match == "" {
 		return "", false
 	}

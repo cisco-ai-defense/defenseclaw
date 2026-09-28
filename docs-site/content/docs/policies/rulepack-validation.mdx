@@ -70,6 +70,10 @@ Fallback is component-specific:
   validate.
 - `rules/local-patterns.yaml` is optional. When it is absent, the compiled
   local patterns remain active.
+- Root-level `compaction.yaml` is optional. When absent, the embedded enabled
+  compaction detector remains active. A present file replaces the hook-only
+  component and must validate; `version: 1` plus `enabled: false` disables
+  both its warning and exact-action lanes for connectors using that pack.
 - Every other present direct `rules/*.yaml` file (excluding
   `rules/local-patterns.yaml`) is validated as one rule-category override or
   addition. Omitted built-in categories keep their compiled defaults.
@@ -79,6 +83,17 @@ Fallback is component-specific:
 This makes partial packs practical without weakening validation: missing known
 components inherit a baseline, while present components are accepted in full
 or rejected in full.
+
+For a custom enabled `compaction.yaml`, start from a bundled profile and keep
+all 15 required RE2 pattern fields. Twelve role-boundary, claim, and summary
+fields can tune advisory warning detection and summary evidence. The other
+three fields, `approval`, `no_ask`, and `curl_pipe`, must match the embedded
+canonical regex values exactly or validation rejects the pack. The
+exact-action lane also uses canonical role-boundary patterns from the embedded
+component, then combines those pinned YAML proof regexes with code-owned
+session, authenticated-approval, and exact-command checks. Custom patterns
+cannot broaden the later command block proof. The Python install-time
+artifact scanner does not apply `compaction.yaml`.
 
 ## Doctor checks effective connector packs
 

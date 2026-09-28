@@ -145,6 +145,45 @@ var allRuleCategories = allRuleGeneration.categories
 var connectorRuleCategories = map[string][]ruleCategory{}
 var connectorRuleGenerations = map[string]*compiledRulePackCategories{}
 
+// A compaction session must observe every effective configuration change,
+// including an off/on transition with no intervening hook. Republishing an
+// unchanged component (or an unrelated global pack while a connector has an
+// override) must not discard active evidence. Protected by ruleCategoriesMu.
+var connectorCompactionEpoch = map[string]uint64{}
+
+func tracksCompactionEpoch(connector string) bool {
+	return connector == "codex" || connector == "claudecode"
+}
+
+// Callers hold ruleCategoriesMu. A connector override takes precedence over
+// the global generation, just as it does for ordinary rule scanning.
+func effectiveCompactionPatternsLocked(connector string) *compiledCompactionPatterns {
+	generation := allRuleGeneration
+	if scoped := connectorRuleGenerations[connector]; scoped != nil {
+		generation = scoped
+	}
+	if generation == nil {
+		return nil
+	}
+	return generation.compaction
+}
+
+func sameCompactionConfig(a, b *compiledCompactionPatterns) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.configDigest == b.configDigest
+}
+
+// Callers hold ruleCategoriesMu and supply the effective pattern before the
+// publication. The epoch catches off/on/off and other round trips even when
+// the next hook sees the same config digest it previously observed.
+func advanceCompactionEpochIfChangedLocked(connector string, before *compiledCompactionPatterns) {
+	if tracksCompactionEpoch(connector) && !sameCompactionConfig(before, effectiveCompactionPatternsLocked(connector)) {
+		connectorCompactionEpoch[connector]++
+	}
+}
+
 func canonicalConnectorRulePackKey(connector string) string {
 	return strings.ToLower(strings.TrimSpace(connector))
 }
@@ -209,6 +248,9 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
 type compiledRulePackCategories struct {
 	categories    []ruleCategory
 	semanticRules []compiledSemanticRule
+	// Compaction signatures share this immutable per-connector generation so a
+	// rule-pack reload changes hook matching atomically with the other rules.
+	compaction *compiledCompactionPatterns
 	// ruleIdentityTitles indexes the immutable generation by normalized rule
 	// ID and exact trimmed title. Local-pattern normalization uses it to
 	// distinguish catalog framing from producer-controlled matched text without
@@ -233,6 +275,10 @@ func compileRulePackCategories(rp *guardrail.RulePack) (*compiledRulePackCategor
 		return nil, err
 	}
 	compiled, err := compileRulePackGenerationWithCompiler(merged, compiler)
+	if err != nil {
+		return nil, err
+	}
+	compiled.compaction, err = compileCompactionPatterns(compactionConfigFromRulePack(rp))
 	if err != nil {
 		return nil, err
 	}
@@ -269,6 +315,7 @@ func compileRulePackGenerationWithCompiler(
 		categories:         ownedCategories,
 		ruleIdentityTitles: make(map[string]map[string]struct{}),
 	}
+	compiled.compaction = defaultCompactionPatterns()
 	claimed := make(map[string]string)
 	semanticRulePositions := make(map[string]int)
 	var staticCost uint64
@@ -375,8 +422,12 @@ func publishRulePackOverrides(compiled *compiledRulePackCategories) {
 		return
 	}
 	ruleCategoriesMu.Lock()
+	beforeCodex := effectiveCompactionPatternsLocked("codex")
+	beforeClaude := effectiveCompactionPatternsLocked("claudecode")
 	allRuleGeneration = compiled
 	allRuleCategories = compiled.categories
+	advanceCompactionEpochIfChangedLocked("codex", beforeCodex)
+	advanceCompactionEpochIfChangedLocked("claudecode", beforeClaude)
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
 		compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
@@ -413,8 +464,10 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 		return
 	}
 	ruleCategoriesMu.Lock()
+	before := effectiveCompactionPatternsLocked(connector)
 	connectorRuleGenerations[connector] = compiled
 	connectorRuleCategories[connector] = compiled.categories
+	advanceCompactionEpochIfChangedLocked(connector, before)
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
 		connector, compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
@@ -437,6 +490,23 @@ func publishConnectorRulePackGeneration(
 	}
 
 	ruleCategoriesMu.Lock()
+	touched := make(map[string]struct{}, len(previousManual)+len(canonicalNext))
+	for _, rawName := range previousManual {
+		name := canonicalConnectorRulePackKey(rawName)
+		if name == "" {
+			continue
+		}
+		touched[name] = struct{}{}
+	}
+	for name := range canonicalNext {
+		touched[name] = struct{}{}
+	}
+	before := make(map[string]*compiledCompactionPatterns, len(touched))
+	for name := range touched {
+		if tracksCompactionEpoch(name) {
+			before[name] = effectiveCompactionPatternsLocked(name)
+		}
+	}
 	for _, rawName := range previousManual {
 		name := canonicalConnectorRulePackKey(rawName)
 		if name == "" {
@@ -451,6 +521,9 @@ func publishConnectorRulePackGeneration(
 		connectorRuleGenerations[name] = compiled
 		connectorRuleCategories[name] = compiled.categories
 	}
+	for name := range touched {
+		advanceCompactionEpochIfChangedLocked(name, before[name])
+	}
 	ruleCategoriesMu.Unlock()
 }
 
@@ -464,8 +537,10 @@ func RemoveConnectorRulePackOverrides(connector string) {
 		return
 	}
 	ruleCategoriesMu.Lock()
+	before := effectiveCompactionPatternsLocked(connector)
 	delete(connectorRuleGenerations, connector)
 	delete(connectorRuleCategories, connector)
+	advanceCompactionEpochIfChangedLocked(connector, before)
 	ruleCategoriesMu.Unlock()
 }
 
