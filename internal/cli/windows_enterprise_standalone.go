@@ -791,8 +791,9 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				label, account.Home, account.Rows))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
-				"the account %s is not enrolled yet and created %s itself (for example when an agent it ran before enrollment was refused); "+
-					"DefenseClaw takes over that folder when the account next signs in, and repair leaves it alone until then",
+				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+
+					"was refused, or after it moved DefenseClaw's folder away); DefenseClaw takes over that folder when the account next "+
+					"signs in, and repair leaves it alone until then",
 				label, filepath.Join(account.Home, ".defenseclaw")))
 		}
 	}

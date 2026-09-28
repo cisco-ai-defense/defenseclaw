@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // deferredPendingProofFixture is a real deferred row for a profile that
@@ -106,16 +108,46 @@ func TestStandaloneDeferredPendingProofAndEnrollmentAdoptAnAccountCreatedDataDir
 	windowsManagedPolicyAncestorTrustCheck = func(string) error { return nil }
 	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
 	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	previousOwner, previousMutation := windowsManagedPolicyOwnerSID, windowsManagedRuntimeSelectorMutationAuthorize
+	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return sid, nil }
+	windowsManagedRuntimeSelectorMutationAuthorize = func() error { return nil }
 	t.Cleanup(func() {
 		windowsManagedPolicyAncestorTrustCheck, windowsManagedPolicyDirTrustCheck, windowsManagedPolicyFileTrustCheck = previousAncestor, previousDir, previousFile
+		windowsManagedPolicyOwnerSID, windowsManagedRuntimeSelectorMutationAuthorize = previousOwner, previousMutation
 	})
-	if removed, err := GarbageCollectWindowsManagedRuntimeGenerations(WindowsManagedRuntimeGenerationGCOptions{
-		Connector:      "claudecode",
-		TargetSID:      sid.String(),
-		DataDir:        dataDir,
-		HookExecutable: hookExe,
-	}); err != nil || removed != 0 {
+	retire := func() (int, error) {
+		return GarbageCollectWindowsManagedRuntimeGenerations(WindowsManagedRuntimeGenerationGCOptions{
+			Connector:      "claudecode",
+			TargetSID:      sid.String(),
+			DataDir:        dataDir,
+			HookExecutable: hookExe,
+		})
+	}
+	if removed, err := retire(); err != nil || removed != 0 {
 		t.Fatalf("lifecycle retire = %d, %v; want nothing to retire", removed, err)
+	}
+	// Nor for an enrolled account that moved DefenseClaw's folder away and
+	// made a new one: its selected generation left with the moved folder.
+	selectorPath, err := windowsManagedRuntimeSelectorPath("claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWindowsManagedPolicyDirectory(filepath.Dir(selectorPath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     "claudecode",
+		Targets: []windowsManagedRuntimeSelectorTarget{{
+			Connector: "claudecode", SID: sid.String(), DataDir: dataDir, HookExecutable: hookExe,
+			GatewayAddr: "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+			GenerationID: strings.Repeat("a", 32), BundleSHA256: "sha256:" + strings.Repeat("b", 64),
+		}},
+	}); err != nil {
+		t.Fatalf("publish the account's selected generation: %v", err)
+	}
+	if removed, err := retire(); err != nil || removed != 0 {
+		t.Fatalf("lifecycle retire with a selected generation = %d, %v; want nothing to retire", removed, err)
 	}
 	var creation windowsTargetOwnedDirectoryCreation
 	if err := runWindowsTestThreadImpersonatedAsSelf(func() error {
