@@ -37,48 +37,65 @@ import (
 )
 
 // Cursor has no managed-hooks-only setting: it runs every matching hook from
-// the enterprise, user, project and Claude-format sources and merges their
-// responses, and preToolUse responses may replace the tool input. To keep the
-// input DefenseClaw inspects identical to the input that runs, the managed
-// hook allows tool calls only while every user- and project-level preToolUse
-// handler is DefenseClaw's own managed registration or approved by the
-// administrator.
+// the enterprise, team, project, user, plugin and Claude-format sources and
+// merges their responses. preToolUse responses may replace the tool input,
+// and workspaceOpen responses may load plugins, and so their hooks, from any
+// directory. To keep the input DefenseClaw inspects identical to the input
+// that runs, the managed hook allows tool calls only while every user-,
+// project- and plugin-level preToolUse or workspaceOpen handler is
+// DefenseClaw's own managed registration or approved by the administrator.
+// Enterprise hooks are administrator-owned and team hooks are distributed by
+// the Cursor team administrator, so neither is scanned.
 
 const (
-	// foreignHookFileLimit bounds every user or project hook file the guard
-	// reads. Larger files cannot be verified and deny.
+	// foreignHookFileLimit bounds every user, project or plugin hook file the
+	// guard reads. Larger files cannot be verified and deny.
 	foreignHookFileLimit int64 = 1 << 20
 	// foreignHookMaxRoots bounds the distinct workspace roots taken from the
 	// payload. A payload that reports more cannot be verified and denies.
 	foreignHookMaxRoots = 32
 	// foreignHookCacheLimit bounds the in-process parse cache.
 	foreignHookCacheLimit = 64
+	// foreignHookPluginMaxDepth and foreignHookPluginMaxDirs bound the walk of
+	// <home>/.cursor/plugins. A tree that exceeds either bound cannot be
+	// verified and denies.
+	foreignHookPluginMaxDepth = 8
+	foreignHookPluginMaxDirs  = 4096
 	// foreignHookDescribeLimit bounds the handler text shown in a denial.
 	foreignHookDescribeLimit = 200
 
 	foreignHookScopeUser    = "user"
 	foreignHookScopeProject = "project"
+	foreignHookScopePlugin  = "plugin"
 
 	foreignHookFormatCursor = "cursor"      // {"hooks":{event:[handler]}}
 	foreignHookFormatClaude = "claude-code" // {"hooks":{event:[{matcher,hooks:[handler]}]}}
+	// foreignHookFormatPlugin reads plugin hook configs in either layout: an
+	// entry with a hooks array is a Claude-format matcher group and any other
+	// entry is a Cursor handler. The event map may also be the document root.
+	foreignHookFormatPlugin = "plugin"
 
 	foreignHookBlockedReason = "enterprise_foreign_hook_blocked"
 )
 
 // foreignHookGatedEvents are the events whose foreign handlers can change what
 // runs: preToolUse may return updated_input (updatedInput in the Claude
-// format). Permission-only and observational events cannot change what runs.
-var foreignHookGatedEvents = [...]string{"preToolUse"}
+// format), and workspaceOpen may return pluginPaths, which load plugins and
+// their hooks from directories the guard cannot enumerate. Permission-only and
+// observational events cannot change what runs.
+var foreignHookGatedEvents = [...]string{"preToolUse", "workspaceOpen"}
 
-// foreignHookFinding is one input-rewriting handler (or an unverifiable file)
-// found outside the administrator-managed hook source.
+// foreignHookFinding is one input-affecting handler (or an unverifiable
+// source) found outside the administrator-managed hook source.
 type foreignHookFinding struct {
 	Scope string
-	// Path is the hook file. It is empty for a problem with the workspace
-	// roots in the payload.
-	Path   string
-	Event  string
-	Digest string
+	// Path is the hook file, plugin manifest or plugin folder. It is empty
+	// for a problem with the workspace roots in the payload.
+	Path string
+	// Directory reports that Path names a folder rather than a file.
+	Directory bool
+	Event     string
+	Digest    string
 	// Handler describes what the handler runs, for the user-facing denial.
 	Handler string
 	Problem string
@@ -88,6 +105,9 @@ type foreignHookSource struct {
 	scope  string
 	path   string
 	format string
+	// inline holds the hooks a plugin manifest at path declares inline; the
+	// manifest is then not read again as a hook document.
+	inline *foreignHookParseResult
 }
 
 type foreignHookParsedHandler struct {
@@ -147,7 +167,12 @@ func evaluateCursorForeignHooks(opts Options, payload []byte) []foreignHookFindi
 func scanCursorForeignHooks(opts Options, payload []byte) []foreignHookFinding {
 	sources, findings := cursorForeignHookSources(opts, payload)
 	for _, source := range sources {
-		result := readForeignHookSource(source)
+		var result foreignHookParseResult
+		if source.inline != nil {
+			result = *source.inline
+		} else {
+			result = readForeignHookSource(source)
+		}
 		if result.problem != "" {
 			findings = append(findings, foreignHookFinding{
 				Scope:   source.scope,
@@ -187,14 +212,25 @@ func cursorForeignHookSources(opts Options, payload []byte) ([]foreignHookSource
 	var sources []foreignHookSource
 	var problems []foreignHookFinding
 	seen := map[string]struct{}{}
-	add := func(scope, format string, parts ...string) {
-		path := filepath.Clean(filepath.Join(parts...))
-		key := foreignHookPathKey(path)
+	addSource := func(source foreignHookSource) {
+		source.path = filepath.Clean(source.path)
+		// A file reached from two scopes is loaded, and approved, once per
+		// scope, so it is scanned once per scope.
+		key := source.scope + ":" + foreignHookPathKey(source.path)
+		if source.inline != nil {
+			key = "inline:" + key
+		}
 		if _, duplicate := seen[key]; duplicate {
 			return
 		}
 		seen[key] = struct{}{}
-		sources = append(sources, foreignHookSource{scope: scope, path: path, format: format})
+		sources = append(sources, source)
+	}
+	add := func(scope, format string, parts ...string) {
+		addSource(foreignHookSource{scope: scope, path: filepath.Join(parts...), format: format})
+	}
+	problem := func(finding foreignHookFinding) {
+		problems = append(problems, finding)
 	}
 	homes := append([]string(nil), opts.ForeignHookHomes...)
 	if len(homes) == 0 {
@@ -205,6 +241,7 @@ func cursorForeignHookSources(opts Options, payload []byte) ([]foreignHookSource
 	if profile := strings.TrimSpace(opts.ForeignHookProfileHome); profile != "" {
 		homes = append(homes, profile)
 	}
+	pluginTrees := map[string]struct{}{}
 	for _, home := range homes {
 		if !filepath.IsAbs(home) {
 			continue
@@ -212,6 +249,12 @@ func cursorForeignHookSources(opts Options, payload []byte) ([]foreignHookSource
 		add(foreignHookScopeUser, foreignHookFormatCursor, home, ".cursor", "hooks.json")
 		add(foreignHookScopeUser, foreignHookFormatClaude, home, ".claude", "settings.json")
 		add(foreignHookScopeUser, foreignHookFormatClaude, home, ".claude", "settings.local.json")
+		tree := filepath.Clean(filepath.Join(home, ".cursor", "plugins"))
+		if _, duplicate := pluginTrees[foreignHookPathKey(tree)]; duplicate {
+			continue
+		}
+		pluginTrees[foreignHookPathKey(tree)] = struct{}{}
+		scanCursorPluginTree(tree, addSource, problem)
 	}
 	if dir := strings.TrimSpace(opts.getenv("CLAUDE_CONFIG_DIR")); dir != "" && filepath.IsAbs(dir) {
 		add(foreignHookScopeUser, foreignHookFormatClaude, dir, "settings.json")
@@ -219,7 +262,7 @@ func cursorForeignHookSources(opts Options, payload []byte) ([]foreignHookSource
 	}
 	roots, rootProblem := cursorPayloadWorkspaceRoots(payload)
 	if rootProblem != "" {
-		problems = append(problems, foreignHookFinding{Scope: foreignHookScopeProject, Problem: rootProblem})
+		problem(foreignHookFinding{Scope: foreignHookScopeProject, Problem: rootProblem})
 	}
 	for _, root := range roots {
 		add(foreignHookScopeProject, foreignHookFormatCursor, root, ".cursor", "hooks.json")
@@ -234,6 +277,238 @@ func (o Options) getenv(key string) string {
 		return o.Getenv(key)
 	}
 	return os.Getenv(key)
+}
+
+// scanCursorPluginTree adds the hook sources of the Cursor plugins under tree
+// (<home>/.cursor/plugins): local plugins, marketplace installs and any other
+// layout Cursor keeps there. A folder holding .cursor-plugin/plugin.json is a
+// plugin; any other hooks/hooks.json in the tree is scanned as well. The walk
+// never follows links or reparse points, skips version-control and package
+// folders, and stops at a bounded depth and size. Anything it cannot verify
+// is reported as a problem so the guard denies.
+func scanCursorPluginTree(
+	tree string,
+	addSource func(foreignHookSource),
+	problem func(foreignHookFinding),
+) {
+	folderProblem := func(path, text string) {
+		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: path, Directory: true, Problem: text})
+	}
+	info, err := os.Lstat(tree)
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		folderProblem(tree, fmt.Sprintf("cannot inspect the folder: %v", err))
+		return
+	}
+	if foreignHookLinkMode(info.Mode()) {
+		folderProblem(tree, "the folder is a link or reparse point")
+		return
+	}
+	if !info.IsDir() {
+		return
+	}
+	type pending struct {
+		dir   string
+		depth int
+	}
+	queue := []pending{{dir: tree}}
+	for listed := 0; len(queue) > 0; listed++ {
+		if listed == foreignHookPluginMaxDirs {
+			folderProblem(tree, fmt.Sprintf("the plugin folders hold more than %d directories", foreignHookPluginMaxDirs))
+			return
+		}
+		current := queue[0]
+		queue = queue[1:]
+		entries, err := os.ReadDir(current.dir)
+		if err != nil {
+			folderProblem(current.dir, fmt.Sprintf("cannot list the folder: %v", err))
+			continue
+		}
+		if scanCursorPluginRoot(current.dir, entries, addSource, problem) {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			path := filepath.Join(current.dir, name)
+			mode := entry.Type()
+			switch {
+			case foreignHookLinkMode(mode):
+				folderProblem(path, "the entry is a link or reparse point")
+			case mode.IsDir() && foreignHookNameIs(name, ".cursor-plugin"):
+				// Marketplace metadata; a plugin manifest here was handled above.
+			case mode.IsDir() && (foreignHookNameIs(name, ".git") || foreignHookNameIs(name, "node_modules")) &&
+				!foreignHookHoldsPluginMetadata(path):
+				// Version-control and package folders are not plugin sources
+				// unless the folder is itself a plugin.
+			case mode.IsDir():
+				if current.depth+1 > foreignHookPluginMaxDepth {
+					folderProblem(path, fmt.Sprintf("the folder is nested more than %d levels deep", foreignHookPluginMaxDepth))
+					continue
+				}
+				queue = append(queue, pending{dir: path, depth: current.depth + 1})
+			case foreignHookNameIs(name, "hooks.json") && foreignHookNameIs(filepath.Base(current.dir), "hooks"):
+				addSource(foreignHookSource{scope: foreignHookScopePlugin, path: path, format: foreignHookFormatPlugin})
+			}
+		}
+	}
+}
+
+// scanCursorPluginRoot adds the hook sources of dir when it is a Cursor plugin
+// and reports whether it is one. A plugin's hooks come from its manifest's
+// hooks field (a path, an inline config, or a list of either) and from the
+// default hooks/hooks.json, which is scanned even when the manifest names
+// another file.
+func scanCursorPluginRoot(
+	dir string,
+	entries []fs.DirEntry,
+	addSource func(foreignHookSource),
+	problem func(foreignHookFinding),
+) bool {
+	folderProblem := func(path, text string) {
+		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: path, Directory: true, Problem: text})
+	}
+	metadata, ok := foreignHookDirEntry(entries, ".cursor-plugin")
+	if !ok {
+		return false
+	}
+	metadataPath := filepath.Join(dir, metadata.Name())
+	if foreignHookLinkMode(metadata.Type()) {
+		folderProblem(metadataPath, "the folder is a link or reparse point")
+		return true
+	}
+	if !metadata.IsDir() {
+		return false
+	}
+	manifestPath := filepath.Join(metadataPath, "plugin.json")
+	data, exists, err := readForeignHookFile(manifestPath)
+	if err != nil {
+		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: manifestPath, Problem: err.Error()})
+		return true
+	}
+	if !exists {
+		// A marketplace root keeps marketplace.json here and its plugins in
+		// subfolders.
+		return false
+	}
+	paths, inline, manifestProblem := cursorPluginManifestHooks(data)
+	if manifestProblem != "" {
+		problem(foreignHookFinding{Scope: foreignHookScopePlugin, Path: manifestPath, Problem: manifestProblem})
+		return true
+	}
+	for _, declared := range paths {
+		declared = filepath.FromSlash(strings.TrimSpace(declared))
+		if filepath.IsAbs(declared) {
+			addSource(foreignHookSource{scope: foreignHookScopePlugin, path: declared, format: foreignHookFormatPlugin})
+			continue
+		}
+		// Resolve relative paths against the plugin folder and, in case a
+		// client resolves them next to the manifest, against .cursor-plugin.
+		for _, base := range []string{dir, metadataPath} {
+			addSource(foreignHookSource{
+				scope:  foreignHookScopePlugin,
+				path:   filepath.Join(base, declared),
+				format: foreignHookFormatPlugin,
+			})
+		}
+	}
+	if len(inline) > 0 {
+		result := parseForeignHookInline(inline)
+		addSource(foreignHookSource{
+			scope:  foreignHookScopePlugin,
+			path:   manifestPath,
+			format: foreignHookFormatPlugin,
+			inline: &result,
+		})
+	}
+	if hooks, ok := foreignHookDirEntry(entries, "hooks"); ok {
+		hooksPath := filepath.Join(dir, hooks.Name())
+		switch {
+		case foreignHookLinkMode(hooks.Type()):
+			folderProblem(hooksPath, "the folder is a link or reparse point")
+		case hooks.IsDir():
+			addSource(foreignHookSource{
+				scope:  foreignHookScopePlugin,
+				path:   filepath.Join(hooksPath, "hooks.json"),
+				format: foreignHookFormatPlugin,
+			})
+		}
+	}
+	return true
+}
+
+// cursorPluginManifestHooks returns the hook config paths and inline configs a
+// plugin manifest declares in its hooks field.
+func cursorPluginManifestHooks(data []byte) ([]string, []map[string]interface{}, string) {
+	manifest, problem := decodeForeignHookJSONObject(data)
+	if problem != "" {
+		return nil, nil, problem
+	}
+	raw, exists := manifest["hooks"]
+	if !exists || raw == nil {
+		return nil, nil, ""
+	}
+	values := []interface{}{raw}
+	if list, ok := raw.([]interface{}); ok {
+		values = list
+	}
+	var paths []string
+	var inline []map[string]interface{}
+	for _, value := range values {
+		switch typed := value.(type) {
+		case nil:
+			continue
+		case string:
+			if strings.TrimSpace(typed) == "" || strings.ContainsRune(typed, 0) {
+				return nil, nil, "the manifest hooks path is empty or invalid"
+			}
+			paths = append(paths, typed)
+		case map[string]interface{}:
+			inline = append(inline, typed)
+		default:
+			return nil, nil, "the manifest hooks value is not a path or an object"
+		}
+	}
+	return paths, inline, ""
+}
+
+func parseForeignHookInline(configs []map[string]interface{}) foreignHookParseResult {
+	var combined foreignHookParseResult
+	for _, config := range configs {
+		result := parseForeignHookContainer(foreignHookFormatPlugin, config)
+		if result.problem != "" {
+			return foreignHookParseResult{problem: "the manifest's inline hooks: " + result.problem}
+		}
+		combined.handlers = append(combined.handlers, result.handlers...)
+	}
+	return combined
+}
+
+func foreignHookDirEntry(entries []fs.DirEntry, name string) (fs.DirEntry, bool) {
+	for _, entry := range entries {
+		if foreignHookNameIs(entry.Name(), name) {
+			return entry, true
+		}
+	}
+	return nil, false
+}
+
+// foreignHookHoldsPluginMetadata reports whether dir has a .cursor-plugin
+// entry of any kind, so a skipped folder name cannot hide a plugin.
+func foreignHookHoldsPluginMetadata(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".cursor-plugin"))
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+func foreignHookNameIs(name, want string) bool {
+	return foreignHookPathKey(name) == foreignHookPathKey(want)
+}
+
+// foreignHookLinkMode reports a symbolic link, junction or other reparse
+// point, which the guard never follows.
+func foreignHookLinkMode(mode fs.FileMode) bool {
+	return mode&(fs.ModeSymlink|fs.ModeIrregular) != 0
 }
 
 // cursorPayloadWorkspaceRoots returns the distinct absolute workspace roots
@@ -347,10 +622,11 @@ func readForeignHookSource(source foreignHookSource) foreignHookParseResult {
 	return result
 }
 
-// readForeignHookFile reads a user- or project-owned hook file without
-// following a final symbolic link or reparse point and without reading more
-// than foreignHookFileLimit bytes. Anything that cannot be read as a bounded
-// regular file is reported as an error so the caller fails closed.
+// readForeignHookFile reads a user-, project- or plugin-owned hook file
+// without following a final symbolic link or reparse point and without
+// reading more than foreignHookFileLimit bytes. Anything that cannot be read
+// as a bounded regular file is reported as an error so the caller fails
+// closed.
 func readForeignHookFile(path string) ([]byte, bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -405,8 +681,8 @@ func decodeForeignHookJSONObject(data []byte) (map[string]interface{}, string) {
 	return document, ""
 }
 
-// parseForeignHookDocument extracts the gated (preToolUse) handlers from a
-// Cursor or Claude-format hook document.
+// parseForeignHookDocument extracts the gated (preToolUse and workspaceOpen)
+// handlers from a Cursor, Claude-format or plugin hook document.
 func parseForeignHookDocument(format string, data []byte) foreignHookParseResult {
 	document, problem := decodeForeignHookJSONObject(data)
 	if problem != "" {
@@ -416,8 +692,14 @@ func parseForeignHookDocument(format string, data []byte) foreignHookParseResult
 }
 
 // parseForeignHookContainer reads the event map under container's hooks key.
+// Plugin configs may also place the event map at the container itself.
 func parseForeignHookContainer(format string, container map[string]interface{}) foreignHookParseResult {
 	var result foreignHookParseResult
+	if format == foreignHookFormatPlugin {
+		if problem := collectForeignHookEvents(format, container, &result); problem != "" {
+			return foreignHookParseResult{problem: problem}
+		}
+	}
 	rawHooks, exists := container["hooks"]
 	if !exists || rawHooks == nil {
 		return result
@@ -482,7 +764,7 @@ func foreignHookEntryHandlers(format string, entry interface{}) ([]foreignHookPa
 		return nil, "is not an object"
 	}
 	rawHandlers, grouped := object["hooks"]
-	if format == foreignHookFormatCursor {
+	if format == foreignHookFormatCursor || (format == foreignHookFormatPlugin && !grouped) {
 		return []foreignHookParsedHandler{{entry: object, handler: object}}, ""
 	}
 	if !grouped {
@@ -522,8 +804,8 @@ func foreignHookEntryHandlers(format string, entry interface{}) ([]foreignHookPa
 // original number literals, no HTML escaping) of the handler's registration
 // together with its event and scope. Binding the event, scope and (for the
 // Claude format) matcher means approving a handler in a user file does not
-// approve the same text in a cloned project, and approving it for one event
-// or matcher does not approve it for another. Administrators approve
+// approve the same text in a cloned project or a plugin, and approving it for
+// one event or matcher does not approve it for another. Administrators approve
 // a handler by adding the digest the denial prints to the allowlist.
 func foreignHookApprovalDigest(scope, event string, entry map[string]interface{}) (string, error) {
 	var buffer bytes.Buffer
@@ -661,13 +943,17 @@ func foreignHookConnectorToken(value string) bool {
 }
 
 func (f foreignHookFinding) subject() string {
-	if f.Path == "" {
+	switch {
+	case f.Path == "":
 		return "the workspace folders Cursor reported"
+	case f.Directory:
+		return fmt.Sprintf("the %s-level hook folder %s", f.Scope, f.Path)
+	default:
+		return fmt.Sprintf("the %s-level hook file %s", f.Scope, f.Path)
 	}
-	return fmt.Sprintf("the %s-level hook file %s", f.Scope, f.Path)
 }
 
-// cursorForeignHookDenyMessage names the first blocking file so the user or
+// cursorForeignHookDenyMessage names the first blocking source so the user or
 // administrator can act on it without reading logs. describeHandler adds what
 // the unapproved handler runs.
 func cursorForeignHookDenyMessage(findings []foreignHookFinding, describeHandler bool) string {
@@ -678,11 +964,14 @@ func cursorForeignHookDenyMessage(findings []foreignHookFinding, describeHandler
 	}
 	if first.Problem != "" {
 		action := "Fix or remove the file so DefenseClaw can check the hooks it registers."
-		if first.Path == "" {
+		switch {
+		case first.Path == "":
 			action = fmt.Sprintf(
 				"Open local folders, at most %d in one workspace, so DefenseClaw can check their hooks.",
 				foreignHookMaxRoots,
 			)
+		case first.Directory:
+			action = "Replace links with regular folders and remove unused plugins so DefenseClaw can check their hooks."
 		}
 		return fmt.Sprintf(
 			"DefenseClaw blocked this tool call: %s cannot be verified (%s)%s. %s",

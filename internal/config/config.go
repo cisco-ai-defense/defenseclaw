@@ -1422,11 +1422,12 @@ type AgentHookConfig struct {
 	// user, project, local and plugin hooks run beside DefenseClaw's managed
 	// hooks; status and verify report the opt-out.
 	AllowUnmanagedHooks bool `mapstructure:"allow_unmanaged_hooks" yaml:"allow_unmanaged_hooks,omitempty"`
-	// ApprovedForeignHooks lists sha256 digests of user- or project-level
-	// hook handlers that the managed hook accepts for connectors without a
-	// vendor managed-hooks-only setting (Cursor). The managed hook denies
-	// tool calls while any other preToolUse hook is registered and names the
-	// digest to approve in its message.
+	// ApprovedForeignHooks lists sha256 approval digests of user-, project-
+	// or plugin-level hook registrations that the managed hook accepts for
+	// connectors without a vendor managed-hooks-only setting (Cursor). The
+	// managed hook denies tool calls while any other preToolUse or
+	// workspaceOpen hook is registered and prints the digest to approve; a
+	// digest covers the registration, its event and its scope.
 	ApprovedForeignHooks []string `mapstructure:"approved_foreign_hooks" yaml:"approved_foreign_hooks,omitempty"`
 }
 
