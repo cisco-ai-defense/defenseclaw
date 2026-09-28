@@ -24,8 +24,8 @@ from defenseclaw.tui.policy_panel import (
     composed_pack_path,
     hilt_change_modal,
     mode_change_modal,
+    policy_threshold_modal,
     protection_change_modal,
-    threshold_change_modal,
 )
 from defenseclaw.tui.screens.posture_picker import approval_choices, threshold_choices
 from defenseclaw.tui.services.policy_state import (
@@ -210,10 +210,10 @@ def test_posture_keys_ask_for_the_right_flow_on_the_highlighted_scope() -> None:
     assert model.handle_key("p").kind == "pick_pack"
     model.handle_key("up")
     assert model.handle_key("m").connector == ""
-    # b and a edit the active policy, so they need one.
+    # b and a set the scope's own tool-call levels, so no active policy is needed.
     none_active = protection_model()
     none_active.apply_policies([PERMISSIVE, STRICT])
-    assert none_active.handle_key("b").kind == "hint"
+    assert none_active.handle_key("b").kind == "pick_block"
     assert PoliciesPanelModel().handle_key("m").kind == "hint"  # nothing loaded yet
 
 
@@ -290,12 +290,12 @@ def test_consequence_modals_turn_red_only_when_protection_weakens() -> None:
     codex, global_row = model.scope_row("codex"), model.scope_row("")
     assert mode_change_modal(model, codex, "observe").actions[0].danger is True
     assert mode_change_modal(model, global_row, "action").actions[0].danger is False
-    assert threshold_change_modal(model, "block", "HIGH+", codex).actions[0].danger is False
-    loosen = threshold_change_modal(PoliciesPanelModel(), "block", "CRITICAL", None)
-    assert loosen.actions[0].danger is False  # no active policy: nothing to compare
-    strict_model = protection_model()
-    strict_model.apply_policies([STRICT.__class__(**{**STRICT.__dict__, "active": True})])
-    assert threshold_change_modal(strict_model, "block", "CRITICAL", codex).actions[0].danger is True
+    # The Policies view's b / a: the policy's LLM-traffic levels.
+    assert policy_threshold_modal("block", "HIGH+", model.active_policy()).actions[0].danger is False
+    loosen = policy_threshold_modal("block", "CRITICAL", STRICT)
+    assert loosen.actions[0].danger is False  # not the active policy: nothing changes yet
+    strict_active = STRICT.__class__(**{**STRICT.__dict__, "active": True})
+    assert policy_threshold_modal("block", "CRITICAL", strict_active).actions[0].danger is True
     assert hilt_change_modal(model, codex, "off").actions[0].danger is True
     assert hilt_change_modal(model, codex, "MEDIUM+").actions[0].danger is False
     database = model.protection_pack("database-destruction-protection")

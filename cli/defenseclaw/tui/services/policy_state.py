@@ -20,16 +20,19 @@ Seven views, in navigation order (keys ``1``-``7``):
    cycles the scope); Space or Enter turns one on or off.
 3. **Chains**: the bounded tool-call chains, grouped by domain (read-only).
 4. **Rule families**: the rule files of the scope's effective pack.
-5. **Policies**: the named security policies (``policy activate``).
+5. **Policies**: the named security policies (``policy activate``); ``b`` /
+   ``a`` change the highlighted policy's levels for LLM traffic.
 6. **Rule packs**: the guardrail rule pack per scope (``guardrail use-pack``).
 7. **Sandbox packs**: the sandbox policy packs, read-only.
 
-The gateway takes a tool call's block and alert levels from the name of the
-scope's rule-pack folder (``internal/gateway/decision.go``
-``guardrailProfileForDir``: ``strict`` blocks MEDIUM+, ``permissive`` and
-everything else block CRITICAL), while the named policy's thresholds apply to
-LLM traffic through the guardrail proxy. The posture rows show the former;
-the policy's levels are shown next to them and changed with ``b``/``a``.
+A tool call's block and alert levels come from ``guardrail.block_at`` /
+``alert_at`` (the connector's own value, else the global one), else from the
+name of the scope's rule-pack folder (``internal/gateway/decision.go``:
+``strict`` blocks MEDIUM+, ``permissive`` and everything else CRITICAL); the
+alert level never sits above the block level. The posture rows show them and
+``b`` / ``a`` there run ``guardrail block-at`` / ``alert-at``. The named
+policy's thresholds apply to LLM traffic through the guardrail proxy only;
+the Policies view shows and changes those (``policy edit guardrail``).
 
 No I/O happens here. The app reads :mod:`defenseclaw.policy_catalog` in a
 thread and feeds the results in; the model answers what to render and which
@@ -43,6 +46,8 @@ import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from defenseclaw.policy_catalog import ScopeLevels, level_value, resolve_levels
 
 POLICY_VIEWS: tuple[str, ...] = (
     "posture",
@@ -89,9 +94,14 @@ SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 LEVEL_FOR_RANK = {4: "CRITICAL", 3: "HIGH+", 2: "MEDIUM+", 1: "LOW+"}
 
-# The levels the block-at and alert-at pickers offer.
+# The levels the policy's block-at and alert-at pickers offer (LLM traffic).
 BLOCK_LEVELS = ("CRITICAL", "HIGH+", "MEDIUM+")
 ALERT_LEVELS = ("HIGH+", "MEDIUM+", "LOW+")
+# The tool-call level pickers (``guardrail block-at`` / ``alert-at``), plus
+# INHERIT: clear the scope's own value and follow the global or pack level.
+TOOL_BLOCK_LEVELS = ("CRITICAL", "HIGH+", "MEDIUM+")
+TOOL_ALERT_LEVELS = ("CRITICAL", "HIGH+", "MEDIUM+", "LOW+")
+INHERIT = "inherit"
 # Human approval (``guardrail hilt``): off, or the lowest severity that asks.
 HILT_LEVELS = ("off", "CRITICAL", "HIGH+", "MEDIUM+", "LOW+")
 
@@ -328,21 +338,53 @@ def mode_intent(mode: str, connector: str = "") -> PolicyCommandIntent:
     )
 
 
-def threshold_intent(kind: str, level: str) -> PolicyCommandIntent:
-    """``policy edit guardrail --block-threshold N`` (or ``--alert-threshold``).
+def threshold_intent(kind: str, level: str, policy: str = "") -> PolicyCommandIntent:
+    """``policy edit guardrail --block-threshold N [-p NAME]`` (or ``--alert-threshold``).
 
-    Edits the active policy; a built-in one is copied to the policy folder
-    first. ``level`` is a threshold label (``HIGH+``).
+    The named policy's level for LLM traffic through the guardrail proxy:
+    ``policy`` names it ("" = the active one); a built-in one is copied to the
+    policy folder first. ``level`` is a threshold label (``HIGH+``).
     """
     rank = level_rank(level)
     if rank is None:
         raise ValueError(f"unknown level {level!r}")
     flag = "--block-threshold" if kind == "block" else "--alert-threshold"
     what = "block" if kind == "block" else "alert"
+    args: tuple[str, ...] = ("policy", "edit", "guardrail", flag, str(rank))
+    if policy:
+        args = (*args, "-p", policy)
     return PolicyCommandIntent(
-        label=f"policy edit guardrail {flag} {rank}",
-        args=("policy", "edit", "guardrail", flag, str(rank)),
-        hint=f"Make the active policy {what} at {level}.",
+        label=f"policy edit guardrail {flag} {rank}" + (f" -p {policy}" if policy else ""),
+        args=args,
+        hint=f"Make the {policy or 'active'} policy {what} LLM traffic at {level}.",
+    )
+
+
+def level_intent(kind: str, level: str, connector: str = "") -> PolicyCommandIntent:
+    """``guardrail block-at|alert-at LEVEL [--connector C]``: a scope's tool-call level.
+
+    ``level`` is a picker value (``CRITICAL``, ``HIGH+``, ``MEDIUM+``,
+    ``LOW+``) or :data:`INHERIT`, which clears the scope's own value.
+    """
+    if level == INHERIT:
+        name = INHERIT
+    else:
+        name = (level or "").strip().rstrip("+").upper()
+        if name not in SEVERITY_RANK:
+            raise ValueError(f"unknown level {level!r}")
+    # Literal argv per setting, so scripts/gap_audit.py sees both commands.
+    if kind == "block":
+        args: tuple[str, ...] = ("guardrail", "block-at", name)
+    else:
+        args = ("guardrail", "alert-at", name)
+    if connector:
+        args = (*args, "--connector", connector)
+    scope = f" for {connector}" if connector else ""
+    what = "block" if kind == "block" else "alert"
+    return PolicyCommandIntent(
+        label=f"guardrail {args[1]} {name}{scope}",
+        args=args,
+        hint=f"Set the tool-call {what} level{scope} to {name}.",
     )
 
 
@@ -385,6 +427,103 @@ def protection_intent(name: str, *, enable: bool, connector: str = "") -> Policy
         args=args,
         hint=f"Turn {'on' if enable else 'off'} {name}{scope or ' for every connector'}.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool-call levels (guardrail.block_at / alert_at)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LevelEffect:
+    """One scope's tool-call levels before and after a block-at / alert-at change."""
+
+    scope: str
+    before: ScopeLevels
+    after: ScopeLevels
+
+    @property
+    def weaker(self) -> bool:
+        """It blocks or alerts on fewer severities (the alert level can follow the block level)."""
+        return self.after.block_rank > self.before.block_rank or self.after.alert_rank > self.before.alert_rank
+
+    @property
+    def subject(self) -> str:
+        return "the global default" if self.scope in {"", "global"} else self.scope
+
+    def loosening(self) -> str:
+        """``blocks HIGH+ instead of MEDIUM+`` ("" when nothing got weaker)."""
+        parts = []
+        if self.after.block_rank > self.before.block_rank:
+            parts.append(f"blocks {self.after.block_at} instead of {self.before.block_at}")
+        if self.after.alert_rank > self.before.alert_rank:
+            parts.append(f"alerts on {self.after.alert_at} instead of {self.before.alert_at}")
+        return " and ".join(parts)
+
+
+def _and_join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def loosened_text(effects: Iterable[LevelEffect]) -> str:
+    """``blocks CRITICAL instead of HIGH+ for the global default, codex and hermes``.
+
+    Scopes that lose the same way share one phrase ("" when none loosens).
+    """
+    groups: dict[str, list[str]] = {}
+    for effect in effects:
+        phrase = effect.loosening()
+        if phrase:
+            groups.setdefault(phrase, []).append(effect.subject)
+    return "; ".join(f"{phrase} for {_and_join(subjects)}" for phrase, subjects in groups.items())
+
+
+@dataclass(frozen=True)
+class LevelChange:
+    """What ``guardrail block-at|alert-at`` would do, from the posture rows.
+
+    ``connector`` is the ``--connector`` value ("" = the global value, which
+    every connector without its own follows); ``value`` the stored level
+    after it (``CRITICAL`` … ``LOW``, "" = inherit). ``effects`` lists every
+    scope it reaches; ``keep_own`` the connectors a global change can't reach
+    because they set their own.
+    """
+
+    kind: str
+    connector: str
+    value: str
+    effects: tuple[LevelEffect, ...]
+    keep_own: tuple[str, ...] = ()
+
+    def effect_for(self, scope: str) -> LevelEffect | None:
+        want = scope or "global"
+        return next((effect for effect in self.effects if effect.scope == want), None)
+
+    def weakened(self) -> tuple[LevelEffect, ...]:
+        return tuple(effect for effect in self.effects if effect.weaker)
+
+
+def levels_setting(levels: ScopeLevels, kind: str) -> tuple[str, str]:
+    """``(label, source)`` of the block (``kind="block"``) or alert level."""
+    if kind == "block":
+        return levels.block_at, levels.block_source
+    return levels.alert_at, levels.alert_source
+
+
+def level_origin(source: str, scope: str, pack: str, profile: str) -> str:
+    """``set for codex`` / ``set globally`` / ``from the strict pack``."""
+    if source == "override":
+        return f"set for {scope}"
+    if source == "global":
+        return "set globally"
+    pack = pack or profile
+    return f"from the {pack} pack" if pack == profile else f"from the {pack} pack ({profile} levels)"
+
+
+def picker_level(stored: str) -> str:
+    """A stored level (``HIGH``) as a picker value (``HIGH+``); "" → :data:`INHERIT`."""
+    rank = SEVERITY_RANK.get((stored or "").strip().upper())
+    return LEVEL_FOR_RANK[rank] if rank else INHERIT
 
 
 # ---------------------------------------------------------------------------
@@ -652,9 +791,11 @@ class PolicyPanelAction:
     ``kind``: ``none`` (not handled), ``render``, ``hint``, ``refresh``,
     ``load_sandbox_packs``, ``pick_policy`` (``policy`` = the highlighted
     one), ``pick_pack`` (``connector`` = the scope, "" = global),
-    ``toggle_mode``, ``pick_block``, ``pick_alert``, ``pick_hilt``
-    (``connector`` = the scope) or ``toggle_protection`` (``pack`` and
-    ``enable``, ``connector`` = the scope).
+    ``toggle_mode``, ``pick_block``, ``pick_alert`` (tool-call levels),
+    ``pick_hilt`` (``connector`` = the scope), ``pick_policy_block`` /
+    ``pick_policy_alert`` (``policy`` = the highlighted policy's LLM-traffic
+    level) or ``toggle_protection`` (``pack`` and ``enable``, ``connector`` =
+    the scope).
     """
 
     kind: str
@@ -675,7 +816,8 @@ POLICY_KEYMAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("1 … 7", "Posture · Opt-in packs · Chains · Rule families · Policies · Rule packs · Sandbox packs", POLICY_VIEWS),
     ("j/k or Up/Down", "Move in the view", POLICY_VIEWS),
     ("m", "Posture: switch the highlighted scope between observe and action", ("posture",)),
-    ("b / a", "Posture: block at / alert at level of the active policy", ("posture",)),
+    ("b / a", "Posture: the scope's tool-call block at / alert at level", ("posture",)),
+    ("b / a", "Policies: the policy's block / alert level for LLM traffic (guardrail proxy)", ("policies",)),
     ("h", "Posture: human approval for the highlighted scope", ("posture",)),
     ("p", "Posture: switch the highlighted scope's rule pack", ("posture",)),
     ("Space / Enter", "Opt-in packs: turn the pack on or off for the scope", ("optin",)),
@@ -713,7 +855,7 @@ def policies_keys_hint(view: str, *, sandbox_supported: bool = True) -> str:
         return f"KEYS  {views} | Enter change pack | i details | r refresh"
     if view == "sandbox_packs":
         return f"KEYS  {views} | Enter details | r refresh | read-only: sandbox pack set"
-    return f"KEYS  {views} | Enter activate a policy | i details | r refresh"
+    return f"KEYS  {views} | Enter activate | b/a LLM block/alert | i details | r refresh"
 
 
 class PoliciesPanelModel:
@@ -924,8 +1066,105 @@ class PoliciesPanelModel:
         return connector if connector and self.multi_connector else ""
 
     def scope_levels(self, row: object | None) -> tuple[str, str]:
-        """``(blocks at, alerts at)`` for the scope's tool calls."""
-        return profile_levels(str(_attr(row, "pack_path")) if row is not None else "")
+        """``(blocks at, alerts at)`` for the scope's tool calls.
+
+        The catalog's ``block_at`` / ``alert_at`` (``guardrail.block_at`` /
+        ``alert_at`` applied); a row without them resolves the same way.
+        """
+        if row is None:
+            return profile_levels("")
+        block, alert = str(_attr(row, "block_at")), str(_attr(row, "alert_at"))
+        if level_rank(block) and level_rank(alert):
+            return block, alert
+        levels = self.row_levels(row)
+        return levels.block_at, levels.alert_at
+
+    @staticmethod
+    def own_levels(row: object | None) -> tuple[str, str]:
+        """The ``(block_at, alert_at)`` a scope sets itself ("" = inherits)."""
+        if row is None:
+            return "", ""
+        return level_value(_attr(row, "own_block_at")), level_value(_attr(row, "own_alert_at"))
+
+    def row_levels(
+        self,
+        row: object,
+        *,
+        global_own: tuple[str, str] | None = None,
+        own: tuple[str, str] | None = None,
+    ) -> ScopeLevels:
+        """How the gateway resolves ``row``'s levels, optionally with changed values.
+
+        ``global_own`` replaces the global row's values, ``own`` the row's own
+        (ignored for the global row, whose own values are the global ones).
+        """
+        shared = global_own if global_own is not None else self.own_levels(self.scope_row(""))
+        path = str(_attr(row, "pack_path"))
+        if not self.connector_of(row):
+            return resolve_levels(path, shared)
+        return resolve_levels(path, shared, own if own is not None else self.own_levels(row))
+
+    def level_change(self, kind: str, row: object, choice: str) -> LevelChange:
+        """What picking ``choice`` (a picker value or :data:`INHERIT`) on ``row`` changes.
+
+        On a single-connector install the change goes to the global value
+        (:meth:`command_connector`), as ``m`` and ``h`` do.
+        """
+        index = 0 if kind == "block" else 1
+        value = "" if choice == INHERIT else (choice or "").strip().rstrip("+").upper()
+        target = self.command_connector(row)
+        if target:
+            own = list(self.own_levels(row))
+            own[index] = value
+            scope = str(_attr(row, "scope"))
+            effect = LevelEffect(scope, self.row_levels(row), self.row_levels(row, own=(own[0], own[1])))
+            return LevelChange(kind, target, value, (effect,))
+        shared = list(self.own_levels(self.scope_row("")))
+        shared[index] = value
+        effects: list[LevelEffect] = []
+        keep_own: list[str] = []
+        for scope_row in self.postures:
+            scope = str(_attr(scope_row, "scope"))
+            if self.connector_of(scope_row) and self.own_levels(scope_row)[index]:
+                keep_own.append(scope)
+                continue
+            after = self.row_levels(scope_row, global_own=(shared[0], shared[1]))
+            effects.append(LevelEffect(scope, self.row_levels(scope_row), after))
+        return LevelChange(kind, "", value, tuple(effects), tuple(keep_own))
+
+    def level_current(self, kind: str, row: object) -> str:
+        """The picker value the change's scope stores now (:data:`INHERIT` if none)."""
+        index = 0 if kind == "block" else 1
+        holder = row if self.command_connector(row) else self.scope_row("")
+        return picker_level(self.own_levels(holder)[index])
+
+    def level_inherit_text(self, kind: str, row: object) -> str:
+        """``Use the pack's level (CRITICAL)`` or ``Use the global level (HIGH+)``."""
+        change = self.level_change(kind, row, INHERIT)
+        effect = change.effect_for(str(_attr(row, "scope")))
+        if effect is None:
+            return "Use the pack's level"
+        label, source = levels_setting(effect.after, kind)
+        where = "the global level" if source == "global" else "the pack's level"
+        return f"Use {where} ({label})"
+
+    def levels_line(self, row: object) -> str:
+        """Where a scope's tool-call levels come from, for its detail."""
+        levels = self.row_levels(row)
+        scope = str(_attr(row, "scope")) or "global"
+        pack = str(_attr(row, "pack"))
+        profile = pack_profile(str(_attr(row, "pack_path")))
+        block, alert = levels.block_source, levels.alert_source
+        if block == alert:
+            line = f"Levels {level_origin(block, scope, pack, profile)}."
+        else:
+            line = (
+                f"Block level {level_origin(block, scope, pack, profile)}; "
+                f"alert level {level_origin(alert, scope, pack, profile)}."
+            )
+        if levels.alert_clamped:
+            line += f" Alerts start at {levels.alert_at}: anything that blocks also alerts."
+        return line
 
     def scope_pack_label(self, row: object) -> str:
         """``strict``, or ``strict+1`` for a pack composed from strict and one opt-in pack."""
@@ -1073,6 +1312,11 @@ class PoliciesPanelModel:
             if key == "enter":
                 return self._toggle_detail()
             return PolicyPanelAction("none")
+        if view == "policies" and key in {"b", "a"}:
+            policy = self.selected_policy()
+            if policy is None:
+                return PolicyPanelAction("hint", hint="No named policies were found.")
+            return PolicyPanelAction("pick_policy_block" if key == "b" else "pick_policy_alert", policy=policy.name)
         if key != "enter":
             return PolicyPanelAction("none")
         if view == "policies":
@@ -1104,8 +1348,6 @@ class PoliciesPanelModel:
             return PolicyPanelAction("pick_hilt", connector=connector)
         if key == "p":
             return PolicyPanelAction("pick_pack", connector=connector)
-        if self.active_policy() is None:
-            return PolicyPanelAction("hint", hint="No policy is active; activate one first (5, Enter).")
         return PolicyPanelAction("pick_block" if key == "b" else "pick_alert", connector=connector)
 
     def _toggle_protection(self) -> PolicyPanelAction:
@@ -1187,11 +1429,11 @@ class PoliciesPanelModel:
         if view == "posture":
             active = self.active_policy()
             if active is None:
-                return "Levels come from each scope's rule pack · no policy is active for LLM traffic"
+                return "Tool-call levels are set per scope below · no policy is active for LLM traffic"
             text = (
                 f"LLM traffic ({active.name} policy): blocks {active.block_at or '?'}, alerts {active.alert_at or '?'}"
             )
-            wide = f"{text} · tool calls: each scope's rule pack"
+            wide = f"{text} · tool calls: per scope below"
             return wide if not width or len(wide) <= width else text
         if view in {"optin", "families"}:
             scope = self.scope_name() or "-"
@@ -1459,23 +1701,25 @@ class PoliciesPanelModel:
                 )
             else:
                 rows.append(
-                    (active, fit(policy.name, max(8, width - 26)), policy.block_at or "-", policy.alert_at or "-")
+                    (active, fit(policy.name, max(8, width - 30)), policy.block_at or "-", policy.alert_at or "-")
                 )
+        # Block / alert here are the policy's levels for LLM traffic through the
+        # guardrail proxy; the Posture view shows the tool-call levels.
         if width >= 100:
             columns: tuple[str, ...] = (
                 "",
                 "Policy",
                 "Kind",
-                "Block at",
-                "Alert at",
+                "LLM block",
+                "LLM alert",
                 "Install block",
                 "Firewall",
                 "Description",
             )
         elif width >= 62:
-            columns = ("", "Policy", "Kind", "Block", "Alert", "Install block")
+            columns = ("", "Policy", "Kind", "LLM block", "LLM alert", "Install block")
         else:
-            columns = ("", "Policy", "Block", "Alert")
+            columns = ("", "Policy", "LLM block", "LLM alert")
         return columns, tuple(rows)
 
     def aside(self) -> tuple[str, tuple[str, ...]]:
@@ -1512,17 +1756,17 @@ class PoliciesPanelModel:
         mode = str(_attr(row, "mode")) or "observe"
         hilt = str(_attr(row, "hilt")) or "off"
         block, alert = self.scope_levels(row)
-        if not self.connector_of(row):
-            source = "the global default"
-        elif _attr(row, "mode_source") == "override":
-            source = "its own setting"
+        # Where the mode comes from; levels_line says where the levels do.
+        if self.connector_of(row) and _attr(row, "mode_source") == "override":
+            source = "its own mode"
         else:
-            source = "from global"
+            source = "global mode"
         lines = [
             posture_summary(scope, mode, block, alert, hilt),
             "",
             f"Tool calls ({mode}, {source}):",
             *matrix_lines(mode, block, alert, hilt),
+            self.levels_line(row),
             "",
             self._pack_line(row),
         ]
@@ -1545,8 +1789,8 @@ class PoliciesPanelModel:
         if base:
             on = len(self.scope_protection(row))
             return (
-                f"Rule pack: {pack} = {base} + {on} opt-in pack{'s' if on != 1 else ''}; tool calls use "
-                f"{profile} levels (the gateway reads them from the folder name)."
+                f"Rule pack: {pack} = {base} + {on} opt-in pack{'s' if on != 1 else ''}; its folder name "
+                f"gives it {profile} levels (the gateway reads them from there)."
             )
         return f"Rule pack: {pack} ({profile} levels)"
 
@@ -1638,8 +1882,9 @@ class PoliciesPanelModel:
         kind = "built-in" if policy.builtin else "custom"
         effects = " · ".join(policy_side_effects(policy))
         lines = [
-            f"block {policy.block_at} · alert {policy.alert_at} · installs blocked at {policy.install_block_at} · "
-            f"firewall {policy.firewall_default or 'unchanged'} · approval {_hilt_label(policy.hilt)}",
+            f"LLM traffic (guardrail proxy): block {policy.block_at} · alert {policy.alert_at}",
+            f"installs blocked at {policy.install_block_at} · firewall {policy.firewall_default or 'unchanged'} · "
+            f"approval {_hilt_label(policy.hilt)}",
             policy.description or "-",
             policy.path + (f"  (activating it: {effects})" if effects else ""),
         ]
@@ -1690,15 +1935,20 @@ __all__ = [
     "CHAIN_DOMAINS",
     "DEFAULT_SANDBOX_PACK",
     "HILT_LEVELS",
+    "INHERIT",
     "PACK_STRICTNESS",
     "POLICY_KEYMAP",
     "POLICY_VIEWS",
     "PROFILE_LEVELS",
     "PROTECTED_CONTEXT",
     "PROTECTED_PACK_PREFIX",
+    "TOOL_ALERT_LEVELS",
+    "TOOL_BLOCK_LEVELS",
     "VIEW_KEYS",
     "VIEW_SHORT_TITLES",
     "VIEW_TITLES",
+    "LevelChange",
+    "LevelEffect",
     "PackRule",
     "PackValidation",
     "PoliciesPanelModel",
@@ -1713,7 +1963,11 @@ __all__ = [
     "hilt_intent",
     "hilt_rank",
     "hilt_weakens",
+    "level_intent",
+    "level_origin",
     "level_rank",
+    "levels_setting",
+    "loosened_text",
     "matrix_lines",
     "mode_intent",
     "mode_weakens",
@@ -1721,6 +1975,7 @@ __all__ = [
     "pack_short_title",
     "pack_weakens",
     "parse_validation",
+    "picker_level",
     "policies_keys_hint",
     "policy_keymap_rows",
     "policy_comparison",

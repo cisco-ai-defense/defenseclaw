@@ -20,8 +20,10 @@ Each flow shows a consequence modal (red, with a second press, when
 protection gets weaker) and then runs the command directly:
 
 - ``m``: ``guardrail mode observe|action [--connector C]``
-- ``b`` / ``a``: pick a level → ``policy edit guardrail --block-threshold N``
-  (or ``--alert-threshold N``)
+- ``b`` / ``a`` on Posture: pick a tool-call level →
+  ``guardrail block-at|alert-at LEVEL|inherit [--connector C]``
+- ``b`` / ``a`` on Policies: pick the policy's LLM-traffic level →
+  ``policy edit guardrail --block-threshold N -p NAME`` (or ``--alert-threshold N``)
 - ``h``: pick approval → ``guardrail hilt on --min-severity S|off [--connector C] --yes``
 - ``p`` / Enter on a rule pack: ``guardrail use-pack PACK [--connector C]``
 - Space on an opt-in pack: ``guardrail protection enable|disable NAME [--connector C]``
@@ -51,6 +53,7 @@ from defenseclaw.tui.screens.posture_picker import (
     LevelPickerScreen,
     approval_choices,
     threshold_choices,
+    tool_level_choices,
 )
 from defenseclaw.tui.screens.rule_pack_picker import (
     PackOption,
@@ -59,7 +62,10 @@ from defenseclaw.tui.screens.rule_pack_picker import (
     RulePackPickerScreen,
 )
 from defenseclaw.tui.services.policy_state import (
+    INHERIT,
     PROTECTED_PACK_PREFIX,
+    TOOL_ALERT_LEVELS,
+    TOOL_BLOCK_LEVELS,
     VIEW_SHORT_TITLES,
     PackRule,
     PackValidation,
@@ -70,6 +76,9 @@ from defenseclaw.tui.services.policy_state import (
     fit,
     hilt_intent,
     hilt_weakens,
+    level_intent,
+    levels_setting,
+    loosened_text,
     mode_intent,
     mode_weakens,
     pack_profile,
@@ -407,10 +416,15 @@ class PolicyPanelMixin:
         scope = model.selected_scope()
         pack = model.selected_protection()
         selectable = pack is not None and getattr(pack, "status", "") != "staged"
+        # b / a: a scope's tool-call levels on Posture, the highlighted policy's
+        # LLM-traffic levels on Policies.
+        levels = (view == "posture" and scope is not None) or (
+            view == "policies" and model.selected_policy() is not None
+        )
         visible = {
             "policies-mode": view == "posture" and scope is not None,
-            "policies-block": view == "posture" and scope is not None and model.active_policy() is not None,
-            "policies-alert": view == "posture" and scope is not None and model.active_policy() is not None,
+            "policies-block": levels,
+            "policies-alert": levels,
             "policies-approval": view == "posture" and scope is not None,
             "policies-rule-pack": view == "posture" and scope is not None and model.global_pack is not None,
             "policies-toggle": view == "optin" and selectable and scope is not None,
@@ -466,7 +480,9 @@ class PolicyPanelMixin:
         elif kind == "toggle_mode":
             flow = self._mode_flow(action.connector)
         elif kind in {"pick_block", "pick_alert"}:
-            flow = self._threshold_flow("block" if kind == "pick_block" else "alert", action.connector)
+            flow = self._level_flow("block" if kind == "pick_block" else "alert", action.connector)
+        elif kind in {"pick_policy_block", "pick_policy_alert"}:
+            flow = self._policy_threshold_flow("block" if kind == "pick_policy_block" else "alert", action.policy)
         elif kind == "pick_hilt":
             flow = self._hilt_flow(action.connector)
         elif kind == "toggle_protection":
@@ -550,22 +566,55 @@ class PolicyPanelMixin:
             return
         await self._run_policy_intent(mode_intent(new, model.command_connector(row)))
 
-    async def _threshold_flow(self, kind: str, connector: str) -> None:
+    async def _level_flow(self, kind: str, connector: str) -> None:
+        """``b`` / ``a`` on Posture: the scope's tool-call level → ``guardrail block-at|alert-at``."""
         model = self.policy_model
-        policy = model.active_policy()
         row = model.scope_row(connector)
         what = "Block" if kind == "block" else "Alert"
+        if row is None:
+            self._set_status("That scope is no longer configured; press r to refresh.")  # type: ignore[attr-defined]
+            return
+        current = model.level_current(kind, row)
+        levels = TOOL_BLOCK_LEVELS if kind == "block" else TOOL_ALERT_LEVELS
+        weaker = [value for value in (*levels, INHERIT) if model.level_change(kind, row, value).weakened()]
+        choices = tool_level_choices(kind, current, model.level_inherit_text(kind, row), weaker)
+        previews = {choice.value: level_preview(model, kind, row, choice.value) for choice in choices}
+        chosen = await self.push_screen_wait(  # type: ignore[attr-defined]
+            LevelPickerScreen(
+                f"{what} at: tool calls for {_level_scope_words(model, row)}",
+                choices,
+                subtitle="Tool calls in action mode. The policy's levels for LLM traffic through the guardrail "
+                "proxy are separate (Policies view).",
+                previews=previews,
+            )
+        )
+        if not chosen or chosen == current:
+            self._set_status(f"{what} level unchanged.")  # type: ignore[attr-defined]
+            return
+        confirmed = await self.push_screen_wait(  # type: ignore[attr-defined]
+            PolicyConsequenceScreen(level_change_modal(model, row, kind, chosen))
+        )
+        if confirmed is None:
+            self._set_status(f"{what} level unchanged.")  # type: ignore[attr-defined]
+            return
+        await self._run_policy_intent(level_intent(kind, chosen, model.command_connector(row)))
+
+    async def _policy_threshold_flow(self, kind: str, name: str) -> None:
+        """``b`` / ``a`` on Policies: the policy's LLM-traffic level → ``policy edit guardrail``."""
+        model = self.policy_model
+        policy = model.policy_named(name)
+        what = "Block" if kind == "block" else "Alert"
         if policy is None:
-            self._set_status("No policy is active; activate one first (5, Enter).")  # type: ignore[attr-defined]
+            self._set_status("That policy is no longer listed; press r to refresh.")  # type: ignore[attr-defined]
             return
         current = str(getattr(policy, "block_at" if kind == "block" else "alert_at", "") or "")
         choices = threshold_choices(kind, current)
-        previews = {choice.value: threshold_preview(model, kind, choice.value, row) for choice in choices}
+        previews = {choice.value: policy_threshold_preview(policy, kind, choice.value) for choice in choices}
         chosen = await self.push_screen_wait(  # type: ignore[attr-defined]
             LevelPickerScreen(
-                f"{what} at: the {policy.name} policy",
+                f"{what} at: LLM traffic (guardrail proxy), {policy.name} policy",
                 choices,
-                subtitle=f"Applies to every connector that uses the {policy.name} policy.",
+                subtitle="Tool calls take their levels from each scope instead (Posture view).",
                 previews=previews,
             )
         )
@@ -573,12 +622,12 @@ class PolicyPanelMixin:
             self._set_status(f"{what} level unchanged.")  # type: ignore[attr-defined]
             return
         confirmed = await self.push_screen_wait(  # type: ignore[attr-defined]
-            PolicyConsequenceScreen(threshold_change_modal(model, kind, chosen, row))
+            PolicyConsequenceScreen(policy_threshold_modal(kind, chosen, policy))
         )
         if confirmed is None:
             self._set_status(f"{what} level unchanged.")  # type: ignore[attr-defined]
             return
-        await self._run_policy_intent(threshold_intent(kind, chosen))
+        await self._run_policy_intent(threshold_intent(kind, chosen, policy.name))
 
     async def _hilt_flow(self, connector: str) -> None:
         model = self.policy_model
@@ -795,9 +844,8 @@ def mode_change_modal(model: PoliciesPanelModel, row: Any, new: str) -> Conseque
     return _modal(title, f"{old} → {new}", details, consequence, _confirm("mode", "s", f"Switch to {new}", weaker))
 
 
-def threshold_preview(model: PoliciesPanelModel, kind: str, level: str, row: Any | None) -> str:
-    """Picker preview for a policy level: LLM traffic now, tool calls unchanged."""
-    policy = model.active_policy()
+def policy_threshold_preview(policy: Any, kind: str, level: str) -> str:
+    """Picker preview for a policy's level: what LLM traffic gets at each severity."""
     block = str(getattr(policy, "block_at", "") or "CRITICAL")
     alert = str(getattr(policy, "alert_at", "") or "MEDIUM+")
     if kind == "block":
@@ -805,48 +853,116 @@ def threshold_preview(model: PoliciesPanelModel, kind: str, level: str, row: Any
     else:
         alert = level
     traffic = " · ".join(f"{sev} {action}" for sev, action in severity_actions(block, alert, "off"))
-    lines = [f"LLM traffic: {traffic}"]
-    if row is not None:
-        tool_block, tool_alert = model.scope_levels(row)
-        level_now = tool_block if kind == "block" else tool_alert
-        verb = "blocks" if kind == "block" else "alerts on"
-        lines.append(
-            f"Tool calls keep their rule pack's levels: {row.scope} {verb} {level_now} "
-            f"({getattr(row, 'pack', '') or '-'} pack)."
-        )
-    return "\n".join(lines)
+    return f"LLM traffic: {traffic}"
 
 
-def threshold_change_modal(model: PoliciesPanelModel, kind: str, level: str, row: Any | None) -> ConsequenceModalModel:
-    """A policy-wide block or alert level; red when it catches fewer severities."""
-    policy = model.active_policy()
+def policy_threshold_modal(kind: str, level: str, policy: Any) -> ConsequenceModalModel:
+    """A named policy's block or alert level for LLM traffic through the guardrail proxy.
+
+    Red with a second press when it catches fewer severities on the active
+    policy; editing another one only saves it until it is activated.
+    """
     name = str(getattr(policy, "name", "") or "active")
+    active = bool(getattr(policy, "active", False))
     old = str(getattr(policy, "block_at" if kind == "block" else "alert_at", "") or "-")
-    weaker = threshold_weakens(old, level)
-    intent = threshold_intent(kind, level)
+    weaker = active and threshold_weakens(old, level)
+    intent = threshold_intent(kind, level, name)
     what = "Block" if kind == "block" else "Alert"
     verb = "blocks" if kind == "block" else "alerts on"
     details = [
-        f"Applies to LLM traffic through the guardrail proxy for every connector that uses the {name} policy.",
+        "LLM traffic through the guardrail proxy only; tool calls keep each scope's levels (Posture view).",
     ]
-    if row is not None:
-        tool_block, tool_alert = model.scope_levels(row)
-        now = tool_block if kind == "block" else tool_alert
-        details.append(
-            f"Tool calls keep their rule pack's levels: {row.scope} {verb} {now} "
-            f"({getattr(row, 'pack', '') or '-'} pack). The strict pack blocks MEDIUM+ (p)."
-        )
+    if not active:
+        details.append(f"The {name} policy isn't active, so nothing changes until you activate it (Enter).")
     if getattr(policy, "builtin", False):
         details.append(f"The built-in {name} policy is copied to your policy folder first.")
-    details.append(_run_line(intent, "; the gateway reloads the policy."))
+    details.append(_run_line(intent, "; the gateway reloads the policy." if active else ""))
     consequence = f"This weakens protection: the policy {verb} {level} instead of {old}." if weaker else ""
     return _modal(
-        f"{what} at {level} in the {name} policy?",
+        f"{what} LLM traffic at {level} in the {name} policy?",
         f"{old} → {level}",
         details,
         consequence,
         _confirm("threshold", "s", f"Set {what.lower()} at {level}", weaker),
     )
+
+
+def _level_scope_words(model: PoliciesPanelModel, row: Any) -> str:
+    """Who a tool-call level change reaches: ``codex``, or every connector."""
+    connector = model.connector_of(row)
+    if connector:
+        return connector
+    return "every connector" if model.multi_connector else "the global default"
+
+
+def level_preview(model: PoliciesPanelModel, kind: str, row: Any, choice: str) -> str:
+    """Picker preview for a tool-call level: the scope at each severity, and who else loosens."""
+    change = model.level_change(kind, row, choice)
+    effect = change.effect_for(str(getattr(row, "scope", "") or "global"))
+    if effect is None:
+        return ""
+    hilt = str(getattr(row, "hilt", "") or "off")
+    after = effect.after
+    lines = [
+        "At each severity: "
+        + " · ".join(f"{sev} {action}" for sev, action in severity_actions(after.block_at, after.alert_at, hilt))
+    ]
+    others = loosened_text(e for e in change.weakened() if e.scope != effect.scope)
+    if others:
+        lines.append(f"Also {others}.")
+    return "\n".join(lines)
+
+
+def level_change_modal(model: PoliciesPanelModel, row: Any, kind: str, choice: str) -> ConsequenceModalModel:
+    """A scope's tool-call block or alert level; red when any scope it reaches loosens.
+
+    A global value replaces the level of every connector without its own,
+    so a connector on a stricter pack can loosen even when the global
+    default gets stricter: the modal names those.
+    """
+    change = model.level_change(kind, row, choice)
+    scope = str(getattr(row, "scope", "") or "global")
+    effect = change.effect_for(scope)
+    before = effect.before if effect is not None else model.row_levels(row)
+    after = effect.after if effect is not None else before
+    old, _old_source = levels_setting(before, kind)
+    new, new_source = levels_setting(after, kind)
+    mode = str(getattr(row, "mode", "") or "observe")
+    hilt = str(getattr(row, "hilt", "") or "off")
+    intent = level_intent(kind, choice, change.connector)
+    connector = model.connector_of(row)
+    details = [posture_summary(scope, mode, after.block_at, after.alert_at, hilt)]
+    if choice == INHERIT:
+        follows = "the global level" if new_source == "global" else "its rule pack's level"
+        details.append(f"Follows {follows} again.")
+    elif old == new:
+        others = "the global or rule pack level" if change.connector else "the rule pack's level"
+        details.append(f"Stays at {new}, but no longer follows {others} if that changes.")
+    if connector and not model.multi_connector:
+        details.append("This install has one connector, so this sets the global level.")
+    elif connector:
+        details.append("Only this connector changes; a running gateway restarts to apply it.")
+    elif model.multi_connector:
+        details.append("Every connector without its own level follows it; a running gateway applies it live.")
+        if change.keep_own:
+            details.append("Keep their own level: " + ", ".join(change.keep_own) + ".")
+    else:
+        details.append("A running gateway applies it live, without a restart.")
+    if after.alert_clamped:
+        details.append(f"Alerts start at {after.alert_at}: anything that blocks also alerts.")
+    details.append(_run_line(intent))
+    loosened = loosened_text(change.weakened())
+    weaker = bool(loosened)
+    consequence = f"This weakens protection: {loosened}." if weaker else ""
+    what = "block" if kind == "block" else "alert"
+    target = change.connector
+    if choice == INHERIT:
+        title = f"Clear {target}'s own {what} level?" if target else f"Clear the global {what} level?"
+        label = "Use the inherited level"
+    else:
+        title = f"Set {target}'s {what} level to {choice}?" if target else f"Set the global {what} level to {choice}?"
+        label = f"{what.capitalize()} at {choice}"
+    return _modal(title, f"{what} level: {old} → {new}", details, consequence, _confirm("level", "s", label, weaker))
 
 
 def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> ConsequenceModalModel:
@@ -965,11 +1081,13 @@ __all__ = [
     "PolicyPanelMixin",
     "composed_pack_path",
     "hilt_change_modal",
+    "level_change_modal",
+    "level_preview",
     "mode_change_modal",
     "policy_change_modal",
+    "policy_threshold_modal",
+    "policy_threshold_preview",
     "protection_change_modal",
     "read_policy_catalog",
     "rule_pack_change_modal",
-    "threshold_change_modal",
-    "threshold_preview",
 ]

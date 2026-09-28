@@ -12,12 +12,15 @@
 
 A short numbered list (the current value marked, weaker choices flagged) with
 a preview of what the highlighted choice means at each severity. The screen
-only returns the chosen value; the app confirms and runs the command.
+only returns the chosen value; the app confirms and runs the command. The
+same screen serves a scope's tool-call levels (:func:`tool_level_choices`,
+``guardrail block-at`` / ``alert-at``), a policy's levels for LLM traffic
+(:func:`threshold_choices`) and human approval (:func:`approval_choices`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from rich.markup import escape as rich_escape
@@ -32,6 +35,9 @@ from defenseclaw.tui.services.policy_state import (
     ALERT_LEVELS,
     BLOCK_LEVELS,
     HILT_LEVELS,
+    INHERIT,
+    TOOL_ALERT_LEVELS,
+    TOOL_BLOCK_LEVELS,
     hilt_weakens,
     threshold_weakens,
 )
@@ -43,6 +49,7 @@ _BLOCK_WORDS = {
     "MEDIUM+": "Block MEDIUM, HIGH and CRITICAL",
 }
 _ALERT_WORDS = {
+    "CRITICAL": "Alert on CRITICAL only",
     "HIGH+": "Alert on HIGH and above",
     "MEDIUM+": "Alert on MEDIUM and above",
     "LOW+": "Alert on everything down to LOW",
@@ -73,6 +80,26 @@ def threshold_choices(kind: str, current: str) -> tuple[LevelChoice, ...]:
     return tuple(
         LevelChoice(level, words[level], current=level == now, weaker=threshold_weakens(now, level)) for level in levels
     )
+
+
+def tool_level_choices(
+    kind: str,
+    current: str,
+    inherit_text: str,
+    weaker: Iterable[str] = (),
+) -> tuple[LevelChoice, ...]:
+    """A scope's tool-call block-at (``kind="block"``) or alert-at choices.
+
+    The levels, then :data:`INHERIT` described by ``inherit_text`` ("Use the
+    pack's level (CRITICAL)"). ``current`` is the value the scope stores
+    (:data:`INHERIT` when it has none); ``weaker`` the choices that would
+    block or alert on fewer severities somewhere.
+    """
+    levels, words = (TOOL_BLOCK_LEVELS, _BLOCK_WORDS) if kind == "block" else (TOOL_ALERT_LEVELS, _ALERT_WORDS)
+    loosen = set(weaker)
+    rows = [LevelChoice(level, words[level], current=level == current, weaker=level in loosen) for level in levels]
+    rows.append(LevelChoice(INHERIT, inherit_text, current=current == INHERIT, weaker=INHERIT in loosen))
+    return tuple(rows)
 
 
 def approval_choices(current: str) -> tuple[LevelChoice, ...]:
@@ -229,4 +256,5 @@ __all__ = [
     "approval_choices",
     "level_lines",
     "threshold_choices",
+    "tool_level_choices",
 ]

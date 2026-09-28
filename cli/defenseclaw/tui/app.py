@@ -1630,8 +1630,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 with Horizontal(id="policies-controls", classes="panel-controls hidden"):
                     for button_id, label, tip in (
                         ("policies-mode", "Mode", "Switch the scope between observe and action (m)"),
-                        ("policies-block", "Block at", "Pick the active policy's block level (b)"),
-                        ("policies-alert", "Alert at", "Pick the active policy's alert level (a)"),
+                        (
+                            "policies-block",
+                            "Block at",
+                            "Pick the block level: the scope's tool calls, or the policy's LLM traffic (b)",
+                        ),
+                        (
+                            "policies-alert",
+                            "Alert at",
+                            "Pick the alert level: the scope's tool calls, or the policy's LLM traffic (a)",
+                        ),
                         ("policies-approval", "Approval", "Pick when the scope asks a human first (h)"),
                         ("policies-rule-pack", "Rule pack", "Switch the scope's rule pack (p)"),
                         ("policies-toggle", "Turn on", "Turn the opt-in pack on or off for the scope (Space)"),
@@ -4546,7 +4554,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ],
             "policies": [
                 *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
-                ("A", "Activity panel (a is alert level on Posture)"),
+                ("A", "Activity panel (a is the alert level on Posture and Policies)"),
                 ("p (Overview)", "Opens this panel; Runtime keeps p for its planes"),
             ],
             "setup": setup_keys.help_rows(self._setup_view(), setup_keys.setup_conditions(self.setup_model)),
@@ -11929,7 +11937,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         elif command == "policy" or (
             command == "guardrail"
             and len(args) > 1
-            and args[1] in {"use-pack", "enable", "disable", "mode", "hilt", "protection"}
+            and args[1] in {"use-pack", "enable", "disable", "mode", "block-at", "alert-at", "hilt", "protection"}
         ):
             if command == "guardrail":
                 self._refresh_cached_config()
