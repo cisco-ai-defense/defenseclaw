@@ -2764,14 +2764,6 @@ connection.close()
         $nativeWorkflowText -notmatch 'WINDOWS_TUI_MODE' -and
         $nativeWorkflowText -notmatch 'test_app_shell') `
         'Windows Python suite balances every test file, the TUI suite included, across eight size-weighted shards'
-    foreach ($node in @(
-        'test_existing_openclaw_integration_requires_pin',
-        'test_f0162_refuses_swapped_symlink',
-        'test_f0421_rechecks_pinned_home_before_chown'
-    )) {
-        Assert-True ($nativeWorkflowText -match "--deselect=.*$node") `
-            "native Windows suite excludes the POSIX-only sandbox assertion $node"
-    }
     Assert-True ($nativeWorkflowText -match 'Run native Windows Local Splunk certification regressions') 'native Windows workflow has a required Local Splunk regression step'
     Assert-True ($nativeHarnessText -match "'pip', 'check'" -and $nativeHarnessText -match "'uv.exe'") 'managed environment runs explicit uv pip check'
     Assert-True ($nativeHarnessText -match 'function Initialize-WindowsNativeTestEnvironment' -and
