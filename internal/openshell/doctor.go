@@ -1014,6 +1014,11 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		}
 	case restartPending(st, r.service):
 		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
+		if r.service == nil || r.service.StartedAt.IsZero() {
+			// Homebrew reports no start time: DefenseClaw's mark says only
+			// that no restart of its own followed its change.
+			mounts.Detail = "enabled in " + st.TOMLPath + "; restart the gateway if you have not since gateway.toml changed"
+		}
 	case unverified != nil && r.gateway != nil && r.gateway.Healthy:
 		mounts.Status, mounts.Detail = StatusWarn, "enabled, but DefenseClaw could not confirm that only you can reach the gateway: "+unverified.Error()
 	default:

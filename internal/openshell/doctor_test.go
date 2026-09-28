@@ -831,13 +831,17 @@ func TestDoctorPendingRestart(t *testing.T) {
 			}
 		}
 		// Homebrew reports no start time; the mark DefenseClaw left
-		// before a restart that never happened still shows.
+		// before a restart of its own that never happened still shows, as
+		// a reminder: the gateway may have been restarted by hand since
+		// (manual test M11).
 		f := newDoctorFixture(t)
 		f.onBrew()
 		mark(f, f.started.Add(-time.Minute))
 		r := f.run()
-		if c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusWarn, "has not been restarted"); c.Fix.Command != "brew services restart nvidia/openshell/openshell" {
-			t.Fatalf("fix = %+v", c.Fix)
+		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusWarn,
+			"/openshell/gateway.toml; restart the gateway if you have not since gateway.toml changed")
+		if strings.Contains(c.Detail, "has not been restarted") || c.Fix.Command != "brew services restart nvidia/openshell/openshell" {
+			t.Fatalf("check = %+v, fix %+v", c, c.Fix)
 		}
 		applyFixes(t, r, openshell.CheckIDBindMounts)
 		expectCheck(t, f.run(), openshell.CheckIDBindMounts, openshell.StatusPass, "enabled")
