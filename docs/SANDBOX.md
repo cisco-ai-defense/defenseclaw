@@ -1866,8 +1866,9 @@ All three mask the same secret files and review the same host-executable
 paths.
 
 Custom packs are `<pack_dir>/<name>/pack.yaml` (default
-`<data_dir>/policies/sandbox`) or an absolute path, loaded with the same strict
-rules as guardrail rule packs. A pack's digest is `sha256:` over the file's
+`<data_dir>/policies/sandbox`; `pack_dir` must be absolute or start with `~/`)
+or an absolute path, loaded with the same strict rules as guardrail rule
+packs. A pack's digest is `sha256:` over the file's
 bytes.
 
 A custom pack is trusted because you own it, and in mount mode the agent

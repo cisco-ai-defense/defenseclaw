@@ -260,7 +260,10 @@ openshell:
 
 `openshell.pack_dir` defaults to `<data_dir>/policies/sandbox`, which is
 `~/.defenseclaw/policies/sandbox` on a default install. DefenseClaw doesn't
-create this directory, so create it when you add your first custom pack.
+create this directory, so create it when you add your first custom pack. A
+different `pack_dir` must be an absolute path or start with `~/`; the
+configuration is refused otherwise. An empty `pack_dir` turns custom pack
+names off.
 
 ## Write a custom pack
 

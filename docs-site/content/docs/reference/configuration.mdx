@@ -556,13 +556,13 @@ openshell:
 | Key | Default | Values and rules |
 | --- | --- | --- |
 | `enabled` | `false` | The sandbox switch. `true` starts the sandbox runtime with the API: the hook ingress and egress proxy listeners and the sandbox manager behind the [sandbox API](/docs/reference/gateway-api#sandbox-api). It also turns on the port checks under [Validation and reload](#validation-and-reload), and a change restarts the API listener. `sandbox setup` sets it to `true`, and `sandbox teardown` to `false`. |
-| `binary` | `openshell` | The upstream `openshell` CLI, used for terminal attach, command runs, file transfer, and provider profile imports. |
+| `binary` | `openshell` | The upstream `openshell` CLI, used for terminal attach, command runs, file transfer, and provider profile imports. A command name looked up on `PATH`, or an absolute path. A relative path with a separator, such as `bin/openshell` or `./openshell`, is refused: it would run from the project folder. |
 | `gateway.name` | `""` | The local OpenShell gateway registration. Empty selects the active registration. At most 128 characters. |
 | `gateway.workspace` | `""` | The OpenShell workspace (tenant). Empty selects `default`. At most 128 characters. |
 | `ingress_port` | `0` | The sandbox hook ingress port, 0–65535. `0` means `gateway.api_port + 1` (18971 by default). Its OpenShell provider profile is `defenseclaw-ingress-<port>`. Sandboxes keep the port their image and policy were built for, so re-create them after a change. |
 | `egress_port` | `0` | The egress proxy port, 0–65535. `0` means `gateway.api_port + 2` (18972 by default). |
 | `pack` | `""` | The sandbox policy pack: `open`, `balanced`, `strict`, a custom pack name under `pack_dir`, or an absolute path (or `~/…`) to a `pack.yaml` or its directory. Empty selects `open`. |
-| `pack_dir` | `<data_dir>/policies/sandbox` | Where custom packs live, as `<name>/pack.yaml`. |
+| `pack_dir` | `<data_dir>/policies/sandbox` | Where custom packs live, as `<name>/pack.yaml`. An absolute path, or one starting with `~/`. Empty turns custom pack names off. |
 | `profile` | `""` | `open`, `balanced`, or `strict`. Empty follows the pack's network mode. |
 | `yolo` | `null` | Skip-permissions mode for the harness. `null` follows the pack. |
 | `workdir.mode` | `""` | `mount` (live bind mount) or `copy`. Empty follows the pack. |
@@ -611,7 +611,9 @@ and use forward slashes. Absolute paths, `~`, drive letters, backslashes, and
 
 **Names** in `harnesses`, `wrappers`, `image.harness_versions`, and
 `admin.allowed_harnesses` start with a letter or digit, then use letters,
-digits, `.`, `_`, and `-`, up to 128 characters.
+digits, `.`, `_`, and `-`, up to 128 characters. An `image.harness_versions`
+key can't contain `.`, which the configuration loader would read as a nested
+key.
 
 ### Packs at a glance
 
