@@ -62,6 +62,13 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 			{Name: "egress", Port: a.Cfg.OpenShellEgressPort()},
 		}
 	}
+	// Off Linux the Docker VM's kernel is checked in a local image: the
+	// base image, else an overlay image built on it.
+	if recs, err := a.Images.List(); err == nil {
+		for _, r := range recs {
+			d.ProbeImages = append(d.ProbeImages, r.Tag)
+		}
+	}
 	return d
 }
 

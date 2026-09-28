@@ -68,6 +68,12 @@ type doctorFixture struct {
 	// probe answers ProbeClientAuth; probes counts the calls.
 	probe  error
 	probes int
+	// vmABI, vmKernel and vmErr answer VMLandlockABI (the Docker VM's
+	// kernel, asked off Linux); vmProbes counts the calls.
+	vmABI    int
+	vmKernel string
+	vmErr    error
+	vmProbes int
 }
 
 // unit renders the service as systemd reports it, started at f.started
@@ -100,6 +106,8 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		busy:     map[string]bool{},
 		started:  time.Now().Add(-time.Hour).Truncate(time.Second),
 		diskFree: 40 << 30,
+		vmABI:    6,
+		vmKernel: "6.12.65-linuxkit",
 	}
 	f.regDir = f.addRegistration("openshell", nil)
 	f.writeTOML(enabledTOML, f.started.Add(-time.Minute))
@@ -135,6 +143,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			BrewFormulaInstalled: func() bool { return true }},
 		Ports:         []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
 		LandlockABI:   func() (int, error) { return 6, nil },
+		VMLandlockABI: func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
 		DiskFree:      func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
 		Listen:        f.listen,
 		Geteuid:       func() int { return 1000 },
@@ -237,6 +246,9 @@ func TestDoctorHealthyHost(t *testing.T) {
 		t.Fatalf("checks = %v\nwant     %v\n%s", got, want, r)
 	}
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
+	if f.vmProbes != 0 {
+		t.Fatalf("a Linux host asked a Docker VM for Landlock %d times", f.vmProbes)
+	}
 	expectCheck(t, r, openshell.CheckIDDisk, openshell.StatusPass, "40.0 GiB free under /data/docker")
 	if f.diskProbed != "/data/docker" || r.DockerVersion != "29.4.0" || r.CLIVersion != "0.1.1" || r.GatewayVersion != "0.1.1" || r.Registration.Name != "openshell" {
 		t.Fatalf("facts = %+v (disk probed at %q)", r, f.diskProbed)
@@ -434,7 +446,8 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "no user bus", setup: service("Failed to connect to bus: No medium found", errors.New("exit status 1")),
 			want: []checkWant{{"gateway-service", fail, "Failed to connect to bus"}}},
 		{name: "macOS skips Linux-only checks", setup: func(f *doctorFixture) { f.onBrew() },
-			want: []checkWant{{"landlock", skip, "Docker Desktop"}, {"linger", skip, ""}, {"gateway-service", pass, "nvidia/openshell/openshell"}, {"telemetry", skip, ""}}},
+			want: []checkWant{{"landlock", pass, "ABI 6 in the Linux VM Docker runs in"}, {"linger", skip, ""},
+				{"gateway-service", pass, "nvidia/openshell/openshell"}, {"telemetry", skip, ""}}},
 		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {
 			f.onBrew()
 			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
@@ -637,6 +650,137 @@ func TestDoctorChecks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoctorChecksLandlockInTheDockerVM: on macOS sandboxes run on the
+// kernel of Docker Desktop's Linux VM, which doctor said enforced Landlock
+// without asking it; Docker Desktop 29.1.5's runs only capability and bpf,
+// so no sandbox could start (manual test M12). Doctor asks that kernel,
+// fails with the way on when it has no Landlock, and says the check did
+// not run, with how to run it, when no image to ask in is local.
+func TestDoctorChecksLandlockInTheDockerVM(t *testing.T) {
+	const (
+		pass, warn, fail, skip = openshell.StatusPass, openshell.StatusWarn, openshell.StatusFail, openshell.StatusSkip
+		vm                     = "Docker Desktop's Linux VM (kernel 6.12.65-linuxkit)"
+		today                  = "macOS sandboxes cannot run on Docker Desktop today"
+	)
+	for _, tc := range []struct {
+		name   string
+		abi    int
+		err    error
+		status openshell.CheckStatus
+		detail string
+		fix    string
+	}{
+		{name: "no Landlock", err: openshell.ErrLandlockMissing, status: fail, detail: vm + " has no Landlock, and OpenShell sandboxes need it", fix: today},
+		{name: "Landlock off", err: openshell.ErrLandlockDisabled, status: fail, detail: vm + " has Landlock turned off, and OpenShell sandboxes need it", fix: today},
+		{name: "ABI too old", abi: 2, status: fail, detail: vm + " has Landlock ABI 2; OpenShell needs ABI 3 or newer", fix: today},
+		{name: "Landlock", abi: 6, status: pass, detail: "ABI 6 in Docker Desktop's Linux VM"},
+		{name: "no image to check in", err: openshell.ErrNoProbeImage, status: warn,
+			detail: "not checked: sandboxes run on the kernel of Docker Desktop's Linux VM, which DefenseClaw checks in the OpenShell base image, and that image is not on this machine yet",
+			fix:    "download the OpenShell base image"},
+		{name: "probe failed", err: errors.New("the probe container failed"), status: warn, detail: "could not check " + vm + ": the probe container failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onBrew()
+			f.runner.On("docker info", dockerInfoJSON("29.1.5", "Docker Desktop", nil), nil)
+			f.vmABI, f.vmErr = tc.abi, tc.err
+			r := f.run()
+			c := expectCheck(t, r, openshell.CheckIDLandlock, tc.status, tc.detail)
+			if c.Detail != tc.detail {
+				t.Fatalf("detail = %q, want %q", c.Detail, tc.detail)
+			}
+			// The check keeps its place, before Docker's, though it runs after.
+			if r.Checks[2].ID != openshell.CheckIDLandlock || r.Checks[3].ID != openshell.CheckIDDocker {
+				t.Fatalf("checks out of order:\n%s", r)
+			}
+			switch {
+			case tc.fix == "" && c.Fix != nil:
+				t.Fatalf("fix = %+v, want none", c.Fix)
+			case tc.fix != "" && (c.Fix == nil || !strings.Contains(c.Fix.Summary, tc.fix)):
+				t.Fatalf("fix = %+v, want one saying %q", c.Fix, tc.fix)
+			case tc.status == fail && (c.Fix.Command != openshell.TroubleshootingURL || c.Fix.Apply != nil):
+				t.Fatalf("fix = %+v, want the guide and nothing to apply", c.Fix)
+			}
+		})
+	}
+
+	t.Run("pulls the base image only when asked", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.onBrew()
+		f.vmErr = openshell.ErrNoProbeImage
+		pull := "docker pull " + openshell.DefaultBaseImage
+		f.runner.On(pull, "", nil)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDLandlock, warn, "not checked")
+		if f.runner.Called("docker pull") {
+			t.Fatal("doctor pulled an image by itself")
+		}
+		if c.Fix.Command != pull || !c.Fix.Automatic {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+		applyFixes(t, r, openshell.CheckIDLandlock)
+		if !f.runner.Called(pull) {
+			t.Fatalf("the fix did not pull the base image: %v", f.runner.Calls())
+		}
+	})
+
+	t.Run("not asked without Docker", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.onBrew()
+		f.found["docker"] = false
+		expectCheck(t, f.run(), openshell.CheckIDLandlock, skip, "the Docker daemon is not available")
+		if f.vmProbes != 0 {
+			t.Fatalf("asked the Docker VM %d times without Docker", f.vmProbes)
+		}
+	})
+}
+
+// TestDoctorAsksTheDockerVMKernel runs the real probe against scripted
+// docker commands: it runs in the first local image, never pulls one, and
+// reads the kernel's answer.
+func TestDoctorAsksTheDockerVMKernel(t *testing.T) {
+	const overlay = "defenseclaw/sandbox:claudecode-1a2b"
+	run := "docker run --rm --pull never --network none --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges --read-only " +
+		"--entrypoint /usr/bin/python3 " + overlay + " -I -S -c"
+	for _, tc := range []struct {
+		name, out string
+		err       error
+		status    openshell.CheckStatus
+		detail    string
+	}{
+		{name: "ENOSYS", out: "kernel 6.12.65-linuxkit\nerrno 38 ENOSYS\n", status: openshell.StatusFail, detail: "(kernel 6.12.65-linuxkit) has no Landlock"},
+		{name: "EOPNOTSUPP", out: "kernel 6.12.65-linuxkit\nerrno 95 EOPNOTSUPP\n", status: openshell.StatusFail, detail: "has Landlock turned off"},
+		{name: "ABI", out: "kernel 6.12.65-linuxkit\nlandlock 6\n", status: openshell.StatusPass, detail: "ABI 6 in"},
+		// A seccomp profile refusing the call says nothing about the kernel.
+		{name: "EPERM", out: "kernel 6.12.65-linuxkit\nerrno 1 EPERM\n", status: openshell.StatusWarn, detail: "failed with errno 1 EPERM"},
+		{name: "no python", out: "exec: \"/usr/bin/python3\": no such file", err: errors.New("exit status 127"), status: openshell.StatusWarn,
+			detail: "the probe container failed: exit status 127: exec: \"/usr/bin/python3\": no such file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onBrew()
+			f.doctor.VMLandlockABI = nil
+			f.doctor.ProbeImages = []string{"", overlay}
+			f.runner.On("docker image inspect --format {{.Id}} "+overlay, "sha256:1a2b\n", nil)
+			f.runner.On(run, tc.out, tc.err)
+			expectCheck(t, f.run(), openshell.CheckIDLandlock, tc.status, tc.detail)
+			if !f.runner.Called("docker image inspect --format {{.Id}} "+openshell.DefaultBaseImage) || !f.runner.Called(run) {
+				t.Fatalf("calls = %v", f.runner.Calls())
+			}
+		})
+	}
+	t.Run("no local image", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.onBrew()
+		f.doctor.VMLandlockABI = nil
+		f.doctor.ProbeImages = []string{overlay}
+		expectCheck(t, f.run(), openshell.CheckIDLandlock, openshell.StatusWarn, "not checked")
+		if f.runner.Called("docker run") || f.runner.Called("docker pull") {
+			t.Fatalf("ran or pulled an image: %v", f.runner.Calls())
+		}
+	})
 }
 
 // TestDoctorPlaintextGateway covers a registration that lets any local

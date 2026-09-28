@@ -58,7 +58,7 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 }
 
 // setupTroubleshootingURL is the sandbox guide's troubleshooting section.
-const setupTroubleshootingURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/#troubleshooting"
+const setupTroubleshootingURL = openshell.TroubleshootingURL
 
 // SetupOptions are the `sandbox setup` flags.
 type SetupOptions struct {
@@ -108,13 +108,39 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	a.printf("  Checking this machine…  ")
 	rep := a.runDoctor(ctx)
 	a.printf("%s\n", a.machineLine(rep))
-	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
-		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
-			a.bad(c.Title + ": " + c.Detail)
-			if c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+	if err := a.machineFailure(rep); err != nil {
+		return err
+	}
+	// Steps left out say so at the end, with the command that does them.
+	var skipped []string
+	// Off Linux sandboxes run on the kernel of Docker Desktop's Linux VM,
+	// which the doctor asks for Landlock in an image already on this
+	// machine. With none yet (the check offers to download the base image
+	// the harness images are built on), setup downloads it and asks again,
+	// before it installs anything that could never run.
+	if c := rep.Get(openshell.CheckIDLandlock); c != nil && c.Status == openshell.StatusWarn && c.Fix != nil && c.Fix.Apply != nil {
+		pull := false
+		if !o.SkipImages {
+			var err error
+			pull, err = a.ask("Download the OpenShell base image now to check Docker Desktop's Linux VM for Landlock? (about 4 GB; the harness images are built on it)", true, assume)
+			if err != nil {
+				return err
 			}
-			return &Silent{Err: fmt.Errorf("this machine cannot run sandboxes yet (%s)", c.Title)}
+		}
+		if !pull {
+			a.warn("Landlock: " + c.Detail)
+			skipped = append(skipped, "checking Docker Desktop's Linux VM for Landlock (`"+CommandName+" doctor --fix` downloads the base image and checks it)")
+		} else {
+			a.note("Downloading the OpenShell base image (about 4 GB)…")
+			if err := c.Fix.Apply(ctx); err != nil {
+				return fmt.Errorf("download the OpenShell base image: %w", err)
+			}
+			a.printf("  Checking this machine again…  ")
+			rep = a.runDoctor(ctx)
+			a.printf("%s\n", a.machineLine(rep))
+			if err := a.machineFailure(rep); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -219,8 +245,6 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			changes.UnsetEnv = []string{openshell.EnvTelemetryEnabled}
 		}
 	}
-	// Steps left out say so at the end, with the command that does them.
-	var skipped []string
 	if changes.EnableBindMounts || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
 		plan, err := a.Gateway.Plan(ctx, changes)
 		if err != nil {
@@ -416,6 +440,21 @@ func (a *App) runningSandboxes(ctx context.Context) (names []string, known bool)
 	return names, true
 }
 
+// machineFailure prints the first machine check that keeps sandboxes
+// from running, with the way on, and returns it already printed.
+func (a *App) machineFailure(rep *openshell.DoctorReport) error {
+	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
+		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
+			a.bad(c.Title + ": " + c.Detail)
+			if c.Fix != nil {
+				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+			}
+			return &Silent{Err: fmt.Errorf("this machine cannot run sandboxes yet (%s)", c.Title)}
+		}
+	}
+	return nil
+}
+
 func failed(rep *openshell.DoctorReport, id string) bool {
 	c := rep.Get(id)
 	return c != nil && c.Status == openshell.StatusFail
@@ -429,8 +468,13 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 		if c == nil || c.Status == openshell.StatusSkip {
 			continue
 		}
-		label := c.Title
+		label, mark := c.Title, a.mark(c.Status != openshell.StatusFail)
 		switch id {
+		case openshell.CheckIDLandlock:
+			// Off Linux it may not have run (no image to check in yet).
+			if c.Status == openshell.StatusWarn {
+				label, mark = "Landlock not checked", a.style("⚠", ansiYellow)
+			}
 		case openshell.CheckIDPlatform:
 			label = strings.SplitN(c.Detail, ":", 2)[0]
 		case openshell.CheckIDDocker:
@@ -448,7 +492,7 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 				label = "OpenShell " + rep.CLIVersion
 			}
 		}
-		parts = append(parts, a.mark(c.Status != openshell.StatusFail)+" "+label)
+		parts = append(parts, mark+" "+label)
 	}
 	return strings.Join(parts, "  ")
 }

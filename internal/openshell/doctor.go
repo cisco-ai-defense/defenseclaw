@@ -253,7 +253,14 @@ type Doctor struct {
 	// (copy-only workdir mode).
 	BindMountsOptional bool
 
-	LandlockABI   func() (int, error)
+	LandlockABI func() (int, error)
+	// VMLandlockABI asks, off Linux, the kernel of the VM Docker runs
+	// containers in for its Landlock ABI and release (dockerVMLandlock by
+	// default); ErrNoProbeImage when no image to ask in is local.
+	VMLandlockABI func(ctx context.Context) (abi int, kernel string, err error)
+	// ProbeImages are local images VMLandlockABI may run in after
+	// DefaultBaseImage (the overlay images DefenseClaw built on it).
+	ProbeImages   []string
 	DiskFree      func(path string) (uint64, error)
 	Listen        func(network, address string) (net.Listener, error)
 	Geteuid       func() int
@@ -289,6 +296,11 @@ func (d *Doctor) defaults() {
 	}
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI
+	}
+	if d.VMLandlockABI == nil {
+		d.VMLandlockABI = func(ctx context.Context) (int, string, error) {
+			return dockerVMLandlock(ctx, d.Runner, append([]string{DefaultBaseImage}, d.ProbeImages...))
+		}
 	}
 	if d.DiskFree == nil {
 		d.DiskFree = diskFree
@@ -349,8 +361,16 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		return r.report
 	}
 	r.checkUser()
-	r.checkLandlock()
-	r.checkDocker(ctx)
+	if r.GOOS == "linux" {
+		r.checkLandlock()
+		r.checkDocker(ctx)
+	} else {
+		// Sandboxes run on the kernel of the VM Docker runs in, which is
+		// asked once Docker answers; the check keeps its place.
+		at := len(r.report.Checks)
+		r.checkDocker(ctx)
+		r.report.Checks = slices.Insert(r.report.Checks, at, r.vmLandlockCheck(ctx))
+	}
 	r.checkLinger(ctx)
 	r.checkService(ctx)
 	r.checkCLI(ctx)
@@ -401,13 +421,9 @@ func (r *doctorRun) checkUser() {
 	r.add(c)
 }
 
+// checkLandlock checks the Linux host's own kernel, which sandboxes run on.
 func (r *doctorRun) checkLandlock() {
 	c := Check{ID: CheckIDLandlock, Title: "Landlock"}
-	if r.GOOS != "linux" {
-		c.Status, c.Detail = StatusSkip, "enforced by the Docker Desktop VM kernel"
-		r.add(c)
-		return
-	}
 	abi, err := r.LandlockABI()
 	switch {
 	case errors.Is(err, ErrLandlockDisabled):

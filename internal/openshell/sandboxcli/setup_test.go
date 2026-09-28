@@ -341,6 +341,110 @@ func TestSetupStopsOnHostFailure(t *testing.T) {
 	}
 }
 
+// macHost is a doctor report of a Mac whose Docker Desktop VM's Landlock
+// check came out as landlock says, without OpenShell yet.
+func macHost(landlock openshell.Check) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+	return hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion, r.DockerVersion = "", "29.1.5"
+		r.Get(openshell.CheckIDPlatform).Status, r.Get(openshell.CheckIDPlatform).Detail = openshell.StatusWarn, "darwin/arm64: macOS sandboxes run on Docker Desktop and are a preview"
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+		*r.Get(openshell.CheckIDLandlock) = landlock
+	})
+}
+
+var (
+	// noLandlockInTheVM is the Landlock check on Docker Desktop 29.1.5.
+	noLandlockInTheVM = openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusFail,
+		Detail: "Docker Desktop's Linux VM (kernel 6.12.65-linuxkit) has no Landlock, and OpenShell sandboxes need it",
+		Fix:    &openshell.Fix{Summary: "macOS sandboxes cannot run on Docker Desktop today (details in the sandbox guide)", Command: openshell.TroubleshootingURL}}
+	landlockNotChecked = "not checked: sandboxes run on the kernel of Docker Desktop's Linux VM, which DefenseClaw checks in the OpenShell base image, and that image is not on this machine yet"
+)
+
+// TestSetupChecksTheDockerVMBeforeInstalling: on a Mac setup installed
+// OpenShell and built images although no sandbox could start, Docker
+// Desktop's Linux VM having no Landlock (manual test M12). Setup stops at
+// the machine check with the doctor's reason; when there is no image yet
+// to check the VM in, it downloads the base image the harness images need
+// anyway, with consent, and checks again before it installs anything.
+func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
+	install := func(ta *testApp) *fakeInstaller {
+		inst := &fakeInstaller{}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		return inst
+	}
+	unchecked := func(pulled *int) openshell.Check {
+		return openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusWarn, Detail: landlockNotChecked,
+			Fix: &openshell.Fix{Summary: "download the OpenShell base image", Automatic: true, Apply: func(context.Context) error { *pulled++; return nil }}}
+	}
+
+	t.Run("no Landlock in the VM", func(t *testing.T) {
+		ta := setupApp(t, "", "", false)
+		ta.GOOS = "darwin"
+		ta.HostDoctor = macHost(noLandlockInTheVM)
+		inst := install(ta)
+		wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true, InstallOpenShell: true}), "this machine cannot run sandboxes yet (Landlock)")
+		has(t, ta.output(), "Checking this machine…  ✓ darwin/arm64  ✗ Landlock  ✓ Docker 29.1.5  ✗ OpenShell not installed\n",
+			"✗ Landlock: Docker Desktop's Linux VM (kernel 6.12.65-linuxkit) has no Landlock, and OpenShell sandboxes need it\n",
+			"→ macOS sandboxes cannot run on Docker Desktop today (details in the sandbox guide) "+openshell.TroubleshootingURL)
+		if inst.ran || len(ta.images.built) != 0 || len(ta.gateway.planned) != 0 {
+			t.Fatalf("setup went on: installed %v, built %v, gateway plans %v", inst.ran, ta.images.built, ta.gateway.planned)
+		}
+	})
+
+	t.Run("downloads the base image to check the VM", func(t *testing.T) {
+		ta := setupApp(t, "y\n", "", false)
+		ta.GOOS = "darwin"
+		pulled, runs := 0, 0
+		ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+			if runs++; pulled == 0 {
+				return macHost(unchecked(&pulled))(ctx, d)
+			}
+			return macHost(noLandlockInTheVM)(ctx, d)
+		}
+		inst := install(ta)
+		wantErr(t, ta.Setup(bg, SetupOptions{}), "this machine cannot run sandboxes yet (Landlock)")
+		has(t, ta.output(), "Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.1.5  ✗ OpenShell not installed\n",
+			"Download the OpenShell base image now to check Docker Desktop's Linux VM for Landlock? (about 4 GB; the harness images are built on it) [Y/n]",
+			"Downloading the OpenShell base image (about 4 GB)…",
+			"Checking this machine again…  ✓ darwin/arm64  ✗ Landlock  ✓ Docker 29.1.5",
+			"✗ Landlock: Docker Desktop's Linux VM (kernel 6.12.65-linuxkit) has no Landlock")
+		if pulled != 1 || runs != 2 || inst.ran {
+			t.Fatalf("pulled %d, doctor runs %d, installed %v", pulled, runs, inst.ran)
+		}
+	})
+
+	t.Run("goes on unchecked without the images", func(t *testing.T) {
+		ta := setupApp(t, "", "", true)
+		ta.GOOS = "darwin"
+		pulled := 0
+		ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = unchecked(&pulled) })
+		ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, NoWrappers: true}))
+		lacks(t, ta.output(), "Download the OpenShell base image now")
+		has(t, ta.output(), "⚠ Landlock: "+landlockNotChecked,
+			"skipped: checking Docker Desktop's Linux VM for Landlock (`defenseclaw sandbox doctor --fix` downloads the base image and checks it)")
+		if pulled != 0 {
+			t.Fatal("pulled the base image with --skip-images")
+		}
+	})
+
+	t.Run("checks in the images it built", func(t *testing.T) {
+		ta := setupApp(t, "", "", true)
+		ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-1a2b"}}
+		var probe []string
+		ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+			probe = d.ProbeImages
+			return hostReport(nil)(ctx, d)
+		}
+		ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true, NoWrappers: true}))
+		if !slices.Equal(probe, []string{"defenseclaw/sandbox:claudecode-1a2b"}) {
+			t.Fatalf("probe images = %v", probe)
+		}
+	})
+}
+
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
