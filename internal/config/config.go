@@ -1671,8 +1671,8 @@ type GuardrailConfig struct {
 	// value wins over these. They never reach OPA, so the named policy's
 	// thresholds for LLM traffic through the guardrail proxy are
 	// unaffected. Resolve through EffectiveBlockAt / EffectiveAlertAt,
-	// never by reading the fields. guardrailNeedsRestart ignores them on
-	// purpose: a global change is not a restart trigger.
+	// never by reading the fields. Hook decisions read the start-time
+	// config, so guardrailNeedsRestart restarts on a change to either.
 	BlockAt string `mapstructure:"block_at" yaml:"block_at,omitempty"`
 	AlertAt string `mapstructure:"alert_at" yaml:"alert_at,omitempty"`
 

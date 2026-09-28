@@ -3240,9 +3240,9 @@ def mode_cmd(
     Sets only ``guardrail.mode``, or with ``--connector X`` only
     ``guardrail.connectors.X.mode`` (creating that block if needed); ``--clear
     --connector X`` removes X's override. The guardrail's on/off state, rule
-    pack and port are never touched. The running gateway applies a global
-    change live; a per-connector change (or one that flips a connector's
-    hook fail mode) restarts a running gateway (``--no-restart`` to skip).
+    pack and port are never touched. Hook decisions read the configuration
+    the gateway started with, so any mode change restarts a running gateway
+    (``--no-restart`` to skip; a stopped gateway is never started).
     """
     from defenseclaw import policy_catalog
 
@@ -3444,9 +3444,9 @@ def _set_tool_call_level(
 
     Writes only ``guardrail.<setting>`` or ``guardrail.connectors.<C>.<setting>``
     (``inherit`` clears it); precedence and clamp are the gateway's
-    (``policy_catalog.resolve_levels``). A global change reloads live. A
-    per-connector one sits in ``guardrail.connectors``, so it restarts a
-    running gateway; a stopped one is never started.
+    (``policy_catalog.resolve_levels``). Hook decisions read the
+    configuration the gateway started with, so a global or per-connector
+    change restarts a running gateway; a stopped one is never started.
     """
     from defenseclaw import policy_catalog
 
@@ -3650,9 +3650,9 @@ block_at_cmd = guardrail.command(
     over the global one, which wins over the rule pack's (strict blocks
     MEDIUM+, default and permissive CRITICAL). Levels apply to tool calls
     in action mode; the named policy's thresholds for LLM traffic through
-    the guardrail proxy are separate (``policy edit guardrail``). A global change
-    reaches a running gateway live; a per-connector one restarts it
-    (``--no-restart`` to skip; a stopped gateway is never started).
+    the guardrail proxy are separate (``policy edit guardrail``). A change
+    restarts a running gateway so hook decisions pick it up (``--no-restart``
+    to skip; a stopped gateway is never started).
     """,
 )(_level_command("block_at"))
 
