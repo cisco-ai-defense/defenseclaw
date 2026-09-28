@@ -611,7 +611,7 @@ class PolicyPanelMixin:
         if confirmed is None:
             self._set_status("Opt-in packs unchanged.")  # type: ignore[attr-defined]
             return
-        await self._run_policy_intent(protection_intent(name, enable=enable, connector=model.connector_of(row)))
+        await self._run_policy_intent(protection_intent(name, enable=enable, connector=model.command_connector(row)))
 
     async def _run_policy_intent(self, intent: Any) -> None:
         await self._run_command(  # type: ignore[attr-defined]
@@ -885,10 +885,12 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
     title = str(getattr(pack, "title", "") or name)
     covers = str(getattr(pack, "covers", "") or getattr(pack, "summary", "") or "")
     scope = str(getattr(row, "scope", "") or "global")
-    connector = model.connector_of(row)
+    connector = model.command_connector(row)
     where = connector or "the global pack"
     intent = protection_intent(name, enable=enable, connector=connector)
     details: list[str] = []
+    if model.connector_of(row) and not connector:
+        details.append("This install has one connector, so this changes the global pack.")
     consequence = ""
     weaker = not enable
     if enable:

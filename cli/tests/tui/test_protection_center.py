@@ -264,6 +264,9 @@ def test_single_connector_install_sets_mode_and_approval_globally() -> None:
     assert protection_model().command_connector(codex) == "codex"
     modal = mode_change_modal(model, codex, "observe")
     assert modal.details[-1].endswith("defenseclaw guardrail mode observe")
+    kubernetes = model.protection_pack("kubernetes-production-protection")
+    enable = protection_change_modal(model, codex, kubernetes, True)
+    assert enable.details[-1].endswith("enable kubernetes-production-protection")
 
 
 # ---- weakening ----------------------------------------------------------------
