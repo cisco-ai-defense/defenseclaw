@@ -253,6 +253,20 @@ struct SandboxSnapshot: Sendable {
 
     var active: [SandboxRow] { sandboxes.filter(\.running) }
 
+    /// Set when the rows on screen are the last good snapshot, not the
+    /// daemon's current answer (the TUI's stale_note).
+    var staleNote: String {
+        guard status.loaded, !error.isEmpty else { return "" }
+        let age = fetchedAt.map { " (last update \(SandboxFormat.duration(Int(Date().timeIntervalSince($0)))) ago)" } ?? ""
+        return "Showing the last good snapshot\(age): \(error)"
+    }
+
+    /// The daemon cannot be asked (the gateway health check fails): keep
+    /// the rows, but say they are not current.
+    mutating func markUnreachable(_ message: String) {
+        error = message.isEmpty ? "its health check fails" : message
+    }
+
     /// Blocked destinations still in force, newest first: blocks an unblock
     /// lifted, and blocks of sandboxes that no longer exist, are history.
     var recentBlocks: [SandboxActivity] {

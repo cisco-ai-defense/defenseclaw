@@ -29,6 +29,7 @@ struct SandboxModelTests {
         aFeedThatStartedOverIsReadFromItsStart()
         resolvedAsksLeaveTheSnapshot()
         headlineExplainsEachState()
+        anUnreachableDaemonIsNotShownAsCurrent()
         activitySummariesArePlain()
         decodesSandboxAPIErrorBodies()
         adminLocksMirrorThePythonEditor()
@@ -184,6 +185,23 @@ struct SandboxModelTests {
         snapshot.apply(status: SandboxDecoding.status(from: ["enabled": true, "reason": "gateway down"]),
                        sandboxes: [], asks: [])
         expect(snapshot.state == "unavailable" && snapshot.headline.contains("gateway down"), "unavailable")
+    }
+
+    private static func anUnreachableDaemonIsNotShownAsCurrent() {
+        var never = SandboxSnapshot()
+        never.markUnreachable("")
+        expect(never.state == "unreachable", "never reached: not Loading forever (\(never.state))")
+        expect(never.headline == "The DefenseClaw daemon is not answering: its health check fails",
+               "headline says why: \(never.headline)")
+
+        var stale = SandboxSnapshot()
+        stale.apply(status: SandboxDecoding.status(from: ["enabled": true, "available": true]),
+                    sandboxes: SandboxDecoding.sandboxes(from: ["sandboxes": [running]]), asks: [])
+        expect(stale.staleNote.isEmpty, "a fresh snapshot has no note")
+        stale.markUnreachable("the DefenseClaw gateway is offline")
+        expect(stale.staleNote.hasPrefix("Showing the last good snapshot"), "stale note: \(stale.staleNote)")
+        expect(stale.staleNote.hasSuffix(": the DefenseClaw gateway is offline"), "stale note says why")
+        expect(stale.sandboxes.count == 1, "the rows stay")
     }
 
     private static func activitySummariesArePlain() {

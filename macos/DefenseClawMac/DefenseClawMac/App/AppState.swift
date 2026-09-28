@@ -936,7 +936,15 @@ final class AppState {
     /// failed refresh keeps the last good snapshot: an empty list during a
     /// daemon restart would read as "no sandboxes", not as a lost connection.
     func refreshSandboxes() async {
-        guard !sandboxRefreshInProgress, !installationBindInProgress, gatewayReachable, sandboxesWatched else { return }
+        guard !sandboxRefreshInProgress, !installationBindInProgress, sandboxesWatched else { return }
+        guard gatewayReachable else {
+            // Say so, rather than "Loading…" forever or the last snapshot
+            // (with live buttons) as if it were current.
+            var next = sandbox
+            next.markUnreachable(lastGatewayError.map { SandboxDecoding.message(for: $0) } ?? "")
+            if next.error != sandbox.error { sandbox = next }
+            return
+        }
         sandboxRefreshInProgress = true
         defer { sandboxRefreshInProgress = false }
         let generation = installationGeneration
@@ -1018,6 +1026,10 @@ final class AppState {
     }
 
     func sandboxActionInFlight(_ key: String) -> Bool { sandboxActionsInFlight.contains(key) }
+
+    /// Sandbox buttons act on what the daemon says now: not on a read-only
+    /// installation, nor on the last good snapshot while the daemon is down.
+    var sandboxActionsAvailable: Bool { installationMutationsAllowed && gatewayReachable }
 
     private func runSandboxAction(key: String, _ body: @escaping () async throws -> String) async {
         guard installationMutationsAllowed else {

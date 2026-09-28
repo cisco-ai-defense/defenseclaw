@@ -99,8 +99,8 @@ struct SandboxesView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                if !snapshot.error.isEmpty, snapshot.status.loaded {
-                    Text("Showing the last good snapshot: \(snapshot.error)")
+                if !snapshot.staleNote.isEmpty {
+                    Text(snapshot.staleNote)
                         .font(.caption2)
                         .foregroundStyle(Cisco.orange)
                 }
@@ -198,7 +198,7 @@ struct SandboxesView: View {
                 Button("Copy connect command") { copy("defenseclaw sandbox connect \(row.name)") }
             }
             .controlSize(.small)
-            .disabled(!appState.installationMutationsAllowed)
+            .disabled(!appState.sandboxActionsAvailable)
         }
     }
 
@@ -280,7 +280,7 @@ struct SandboxUnblockMenu: View {
         }
         .controlSize(.small)
         .fixedSize()
-        .disabled(appState.sandboxActionInFlight(key) || !appState.installationMutationsAllowed)
+        .disabled(appState.sandboxActionInFlight(key) || !appState.sandboxActionsAvailable)
     }
 }
 
@@ -317,7 +317,7 @@ struct SandboxAskRow: View {
                 Button("Reject") { Task { await appState.decideSandboxAsk(ask, approve: false) } }
             }
             .controlSize(.small)
-            .disabled(appState.sandboxActionInFlight("ask|\(ask.id)") || !appState.installationMutationsAllowed)
+            .disabled(appState.sandboxActionInFlight("ask|\(ask.id)") || !appState.sandboxActionsAvailable)
         }
     }
 }
@@ -346,6 +346,12 @@ struct SandboxMenuSection: View {
                     }
                 }
                 .buttonStyle(.plain)
+                if !snapshot.staleNote.isEmpty {
+                    Text(snapshot.staleNote)
+                        .font(.caption2)
+                        .foregroundStyle(Cisco.orange)
+                        .lineLimit(2)
+                }
                 ForEach(snapshot.active.prefix(3)) { row in
                     HStack(spacing: 6) {
                         Circle().fill(row.alerts.isEmpty ? Cisco.green : Cisco.orange).frame(width: 6, height: 6)
@@ -368,7 +374,7 @@ struct SandboxMenuSection: View {
                         }
                         .controlSize(.mini)
                         .help("Unblock \(event.host) for \(event.sandbox) (use the Sandboxes panel to unblock everywhere)")
-                        .disabled(!appState.installationMutationsAllowed)
+                        .disabled(!appState.sandboxActionsAvailable)
                     }
                 }
                 ForEach(snapshot.asks.prefix(2)) { ask in
@@ -396,6 +402,11 @@ struct SandboxOverviewCard: View {
                 Text(snapshot.headline)
                     .font(.caption)
                     .foregroundStyle(snapshot.state == "ready" ? Color.secondary : Cisco.orange)
+                if !snapshot.staleNote.isEmpty {
+                    Text(snapshot.staleNote)
+                        .font(.caption2)
+                        .foregroundStyle(Cisco.orange)
+                }
                 HStack(spacing: 18) {
                     metric("Active", "\(snapshot.active.count)")
                     metric("Blocked sites", "\(snapshot.sandboxes.reduce(0) { $0 + $1.blocked })")
