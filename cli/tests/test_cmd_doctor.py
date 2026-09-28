@@ -46,6 +46,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_openclaw_transport_advisory,
     _check_openhands_hooks,
     _check_proxy_interception,
+    _check_scanners,
     _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
@@ -2916,6 +2917,44 @@ class TestLegacySandboxDoctor(unittest.TestCase):
             status, detail = _gateway_service_health_assessment(cfg, health)
         self.assertNotEqual(status, "operational", detail)
         self.assertNotIn("sandbox", detail)
+
+
+@unittest.skipIf(os.name == "nt", "the POSIX repair command")
+class DoctorScannerRepairHintTests(unittest.TestCase):
+    """A failed skill-scanner check names the command that repairs it (manual test R2-44)."""
+
+    _CFG = SimpleNamespace(
+        scanners=SimpleNamespace(
+            skill_scanner=SimpleNamespace(binary="/opt/dc/.venv/bin/skill-scanner"),
+            mcp_scanner=SimpleNamespace(binary="mcp-scanner"),
+        )
+    )
+
+    def _run(self, side_effect):
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=lambda b: b),
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", side_effect=side_effect),
+        ):
+            _check_scanners(self._CFG, result)
+        return result.checks[0]
+
+    def test_timeout_says_to_retry_then_names_the_resolver(self):
+        import subprocess as sp
+
+        check = self._run(sp.TimeoutExpired(cmd="skill-scanner", timeout=10))
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("did not answer --version within 10s", check["detail"])
+        self.assertIn("run `defenseclaw doctor` again", check["detail"])
+        self.assertIn("`bash defenseclaw-upgrade.sh --yes`", check["detail"])
+        self.assertIn("/docs/get-started/upgrade/", check["detail"])
+        self.assertNotIn("repair path", check["detail"])
+
+    def test_unstartable_launcher_names_the_resolver(self):
+        check = self._run(OSError("exec format error"))
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("could not start: exec format error; repair the launcher with the release upgrade resolver",
+                      check["detail"])
 
 
 if __name__ == "__main__":

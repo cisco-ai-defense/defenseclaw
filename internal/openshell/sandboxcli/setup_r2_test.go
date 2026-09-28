@@ -252,6 +252,25 @@ func TestSetupNamesKiroAsTyped(t *testing.T) {
 	}
 }
 
+// TestDoctorWrapperHintNamesAConfiguredHarness pins that the doctor's
+// wrapper hint names a harness this install set up (manual test R2-44).
+func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
+	for _, tc := range []struct {
+		harnesses []string
+		want      string
+	}{
+		{nil, "none (`defenseclaw sandbox enable claude` makes `claude` run sandboxed)"},
+		{[]string{"kiro", "hermes", "openhands"}, "none (`defenseclaw sandbox enable hermes` makes `hermes` run sandboxed)"},
+		{[]string{"kiro"}, "none"},
+	} {
+		ta := newTestApp(t, "")
+		ta.Cfg.OpenShell.Harnesses = tc.harnesses
+		if c := ta.wrappersCheck(); c.Detail != tc.want {
+			t.Errorf("harnesses %v: wrappers check = %q, want %q", tc.harnesses, c.Detail, tc.want)
+		}
+	}
+}
+
 // TestTeardownDryRunListsEveryStep pins the dry run a newcomer reads: every
 // step, "none" and "nothing to restore" included, the provider profiles
 // labeled by whose they are, and a closing "nothing was changed" (manual

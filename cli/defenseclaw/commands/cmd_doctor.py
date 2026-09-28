@@ -1790,6 +1790,29 @@ def _check_component_connector_compatibility(
         )
 
 
+_DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
+
+
+def _scanner_repair_hint() -> str:
+    """The command that repairs the skill-scanner launcher of this install.
+
+    On macOS and Linux the release upgrade resolver reconciles the launcher
+    with the managed virtualenv, at the installed version too (the built-in
+    ``defenseclaw upgrade`` stops early when the version is already current);
+    on Windows, DefenseClaw Setup's repair does.
+    """
+
+    if os.name == "nt":
+        return (
+            "repair the install with `DefenseClawSetup-x64.exe /repair` "
+            f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
+        )
+    return (
+        "repair the launcher with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
+        f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
+    )
+
+
 def _check_scanners(cfg, r: _DoctorResult) -> None:
     bins = [
         ("skill-scanner", cfg.scanners.skill_scanner.binary),
@@ -1832,7 +1855,8 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} timed out during --version; run the authenticated upgrade/repair path",
+                f"{probe_path} did not answer --version within 10s; a busy machine can cause this, so run "
+                f"`defenseclaw doctor` again, and if it keeps failing, {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -1840,7 +1864,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             _emit(
                 "fail",
                 f"Scanner: {name}",
-                f"{probe_path} could not start: {exc}; run the authenticated upgrade/repair path",
+                f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
                 r=r,
             )
             continue
@@ -1853,7 +1877,7 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
             detail = f"{probe_path} failed --version (exit {probe.returncode})"
             if output:
                 detail += f": {output}"
-            detail += "; run the authenticated upgrade/repair path"
+            detail += "; " + _scanner_repair_hint()
             _emit("fail", f"Scanner: {name}", detail, r=r)
             continue
         _emit(

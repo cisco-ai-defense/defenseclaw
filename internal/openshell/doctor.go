@@ -599,7 +599,14 @@ func (r *doctorRun) checkDisk(root string) {
 		return
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), root)
-	prune := &Fix{Summary: "free space under the Docker root (unused images, build cache)", Command: "docker system prune && defenseclaw sandbox image prune"}
+	// DefenseClaw's own prune first: on a shared machine `docker system
+	// prune` also removes other people's stopped containers, networks and
+	// build cache.
+	prune := &Fix{
+		Summary: "remove DefenseClaw's unused sandbox images (rather than `docker system prune`, which also removes " +
+			"every stopped container, unused network and build cache on this machine, other users' too)",
+		Command: "defenseclaw sandbox image prune",
+	}
 	switch {
 	case free < DiskFailBytes:
 		c.Status, c.Fix = StatusFail, prune

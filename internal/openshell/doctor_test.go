@@ -407,9 +407,17 @@ func TestDoctorDisk(t *testing.T) {
 		f := newDoctorFixture(t)
 		var probed string
 		f.doctor.DiskFree = func(p string) (uint64, error) { probed = p; return tc.free, tc.err }
-		expectCheck(t, f.run(), openshell.CheckIDDisk, tc.status, tc.detail)
+		c := expectCheck(t, f.run(), openshell.CheckIDDisk, tc.status, tc.detail)
 		if probed != "/data/docker" {
 			t.Fatalf("probed %q, want the Docker root", probed)
+		}
+		// Low space names DefenseClaw's own prune, and warns about the
+		// machine-wide one instead of suggesting it.
+		if tc.err == nil {
+			if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox image prune" ||
+				!strings.Contains(c.Fix.Summary, "rather than `docker system prune`, which also removes") {
+				t.Fatalf("disk fix = %+v", c.Fix)
+			}
 		}
 	}
 }

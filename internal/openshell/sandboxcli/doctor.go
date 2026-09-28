@@ -277,11 +277,31 @@ func (a *App) wrappersCheck() openshell.Check {
 		c.Status, c.Detail = openshell.StatusFail, strings.Join(broken, "; ")
 		c.Fix = &openshell.Fix{Summary: "re-enable the wrappers (or disable them)", Command: CommandName + " enable <harness>"}
 	case len(parts) == 0:
-		c.Detail = "none (`" + CommandName + " enable claude` makes `claude` run sandboxed)"
+		c.Detail = "none"
+		if s := a.wrapperExample(); s != nil {
+			c.Detail += " (`" + CommandName + " enable " + HarnessArg(s) + "` makes `" + s.Command + "` run sandboxed)"
+		}
 	default:
 		c.Detail = strings.Join(parts, "; ") + " (" + wrapper.EnvBypass + "=1 bypasses)"
 	}
 	return c
+}
+
+// wrapperExample is the harness the wrapper hint names: the first
+// configured one that may run and whose command people type (nil when
+// none is).
+func (a *App) wrapperExample() *harness.Spec {
+	specs, err := a.harnesses(nil)
+	if err != nil {
+		return nil
+	}
+	specs, _ = a.allowedHarnesses(specs)
+	for _, s := range specs {
+		if _, launched := launchedCommands[s.Command]; !launched {
+			return s
+		}
+	}
+	return nil
 }
 
 func (a *App) adminCheck() openshell.Check {
