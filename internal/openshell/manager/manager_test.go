@@ -692,6 +692,44 @@ func TestCreateImportsACredentialProfileThatVanished(t *testing.T) {
 	}
 }
 
+// TestUptimeSurvivesADaemonRestart pins that a restarted daemon reports a
+// still-ready sandbox's uptime from when it became ready (record.ReadyAt;
+// OpenShell 0.1.1 reports no transition times), not from its adoption.
+func TestUptimeSurvivesADaemonRestart(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	e.create(sandboxapi.CreateRequest{Name: "uptimebox"})
+	e.watch.waitStarted(t, "uptimebox")
+	e.stop()
+	store := newRecordStore(e.dataDir)
+	recs, errs := store.loadAll()
+	if len(errs) > 0 || len(recs) != 1 || recs[0].ReadyAt.IsZero() {
+		t.Fatalf("records = %+v, %v; want the ready time kept", recs, errs)
+	}
+	// The daemon is down for a while; the sandbox keeps running.
+	time.Sleep(2100 * time.Millisecond)
+	e.m = e.newManager()
+	e.run()
+	eventually(t, "the adopted sandbox is ready", func() bool {
+		sb, err := e.m.Get(context.Background(), "uptimebox")
+		return err == nil && sb.Phase == "ready"
+	})
+	sb, _ := e.m.Get(context.Background(), "uptimebox")
+	if sb.UptimeSeconds < 2 || !sb.StartedAt.Equal(recs[0].ReadyAt) {
+		t.Fatalf("uptime after the restart = %ds since %v, want it counted from %v", sb.UptimeSeconds, sb.StartedAt, recs[0].ReadyAt)
+	}
+	// A stop ends it: the next start counts from then.
+	if _, err := e.m.Stop(context.Background(), "uptimebox"); err != nil {
+		t.Fatal(err)
+	}
+	e.m.mu.Lock()
+	ready := e.m.boxes["uptimebox"].rec.ReadyAt
+	e.m.mu.Unlock()
+	if !ready.IsZero() {
+		t.Fatalf("a stopped sandbox keeps its ready time %v", ready)
+	}
+}
+
 func TestDeleteKeepSnapshot(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "keepbox"})

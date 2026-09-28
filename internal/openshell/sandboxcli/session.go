@@ -280,7 +280,7 @@ func firstN(list []string, n int) []string {
 func (s *session) end(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	a := s.app
-	after, err := s.api.Get(ctx, s.sb.Name)
+	after, err := s.settled(ctx)
 	if err != nil {
 		return apiError(err)
 	}
@@ -458,6 +458,42 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	a.note("Sandbox kept (stopped) → " + next + "   delete: " + CommandName + " delete " + name)
 	return nil
 }
+
+// settled reads the sandbox for the session summary once its counts stop
+// changing: OpenShell reports the session's last denials on its event
+// stream a moment after they happen, so a read right as the session ends
+// would miss them and disagree with a later status. It reads at most
+// settleReads more times, settleInterval apart, and takes the last read
+// when the counts keep moving.
+func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
+	after, err := s.api.Get(ctx, s.sb.Name)
+	if err != nil {
+		return nil, err
+	}
+	for range settleReads {
+		if s.app.Sleep(ctx, settleInterval) != nil {
+			break
+		}
+		next, err := s.api.Get(ctx, s.sb.Name)
+		if err != nil {
+			break
+		}
+		same := next.Egress.Destinations == after.Egress.Destinations && next.Egress.Blocked == after.Egress.Blocked &&
+			next.Hooks.ToolCalls == after.Hooks.ToolCalls && next.Hooks.ToolBlocked == after.Hooks.ToolBlocked &&
+			next.Hooks.HookFailed == after.Hooks.HookFailed
+		after = next
+		if same {
+			break
+		}
+	}
+	return after, nil
+}
+
+// settleReads and settleInterval pace settled.
+const (
+	settleReads    = 3
+	settleInterval = time.Second
+)
 
 // summaryLine is "Session ended · 57 tool calls (1 blocked: …) · 23 sites
 // contacted (1 request blocked) · 8 files changed (+212 −37)". Sites count

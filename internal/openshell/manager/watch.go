@@ -19,7 +19,9 @@ package manager
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -199,9 +201,15 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	id := b.identity()
 	name, harnessName := b.rec.Name, b.rec.Harness
 	m.mu.Unlock()
+	// A record from before this daemon started is OpenShell's stream
+	// replaying what it recorded while DefenseClaw was down: it lands on
+	// the feed after newer events, so the feed marks it.
+	replayed := at.Before(m.startedAt)
 	switch r.Class {
+	case ocsf.ClassConfig:
+		m.noteSyntheticAddress(b, r.Message)
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
-		host := triage.NormalizeHost(r.Host)
+		host := m.namedHost(b, triage.NormalizeHost(r.Host))
 		if host == openshellHostAlias {
 			m.hostAliasEvent(ctx, b, r, at, harnessName)
 			return
@@ -215,9 +223,12 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// triage's rejection of its proposal explains it once, and it is no
 		// sign of work (the Codex TUI makes it at start, before any prompt).
 		fetch := r.Denied() && harnessFetchDenial(harnessName, r, host)
-		// A lookup of the sandbox's own host name reaches nothing either
-		// (ownHostName): audited, but no blocked site and no feed line.
-		quiet := fetch || (r.Denied() && ownHostName(host))
+		// A refused name lookup (dnsRefusal) is no blocked request: the
+		// connection that follows it is, and it is denied and counted on
+		// its own. Nor is a connection to the sandbox's own host name
+		// (ownHostName), which reaches nothing. Both are audited, but
+		// neither counted nor shown on the feed.
+		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host)))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
 			m.markWork(b, at, ofHarness)
@@ -241,7 +252,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
-			// on the stream. A single-label name draws none.
+			// on the stream. A lookup draws none.
 			if fetch || !quiet {
 				m.scheduleTriage(b)
 			}
@@ -254,7 +265,8 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		_ = m.tel.RecordSandboxEgress(ctx, ev)
 		if r.Denied() && !quiet {
 			m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
-				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)"})
+				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
+				Replayed: replayed})
 		}
 	case ocsf.ClassProcess:
 		if harnessActivity(harnessName, r.Binary) {
@@ -272,8 +284,64 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		_ = m.tel.RecordSandboxFinding(ctx, ev)
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: severity,
-			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message)})
+			Host: r.Host, Message: firstNonEmpty(r.Title, r.Message), Replayed: replayed})
 	}
+}
+
+// dnsRefusal reports OpenShell's refusal of a name lookup ("NET:REFUSE …
+// DENIED <name> [reason:policy_dns_ineligible]": no port, no process).
+// OpenShell answers it with a staged address and judges the connection
+// that follows, which it reports as a denial of its own.
+func dnsRefusal(r ocsf.Record) bool {
+	return r.Class == ocsf.ClassNetwork && strings.EqualFold(r.Activity, "REFUSE") && r.Port == 0 && r.Binary == ""
+}
+
+// syntheticPrefix is where OpenShell's policy DNS takes the addresses it
+// hands out for names (policy.go lists it among the reserved ranges).
+var syntheticPrefix = netip.MustParsePrefix("198.18.0.0/15")
+
+// maxSyntheticNames bounds the names one sandbox's synthetic addresses map.
+const maxSyntheticNames = 512
+
+// syntheticMapping is OpenShell's record of a synthetic address it handed
+// out: "Policy DNS mapped <name> resolved=… synthetic=<addr> …" or "Policy
+// DNS staged unapproved name <name> synthetic=<addr> …".
+var syntheticMapping = regexp.MustCompile(`^Policy DNS (?:mapped|staged unapproved name) (\S+) (?:\S+ )*?synthetic=(\S+)`)
+
+// noteSyntheticAddress keeps the name behind a synthetic address OpenShell
+// reports (syntheticMapping), so a later record of a connection to the
+// address names the destination (namedHost).
+func (m *Manager) noteSyntheticAddress(b *box, msg string) {
+	sub := syntheticMapping.FindStringSubmatch(strings.TrimSpace(msg))
+	if sub == nil {
+		return
+	}
+	name := triage.NormalizeHost(sub[1])
+	addr, err := netip.ParseAddr(sub[2])
+	if err != nil || name == "" || !syntheticPrefix.Contains(addr.Unmap()) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b.synthetic == nil || len(b.synthetic) >= maxSyntheticNames {
+		b.synthetic = map[string]string{}
+	}
+	b.synthetic[addr.Unmap().String()] = name
+}
+
+// namedHost is the destination name behind a synthetic address OpenShell
+// reported (noteSyntheticAddress), else host as recorded.
+func (m *Manager) namedHost(b *box, host string) string {
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !syntheticPrefix.Contains(addr.Unmap()) {
+		return host
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if name := b.synthetic[addr.Unmap().String()]; name != "" {
+		return name
+	}
+	return host
 }
 
 const openshellHostAlias = "host.openshell.internal"

@@ -331,13 +331,19 @@ defenseclaw sandbox activity -f
 ```text
 14:02:11 myapp-7f3a ✓ registry.npmjs.org
 14:02:13 myapp-7f3a ✓ docs.python.org
-14:02:20 myapp-7f3a ✗ webhook.site (webhook_catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+14:02:20 myapp-7f3a ✗ webhook.site (webhook catcher)  → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 14:05:48 myapp-7f3a ? ask ap_5f2c9a1e7b3d4c60: the sandbox asks to reach port 5432 on your machine  → defenseclaw sandbox approve myapp-7f3a ap_5f2c9a1e7b3d4c60
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
 
 Nothing in the feed waits for you except asks. `--sandbox NAME` limits the
 feed to one sandbox, and `-o json` prints the events as JSON.
+
+A blocked connection shows once, with a short reason. The name lookups
+OpenShell refuses before it denies a connection aren't listed or counted.
+When DefenseClaw starts again, OpenShell replays what it recorded while
+DefenseClaw was down. Those lines come after newer ones and end with
+`(while DefenseClaw was down)`.
 
 ### What the network allows
 

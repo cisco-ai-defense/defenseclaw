@@ -1858,6 +1858,28 @@ shorthand in log lines (classes `NET`, `HTTP`, `SSH`, `PROC`, `FINDING`,
 `LIFECYCLE`, `CONFIG`, `API`, `EVENT`); a fixture corpus captured on a live
 host backs its tests.
 
+The manager (`watch.go`) turns the records into the feed and the counts:
+
+- A denied connection counts once as a blocked request. OpenShell first
+  refuses the name lookup (`NET:REFUSE … [reason:policy_dns_ineligible]`, no
+  port and no process), answers it with a staged address and then denies
+  the connection; the refusal is audited but neither counted nor shown.
+  A record of the container's own host name (Docker's 12-hex-digit default)
+  is treated the same.
+- `CONFIG` records of the policy DNS (`Policy DNS mapped <name> …
+  synthetic=<addr>`, `Policy DNS staged unapproved name <name> …`) map the
+  synthetic addresses in 198.18.0.0/15 to their names, so a later record of
+  a connection to such an address names its destination;
+  `host.openshell.internal`'s address is handled as the host alias.
+- A record from before the daemon started is a replay; its feed event
+  carries `replayed: true` and the CLI adds `(while DefenseClaw was down)`.
+- The sandbox record keeps when the sandbox became ready (`ready_at`,
+  OpenShell 0.1.1 reports no transition times), so a restarted daemon
+  reports its uptime from then.
+- The end-of-session summary reads the sandbox until its counts stop moving
+  (at most three more reads, a second apart), because OpenShell reports the
+  last denials a moment after the session ends.
+
 ## Platform behaviours to design around
 
 These were measured on one Linux arm64 host running OpenShell 0.1.1 (the

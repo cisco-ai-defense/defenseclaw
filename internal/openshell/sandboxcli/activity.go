@@ -93,7 +93,7 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	case sandboxapi.ActivityEgressBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
 		if why := firstNonEmpty(ev.Category, ev.Reason); why != "" {
-			b.WriteString(" (" + why + ")")
+			b.WriteString(" (" + reasonText(why) + ")")
 		}
 		if ev.Unblockable && ev.Host != "" {
 			scope := ""
@@ -134,7 +134,45 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 	default:
 		b.WriteString(firstNonEmpty(ev.Message, ev.Kind))
 	}
+	if ev.Replayed {
+		// OpenShell replays what it recorded while the daemon was down,
+		// after newer events.
+		b.WriteString(a.dim(" (while DefenseClaw was down)"))
+	}
 	return b.String()
+}
+
+// reasonTexts explain the reason tokens the feed carries for blocked
+// egress: OpenShell's own for the connections it denies, and the egress
+// proxy's categories.
+var reasonTexts = map[string]string{
+	"transparent_tcp_policy_denied":  "no OpenShell rule allows it",
+	"transparent_tcp_mapping_denied": "no OpenShell rule allows this port",
+	"policy_dns_ineligible":          "no OpenShell rule allows the name",
+	"paste_site":                     "paste site",
+	"file_drop":                      "file-sharing site",
+	"webhook_catcher":                "webhook catcher",
+	"tunnel":                         "tunnel service",
+	"anonymizer":                     "anonymizer",
+	"host_internal":                  "this machine",
+	"private_network":                "private network",
+	"port_not_allowed":               "port not allowed",
+	"invalid_destination":            "invalid destination",
+	"admin_block":                    "blocked by your organization",
+	"admin_allow_only":               "not on your organization's allowed list",
+	"operator_block":                 "on your block list",
+	"not_allowlisted":                "not on the allowlist",
+	"rate_limited":                   "rate limited",
+	"ip_literal":                     "IP address instead of a name",
+}
+
+// reasonText is the short explanation of a feed reason token; an unknown
+// token reads with spaces for its underscores.
+func reasonText(token string) string {
+	if text, ok := reasonTexts[token]; ok {
+		return text
+	}
+	return strings.ReplaceAll(token, "_", " ")
 }
 
 func hostPort(ev sandboxapi.ActivityEvent) string {

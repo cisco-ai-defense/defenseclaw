@@ -86,7 +86,10 @@ type box struct {
 	// seenChunks are the pending draft chunks triage decided; it is pruned
 	// to the inbox's pending chunks on every poll.
 	seenChunks map[string]struct{}
-	blocked    int
+	// synthetic maps the synthetic addresses OpenShell's policy DNS handed
+	// the sandbox to their names (noteSyntheticAddress).
+	synthetic map[string]string
+	blocked   int
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// Proposal flood limits (see approvals.go): recent automatic
@@ -230,6 +233,14 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
 		b.reach = hookReach{}
+		// A restarted daemon that finds the sandbox still ready keeps the
+		// time it became ready (uptime); a real transition takes now.
+		if previous != audit.SandboxPhaseReady || b.rec.ReadyAt.IsZero() {
+			b.rec.ReadyAt = b.started.UTC()
+		}
+	}
+	if phase != audit.SandboxPhaseReady {
+		b.rec.ReadyAt = time.Time{}
 	}
 	b.rec.Phase = string(phase)
 	id := b.identity()
@@ -391,8 +402,14 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.Phase = string(audit.SandboxPhaseUnknown)
 	}
 	if b.phase == audit.SandboxPhaseReady && !b.started.IsZero() {
-		v.StartedAt = b.started
-		v.UptimeSeconds = int64(m.now().Sub(b.started) / time.Second)
+		started := b.started
+		// Became ready before this daemon adopted it (record.ReadyAt), and
+		// not before OpenShell created it (a sandbox made again since).
+		if ready := r.ReadyAt; !ready.IsZero() && ready.Before(started) && (b.sb == nil || !ready.Before(b.sb.CreatedAt)) {
+			started = ready
+		}
+		v.StartedAt = started
+		v.UptimeSeconds = int64(m.now().Sub(started) / time.Second)
 	}
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,

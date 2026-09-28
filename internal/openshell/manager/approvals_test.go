@@ -209,14 +209,18 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	eventually(t, "the agent's approval", func() bool { return chunkStatus(e, sb.Name, curl) == "approved" })
 }
 
-// TestOwnHostNameLookupIsNoBlockedSite pins that OpenShell's refusal of a
-// lookup of the sandbox's own container host name (git's, to make up an
-// address) is audited but neither counted as a blocked site nor shown on
-// the feed, while a refused single-label name of another shape still is.
-func TestOwnHostNameLookupIsNoBlockedSite(t *testing.T) {
+// TestOpenShellDenialsCountConnections pins what of OpenShell's denials
+// counts as a blocked request and shows on the feed: the connection. A
+// refused name lookup (which OpenShell answers with a staged address before
+// it denies the connection that follows) and a connection to the sandbox's
+// own container host name (git looks it up to make up an address) are
+// audited but neither counted nor shown. A connection to a synthetic
+// address names the destination OpenShell mapped it to; a record from
+// before the daemon started is marked as replayed.
+func TestOpenShellDenialsCountConnections(t *testing.T) {
 	e := newEnv(t, nil)
 	e.run()
-	sb := e.create(sandboxapi.CreateRequest{Name: "hostnamebox"})
+	sb := e.create(sandboxapi.CreateRequest{Name: "denialbox"})
 	e.watch.waitStarted(t, sb.Name)
 	feed := func() []sandboxapi.ActivityEvent {
 		var out []sandboxapi.ActivityEvent
@@ -227,36 +231,64 @@ func TestOwnHostNameLookupIsNoBlockedSite(t *testing.T) {
 		}
 		return out
 	}
-	push := func(line string) {
+	push := func(line string, at time.Time) {
 		t.Helper()
 		rec, err := ocsf.Parse(line)
 		if err != nil {
 			t.Fatal(err)
 		}
-		e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
+		e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, at)
 	}
-	push("NET:REFUSE [MED] DENIED abf22769329d [reason:policy_dns_ineligible]")
-	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 0 {
-		t.Fatalf("the host name lookup counted as %d blocked sites", got.Egress.Blocked)
+	blocked := func() int {
+		got, _ := e.m.Get(context.Background(), sb.Name)
+		return got.Egress.Blocked
 	}
-	if got := feed(); len(got) != 0 {
-		t.Fatalf("the host name lookup is on the feed: %+v", got)
+	now := time.Now()
+	// One curl to an unknown destination: the lookup, then the connection.
+	push("NET:REFUSE [MED] DENIED evil.example.net [reason:policy_dns_ineligible]", now)
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]", now)
+	if n := blocked(); n != 1 {
+		t.Fatalf("one denied connection counted as %d blocked requests", n)
 	}
-	var audited bool
+	if got := feed(); len(got) != 1 || got[0].Host != "evil.example.net" || got[0].Replayed {
+		t.Fatalf("feed = %+v, want one line for the connection", got)
+	}
+	// The lookup of the container's own host name, and a connection to it.
+	push("NET:REFUSE [MED] DENIED abf22769329d [reason:policy_dns_ineligible]", now)
+	push("NET:OPEN [MED] DENIED /usr/bin/python3(0) -> abf22769329d:80 [reason:transparent_tcp_policy_denied]", now)
+	if n := blocked(); n != 1 {
+		t.Fatalf("the host name counted: %d blocked requests", n)
+	}
+	var audited int
 	e.tel.mu.Lock()
 	for _, ev := range e.tel.egress {
-		audited = audited || (ev.Host == "abf22769329d" && ev.Blocked)
+		if ev.Host == "abf22769329d" && ev.Blocked {
+			audited++
+		}
 	}
 	e.tel.mu.Unlock()
-	if !audited {
-		t.Fatal("the host name lookup was not audited")
+	if audited != 2 {
+		t.Fatalf("audited %d records of the host name, want 2", audited)
 	}
-	push("NET:REFUSE [MED] DENIED jenkins [reason:policy_dns_ineligible]")
-	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 1 {
-		t.Fatalf("another single-label name counted as %d blocked sites, want 1", got.Egress.Blocked)
+	// A synthetic address OpenShell mapped names its destination.
+	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped api.example.org resolved=93.184.216.34 synthetic=198.18.0.7 ports=443 mapping_id=m1", now)
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.7:8443 [reason:transparent_tcp_mapping_denied]", now)
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.9:8443 [reason:transparent_tcp_mapping_denied]", now)
+	got := feed()
+	if len(got) != 3 || got[1].Host != "api.example.org" || got[1].Port != 8443 || got[2].Host != "198.18.0.9" {
+		t.Fatalf("feed = %+v, want the mapped name, then an unmapped address as recorded", got)
 	}
-	if got := feed(); len(got) != 1 || got[0].Host != "jenkins" {
-		t.Fatalf("feed = %+v, want the other name", got)
+	// The host alias's synthetic address is the host alias: a host port,
+	// which triage asks about, not a blocked site.
+	push("CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18998 mapping_id=m2", now)
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:29170 [reason:transparent_tcp_mapping_denied]", now)
+	if got := feed(); len(got) != 3 || blocked() != 3 {
+		t.Fatalf("feed = %+v, blocked %d; the host alias's address counted as a blocked site", got, blocked())
+	}
+	// Records from before the daemon started are replays.
+	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> old.example.org:443 [reason:transparent_tcp_policy_denied]", e.m.startedAt.Add(-time.Minute))
+	if got := feed(); len(got) != 4 || !got[3].Replayed {
+		t.Fatalf("feed = %+v, want the replayed record marked", got)
 	}
 }
 

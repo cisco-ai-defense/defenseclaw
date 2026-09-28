@@ -24,6 +24,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,6 +166,29 @@ func TestRunHarnessExitStatusPropagates(t *testing.T) {
 	var exit *ExitError
 	if !errors.As(err, &exit) || exit.Code != 3 {
 		t.Fatalf("Run = %v, want exit status 3", err)
+	}
+}
+
+// TestRunSummaryWaitsForLateDenials pins that the session summary counts
+// the denials OpenShell reports a moment after the session ends, so it
+// agrees with a later status.
+func TestRunSummaryWaitsForLateDenials(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.review = sandboxapi.ReviewResponse{Summary: "0 files changed (+0 −0)", Report: &workspace.ReviewReport{}}
+	var armed atomic.Bool
+	var late atomic.Int32
+	late.Store(2)
+	ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+		if armed.Load() && late.Add(-1) >= 0 {
+			sb.Egress.Blocked++
+		}
+	}
+	ta.term.during = func() { armed.Store(true) }
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	if out := ta.output(); !strings.Contains(out, "0 sites contacted (2 requests blocked)") {
+		t.Fatalf("the summary missed the late denials:\n%s", out)
 	}
 }
 

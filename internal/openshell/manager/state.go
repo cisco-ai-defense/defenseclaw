@@ -114,6 +114,10 @@ type record struct {
 	// Phase is the last lifecycle phase recorded for the sandbox, so a
 	// restarted daemon reports the transition it observes.
 	Phase string `json:"phase,omitempty"`
+	// ReadyAt is when DefenseClaw saw the sandbox become ready (zero while
+	// it is not): a restarted daemon that finds it still ready reports its
+	// uptime from then. OpenShell 0.1.1 reports no transition times.
+	ReadyAt time.Time `json:"ready_at,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
 	// Unblocks are sandbox-scoped egress unblock patterns.

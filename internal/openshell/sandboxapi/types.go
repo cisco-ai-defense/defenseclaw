@@ -636,6 +636,10 @@ type ActivityEvent struct {
 	// Reason is the machine-readable cause, Message the display line.
 	Reason  string `json:"reason,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Replayed marks an OpenShell record from before the daemon started,
+	// which OpenShell's stream replays when DefenseClaw starts again: it
+	// arrives after newer events.
+	Replayed bool `json:"replayed,omitempty"`
 }
 
 // ActivityQuery selects the activity stream.

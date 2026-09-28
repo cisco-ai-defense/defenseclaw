@@ -174,13 +174,16 @@ type Options struct {
 
 // Manager implements the gateway's SandboxController.
 type Manager struct {
-	opts    Options
-	ws      Workspace
-	tel     audit.SandboxTelemetry
-	records recordStore
-	now     func() time.Time
-	logf    func(string, ...any)
-	host    HostUser
+	opts Options
+	// startedAt is when this daemon's manager was made: OpenShell records
+	// from before it are replays (see ocsfEvent).
+	startedAt time.Time
+	ws        Workspace
+	tel       audit.SandboxTelemetry
+	records   recordStore
+	now       func() time.Time
+	logf      func(string, ...any)
+	host      HostUser
 
 	feed      *Feed
 	creds     *egress.CredentialStore
@@ -301,6 +304,7 @@ func New(opts Options) (*Manager, error) {
 		toolCalls: newHookTamperTracker(),
 		boxes:     map[string]*box{},
 		approvals: map[string]*approval{},
+		startedAt: opts.Now(),
 	}
 	if m.tel == nil {
 		m.tel = nopTelemetry{}
