@@ -424,6 +424,24 @@ The default managed layout is:
 | Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v3 application-control and Claude-precedence evidence. |
 | Service definitions | SCM registry and security descriptors | Administrators/LocalSystem only. |
 
+The Secure Client UI socket check identifies the executable a connecting
+process was started from, at the time it connects. The kernel's image name for
+that process must equal an allowed path exactly (ASCII letters in either case;
+every other character must match), and the file at that path must carry an
+allowed embedded Authenticode signature. Two limits follow from this design:
+
+- The check does not prove which code runs inside the process. Windows does not
+  isolate the processes of one signed-in user from each other, so a process of
+  the same user can start `csc_ui.exe` and control it, or reuse a connection the
+  GUI already opened, and read the same stream. On macOS the hardened runtime
+  prevents this; Windows has no equivalent for the Secure Client GUI. The stream
+  is read-only (health, statistics, and notifications), notification text
+  carries no credentials, raw prompts, or policy bodies, and every signed-in
+  user's GUI already receives the same machine-wide stream.
+- Start the GUI through its full path. A launch through an 8.3 short path such
+  as `C:\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe` is refused, and the gateway log
+  shows the short path and says so in the refusal reason.
+
 The installer rejects install/state roots outside exact mount-manager drive
 roots on fixed local NTFS volumes, path escapes, unsafe owners or DACLs, and
 reparse points in managed path chains. It requires the effective drive, global

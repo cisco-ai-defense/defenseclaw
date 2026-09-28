@@ -24,6 +24,26 @@ package ipc
 // machine-wide health, stats and notification stream, as on macOS.
 // Scoping records to one session would need the originating session on
 // block events, which the gateway does not record today.
+//
+// Admission also authenticates the executable, not the code running in
+// the process, and this is weaker than macOS. The check binds a
+// connection to the image its peer process was created from, once, when
+// the connection is accepted. Windows does not isolate processes of one
+// user from each other and csc_ui.exe is not a protected process, so a
+// process of the same user can start csc_ui.exe itself and control it,
+// or duplicate a socket the GUI already had admitted, and then read the
+// same stream. On macOS the hardened runtime prevents that. The exposure
+// is bounded: the service is read-only (GetHealth, GetStatsSnapshot,
+// WatchNotifications), notification bodies carry no secrets, raw
+// prompts or policy bodies by contract (secureclient.proto), and every
+// signed-in user's GUI receives the same stream anyway. Binding a
+// connection to the GUI's own code needs a credential the GUI proves
+// after connecting, such as one issued through the Secure Client agent
+// service.
+//
+// The image name is compared exactly as the kernel recorded it at
+// launch, so a GUI started through an 8.3 short path is refused; the
+// refusal reason says so (shortNameLaunchHint).
 
 import (
 	"errors"
@@ -572,7 +592,7 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity,
 	}
 	drivePath, ok := l.policy.matchKernelImage(process.ImagePath)
 	if !ok {
-		return id, "peer image is not an allowed Secure Client GUI executable"
+		return id, "peer image is not an allowed Secure Client GUI executable" + shortNameLaunchHint(process.ImagePath)
 	}
 	image, err := l.resolve.openImage(drivePath)
 	if err != nil {
@@ -593,6 +613,20 @@ func (l *windowsPeerAuthListener) authenticate(c net.Conn) (windowsPeerIdentity,
 		return id, reason
 	}
 	return id, ""
+}
+
+// shortNameLaunchHint explains the refusal of a process whose image
+// name contains "~", which is most often a GUI started through an 8.3
+// short path such as C:\PROGRA~2\... The kernel records the image name
+// as the process was launched, and matchKernelImage does not expand
+// short names, because that would mean reading directories named by the
+// peer. Without the hint the log shows only a generic refusal of what
+// may be the genuine, signed GUI.
+func shortNameLaunchHint(kernelPath string) string {
+	if !strings.Contains(kernelPath, "~") {
+		return ""
+	}
+	return " (the launch path contains '~', possibly an 8.3 short name; start the GUI through its full path)"
 }
 
 // Close stops accepting. Checks still in flight finish on their own

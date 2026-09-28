@@ -234,6 +234,34 @@ func TestWindowsPeerAuthDoesNotOpenImagesOutsideThePolicy(t *testing.T) {
 	}
 }
 
+// TestWindowsPeerAuthExplainsShortNameLaunchRefusal covers a GUI
+// started through an 8.3 short path. The kernel records the short
+// name, the exact comparison refuses it without opening anything, and
+// the logged reason must say why, since the refused process may be the
+// genuine GUI.
+func TestWindowsPeerAuthExplainsShortNameLaunchRefusal(t *testing.T) {
+	for _, kernelPath := range []string{
+		`\Device\HarddiskVolume3\PROGRA~2\Cisco\CISCOS~1\UI\csc_ui.exe`,
+		`\Device\HarddiskVolume3\Program Files (x86)\Cisco\CISCOS~1\UI\csc_ui.exe`,
+	} {
+		peer := genuineWindowsPeer()
+		peer.process.ImagePath = kernelPath
+		_, reason := authenticateFake(t, peer)
+		if !strings.Contains(reason, "not an allowed Secure Client GUI executable") ||
+			!strings.Contains(reason, "8.3 short name") {
+			t.Errorf("%q: reason = %q, want a refusal naming the 8.3 short path", kernelPath, reason)
+		}
+		if opened := peer.opened(); len(opened) != 0 {
+			t.Errorf("%q: gateway opened %q", kernelPath, opened)
+		}
+	}
+	peer := genuineWindowsPeer()
+	peer.process.ImagePath = `\Device\HarddiskVolume3\Users\alice\Downloads\csc_ui.exe`
+	if _, reason := authenticateFake(t, peer); strings.Contains(reason, "8.3") {
+		t.Fatalf("reason for a path without '~' = %q", reason)
+	}
+}
+
 // unicodeFoldVariants returns every copy of path with one ASCII letter
 // replaced by a non-ASCII rune that Unicode simple folding (and so
 // strings.EqualFold) treats as the same letter, such as U+017F for "s"
