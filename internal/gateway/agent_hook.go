@@ -112,6 +112,7 @@ type agentHookRequest struct {
 	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
 	CorrelationIdentifiers      []connector.CorrelationValue
 	SuppressCorrelationEmit     bool
+	CorrelationUnavailable      bool // correlation failed, not a replay: not exported, still audited
 	CorrelationReceipt          *audit.CorrelationReceiptLocator
 	CWD                         string
 	ToolName                    string
@@ -308,9 +309,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// enforcement. The hook must still be evaluated if the local ledger is
 			// temporarily unavailable; runtime export receives no incomplete
 			// occurrence envelope and therefore cannot publish a partial join.
+			// The verdict still gets its local audit row (finalizeAgentHook).
 			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, correlationErr)
-			req.SuppressCorrelationEmit = true
+			req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
 		} else {
 			req = correlatedReq
 		}
@@ -652,7 +654,11 @@ func (a *APIServer) finalizeAgentHook(
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 		})
-
+	}
+	// Every verdict has its audit row, save the exact replay of a delivery
+	// whose row is already persisted: a hook whose correlation failed is
+	// not exported (no partial join), but it is audited.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("audit", func() {
 			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
 		})
@@ -875,7 +881,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	if correlationErr != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] synthetic hook correlation unavailable connector=%s event=%s: %v\n",
 			connectorName, req.HookEventName, correlationErr)
-		req.SuppressCorrelationEmit = true
+		req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
 	} else {
 		ctx, req = correlatedCtx, correlatedReq
 	}
@@ -945,6 +951,9 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 	if !req.SuppressCorrelationEmit {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+	}
+	// As in finalizeAgentHook: only an exact replay goes without its row.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)

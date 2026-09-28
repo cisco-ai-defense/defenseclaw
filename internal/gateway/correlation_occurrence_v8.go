@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,7 +29,41 @@ const correlationReceiptTTL = 7 * 24 * time.Hour
 // Policy evaluation still runs for an exact transport replay, but the replay
 // receipt suppresses duplicate telemetry/audit emission after incrementing its
 // durable delivery count.
+//
+// The correlation state is written optimistically: an attempt reads the
+// session cursor (and resolves the connector instance) before its
+// transaction, and a write another hook of the same session committed in
+// between makes it stale (audit.ErrCorrelationStale). Concurrent hooks of
+// one session are routine (a SubagentStart next to a SessionStart), so a
+// stale attempt starts over from the request as it arrived, up to
+// hookCorrelationAttempts times.
 func (a *APIServer) correlateHookOccurrence(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+) (context.Context, agentHookRequest, error) {
+	for attempt := 1; ; attempt++ {
+		outCtx, out, err := a.correlateHookOccurrenceOnce(ctx, profile, cloneHookCorrelationState(req), rawBody)
+		if !errors.Is(err, audit.ErrCorrelationStale) || attempt >= hookCorrelationAttempts || ctx.Err() != nil {
+			return outCtx, out, err
+		}
+	}
+}
+
+// hookCorrelationAttempts bounds the attempts of one hook's correlation.
+const hookCorrelationAttempts = 8
+
+// cloneHookCorrelationState copies the correlation maps and slices an
+// attempt adds to, so a stale attempt leaves the request as it arrived.
+func cloneHookCorrelationState(req agentHookRequest) agentHookRequest {
+	req.CorrelationValues = maps.Clone(req.CorrelationValues)
+	req.CorrelationOrigins = maps.Clone(req.CorrelationOrigins)
+	req.CorrelationIdentifiers = slices.Clone(req.CorrelationIdentifiers)
+	return req
+}
+
+func (a *APIServer) correlateHookOccurrenceOnce(
 	ctx context.Context,
 	profile connector.HookProfile,
 	req agentHookRequest,
