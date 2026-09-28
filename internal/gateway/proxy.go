@@ -613,7 +613,12 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
 	withRequestID := p.requestIDMiddleware(withCorr)
 	handler := inboundTraceContextMiddleware(withRequestID)
-	srv := &http.Server{Addr: addr, Handler: handler}
+	// WebSocket upgrade requests bypass the middleware chain because
+	// middleware wrappers lose the http.Hijacker interface needed for
+	// TCP connection takeover. The WebSocket handler authenticates and
+	// proxies independently.
+	wsHandler := p.webSocketBypass(handler)
+	srv := &http.Server{Addr: addr, Handler: wsHandler}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
 		"port": p.cfg.Port,
@@ -769,6 +774,10 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 // (from X-DC-Target-URL + original path). No format translation is needed.
 func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		if isWebSocketUpgrade(r) {
+			p.handleWebSocketPassthrough(w, r)
+			return
+		}
 		// GET on unknown paths (health probes, etc.) — just 200 OK.
 		w.WriteHeader(http.StatusOK)
 		return
