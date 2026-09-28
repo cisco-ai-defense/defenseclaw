@@ -514,6 +514,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     is driven by the migration ledger and the design spec.
     """
 
+    # Screen gets "-short" up to 30 rows (see the #body-panel CSS).
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (31, "-tall")]
+
     CSS = TEXTUAL_CSS + """
     Screen {
         background: TOKEN_SURFACE_BASE;
@@ -562,6 +565,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         padding: 1 2;
         border: none;
         background: TOKEN_SURFACE_BASE;
+    }
+
+    /* On a short terminal (80x24) the blank rows above the body go to content. */
+    Screen.-short #body-panel {
+        margin: 0 1;
+        padding: 0 2 1 2;
     }
 
     #body {
@@ -11134,11 +11143,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         for field in section.fields
                     ),
                 )
+            # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
+            # size the Field column and push values off an 80-column screen;
+            # the focused field's full label is in the body line above.
             return (
                 ("Field", "Value", "Validation", "Hint"),
                 tuple(
                     (
-                        field.label,
+                        _truncate_ellipsis(field.label, 34),
                         _config_display_value(field),
                         _validation_label(field),
                         field.hint,
