@@ -1518,6 +1518,51 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	return []byte(rendered), nil
 }
 
+// managedPluginArtifactDrift returns the managed plugin path when the
+// installed plugin is missing or differs in any byte from the plugin Setup
+// renders for opts, and "" when it matches or c installs no plugin.
+func (c *hookOnlyConnector) managedPluginArtifactDrift(opts SetupOpts) (string, error) {
+	if c == nil || !c.pluginArtifact {
+		return "", nil
+	}
+	path := c.configPath(opts)
+	expected, err := c.renderPluginArtifact(opts)
+	if err != nil {
+		return path, err
+	}
+	const maxManagedPluginBytes = 4 << 20
+	installed, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	if err != nil {
+		return path, err
+	}
+	if !bytes.Equal(installed, expected) {
+		return path, nil
+	}
+	return "", nil
+}
+
+// ManagedPluginArtifactDrift compares conn's managed in-agent plugin (Amp,
+// OpenCode) with the bytes Setup renders for opts, and returns the plugin
+// path when the installed file is missing or differs. The standalone Unix
+// guardian relies on it rather than on the ownership markers or the
+// recorded digests (the contract lock and the custody receipt): the user
+// can edit the plugin and those digests together, and the agent runs every
+// line of the plugin. It returns "" for a connector without a managed
+// plugin. The file is read with the caller's credentials, bounded and
+// without following a link.
+func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) {
+	plugin, ok := conn.(interface {
+		managedPluginArtifactDrift(SetupOpts) (string, error)
+	})
+	if !ok {
+		return "", nil
+	}
+	return plugin.managedPluginArtifactDrift(opts)
+}
+
 // setupPluginArtifact writes the rendered bridge plugin to the host agent's
 // auto-load directory at 0o600. Its scoped token stays in an owner-only
 // sidecar. The managed-file backup lets Teardown restore a prior file only
@@ -1756,7 +1801,14 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	if c.name != "hermes" {
 		path = managedFileBackupTargetPath(opts.DataDir, c.name, logicalName, c.configPath(opts))
 	}
-	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
+	// Hermes: a captured config.yaml that already registers DefenseClaw's
+	// hook (a file put back from an earlier enrollment) is not restored, or
+	// DefenseClaw's entries would stay; only they are removed instead.
+	var restored bool
+	var err error
+	if c.name != "hermes" || !hermesConfigBackupHoldsOwnedHooks(opts.DataDir, logicalName, path, c.hookCommand(opts)) {
+		restored, err = restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
+	}
 	switch {
 	case err != nil:
 		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
@@ -3699,16 +3751,21 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	}
 	logicalName := hermesAllowlistLogicalName
 	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
-	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
-	if err != nil {
-		return err
-	}
-	if restored {
-		return nil
-	}
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
 	if backupErr != nil && !os.IsNotExist(backupErr) {
 		return backupErr
+	}
+	// Approvals that carry DefenseClaw's ownership marker are DefenseClaw's
+	// even in the copy Setup captured (a file put back from an earlier
+	// enrollment holds them), so that copy is restored only without them.
+	if backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes) {
+		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
+		if err != nil {
+			return err
+		}
+		if restored {
+			return nil
+		}
 	}
 	if backup == nil {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
@@ -3735,6 +3792,9 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 		if approvals, ok := pristine["approvals"].([]interface{}); ok {
 			for _, raw := range approvals {
 				if entry, ok := raw.(map[string]interface{}); ok {
+					if owned, _ := entry[hermesAllowlistOwnerField].(bool); owned {
+						continue
+					}
 					event, _ := entry["event"].(string)
 					entryCommand, _ := entry["command"].(string)
 					pristinePairs[event+"\x00"+entryCommand] = true
@@ -3777,6 +3837,39 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	}
 	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
 	return nil
+}
+
+// hermesConfigBackupHoldsOwnedHooks reports whether the config.yaml copy
+// Setup captured registers DefenseClaw's hook.
+func hermesConfigBackupHoldsOwnedHooks(dataDir, logicalName, path, hookScript string) bool {
+	backup, err := loadManagedFileBackupForTransform(dataDir, "hermes", logicalName, path)
+	if err != nil || backup == nil || !backup.Existed {
+		return false
+	}
+	var cfg map[string]interface{}
+	if yaml.Unmarshal(backup.PristineBytes, &cfg) != nil {
+		return false
+	}
+	return containsHookScript(cfg["hooks"], hookScript)
+}
+
+// hermesAllowlistHoldsOwnedApprovals reports whether an allowlist document
+// holds an approval with DefenseClaw's ownership marker.
+func hermesAllowlistHoldsOwnedApprovals(data []byte) bool {
+	var document struct {
+		Approvals []interface{} `json:"approvals"`
+	}
+	if json.Unmarshal(data, &document) != nil {
+		return false
+	}
+	for _, raw := range document.Approvals {
+		if entry, ok := raw.(map[string]interface{}); ok {
+			if owned, _ := entry[hermesAllowlistOwnerField].(bool); owned {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func writeHermesDirectNativeState(opts SetupOpts, command, status string) error {
@@ -4249,15 +4342,23 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 	if err != nil {
 		return err
 	}
-	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
-		for event, raw := range hooks {
-			hooks[event] = removeOwnedFlatHooks(raw, hookScript)
-		}
-		pruneEmptyMapArrays(hooks)
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return nil
 	}
-	data, err := yaml.Marshal(cfg)
+	for event, raw := range hooks {
+		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
+	}
+	pruneEmptyMapArrays(hooks)
+	// DefenseClaw owns entries in the hooks mapping only: every other byte of
+	// config.yaml (Hermes' commented template, the user's settings and their
+	// order and quoting) stays as it is.
+	data, err := marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", hooks)
 	if err != nil {
 		return err
+	}
+	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
+		return nil
 	}
 	return atomicWriteFile(path, data, 0o600)
 }

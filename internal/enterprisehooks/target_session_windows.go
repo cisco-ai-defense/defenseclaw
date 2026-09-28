@@ -32,9 +32,12 @@ func windowsEnterpriseStandaloneDeferredDataDirAbsent(err error) bool {
 // runtime, so it proves the pending state like an absent one; enrollment
 // adopts it in the account's session.
 func windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir string, target *windows.SID) bool {
-	if !windowsEnterpriseStandaloneProcess() {
-		return false
-	}
+	return windowsEnterpriseStandaloneProcess() && windowsAccountCreatedDataDirAt(dataDir, target)
+}
+
+// windowsAccountCreatedDataDirAt reads dataDir's owner and DACL and reports
+// windowsAccountCreatedDataDir for it; any read failure reports false.
+func windowsAccountCreatedDataDirAt(dataDir string, target *windows.SID) bool {
 	extended, err := winpath.Extended(dataDir)
 	if err != nil {
 		return false
@@ -45,6 +48,29 @@ func windowsEnterpriseStandaloneDeferredDataDirAccountCreated(dataDir string, ta
 	}
 	ok, err := windowsAccountCreatedDataDir(dataDir, descriptor, target)
 	return err == nil && ok
+}
+
+// WindowsAccountCreatedDataDir reports whether home's %USERPROFILE%\.defenseclaw
+// is a data directory the account (sid) created itself before enrollment
+// (windowsAccountCreatedDataDir), which the guardian adopts when the account
+// next signs in and Upgrade/Repair leave alone. Status names such accounts.
+func WindowsAccountCreatedDataDir(home, sid string) bool {
+	target, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	return windowsAccountCreatedDataDirAt(filepath.Join(filepath.Clean(home), ".defenseclaw"), target)
+}
+
+// WindowsLocalAccountSID reports whether sid is an account of this
+// computer's own account database. Only such an account's failed name
+// lookup shows it was deleted: a domain or Microsoft Entra account's lookup
+// also fails while its directory cannot be reached.
+func WindowsLocalAccountSID(sid string) bool {
+	machine, err := windowsMachineAccountDomainSID()
+	machine = strings.ToUpper(strings.TrimSpace(machine))
+	return err == nil && machine != "" &&
+		strings.HasPrefix(strings.ToUpper(strings.TrimSpace(sid)), machine+"-")
 }
 
 func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget) error {

@@ -17,8 +17,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"syscall"
 )
 
 // apiPortHeldError is a gateway that serves hooks on its socket while its
@@ -39,7 +43,7 @@ func (l *lifecycle) gatewayHealth(ctx context.Context, gateway Unit, serviceUID 
 	env := l.env
 	code, body, err := env.HealthGet(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("the gateway does not serve the hook socket %s: %w", env.Layout.HookSocketPath, err)
+		return nil, env.hookSocketProblem(err)
 	}
 	if err := env.gatewayServing(ctx, gateway, serviceUID); err != nil {
 		return nil, err
@@ -81,6 +85,30 @@ func (l *lifecycle) gatewayHealth(ctx context.Context, gateway Unit, serviceUID 
 		return nil, &apiPortHeldError{message: message + "; the gateway keeps retrying the port"}
 	}
 	return nil, errors.New(message)
+}
+
+// hookSocketProblem says in words why the hook socket did not answer. The
+// request error names the API address (the request's Host) and Go's dial
+// details, which read as if the TCP API had been asked.
+func (e *Env) hookSocketProblem(err error) error {
+	var reason string
+	var netErr net.Error
+	var urlErr *url.Error
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		reason = "the socket file does not exist"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		reason = "nothing is listening on it"
+	case errors.Is(err, fs.ErrPermission):
+		reason = "this account may not connect to it"
+	case errors.As(err, &netErr) && netErr.Timeout():
+		reason = "it did not answer in time"
+	case errors.As(err, &urlErr):
+		reason = "it did not answer (" + urlErr.Err.Error() + ")"
+	default:
+		reason = "it did not answer (" + err.Error() + ")"
+	}
+	return fmt.Errorf("the gateway does not serve the hook socket %s: %s", e.Layout.HookSocketPath, reason)
 }
 
 // apiHealth is readiness for a gateway that answers /health only on the

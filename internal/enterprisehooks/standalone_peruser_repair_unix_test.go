@@ -233,11 +233,11 @@ func TestStandaloneVerifyReportsAndRepairsAChangedHookScript(t *testing.T) {
 	}
 }
 
-// The managed Amp plugin and its runtime lock are both user-owned. An
-// appended line and a matching lock digest keep the old checks green, but
-// verification must reject the edit and let the guardian reinstall the
-// rendered file.
-func TestStandaloneVerifyRepairsAnAppendedAmpPluginLine(t *testing.T) {
+// A managed in-agent plugin (Amp, OpenCode), its runtime lock and its
+// custody receipt are all user-owned. An appended line with matching lock
+// and receipt digests kept the old checks green, but verification must
+// reject the edit and let the guardian reinstall the rendered file.
+func TestStandaloneVerifyRepairsAnAppendedManagedPluginLine(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	setStandaloneProfileForTest(t, true)
@@ -245,65 +245,79 @@ func TestStandaloneVerifyRepairsAnAppendedAmpPluginLine(t *testing.T) {
 	connector.AMPPluginPathOverride = ""
 	t.Cleanup(func() { connector.AMPPluginPathOverride = previous })
 
-	home := newTestHome(t)
-	t.Setenv("HOME", home)
-	opts := openHandsStandaloneOptions(home, "action")
-	opts.ConnectorName = "amp"
-	opts.AgentVersion = "0.0.1785334225"
-	opts.ForeignHookGuardBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
-	ctx := context.Background()
-	result, err := Install(ctx, opts)
-	if err != nil {
-		t.Fatalf("install: %v", err)
-	}
-	if len(result.HookConfigPaths) != 1 {
-		t.Fatalf("plugin paths = %v", result.HookConfigPaths)
-	}
-	if _, err := Verify(ctx, opts); err != nil {
-		t.Fatalf("verify installed plugin: %v", err)
-	}
-	plugin := result.HookConfigPaths[0]
-	original, err := os.ReadFile(plugin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	edited := append(append([]byte{}, original...), "// user line\n"...)
-	if err := os.WriteFile(plugin, edited, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	lockPath := filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")
-	lockBody, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lock map[string]any
-	if err := json.Unmarshal(lockBody, &lock); err != nil {
-		t.Fatal(err)
-	}
-	digests := lock["connectors"].(map[string]any)["amp"].(map[string]any)["hook_script_digests"].(map[string]any)
-	sum := sha256.Sum256(edited)
-	digests[filepath.Base(plugin)] = fmt.Sprintf("sha256:%x", sum)
-	lockBody, err = json.Marshal(lock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(lockPath, lockBody, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Verify(ctx, opts); err == nil || !strings.Contains(err.Error(), "differs from the rendered template") || !strings.Contains(err.Error(), plugin) {
-		t.Fatalf("verify edited plugin = %v, want drift naming %s", err, plugin)
-	}
-	repair := opts
-	repair.AllowMissingHookConfigRepair = true
-	if _, err := Install(ctx, repair); err != nil {
-		t.Fatalf("repair: %v", err)
-	}
-	if _, err := Verify(ctx, opts); err != nil {
-		t.Fatalf("verify repaired plugin: %v", err)
-	}
-	restored, err := os.ReadFile(plugin)
-	if err != nil || string(restored) != string(original) {
-		t.Fatalf("repair did not restore the rendered plugin (read error: %v)", err)
+	for _, tc := range []struct{ name, agentVersion string }{
+		{"amp", "0.0.1785334225"},
+		{"opencode", "opencode 1.18.11"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := newTestHome(t)
+			t.Setenv("HOME", home)
+			opts := openHandsStandaloneOptions(home, "action")
+			opts.ConnectorName = tc.name
+			opts.AgentVersion = tc.agentVersion
+			opts.ForeignHookGuardBinary = "/opt/defenseclaw/bin/defenseclaw-hook"
+			ctx := context.Background()
+			result, err := Install(ctx, opts)
+			if err != nil {
+				t.Fatalf("install: %v", err)
+			}
+			if len(result.HookConfigPaths) != 1 {
+				t.Fatalf("plugin paths = %v", result.HookConfigPaths)
+			}
+			if _, err := Verify(ctx, opts); err != nil {
+				t.Fatalf("verify installed plugin: %v", err)
+			}
+			plugin := result.HookConfigPaths[0]
+			original, err := os.ReadFile(plugin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := append(append([]byte{}, original...), "// user line\n"...)
+			if err := os.WriteFile(plugin, edited, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(edited)
+			rewrite := func(path string, edit func(map[string]any)) {
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var doc map[string]any
+				if err := json.Unmarshal(body, &doc); err != nil {
+					t.Fatal(err)
+				}
+				edit(doc)
+				if body, err = json.Marshal(doc); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dataDir := filepath.Join(home, ".defenseclaw")
+			rewrite(filepath.Join(dataDir, "hook_contract_lock.json"), func(lock map[string]any) {
+				digests := lock["connectors"].(map[string]any)[tc.name].(map[string]any)["hook_script_digests"].(map[string]any)
+				digests[filepath.Base(plugin)] = fmt.Sprintf("sha256:%x", sum)
+			})
+			rewrite(filepath.Join(dataDir, "connector_backups", tc.name, "config.json"), func(receipt map[string]any) {
+				receipt["post_sha256"] = fmt.Sprintf("%x", sum)
+			})
+			if _, err := Verify(ctx, opts); err == nil || !strings.Contains(err.Error(), plugin) {
+				t.Fatalf("verify edited plugin = %v, want drift naming %s", err, plugin)
+			}
+			repair := opts
+			repair.AllowMissingHookConfigRepair = true
+			if _, err := Install(ctx, repair); err != nil {
+				t.Fatalf("repair: %v", err)
+			}
+			if _, err := Verify(ctx, opts); err != nil {
+				t.Fatalf("verify repaired plugin: %v", err)
+			}
+			restored, err := os.ReadFile(plugin)
+			if err != nil || string(restored) != string(original) {
+				t.Fatalf("repair did not restore the rendered plugin (read error: %v)", err)
+			}
+		})
 	}
 }
 

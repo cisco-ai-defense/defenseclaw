@@ -73,10 +73,11 @@ target, wrapped commands included, without the stand-in's redirect and path.
 A match there is complete proof for a rule that has no code-owned
 prerequisite and cannot depend on the dropped redirect and path (no `!`,
 `==`, `!=`, `in` or `all()` over `redirects`, `paths`, `artifacts` or
-`archive_lineages`, and no `parse`, `argv_complete` or lineage
-`authoritative` read). A non-match proves nothing, so the regex fallback still
-sees the whole command. Nearly all built-in rules have a code-owned
-prerequisite, so for them such a command still falls back to the regex.
+`archive_lineages`, and no `parse` or lineage `authoritative` read; a
+command's `c.argv_complete` may be read). A non-match proves nothing, so the
+regex fallback still sees the whole command. Nearly all built-in rules have a
+code-owned prerequisite, so for them such a command still falls back to the
+regex.
 
 Second, for a POSIX command with `&&` or `||` lists (`<cmd> && ...`,
 `<cmd> || true`), CEL rules also run on the analysis of the commands certain
@@ -84,9 +85,9 @@ to run: every statement of the top-level sequence, and of each list only its
 first command. A match there is complete proof for a rule that has no
 code-owned prerequisite and cannot depend on the left-out commands (no `!`,
 `==`, `!=`, `in` or `all()` over `commands`, `paths`, `network`, `data_flows`,
-`artifacts` or `archive_lineages`, and no `parse`, `argv_complete` or lineage
-`authoritative` read). A command after `&&` or `||` might not run, so a match
-on it alone stays detection-only.
+`artifacts` or `archive_lineages`, and no `parse` or lineage `authoritative`
+read; a command's `c.argv_complete` may be read). A command after `&&` or
+`||` might not run, so a match on it alone stays detection-only.
 
 Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only

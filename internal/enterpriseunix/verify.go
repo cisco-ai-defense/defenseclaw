@@ -71,17 +71,13 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 		}
 	}
-	if strict {
-		for _, problem := range problems {
-			r.AddError(codeVerify, problem)
-		}
-		if r.TransactionPending {
-			r.AddError(codeVerify, "a lifecycle transaction is pending; the next mutating run recovers it")
-		}
-	} else {
-		for _, problem := range problems {
-			r.AddWarning(codeVerify, problem)
-		}
+	// A problem either action finds makes the deployment unhealthy, and
+	// both exit 1 for it; status leaves out verify's stricter checks.
+	for _, problem := range problems {
+		r.AddError(codeVerify, problem)
+	}
+	if strict && r.TransactionPending {
+		r.AddError(codeVerify, "a lifecycle transaction is pending; the next mutating run recovers it")
 	}
 	return 0
 }
@@ -190,7 +186,7 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 
 	if !record.NoStart {
 		for _, unit := range env.Services.Units() {
-			if unit.Required && !env.Services.Active(ctx, unit) {
+			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) {
 				add("%s is not active", unit.Name)
 			}
 		}
@@ -232,6 +228,37 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		}
 	}
 	return problems
+}
+
+// restartSettle bounds the wait for a unit its service manager is about to
+// start again. The sensor helper exits on purpose when the guardian manifest
+// changes (an account was enrolled or revoked), and systemd (RestartSec=5s)
+// or launchd (ThrottleInterval 5) restarts it.
+const restartSettle = 15 * time.Second
+
+// backFromRestart reports whether a unit that is not active is in a planned
+// restart and is active again within restartSettle. A unit that crashed is
+// not waited for: a crash loop would come back for a moment each time and
+// read as healthy.
+func (l *lifecycle) backFromRestart(ctx context.Context, unit Unit) bool {
+	env := l.env
+	if restarts, ok := env.Services.(plannedRestartReporter); !ok || !restarts.PlannedRestart(ctx, unit) {
+		return false
+	}
+	deadline := env.Now().Add(restartSettle)
+	for {
+		if env.Services.Active(ctx, unit) {
+			return true
+		}
+		if !env.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(env.PollInterval):
+		}
+	}
 }
 
 // installedModeProblems reports recorded files whose mode or owner drifted,

@@ -748,6 +748,17 @@ func TestStatusAndVerify(t *testing.T) {
 	if verify.Enrollment.Targets != 2 || !verify.Readiness.Guardian {
 		t.Fatalf("verify description: %+v %+v", verify.Enrollment, verify.Readiness)
 	}
+	// The sensor helper restarts itself when an account is enrolled or
+	// revoked; systemd's restart delay is not a verify failure. The restart
+	// after a crash is, though the unit comes back for a moment.
+	h.services.active[unitSensorHelper] = false
+	h.services.restarting[unitSensorHelper] = "success"
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+	h.services.active[unitSensorHelper] = false
+	h.services.restarting[unitSensorHelper] = "exit-code"
+	if got := messagesOf(h.run(Options{Action: ActionVerify}).Errors, codeVerify); !strings.Contains(got, unitSensorHelper+" is not active") {
+		t.Fatalf("verify waited out the restart of a crashed unit: %s", got)
+	}
 
 	unit := h.env.P("/etc/systemd/system/" + unitGateway)
 	if err := os.WriteFile(unit, []byte("[Service]\nUser=root\n"), 0o644); err != nil {
@@ -762,6 +773,10 @@ func TestStatusAndVerify(t *testing.T) {
 	}
 	if !strings.Contains(joined, unitGateway+" was modified") || !strings.Contains(joined, unitEnumerator+" is not active") {
 		t.Fatalf("verify did not name the tampering: %s", joined)
+	}
+	// Status exits 1 for an unhealthy deployment too, as the docs say.
+	if status := h.run(Options{Action: ActionStatus}); status.ExitCode != 1 || !strings.Contains(messagesOf(status.Errors, codeVerify), unitEnumerator+" is not active") {
+		t.Fatalf("status of an unhealthy deployment: exit %d, errors %+v", status.ExitCode, status.Errors)
 	}
 	repair := h.run(Options{Action: ActionRepair})
 	requireOK(t, repair)

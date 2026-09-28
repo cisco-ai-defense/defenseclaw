@@ -1985,6 +1985,55 @@ func TestHermesAllowlistSurgicalCleanupPreservesForeignEntries(t *testing.T) {
 			t.Fatalf("managed approval survived surgical cleanup: %#v", entry)
 		}
 	}
+
+	// Files put back from an enrolled state (a commented config.yaml with
+	// DefenseClaw's hooks, the allowlist with its approvals) are what the
+	// next Setup captures. Teardown still takes out only DefenseClaw's
+	// entries, and every other config.yaml byte stays.
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	enrolledConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolledAllowlist, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("second Teardown: %v", err)
+	}
+	if err := os.WriteFile(configPath, append([]byte("# Hermes settings\n"), enrolledConfig...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(allowlistPath, enrolledAllowlist, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over put-back files: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown over put-back files: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean over put-back files: %v", err)
+	}
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(config, []byte("# Hermes settings\nhooks_auto_accept: false\n")) || bytes.Contains(config, []byte(conn.hookCommand(opts))) {
+		t.Fatalf("config.yaml after teardown over put-back files:\n%s", config)
+	}
+	if cleaned, err = readHermesAllowlist(allowlistPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range cleaned["approvals"].([]interface{}) {
+		if entry := raw.(map[string]interface{}); entry[hermesAllowlistOwnerField] == true {
+			t.Fatalf("managed approval survived teardown over put-back files: %#v", entry)
+		}
+	}
 }
 
 func TestHermesAllowlistTamperedOwnershipRefusesAmbiguousCleanup(t *testing.T) {

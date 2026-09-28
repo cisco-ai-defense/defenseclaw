@@ -23,7 +23,7 @@ Two lifecycle actions report on a deployment. Neither one changes the host.
 
 | Action | What it does | Use it for |
 | --- | --- | --- |
-| `status` | Reports the recorded state: installed version, services, readiness, machine policy, and enrollment counts | Inventory and dashboards |
+| `status` | Reports the recorded state: installed version, services, readiness, machine policy, and enrollment counts. On Linux and macOS it also runs the basic checks (files, services, gateway health); each problem is an error, and the command exits non-zero | Inventory and dashboards |
 | `verify` | Runs every check. On Linux and macOS: file digests, owners and modes, the config and credentials against what was last applied, the runtime descriptor, the service account, required services, gateway health, and the guardian's authorization ledger. On Windows: files, DACLs, service settings, the mode pin, and readiness. Each problem is an error, and the command exits non-zero | Compliance and alerting |
 
 ```bash title="Linux"
@@ -253,13 +253,20 @@ If a user you expect is missing, see
 A user can break the files DefenseClaw needs in their own account, for
 example by making `~/.defenseclaw` unreadable, replacing an agent's config
 folder with a file or a symbolic link, or leaving an agent config the agent
-cannot parse. That account is then not protected for the affected agents,
-so the device is reported unhealthy by design: `status` warns with
-`guardian_target_failed` and sets `security_complete: false`, `verify`
-fails, and the MDM detection script `detect.sh --require-healthy` reports
-the device as not compliant. Every other account stays protected and the
-services stay ready. Once the account is fixed, the next reconcile (within
-a minute) clears the failure.
+cannot parse. That account is then not protected for the affected agents.
+Every other account stays protected and the services stay ready. Once the
+account is fixed, the next reconcile (within a minute) clears the warning.
+
+When the guardian is refused by a path in the user's own home (a link, a
+file where a folder belongs or a folder where a file belongs, or a folder
+the user made unreadable), `status` and `verify` report it for that account
+as the warning `guardian_target_user_path`, which names the path. It does
+not fail `verify`, `detect.sh --require-healthy` or `security_complete`,
+because only that account is affected and the user could have made the
+change themselves. Any other reason the account cannot be protected is
+reported as `guardian_target_failed`: it sets `security_complete: false`,
+`verify` fails, and `detect.sh --require-healthy` reports the device as not
+compliant.
 
 The guardian repairs, as that user and within a minute, what DefenseClaw
 owns in the account:
@@ -273,15 +280,15 @@ owns in the account:
 - a missing `~/.kiro` or `~/.kiro/hooks` folder, which Kiro does not create;
 - group or other write on the home folder of an enrolled user.
 
-It does not change anything else in the account, so these stay failed for
-that account until the user or an administrator fixes them: a link or a
+It does not change anything else in the account, so these stay unprotected
+for that account until the user or an administrator fixes them: a link or a
 non-directory where an agent's config folder should be, an agent config the
 agent cannot parse, a special file such as a named pipe at a config path,
 and files another account owns.
 
 To find the account, read `warnings[]` in `status --json` or `verify --json`:
-each `guardian_target_failed` entry names the user, the connector and the
-reason. As root, `defenseclaw-gateway enterprise hooks status --json` lists
+each `guardian_target_user_path` and `guardian_target_failed` entry names
+the user, the connector and the reason. As root, `defenseclaw-gateway enterprise hooks status --json` lists
 every user and connector with its state.
 
 ## Logs and events

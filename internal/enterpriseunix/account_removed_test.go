@@ -26,41 +26,58 @@ import (
 // ("openhands for user bob is not protected: target account ... does
 // not exist: no such account") until the enumerator revoked the target, so
 // MDM detection reported the host non-compliant. The account is gone; the
-// target is reported as a warning until it is revoked.
-func TestDeletedAccountTargetDoesNotFailTheHost(t *testing.T) {
+// target is reported as a warning until it is revoked. Likewise an account
+// that broke a path in its own home (its Amp plugins folder replaced by a
+// file) failed verify for the whole host until it undid the change; that
+// target is reported for the account only, while the same refusal of a path
+// outside the account's home still fails verify.
+func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			ledger := filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)
-			data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": false, "target_count": 2, "success_count": 1, "failure_count": 1})
+			data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": false, "target_count": 3, "success_count": 1, "failure_count": 2})
 			if err := os.WriteFile(ledger, data, 0o640); err != nil {
 				t.Fatal(err)
 			}
 			if before := h.run(Options{Action: ActionStatus}); !before.SecurityComplete {
 				t.Fatalf("the test host must start security-complete: %+v %+v", before.Readiness, before.Warnings)
 			}
-			state, _ := json.Marshal(map[string]any{"results": []map[string]any{
-				{"user": "alice", "connector": "codex", "ok": true},
-				{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`},
-			}})
-			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
-				t.Fatal(err)
+			writeState := func(ampPath string) {
+				state, _ := json.Marshal(map[string]any{"results": []map[string]any{
+					{"user": "alice", "connector": "codex", "ok": true},
+					{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`},
+					{"user": "carol", "user_home": "/home/carol", "connector": "amp", "ok": false, "error": "enterprise hooks: hook config parent is not a directory: " + ampPath},
+				}})
+				if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+					t.Fatal(err)
+				}
 			}
+			writeState("/home/carol/.config/amp/plugins")
 			status := h.run(Options{Action: ActionStatus})
 			if hasWarning(status, codeGuardianTargetFailed) {
-				t.Fatalf("a deleted account is reported as a protection failure: %+v", status.Warnings)
+				t.Fatalf("one account's target is reported as a protection failure: %+v", status.Warnings)
 			}
 			if got := messagesOf(status.Warnings, codeGuardianTargetAccountRemoved); !strings.Contains(got, "openhands for user bob: the account no longer exists") || !strings.Contains(got, "after 3 consecutive definitive misses") {
 				t.Fatalf("status does not report the deleted account's target: %+v", status.Warnings)
 			}
+			if got := messagesOf(status.Warnings, codeGuardianTargetUserPath); !strings.Contains(got, "amp for user carol is not protected: hook config parent is not a directory: /home/carol/.config/amp/plugins") {
+				t.Fatalf("status does not report the account's own path: %+v", status.Warnings)
+			}
 			if !status.SecurityComplete {
-				t.Fatal("a deleted account made the host security-incomplete")
+				t.Fatal("one account's target made the host security-incomplete")
 			}
 			verify := h.run(Options{Action: ActionVerify})
 			requireOK(t, verify)
-			if !hasWarning(verify, codeGuardianTargetAccountRemoved) {
-				t.Fatalf("verify does not report the deleted account's target: %+v", verify.Warnings)
+			if !hasWarning(verify, codeGuardianTargetAccountRemoved) || !hasWarning(verify, codeGuardianTargetUserPath) {
+				t.Fatalf("verify does not report the account targets: %+v", verify.Warnings)
+			}
+			writeState("/home/dave/.config/amp/plugins")
+			verify = h.run(Options{Action: ActionVerify})
+			requireError(t, verify, codeVerify)
+			if !hasWarning(verify, codeGuardianTargetFailed) || verify.SecurityComplete {
+				t.Fatalf("a refused path outside the account's home does not fail verify: %+v", verify.Warnings)
 			}
 		})
 	}

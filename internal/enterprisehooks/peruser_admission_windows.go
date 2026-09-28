@@ -137,7 +137,8 @@ var windowsStandaloneExecutableUnreadable = func(candidate string, lstatErr erro
 
 func windowsStandaloneUnreadableExecutable(candidate string) string {
 	return fmt.Sprintf("%s cannot be read as this account (access denied: a folder on its path does not grant "+
-		"Administrators access); run verify as LocalSystem, which the guardian uses, or run repair", candidate)
+		"Administrators access); the guardian runs as LocalSystem and can read it, so run verify as LocalSystem "+
+		"to check this user (repair does not change this folder)", candidate)
 }
 
 // windowsStandaloneRowAdmission reports whether the guardian can manage one

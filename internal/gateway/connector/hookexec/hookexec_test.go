@@ -1935,6 +1935,29 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
 		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
 	}
+	// Codex shows its structured denial, not stderr, so the denial names
+	// the reason too instead of the generic failed-closed text.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "codex",
+		Event:                    "PreToolUse",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		FailMode:                 "open",
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != 0 || !strings.Contains(out.String(), `"permissionDecision":"deny"`) ||
+		!strings.Contains(out.String(), "this account is not enrolled") || strings.Contains(out.String(), failedClosed) {
+		t.Fatalf("codex denial: code = %d stdout = %q, want a deny that names the enrollment", code, out.String())
+	}
 	// Hermes has no fail-closed contract: the same refusal allows, so the
 	// hook must not claim to block.
 	out.Reset()

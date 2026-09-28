@@ -394,7 +394,9 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 		applyWindowsEnterpriseUnprotectedAgents(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
+		applyWindowsEnterpriseAccountFolders(result)
 	}
+	applyWindowsEnterpriseGatewayStartFailure(result, report)
 	messages := append([]string{}, report.Errors...)
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
 		messages = append(messages, report.Error)
@@ -582,6 +584,166 @@ var windowsEnterpriseAmpMachineFolderProblems = func() []string {
 		return []string{"resolve ProgramData for the Amp machine folder: " + err.Error()}
 	}
 	return enterprisepolicy.InspectWindowsAmpMachineFolder(enterprisepolicy.Options{GOOS: "windows", WindowsProgramData: programData})
+}
+
+// windowsEnterpriseGatewayStartFailure returns the last error the gateway
+// service wrote to its log, and that log's path; tests replace it.
+var windowsEnterpriseGatewayStartFailure = readWindowsEnterpriseGatewayStartFailure
+
+// windowsEnterpriseGatewayLogTailBytes bounds how much of the gateway log
+// status reads.
+const windowsEnterpriseGatewayLogTailBytes = 64 << 10
+
+func readWindowsEnterpriseGatewayStartFailure() (string, string) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil || strings.TrimSpace(layout.LogDir) == "" {
+		return "", ""
+	}
+	path := filepath.Join(layout.LogDir, "gateway", "gateway.log")
+	file, err := os.Open(path)
+	if err != nil {
+		return "", path
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", path
+	}
+	offset := info.Size() - windowsEnterpriseGatewayLogTailBytes
+	if offset < 0 {
+		offset = 0
+	}
+	tail := make([]byte, info.Size()-offset)
+	if _, err := file.ReadAt(tail, offset); err != nil && !errors.Is(err, io.EOF) {
+		return "", path
+	}
+	reason := ""
+	for _, line := range strings.Split(string(tail), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error: ") {
+			reason = strings.TrimSpace(strings.TrimPrefix(line, "Error: "))
+		}
+	}
+	return reason, path
+}
+
+// applyWindowsEnterpriseGatewayStartFailure names, for status and verify,
+// why an installed gateway service is not running: a gateway that failed
+// on every start was reported only as "not healthy (installer exit 1)". The
+// reason is the last error the service logged before it exited.
+func applyWindowsEnterpriseGatewayStartFailure(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if (result.Action != "status" && result.Action != "verify") || !report.Installed || report.TransactionPending ||
+		strings.TrimSpace(report.GatewayService) == "" || report.GatewayServiceState == "running" {
+		return
+	}
+	reason, logPath := windowsEnterpriseGatewayStartFailure()
+	if reason == "" {
+		return
+	}
+	message := fmt.Sprintf("the %s service is not running; the last error it logged: %s (log: %s)",
+		report.GatewayService, windowsEnterpriseBoundedDiagnostic(reason), logPath)
+	if strings.Contains(reason, "Access is denied") {
+		message += "; run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+	}
+	result.AddError("gateway_start_failed", message)
+}
+
+// windowsEnterpriseManifestAccount is one account the installed manifest
+// holds rows for.
+type windowsEnterpriseManifestAccount struct {
+	User, SID, Home string
+	Rows            int
+}
+
+// windowsEnterpriseManifestAccounts reads the installed manifest's accounts;
+// windowsEnterpriseAccountCreatedDataDir reports an account-created data
+// folder, and windowsEnterpriseAccountDeleted a local account SID that no
+// longer names an account. Tests replace them.
+var (
+	windowsEnterpriseManifestAccounts      = readWindowsEnterpriseManifestAccounts
+	windowsEnterpriseAccountCreatedDataDir = enterprisehooks.WindowsAccountCreatedDataDir
+	windowsEnterpriseAccountDeleted        = func(sid string) bool {
+		// A domain or Entra account's lookup also fails while its directory
+		// is unreachable; never tell the administrator to remove that
+		// profile.
+		parsed, err := windows.StringToSid(sid)
+		if err != nil || !enterprisehooks.WindowsLocalAccountSID(parsed.String()) {
+			return false
+		}
+		_, _, _, err = parsed.LookupAccount("")
+		return errors.Is(err, windows.ERROR_NONE_MAPPED)
+	}
+)
+
+func readWindowsEnterpriseManifestAccounts() ([]windowsEnterpriseManifestAccount, error) {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	body, err := readWindowsEnterpriseBoundedFile(layout.ManifestPath, 16<<20)
+	if err != nil {
+		return nil, err
+	}
+	var manifest struct {
+		Targets []struct {
+			User     string `yaml:"user"`
+			SID      string `yaml:"sid"`
+			UserHome string `yaml:"user_home"`
+		} `yaml:"targets"`
+	}
+	if err := yaml.Unmarshal(body, &manifest); err != nil {
+		return nil, err
+	}
+	var accounts []windowsEnterpriseManifestAccount
+	index := map[string]int{}
+	for _, target := range manifest.Targets {
+		key := strings.ToUpper(strings.TrimSpace(target.SID))
+		if key == "" {
+			continue
+		}
+		if at, seen := index[key]; seen {
+			accounts[at].Rows++
+			continue
+		}
+		index[key] = len(accounts)
+		accounts = append(accounts, windowsEnterpriseManifestAccount{
+			User: target.User, SID: strings.TrimSpace(target.SID), Home: target.UserHome, Rows: 1,
+		})
+	}
+	return accounts, nil
+}
+
+// applyWindowsEnterpriseAccountFolders names two accounts the manifest keeps
+// rows for that the administrator should know about: one that was deleted
+// while its profile folder stays (the enumerator keeps its rows until the
+// profile is removed), and one that created its own
+// %USERPROFILE%\.defenseclaw before it was enrolled (the guardian adopts
+// it at the account's next sign-in; Upgrade and Repair leave it alone).
+func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
+	accounts, err := windowsEnterpriseManifestAccounts()
+	if err != nil {
+		return
+	}
+	for _, account := range accounts {
+		if _, err := os.Lstat(account.Home); err != nil {
+			continue
+		}
+		label := account.SID
+		if strings.TrimSpace(account.User) != "" {
+			label = fmt.Sprintf("%s (%s)", account.User, account.SID)
+		}
+		switch {
+		case windowsEnterpriseAccountDeleted(account.SID):
+			result.AddWarning("deleted_account_rows", fmt.Sprintf(
+				"the account %s no longer exists, but its profile folder %s does, so DefenseClaw keeps its %d enrollment row(s) "+
+					"until the profile is removed; remove it under System Properties > Advanced > User Profiles to revoke them",
+				label, account.Home, account.Rows))
+		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
+			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
+				"the account %s is not enrolled yet and created %s itself (for example when an agent it ran before enrollment was refused); "+
+					"DefenseClaw takes over that folder when the account next signs in, and repair leaves it alone until then",
+				label, filepath.Join(account.Home, ".defenseclaw")))
+		}
+	}
 }
 
 // applyWindowsEnterpriseAmpMachineFolder reports an Amp machine folder a

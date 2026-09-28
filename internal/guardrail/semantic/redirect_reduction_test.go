@@ -73,7 +73,7 @@ func TestRedirectReductionSafe(t *testing.T) {
 			`f.commands.exists(c, c.redirects.exists(r, r.fd == 1) != true)`,
 			false,
 		},
-		{"argv_complete", `f.commands.exists(c, c.argv_complete)`, false},
+		{"a command's argv_complete", `f.commands.exists(c, c.argv_complete)`, true},
 		{
 			"no path anywhere",
 			marker + ` && !f.paths.exists(p, p.value.startsWith("/etc/"))`,

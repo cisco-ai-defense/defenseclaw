@@ -13,6 +13,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,10 +162,12 @@ func TestHookForeignGuardDriftedFollowsTheRenderedGuard(t *testing.T) {
 // rendered standalone Hermes hook against a stand-in for the
 // administrator-owned hook binary. A pre_tool_call the guard denies is
 // blocked with the Hermes block object the guard rendered and never reaches
-// the gateway; any answer but an explicit allow blocks too. An allowed call,
-// a session start (which cannot be blocked) and events that cannot change a
-// tool call reach the gateway as before; only tool calls and session starts
-// run the guard, with the agent's own HOME.
+// the gateway; any answer but an explicit allow blocks too, and a check that
+// gives no decision is named in the block and reported to the gateway's
+// session route for its audit row. An allowed call, a session start (which
+// cannot be blocked) and events that cannot change a tool call reach the
+// gateway as before; only tool calls and session starts run the guard, with
+// the agent's own HOME and without the hook's address-space limit.
 func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) {
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
@@ -185,6 +188,7 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 	script := "#!/bin/bash\n" +
 		"printf '%s' \"$HOME\" > " + shellSingleQuoteForTest(filepath.Join(stub, "home")) + "\n" +
 		"printf '%s' \"$*\" > " + shellSingleQuoteForTest(filepath.Join(stub, "args")) + "\n" +
+		"{ ulimit -S -v; ulimit -H -v; } > " + shellSingleQuoteForTest(filepath.Join(stub, "vlimit")) + "\n" +
 		"[ -e " + shellSingleQuoteForTest(filepath.Join(stub, "noread")) + " ] || cat > " + shellSingleQuoteForTest(filepath.Join(stub, "stdin")) + "\n" +
 		"cat " + shellSingleQuoteForTest(filepath.Join(stub, "answer")) + " 2>/dev/null\n" +
 		"exit \"$(cat " + shellSingleQuoteForTest(filepath.Join(stub, "rc")) + " 2>/dev/null || echo 0)\"\n"
@@ -277,24 +281,44 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 	if stdin, _ := stubRead("stdin"); strings.TrimSuffix(stdin, "\n") != payload {
 		t.Fatalf("the guard did not get the Hermes payload: %q", stdin)
 	}
+	// The check is a Go program, which cannot start under the hook's
+	// address-space limit (Linux enforces it): it runs without that limit.
+	if limits, _ := stubRead("vlimit"); len(strings.Fields(limits)) != 2 || strings.Fields(limits)[0] != strings.Fields(limits)[1] {
+		t.Fatalf("the guard ran under an address-space limit (soft and hard: %q)", limits)
+	}
 
-	// No usable answer (a failed check, a malformed or bodiless one): a
-	// fixed block, no gateway request.
-	answer("not json\n", 0)
-	if code, stdout, stderr, _ = run("pre_tool_call"); code != 0 || !strings.HasPrefix(stdout, `{"action":"block","message":"DefenseClaw blocked this tool call`) || requests() != 0 {
-		t.Fatalf("malformed answer: exit %d stdout=%q stderr=%q requests=%d, want a block", code, stdout, stderr, requests())
+	// No decision (the check exited without an answer): a fixed block that
+	// names why, and the block sent to the gateway's session route, which
+	// writes its audit row; the tool call itself does not reach the gateway.
+	answer("", 2)
+	if code, stdout, stderr, _ = run("pre_tool_call"); code != 0 || !strings.HasPrefix(stdout, `{"action":"block","message":"DefenseClaw blocked this tool call`) ||
+		!strings.Contains(stdout, "status 2") || !strings.Contains(stderr, "enterprise_foreign_hook_check_failed") {
+		t.Fatalf("failed check: exit %d stdout=%q stderr=%q, want a block naming the exit status", code, stdout, stderr)
+	}
+	paths, _, bodies := gateway.recorded()
+	var report struct {
+		Key      struct{ Connector, Session string }
+		Decision struct {
+			Deny   bool
+			Reason string
+		}
+	}
+	if len(paths) != 1 || paths[0] != "/api/v1/foreign-hook-session/hermes" || json.Unmarshal([]byte(bodies[0]), &report) != nil ||
+		report.Key.Connector != "hermes" || report.Key.Session != "s-1" || !report.Decision.Deny ||
+		!strings.HasPrefix(report.Decision.Reason, "enterprise_foreign_hook_check_failed: ") {
+		t.Fatalf("failed check: gateway requests %q bodies %q, want one session-route block report", paths, bodies)
 	}
 
 	// Allowed: the gateway decides.
 	answer(`{"deny":false}`+"\n", 0)
-	if code, stdout, stderr, _ = run("pre_tool_call"); code != 0 || !strings.Contains(stdout, "hook-socket") || requests() != 1 {
+	if code, stdout, stderr, _ = run("pre_tool_call"); code != 0 || !strings.Contains(stdout, "hook-socket") || requests() != 2 {
 		t.Fatalf("allowed tool call: exit %d stdout=%q stderr=%q requests=%d", code, stdout, stderr, requests())
 	}
 
 	// A session start runs the guard (the gateway records the session) but
 	// cannot be blocked.
 	answer(`{"deny":true,"reason":"enterprise_foreign_hook_blocked: x","hook_output":`+block+`}`+"\n", 0)
-	if code, stdout, stderr, _ = run("on_session_start"); code != 0 || strings.Contains(stdout, `"block"`) || requests() != 2 {
+	if code, stdout, stderr, _ = run("on_session_start"); code != 0 || strings.Contains(stdout, `"block"`) || requests() != 3 {
 		t.Fatalf("session start: exit %d stdout=%q stderr=%q requests=%d", code, stdout, stderr, requests())
 	}
 	if _, ran := stubRead("args"); !ran {
@@ -308,7 +332,7 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 		t.Fatal(err)
 	}
 	large := `{"hook_event_name":"pre_tool_call","session_id":"s-1","tool_name":"write_file","tool_input":{"content":"` + strings.Repeat("x", 100<<10) + `"}}`
-	if code, stdout, stderr, _ = runPayload(large); code != 0 || !strings.Contains(stdout, "hook-socket") || requests() != 3 {
+	if code, stdout, stderr, _ = runPayload(large); code != 0 || !strings.Contains(stdout, "hook-socket") || requests() != 4 {
 		t.Fatalf("large allowed tool call: exit %d stdout=%q stderr=%q requests=%d", code, stdout, stderr, requests())
 	}
 	if err := os.Remove(filepath.Join(stub, "noread")); err != nil {
@@ -317,7 +341,7 @@ func TestStandaloneHermesHookBlocksWhileTheForeignHookGuardDenies(t *testing.T) 
 
 	// Other events never run the guard.
 	answer(`{"deny":true}`+"\n", 0)
-	if code, stdout, stderr, _ = run("post_tool_call"); code != 0 || strings.Contains(stdout, `"block"`) || requests() != 4 {
+	if code, stdout, stderr, _ = run("post_tool_call"); code != 0 || strings.Contains(stdout, `"block"`) || requests() != 5 {
 		t.Fatalf("post_tool_call: exit %d stdout=%q stderr=%q requests=%d", code, stdout, stderr, requests())
 	}
 	if _, ran := stubRead("args"); ran {

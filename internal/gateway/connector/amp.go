@@ -26,8 +26,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // AMPPluginPathOverride is a test seam for the user-wide plugin artifact.
@@ -75,31 +73,6 @@ func NewAMPConnector() *AMPConnector {
 
 func (c *AMPConnector) HookRuntimeArtifacts(opts SetupOpts) []string {
 	return []string{ampPluginPath(opts)}
-}
-
-// AMPManagedPluginDrift reports the managed plugin path when its installed
-// bytes differ from the current render. The standalone Unix guardian uses
-// this instead of the target-owned contract lock or ownership markers: Amp
-// executes appended code even when both of those still appear valid.
-func AMPManagedPluginDrift(opts SetupOpts) (string, error) {
-	conn := NewAMPConnector()
-	path := ampPluginPath(opts)
-	expected, err := conn.renderPluginArtifact(opts)
-	if err != nil {
-		return path, err
-	}
-	const maxManagedPluginBytes = 4 << 20
-	installed, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
-	if os.IsNotExist(err) {
-		return path, nil
-	}
-	if err != nil {
-		return path, err
-	}
-	if !bytes.Equal(installed, expected) {
-		return path, nil
-	}
-	return "", nil
 }
 
 // Authenticate requires an explicit bearer even on loopback. Amp's managed

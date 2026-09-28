@@ -81,6 +81,13 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			redirectReductionMarker,
 			argvMarker+` && !f.commands.exists(c, c.redirects.exists(r, r.fd == 1))`,
 		),
+		// The authoring guide's form: require a complete argv. A kept
+		// command's argv_complete comes from a complete analysis.
+		redirectReductionRule(
+			"TEST-MARKER-COMPLETE-ARGV",
+			redirectReductionMarker,
+			`f.commands.exists(c, c.argv_complete && c.argv.exists(a, a == "`+redirectReductionMarker+`"))`,
+		),
 	)
 
 	const (
@@ -96,25 +103,25 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 		{
 			name:    "tilde target",
 			command: "echo " + redirectReductionMarker + " > ~/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
 			name:    "no redirect",
 			command: "echo " + redirectReductionMarker,
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": blocks, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 		{
 			// An expanding argument is not reduced: the argv is not static.
 			name:    "expanding argument",
 			command: "echo " + redirectReductionMarker + " $SUFFIX > ~/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
 			// A command after && might not run, so a match on it stays
 			// detection-only.
 			name:    "chained command",
 			command: "cd /tmp && echo " + redirectReductionMarker + " > ~/dc-x.txt",
-			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": detectionOnly, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": detectionOnly},
 		},
 		{
 			// The first command of an && or || list always runs, so rules
@@ -122,7 +129,7 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			// negates over commands does not: a left-out command might run.
 			name:    "first command of an && list",
 			command: "echo " + redirectReductionMarker + " && echo done",
-			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly},
+			want:    map[string]string{"TEST-MARKER-BLOCK": blocks, "TEST-MARKER-NO-STDOUT-REDIRECT": detectionOnly, "TEST-MARKER-COMPLETE-ARGV": blocks},
 		},
 	}
 	for _, test := range tests {

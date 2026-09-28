@@ -60,11 +60,26 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 		t.Fatalf("managed hook registration present = %v, %v", present, err)
 	}
 
+	// A key added to the CLI settings after Setup, which a later Setup (the
+	// guardian's repair) leaves in place, survives teardown: only
+	// DefenseClaw's default-agent setting comes out.
+	settings := filepath.Join(home, "settings", "cli.json")
+	edited := "{\"chat.defaultAgent\": \"" + kiroManagedAgentName + "\", \"chat.enableAutoAgentUpgrade\": false}\n"
+	if err := os.WriteFile(settings, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repeated Setup: %v", err)
+	}
+
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean: %v", err)
+	}
+	if cfg, err := readJSONObject(settings); err != nil || len(cfg) != 1 || cfg["chat.enableAutoAgentUpgrade"] != false {
+		t.Fatalf("settings after teardown = %v (err %v), want only the user's key", cfg, err)
 	}
 }
 
