@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -187,3 +188,77 @@ def test_picker_restores_terminal_mode_when_interrupted() -> None:
         )
 
     assert current_mode == original_mode
+
+
+def _replay_screen(output: str) -> list[str]:
+    """Replay the carriage returns, newlines, cursor-up and erase-line controls a terminal would."""
+
+    rows = [""]
+    row = col = 0
+    for token in re.split(r"(\x1b\[\d*[A-Za-z]|\r|\n)", output):
+        if not token:
+            continue
+        if token == "\r":
+            col = 0
+        elif token == "\n":
+            row += 1
+            col = 0
+            if row == len(rows):
+                rows.append("")
+        elif token.startswith("\x1b["):
+            if token.endswith("A"):
+                row = max(0, row - int(token[2:-1] or "1"))
+            elif token == "\x1b[2K":
+                rows[row] = ""
+        else:
+            line = rows[row].ljust(col)
+            rows[row] = line[:col] + token + line[col + len(token):]
+            col += len(token)
+    while rows and not rows[-1]:
+        rows.pop()
+    return rows
+
+
+def test_redraw_shows_the_empty_choice_warning_below_one_menu(capsys) -> None:
+    """Enter on an empty choice must leave the warning on screen, not a copy of the first row."""
+
+    keys = iter(["n", "\r", "\r"])
+
+    def getchar() -> str:
+        try:
+            return next(keys)
+        except StopIteration:
+            raise KeyboardInterrupt from None
+
+    with pytest.raises(KeyboardInterrupt):
+        terminal_checkbox.prompt_checkbox_selection(
+            ["hermes", "codex"],
+            default_selected=["hermes"],
+            title="Select connectors",
+            empty_ok=False,
+            redraw=True,
+            getchar=getchar,
+        )
+
+    screen = _replay_screen(capsys.readouterr().out)
+    assert screen[-3:-1] == ["  > [ ] hermes", "    [ ] codex"]
+    assert screen[-1].endswith("Select at least one connector.")
+    assert sum("hermes" in line for line in screen) == 1
+
+
+def test_redraw_clears_the_empty_choice_warning_on_the_next_key(capsys) -> None:
+    keys = iter(["n", "\r", "j", " ", "\r"])
+    selected = terminal_checkbox.prompt_checkbox_selection(
+        ["hermes", "codex"],
+        default_selected=["hermes", "codex"],
+        title="Select connectors",
+        empty_ok=False,
+        redraw=True,
+        getchar=lambda: next(keys),
+    )
+
+    assert selected == ["codex"]
+    screen = _replay_screen(capsys.readouterr().out)
+    assert screen[-2:] == ["    [ ] hermes", "  > [x] codex"]
+    assert sum("hermes" in line for line in screen) == 1
+    assert not any("Select at least one connector." in line for line in screen)
