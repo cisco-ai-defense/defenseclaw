@@ -178,8 +178,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		case !keepTelemetry && state.TelemetryEnabled():
 			// Say what a yes costs before it is given: an edit of
 			// gateway.env and a restart of the shared gateway.
-			yes, err := a.ask("Disable OpenShell's anonymous usage telemetry? (edits "+a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env"))+
-				" and restarts the OpenShell gateway"+a.restartImpact(ctx)+")", true, assume)
+			question := "Disable OpenShell's anonymous usage telemetry?"
+			if !assume {
+				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
+					" and restarts the OpenShell gateway" + a.restartImpact(ctx) + ")"
+			}
+			yes, err := a.ask(question, true, assume)
 			if err != nil {
 				return err
 			}
