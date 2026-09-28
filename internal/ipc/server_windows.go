@@ -43,9 +43,8 @@ const windowsSocketParentDirMode = os.FileMode(0o750)
 // fail-closed boundary in every production Windows binary.
 var allowUnsafeSocketOverrideForTest bool
 
-// bindListenerForOS is the Windows bind block for the spec 004
-// initial-cut deferred-auth IPC surface. Differences from
-// server_unix.go's sibling:
+// bindListenerForOS is the Windows bind block for the spec 004 IPC
+// surface. Differences from server_unix.go's sibling:
 //
 //   - Skips os.Chmod on the socket file (Windows Chmod only touches
 //     the read-only bit — Unix mode bits don't map to Windows DACLs).
@@ -56,10 +55,9 @@ var allowUnsafeSocketOverrideForTest bool
 //     ProgramData cannot silently over-permit (spec 004 REQ-03
 //     through REQ-05).
 //
-// Returns the raw net.Listener; the caller wraps it in the codesign
-// validating listener (a passthrough on Windows — the Windows
-// codesign validator in peerauth_windows.go returns the inner
-// listener verbatim under the initial-cut posture).
+// Returns the raw net.Listener; the caller wraps it with
+// wrapPeerAuthListener, which authenticates every peer process before
+// gRPC sees the connection.
 func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// Refuse an operator override that points the socket at a
 	// pre-existing path outside our dedicated dir. Applying
@@ -201,4 +199,26 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 		)
 	}
 	return nil
+}
+
+// wrapPeerAuthListener authenticates every accepted Windows peer: the
+// process behind the AF_UNIX connection must be an allowed Secure
+// Client GUI executable inside the Cisco Secure Client install
+// directory under a trusted Program Files root, and WinVerifyTrust
+// must accept its embedded Authenticode signature from an allowed
+// signer. The socket DACL admits any authenticated user so the GUI can
+// connect from each interactive session; this check is what limits
+// the stream to the Secure Client GUI. There is no passthrough mode.
+func (s *Server) wrapPeerAuthListener(inner net.Listener) (net.Listener, error) {
+	return newWindowsSecureClientListener(inner,
+		s.allowedWindowsImages,
+		s.allowedWindowsSigners,
+		s.logWindowsReject)
+}
+
+// logWindowsReject logs a Windows peer-auth rejection. The session and
+// executable path identify which process was refused; neither is a
+// secret.
+func (s *Server) logWindowsReject(id windowsPeerIdentity, reason string) {
+	s.opts.Logf("peer rejected: pid=%d session=%d image=%q reason=%s", id.PID, id.SessionID, id.ImagePath, reason)
 }

@@ -1699,6 +1699,22 @@
           "items": {
             "$ref": "#/$defs/boundedString"
           }
+        },
+        "allowed_windows_signers": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "allowed_windows_images": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
         }
       }
     },
