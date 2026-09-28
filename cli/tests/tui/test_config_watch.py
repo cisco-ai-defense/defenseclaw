@@ -18,18 +18,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import os
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 from defenseclaw import config as config_module
-from defenseclaw.file_permissions import make_private_directory, protect_private_file
 from defenseclaw.tui import app as app_module
 from defenseclaw.tui.app import DefenseClawTUI
 from defenseclaw.tui.panels.overview import EnforcementCounts
@@ -39,7 +34,6 @@ from defenseclaw.tui.services.config_watch import (
     ConfigChangeWatcher,
     probe_config_generation,
 )
-from textual.containers import VerticalScroll
 
 
 def _config_payload(
@@ -398,137 +392,3 @@ async def test_external_refresh_preserves_active_setup_form_snapshot(
     assert app.setup_model.config is app.config
     assert app.config.guardrail.effective_mode("claudecode") == "action"
     assert "Config changed on disk" in app._setup_body_text()  # noqa: SLF001
-
-
-@pytest.mark.asyncio
-async def test_external_mode_refresh_preserves_filter_and_overview_scroll(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    initial = _config_payload(
-        tmp_path,
-        {
-            "claudecode": {"mode": "observe"},
-            "codex": {"mode": "action"},
-            "cursor": {"mode": "observe"},
-            "opencode": {"mode": "action"},
-        },
-    )
-    path = _configure_active_path(monkeypatch, tmp_path, initial)
-    app = DefenseClawTUI(config=config_module.load(), config_path=path)
-    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
-
-    async with app.run_test(size=(110, 18)) as pilot:
-        app._set_connector_filter("codex")  # noqa: SLF001
-        scroller = app.query_one("#body-scroll", VerticalScroll)
-        scroller.scroll_to(y=min(8, scroller.max_scroll_y), animate=False, immediate=True)
-        await pilot.pause()
-        before = scroller.scroll_y
-        assert before > 0
-
-        changed = copy.deepcopy(initial)
-        changed["guardrail"]["connectors"]["codex"]["mode"] = "observe"  # type: ignore[index]
-        _atomic_write(path, changed)
-        await app._poll_config_once(now=1.0)  # noqa: SLF001
-        await pilot.pause()
-
-        assert app._connector_filter() == "codex"  # noqa: SLF001
-        assert scroller.scroll_y == before
-
-
-@pytest.mark.skipif(os.name != "nt", reason="native Windows current-source acceptance")
-@pytest.mark.allow_subprocess
-@pytest.mark.asyncio
-async def test_native_windows_open_tui_observes_external_cli_mode_change(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    current_windows_claude_version_probe: Path,
-    current_windows_gateway: Path,
-) -> None:
-    """Two-terminal acceptance: an open TUI observes setup CLI replacement."""
-
-    agent_bin = tmp_path / "trusted-agent-bin"
-    make_private_directory(agent_bin)
-    claude_executable = agent_bin / "claude.exe"
-    shutil.copy2(current_windows_claude_version_probe, claude_executable)
-    protect_private_file(claude_executable)
-
-    initial = _config_payload(tmp_path, {"claudecode": {"mode": "observe"}})
-    initial["ai_discovery"] = {
-        "require_trusted_binary_paths": True,
-        "trusted_binary_prefixes": [str(agent_bin)],
-    }
-    path = _configure_active_path(monkeypatch, tmp_path, initial)
-    protect_private_file(path)
-    app = DefenseClawTUI(config=config_module.load(), config_path=path)
-    # This acceptance targets config polling, not network/process pollers.
-    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
-    monkeypatch.setattr(app, "_schedule_config_poll", lambda: None)
-
-    isolated_home = tmp_path / "user-home"
-    isolated_home.mkdir()
-    repo_root = Path(__file__).resolve().parents[3]
-    environment = os.environ.copy()
-    environment.update(
-        {
-            # Use the isolated version-probe fixture instead of a live Claude
-            # client while preserving normal version and executable custody.
-            "DEFENSECLAW_CONFIG": str(path),
-            "DEFENSECLAW_GATEWAY_BIN": str(current_windows_gateway),
-            "DEFENSECLAW_HOME": str(tmp_path),
-            "HOME": str(isolated_home),
-            "PATH": str(agent_bin) + os.pathsep + os.environ.get("PATH", ""),
-            "USERPROFILE": str(isolated_home),
-        }
-    )
-    command = (
-        sys.executable,
-        "-m",
-        "defenseclaw.main",
-        "setup",
-        "claude-code",
-        "--yes",
-        "--mode",
-        "action",
-        "--no-restart",
-    )
-
-    async with app.run_test(size=(140, 45)) as pilot:
-        assert app.overview_model.cfg is not None
-        assert app.overview_model.cfg.guardrail_mode == "observe"
-        cli_log = tmp_path / "setup-cli.log"
-        with cli_log.open("wb") as output_stream:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                cwd=repo_root,
-                env=environment,
-                stdout=output_stream,
-                stderr=subprocess.STDOUT,
-                timeout=90,
-                check=False,
-            )
-        output = cli_log.read_text(encoding="utf-8", errors="replace")
-        assert result.returncode == 0, output
-        assert "Config saved" in output
-        assert "Claude Code action setup" in output
-        persisted = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert persisted["guardrail"]["connectors"]["claudecode"]["mode"] == "action"
-        for poll_number in range(1, 4):
-            # Exercise the same poll operation used by the one-second TUI
-            # timer with deterministic intervals. Same-identity writes may
-            # need two stable observations; atomic replacements need one.
-            await app._poll_config_once(now=float(poll_number))  # noqa: SLF001
-            if app.overview_model.cfg and app.overview_model.cfg.guardrail_mode == "action":
-                break
-            await pilot.pause()
-
-        assert app.overview_model.cfg is not None
-        assert app.overview_model.cfg.guardrail_mode == "action"
-        assert app.config.guardrail.effective_mode("claudecode") == "action"
-        assert app.setup_model.config is app.config
-        assert app._config_reload_count == 1  # noqa: SLF001

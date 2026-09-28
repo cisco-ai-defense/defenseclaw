@@ -8,14 +8,18 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native Textual SVG snapshot smoke tests for the shell."""
+"""Fake-data DefenseClaw TUI for smoke tests and the defenseclaw-tui render script.
+
+``snapshot_app`` builds the full app with every panel model pre-loaded, so
+nothing reads the real home, gateway or SQLite. ``screen_text`` dumps the
+current screen as plain text, which is what a person sees in the terminal.
+"""
 
 from __future__ import annotations
 
-import html
+import io
 from types import SimpleNamespace
 
-import pytest
 from defenseclaw.config import RegistrySource
 from defenseclaw.models import Event
 from defenseclaw.tui.app import DefenseClawTUI
@@ -36,29 +40,11 @@ from defenseclaw.tui.panels.registries import RegistriesPanelModel
 from defenseclaw.tui.panels.setup import SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolRow, ToolsPanelModel
-from defenseclaw.tui.screens.command_preview import CommandPreviewScreen
 from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
-from defenseclaw.tui.widgets.action_menu import ActionMenuScreen
-
-QA_SIZES = ((80, 24), (120, 40), (180, 50))
-
-TOP_LEVEL_PANELS = (
-    ("overview", None, "Overview"),
-    ("alerts", "2", "Alerts"),
-    ("skills", "3", "Skills"),
-    ("mcps", "4", "MCPs"),
-    ("plugins", "5", "Plugins"),
-    ("inventory", "6", "Inventory"),
-    ("logs", "8", "Logs"),
-    ("audit", "9", "Audit"),
-    ("activity", "a", "Activity"),
-    ("ai", "V", "AI Discovery"),
-    ("registries", None, "Registries"),
-    ("setup", "0", "Setup Wizards"),
-)
+from rich.console import Console
 
 
-def _snapshot_config(tmp_path) -> SimpleNamespace:
+def snapshot_config(tmp_path) -> SimpleNamespace:
     policy_dir = tmp_path / "policies"
     policy_dir.mkdir()
     (policy_dir / "alpha.yaml").write_text("description: alpha policy\n", encoding="utf-8")
@@ -89,8 +75,8 @@ def _snapshot_config(tmp_path) -> SimpleNamespace:
     )
 
 
-def _snapshot_app(tmp_path) -> DefenseClawTUI:
-    config = _snapshot_config(tmp_path)
+def snapshot_app(tmp_path, *, setup_config: object | None = None) -> DefenseClawTUI:
+    config = snapshot_config(tmp_path)
 
     overview = OverviewPanelModel()
     overview.set_health(
@@ -217,7 +203,7 @@ def _snapshot_app(tmp_path) -> DefenseClawTUI:
         ai_discovery_model=ai_discovery,
         registries_model=registries,
         tools_model=tools,
-        setup_model=SetupPanelModel({}),
+        setup_model=SetupPanelModel(setup_config if setup_config is not None else {}),
     )
     app.activity_model.add_entry("doctor")
     app.activity_model.append_output("Checking gateway...")
@@ -225,115 +211,19 @@ def _snapshot_app(tmp_path) -> DefenseClawTUI:
     return app
 
 
-def _assert_svg_snapshot(svg: str, *needles: str) -> None:
-    assert svg.startswith("<svg")
-    assert len(svg) > 1_000
-    normalized = html.unescape(svg).replace("\xa0", " ")
-    for needle in needles:
-        assert needle in normalized
+def screen_text(app: DefenseClawTUI) -> str:
+    """Return the current screen, including modals over it, as plain text."""
 
-
-@pytest.mark.asyncio
-@pytest.mark.tui_snapshot
-@pytest.mark.parametrize("size", QA_SIZES)
-@pytest.mark.parametrize(("panel", "shortcut", "expected"), TOP_LEVEL_PANELS)
-async def test_textual_top_level_panel_exports_svg_snapshot(
-    tmp_path,
-    panel: str,
-    shortcut: str | None,
-    expected: str,
-    size: tuple[int, int],
-) -> None:
-    app = _snapshot_app(tmp_path)
-
-    async with app.run_test(size=size) as pilot:
-        if panel == "registries":
-            app.action_switch_panel("registries")
-        elif shortcut is not None:
-            await pilot.press(shortcut)
-        await pilot.pause()
-        svg = app.export_screenshot()
-
-    assert app.active_panel == panel
-    _assert_svg_snapshot(svg, "DefenseClaw", expected)
-
-
-@pytest.mark.asyncio
-@pytest.mark.tui_snapshot
-async def test_textual_command_preview_modal_exports_svg_snapshot(tmp_path) -> None:
-    app = _snapshot_app(tmp_path)
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press(":")
-        await pilot.press(*"block skill alpha")
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen_stack[-1], CommandPreviewScreen)
-        svg = app.export_screenshot()
-
-    _assert_svg_snapshot(svg, "Confirm Command", "defenseclaw skill block alpha")
-
-
-@pytest.mark.asyncio
-@pytest.mark.tui_snapshot
-async def test_textual_action_menu_exports_svg_snapshot(tmp_path) -> None:
-    app = _snapshot_app(tmp_path)
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("3")
-        await pilot.press("o")
-        await pilot.pause()
-        assert isinstance(app.screen_stack[-1], ActionMenuScreen)
-        svg = app.export_screenshot()
-
-    _assert_svg_snapshot(svg, "Skills Actions", "Scan")
-
-
-@pytest.mark.asyncio
-@pytest.mark.tui_snapshot
-async def test_textual_detail_state_exports_svg_snapshot(tmp_path) -> None:
-    app = _snapshot_app(tmp_path)
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("3")
-        await pilot.press("enter")
-        await pilot.pause()
-        svg = app.export_screenshot()
-
-    assert app.skills_model.detail_open is True
-    # ``_format_skill_detail`` builds the header as
-    # ``[bold #22D3EE]Skill[/] alpha`` and the SVG export captures the
-    # raw markup payload as literal text — checking for ``Skill[/]
-    # alpha`` keeps the assertion exactly aligned with the rendered
-    # detail pane (no colon between "Skill" and the row name).
-    _assert_svg_snapshot(svg, "Skill[/] alpha", "math helper")
-
-
-@pytest.mark.asyncio
-@pytest.mark.tui_snapshot
-async def test_textual_setup_form_exports_svg_snapshot(tmp_path) -> None:
-    app = _snapshot_app(tmp_path)
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")  # wizard list -> goal menu.
-        await pilot.pause()
-        await pilot.press("enter")  # goal menu -> filtered form.
-        await pilot.pause()
-        svg = app.export_screenshot()
-
-    assert app.setup_model.form_active is True
-    _assert_svg_snapshot(svg, "Setup Wizard", "Connector Setup")
-
-
-@pytest.mark.asyncio
-@pytest.mark.tui_snapshot
-async def test_textual_first_run_setup_exports_svg_snapshot() -> None:
-    app = DefenseClawTUI(first_run=True)
-
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        svg = app.export_screenshot()
-
-    assert app.active_panel == "setup"
-    _assert_svg_snapshot(svg, "DefenseClaw first-run setup", "Connector")
+    width, height = app.size
+    console = Console(
+        width=width,
+        height=height,
+        file=io.StringIO(),
+        force_terminal=True,
+        color_system=None,
+        record=True,
+        legacy_windows=False,
+        safe_box=False,
+    )
+    console.print(app.screen._compositor.render_update(full=True, screen_stack=app._background_screens))
+    return console.export_text(styles=False)

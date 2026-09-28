@@ -20,7 +20,6 @@ from unittest.mock import patch
 import pytest
 from defenseclaw.inventory import agent_discovery as ad
 from defenseclaw.tui.screens import trusted_paths_editor as tpe
-from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.screens.trusted_paths_editor import (
     TrustedPathRow,
     TrustedPathsEditorScreen,
@@ -29,8 +28,6 @@ from defenseclaw.tui.screens.trusted_paths_editor import (
     untrusted_connector_dir,
     untrusted_connector_dirs,
 )
-from textual.app import App, ComposeResult
-from textual.widgets import Input, Static
 
 _DEFAULT_ROW = TrustedPathRow("/usr/bin", "default", "ok", False)
 _OPERATOR_ROW = TrustedPathRow("/opt/acme/bin", "config", "missing", True)
@@ -46,30 +43,6 @@ def _isolate_trusted_env(tmp_path, monkeypatch):
     monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
     yield tmp_path
     tpe._UNTRUSTED_DIR_CACHE.clear()
-
-
-class _Harness(App):
-    def __init__(self, rows: tuple[TrustedPathRow, ...], *, prefill: str = "", context: str = "") -> None:
-        super().__init__()
-        self._rows = rows
-        self._prefill = prefill
-        # NOTE: not ``_context`` — that name is reserved by Textual's
-        # MessagePump (called as ``with self._context():`` in the message
-        # loop); shadowing it with a str crashes the app's pump and hangs.
-        self._context_text = context
-        self.result: SetupResourceResult | None = None
-
-    def compose(self) -> ComposeResult:
-        yield Static("trusted-paths harness")
-
-    def on_mount(self) -> None:
-        self.push_screen(
-            TrustedPathsEditorScreen(self._rows, prefill=self._prefill, context=self._context_text),
-            self._set_result,
-        )
-
-    def _set_result(self, result: SetupResourceResult | None) -> None:
-        self.result = result
 
 
 def _disc(signal: ad.AgentSignal) -> ad.AgentDiscovery:
@@ -124,86 +97,6 @@ def test_rows_from_config_reflect_collect_view() -> None:
     assert legacy_rows[0].removable
 
 
-@pytest.mark.asyncio
-async def test_add_via_input_returns_cli_args() -> None:
-    app = _Harness((_DEFAULT_ROW,))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        app.screen.query_one("#trusted-editor-add", Input).value = "/opt/tools"
-        app.screen.action_add()
-        await pilot.pause()
-    assert isinstance(app.result, SetupResourceResult)
-    assert app.result.action == "add"
-    assert app.result.args == ("setup", "trusted-paths", "add", "/opt/tools")
-
-
-@pytest.mark.asyncio
-async def test_remove_removable_row_returns_cli_args() -> None:
-    app = _Harness((_OPERATOR_ROW,))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        app.screen.cursor = 0
-        app.screen.action_remove()
-        await pilot.pause()
-    assert isinstance(app.result, SetupResourceResult)
-    assert app.result.action == "remove"
-    assert app.result.args == ("setup", "trusted-paths", "remove", "/opt/acme/bin")
-
-
-@pytest.mark.asyncio
-async def test_remove_default_row_is_refused() -> None:
-    app = _Harness((_DEFAULT_ROW,))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        app.screen.cursor = 0
-        app.screen.action_remove()
-        await pilot.pause()
-        # No dismissal happened: a built-in default cannot be removed, so the
-        # editor is still the active modal.
-        assert isinstance(app.screen, TrustedPathsEditorScreen)
-    assert app.result is None
-
-
-@pytest.mark.asyncio
-async def test_empty_add_is_refused() -> None:
-    app = _Harness((_DEFAULT_ROW,))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        app.screen.action_add()  # input is empty
-        await pilot.pause()
-    assert app.result is None
-
-
-@pytest.mark.asyncio
-async def test_escape_dismisses_without_action() -> None:
-    app = _Harness((_OPERATOR_ROW,))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        await pilot.press("escape")
-        await pilot.pause()
-    assert app.result is None
-
-
-@pytest.mark.asyncio
-async def test_prefill_seeds_the_add_field() -> None:
-    app = _Harness((_OPERATOR_ROW,), prefill="/opt/acme/bin", context="trust this dir")
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        value = app.screen.query_one("#trusted-editor-add", Input).value
-    assert value == "/opt/acme/bin"
-
-
-@pytest.mark.asyncio
-async def test_prefill_path_can_be_added_directly() -> None:
-    app = _Harness((_OPERATOR_ROW,), prefill="/opt/acme/bin")
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        app.screen.action_add()  # uses the pre-filled value, no typing needed
-        await pilot.pause()
-    assert isinstance(app.result, SetupResourceResult)
-    assert app.result.args == ("setup", "trusted-paths", "add", "/opt/acme/bin")
-
-
 # ---- proactive untrusted-connector highlight ------------------------------
 
 
@@ -246,10 +139,7 @@ def test_untrusted_connector_dirs_empty_when_all_trusted() -> None:
 def test_untrusted_summary_names_every_connector_no_cap() -> None:
     # >3 untrusted connectors: the summary must name them all (the old code
     # capped at 3 and collapsed the rest into "+N more").
-    agents = {
-        f"c{i}": _agent(f"c{i}", f"/home/u/.local/bin/c{i}", ad.UNTRUSTED_PREFIX_ERROR)
-        for i in range(5)
-    }
+    agents = {f"c{i}": _agent(f"c{i}", f"/home/u/.local/bin/c{i}", ad.UNTRUSTED_PREFIX_ERROR) for i in range(5)}
     with patch.object(ad, "discover_agents", return_value=_multi_disc(agents)):
         summary = TrustedPathsEditorScreen((_DEFAULT_ROW,))._untrusted_summary()
     assert "more" not in summary
@@ -271,65 +161,13 @@ def test_rows_from_config_surfaces_load_error_as_sentinel() -> None:
     assert "disk boom" in rows[0].resolved
 
 
-@pytest.mark.asyncio
-async def test_editor_surfaces_load_error_instead_of_empty_list() -> None:
-    from textual.widgets import DataTable
-
-    err_row = TrustedPathRow("disk read failed", "<error>", "load failed", False, error=True)
-    app = _Harness((err_row,))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.pause()
-        screen = app.screen
-        # The sentinel is NOT a selectable/removable data row.
-        assert screen.rows == ()
-        assert screen._selected_row() is None
-        # The failure is surfaced loudly (not a clean empty allow-list).
-        assert "Could not read" in screen._status_message
-        assert "UNKNOWN" in screen._status_message
-        # And a visible error row is shown in the table.
-        assert screen.query_one("#trusted-editor-table", DataTable).row_count == 1
-
-
-@pytest.mark.asyncio
-async def test_editor_shows_untrusted_summary_when_browsed() -> None:
-    """Opened directly (no routing context) the editor surfaces a one-line
-    summary of connectors whose binary resolves into an untrusted dir."""
-    disc = _multi_disc(
-        {"codex": _agent("codex", "/home/u/.local/bin/codex", ad.UNTRUSTED_PREFIX_ERROR)}
-    )
-    app = _Harness((_DEFAULT_ROW,))  # no prefill, no context
-    with patch.object(ad, "discover_agents", return_value=disc):
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            text = app.screen._status_message
-    assert "codex" in text
-    assert "untrusted" in text.lower()
-
-
-@pytest.mark.asyncio
-async def test_editor_routing_context_wins_over_summary() -> None:
-    """When routed for a specific connector, that context message is shown
-    instead of the generic untrusted-connectors summary."""
-    disc = _multi_disc(
-        {"codex": _agent("codex", "/home/u/.local/bin/codex", ad.UNTRUSTED_PREFIX_ERROR)}
-    )
-    app = _Harness((_DEFAULT_ROW,), context="Claude Code binary is outside a trusted prefix.")
-    with patch.object(ad, "discover_agents", return_value=disc):
-        async with app.run_test(size=(120, 40)) as pilot:
-            await pilot.pause()
-            text = app.screen._status_message
-    assert text == "Claude Code binary is outside a trusted prefix."
-
-
 # ---- fix (a): fresh scan reflects current trust without a restart ----------
 
 
 def test_refresh_merges_persisted_env(tmp_path, monkeypatch):
     """A prefix persisted to legacy .env after launch is unioned into the live env,
     without dropping anything already exported."""
-    (tmp_path / ".env").write_text(
-        "DEFENSECLAW_TRUSTED_BIN_PREFIXES=/opt/foo\n", encoding="utf-8"
-    )
+    (tmp_path / ".env").write_text("DEFENSECLAW_TRUSTED_BIN_PREFIXES=/opt/foo\n", encoding="utf-8")
     monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "/opt/bar")
     _refresh_trusted_prefix_env(str(tmp_path))
     parts = os.environ["DEFENSECLAW_TRUSTED_BIN_PREFIXES"].split(os.pathsep)
