@@ -42,9 +42,7 @@ FOOTER_ROWS = 3
 # Panels whose primary content is below the fold at 80x24 today. The owning
 # track removes the entry when it fixes the layout (strict xfail fails loudly
 # once the panel passes).
-KNOWN_BELOW_FOLD = {
-    "setup": "Setup wizard list starts below the fold at 80x24",
-}
+KNOWN_BELOW_FOLD: dict[str, str] = {}
 
 
 def _panel_params() -> list[object]:
