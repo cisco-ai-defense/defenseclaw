@@ -62,11 +62,28 @@ function stubFetch(responses, isToolRequest) {
   return { all, tool };
 }
 
-async function openCodeToolCall(responses, token) {
+// openCodeClient is the SDK client OpenCode hands its plugins, reduced to
+// the TUI toast the bridge shows a block with; failing makes it reject.
+function openCodeClient(failing) {
+  const toasts = [];
+  const client = {
+    tui: {
+      showToast: async (options) => {
+        toasts.push(options);
+        if (failing) throw new Error("fixture: no TUI");
+        return { data: true };
+      },
+    },
+  };
+  return { client, toasts };
+}
+
+async function openCodeToolCall(responses, token, failingToast) {
   setToken(token);
   const seen = stubFetch(responses, (p) => p.hook_event_name === "tool.execute.before");
   const { url, module } = await load();
-  const hooks = await module.DefenseClaw({ directory: "/work/proj" });
+  const { client, toasts } = openCodeClient(failingToast);
+  const hooks = await module.DefenseClaw({ directory: "/work/proj", client });
   await hooks.config({ plugin_origins: [{ spec: url }], mcp: {} });
   let error;
   try {
@@ -74,7 +91,7 @@ async function openCodeToolCall(responses, token) {
   } catch (err) {
     error = err;
   }
-  return { denied: Boolean(error), message: error ? error.message : "", ...seen };
+  return { denied: Boolean(error), message: error ? error.message : "", toasts, ...seen };
 }
 
 async function ampToolCall(responses, token) {
@@ -160,16 +177,32 @@ const scenarios = [
     },
   },
   { name: "block without an event verdict denies", responses: [reply(200, { action: "block", reason: "fixture block" })], denied: true, tool: 1 },
+  {
+    name: "a block still denies when the TUI toast fails",
+    responses: [reply(200, { action: "block", reason: "fixture policy" })],
+    failingToast: true,
+    denied: true,
+    tool: 1,
+  },
   { name: "missing token fails closed before any request", responses: [allow()], token: undefined, denied: true, tool: 0 },
   { name: "malformed token fails closed before any request", responses: [allow()], token: "bad token\nX-Injected: 1", denied: true, tool: 0 },
 ];
 
 for (const scenario of scenarios) {
   const token = "token" in scenario ? scenario.token : TOKEN;
-  const run = await toolCall(scenario.responses, token);
+  const run = await toolCall(scenario.responses, token, scenario.failingToast);
   assert.equal(run.denied, scenario.denied, `${kind}: ${scenario.name}: denied`);
   assert.equal(run.tool.length, scenario.tool, `${kind}: ${scenario.name}: tool requests`);
   if (scenario.denied) assert.match(run.message, /DefenseClaw|fixture/, `${kind}: ${scenario.name}: message`);
+  if (kind === "opencode") {
+    // OpenCode's TUI shows a refused tool as its bare command line, so every
+    // denial is also a toast carrying the reason the model gets.
+    assert.equal(run.toasts.length, scenario.denied ? 1 : 0, `${kind}: ${scenario.name}: toasts`);
+    if (scenario.denied) {
+      assert.equal(run.toasts[0].body.message, run.message, `${kind}: ${scenario.name}: toast message`);
+      assert.equal(run.toasts[0].body.variant, "error", `${kind}: ${scenario.name}: toast variant`);
+    }
+  }
   if (scenario.verify) scenario.verify(run);
 }
 console.log(`${kind} sandbox plugin contract: ${scenarios.length} scenarios passed`);

@@ -241,6 +241,9 @@ replaces that list, so name every harness you want:
   any other plugin or custom tool would load, and refuses `--pure`, which
   loads none. DefenseClaw also reports a sandbox whose hooks go silent while
   the harness is active.
+- **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
+  command line only, so the plugin also shows DefenseClaw's reason in a toast
+  (the model gets the same reason as the tool's error).
 - **Skip-permissions.** On by default (the `open` and `balanced` packs):
   OpenCode starts with `--auto`, which approves every permission OpenCode's
   config does not deny. `--safe`, or the `strict` pack, keeps OpenCode's

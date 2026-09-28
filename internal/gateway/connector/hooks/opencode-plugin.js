@@ -379,7 +379,21 @@ async function defenseclawPostLifecycle(event, cwd) {
   }
 }
 
-export const DefenseClaw = async ({ directory, worktree }) => {
+{{if .Sandbox}}// OpenCode's TUI shows a tool the plugin refused as its bare command line;
+// the thrown reason reaches only the model. A toast shows the user why.
+// Best effort and never awaited: a headless run has no TUI, and a missing
+// client or a failed request never changes the verdict.
+function defenseclawToast(client, reason) {
+  try {
+    const shown = client && client.tui && typeof client.tui.showToast === "function" &&
+      client.tui.showToast({ body: { title: "DefenseClaw blocked this tool call", message: reason, variant: "error", duration: 15000 } });
+    if (shown && typeof shown.catch === "function") shown.catch(() => {});
+  } catch (_) {
+    // No TUI to tell.
+  }
+}
+
+{{end}}export const DefenseClaw = async ({ directory, worktree{{if .Sandbox}}, client{{end}} }) => {
   const cwd = directory || worktree || "";
   return {
     config: async (config) => {
@@ -414,7 +428,8 @@ export const DefenseClaw = async ({ directory, worktree }) => {
         mcpIdentity,
         true,
       );
-      if (verdict && verdict.reason) throw new Error(verdict.reason);
+{{if .Sandbox}}      if (verdict && verdict.reason) defenseclawToast(client, verdict.reason);
+{{end}}      if (verdict && verdict.reason) throw new Error(verdict.reason);
       if (verdict && verdict.mode === "action" && mcpIdentity.status === "ambiguous") {
         throw new Error("DefenseClaw refused an OpenCode tool with ambiguous MCP server identity.");
       }
