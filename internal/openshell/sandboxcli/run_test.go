@@ -169,6 +169,68 @@ func TestRunHarnessExitStatusPropagates(t *testing.T) {
 	}
 }
 
+// TestRunOffersChoicesForAFolderMountedLive pins that on a terminal a run
+// whose folder another sandbox mounts live (here a kept, stopped Codex one)
+// asks instead of failing: a copy by default, deleting that sandbox first,
+// or nothing. Without a terminal the daemon's refusal names the command.
+func TestRunOffersChoicesForAFolderMountedLive(t *testing.T) {
+	setup := func(t *testing.T, input string) *testApp {
+		ta := newTestApp(t, input)
+		sb := sampleSandbox("dc-codex-proj-9z9z")
+		sb.Harness, sb.HarnessName, sb.Phase, sb.Project = "codex", "Codex", "stopped", ta.project
+		ta.daemon.add(sb)
+		ta.daemon.review = sandboxapi.ReviewResponse{Summary: "0 files changed (+0 −0)", Report: &workspace.ReviewReport{}}
+		return ta
+	}
+	creates := func(ta *testApp) []sandboxapi.CreateRequest {
+		var out []sandboxapi.CreateRequest
+		for _, c := range ta.daemon.callsTo("POST", sandboxapi.PathSandboxes) {
+			var req sandboxapi.CreateRequest
+			if err := json.Unmarshal(c.Body, &req); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, req)
+		}
+		return out
+	}
+	t.Run("copy by default", func(t *testing.T) {
+		ta := setup(t, "\n\n")
+		if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
+			t.Fatalf("Run: %v\n%s", err, ta.output())
+		}
+		if got := creates(ta); len(got) != 1 || !got[0].Copy {
+			t.Fatalf("creates = %+v, want one copy-mode create", got)
+		}
+		if out := ta.output(); !strings.Contains(out, "Sandbox dc-codex-proj-9z9z (Codex, stopped) already mounts this folder live") {
+			t.Fatalf("output:\n%s", out)
+		}
+	})
+	t.Run("delete first", func(t *testing.T) {
+		ta := setup(t, "d\ny\n\n")
+		if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
+			t.Fatalf("Run: %v\n%s", err, ta.output())
+		}
+		if n := len(ta.daemon.callsTo("DELETE", sandboxapi.PathSandboxes+"/dc-codex-proj-9z9z")); n != 1 {
+			t.Fatalf("delete calls = %d", n)
+		}
+		if got := creates(ta); len(got) != 1 || got[0].Copy {
+			t.Fatalf("creates = %+v, want one live-mount create", got)
+		}
+	})
+	t.Run("quit", func(t *testing.T) {
+		ta := setup(t, "q\n")
+		if err := ta.Run(context.Background(), RunOptions{Harness: "claude"}); err != nil {
+			t.Fatalf("Run: %v\n%s", err, ta.output())
+		}
+		if got := creates(ta); len(got) != 0 {
+			t.Fatalf("creates = %+v, want none", got)
+		}
+		if out := ta.output(); !strings.Contains(out, "`defenseclaw sandbox delete dc-codex-proj-9z9z` frees the folder") {
+			t.Fatalf("output:\n%s", out)
+		}
+	})
+}
+
 // TestRunSummaryWaitsForLateDenials pins that the session summary counts
 // the denials OpenShell reports a moment after the session ends, so it
 // agrees with a later status.

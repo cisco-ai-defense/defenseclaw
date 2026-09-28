@@ -227,8 +227,9 @@ func TestOneLiveMountPerFolder(t *testing.T) {
 	}
 	for _, project := range []string{e.project, sub} {
 		_, err := e.m.Create(ctx, sandboxapi.CreateRequest{Name: "secondbox", Harness: "claudecode", Project: project})
-		if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Message, "--copy") {
-			t.Fatalf("refusal = %q", apiErr.Message)
+		if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Message, "--copy") ||
+			!strings.Contains(apiErr.Message, "`defenseclaw sandbox delete firstbox`") {
+			t.Fatalf("refusal = %q, want the flag and the exact delete command", apiErr.Message)
 		}
 	}
 	if _, err := e.m.Get(ctx, "secondbox"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {

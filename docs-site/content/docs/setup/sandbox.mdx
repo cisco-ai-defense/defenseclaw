@@ -296,7 +296,10 @@ interactive `run` without `--name` asks whether to resume it. `--new`
 starts a new sandbox instead, but a second sandbox can't mount the folder
 live while the first one exists, even stopped: add `--copy`, or delete the
 old sandbox first. The same applies to a run of another harness in a folder
-a kept sandbox mounts.
+a kept sandbox mounts. In a terminal, `run` names that sandbox and asks
+whether to work on a copy (the default), delete that sandbox first, or quit.
+Without a terminal the refusal names the `defenseclaw sandbox delete`
+command.
 
 ## During the session
 

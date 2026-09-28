@@ -165,8 +165,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if mode == config.OpenShellWorkdirMount {
 		if other := m.sharingMount(b, project, false); other != "" {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
-				"sandbox %s already mounts %s (or a folder inside or around it) live; run this one with --copy, or delete %s first",
-				other, project, other)
+				"sandbox %s already mounts %s (or a folder inside or around it) live, stopped or not, and a folder takes one live mount "+
+					"(each would undo the other's work); run this one with --copy, or delete %s first: `defenseclaw sandbox delete %s`",
+				other, project, other, other)
 		}
 	}
 

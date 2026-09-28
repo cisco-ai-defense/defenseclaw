@@ -203,6 +203,19 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		}
 	}
 
+	// A folder takes one live mount, and the daemon refuses a second (a
+	// kept, stopped sandbox holds it too): on a terminal the user picks
+	// what to do instead of reading the refusal.
+	if !copyMode && a.IO.TTY && !o.Detach {
+		if holder := a.liveMountHolder(ctx, api, project); holder != nil {
+			proceed, useCopy, err := a.resolveLiveMount(ctx, api, project, holder)
+			if err != nil || !proceed {
+				return err
+			}
+			copyMode = useCopy
+		}
+	}
+
 	env = a.withGitIdentity(ctx, project, env)
 	req, llm, err := a.createRequest(spec, project, o, copyMode, env)
 	if err != nil {
@@ -665,6 +678,59 @@ func (a *App) preflightViolations(list []sandboxapi.Violation) (map[string]bool,
 
 func violationKey(v sandboxapi.Violation) string {
 	return v.Key + "\x00" + v.Constraint + "\x00" + v.Attempted
+}
+
+// liveMountHolder returns the sandbox that mounts project (or a folder
+// inside or around it) live, stopped or not: the daemon refuses a second
+// live mount of it (two would each undo the other's work). Nil when none
+// does or the daemon cannot list them (the create then says so itself).
+func (a *App) liveMountHolder(ctx context.Context, api API, project string) *sandboxapi.Sandbox {
+	list, err := api.List(ctx)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
+	for i := range list {
+		sb := list[i]
+		if sb.WorkdirMode != config.OpenShellWorkdirMount || sb.Project == "" || sb.Phase == "deleted" {
+			continue
+		}
+		if workspace.Overlaps(project, sb.Project) {
+			return &sb
+		}
+	}
+	return nil
+}
+
+// resolveLiveMount asks what to do about the sandbox holding the folder's
+// live mount: work on a copy (the default), delete that sandbox first
+// (`sandbox delete` confirms and names what goes), or start nothing.
+func (a *App) resolveLiveMount(ctx context.Context, api API, project string, holder *sandboxapi.Sandbox) (proceed, useCopy bool, err error) {
+	a.note(fmt.Sprintf("Sandbox %s (%s, %s) already mounts this folder live; a folder takes one live mount, since each would undo the other's work.",
+		holder.Name, firstNonEmpty(holder.HarnessName, holder.Harness), holder.Phase))
+	key, err := a.choose("Run this one on a copy, delete "+holder.Name+" first, or quit?", []choice{
+		{Key: "c", Label: "copy"}, {Key: "d", Label: "delete " + holder.Name}, {Key: "q", Label: "quit"},
+	}, "c")
+	if err != nil {
+		return false, false, err
+	}
+	switch key {
+	case "c":
+		a.note("working on a copy (--copy): `" + CommandName + " pull` brings the changes back")
+		return true, true, nil
+	case "d":
+		if err := a.Delete(ctx, DeleteOptions{Names: []string{holder.Name}}); err != nil {
+			return false, false, err
+		}
+		if a.liveMountHolder(ctx, api, project) != nil {
+			a.note("nothing started: " + holder.Name + " still mounts this folder")
+			return false, false, nil
+		}
+		return true, false, nil
+	default:
+		a.note("nothing started; `" + CommandName + " run --copy` works on a copy, `" + CommandName + " delete " + holder.Name + "` frees the folder")
+		return false, false, nil
+	}
 }
 
 // resumable returns this folder's most recent sandbox of the harness.
