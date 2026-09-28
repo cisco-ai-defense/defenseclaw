@@ -18,6 +18,13 @@ package nestguard
 
 import "golang.org/x/sys/unix"
 
+// dirOpenFlags opens a directory on the quarantine path; O_NOFOLLOW makes
+// a symlink fail to open.
+const dirOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// fchmodDir changes the mode of the directory fd refers to.
+func fchmodDir(fd int, mode uint32) error { return unix.Fchmod(fd, mode) }
+
 // renameNoReplace renames from to to inside the directory dirfd, failing
 // with EEXIST when to exists (renameatx_np RENAME_EXCL).
 func renameNoReplace(dirfd int, from, to string) error {

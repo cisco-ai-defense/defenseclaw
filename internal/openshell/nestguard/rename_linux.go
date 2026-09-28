@@ -18,9 +18,22 @@ package nestguard
 
 import (
 	"errors"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
+
+// dirOpenFlags opens a directory on the quarantine path for lookups only
+// (O_PATH), which needs search permission on its parent but no read
+// permission on the directory itself. With O_NOFOLLOW a symlink opens as
+// the link, which O_DIRECTORY and quarantine's type check refuse.
+const dirOpenFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+// fchmodDir changes the mode of the directory fd refers to. fchmod refuses
+// an O_PATH descriptor; its /proc/self/fd link names exactly that inode.
+func fchmodDir(fd int, mode uint32) error {
+	return unix.Fchmodat(unix.AT_FDCWD, "/proc/self/fd/"+strconv.Itoa(fd), mode, 0)
+}
 
 // renameNoReplace renames from to to inside the directory dirfd, failing
 // with EEXIST when to exists. Filesystems without RENAME_NOREPLACE get a

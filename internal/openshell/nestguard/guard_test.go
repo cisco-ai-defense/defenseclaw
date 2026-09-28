@@ -508,6 +508,136 @@ func waitMode(t *testing.T, g *Guard, want Mode) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+// runGuard starts g and stops it when the test ends.
+func runGuard(t *testing.T, g *Guard, mode Mode) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	})
+	waitMode(t, g, mode)
+}
+
+// mkdirMode creates dir with exactly mode and gives it 0755 back at
+// cleanup so the test directory can be removed.
+func mkdirMode(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, mode); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+}
+
+func skipRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root reads and watches every folder")
+	}
+}
+
+// TestEventsWatchFolderCreatedUnreadable: the agent runs as the operator's
+// uid and can create a folder without the read permission a watch needs.
+// When it makes the folder readable later, the guard watches it then and
+// quarantines a .git created inside, although no event came from it
+// before. The poll interval is far away, so the mode change does it.
+func TestEventsWatchFolderCreatedUnreadable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("inotify only")
+	}
+	skipRoot(t)
+	root := realTemp(t)
+	baseline, _ := TakeBaseline(context.Background(), root, 0, noLinks)
+	var c collector
+	g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: ModeEvents, PollInterval: time.Hour, Gitlinks: noLinks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGuard(t, g, ModeEvents)
+
+	dir := filepath.Join(root, "late")
+	mkdirMode(t, dir, 0)
+	time.Sleep(200 * time.Millisecond)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	mkdir(t, filepath.Join(dir, ".git"))
+	got := c.wait(t, 1)
+	if got[0].Dir != "late" || got[0].Quarantined == "" {
+		t.Fatalf("detection = %+v", got[0])
+	}
+}
+
+// TestRepositoryInUnlistableFolder: a folder with search and write but no
+// read permission can be neither listed nor watched, yet host git finds a
+// .git in it by path. The guard looks it up by name, in both modes, and
+// on Linux renames it through the folder as host git would reach it. One
+// that existed before the session is left alone.
+func TestRepositoryInUnlistableFolder(t *testing.T) {
+	skipRoot(t)
+	modes := []Mode{ModePoll}
+	if runtime.GOOS == "linux" {
+		modes = append(modes, ModeEvents)
+	}
+	for _, mode := range modes {
+		t.Run(string(mode), func(t *testing.T) {
+			root := realTemp(t)
+			old := filepath.Join(root, "old")
+			mkdir(t, filepath.Join(old, ".git"))
+			if err := os.Chmod(old, 0o311); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(old, 0o755) })
+			baseline, err := TakeBaseline(context.Background(), root, 0, noLinks)
+			if err != nil || !slices.Equal(baseline.Repos, []string{"old"}) {
+				t.Fatalf("baseline = %+v, %v; want the repository in the unlistable folder", baseline, err)
+			}
+			var c collector
+			g, err := New(Options{Root: root, Baseline: baseline, OnDetect: c.add, Mode: mode, PollInterval: 50 * time.Millisecond, Gitlinks: noLinks})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runGuard(t, g, mode)
+
+			dir := filepath.Join(root, "hidden")
+			mkdirMode(t, dir, 0o300)
+			time.Sleep(100 * time.Millisecond)
+			if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			got := c.wait(t, 1)
+			if got[0].Dir != "hidden" {
+				t.Fatalf("detection = %+v", got[0])
+			}
+			if runtime.GOOS == "linux" {
+				if got[0].Quarantined == "" {
+					t.Fatalf("not quarantined: %+v", got[0])
+				}
+				if _, err := os.Lstat(filepath.Join(dir, ".git")); !os.IsNotExist(err) {
+					t.Fatal("hidden/.git is still in place")
+				}
+				if info, err := os.Lstat(dir); err != nil || info.Mode().Perm() != 0o300 {
+					t.Fatalf("hidden mode = %v, %v; want the agent's 0300 kept", info, err)
+				}
+			}
+			if _, err := os.Lstat(filepath.Join(old, ".git")); err != nil {
+				t.Fatal("the pre-session repository was quarantined")
+			}
+			if n := len(c.list()); n != 1 {
+				t.Fatalf("detections = %+v", c.list())
+			}
+		})
+	}
+}
+
 func TestWatchLimitFallsBackToPolling(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("inotify only")

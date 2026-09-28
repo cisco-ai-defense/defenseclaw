@@ -37,7 +37,9 @@ func supported() bool { return true }
 // agent plants (or swaps in) anywhere on the path makes the quarantine fail
 // instead of renaming something outside dir; the final rename never follows
 // the .git entry itself either. An existing name is never replaced. It
-// returns the name the entry got.
+// returns the name the entry got. Where the platform can (dirOpenFlags),
+// the directories are opened for lookups only, so a folder the agent took
+// read permission from is still traversed as host git traverses it.
 //
 // The sandbox runs as the operator's uid, so the agent can take write
 // permission off dir to make the rename fail: a dir owned by the guard's
@@ -48,7 +50,7 @@ func supported() bool { return true }
 // status last changed before it: the entry existed before the session,
 // which cannot give what it creates or changes an older change time.
 func quarantine(root, dir, name string, keepBefore time.Time) (string, error) {
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(root, dirOpenFlags, 0)
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", root, err)
 	}
@@ -58,13 +60,18 @@ func quarantine(root, dir, name string, keepBefore time.Time) (string, error) {
 				unix.Close(fd)
 				return "", fmt.Errorf("invalid directory %q", dir)
 			}
-			next, err := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			next, err := unix.Openat(fd, part, dirOpenFlags, 0)
 			unix.Close(fd)
 			if err != nil {
 				if errors.Is(err, unix.ENOENT) {
 					return "", fs.ErrNotExist
 				}
 				return "", fmt.Errorf("open %s without following symlinks: %w", dir, err)
+			}
+			var st unix.Stat_t
+			if err := unix.Fstat(next, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+				unix.Close(next)
+				return "", fmt.Errorf("open %s without following symlinks: %s is not a directory", dir, part)
 			}
 			fd = next
 		}
@@ -113,11 +120,11 @@ func renameWritable(dirfd int, from, to string) error {
 		return err
 	}
 	mode := uint32(st.Mode) & 0o7777
-	if mode&0o300 == 0o300 || unix.Fchmod(dirfd, mode|0o300) != nil {
+	if mode&0o300 == 0o300 || fchmodDir(dirfd, mode|0o300) != nil {
 		return err
 	}
 	err = renameNoReplace(dirfd, from, to)
 	// A mode left writable only costs the agent's own restriction.
-	_ = unix.Fchmod(dirfd, mode)
+	_ = fchmodDir(dirfd, mode)
 	return err
 }

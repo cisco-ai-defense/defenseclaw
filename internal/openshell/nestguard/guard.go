@@ -523,6 +523,14 @@ func scan(root, rel string, maxEntries int, skip func(string) bool) ([]string, b
 				return walkErr
 			}
 			if d != nil && d.IsDir() {
+				// A folder that cannot be listed (the agent runs as the
+				// operator's uid and can take read permission away) still
+				// has its .git found by path by host git.
+				if errors.Is(walkErr, fs.ErrPermission) && hasGitEntry(p) {
+					if r, err := filepath.Rel(root, p); err == nil {
+						found = append(found, cleanRel(filepath.ToSlash(r)))
+					}
+				}
 				return fs.SkipDir
 			}
 			return nil
@@ -554,6 +562,24 @@ func scan(root, rel string, maxEntries int, skip func(string) bool) ([]string, b
 	})
 	sort.Strings(found)
 	return found, truncated, err
+}
+
+// hasGitEntry reports whether dir holds a .git entry of any type, looked
+// up by name: dir may lack the read permission a listing needs.
+func hasGitEntry(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, GitEntry))
+	return err == nil
+}
+
+// probe handles the .git entry of dir (absolute), a folder the guard can
+// neither list nor watch.
+func (g *Guard) probe(dir string) {
+	if !hasGitEntry(dir) {
+		return
+	}
+	if rel, err := filepath.Rel(g.opts.Root, dir); err == nil {
+		g.handle(filepath.ToSlash(rel))
+	}
 }
 
 // isGitEntry reports whether the entry at p, named name, is what git finds

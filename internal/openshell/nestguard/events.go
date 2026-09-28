@@ -67,6 +67,14 @@ func (g *Guard) runEvents(ctx context.Context) error {
 		watches++
 		return nil
 	}
+	// unwatched are directories whose watch failed for lack of permission.
+	// The sandbox runs as the operator's uid, so the agent can create a
+	// folder without read permission (inotify needs it) and create .git in
+	// it later, or make it readable first: no event comes from inside such
+	// a folder. Its .git is looked up by name (host git finds it by path
+	// with search permission alone), and its watch is retried when its
+	// mode changes and on every poll interval.
+	unwatched := map[string]bool{}
 	// watchTree adds every directory under dir; it returns errWatchLimit
 	// when the limit is hit.
 	watchTree := func(dir string) error {
@@ -95,11 +103,33 @@ func (g *Guard) runEvents(ctx context.Context) error {
 				if errors.Is(err, errWatchLimit) {
 					return err
 				}
+				if errors.Is(err, fs.ErrPermission) {
+					unwatched[p] = true
+					g.probe(p)
+				}
 				// A directory that vanished or cannot be read: skip it.
 				return fs.SkipDir
 			}
+			delete(unwatched, p)
 			return nil
 		})
+	}
+	// retry watches an unwatched directory again and, once that works,
+	// checks what it holds. It returns errWatchLimit when the limit is hit.
+	retry := func(dir string) error {
+		delete(unwatched, dir)
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			return nil
+		}
+		if err := watchTree(dir); errors.Is(err, errWatchLimit) {
+			return err
+		}
+		if !unwatched[dir] {
+			if rel, err := filepath.Rel(g.opts.Root, dir); err == nil {
+				g.sweep(filepath.ToSlash(rel))
+			}
+		}
+		return nil
 	}
 	if err := watchTree(g.opts.Root); err != nil {
 		if errors.Is(err, errWatchLimit) {
@@ -122,7 +152,9 @@ func (g *Guard) runEvents(ctx context.Context) error {
 
 	var indexTimer *time.Timer
 	indexDue := make(chan struct{}, 1)
+	recheck := time.NewTicker(g.opts.PollInterval)
 	defer func() {
+		recheck.Stop()
 		if indexTimer != nil {
 			indexTimer.Stop()
 		}
@@ -131,6 +163,17 @@ func (g *Guard) runEvents(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-recheck.C:
+			dirs := make([]string, 0, len(unwatched))
+			for dir := range unwatched {
+				dirs = append(dirs, dir)
+			}
+			for _, dir := range dirs {
+				if err := retry(dir); err != nil {
+					g.opts.Logf("nested-repository guard: the file-watch limit was reached; polling instead")
+					return errFallback
+				}
+			}
 		case <-indexDue:
 			g.checkGitlinks(ctx)
 		case err, ok := <-w.Errors:
@@ -146,6 +189,14 @@ func (g *Guard) runEvents(ctx context.Context) error {
 		case ev, ok := <-w.Events:
 			if !ok {
 				return errFallback
+			}
+			if ev.Has(fsnotify.Chmod) && unwatched[ev.Name] {
+				// A folder the guard could not watch changed mode.
+				if err := retry(ev.Name); err != nil {
+					g.opts.Logf("nested-repository guard: the file-watch limit was reached; polling instead")
+					return errFallback
+				}
+				continue
 			}
 			if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Rename) && !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Remove) {
 				continue
