@@ -144,7 +144,8 @@ def _child_owns_ctrl_c() -> Iterator[_HandoverCtrlC]:
         yield handler
     finally:
         handler.at_prompt = False
-        signal.signal(signal.SIGINT, previous)
+        # None: the handler was not installed from Python; Python's own is the closest.
+        signal.signal(signal.SIGINT, previous if previous is not None else signal.default_int_handler)
 
 
 def _drop_pending_input() -> None:
@@ -507,11 +508,17 @@ class SandboxPanelMixin:
         return 0 < width < SANDBOX_BUTTON_BAR_MIN_WIDTH
 
     def on_resize(self, _event: events.Resize) -> None:
-        # The table's columns and the button bar follow the width.
+        # The table's columns and the button bar follow the width, once the
+        # app has taken the new size.
         if getattr(self, "active_panel", "") != "sandboxes" or getattr(self, "help_open", False):
             return
+        self.call_after_refresh(self._render_sandbox_after_resize)  # type: ignore[attr-defined]
+
+    def _render_sandbox_after_resize(self) -> None:
         from textual.css.query import NoMatches
 
+        if getattr(self, "active_panel", "") != "sandboxes":
+            return
         try:
             self._render_chrome()  # type: ignore[attr-defined]
         except NoMatches:

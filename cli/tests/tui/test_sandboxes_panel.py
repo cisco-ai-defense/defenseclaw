@@ -1781,6 +1781,26 @@ async def test_narrow_terminals_drop_the_button_bar(fetch, size, hidden) -> None
         assert "KEYS" in app.hint_text
 
 
+@pytest.mark.asyncio
+async def test_resizing_the_terminal_collapses_and_restores_the_button_bar(fetch) -> None:
+    app = DefenseClawTUI(config=_config())
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.press("7")
+        await app._refresh_sandbox_snapshot(render=True)  # noqa: SLF001
+        await pilot.pause()
+        bar = app.query_one("#sandboxes-controls")
+        assert not bar.has_class("hidden")
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
+        await pilot.pause()
+        assert bar.has_class("hidden")
+        assert "Pack/Profile" not in app._table_columns  # noqa: SLF001
+        await pilot.resize_terminal(120, 30)
+        await pilot.pause()
+        await pilot.pause()
+        assert not bar.has_class("hidden")
+
+
 def test_narrow_asks_keep_what_the_reason_adds() -> None:
     model = SandboxesPanelModel()
     model.set_snapshot(STATUS, [RUNNING], [PRIVATE_ASK, PUBLIC_ASK])
