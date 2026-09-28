@@ -1092,6 +1092,11 @@ func TestBypassArgs(t *testing.T) {
 		{"amp allow all", Amp, []string{"--dangerously-allow-all", "-x", "hi"}, []string{"-x", "hi"}, []string{"--dangerously-allow-all"}},
 		{"cursor force", Cursor, []string{"--force", "-p", "hi"}, []string{"-p", "hi"}, []string{"--force"}},
 		{"kiro trust all", Kiro, []string{"--trust-all-tools", "--trust-tools=fs_read"}, []string{"--trust-tools=fs_read"}, []string{"--trust-all-tools"}},
+		// clap joins boolean short flags (-r, -l, -v, -h); -f, -d and -w
+		// take the rest of the cluster as their value.
+		{"kiro trust all short", Kiro,
+			[]string{"-a", "-va", "-rva", "-av", "-f", "json", "-fa", "-wa", "-v", "--", "-a"},
+			[]string{"-f", "json", "-fa", "-wa", "-v", "--", "-a"}, []string{"-a", "-va", "-rva", "-av"}},
 		{"devin permission mode", Devin,
 			[]string{"--permission-mode", "dangerous", "--permission-mode=autonomous", "--permission-mode", "auto"},
 			[]string{"--permission-mode", "auto"}, []string{"--permission-mode", "dangerous", "--permission-mode=autonomous"}},

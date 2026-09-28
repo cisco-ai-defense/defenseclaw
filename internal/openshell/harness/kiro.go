@@ -79,8 +79,15 @@ readlink -f /usr/local/bin/kiro-cli`,
 			Run:     run + "; " + link,
 		}}, nil
 	},
-	launcher:    kiroLauncher,
-	bypassFlags: []bypassFlag{{name: "--trust-all-tools"}},
+	launcher: kiroLauncher,
+	// kiro-cli-chat chat (clap) takes --trust-all-tools as -a too, also
+	// joined with the boolean short flags -r, -l, -v and -h (-va); -f, -d
+	// and -w take the rest of a cluster as their value. --trust-tools, which
+	// trusts only the tools it names, stays.
+	bypassFlags: []bypassFlag{
+		{name: "--trust-all-tools"},
+		{name: "-a", cluster: clapShortCluster('a', "rlvh")},
+	},
 	launchArgv: func(opts LaunchOptions, cp CredentialProfile) ([]string, error) {
 		argv := []string{KiroLauncherPath}
 		if opts.Mode == Headless {

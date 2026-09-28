@@ -539,6 +539,10 @@ type bypassFlag struct {
 	// inline, for a flag without value, also counts name=<v> when
 	// inline(v) (Go's flag package takes -flag=true for a boolean).
 	inline func(string) bool
+	// cluster, for a short flag of a parser that joins single-letter flags
+	// in one argument (clap: -va is -v -a), reports whether a whole
+	// argument sets it (clapShortCluster).
+	cluster func(string) bool
 }
 
 // names reports whether an argument's name part (before any "=") is f.
@@ -547,6 +551,26 @@ func (f bypassFlag) names(name string) bool {
 		return true
 	}
 	return f.abbrev != "" && len(name) >= len(f.abbrev) && strings.HasPrefix(f.name, name)
+}
+
+// clapShortCluster matches a clap short-flag cluster that sets the flag
+// short: one dash, then short after nothing but the boolean short flags in
+// booleans (a flag that takes a value takes the rest of the cluster as it).
+func clapShortCluster(short byte, booleans string) func(string) bool {
+	return func(arg string) bool {
+		if len(arg) < 2 || arg[0] != '-' || arg[1] == '-' {
+			return false
+		}
+		for i := 1; i < len(arg); i++ {
+			switch c := arg[i]; {
+			case c == short:
+				return true
+			case strings.IndexByte(booleans, c) < 0:
+				return false
+			}
+		}
+		return false
+	}
 }
 
 // goBoolTrue reports whether Go's strconv.ParseBool reads v as true.
@@ -564,11 +588,13 @@ func goBoolTrue(v string) bool {
 // --permission-mode bypassPermissions; Codex's
 // --dangerously-bypass-approvals-and-sandbox, --ask-for-approval never and
 // -c approval_policy="never"; for argparse harnesses (Hermes, OpenHands)
-// every prefix the parser resolves to a bypass flag, and for agy (Go flags)
-// the single-dash and =true forms. Arguments after "--" are never flags. The
-// filter spares the user a confusing refusal; the enforcement is the
-// sandbox's managed configuration, which refuses bypass mode whatever the
-// harness is asked.
+// every prefix the parser resolves to a bypass flag, for agy (Go flags) the
+// single-dash and =true forms, and for Kiro (clap) -a in any short-flag
+// cluster. Arguments after "--" are never flags. The filter spares the user
+// a confusing refusal; the enforcement is the sandbox's managed
+// configuration, which refuses bypass mode whatever the harness is asked; a
+// harness without such a setting (Kiro) keeps a safe run's prompts through
+// this filter alone.
 func (s *Spec) BypassArgs(args []string) (kept, dropped []string) {
 	kept = make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -580,6 +606,10 @@ func (s *Spec) BypassArgs(args []string) (kept, dropped []string) {
 		name, inline, hasInline := strings.Cut(arg, "=")
 		matched := false
 		for _, f := range s.bypassFlags {
+			if f.cluster != nil && f.cluster(arg) {
+				dropped, matched = append(dropped, arg), true
+				break
+			}
 			if !f.names(name) {
 				continue
 			}
