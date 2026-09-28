@@ -469,7 +469,16 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
             )
     if not reload_gateway:
         return
+    _reload_and_report(app, name)
 
+
+def _reload_and_report(app: AppContext, name: str) -> None:
+    """Ask the running gateway to reload its policy and say how that went.
+
+    Shared by ``policy activate`` and ``policy edit``: reloaded → ok;
+    gateway not running → the change is saved for its next start (exit 0);
+    rejected → exit 1 pointing at ``defenseclaw policy validate``.
+    """
     outcome, detail = _reload_gateway_policy(app)
     if outcome == "reloaded":
         ux.ok("Gateway reloaded the policy; it is enforcing it now.")
@@ -841,7 +850,21 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
 
 @policy.group()
 def edit() -> None:
-    """Edit policy sections (guardrail, firewall, scanner, actions)."""
+    """Edit policy sections (guardrail, firewall, scanner, actions).
+
+    Editing the active policy also syncs OPA data.json and, by default, asks
+    the running gateway to reload it (``--no-reload`` to skip). Editing any
+    other policy only saves the draft.
+    """
+
+
+_reload_option = click.option(
+    "--reload/--no-reload",
+    "reload_gateway",
+    default=True,
+    show_default=True,
+    help="When the edited policy is the active one, ask the running gateway to reload it.",
+)
 
 
 @edit.command("actions")
@@ -851,9 +874,10 @@ def edit() -> None:
 @click.option("--file", "file_action", type=click.Choice(FILE_CHOICES), default=None)
 @click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None)
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_actions(app: AppContext, severity: str, runtime: str | None, file_action: str | None,
-                 install: str | None, policy_name: str | None) -> None:
+                 install: str | None, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit severity actions for the global policy."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -875,8 +899,9 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         click.echo("No changes specified.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("scanner")
@@ -889,10 +914,11 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
 @click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None)
 @click.option("--remove", is_flag=True, help="Remove this override (revert to global)")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str | None,
                  file_action: str | None, install: str | None, remove: bool,
-                 policy_name: str | None) -> None:
+                 policy_name: str | None, reload_gateway: bool) -> None:
     """Edit per-scanner-type severity overrides."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -904,8 +930,9 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             del scanner_ovr[severity]
             if not scanner_ovr:
                 del overrides[scanner_type]
-            _save_and_maybe_sync(app, path, data, name)
+            synced = _save_and_maybe_sync(app, path, data, name)
             ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
+            _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
         return
@@ -928,8 +955,9 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("guardrail")
@@ -945,11 +973,16 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
 @click.option("--set-severity-mapping", nargs=2, multiple=True, metavar="CATEGORY SEVERITY",
               help="Set severity mapping (e.g. --set-severity-mapping injection CRITICAL)")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold: int | None,
                    cisco_trust_level: str | None, add_pattern: tuple, remove_pattern: tuple,
-                   set_severity_mapping: tuple, policy_name: str | None) -> None:
-    """Edit guardrail thresholds, patterns, and severity mappings."""
+                   set_severity_mapping: tuple, policy_name: str | None, reload_gateway: bool) -> None:
+    """Edit guardrail thresholds, patterns, and severity mappings.
+
+    Thresholds are severity ranks (4=CRITICAL, 3=HIGH, 2=MEDIUM, 1=LOW) and
+    apply to every connector that uses this policy.
+    """
     path, data, name = _resolve_editable_policy(app, policy_name)
 
     guardrail = data.setdefault("guardrail", {})
@@ -991,8 +1024,9 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         click.echo("No changes specified.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Guardrail updated: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("firewall")
@@ -1004,10 +1038,11 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 @click.option("--add-port", multiple=True, type=int, help="Add an allowed port")
 @click.option("--remove-port", multiple=True, type=int, help="Remove an allowed port")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple,
                   remove_domain: tuple, add_blocked: tuple, remove_blocked: tuple,
-                  add_port: tuple, remove_port: tuple, policy_name: str | None) -> None:
+                  add_port: tuple, remove_port: tuple, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit egress firewall rules (domains, ports, blocked destinations)."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -1052,8 +1087,9 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         click.echo("No changes specified.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Firewall updated: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 # ---------------------------------------------------------------------------
@@ -1210,7 +1246,7 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     return path, data, name
 
 
-def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> None:
+def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> bool:
     """Persist the edited policy YAML, syncing the live OPA data.json only
     when the edited policy is the active one (OTHER-2).
 
@@ -1218,16 +1254,24 @@ def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> N
     data.json nor silently stamp the draft as active (a "tweak a draft"
     action becoming a live policy swap). When the edited policy isn't
     active we save the YAML and tell the operator how to apply it.
+    Returns True when the live (active) copy was synced.
     """
     _save_policy(path, data)
     active = _get_active_policy_name(app)
     if active is not None and name == active:
         _sync_opa_data(app, data)
-    else:
-        click.echo(
-            f"  {ux.dim('Saved draft. Activate with:')} "
-            f"defenseclaw policy activate {name}"
-        )
+        return True
+    click.echo(
+        f"  {ux.dim('Saved draft. Activate with:')} "
+        f"defenseclaw policy activate {name}"
+    )
+    return False
+
+
+def _reload_after_edit(app: AppContext, name: str, *, synced: bool, reload_gateway: bool) -> None:
+    """After editing the active policy, reload it like ``policy activate``."""
+    if synced and reload_gateway:
+        _reload_and_report(app, name)
 
 
 def _opa_runtime_action(runtime: str) -> str:
