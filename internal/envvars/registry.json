@@ -1530,6 +1530,25 @@
       "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
     },
     {
+      "name": "DEFENSECLAW_GUARD_CAUSE",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: why the foreign-hook check gave no decision (its exit status, no answer, or an answer DefenseClaw could not read), named in the block message.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
       "name": "DEFENSECLAW_GUARD_EVENT",
       "category": "hook_internal",
       "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the Hermes event name read from the hook payload, which selects whether the foreign-hook check runs.",
@@ -1590,6 +1609,44 @@
       "name": "DEFENSECLAW_GUARD_RESULT",
       "category": "hook_internal",
       "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the JSON answer of defenseclaw-hook --foreign-hook-check; only an explicit allow answer (deny false) continues to the gateway.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_SESSION",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the Hermes session id read from the hook payload, sent with the block to the gateway's foreign-hook session route when the check gave no decision.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_STATUS",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the exit status of defenseclaw-hook --foreign-hook-check, named in the block message when the check gave no decision.",
       "default": "unset",
       "accepted_values": [
         "set by the script"
