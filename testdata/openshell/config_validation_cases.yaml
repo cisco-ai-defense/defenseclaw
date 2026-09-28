@@ -1,8 +1,9 @@
-# Shared openshell config validation corpus. The Go loader (schema +
-# Config.ValidateOpenShell, internal/config/openshell_parity_test.go) and the
-# Python writer (schema + defenseclaw.openshell_validation,
-# cli/tests/test_config_openshell.py) must agree on every case, so Python can
-# never save a section the gateway refuses to load.
+# Shared openshell config validation corpus. The Go daemon loader
+# (LoadRuntimeV8File: schema + Config.ValidateOpenShell,
+# internal/config/openshell_parity_test.go) and the Python writer (schema +
+# defenseclaw.openshell_validation, cli/tests/test_config_openshell.py) must
+# agree on every case, so Python can never save a section the gateway refuses
+# to load. Keep cases independent of the host OS: both suites run on Windows.
 schema_version: 1
 cases:
   - name: absent-section

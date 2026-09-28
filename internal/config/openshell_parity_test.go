@@ -26,6 +26,11 @@ import (
 
 // TestOpenShellSharedValidationCorpus loads every case of the corpus the
 // Python writer is also tested against (cli/tests/test_config_openshell.py).
+// Go's verdict is the daemon's loader, LoadRuntimeV8File (the v8 schema, the
+// observability compiler and ValidateOpenShell): LoadFromFile skips the
+// schema, so it alone would hide a schema value Python accepts and the daemon
+// refuses. A valid case must also load through LoadFromFile, which the Go
+// CLI commands use.
 func TestOpenShellSharedValidationCorpus(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "openshell", "config_validation_cases.yaml"))
 	if err != nil {
@@ -57,15 +62,18 @@ func TestOpenShellSharedValidationCorpus(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.Source+"data_dir: "+dir+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := LoadFromFile(path)
+			_, err := LoadRuntimeV8File(path)
 			if tc.Valid && err != nil {
-				t.Fatalf("Go rejected a shared valid case: %v", err)
+				t.Fatalf("the daemon's loader rejected a shared valid case: %v", err)
 			}
 			if !tc.Valid && err == nil {
-				t.Fatal("Go accepted a shared invalid case")
+				t.Fatal("the daemon's loader accepted a shared invalid case")
 			}
 			if err != nil {
 				t.Logf("rejected: %v", err)
+			}
+			if _, legacyErr := LoadFromFile(path); tc.Valid && legacyErr != nil {
+				t.Fatalf("LoadFromFile rejected a shared valid case: %v", legacyErr)
 			}
 		})
 	}
