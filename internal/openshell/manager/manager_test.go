@@ -712,7 +712,7 @@ func TestUptimeSurvivesADaemonRestart(t *testing.T) {
 	e.run()
 	eventually(t, "the adopted sandbox is ready", func() bool {
 		sb, err := e.m.Get(context.Background(), "uptimebox")
-		return err == nil && sb.Phase == "ready"
+		return err == nil && sb.Phase == "ready" && !sb.StartedAt.IsZero()
 	})
 	sb, _ := e.m.Get(context.Background(), "uptimebox")
 	if sb.UptimeSeconds < 2 || !sb.StartedAt.Equal(recs[0].ReadyAt) {
