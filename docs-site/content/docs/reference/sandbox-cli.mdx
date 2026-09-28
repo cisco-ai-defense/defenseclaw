@@ -61,9 +61,14 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   return the exit status of the harness, and `exec` that of its command
   (`connect --shell` exits `0` when the shell ends). When the harness exits
   `0` but not one of the session's hooks reached DefenseClaw, so that every
-  tool call was blocked, `run` and `connect` exit `69`. `logs` does the same when it reports a finished detached run none of
-  whose hooks reached DefenseClaw. An interrupted command returns `130`, and
-  an unsupported platform or setup returns `3`.
+  tool call was blocked, `run` and `connect` exit `69`. A harness that sends
+  its first hook only with your first prompt (Kiro CLI, Hermes Agent,
+  Antigravity, OpenHands, OmniGent, GitHub Copilot CLI) and was never
+  prompted is not counted, unless the daemon saw it work without hooks.
+  `logs` does the same when it reports a finished detached run none of
+  whose hooks reached DefenseClaw. An interrupted command returns `130`
+  (Ctrl-C at the end-of-session question too), and an unsupported platform
+  or setup returns `3`.
 
 | Command | What it does |
 | --- | --- |
@@ -81,7 +86,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | [`sandbox activity`](#sandbox-activity) | The live activity feed. |
 | [`sandbox approvals`](#sandbox-approvals), [`approve`](#sandbox-approve), [`reject`](#sandbox-reject) | The asks waiting for you, and your answers. |
 | [`sandbox unblock`](#sandbox-unblock) | Lift an egress block. |
-| [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its snapshot. |
+| [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its undo point. |
 | [`sandbox pull`](#sandbox-pull) | Bring a copy-mode sandbox's work back. |
 | [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, and edit the sandbox policy. |
 | [`sandbox pack`](#sandbox-pack) | List, show, and validate policy packs. |
@@ -305,37 +310,77 @@ its work back with `pull`. Skip-permissions mode is on by default, and
 `--safe` keeps the harness's own prompts. The harness gets your terminal.
 Arguments after `--` go to the harness.
 
-While the harness runs, each ask (a port on your machine, a private address,
-a destination the profile does not list) is announced in the terminal with
-the `sandbox approve` command that answers it from another terminal.
+While the harness runs, the session announces what can't wait: each ask (a
+port on your machine, a private address, a destination the profile does not
+list) with its destination and the `sandbox approve` command that answers it
+from another terminal (or `defenseclaw tui`, key `7`, then `t` for the Asks
+view); a destination DefenseClaw blocked, with the `sandbox unblock` command
+that lifts the block; a finding such as an alert on a tool call or hook
+tamper; a quarantined nested repository; and a DefenseClaw daemon that
+does not answer (the hooks fail closed until it is back). The harness draws
+its own screen, so these notices go to the terminal's title and, where the
+terminal has them, a desktop notification (an ask also rings the bell)
+instead of lines written over it. The end-of-session summary repeats them.
+Without a terminal (`--prompt`), they are lines on standard error. A
+harness that sends its first hook only with your first prompt is not
+warned about while it waits for one.
 
 When the harness exits (Ctrl-C, a closed terminal window or a `kill` of the
 CLI end the harness, not the session), the sandbox the session started is
 stopped first, so nothing it left running changes the folder after the
-review. You then get a summary line: tool calls and blocks, sites contacted
-and blocked, and files changed. Changes that can run code on your machine
+review. If the sandbox was stopped, undone or deleted from elsewhere (another
+terminal, the TUI), which ends the harness, the summary starts by saying so.
+You then get a summary line: tool calls and blocks (the blocking rule's
+title and ID), new sites contacted and requests blocked, and files changed,
+followed by the session's notices. Changes that can run code on your machine
 are called out, and asks still waiting are named. For a mounted folder you
-then keep the changes, undo them, or see the diff first
-(`openshell.workdir.on_exit` can decide for you). Otherwise, without a
-terminal or with `--yes`, a mounted folder keeps them. When the review
-fails, you are still asked, and `--rm` keeps the undo snapshot.
+then keep the changes, undo them, or see the diff first (a letter, then
+Enter; a long diff opens in `$PAGER`, by default `less`), and a kept change
+is confirmed (`openshell.workdir.on_exit` can decide for you). Ctrl-C at
+that question decides nothing: the changes stay, the undo point is kept for
+`undo`, the sandbox is stopped and kept, and the command exits `130`.
+Otherwise, without a terminal or with `--yes`, a mounted folder keeps them.
+When the review fails, you are still asked, and `--rm` keeps the undo point.
 In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
 patch, or skip, which leaves them in the sandbox for `pull`. Without a
 terminal, or with `--yes`, copy mode skips: nothing is applied. The sandbox is
 then stopped and kept for `connect`, unless you passed `--rm`. In copy mode
 `--rm` is not honored while changes are left in the sandbox (you skipped,
 declined changes that can run code on your machine, or the pull or apply
-failed), so they aren't lost.
+failed), so they aren't lost. A pull that fails because the disk is full
+says so.
+
+A kept sandbox's resume line is followed, for Claude Code, Codex, OpenCode
+and GitHub Copilot CLI, by the command that continues the same conversation
+inside the sandbox, for example
+`defenseclaw sandbox connect myapp-7f3a -- --continue` (Codex:
+`-- resume --last`). A plain `connect` starts a new conversation. The
+`claude --resume <id>` or `codex resume <id>` line the harness itself prints
+runs it on this machine, outside the sandbox, unless the shell wrapper is on
+(`sandbox enable`), which sends it into the folder's sandbox.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
 another one instead. A resumed sandbox keeps the settings it was created
 with, so when you pass flags only a new sandbox takes (`--safe`, `--pack`,
-`--credential`, `--env` and the like), the offer names them and defaults
-to no. Only one sandbox can mount a folder live, so while
-any sandbox that mounts the folder exists (even stopped), a new live run
-there is refused: use `--copy`, or delete the other sandbox first. Inside a sandbox, `sandbox run <harness>` runs the
+`--credential`, `--env` and the like) and the sandbox doesn't already have
+them, the offer names them and defaults to no. Typing the run's own command
+again is a plain resume. A sandbox the current policy would not start (a
+live mount your organization now runs on a copy, a harness it no longer
+allows) is not offered: `run` names it and the `sandbox delete` command,
+and `status` and `connect` say the same. Only one sandbox can mount a
+folder live, so while any sandbox that mounts the folder exists (even
+stopped), a new live run there is refused. In a terminal, `run` names that
+sandbox, its phase and the `sandbox connect` and `sandbox delete` commands,
+then asks whether to work on a copy (the default), delete it first, or quit;
+without a terminal, use `--copy`, or delete the other sandbox first. Inside a sandbox, `sandbox run <harness>` runs the
 harness directly.
+
+`run` remembers, for the sandbox it created, the harness options after
+`--` (not a prompt), the `--credential` names and hosts, the `--env` names
+and the banner's model line; secret values are never kept. `connect`, and a
+shell wrapper's resume, pass those options again before any new ones, and
+show the same Model and Secret lines as the run.
 
 ```bash
 defenseclaw sandbox run claude
@@ -361,21 +406,43 @@ A few rules the flags follow:
   gives the harness a placeholder that works only against the provider's
   hosts. With `--llm none`, or when nothing is found, you log in inside the
   sandbox, which stores a real token there that the agent can read. A Claude
-  subscription can instead run `claude setup-token` on this machine and
-  export the token it prints as `CLAUDE_CODE_OAUTH_TOKEN`.
+  subscription can instead run `claude setup-token` on this machine (with
+  the shell wrapper on, `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`) and
+  export the token it prints as `CLAUDE_CODE_OAUTH_TOKEN`; the banner
+  suggests it only when Claude Code is installed here.
 - `--credential NAME=host[:port]` gives the sandbox a placeholder in `$NAME`
   that OpenShell swaps for your value only on requests to that host (port 443
   unless you give one). `--github-write` does the same for your `GH_TOKEN` or
   `GITHUB_TOKEN` and `api.github.com`: the placeholder works there with
   everything the token may do, in any repository it reaches, and `git push`
-  over HTTPS (to `github.com`) is not authenticated.
+  over HTTPS (to `github.com`) is not authenticated. A binding of the
+  harness's model key is the run's model credential, as the banner's Model
+  line says.
+- `--env KEY=VALUE` is for non-secret settings: the sandbox holds the value
+  in plain text, which the agent can read. A name that looks like a secret
+  (`KIRO_API_KEY`, `*_TOKEN`, `*_PASSWORD`) gets a warning; bind a key with
+  `--credential NAME=HOST` instead, so the sandbox sees only a placeholder.
+- Hermes Agent's managed `defenseclaw` provider reads an OpenAI-compatible
+  endpoint from `HERMES_DEFENSECLAW_BASE_URL` and its key from
+  `HERMES_DEFENSECLAW_API_KEY`: for your own endpoint, run
+  `defenseclaw sandbox run hermes --llm none --credential HERMES_DEFENSECLAW_API_KEY=HOST[:PORT] --env HERMES_DEFENSECLAW_BASE_URL=https://HOST/v1 -- --provider defenseclaw -m MODEL`.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
   [sandbox policy](/docs/setup/sandbox-policy). An organization limit can
-  clamp or refuse them, and `sandbox policy explain` shows the outcome
-  before you run.
+  refuse them ("blocked by your organization's DefenseClaw policy") or
+  lower them ("limited by …; running with X instead of Y"), and
+  `sandbox policy explain` shows the outcome before you run. A flag the
+  organization lowers, `--cpu` and `--memory` included, is confirmed before
+  anything is created; answering no creates nothing. When the organization
+  puts the folder on a copy (`openshell.admin.require_copy_for`, or a
+  required pack that works on copies), `run` says so before it copies.
 - In a safe run (`--safe`, or a policy that keeps the prompts), harness
-  arguments that would turn the prompts off are dropped with a warning.
+  arguments that would turn the prompts off are dropped with a warning that
+  names the organization when the policy is its. OmniGent has no
+  skip-permissions switch: its banner shows that its approvals come from its
+  own policies, DefenseClaw's included.
+- A folder that can't be mounted live (a linked git worktree, a git
+  directory outside it) runs on a copy, with one line saying why.
 
 {/* AUTOGEN-BEGIN: sandbox-flags run */}
 | Flag | Takes | Default | Description |
@@ -409,16 +476,21 @@ A few rules the flags follow:
 ### `sandbox connect`
 
 Resumes a sandbox: it starts the sandbox if it is stopped, then attaches the
-harness to your terminal, or a shell with `--shell`. A harness session ends
-the same way as a `run` session. A `--shell` session just returns when the
-shell exits, with status `0`: there is no end-of-session summary or review,
-the sandbox keeps running, and `--rm` doesn't apply. Needs a terminal,
-except with `--prompt TEXT` (or the harness's own print flag after `--`),
-which runs one prompt headless. A session stops the sandbox at its end only
-when it started it, and leaves one whose detached run is still going running.
+harness to your terminal, or a login shell in the project folder with
+`--shell`. The harness gets the options its `run` was given after `--`
+first, then the ones you pass now, and the banner shows the run's Model and
+Secret lines. Both kinds of session end the same way as a `run` session,
+with the summary and the keep-or-undo question (a `--shell` session exits
+`0`). Needs a terminal, except with `--prompt TEXT` (or the harness's own
+print flag after `--`), which runs one prompt headless. A session stops the
+sandbox at its end only when it started it, and leaves one whose detached
+run is still going running. To continue the harness's last conversation,
+pass its own flag: `-- --continue` for Claude Code, `-- resume --last` for
+Codex.
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a
+defenseclaw sandbox connect myapp-7f3a -- --continue
 defenseclaw sandbox connect fix-tests --refresh -- --model sonnet
 defenseclaw sandbox connect myapp-7f3a --shell
 ```
@@ -475,7 +547,10 @@ defenseclaw sandbox logs fix-tests --lines 50
 ### `sandbox list`
 
 Lists this DefenseClaw's sandboxes with their harness, phase, workspace mode,
-profile, uptime, hook traffic, and project folder.
+profile, uptime, hook traffic, and project folder. The HOOKS column reads
+`tamper!` once a tool call ran without a DefenseClaw verdict, `unreachable!`
+while the hooks do not reach DefenseClaw, and `silent!` while the harness
+works without hook traffic.
 
 ```bash
 defenseclaw sandbox list
@@ -493,9 +568,11 @@ Without a name, shows the sandbox subsystem: whether it is on and reachable,
 the OpenShell gateway, the listener addresses, the default pack and profile,
 the organization policy, and counts. With a name, shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
-policy, hook tamper tier, hook traffic and the last blocked tool call, egress
-totals, credential endpoints, the undo snapshot, waiting asks, nested
-repositories, and warnings.
+policy, hook tamper tier, hook traffic and the last blocked tool call, the
+tool calls that ran without a DefenseClaw verdict (hook tamper), egress
+totals, credential endpoints, the undo point, waiting asks, nested
+repositories, and warnings, including a stopped sandbox the current policy
+would not start.
 
 ```bash
 defenseclaw sandbox status
@@ -536,8 +613,9 @@ kept at the end of a session ("Keep changes?", `--yes` or `on_exit: keep`)
 count as accepted: the next `start` or `connect` takes a fresh snapshot.
 `--new-snapshot` accepts the changes and takes a fresh snapshot;
 `--no-snapshot` always keeps the old one. `start` says which undo point
-applies. A sandbox that is already running is left as it is. Attach to it
-with `connect`.
+applies, and when it kept the old one, that stopping the sandbox and
+starting it with `--new-snapshot` accepts the changes instead. A sandbox
+that is already running is left as it is. Attach to it with `connect`.
 
 ```bash
 defenseclaw sandbox start myapp-7f3a
@@ -553,10 +631,12 @@ defenseclaw sandbox start myapp-7f3a
 ### `sandbox delete`
 
 Deletes sandboxes together with their OpenShell providers and credentials,
-and their undo snapshot unless you pass `--keep-snapshot`. Asks once per
+and their undo point (snapshot) unless you pass `--keep-snapshot`. Asks once per
 sandbox unless you pass `--yes`. A copy-mode sandbox holding work that was
 never pulled back (or a pull never applied) is named in the question, which
-then defaults to no; `teardown` lists such sandboxes before it asks.
+then defaults to no; `teardown` lists such sandboxes before it asks. A
+stopped copy-mode sandbox whose last session found nothing to bring back is
+not warned about.
 
 ```bash
 defenseclaw sandbox delete myapp-7f3a
@@ -712,10 +792,12 @@ defenseclaw sandbox review myapp-7f3a --diff
 
 ### `sandbox undo`
 
-Restores a mounted project to its pre-session snapshot. It shows a preview
-first, then asks. The sandbox is stopped before the restore, and `--restart`
-starts it again afterwards. Branches and tags the session moved are put back
-too, unless you pass `--keep-refs`.
+Restores a mounted project to its undo point (the snapshot a session
+started from). It shows a preview first, then asks. The sandbox is stopped
+before the restore, and `--restart` starts it again afterwards. Branches and
+tags the session moved are put back too, unless you pass `--keep-refs`. The
+session's own state is kept in a commit, and the command `undo` prints
+(`git -C FOLDER checkout COMMIT -- .`) brings its files back.
 
 ```bash
 defenseclaw sandbox undo myapp-7f3a --preview
