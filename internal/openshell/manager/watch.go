@@ -215,6 +215,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// triage's rejection of its proposal explains it once, and it is no
 		// sign of work (the Codex TUI makes it at start, before any prompt).
 		fetch := r.Denied() && harnessFetchDenial(harnessName, r, host)
+		// A lookup of the sandbox's own host name reaches nothing either
+		// (ownHostName): audited, but no blocked site and no feed line.
+		quiet := fetch || (r.Denied() && ownHostName(host))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
 			m.markWork(b, at, ofHarness)
@@ -231,15 +234,17 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
-			if !fetch {
+			if !quiet {
 				m.mu.Lock()
 				b.blocked++
 				m.mu.Unlock()
 			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
-			// on the stream.
-			m.scheduleTriage(b)
+			// on the stream. A single-label name draws none.
+			if fetch || !quiet {
+				m.scheduleTriage(b)
+			}
 		} else {
 			ev.DecisionCode = "SANDBOX_EGRESS_ALLOWED"
 		}
@@ -247,7 +252,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 			ev.Scheme = schemeOf(r.URL)
 		}
 		_ = m.tel.RecordSandboxEgress(ctx, ev)
-		if r.Denied() && !fetch {
+		if r.Denied() && !quiet {
 			m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
 				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)"})
 		}
@@ -272,6 +277,24 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 }
 
 const openshellHostAlias = "host.openshell.internal"
+
+// ownHostName reports the host name Docker gives a sandbox's container,
+// the first 12 hex digits of its ID, which is the workload's own name.
+// Tools look it up to find their own address: git does when it has no
+// identity, to make up an e-mail address. OpenShell's DNS refuses it like
+// every single-label name, and nothing is reached by it, so its refusal is
+// no blocked site.
+func ownHostName(host string) bool {
+	if len(host) != 12 {
+		return false
+	}
+	for i := 0; i < len(host); i++ {
+		if c := host[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 // hostAliasEvent handles OpenShell's record of a connection to the host.
 // Relays to DefenseClaw's own listeners are reported by those listeners,

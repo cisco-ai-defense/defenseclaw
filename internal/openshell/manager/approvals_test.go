@@ -209,6 +209,57 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 	eventually(t, "the agent's approval", func() bool { return chunkStatus(e, sb.Name, curl) == "approved" })
 }
 
+// TestOwnHostNameLookupIsNoBlockedSite pins that OpenShell's refusal of a
+// lookup of the sandbox's own container host name (git's, to make up an
+// address) is audited but neither counted as a blocked site nor shown on
+// the feed, while a refused single-label name of another shape still is.
+func TestOwnHostNameLookupIsNoBlockedSite(t *testing.T) {
+	e := newEnv(t, nil)
+	e.run()
+	sb := e.create(sandboxapi.CreateRequest{Name: "hostnamebox"})
+	e.watch.waitStarted(t, sb.Name)
+	feed := func() []sandboxapi.ActivityEvent {
+		var out []sandboxapi.ActivityEvent
+		for _, ev := range e.m.ActivitySince(0, sb.Name) {
+			if ev.Kind == sandboxapi.ActivityEgressBlocked {
+				out = append(out, ev)
+			}
+		}
+		return out
+	}
+	push := func(line string) {
+		t.Helper()
+		rec, err := ocsf.Parse(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.m.ocsfEvent(context.Background(), e.m.boxes[sb.Name], rec, time.Now())
+	}
+	push("NET:REFUSE [MED] DENIED abf22769329d [reason:policy_dns_ineligible]")
+	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 0 {
+		t.Fatalf("the host name lookup counted as %d blocked sites", got.Egress.Blocked)
+	}
+	if got := feed(); len(got) != 0 {
+		t.Fatalf("the host name lookup is on the feed: %+v", got)
+	}
+	var audited bool
+	e.tel.mu.Lock()
+	for _, ev := range e.tel.egress {
+		audited = audited || (ev.Host == "abf22769329d" && ev.Blocked)
+	}
+	e.tel.mu.Unlock()
+	if !audited {
+		t.Fatal("the host name lookup was not audited")
+	}
+	push("NET:REFUSE [MED] DENIED jenkins [reason:policy_dns_ineligible]")
+	if got, _ := e.m.Get(context.Background(), sb.Name); got.Egress.Blocked != 1 {
+		t.Fatalf("another single-label name counted as %d blocked sites, want 1", got.Egress.Blocked)
+	}
+	if got := feed(); len(got) != 1 || got[0].Host != "jenkins" {
+		t.Fatalf("feed = %+v, want the other name", got)
+	}
+}
+
 func TestApprovalRejectAlwaysPersists(t *testing.T) {
 	e := newEnv(t, func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
 	e.run()

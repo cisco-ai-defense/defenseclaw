@@ -172,6 +172,15 @@ The harness spec builds the environment passed to `openshell sandbox create
   sandbox. The ID is also meant to tell a nested DefenseClaw launch that it
   already runs sandboxed.
 - The connector's startup variables (see [overlay images](#overlay-images)).
+- `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and
+  `GIT_COMMITTER_EMAIL` carry the identity the host's git uses for the
+  project (`user.name` and `user.email`, the repository's before the
+  user's), read by `sandbox run` (`sandboxcli.withGitIdentity`). The
+  sandbox has none of the user's git configuration, so without them its git
+  refuses to commit and looks up the container's host name to make up an
+  address. `--env` overrides them. OpenShell's refusal of a lookup of the
+  container's own host name (Docker's 12-hex-digit default) is audited but is
+  neither a blocked site nor a feed line.
 
 One shell fragment (`egressEnvScript` in
 `internal/openshell/harness/shellenv.go`) exports `HTTPS_PROXY`,

@@ -137,6 +137,10 @@ type App struct {
 	Gateway    GatewayService
 	Installer  func(consent func(*openshell.InstallPlan) (bool, error)) Installer
 	OpenShell  func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
+	// GitConfig is the value of a git configuration key as the host's git
+	// reads it in dir (the repository's, the user's and the system's), ""
+	// when unset.
+	GitConfig func(ctx context.Context, dir, key string) string
 
 	once   sync.Once
 	reader *bufio.Reader
@@ -253,6 +257,9 @@ func (a *App) defaults() {
 		}
 		if a.HostDoctor == nil {
 			a.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport { return d.Run(ctx) }
+		}
+		if a.GitConfig == nil {
+			a.GitConfig = a.hostGitConfig
 		}
 		a.reader = bufio.NewReader(a.IO.In)
 	})

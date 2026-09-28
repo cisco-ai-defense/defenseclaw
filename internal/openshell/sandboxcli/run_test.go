@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -164,6 +165,49 @@ func TestRunHarnessExitStatusPropagates(t *testing.T) {
 	var exit *ExitError
 	if !errors.As(err, &exit) || exit.Code != 3 {
 		t.Fatalf("Run = %v, want exit status 3", err)
+	}
+}
+
+// TestRunCarriesTheGitIdentity pins that the sandbox's git gets the
+// identity the host's git uses for the project, so commits work and git
+// does not look up the sandbox's host name for an address. --env wins, and
+// a value no environment variable can carry is dropped.
+func TestRunCarriesTheGitIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config map[string]string
+		env    []string
+		want   map[string]string
+	}{
+		{"the project's identity", map[string]string{"user.name": "Dana Dev", "user.email": "dana@example.org"}, nil,
+			map[string]string{"GIT_AUTHOR_NAME": "Dana Dev", "GIT_COMMITTER_NAME": "Dana Dev",
+				"GIT_AUTHOR_EMAIL": "dana@example.org", "GIT_COMMITTER_EMAIL": "dana@example.org"}},
+		{"--env wins", map[string]string{"user.name": "Dana Dev", "user.email": "dana@example.org"},
+			[]string{"GIT_AUTHOR_EMAIL=bot@example.org"},
+			map[string]string{"GIT_AUTHOR_NAME": "Dana Dev", "GIT_COMMITTER_NAME": "Dana Dev",
+				"GIT_AUTHOR_EMAIL": "bot@example.org", "GIT_COMMITTER_EMAIL": "dana@example.org"}},
+		{"no identity", nil, nil, map[string]string{}},
+		{"a malformed value", map[string]string{"user.name": "Dana\x1b[2J", "user.email": "dana@example.org"}, nil,
+			map[string]string{"GIT_AUTHOR_EMAIL": "dana@example.org", "GIT_COMMITTER_EMAIL": "dana@example.org"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.gitConfig = tc.config
+			ta.daemon.review = sandboxapi.ReviewResponse{Summary: "0 files changed (+0 −0)", Report: &workspace.ReviewReport{}}
+			if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Env: tc.env}); err != nil {
+				t.Fatalf("Run: %v\n%s", err, ta.output())
+			}
+			req := createRequest(t, ta.daemon)
+			got := map[string]string{}
+			for k, v := range req.Env {
+				if strings.HasPrefix(k, "GIT_") {
+					got[k] = v
+				}
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Fatalf("git environment = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

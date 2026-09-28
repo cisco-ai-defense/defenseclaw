@@ -682,6 +682,8 @@ type testApp struct {
 	project  string
 	home     string
 	execs    [][]string
+	// gitConfig answers App.GitConfig by key.
+	gitConfig map[string]string
 }
 
 func newTestApp(t *testing.T, input string) *testApp {
@@ -735,6 +737,8 @@ func newTestApp(t *testing.T, input string) *testApp {
 		OpenShell: func(context.Context) (openshell.Client, *openshell.Registration, error) {
 			return nil, nil, io.ErrClosedPipe
 		},
+		// Never the developer's own git identity.
+		GitConfig: func(_ context.Context, _, key string) string { return ta.gitConfig[key] },
 	}
 	return ta
 }

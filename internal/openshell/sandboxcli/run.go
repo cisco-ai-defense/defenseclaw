@@ -203,6 +203,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) error {
 		}
 	}
 
+	env = a.withGitIdentity(ctx, project, env)
 	req, llm, err := a.createRequest(spec, project, o, copyMode, env)
 	if err != nil {
 		return err
