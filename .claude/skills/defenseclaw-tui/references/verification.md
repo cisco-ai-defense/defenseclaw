@@ -50,7 +50,14 @@ tmux kill-session -t dc-tui-80               # kill only sessions you created
 tmux new-session -d -s dc-tui-120 -x 120 -y 40 ".venv/bin/python $S/demo.py"
 ```
 
-- Pick a unique session name. Other agents share this machine.
+- Wait until the app is ready before sending keys (poll `capture-pane` for
+  `Ready.`); keys sent during startup land on the wrong panel.
+- **Check text entry the way a terminal delivers it**, not only key by key:
+  `tmux send-keys -t S -l 'OPENAI_API_KEY'` sends one burst, and
+  `tmux set-buffer 'sk-x y'; tmux paste-buffer -p -t S` sends a bracketed paste.
+  Both must land whole in the text box.
+- Pick a unique session name (or a private socket, `tmux -L <name>`). Other
+  agents share this machine.
 - Use it for focus, key routing, modals, mouse and timing (the 2 s refresh
   re-rendering over an open interaction). `render.py` can't show these.
 - Log UX problems as you go (copy, fit, keys that are advertised but dead).
@@ -61,11 +68,14 @@ Use this when the change depends on real CLI behaviour (config writes, `--json`
 output, stdin secrets):
 
 ```bash
-SCRATCH=$(mktemp -d)
+# macOS: /tmp and $TMPDIR are symlinks, and init refuses an indirect data dir
+# ("data-dir-path-is-indirect"), so resolve the path first.
+SCRATCH=$(cd "$(mktemp -d)" && pwd -P)
 export HOME=$SCRATCH/home DEFENSECLAW_HOME=$SCRATCH/home/.defenseclaw \
        CLAUDE_CONFIG_DIR=$SCRATCH/home/.claude CODEX_HOME=$SCRATCH/home/.codex
 mkdir -p "$DEFENSECLAW_HOME" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"
-.venv/bin/defenseclaw init --non-interactive --yes      # only ever inside $SCRATCH
+# Only ever inside $SCRATCH. Offline: no connector, no scanner install, no gateway.
+.venv/bin/defenseclaw init --non-interactive --connector none --skip-install --no-start-gateway --no-verify
 printf 'sk-test\n' | .venv/bin/defenseclaw keys set OPENAI_API_KEY --value-stdin
 .venv/bin/defenseclaw policy list --json
 tmux new-session -d -s dc-tui-real -x 80 -y 24 \
@@ -75,6 +85,8 @@ tmux new-session -d -s dc-tui-real -x 80 -y 24 \
 - Never touch the real `~/.defenseclaw`, real agent configs (`~/.claude`,
   `~/.codex`), or run `init`/`setup` against the real HOME.
 - Don't start a gateway on a port another agent is using. Check with `lsof -i :<port>`.
+- With no gateway running, commands that write an audit event must still finish:
+  they print "…the audit event was not recorded" and exit 0.
 - Delete only the scratch directories you created.
 
 ## Windows, macOS and Linux host passes

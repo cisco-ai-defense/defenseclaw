@@ -55,13 +55,15 @@ Widget ids: `#header #tabs #body-scroll #body #panel-table #detail-panel
 
 ## Key routing (`DefenseClawTUI.on_key`)
 
-1. A modal is open (`len(self.screen_stack) > 1`): the app does nothing and the
-   modal owns keys.
+1. A modal is open (`len(self.screen_stack) > 1`): the modal owns keys. The one
+   exception is a printable key that bubbled up from the screen underneath while
+   a `FieldEditorScreen` is on top (the rest of a typing burst); it is typed into
+   the text box. Pastes go through `on_paste`, which opens the Setup text box.
 2. The command palette is open or focused: `_handle_command_palette_key`.
 3. The panel table has focus and the key is `up`/`down`: DataTable handles it
    (unless an overlay blocks it).
 4. `_handle_active_panel_key(event)` normalizes with `_panel_key(event)` (it
-   lowercases capitals except `A C E G J M N R S T V X`, and names
+   lowercases capitals except `A C D E G J M N P R S T V X Y`, and names
    enter/escape/space/tab/backspace/ctrl+x), then goes to the active
    panel's `model.handle_key` → `_apply_<panel>_action`. If it returns True,
    the key is stopped and default-prevented.

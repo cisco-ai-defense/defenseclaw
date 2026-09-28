@@ -23,7 +23,9 @@ fix the skill.
    `_confirm_and_run_intent` → `CommandPreviewScreen` →
    `CommandExecutor` → `_handle_successful_command` refresh. Destructive
    intents set `risk="destructive"` and go through
-   `ConsequenceModalScreen(danger=True)`. The one sanctioned direct write is the
+   `ConsequenceModalScreen(danger=True)`. A flow with its own consequence modal
+   that shows the exact command runs it after that confirm; never stack a third
+   prompt. The one sanctioned direct write is the
    Setup config editor (`apply_config_field` + `config.save()` after `ConfigDiffScreen`).
 3. **Send secrets over stdin, never argv.** Set `intent.secret_stdin` and use
    `--value-stdin` (for example `keys set NAME --value-stdin`). Secrets never
@@ -33,7 +35,8 @@ fix the skill.
    previous command finishes, and only if it exited 0.
 5. **Route all text entry through `FieldEditorScreen`** (`screens/field_editor.py`).
    Never type into fields through panel keys. `_panel_key` lowercases most
-   capital letters.
+   capital letters. Test it the way a terminal sends it: a burst of keys and a
+   paste must land whole (`references/gotchas.md`).
 6. **Only model config-editor fields the Python `Config` can persist.**
    `Config.save()` silently drops unmodeled keys, so show those read-only with a hint.
 7. **Advertise keys only through `HintEngine` or the per-view keymap**

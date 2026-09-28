@@ -6,12 +6,24 @@ nobody reintroduces them.
 
 ## Keys and text entry
 
-- **`_panel_key` lowercases most capitals.** Only `A C E G J M N R S T V X` stay
-  uppercase, and everything else is folded (so `U` becomes `u`). Never route
+- **`_panel_key` lowercases most capitals.** Only `A C D E G J M N P R S T V X Y`
+  stay uppercase, and everything else is folded (so `U` becomes `u`). `D`/`Y` are
+  global (background doctor, copy output) and `P` is the Policies shortcut, which
+  Runtime would otherwise swallow as its local `p`. Never route
   text entry through panel keys, because typed text loses its capitals and
   collides with shortcuts. Use `FieldEditorScreen`. For one distinct capital,
   read `event.character` (see the Sandboxes `U` undo case in
   `_handle_active_panel_key`).
+- **A terminal delivers fast typing as one burst, and Textual routes every key
+  of it before the first one is handled.** The key that opens a modal (for
+  example the Setup text box) pushes it, but the rest of the burst was already
+  forwarded to the screen underneath and bubbles back to `DefenseClawTUI.on_key`,
+  which ignores keys while a modal is open. `on_key` hands printable ones to an
+  open `FieldEditorScreen.type_text`; keep that path for any modal that opens on a
+  printable key. Pilot's `press()` waits between keys and never shows this: post
+  `events.Key` messages back to back to reproduce it.
+- **Pastes don't reach rows that only take keys.** `on_paste` opens the Setup text
+  box with the pasted text (first line). New key-driven text rows need the same.
 - **Panel handlers run before panel shortcuts.** If your panel consumes `r`,
   `a`, `n` or `v`, that key no longer switches panel from there. That's fine
   when intended, but check the table in `ux-rules.md`.
@@ -50,6 +62,11 @@ nobody reintroduces them.
   after launching it, not after it finished. Follow-ups now run only after the
   previous command finished and exited 0. Keep it that way, and test it with a
   failing first command.
+- **Commands that write an audit event must finish when the gateway is down.**
+  `logger.log_action`/`log_activity` raise `CanonicalObservabilityUnavailableError`
+  without a running gateway. Catch it after the change is saved, warn that the
+  audit event was not recorded, and exit 0 (see `keys set`, `policy activate`,
+  `guardrail use-pack`); otherwise the TUI reports a failure for a saved change.
 - **`policy activate` didn't reload the gateway before this update.** It wrote
   the files, and the running gateway kept the old policy until restart. Now it
   POSTs `/policy/reload` (`--no-reload` to skip). If the gateway is unreachable
@@ -70,6 +87,13 @@ nobody reintroduces them.
 - **Stale background snapshots.** Heavy panels render off-thread with a
   generation counter. If you add a new direct render path, go through
   `_render_chrome` so the generation is bumped.
+
+- **The command-progress strip covers about five rows at 80x24.** A success hides
+  itself after `STRIP_SUCCESS_SECONDS` (the toast already announced it); failures
+  and cancellations stay until dismissed. Don't make success receipts sticky.
+- **Don't stack confirmations.** A picker plus a consequence modal that shows the
+  exact command is enough; run the command after that confirm (as the Policies
+  flows and destructive intents do) instead of adding the generic preview too.
 
 ## Tests and tooling
 

@@ -96,6 +96,21 @@ async def test_picker_escape_returns_none():
     assert app.result is None
 ```
 
+## Terminal-shaped input
+
+`pilot.press()` waits for each key to be processed, so it can't reproduce what a
+terminal does with fast typing or a paste. For text entry, also post the events
+back to back and assert the whole value arrived:
+
+```python
+from textual import events
+
+for character in "OPENAI_API_KEY":
+    app.post_message(events.Key(character, character))
+await pilot.pause()
+app.post_message(events.Paste("sk-x y"))
+```
+
 ## Gates before committing
 
 ```bash
