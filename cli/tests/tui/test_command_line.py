@@ -220,3 +220,4 @@ def test_display_argv_quotes_an_argument_with_spaces() -> None:
         "guardrail block-message 'Blocked here' --yes"
     )
     assert display_argv(("keys", "set", "NAME", "--value-stdin")) == "keys set NAME --value-stdin"
+    assert display_argv(("setup", "guardrail", "--block-message", "")) == "setup guardrail --block-message ''"

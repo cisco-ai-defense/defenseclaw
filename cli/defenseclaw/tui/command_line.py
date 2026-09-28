@@ -32,13 +32,14 @@ class ParsedCommand:
 
 
 def display_argv(argv: tuple[str, ...] | list[str]) -> str:
-    """Join argv for display, quoting an argument that contains spaces.
+    """Join argv for display, quoting an argument that is empty or contains spaces.
 
-    ``block-message 'Blocked here'`` reads as the two arguments it runs;
-    joined plainly it read as three.
+    ``block-message 'Blocked here'`` reads as the two arguments it runs, and
+    ``--block-message ''`` shows the empty value a cleared field sends;
+    joined plainly they read as three words and as nothing.
     """
 
-    return " ".join(shlex.quote(arg) if any(ch.isspace() for ch in arg) else arg for arg in argv)
+    return " ".join(shlex.quote(arg) if not arg or any(ch.isspace() for ch in arg) else arg for arg in argv)
 
 
 def _contains_shell_operator(text: str) -> bool:
