@@ -326,8 +326,8 @@ defenseclaw guardrail disable --connector hermes --yes
 ```
 
 Disabling removes only DefenseClaw's entries: its hooks from `config.yaml`,
-keeping every other byte of the file (comments included), and its approvals
-from `shell-hooks-allowlist.json`.
+which keeps every byte outside the `hooks` mapping (comments included), and
+its approvals from `shell-hooks-allowlist.json`.
 
 Then reload or restart every affected Hermes host. Until that happens, the
 Windows native tombstone keeps any cached exact DefenseClaw callback disabled;
