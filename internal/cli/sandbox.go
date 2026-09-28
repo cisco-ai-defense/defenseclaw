@@ -235,7 +235,7 @@ harness.`,
 	f.StringArrayVar(&o.Unmask, "unmask", nil, "share a masked secret file or glob with the sandbox (repeatable)")
 	f.IntSliceVar(&o.HostPorts, "host-port", nil, "open this localhost port on your machine to the sandbox (repeatable)")
 	f.StringArrayVar(&o.Credentials, "credential", nil, "NAME=host[:port]: give the sandbox a placeholder for $NAME that works only against that host (repeatable)")
-	f.BoolVar(&o.GitHubWrite, "github-write", false, "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests)")
+	f.BoolVar(&o.GitHubWrite, "github-write", false, "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered")
 	f.BoolVar(&o.NoMCP, "no-mcp", false, "leave the harness's MCP servers behind")
 	f.BoolVarP(&o.Detach, "detach", "d", false, "run in the background (needs --prompt); follow with sandbox logs -f")
 	f.BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")

@@ -50,8 +50,13 @@ func TestRunGitHubWriteBindsTheTokenToTheAPI(t *testing.T) {
 	if strings.Contains(ta.output(), "gh-test-token") {
 		t.Fatal("the token was printed")
 	}
-	if !strings.Contains(ta.output(), "GH_TOKEN/GITHUB_TOKEN → api.github.com only") {
-		t.Fatalf("banner:\n%s", ta.output())
+	// The banner says what the binding is: the whole token at the API
+	// host, and no git push over HTTPS.
+	for _, want := range []string{"GH_TOKEN/GITHUB_TOKEN → api.github.com only", "with everything the token may do",
+		"`git push` over HTTPS is not authenticated"} {
+		if !strings.Contains(ta.output(), want) {
+			t.Fatalf("banner lacks %q:\n%s", want, ta.output())
+		}
 	}
 }
 

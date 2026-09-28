@@ -223,7 +223,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "github-write",
                 "bool",
                 "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the "
-                "GitHub API (for example to open pull requests)",
+                "GitHub API (for example to open pull requests) with everything the token may do; git push "
+                "over HTTPS is not covered",
             ),
             _Flag("no-mcp", "bool", "leave the harness's MCP servers behind"),
             _Flag(

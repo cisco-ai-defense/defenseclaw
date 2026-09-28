@@ -990,7 +990,11 @@ func sbCredentials(o RunOptions) []string {
 		}
 	}
 	if o.GitHubWrite {
-		out = append(out, "GH_TOKEN/GITHUB_TOKEN → api.github.com only (gh can call the GitHub API, for example to open pull requests)")
+		// OpenShell binds a placeholder to a host, not to a repository:
+		// the token works there with everything it may do, and git's own
+		// HTTPS traffic goes to github.com, which it is not bound to.
+		out = append(out, "GH_TOKEN/GITHUB_TOKEN → api.github.com only: gh and the GitHub API (pull requests, issues) with everything the token may do, "+
+			"in any repository it reaches; `git push` over HTTPS is not authenticated")
 	}
 	return out
 }

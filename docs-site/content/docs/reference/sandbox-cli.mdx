@@ -226,8 +226,14 @@ the command that runs `sandbox run <harness>` with your arguments after `--`.
 The harness is also recorded in `openshell.wrappers`. New shells pick the
 block up. To skip the sandbox for one call, run the command with
 `DEFENSECLAW_NO_SANDBOX=1` set. Inside a sandbox the function runs the harness
-directly. Nothing outside the block changes, and removing the last wrapper
-removes the block.
+directly. The bash and zsh block first drops an alias of the same name (Claude
+Code's installer adds one), which would otherwise keep running the harness
+outside the sandbox. `--version`, `--help` and the harness's own management
+commands (`claude mcp add|list|…`, `claude config`, `claude update`,
+`claude setup-token`, `codex login`, `codex mcp …`) start no agent, so they
+run with the harness installed on this machine. Nothing outside the block
+changes, and removing the last wrapper removes the block. An `--rc` file is
+recorded, so `disable`, `doctor` and `teardown` find it again.
 
 ```bash
 defenseclaw sandbox enable claude
@@ -244,7 +250,8 @@ defenseclaw sandbox enable codex --shell zsh
 ### `sandbox disable`
 
 Removes the harness's wrapper block. Without `--shell` or `--rc`, it removes
-the block from the rc files of bash, zsh, and fish.
+the block from the rc files of bash, zsh, and fish, and from every `--rc` file
+`enable` wrote.
 
 ```bash
 defenseclaw sandbox disable claude
@@ -297,11 +304,20 @@ its work back with `pull`. Skip-permissions mode is on by default, and
 `--safe` keeps the harness's own prompts. The harness gets your terminal.
 Arguments after `--` go to the harness.
 
-When the harness exits, you get a summary line: tool calls and blocks, sites
-contacted and blocked, and files changed. Changes that can run code on your
-machine are called out. For a mounted folder you then keep the changes, undo
-them, or see the diff first (`openshell.workdir.on_exit` can decide for you).
-Otherwise, without a terminal or with `--yes`, a mounted folder keeps them.
+While the harness runs, each ask (a port on your machine, a private address,
+a destination the profile does not list) is announced in the terminal with
+the `sandbox approve` command that answers it from another terminal.
+
+When the harness exits (Ctrl-C, a closed terminal window or a `kill` of the
+CLI end the harness, not the session), the sandbox the session started is
+stopped first, so nothing it left running changes the folder after the
+review. You then get a summary line: tool calls and blocks, sites contacted
+and blocked, and files changed. Changes that can run code on your machine
+are called out, and asks still waiting are named. For a mounted folder you
+then keep the changes, undo them, or see the diff first
+(`openshell.workdir.on_exit` can decide for you). Otherwise, without a
+terminal or with `--yes`, a mounted folder keeps them. When the review
+fails, you are still asked, and `--rm` keeps the undo snapshot.
 In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
 patch, or skip, which leaves them in the sandbox for `pull`. Without a
 terminal, or with `--yes`, copy mode skips: nothing is applied. The sandbox is
@@ -312,7 +328,10 @@ failed), so they aren't lost.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
-another one instead. Only one sandbox can mount a folder live, so while
+another one instead. A resumed sandbox keeps the settings it was created
+with, so when you pass flags only a new sandbox takes (`--safe`, `--pack`,
+`--credential`, `--env` and the like), the offer names them and defaults
+to no. Only one sandbox can mount a folder live, so while
 any sandbox that mounts the folder exists (even stopped), a new live run
 there is refused: use `--copy`, or delete the other sandbox first. Inside a sandbox, `sandbox run <harness>` runs the
 harness directly.
@@ -340,11 +359,15 @@ A few rules the flags follow:
   Amazon Bedrock in `--bedrock-region`, and `auto` never picks it. OpenShell
   gives the harness a placeholder that works only against the provider's
   hosts. With `--llm none`, or when nothing is found, you log in inside the
-  sandbox.
+  sandbox, which stores a real token there that the agent can read. A Claude
+  subscription can instead run `claude setup-token` on this machine and
+  export the token it prints as `CLAUDE_CODE_OAUTH_TOKEN`.
 - `--credential NAME=host[:port]` gives the sandbox a placeholder in `$NAME`
   that OpenShell swaps for your value only on requests to that host (port 443
   unless you give one). `--github-write` does the same for your `GH_TOKEN` or
-  `GITHUB_TOKEN` and `api.github.com`.
+  `GITHUB_TOKEN` and `api.github.com`: the placeholder works there with
+  everything the token may do, in any repository it reaches, and `git push`
+  over HTTPS (to `github.com`) is not authenticated.
 - `--pack`, `--profile`, `--copy`, `--safe`, `--unmask`, `--host-port`,
   `--no-mcp`, `--cpu`, and `--memory` go through the
   [sandbox policy](/docs/setup/sandbox-policy). An organization limit can
@@ -363,7 +386,7 @@ A few rules the flags follow:
 | `--credential` | text, repeatable |  | NAME=host[:port]: give the sandbox a placeholder for `$NAME` that works only against that host (repeatable). |
 | `-d`, `--detach` | switch |  | Run in the background (needs --prompt); follow with sandbox logs -f. |
 | `--env` | text, repeatable |  | KEY=VALUE non-secret variable for the sandbox (repeatable). |
-| `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests). |
+| `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered. |
 | `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
 | `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini. |
 | `--memory` | text |  | Memory limit, for example 4Gi. |
@@ -530,7 +553,9 @@ defenseclaw sandbox start myapp-7f3a
 
 Deletes sandboxes together with their OpenShell providers and credentials,
 and their undo snapshot unless you pass `--keep-snapshot`. Asks once per
-sandbox unless you pass `--yes`.
+sandbox unless you pass `--yes`. A copy-mode sandbox holding work that was
+never pulled back (or a pull never applied) is named in the question, which
+then defaults to no; `teardown` lists such sandboxes before it asks.
 
 ```bash
 defenseclaw sandbox delete myapp-7f3a
@@ -662,10 +687,13 @@ defenseclaw sandbox unblock docs.example.com --always
 Reviews a mounted project's changes since the session's snapshot. It prints
 a summary of the changes and flags the files that can run code on your
 machine, such as `package.json` scripts, build and task files, CI workflows,
-git attributes and submodules, harness and agent config, lock files, new or
-newly executable files, symbolic links, and embedded git repositories. It
-also flags secret-like files, and lists the review's findings and the nested
-repositories the session's guard found. `--diff` prints the unified diff too.
+git attributes and submodules, harness and agent config (git-ignored files
+such as `.claude/settings.local.json` included), lock files, new or newly
+executable files, symbolic links, and embedded git repositories, new ones and
+changes to the git config, hooks or `.git` pointer of those that were there
+before. It also flags secret-like files, and lists the review's findings and
+the nested repositories the session's guard found. `--diff` prints the
+unified diff too.
 
 ```bash
 defenseclaw sandbox review myapp-7f3a
