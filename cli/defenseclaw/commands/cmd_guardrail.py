@@ -2301,15 +2301,33 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
 
 
 @guardrail.command("list-packs")
+@click.option("--json", "json_out", is_flag=True, help="Print the rule packs as JSON.")
 @pass_ctx
-def list_packs_cmd(app: AppContext) -> None:
+def list_packs_cmd(app: AppContext, json_out: bool) -> None:
     """List the available guardrail rule packs and who enforces which.
 
-    Shows the built-in presets accepted by ``defenseclaw setup <connector>
-    --rule-pack`` alongside the resolved rule-pack directory each active
-    connector is actually enforcing (per-connector override > global pack >
-    built-in default). Read-only — it changes nothing.
+    Shows the built-in presets, custom packs found under
+    ``<policy_dir>/guardrail/`` or configured anywhere, and the resolved
+    rule-pack directory each active connector is actually enforcing
+    (per-connector override > global pack > built-in default). Switch packs
+    with ``defenseclaw guardrail use-pack``. Read-only — it changes nothing.
     """
+    from defenseclaw import policy_catalog
+
+    if json_out:
+        click.echo(
+            json.dumps(
+                {
+                    "version": 1,
+                    "global": policy_catalog.global_pack(app.cfg).to_json(),
+                    "connectors": [row.to_json() for row in policy_catalog.effective_packs(app.cfg)],
+                    "packs": [pack.to_json() for pack in policy_catalog.discover_rule_packs(app.cfg)],
+                },
+                indent=2,
+            )
+        )
+        return
+
     gc = app.cfg.guardrail
     ux.section("Guardrail rule packs", indent="  ")
 
@@ -2317,6 +2335,17 @@ def list_packs_cmd(app: AppContext) -> None:
     for pname, desc in _RULE_PACK_PRESETS:
         click.echo(f"      - {ux.accent(pname)}: {ux.dim(desc)}")
     click.echo()
+
+    try:
+        custom = [p for p in policy_catalog.discover_rule_packs(app.cfg) if p.kind == "custom"]
+    except Exception:  # noqa: BLE001 — discovery is best-effort in a listing.
+        custom = []
+    if custom:
+        click.echo(f"  • {ux._style('custom packs:', fg='bright_black', bold=True)}")
+        for pack in custom:
+            used = f" (used by {', '.join(pack.used_by)})" if pack.used_by else ""
+            click.echo(f"      - {ux.accent(pack.name)}: {pack.path}{ux.dim(used)}")
+        click.echo()
 
     global_dir = (getattr(gc, "rule_pack_dir", "") or "").strip()
     click.echo(
