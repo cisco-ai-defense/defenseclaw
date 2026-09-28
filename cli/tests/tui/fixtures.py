@@ -205,6 +205,9 @@ def snapshot_app(tmp_path, *, setup_config: object | None = None) -> DefenseClaw
         tools_model=tools,
         setup_model=SetupPanelModel(setup_config if setup_config is not None else {}),
     )
+    # The tab underline animates on every panel switch, and Pilot waits for
+    # it; with animations off a switch settles in ~0.1 s instead of ~0.4 s.
+    app.animation_level = "none"
     app.activity_model.add_entry("doctor")
     app.activity_model.append_output("Checking gateway...")
     app.activity_model.finish_entry(0)
