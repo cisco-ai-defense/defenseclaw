@@ -122,7 +122,7 @@ func TestConnectBannerNamesTheModelVariable(t *testing.T) {
 	if err := ta.Connect(context.Background(), ConnectOptions{Name: "r2a-bed"}); err != nil {
 		t.Fatal(err)
 	}
-	if out := ta.output(); !strings.Contains(out, "Model     AWS_BEARER_TOKEN_BEDROCK → ") || strings.Contains(out, "claude-bedrock-mantle credential") {
+	if out := ta.output(); !strings.Contains(out, "Model     anthropic.claude-sonnet-5 (the default; -- --model MODEL picks another) · AWS_BEARER_TOKEN_BEDROCK → ") || strings.Contains(out, "claude-bedrock-mantle credential") {
 		t.Fatalf("connect banner:\n%s", out)
 	}
 }

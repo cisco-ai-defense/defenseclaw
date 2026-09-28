@@ -39,8 +39,8 @@ func TestHookReachIgnoresStartupTraffic(t *testing.T) {
 	r := newReachEnv(t)
 	ctx := context.Background()
 	for _, host := range []string{"pypi.org", "antigravity-unleash.goog", "raw.githubusercontent.com"} {
-		r.m.egressEvent(ctx, egress.Event{Kind: egress.EventAllowed, SandboxName: r.name, Host: host, Port: 443, Time: r.clock(), FirstSeen: true})
-		r.m.egressEvent(ctx, egress.Event{Kind: egress.EventClosed, SandboxName: r.name, Host: host, Port: 443, Time: r.clock()})
+		r.m.egressEvent(ctx, egress.Event{Kind: egress.EventAllowed, SandboxName: r.name, Host: host, Port: 443, Time: r.clock(), FirstSeen: true}, 0)
+		r.m.egressEvent(ctx, egress.Event{Kind: egress.EventClosed, SandboxName: r.name, Host: host, Port: 443, Time: r.clock()}, 0)
 	}
 	// The harness's own requests around the proxy, refused or allowed by a
 	// rule that is no provider's, and a tool's.

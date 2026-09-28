@@ -82,7 +82,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Project   ~/proj → /work/proj (live)   undo point taken → `defenseclaw sandbox undo dc-claude-proj-1a2b` restores it",
 		"Hidden    .env",
 		"Protected .git/hooks .git/config (read-only)",
-		"Model     ANTHROPIC_API_KEY → api.anthropic.com only",
+		"Model     sonnet · ANTHROPIC_API_KEY → api.anthropic.com only",
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
@@ -473,14 +473,14 @@ func TestRunBannerShowsTheModel(t *testing.T) {
 	if out := ta.output(); strings.Contains(out, "rejects every turn") || !strings.Contains(out, "Model     openai.gpt-oss-20b") {
 		t.Fatalf("headless banner:\n%s", out)
 	}
-	// A harness DefenseClaw cannot tell the model of prints none.
+	// Claude Code names the model its --model flag picks.
 	ta = newTestApp(t, "")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{}}
 	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Args: []string{"--model", "sonnet"}}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out := ta.output(); !strings.Contains(out, "Model     ANTHROPIC_API_KEY → api.anthropic.com only") {
+	if out := ta.output(); !strings.Contains(out, "Model     sonnet · ANTHROPIC_API_KEY → api.anthropic.com only") {
 		t.Fatalf("output:\n%s", out)
 	}
 }
