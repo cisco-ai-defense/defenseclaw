@@ -108,24 +108,32 @@ never treats directory presence as proof that the pack is valid.
 
 ## Apply a validated pack
 
-Validation is a preflight; it does not change the running gateway. Point the
-global or per-connector `rule_pack_dir` at the validated directory, then restart
-the gateway through your normal setup or service workflow. Startup and restart
-load the pack through the same strict validator.
+Validation is a preflight; it does not change the running gateway. Switch to
+the validated pack with `defenseclaw guardrail use-pack`, which validates the
+pack again and then writes the global or one connector's `rule_pack_dir`. An
+invalid pack changes nothing. The gateway notices the new `rule_pack_dir` in
+`config.yaml` and reloads the rules through the same strict validator; startup
+and restart use that validator too.
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org
-defenseclaw setup guardrail \
-  --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
-  --restart
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org        # every connector
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org --connector codex
+defenseclaw guardrail list-packs                                               # who uses which pack
 defenseclaw doctor
 ```
+
+A global switch removes every per-connector override and lists the ones it
+removed. `--connector X` changes only that connector; `use-pack --clear
+--connector X` puts it back on the global pack. If the validator is
+unavailable, built-in presets are applied with a warning, while custom packs
+are refused (exit `2`) unless you pass `--no-validate`.
 
 DefenseClaw does not watch rule-pack files for live changes. Editing a file in
 the active directory does not update an already running gateway, and
 `defenseclaw-gateway policy reload` reloads OPA policy rather than guardrail
-rule packs. Validate the finished directory and restart the gateway at the
-deployment boundary.
+rule packs. Validate the finished directory, then switch to it with `use-pack`
+(a new directory) or restart the gateway (edits in place).
 
 ## Safe editing loop
 
@@ -133,7 +141,7 @@ deployment boundary.
 2. Make one focused component change.
 3. Run `defenseclaw guardrail validate-pack PATH`.
 4. Run your rule fixtures or representative scans.
-5. Update `rule_pack_dir`, restart the gateway, and run `defenseclaw doctor`.
+5. Run `defenseclaw guardrail use-pack PATH` (or restart the gateway after editing the active pack in place), then run `defenseclaw doctor`.
 
 Do not use Python regular-expression behavior as a substitute for validation.
 Rule patterns are enforced by the Go gateway, so the gateway validator is the

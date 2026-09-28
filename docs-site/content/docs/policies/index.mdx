@@ -202,13 +202,15 @@ policies/guardrail/<pack>/
   suppressions.yaml           # the suppression layer (see below)
 ```
 
-Pick a pack at setup time:
+Switch packs with `use-pack`. It validates the pack first and writes nothing if the pack is invalid:
 
 ```bash
-defenseclaw setup guardrail --rule-pack strict
+defenseclaw guardrail use-pack strict                    # every connector
+defenseclaw guardrail use-pack strict --connector codex  # one connector
+defenseclaw guardrail list-packs                         # presets, custom packs, and who uses which
 ```
 
-`--rule-pack` only accepts the three bundled profiles (`default`, `strict`, `permissive`). To run a custom pack from your own directory, point `guardrail.rule_pack_dir` at it in `~/.defenseclaw/config.yaml` — see [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full workflow.
+`use-pack` accepts a bundled profile (`default`, `strict`, `permissive`), the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory path. A global switch removes per-connector overrides; `--clear --connector X` returns one connector to the global pack. `defenseclaw setup guardrail --rule-pack` still works at setup time. See [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full custom-pack workflow.
 
 ### Rule shape
 
@@ -505,15 +507,17 @@ the expression schema and authoring examples.
   </Step>
   <Step>
     **Apply the validated directory and verify the effective connector packs.**
-    The setup command writes `rule_pack_dir` and restarts the gateway so it
-    rebuilds the local rules and judge:
+    `use-pack` validates the directory again and writes `rule_pack_dir`; the
+    gateway notices the change in `config.yaml` and rebuilds the local rules
+    and judge:
 
     ```bash
-    defenseclaw setup guardrail \
-      --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
-      --restart
+    defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
+    defenseclaw guardrail list-packs
     defenseclaw doctor
     ```
+
+    Add `--connector X` to switch only one connector.
 
     DefenseClaw does not watch rule-pack files for live changes.
     `defenseclaw-gateway policy reload` recompiles OPA modules under

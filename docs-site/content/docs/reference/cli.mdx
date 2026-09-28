@@ -178,6 +178,10 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set behavior for hook delivery, authentication, and invalid-response failures. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
 | `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
+| `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
+| `defenseclaw guardrail use-pack PACK [--connector X] [--no-validate] [--json]` | Switch rule packs. `PACK` is a preset (`default`, `strict`, `permissive`), the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory. The pack is validated first and an invalid pack changes nothing. Without `--connector`, every connector uses `PACK` and all per-connector overrides are removed (the output lists them). `--connector X` writes only X's override. If the validator is unavailable, presets are applied with a warning and custom packs are refused (exit 2) unless you pass `--no-validate`. Never changes the guardrail's on/off state, mode, or port; the running gateway picks up the change from `config.yaml`. |
+| `defenseclaw guardrail use-pack --clear --connector X` | Remove X's rule-pack override so it uses the global pack again. |
+| `defenseclaw guardrail validate-pack PATH [--json]` | Validate a rule pack offline with the gateway's own validator. Exit `1` means invalid, `2` means the validator is unavailable. |
 
 ```bash
 defenseclaw guardrail status                              # full per-connector roster
@@ -187,9 +191,40 @@ defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
 defenseclaw guardrail block-message --clear --connector codex # inherit global / built-in
 defenseclaw guardrail block-message --clear                # clear global + active overrides
 defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
+defenseclaw guardrail use-pack strict                     # every connector, clears overrides
+defenseclaw guardrail use-pack ~/packs/my-org --connector codex
+defenseclaw guardrail use-pack --clear --connector codex  # back to the global pack
 ```
 
 See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) for the full multi-connector model.
+
+## Policies
+
+Named security policies (`default`, `strict`, `permissive`, plus any you create) set admission, skill actions, guardrail thresholds, and the firewall defaults. `policy list` shows only real security policies; the bundled host-firewall template (`firewall-deny-default`) is managed with `defenseclaw firewall`, and `policy activate` refuses it.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw policy list [--json]` | List built-in and custom policies and mark the active one. `--json` prints `{"version": 1, "active": "<name>", "policies": [...]}`; each policy reports `block_at`, `alert_at`, `install_block_at` (`CRITICAL`, `HIGH+`, `MEDIUM+`, `LOW+` or `none`), `firewall_default`, `hilt`, `scanner_overrides`, and whether activating it replaces webhooks (`replaces_webhooks`) or changes Cisco AI Defense settings (`sets_cisco`). |
+| `defenseclaw policy show NAME [--json]` | Show one policy. `--json` prints `{"version": 1, "policy": {...}}` with the same fields; exits `1` if the policy doesn't exist. |
+| `defenseclaw policy activate NAME [--reload/--no-reload]` | Apply a policy to `config.yaml` and the OPA `data.json`, then (by default) ask the running gateway to reload it. If the gateway isn't running, the policy is saved and loads when the gateway starts (exit `0`). If the gateway rejects the reload, the command exits `1`; run `defenseclaw policy validate` to find the problem. |
+
+```bash
+defenseclaw policy list --json | jq -r '.active'
+defenseclaw policy show strict --json
+defenseclaw policy activate strict              # save + live reload
+defenseclaw policy activate strict --no-reload  # save only
+```
+
+## Credentials
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw keys list [--json]` | Show every credential DefenseClaw knows about and where its value comes from. |
+| `defenseclaw keys set NAME [--value V \| --value-stdin]` | Save a credential to `~/.defenseclaw/.env`. Without a value option it prompts with hidden input. `--value-stdin` reads the first line of standard input (trailing newline removed) and never echoes it, so the secret stays out of shell history and process listings; an empty line exits `1`. `--value` and `--value-stdin` can't be combined. |
+
+```bash
+printf '%s\n' "$VT_KEY" | defenseclaw keys set VIRUSTOTAL_API_KEY --value-stdin
+```
 
 ## Multi-connector
 
