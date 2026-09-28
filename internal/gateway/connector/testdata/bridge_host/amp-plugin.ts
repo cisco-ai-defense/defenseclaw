@@ -506,6 +506,23 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	})
 
 	amp.on("agent.start", async (event, ctx) => {
+		// Amp does not define tool.call handler order. A project plugin can
+		// rewrite a call before this plugin sees it, so cancel the turn at
+		// agent.start when the standalone guard finds an unapproved plugin.
+		// Amp guarantees that cancel during this event prevents the turn from
+		// starting; the guard applies the usual allowed_hooks digests.
+		if (DC_FOREIGN_GUARD && DC_HOOK_SOCKET) {
+			const blocked = await foreignHookCheck("agent.start")
+			if (blocked) {
+				await ctx.thread.cancel()
+				try {
+					await ctx.ui.notify(blocked)
+				} catch {
+					// Cancellation is the policy action; notice is best effort.
+				}
+				return {}
+			}
+		}
 		const threadID = stringID(event.thread.id)
 		const turnID = stringID(event.id)
 		turns.set(threadID, { turnID, message: event.message })

@@ -384,13 +384,16 @@ function defenseclawBlock(client, reason) {
 
 // defenseclawConfirmNotice is the notice for a verdict that asks for the
 // user's confirmation (human-in-the-loop). This bridge cannot ask, so the
-// call runs; the notice keeps that from happening silently.
+// call runs; the notice keeps that from happening silently. A reason that
+// already comes from DefenseClaw (it names the rule) leads the notice.
 function defenseclawConfirmNotice(data) {
   if (!data || String(data.raw_action || "").toLowerCase() !== "confirm" || data.action === "block") return "";
+  const reason = String(data.reason || "").trim();
   const severity = data.severity && data.severity !== "NONE" ? " (" + data.severity + ")" : "";
-  const reason = data.reason ? ": " + data.reason : "";
-  return "DefenseClaw flagged this tool call for review" + severity + reason +
-    ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
+  const lead = /^DefenseClaw\b/.test(reason)
+    ? reason.replace(/\.$/, "")
+    : "DefenseClaw flagged this tool call for review" + severity + (reason ? ": " + reason : "");
+  return lead + ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
 }
 
 // defenseclawShowNotice shows a notice in the OpenCode TUI. It is best
@@ -580,7 +583,11 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
     // The decision is resolved BEFORE the throw so a fail-open transport
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
-      const blocked = (await defenseclawStartupGuard) || (await defenseclawForeignHookCheck("tool.execute.before", cwd));
+      // Every call runs the check, also after a block at load (which holds
+      // for the process), so the gateway records each denied call.
+      const startupBlock = await defenseclawStartupGuard;
+      const callBlock = await defenseclawForeignHookCheck("tool.execute.before", cwd);
+      const blocked = startupBlock || callBlock;
       if (blocked) throw defenseclawBlock(client, blocked);
       const mcpIdentity = defenseclawResolveMCPServer(input && input.tool);
       const verdict = await defenseclawPost(
