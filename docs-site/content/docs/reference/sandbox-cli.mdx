@@ -347,6 +347,8 @@ that question decides nothing: the changes stay, the undo point is kept for
 `undo`, the sandbox is stopped and kept, and the command exits `130`.
 Otherwise, without a terminal or with `--yes`, a mounted folder keeps them.
 When the review fails, you are still asked, and `--rm` keeps the undo point.
+`--rm` also keeps it when nobody accepted the changes (no terminal and no
+`--yes`), so `sandbox undo` still reverts them; `sandbox delete` drops it.
 In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
 patch, or skip, which leaves them in the sandbox for `pull`. Without a
 terminal, or with `--yes`, copy mode skips: nothing is applied. The sandbox is

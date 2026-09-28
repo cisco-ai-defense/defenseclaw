@@ -151,6 +151,38 @@ func TestHeadlessSessionOnATerminalAsksToKeepChanges(t *testing.T) {
 	}
 }
 
+// Without a terminal nobody answers the keep/undo question: the changes
+// are kept but stay undoable, so --rm keeps the undo snapshot and says how
+// to undo or drop it. With --yes the changes were accepted, and --rm drops
+// the snapshot.
+func TestHeadlessRmKeepsTheSnapshotOfUnacceptedChanges(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.TTY = false
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Prompt: "fix it", Rm: true}); err != nil {
+		t.Fatalf("Run: %v\n%s", err, ta.output())
+	}
+	del := ta.daemon.callsTo("DELETE", sbPath)
+	if len(del) != 1 || !strings.Contains(string(del[0].Body), `"keep_snapshot":true`) {
+		t.Fatalf("delete calls = %+v; want the snapshot kept", del)
+	}
+	out := ta.output()
+	for _, want := range []string{"its undo point is kept because nobody accepted the changes",
+		"undo: defenseclaw sandbox undo dc-claude-proj-1a2b", "drop it: defenseclaw sandbox delete dc-claude-proj-1a2b"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+
+	ta = newTestApp(t, "")
+	ta.IO.TTY = false
+	if err := ta.Run(context.Background(), RunOptions{Harness: "claude", Prompt: "fix it", Rm: true, Yes: true}); err != nil {
+		t.Fatalf("Run --yes: %v\n%s", err, ta.output())
+	}
+	if del := ta.daemon.callsTo("DELETE", sbPath); len(del) != 1 || strings.Contains(string(del[0].Body), "keep_snapshot") {
+		t.Fatalf("delete calls with --yes = %+v; want the snapshot dropped", del)
+	}
+}
+
 // An ask waits for the user while the harness owns the terminal: the
 // banner says where asks are answered, each one is announced live with the
 // command that answers it, and the end of the session names those left.

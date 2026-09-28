@@ -59,8 +59,10 @@ type session struct {
 	// run the next prompt).
 	headless bool
 	// keepSnapshot keeps the undo snapshot when --rm deletes the sandbox:
-	// the session's changes could not be reviewed.
+	// the session's changes could not be reviewed, or nobody accepted them.
+	// keepWhy says which.
 	keepSnapshot bool
+	keepWhy      string
 
 	// before is the sandbox as it was when the session started, for the
 	// end-of-session deltas.
@@ -583,7 +585,7 @@ func (s *session) end(ctx context.Context) error {
 	changed := !reviewed || (rev != nil && rev.Report != nil && (rev.Report.FilesChanged > 0 || len(rev.Report.Flags) > 0 ||
 		rev.Report.HeadBefore != rev.Report.HeadAfter || rev.Report.BranchBefore != rev.Report.BranchAfter))
 	if !reviewed {
-		s.keepSnapshot = true
+		s.keepSnapshot, s.keepWhy = true, "the changes were not reviewed"
 		if after.Snapshot != nil {
 			a.note("undo still restores the folder to its undo point: `" + CommandName + " undo " + s.sb.Name + "`")
 		}
@@ -633,7 +635,7 @@ func (s *session) end(ctx context.Context) error {
 		return s.finish(ctx, true)
 	case decision == "i":
 		// Ctrl-C at the question: nothing was decided.
-		s.interrupted, s.keepSnapshot = true, true
+		s.interrupted, s.keepSnapshot, s.keepWhy = true, true, "nothing was decided"
 		a.warn("interrupted: nothing was decided, so the changes stay in the folder and the undo point is kept (`" + CommandName + " undo " +
 			s.sb.Name + "` still reverts them; `" + CommandName + " review " + s.sb.Name + "` shows them)")
 	case !changed:
@@ -646,6 +648,11 @@ func (s *session) end(ctx context.Context) error {
 		a.ok("kept: the changes stay in the folder, and the undo point stays, since they could not be reviewed")
 	case after.Snapshot != nil:
 		a.note("the changes stay in the folder; `" + CommandName + " undo " + s.sb.Name + "` still reverts them")
+	}
+	if changed && !accepted && !s.keepSnapshot && after.Snapshot != nil {
+		// Nobody kept the changes (no terminal and no --yes, or no answer):
+		// they stay undoable, so --rm keeps the undo snapshot.
+		s.keepSnapshot, s.keepWhy = true, "nobody accepted the changes (--yes accepts them when no terminal can)"
 	}
 	return s.finish(ctx, stopped)
 }
@@ -722,7 +729,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		}
 		a.forgetCLIState(name)
 		if s.keepSnapshot {
-			a.ok("sandbox " + name + " deleted (--rm); its undo point is kept because the changes were not reviewed → review: " +
+			a.ok("sandbox " + name + " deleted (--rm); its undo point is kept because " + s.keepWhy + " → review: " +
 				CommandName + " review " + name + "   undo: " + CommandName + " undo " + name + "   drop it: " + CommandName + " delete " + name)
 			return nil
 		}
