@@ -152,3 +152,15 @@ def test_reload_policy_client_posts_policy_reload(monkeypatch):
     assert client.reload_policy()["status"] == "reloaded"
     assert seen["url"].endswith("/policy/reload")
     assert seen["kwargs"]["allow_redirects"] is False
+
+
+def test_activate_with_stopped_gateway_skips_audit_and_succeeds(app, monkeypatch):
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    def _down(*_args, **_kwargs):
+        raise CanonicalObservabilityUnavailableError("no gateway")
+
+    monkeypatch.setattr(app.logger, "log_action", _down)
+    result = _invoke(app, ["activate", "permissive"])
+    assert result.exit_code == 0, result.output
+    assert "it loads this policy when it starts" in result.output

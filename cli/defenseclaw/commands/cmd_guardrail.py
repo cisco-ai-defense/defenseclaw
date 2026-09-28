@@ -2533,8 +2533,7 @@ def use_pack_cmd(
         _preflight_config_write(app)
         block.rule_pack_dir = ""
         _save_use_pack(app, _finish, scope)
-        if app.logger:
-            app.logger.log_action("guardrail-use-pack", "config", f"connector={connector_key} cleared=true")
+        _log_use_pack(app, f"connector={connector_key} cleared=true")
         _finish(
             ok=True,
             exit_code=0,
@@ -2647,12 +2646,7 @@ def use_pack_cmd(
         message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack ({path})."
 
     _save_use_pack(app, _finish, scope)
-    if app.logger:
-        app.logger.log_action(
-            "guardrail-use-pack",
-            "config",
-            f"scope={scope} connector={connector_key or ''} pack={pack_name} cleared={','.join(cleared)}",
-        )
+    _log_use_pack(app, f"scope={scope} connector={connector_key or ''} pack={pack_name} cleared={','.join(cleared)}")
     _finish(
         ok=True,
         exit_code=0,
@@ -2664,6 +2658,21 @@ def use_pack_cmd(
         warning=warning,
         message=message + " The running gateway applies it automatically.",
     )
+
+
+def _log_use_pack(app: AppContext, details: str) -> None:
+    """Audit a saved pack switch; a stopped gateway only skips the audit event."""
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    if not app.logger:
+        return
+    try:
+        app.logger.log_action("guardrail-use-pack", "config", details)
+    except CanonicalObservabilityUnavailableError:
+        click.echo(
+            "  ⚠ Change saved, but the gateway runtime is unavailable; the audit event was not recorded.",
+            err=True,
+        )
 
 
 def _save_use_pack(app: AppContext, finish, scope: str) -> None:

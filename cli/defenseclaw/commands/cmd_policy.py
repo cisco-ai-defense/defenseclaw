@@ -453,10 +453,21 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     (POST /policy/reload) so the change takes effect immediately. If the
     gateway isn't running, it loads the policy when it next starts.
     """
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
     if app.logger:
-        app.logger.log_action("policy-activate", name, f"source={path}")
+        try:
+            app.logger.log_action("policy-activate", name, f"source={path}")
+        except CanonicalObservabilityUnavailableError:
+            # Same offline-staging rule as setup: the policy is saved for the
+            # next gateway start, but the audit event can't be admitted now.
+            click.echo(
+                "  ⚠ Policy saved, but the gateway runtime is unavailable; the audit event "
+                "was not recorded.",
+                err=True,
+            )
     if not reload_gateway:
         return
 
