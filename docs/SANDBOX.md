@@ -915,15 +915,28 @@ The daemon therefore runs a nested-repository guard
 (`internal/openshell/nestguard`) for every mounted sandbox while it is ready:
 
 - Before the sandbox runs (at create and at every start), the manager records
-  the `.git` entries the folder already holds. Those are never touched.
+  the `.git` entries the folder already holds. Those are never touched. When
+  the folder is too large for that scan to finish, a `.git` the guard finds
+  later is left alone only if its change time is older than the scan, which
+  the session cannot fake.
 - While the sandbox runs, the guard watches the folder with inotify (on
   macOS, and when the watch limit is reached, it falls back to a bounded
   periodic scan). The moment a new `.git` entry appears at any depth,
   directory, file or symbolic link, including the top level of a folder that
-  had no git, the guard renames it to `.git.defenseclaw-quarantine-<time>`.
-  The rename walks the path with `O_NOFOLLOW` directory handles and never
-  replaces an existing name, so a symbolic link the agent swaps in cannot
-  redirect it. No git on the host ever reads the planted configuration.
+  had no git, the guard renames it to `.git.defenseclaw-quarantine-<time>`,
+  and again for every `.git` created later in the same folder. On a
+  case-insensitive filesystem (macOS's default) `.GIT` and other spellings
+  count, since git finds them as `.git`. The rename walks the path with
+  `O_NOFOLLOW` directory handles and never replaces an existing name, so a
+  symbolic link the agent swaps in cannot redirect it. The sandbox runs as
+  your uid, so a folder the agent made read-only gets write permission back
+  for the rename and its mode restored. No git on the host ever reads the
+  planted configuration. A rename that keeps failing is reported once.
+- The repositories that were there before are writable through the mount
+  like the rest of the folder (only the project's own repository and its
+  submodules are pinned read-only). The snapshot records the git config,
+  hooks, `commondir`, attributes and `.git` pointer of up to 64 of them, and
+  the end-of-session review flags every change to those as critical.
 - It also reports new gitlink (submodule) entries in the project's index;
   those are not changed.
 - Each detection is kept on the sandbox record (`nested_repos` in the REST
