@@ -912,15 +912,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				} else if clientAuth := r.Header.Get("Authorization"); clientAuth != "" {
 					// No provider key configured but the client sent
 					// an Authorization header — passthrough the client's
-					// own credentials (e.g. Codex OAuth tokens).
+					// own credentials and original model choice.
 					targetOrigin = base
 					connForwardKey = strings.TrimPrefix(clientAuth, "Bearer ")
 					directProviderHydrated = true
-					if !strings.Contains(r.URL.Path, "/invoke") {
-						body = patchModelInBody(body, cfgModel)
-					}
-					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: client-auth passthrough hydration model=%q base=%s\n",
-						cfgModel, scrubURLSecrets(base))
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: client-auth passthrough hydration base=%s\n",
+						scrubURLSecrets(base))
 				} else {
 					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: no API key available for configured model %q\n", cfgModel)
 				}
@@ -1006,7 +1003,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				r.URL.RawPath = ""
 				bedrockTranslateNeeded = true
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→anthropic translation model=%q\n", decision.Model)
-			} else if decision.Model != "" && !strings.Contains(r.URL.Path, "/invoke") {
+			} else if decision.Model != "" && !strings.Contains(r.URL.Path, "/invoke") && decision.APIKeyOverride {
+				// Only patch the model when credentials are being overridden.
+				// Passthrough auth (APIKeyOverride=false) preserves the
+				// client's original model choice alongside their credentials.
 				body = patchModelInBody(body, decision.Model)
 			}
 		}

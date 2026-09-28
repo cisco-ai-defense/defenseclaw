@@ -1501,7 +1501,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
 			// Route Codex LLM traffic through the DefenseClaw proxy for
 			// semantic routing, model selection, and/or full inspection.
-			cfg["openai_base_url"] = "http://" + opts.ProxyAddr + "/c/codex/v1"
+			// No /v1 suffix — Codex appends its own path structure directly
+			// (e.g. /responses, /chat/completions). The proxy strips /c/codex
+			// and joins the remainder with the configured upstream base_url.
+			cfg["openai_base_url"] = "http://" + opts.ProxyAddr + "/c/codex"
 		} else if v, ok := cfg["openai_base_url"].(string); ok && isDefenseClawCodexProxyRedirect(v) {
 			// Heal legacy installs that injected a DefenseClaw LLM-proxy
 			// redirect at the top-level `openai_base_url`. The proxy listener
