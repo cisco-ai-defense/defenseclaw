@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1153,7 +1154,12 @@ def _fake_terminal(monkeypatch, app, returncode: int = 0):
 
     @contextlib.contextmanager
     def suspend():
-        yield
+        # App.suspend points stdout and stderr at the terminal it hands over
+        # (UTF-8 once main() has run); a buffer stands in for it. Without one,
+        # headless Textual forwards the handover banner to the test process's
+        # own stdout, a cp1252 pipe on Windows runners.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            yield
 
     def run(argv, cwd=None, check=False):
         ran.append((argv, cwd))
