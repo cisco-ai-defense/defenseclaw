@@ -115,6 +115,9 @@ func TestActivityRendering(t *testing.T) {
 		{Seq: 8, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "evil.example.net", Source: sandboxapi.SourceOpenShell,
 			Reason: "transparent_tcp_policy_denied", Replayed: true},
 		{Seq: 9, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "example.org", Category: "not_allowlisted", Reason: "some_new_token"},
+		// The daemon's reason does not name the destination: the line does.
+		{Seq: 10, Time: at, Kind: sandboxapi.ActivityApprovalRequested, Sandbox: "box", ApprovalID: "ap-2", Host: "api.example.com", Port: 443,
+			Message: "approvals are manual for the strict profile"},
 	}
 	if err := ta.Activity(context.Background(), ActivityOptions{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
@@ -130,6 +133,7 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ✓ DefenseClaw hooks reach the daemon again",
 		"12:01:02 ✗ evil.example.net (no OpenShell rule allows it) (while DefenseClaw was down)",
 		"12:01:02 ✗ example.org (not on the allowlist)",
+		"12:01:02 ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -139,14 +143,14 @@ func TestActivityRendering(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct{ Events []sandboxapi.ActivityEvent }
-	if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || len(got.Events) != 9 {
+	if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || len(got.Events) != 10 {
 		t.Fatalf("activity json: %v %s", err, ta.output())
 	}
 	ta.out.Reset()
 	if err := ta.Activity(context.Background(), ActivityOptions{Follow: true, Sandbox: "box"}); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(ta.output(), "\n"); n != 9 {
+	if n := strings.Count(ta.output(), "\n"); n != 10 {
 		t.Fatalf("followed %d events:\n%s", n, ta.output())
 	}
 }
