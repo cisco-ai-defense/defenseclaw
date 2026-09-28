@@ -411,6 +411,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if message == "" {
 			continue
 		}
+		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if lifecycle {
 			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
@@ -642,9 +643,54 @@ func applyWindowsEnterpriseGatewayStartFailure(result *enterprisestatus.Result, 
 	message := fmt.Sprintf("the %s service is not running; the last error it logged: %s (log: %s)",
 		report.GatewayService, windowsEnterpriseBoundedDiagnostic(reason), logPath)
 	if strings.Contains(reason, "Access is denied") {
-		message += "; run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+		message += "; " + windowsEnterpriseRepairServiceAccess
 	}
 	result.AddError("gateway_start_failed", message)
+}
+
+// windowsEnterpriseRepairServiceAccess is what restores a DefenseClaw
+// service's access to its folders.
+const windowsEnterpriseRepairServiceAccess = "run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+
+// windowsEnterpriseServiceRightsPattern matches the lifecycle's report that a
+// managed path lacks the rights of a service's virtual account, which it
+// names only by its S-1-5-80 SID.
+var windowsEnterpriseServiceRightsPattern = regexp.MustCompile(
+	`managed path is missing required rights for (S-1-5-80(?:-[0-9]+)+) \(required=([^ )]*) actual=([^)]*)\): (.+)$`)
+
+// windowsEnterpriseServiceSIDName returns the service whose virtual account
+// (NT SERVICE\<name>) sid is, or "" for any other SID; tests replace it.
+var windowsEnterpriseServiceSIDName = func(sid string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || !strings.EqualFold(domain, "NT SERVICE") {
+		return ""
+	}
+	return account
+}
+
+// windowsEnterpriseNameServiceRights rewrites a missing-rights report about a
+// service SID to name the service; with repair it also says what restores
+// the access.
+func windowsEnterpriseNameServiceRights(message string, repair bool) string {
+	match := windowsEnterpriseServiceRightsPattern.FindStringSubmatchIndex(message)
+	if match == nil {
+		return message
+	}
+	sid := message[match[2]:match[3]]
+	name := windowsEnterpriseServiceSIDName(sid)
+	if name == "" {
+		return message
+	}
+	text := fmt.Sprintf("the %s service (NT SERVICE\\%s, %s) is missing required rights on %s (required %s, has %s)",
+		name, name, sid, message[match[8]:match[9]], message[match[4]:match[5]], message[match[6]:match[7]])
+	if repair {
+		text += "; " + windowsEnterpriseRepairServiceAccess
+	}
+	return message[:match[0]] + text
 }
 
 // windowsEnterpriseManifestAccount is one account the installed manifest
@@ -840,7 +886,12 @@ func finishWindowsEnterpriseStandalone(
 	}
 	summary := "the standalone enterprise " + result.Action + " failed"
 	if len(result.Errors) != 0 {
-		summary += ": " + result.Errors[0].Message
+		if opts.jsonOutput {
+			summary += ": " + result.Errors[0].Message
+		} else {
+			// The summary above already printed every error in full.
+			summary += ": " + result.Errors[0].Code
+		}
 	}
 	return withExitCode(errors.New(summary), exitCode)
 }

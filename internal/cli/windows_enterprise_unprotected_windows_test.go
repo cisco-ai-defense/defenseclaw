@@ -7,10 +7,13 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -122,5 +125,37 @@ func TestWindowsStandaloneStatusNamesGatewayStartFailureAndDeletedAccount(t *tes
 	// whose directory may be unreachable) is never reported deleted.
 	if previousDeleted("S-1-5-21-1-2-3-1001") {
 		t.Fatal("a non-local SID whose lookup failed was reported deleted")
+	}
+
+	// Human status prints the start failure once: the summary lists it, and
+	// the returned error names only its code.
+	previousObserver := windowsEnterpriseStandaloneObserver
+	t.Cleanup(func() { windowsEnterpriseStandaloneObserver = previousObserver })
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	err := finishWindowsEnterpriseStandalone(cmd, &windowsEnterpriseLifecycleOptions{}, status, 0)
+	if err == nil || strings.Count(out.String()+err.Error(), "cannot inspect configured path") != 1 {
+		t.Fatalf("human status printed the start failure other than once: %q, %v", out.String(), err)
+	}
+
+	// Verify names the service whose access a managed path lost, and what
+	// restores it, instead of only its service SID.
+	previousServiceName := windowsEnterpriseServiceSIDName
+	t.Cleanup(func() { windowsEnterpriseServiceSIDName = previousServiceName })
+	windowsEnterpriseServiceSIDName = func(string) string { return "DefenseClawGateway" }
+	verify := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(verify, &windowsEnterpriseLifecycleOptions{}, &windowsEnterpriseInstallerReport{
+		Installed: true, GatewayService: "DefenseClawGateway", GatewayServiceState: "running",
+		Errors: []string{`managed path is missing required rights for S-1-5-80-1-2-3-4-5 (required=ReadAndExecute actual=0): C:\ProgramData\Cisco\DefenseClaw`},
+	}, windowsEnterpriseStandaloneRun{ExitCode: 1})
+	named := false
+	for _, message := range verify.Errors {
+		named = named || (strings.Contains(message.Message, "DefenseClawGateway service") &&
+			strings.Contains(message.Message, "enterprise windows repair"))
+	}
+	if !named {
+		t.Fatalf("verify errors = %+v, want the service named with the repair that restores it", verify.Errors)
 	}
 }
