@@ -131,27 +131,6 @@ rule registry and agent-version vulnerability ranges are future work; the
 current hook contracts establish product compatibility, not that a particular
 Codex or Claude Code release is vulnerable.
 
-## Benign-trace noise check
-
-The opt-in `TestCompactionHFTraceCandidateBenchmark` replays normalized
-Hugging Face agent-trace `tool_result` records through the two compaction
-candidate detectors. Point it at a directory of JSONL trace files:
-
-```bash
-DEFENSECLAW_HF_COMPACTION_CORPUS_DIR=/path/to/corpus \
-  go test ./internal/gateway -run '^TestCompactionHFTraceCandidateBenchmark$' -count=1 -v
-```
-
-In a local run over nine public trace datasets (20,529 eligible tool results:
-11,162 Codex and 9,367 Claude Code), neither the strict nor the warning-only
-detector matched. This is a useful noise check, **not a guarantee of zero false
-positives**: the trace converter's `is_attack: false` value is assigned
-automatically, not independently adjudicated. These normalized records also
-contain no real `PreCompact`, `PostCompact`, or exposed summaries. The test's
-immediate-compaction replay is explicitly a synthetic upper bound, not an
-observed post-compaction warning or block rate. Review any future positive
-record in its source context before calling it a false positive.
-
 ## Manual test in a disposable workspace
 
 Use `https://example.invalid/bootstrap.sh` in the fixture. This reserved
