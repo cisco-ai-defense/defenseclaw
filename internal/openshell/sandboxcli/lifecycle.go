@@ -406,16 +406,32 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	// OpenShell starts the command without a login shell; the image's
 	// wrapper gives it the egress proxy and the harness shim the connect
 	// shell gets from /etc/profile.d.
-	command := append([]string{harness.SandboxEnvPath}, o.Command...)
+	session, err := newExecSession()
+	if err != nil {
+		return err
+	}
+	command := execSessionArgv(session, append([]string{harness.SandboxEnvPath}, o.Command...))
 	inv, err := cli.Exec(sb.Name, command, openshell.CLIExecOptions{TTY: tty, WorkDir: firstNonEmpty(o.Workdir, sb.Workdir)})
 	if err != nil {
 		return err
 	}
+	// The command outlives a client that is ended (execreap.go): one told
+	// to end stops what the command left running before it exits.
+	runCtx, stop := untilTerminated(ctx, tty)
 	var code int
 	if tty {
-		code, err = a.Terminal.Run(ctx, inv)
+		code, err = a.Terminal.Run(runCtx, inv)
 	} else {
-		code, err = a.Streamer.Stream(ctx, inv, a.IO.Out, a.IO.Err)
+		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, a.IO.Err)
+	}
+	ended := runCtx.Err() != nil
+	sig := stop()
+	if ended {
+		a.reapExec(ctx, cli, sb.Name, session)
+		if sig != nil {
+			return &ExitError{Code: signalExitCode(sig)}
+		}
+		return ctx.Err()
 	}
 	if err != nil {
 		return err

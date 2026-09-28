@@ -41,6 +41,24 @@ func signalNumber(exit *exec.ExitError) int {
 	return 0
 }
 
+// terminationSignals are the signals that end a `sandbox exec` client:
+// a hangup and SIGTERM, and without a terminal the interrupt the terminal
+// sends the whole job (with one, the command gets it as a keystroke).
+func terminationSignals(interactive bool) []os.Signal {
+	if interactive {
+		return []os.Signal{syscall.SIGHUP, syscall.SIGTERM}
+	}
+	return []os.Signal{syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT}
+}
+
+// signalExitCode is the shell's exit status of a process a signal ended.
+func signalExitCode(s os.Signal) int {
+	if n, ok := s.(syscall.Signal); ok {
+		return 128 + int(n)
+	}
+	return 130
+}
+
 // execProcess replaces this process with path.
 func execProcess(path string, argv, env []string) error {
 	return syscall.Exec(path, argv, env)

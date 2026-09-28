@@ -32,6 +32,10 @@ var sessionSignals = []os.Signal{os.Interrupt}
 
 func signalNumber(*exec.ExitError) int { return 0 }
 
+func terminationSignals(bool) []os.Signal { return []os.Signal{os.Interrupt} }
+
+func signalExitCode(os.Signal) int { return 130 }
+
 func execProcess(string, []string, []string) error {
 	return errors.New("sandbox: replacing the process is not supported on this platform")
 }

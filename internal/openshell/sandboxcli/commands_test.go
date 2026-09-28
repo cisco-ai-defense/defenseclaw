@@ -27,7 +27,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -390,15 +392,171 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	}
 }
 
+// TestExecStopsItsCommandWhenTheClientEnds pins that a `sandbox exec`
+// client that is ended stops its command in the sandbox, which OpenShell
+// leaves running: the command carries a session mark, and the reaper
+// targets exactly that session.
+func TestExecStopsItsCommandWhenTheClientEnds(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.add(sampleSandbox("box"))
+	ta.IO.TTY = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ta.stream.answer = func(argv []string) (int, string) {
+		if _, cmd := execSession(sandboxCommand(argv)); len(cmd) > 0 && cmd[0] == "sleep" {
+			cancel() // the client is told to end while the command runs
+			return -1, ""
+		}
+		return 0, ""
+	}
+	if err := ta.Exec(ctx, ExecOptions{Name: "box", Command: []string{"sleep", "600"}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("exec = %v, want the cancellation", err)
+	}
+	if len(ta.stream.runs) != 2 {
+		t.Fatalf("runs = %q, want the command and the reaper", ta.stream.runs)
+	}
+	session, cmd := execSession(sandboxCommand(ta.stream.runs[0]))
+	if len(session) != 32 || !slices.Equal(cmd, []string{"sleep", "600"}) {
+		t.Fatalf("the command runs under no session shell: %q", ta.stream.runs[0])
+	}
+	reap := sandboxCommand(ta.stream.runs[1])
+	if len(reap) != 5 || reap[0] != "/bin/sh" || reap[2] != reapScript || reap[4] != session {
+		t.Fatalf("reaper = %q, want session %s", reap, session)
+	}
+	// A command that ends on its own is not reaped.
+	ta.stream.runs = nil
+	if err := ta.Exec(context.Background(), ExecOptions{Name: "box", Command: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ta.stream.runs) != 1 {
+		t.Fatalf("runs = %q, want the command only", ta.stream.runs)
+	}
+}
+
+// execSession splits a `sandbox exec` command into its session id and the
+// user's command, without the session shell and the sandbox-env wrapper.
+func execSession(cmd []string) (string, []string) {
+	if len(cmd) < 4 || cmd[0] != "/bin/sh" || cmd[1] != "-c" || cmd[2] != execSessionShell ||
+		!strings.HasPrefix(cmd[3], execSessionMark) {
+		return "", cmd
+	}
+	session, rest := strings.TrimPrefix(cmd[3], execSessionMark), cmd[4:]
+	if len(rest) > 0 && rest[0] == harness.SandboxEnvPath {
+		rest = rest[1:]
+	}
+	return session, rest
+}
+
+// TestReapScriptStopsTheSession runs the reaper on this machine (Linux,
+// where /proc lists processes): it stops the session shell of its session
+// and every process below it, and leaves another session's alone. The
+// session shell exits with its command's status.
+func TestReapScriptStopsTheSession(t *testing.T) {
+	if _, err := os.Stat("/proc/self/status"); err != nil {
+		t.Skip("no /proc on this platform")
+	}
+	mine, other := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	dir := t.TempDir()
+	start := func(session string) *exec.Cmd {
+		// The command's own child writes its pid, to be found again.
+		argv := execSessionArgv(session, []string{"/bin/sh", "-c", `sleep 600 & echo $! >"$0"; wait`, filepath.Join(dir, session)})
+		cmd := exec.Command(argv[0], argv[1:]...)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+		return cmd
+	}
+	child := func(session string) int {
+		t.Helper()
+		for i := 0; i < 50; i++ {
+			if data, err := os.ReadFile(filepath.Join(dir, session)); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					return pid
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("session %s's command never started its child", session)
+		return 0
+	}
+	target, bystander := start(mine), start(other)
+	mineChild, otherChild := child(mine), child(other)
+	t.Cleanup(func() {
+		for _, pid := range []int{mineChild, otherChild} {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
+	if out, err := exec.Command("/bin/sh", "-c", reapScript, "defenseclaw-reap", mine).CombinedOutput(); err != nil {
+		t.Fatalf("reaper: %v\n%s", err, out)
+	}
+	done := make(chan error, 1)
+	go func() { done <- target.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the session's process is still running")
+	}
+	// Its command's child went with it (gone from /proc, or a zombie its
+	// new parent has not reaped yet).
+	gone := false
+	for i := 0; i < 100 && !gone; i++ {
+		status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", mineChild))
+		gone = os.IsNotExist(err) || strings.Contains(string(status), "State:\tZ")
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !gone {
+		t.Fatal("the session's command's child is still running")
+	}
+	if err := bystander.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("another session's process was stopped: %v", err)
+	}
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", otherChild)); err != nil {
+		t.Fatalf("another session's child was stopped: %v", err)
+	}
+	status := exec.Command(execSessionArgv(mine, []string{"/bin/sh", "-c", "exit 7"})[0], execSessionArgv(mine, []string{"/bin/sh", "-c", "exit 7"})[1:]...)
+	var exit *exec.ExitError
+	if err := status.Run(); !errors.As(err, &exit) || exit.ExitCode() != 7 {
+		t.Fatalf("the session shell's status = %v, want 7", err)
+	}
+	if out, err := exec.Command("/bin/sh", "-c", reapScript, "defenseclaw-reap", "not-hex").CombinedOutput(); err == nil {
+		t.Fatalf("a malformed session id was accepted:\n%s", out)
+	}
+}
+
+// TestExecSessionShellLeavesKeystrokeSignalsToTheCommand pins that the
+// session shell survives the Ctrl-C a terminal sends the whole foreground
+// group, waits for its command and exits with the command's status: a
+// command that handles SIGINT (a REPL) keeps its session.
+func TestExecSessionShellLeavesKeystrokeSignalsToTheCommand(t *testing.T) {
+	argv := execSessionArgv(strings.Repeat("c", 32), []string{"/bin/sh", "-c", `trap 'exit 5' INT; sleep 2 & wait; exit 0`})
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	// SIGINT to the session shell alone: it must keep waiting.
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err := cmd.Wait()
+	if time.Since(start) < time.Second {
+		t.Fatalf("the session shell ended at SIGINT (%v) instead of waiting for its command", err)
+	}
+	if err != nil {
+		t.Fatalf("the session shell's status = %v, want its command's 0", err)
+	}
+}
+
 func TestExecAndLogs(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.add(sampleSandbox("box"))
 	ta.IO.TTY = false
 	ta.stream.answer = func(argv []string) (int, string) {
-		cmd := sandboxCommand(argv)
-		if cmd[0] == harness.SandboxEnvPath {
-			cmd = cmd[1:]
-		}
+		_, cmd := execSession(sandboxCommand(argv))
 		switch {
 		case len(cmd) > 2 && cmd[2] == runTailScript:
 			return 0, "log line\n"
@@ -423,7 +581,14 @@ func TestExecAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmds := ta.stream.commands()
-	if !slices.Contains(cmds, harness.SandboxEnvPath+" ls -la") || slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "sh -c "+runTailScript+" sh "+RunDir+" 50") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
+	// `sandbox exec` runs the command through sandbox-env, under its
+	// session shell.
+	wrapped := slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
+		cmd := sandboxCommand(argv)
+		session, rest := execSession(cmd)
+		return session != "" && len(cmd) > 4 && cmd[4] == harness.SandboxEnvPath && slices.Equal(rest, []string{"ls", "-la"})
+	})
+	if !wrapped || slices.Contains(cmds, "ls -la") || !slices.Contains(cmds, "sh -c "+runTailScript+" sh "+RunDir+" 50") || !slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
 		return isRunStatus(sandboxCommand(argv))
 	}) {
 		t.Fatalf("commands = %q", cmds)

@@ -482,7 +482,9 @@ func TestRunResumeNamesTheFlagsItIgnores(t *testing.T) {
 	}
 	opts := RunOptions{Harness: "claude", Safe: true, Pack: "open", Credentials: []string{"STRIPE_API_KEY=api.stripe.com"}}
 
-	ta := newTestApp(t, "\n")
+	// No to the resume, the default (a copy) for the folder the old sandbox
+	// still mounts live, and skip bringing the copy's changes back.
+	ta := newTestApp(t, "\n\ns\n")
 	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
 	existing(ta)
 	if err := ta.Run(context.Background(), opts); err != nil {

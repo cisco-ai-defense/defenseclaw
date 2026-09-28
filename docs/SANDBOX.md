@@ -195,6 +195,21 @@ carries. It runs wherever a process starts in a DefenseClaw image:
 | A `sandbox connect --shell` shell, or `openshell sandbox exec` with its default login shell | `/etc/profile` sources the root-owned `/etc/profile.d/defenseclaw-sandbox.sh`. |
 | `defenseclaw-gateway sandbox exec` | OpenShell starts it without a login shell, so the CLI runs the command through the root-owned `/usr/local/lib/defenseclaw/bin/sandbox-env`, which also drops the shell start-up and Node loader variables the launchers drop. |
 
+Ending a `sandbox exec` client does not stop its command: OpenShell 0.1.1
+leaves a command running when its exec stream ends. So the CLI starts the
+command under a session shell, `/bin/sh -c '"$@"; exit $?'
+defenseclaw-exec-<32 hex digits> sandbox-env COMMAND...`, which runs it as
+a child and keeps the session id in its argv. A client that is told to end
+(SIGHUP, SIGTERM, and without a terminal the Ctrl-C the terminal sends the
+whole job; with one, Ctrl-C reaches the command as a keystroke) runs one
+more exec before it exits, `sandboxcli.reapScript`. It finds the session
+shell by its `/proc/<pid>/cmdline`, collects every process below it by
+`PPid`, and stops them as the sandbox user: SIGTERM, then SIGKILL after five
+seconds. The mark is in argv because a sandbox process cannot read another
+exec's `/proc/<pid>/environ` (Yama `ptrace_scope` 1), while it can read its
+`cmdline` and `status` and signal it. A process that leaves the tree
+(`setsid` and a double fork) keeps running until the sandbox stops.
+
 The profile fragment and `sandbox-env` also put
 `/usr/local/lib/defenseclaw/shims` first on `PATH`. It holds a shim named
 after the harness command (`claude`, `codex`, `opencode`, `copilot`, …) that
