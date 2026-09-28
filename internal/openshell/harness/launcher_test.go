@@ -213,6 +213,31 @@ func TestLaunchersKeepNodeOffWorkloadCode(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeLauncherQuietsTheNativeInstallCheck pins the one Claude Code
+// installation check DISABLE_INSTALLATION_CHECKS leaves on: ~/.local/bin
+// follows the system directories on PATH (once), and a relative HOME adds
+// nothing.
+func TestClaudeCodeLauncherQuietsTheNativeInstallCheck(t *testing.T) {
+	launcher, dir := launcherFixture(t, ClaudeCode, `/usr/bin/env >"${0%/*}/record"`+"\n")
+	for _, tc := range []struct{ home, path, want string }{
+		{dir, "/usr/bin:/bin", LauncherSystemPATH + ":/usr/bin:/bin:" + dir + "/.local/bin"},
+		{dir, "/usr/bin:" + dir + "/.local/bin", LauncherSystemPATH + ":/usr/bin:" + dir + "/.local/bin"},
+		{"relative", "/usr/bin:/bin", LauncherSystemPATH + ":/usr/bin:/bin"},
+	} {
+		code, out := startLauncher(t, launcher, tc.home, dir, []string{"PATH=" + tc.path})
+		got, _ := os.ReadFile(filepath.Join(dir, "record"))
+		if code != 0 || !strings.Contains("\n"+string(got), "\nPATH="+tc.want+"\n") {
+			t.Fatalf("HOME=%s PATH=%s: exit %d, want PATH=%s\n%s%s", tc.home, tc.path, code, tc.want, got, out)
+		}
+	}
+	artifacts := artifactsFor(t, ClaudeCode)
+	for _, name := range []string{"DISABLE_INSTALLATION_CHECKS", "DISABLE_UPDATES", "DISABLE_AUTOUPDATER"} {
+		if artifacts.Env[name] != "1" {
+			t.Errorf("the Claude Code sandbox env does not set %s=1: %v", name, artifacts.Env)
+		}
+	}
+}
+
 // TestLaunchersLeaveProxyAloneWithoutEgress keeps a strict-profile sandbox
 // (no DefenseClaw proxy) free of proxy settings.
 func TestLaunchersLeaveProxyAloneWithoutEgress(t *testing.T) {

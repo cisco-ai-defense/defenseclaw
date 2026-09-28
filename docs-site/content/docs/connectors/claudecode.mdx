@@ -219,8 +219,10 @@ sandbox image; your own Claude Code configuration does not change.
   `/etc/claude-code/managed-settings.d/50-defenseclaw.json`, with
   `allowManagedHooksOnly` set, so user and project settings cannot add hooks
   or switch DefenseClaw's off. The same drop-in turns off Claude Code's own
-  sandbox (it cannot run inside OpenShell), the auto-updater and non-essential
-  traffic, and sends Claude Code's OTel to DefenseClaw. The hooks fail closed
+  sandbox (it cannot run inside OpenShell), the auto-updater, the installation
+  checks (the image pins its own Claude Code, so there is nothing to install or
+  update) and non-essential traffic, and sends Claude Code's OTel to
+  DefenseClaw. The hooks fail closed
   and authenticate with a per-sandbox token, never the host gateway token.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs):
   Claude Code starts with `--dangerously-skip-permissions`. `--safe`, or the

@@ -172,7 +172,19 @@ var claudeCodeLauncher = `#!/bin/bash -p
 # key. For an OpenShell placeholder those include revision digits that change
 # on every sandbox start, so the approval is recorded again on each launch.
 set -u
-` + launcherPreamble + `cfg="${HOME:-/sandbox}/.claude.json"
+` + launcherPreamble + `# Claude Code's native build asks the user to add ~/.local/bin, where its own
+# installer links it, to PATH until it is there (DISABLE_INSTALLATION_CHECKS
+# does not cover that check). The pinned binary never lives there; the entry
+# only follows the system directories, as Ubuntu's ~/.profile adds it.
+case "${HOME:-}" in
+  /*)
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*) ;;
+      *) PATH="$PATH:$HOME/.local/bin" ;;
+    esac
+    ;;
+esac
+cfg="${HOME:-/sandbox}/.claude.json"
 key="${ANTHROPIC_API_KEY:-}"
 if [ -n "$key" ] && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ -w "$cfg" ] && [ -x /usr/bin/jq ]; then
   if [ "${#key}" -gt 20 ]; then

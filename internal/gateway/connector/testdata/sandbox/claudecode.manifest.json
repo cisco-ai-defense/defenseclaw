@@ -5,7 +5,9 @@
   "env": {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
-    "DISABLE_AUTOUPDATER": "1"
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_INSTALLATION_CHECKS": "1",
+    "DISABLE_UPDATES": "1"
   },
   "binaries": [
     {
@@ -81,7 +83,7 @@
     "/etc/claude-code/managed-settings.d/50-defenseclaw.json": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "sha256": "5a9dfdad47ce5c83401fbe7b73569387a60bab6a0ecbf59c6a05415977c7382d"
+      "sha256": "d1f0de4ac5b4e26534863d5273d336cd8a53d3b459c0c4b8f788d73d9e3e7f14"
     },
     "/sandbox/.claude.json": {
       "mode": "-rw-------",

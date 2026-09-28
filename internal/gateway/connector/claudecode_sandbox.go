@@ -40,8 +40,17 @@ const ClaudeCodeSandboxDropInPath = claudeCodeSandboxManagedRoot + "/managed-set
 // applies managed-settings env too late for startup traffic (autoupdater,
 // marketplace clone, feature-flag fetches), and OpenShell does not propagate
 // image ENV, so these travel through sandbox create --env as well.
+//
+// The image pins Claude Code, so it neither updates itself nor tells the
+// user how to: DISABLE_UPDATES makes `claude update` say updates are managed,
+// and DISABLE_INSTALLATION_CHECKS drops the native-installer checks (a
+// ~/.local/bin/claude link, the installMethod in ~/.claude.json) that the
+// relocated binary never satisfies. The in-image launcher puts ~/.local/bin
+// on PATH for the one check that ignores it.
 var claudeCodeSandboxStartupEnv = map[string]string{
 	"DISABLE_AUTOUPDATER":                                  "1",
+	"DISABLE_UPDATES":                                      "1",
+	"DISABLE_INSTALLATION_CHECKS":                          "1",
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":             "1",
 	"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1",
 }
