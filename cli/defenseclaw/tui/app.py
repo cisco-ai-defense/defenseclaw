@@ -3379,7 +3379,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.add_columns("Command", "Risk", "Would run", "Needs")
         for index, entry in enumerate(matches):
             name, badge, preview, hint = _palette_row_for_entry(entry)
-            palette.add_row(name, badge, preview, hint, key=str(index))
+            # Plain strings in a DataTable are parsed as markup, which ate
+            # the whole "[diagnostics/read-only]" badge: the Risk column was
+            # always blank. Text cells are drawn literally.
+            palette.add_row(
+                Text(name),
+                Text(badge, style=_palette_risk_style(badge)),
+                Text(preview),
+                Text(hint),
+                key=str(index),
+            )
         if matches:
             palette.move_cursor(row=0, column=0, animate=False)
         else:
@@ -14371,6 +14380,19 @@ def _truncate_for_strip(value: str, width: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+def _palette_risk_style(badge: str) -> str:
+    """Colour for a palette ``[category/risk]`` badge: danger stands out."""
+
+    risk = badge.rstrip("]").rpartition("/")[2]
+    if risk == "destructive":
+        return f"bold {TOKENS.accent_red}"
+    if risk in {"restart", "secret"}:
+        return TOKENS.accent_amber
+    if risk == "read-only":
+        return TOKENS.text_muted
+    return TOKENS.text_secondary
 
 
 def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
