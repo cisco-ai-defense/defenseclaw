@@ -714,6 +714,11 @@ class OrchestratorClient:
             raise SandboxAPIError(
                 "internal", "the DefenseClaw daemon answered with a redirect", detail=str(exc)
             ) from exc
+        except requests.ConnectTimeout as exc:
+            # Nothing accepted the connection. Windows retries a refused
+            # localhost connect for about two seconds, so a stopped daemon
+            # shows up there as a connect timeout rather than a refusal.
+            raise SandboxAPIError("unavailable", "the DefenseClaw daemon is not reachable", detail=str(exc)) from exc
         except requests.Timeout as exc:
             raise SandboxAPIError(
                 "unavailable", "the DefenseClaw daemon did not answer in time", detail=str(exc)

@@ -26,6 +26,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import requests
 from defenseclaw.gateway import (
     SANDBOX_ADMIN_MESSAGE,
     OrchestratorClient,
@@ -272,6 +273,29 @@ def test_an_unreachable_daemon_is_unavailable() -> None:
         client.sandbox_status()
     assert info.value.code == "unavailable"
     assert info.value.plain() == "the DefenseClaw daemon is not reachable"
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        # Windows reports a stopped daemon's closed port this way.
+        (requests.ConnectTimeout, "the DefenseClaw daemon is not reachable"),
+        (requests.ReadTimeout, "the DefenseClaw daemon did not answer in time"),
+    ],
+)
+def test_a_connect_timeout_is_unreachable_and_a_read_timeout_is_slow(
+    monkeypatch: pytest.MonkeyPatch, failure: type[requests.Timeout], message: str
+) -> None:
+    client = OrchestratorClient(host="127.0.0.1", port=1, token="t", timeout=1)
+
+    def fail(*_args: Any, **_kwargs: Any) -> None:
+        raise failure("timed out")
+
+    monkeypatch.setattr(client._session, "request", fail)
+    with pytest.raises(SandboxAPIError) as info:
+        client.sandbox_status()
+    assert info.value.code == "unavailable"
+    assert info.value.plain() == message
 
 
 def test_the_activity_stream_replays_and_follows(daemon: FakeDaemon) -> None:
