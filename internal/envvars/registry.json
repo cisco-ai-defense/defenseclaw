@@ -2362,6 +2362,19 @@
       "security_note": "Private paired Setup binding only. This is not a public path override and must be accepted only when it names the packaged Setup process above the custody-bound installed launcher."
     },
     {
+      "name": "DEFENSECLAW_IPC_PEERAUTH_HELPER_SOCKET",
+      "category": "test_fixture",
+      "purpose": "Passes the disposable AF_UNIX socket path to the Windows IPC peer-auth subprocess test helper.",
+      "default": "unset",
+      "accepted_values": ["absolute path to the test socket", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/ipc/peerauth_windows_test.go", "description": "Connects the subprocess to the isolated test listener"}
+      ],
+      "since": "0.8.6"
+    },
+    {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable. Linux and macOS administrators can use managed.socket_path; managed Windows fixes the socket under trusted Program Files for the Cisco Secure Client peer.",
