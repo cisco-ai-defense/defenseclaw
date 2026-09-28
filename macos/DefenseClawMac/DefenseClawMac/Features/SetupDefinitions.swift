@@ -785,7 +785,9 @@ enum TUIWizards {
     private static let sandbox = WizardDefinition(
         id: "sandbox", title: "Sandbox", icon: "cube.transparent",
         blurb: "Run Claude Code and Codex in NVIDIA OpenShell sandboxes that see only your project folder. "
-            + "Needs Docker. If OpenShell is missing, run `defenseclaw sandbox setup --install-openshell` "
+            + "Sandboxes cannot run on a Mac yet: OpenShell needs Landlock, and Docker Desktop's Linux VM "
+            + "kernel has none (the doctor action checks this). "
+            + "If OpenShell is missing, run `defenseclaw sandbox setup --install-openshell` "
             + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula).",
         baseArgs: ["sandbox", "setup"],
         commandBuilder: sandboxCommands,
