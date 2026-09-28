@@ -241,8 +241,10 @@ deleted.
 - New configuration under `openshell:` (enabled, ports, pack/profile, yolo,
   workdir, egress, image, approvals, resources, harnesses, wrappers, mcp,
   token_delivery, admin) and new environment variables
-  (`DEFENSECLAW_SANDBOX_*`, `DEFENSECLAW_EGRESS_*`, `DEFENSECLAW_NO_SANDBOX`);
-  see the configuration and environment-variable references.
+  (`DEFENSECLAW_SANDBOX_ID`, `DEFENSECLAW_SANDBOX_NAME`,
+  `DEFENSECLAW_SANDBOX_TOKEN`, `DEFENSECLAW_EGRESS_URL`,
+  `DEFENSECLAW_EGRESS_BYPASS`, `DEFENSECLAW_NO_SANDBOX`); see the
+  configuration and environment-variable references.
 - Fixes that also apply outside sandboxes:
   - The Claude Code and Codex hook scripts treated an `alert` verdict (flag
     without blocking) as an invalid reply, so a fail-closed install blocked
