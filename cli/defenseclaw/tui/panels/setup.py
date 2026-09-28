@@ -47,6 +47,7 @@ from defenseclaw.observability.v8_redaction_policy import (
 from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.platform_support import (
     LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
+    host_os,
     local_observability_stack_supported,
     local_splunk_stack_supported,
     openshell_sandboxes_supported,
@@ -1325,7 +1326,7 @@ class SetupPanelModel:
 
     def _sandbox_form_fields(self, overrides: Mapping[str, str]) -> tuple[WizardFormField, ...]:
         return _apply_dynamic_fields(
-            sandbox_wizard_fields(self.config, machine=self.sandbox_machine),
+            sandbox_wizard_fields(self.config, machine=self.sandbox_machine, os_name=self.os_name),
             overrides,
             {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
         )
@@ -4628,13 +4629,16 @@ def sandbox_wizard_fields(
     cfg: object | Mapping[str, Any] | None = None,
     *,
     machine: SandboxMachineCheck | None = None,
+    os_name: str | None = None,
 ) -> tuple[WizardFormField, ...]:
     """The OpenShell sandbox setup wizard (``defenseclaw sandbox setup``).
 
     Every consent the interactive command asks for is a field here, so the
     wizard runs the command with ``--non-interactive`` and explicit flags:
     the answers are the consent. ``machine`` is the doctor's check of this
-    machine; until it answers, Install OpenShell stays off.
+    machine; until it answers, Install OpenShell stays off. On macOS there is
+    no telemetry question: the Homebrew gateway does not read gateway.env,
+    so setup cannot turn OpenShell's telemetry off there.
     """
 
     configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
@@ -4717,15 +4721,20 @@ def sandbox_wizard_fields(
             "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy.",
             visible_when=is_setup,
         ),
-        WizardFormField(
-            "Disable OpenShell Telemetry",
-            "bool",
-            no_flag="--upstream-telemetry",
-            value="yes",
-            default="yes",
-            hint="Turn OpenShell's anonymous usage telemetry off.",
-            visible_when=is_setup,
-        ),
+    ]
+    if (host_os() if os_name is None else os_name).strip().lower() != "darwin":
+        fields.append(
+            WizardFormField(
+                "Disable OpenShell Telemetry",
+                "bool",
+                no_flag="--upstream-telemetry",
+                value="yes",
+                default="yes",
+                hint="Turn OpenShell's anonymous usage telemetry off.",
+                visible_when=is_setup,
+            )
+        )
+    fields += [
         WizardFormField(
             "Shell Wrappers",
             "bool",

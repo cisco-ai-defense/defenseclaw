@@ -109,8 +109,9 @@ Open the TUI (`defenseclaw tui`), press `0` for Setup, and pick the
 **Sandbox** wizard (slot 13). It first runs `defenseclaw sandbox doctor`
 to check the machine, then shows every question the command line asks as a
 field: the harnesses (Claude Code and Codex), whether to install OpenShell,
-project-folder mounts, OpenShell telemetry (Linux only, see step 4 below),
-shell wrappers, and whether to build the images now. Your answers are the
+project-folder mounts, OpenShell telemetry (Linux only, see step 4 below; the
+field is not shown on macOS), shell wrappers, and whether to build the images
+now. Your answers are the
 consent: the wizard runs `defenseclaw sandbox setup --non-interactive` with
 the matching flags, and only `sudo` may still ask for your password. Choose **doctor** as the action
 to check the machine without changing anything.
@@ -123,8 +124,8 @@ wizard asks the same questions as the TUI and runs the same
 `defenseclaw sandbox setup --non-interactive` command, except that it never
 installs OpenShell: the installer needs `sudo`, so if OpenShell is missing,
 run `defenseclaw sandbox setup --install-openshell` in a terminal first.
-Its **Disable OpenShell telemetry** answer has no effect on a Mac: OpenShell's
-telemetry stays on there (see step 4 below).
+It has no telemetry question: setup cannot turn OpenShell's telemetry off on
+a Mac (see step 4 below).
 
 </Tab>
 </Tabs>
@@ -149,9 +150,9 @@ What setup does, in order:
    keep it (`--upstream-telemetry`). Setup does this in the gateway's
    `gateway.env`, which only the Linux systemd service reads. On macOS the
    Homebrew gateway runs under launchd, which ignores that file, so setup
-   cannot turn the telemetry off there: it stays on whatever you answer, and
-   the doctor shows its telemetry check as skipped (`gateway.env is read by
-   the systemd unit only`).
+   cannot turn the telemetry off there: it does not ask, leaves `gateway.env`
+   alone and says the telemetry stays on, and the doctor shows its telemetry
+   check as skipped (`gateway.env is read by the systemd unit only`).
 5. **Records the harnesses** in `openshell.harnesses` and shows which model
    credential each one would use, then turns `openshell.enabled` on.
 6. **Offers the shell wrappers** that make typing `claude` or `codex` start

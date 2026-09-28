@@ -37,6 +37,13 @@ from defenseclaw.tui.services.setup_state import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _linux_host(monkeypatch):
+    # The wizard's fields depend on the host (no telemetry question on macOS);
+    # pin Linux unless a test names the platform.
+    monkeypatch.setattr("defenseclaw.tui.panels.setup.host_os", lambda: "linux")
+
+
 def _set(fields, label: str, value: str):
     return [field.with_value(value) if field.label == label else field for field in fields]
 
@@ -90,6 +97,14 @@ def test_each_consent_maps_to_its_flag(changes: dict[str, str], expected_tail: t
     args = build_wizard_args(SetupWizard.SANDBOX, fields)
     assert args[:5] == ("sandbox", "setup", "--non-interactive", "--harness", "claudecode")
     assert args[5:] == expected_tail
+
+
+def test_macos_has_no_telemetry_question() -> None:
+    # The Homebrew gateway does not read gateway.env, so the answer would do nothing.
+    fields = list(sandbox_wizard_fields(os_name="darwin"))
+    assert "Disable OpenShell Telemetry" not in {field.label for field in fields}
+    assert "--upstream-telemetry" not in build_wizard_args(SetupWizard.SANDBOX, fields)
+    assert "Disable OpenShell Telemetry" in {field.label for field in sandbox_wizard_fields(os_name="linux")}
 
 
 def test_doctor_action_only_checks_the_machine() -> None:

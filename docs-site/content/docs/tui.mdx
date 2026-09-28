@@ -186,7 +186,7 @@ with `defenseclaw sandbox doctor` instead.
 | This machine | none | Docker, Landlock (Linux), OpenShell and bind-mount status, from a `sandbox doctor` check that runs when the form opens |
 | Install OpenShell | `--install-openshell` | On when OpenShell is missing or its gateway needs attention: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` |
 | Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy |
-| Disable OpenShell Telemetry | `--upstream-telemetry` when off | On |
+| Disable OpenShell Telemetry | `--upstream-telemetry` when off | On. Not shown on macOS: the Homebrew gateway does not read `gateway.env`, so setup cannot turn OpenShell's telemetry off there |
 | Shell Wrappers | `--wrappers` or `--no-wrappers` | Off. On makes `claude` and `codex` run sandboxed when you type them |
 | Build Images Now | `--skip-images` when off | On. The first build downloads about 3 GB; off leaves it to the first run |
 

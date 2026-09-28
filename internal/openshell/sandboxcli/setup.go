@@ -158,17 +158,25 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		copyOnly = !yes
 	}
 	telemetryOff := !o.UpstreamTelemetry
-	if !o.UpstreamTelemetry && state.TelemetryEnabled() {
-		yes, err := a.ask("Disable OpenShell's anonymous usage telemetry?", true, assume)
-		if err != nil {
-			return err
+	if a.GOOS == "darwin" {
+		// Homebrew's launchd service does not read gateway.env (the doctor
+		// skips the telemetry check there): nothing to ask or change.
+		if telemetryOff {
+			a.note("OpenShell's anonymous usage telemetry stays on under Homebrew (its service does not read gateway.env)")
 		}
-		telemetryOff = yes
-	}
-	if telemetryOff && state.TelemetryEnabled() {
-		changes.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	} else if !telemetryOff && !state.TelemetryEnabled() {
-		changes.UnsetEnv = []string{openshell.EnvTelemetryEnabled}
+	} else {
+		if !o.UpstreamTelemetry && state.TelemetryEnabled() {
+			yes, err := a.ask("Disable OpenShell's anonymous usage telemetry?", true, assume)
+			if err != nil {
+				return err
+			}
+			telemetryOff = yes
+		}
+		if telemetryOff && state.TelemetryEnabled() {
+			changes.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
+		} else if !telemetryOff && !state.TelemetryEnabled() {
+			changes.UnsetEnv = []string{openshell.EnvTelemetryEnabled}
+		}
 	}
 	if changes.EnableBindMounts || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
 		plan, err := a.Gateway.Plan(ctx, changes)

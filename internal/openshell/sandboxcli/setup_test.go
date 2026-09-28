@@ -188,6 +188,33 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	}
 }
 
+// TestSetupOnMacOSLeavesTelemetryAlone: the Homebrew gateway does not read
+// gateway.env, so setup neither asks about OpenShell's telemetry nor edits
+// that file (and restarts the gateway) for a change that does nothing.
+func TestSetupOnMacOSLeavesTelemetryAlone(t *testing.T) {
+	for _, upstream := range []bool{false, true} {
+		// On a terminal: the only question is the bind mounts one.
+		ta := newTestApp(t, "y\n")
+		ta.GOOS = "darwin"
+		writeConfig(t, ta, "")
+		ta.HostDoctor = hostReport(nil)
+		if err := ta.Setup(context.Background(), SetupOptions{SkipImages: true, NoWrappers: true, UpstreamTelemetry: upstream}); err != nil {
+			t.Fatalf("Setup: %v\n%s", err, ta.output())
+		}
+		if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts ||
+			len(ta.gateway.planned[0].Env) != 0 || len(ta.gateway.planned[0].UnsetEnv) != 0 {
+			t.Fatalf("upstream %t: gateway plans = %+v", upstream, ta.gateway.planned)
+		}
+		out := ta.output()
+		if strings.Contains(out, "Disable OpenShell's anonymous usage telemetry?") {
+			t.Fatalf("upstream %t: setup asked about telemetry:\n%s", upstream, out)
+		}
+		if note := strings.Contains(out, "telemetry stays on under Homebrew"); note == upstream {
+			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, note, out)
+		}
+	}
+}
+
 func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.HostDoctor = hostReport(nil)

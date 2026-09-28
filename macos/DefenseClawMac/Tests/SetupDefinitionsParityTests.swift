@@ -685,16 +685,18 @@ struct SetupDefinitionsParityTests {
         expect(wizard != nil, "the Sandbox wizard is listed")
         expect(wizard?.fields.contains { $0.key == "install-openshell" } == false,
                "the app never runs the sudo installer (it needs a terminal)")
+        expect(wizard?.fields.contains { $0.key.contains("telemetry") || $0.label.contains("telemetry") } == false,
+               "no telemetry question: the Homebrew gateway does not read gateway.env")
         // The same literal the TUI test pins (test_sandbox_setup_wizard.py).
         let defaults = Dictionary(uniqueKeysWithValues: (wizard?.fields ?? []).map { ($0.key, $0.defaultValue) })
         expect(TUIWizards.sandboxCommands(defaults, false) == [[
             "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--harness", "codex", "--no-wrappers",
         ]], "defaults match the TUI wizard")
         expect(TUIWizards.sandboxCommands([
-            "harness-codex": "no", "mounts": "no", "disable-telemetry": "no", "wrappers": "yes", "build-images": "no",
+            "harness-codex": "no", "mounts": "no", "wrappers": "yes", "build-images": "no",
         ], false) == [[
             "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--no-mounts",
-            "--upstream-telemetry", "--wrappers", "--skip-images",
+            "--wrappers", "--skip-images",
         ]], "every consent flag")
         expect(TUIWizards.sandboxCommands(["action": "doctor"], false) == [["sandbox", "doctor"]], "doctor action")
         expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil,
@@ -704,7 +706,8 @@ struct SetupDefinitionsParityTests {
                "configured harnesses seed the toggles")
 
         // Every flag the TUI builder can emit is one the app emits too, except
-        // the sudo installer.
+        // the sudo installer and the telemetry opt-in the TUI offers only off
+        // macOS.
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let python = (try? String(
             contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/panels/setup.py"),
@@ -723,10 +726,9 @@ struct SetupDefinitionsParityTests {
             Range(match.range(at: 1), in: body).map { String(body[$0]) }
         })
         let swiftFlags: Set<String> = [
-            "--non-interactive", "--harness", "--no-mounts", "--upstream-telemetry", "--wrappers", "--no-wrappers",
-            "--skip-images",
+            "--non-interactive", "--harness", "--no-mounts", "--wrappers", "--no-wrappers", "--skip-images",
         ]
-        expect(tuiFlags == swiftFlags.union(["--install-openshell"]),
+        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--upstream-telemetry"]),
                "TUI sandbox flags \(tuiFlags.sorted()) differ from the app's")
     }
 
