@@ -516,6 +516,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         f"    {ux.accent('defenseclaw setup <connector>')} "
         + ux.dim("Add another supported native agent")
     )
+    if _sandboxes_possible():
+        click.echo(
+            f"    {ux.accent('defenseclaw sandbox setup')}    " + ux.dim("Run coding agents in OpenShell sandboxes")
+        )
 
     store.close()
 
@@ -612,6 +616,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
+    # --start-gateway/--no-start-gateway as typed (None: neither); the wizard
+    # replaces start_gateway with its answer.
+    start_gateway_flag = start_gateway
     # Reject a legacy source before discovery prompts or connector mutation.
     # The hard cut requires the ordinary upgrade transaction to create v8;
     # spending an entire interactive setup session before discovering that
@@ -733,6 +740,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
+    if not start_gateway:
+        _word_sidecar_skip(report, prompted=interactive_wizard, flag=start_gateway_flag)
 
     config_upgrade_required = any(
         step.name == "Config" and step.status == "fail" and step.next_command == "defenseclaw upgrade"
@@ -2029,8 +2038,39 @@ def _render_first_run_report(report, renderer) -> None:
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if _sandboxes_possible():
+        renderer.echo("  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup")
     if summary := _unguarded_acp_summary():
         renderer.echo(f"  Unguarded ACP agents found ({summary}): defenseclaw setup acp")
+
+
+def _sandboxes_possible() -> bool:
+    """Whether this machine could run OpenShell sandboxes: Linux or macOS with Docker.
+
+    Advisory only, like the ACP hint: ``defenseclaw sandbox setup`` checks the
+    rest (Landlock, the Docker daemon, OpenShell itself).
+    """
+
+    return platform_support.openshell_sandboxes_supported() and shutil.which("docker") is not None
+
+
+# The Sidecar step bootstrap records when init does not start the gateway;
+# init words it by how that was decided.
+_SIDECAR_SKIPPED_DETAIL = "not started (--no-start-gateway)"
+
+
+def _word_sidecar_skip(report, *, prompted: bool, flag: bool | None) -> None:
+    """Describe a gateway init did not start by the answer given, not a flag never typed."""
+
+    if prompted:
+        detail = "not started (you chose not to start it)"
+    elif flag is False:
+        detail = _SIDECAR_SKIPPED_DETAIL
+    else:
+        detail = "not started (init starts it only with --start-gateway)"
+    for step in report.setup:
+        if step.name == "Sidecar" and step.status == "skip" and step.detail == _SIDECAR_SKIPPED_DETAIL:
+            step.detail = detail
 
 
 def _unguarded_acp_summary() -> str:

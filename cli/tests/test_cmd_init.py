@@ -463,6 +463,63 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
 
+    def test_sidecar_step_names_how_the_start_was_declined(self):
+        # Manual test R2-41: the Sidecar step names the answer given, not a
+        # flag the operator never typed, and the Next list points at
+        # sandbox setup on a machine that could run sandboxes.
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        settings = [
+            {
+                "connector": "codex",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            }
+        ]
+        # Every init below gets a fresh data dir; tearDown removes the last.
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        for possible in (True, False):
+            self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-word-"))
+            self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+            with (
+                patch.object(cmd_init, "_stdin_is_tty", return_value=True),
+                patch.object(
+                    cmd_init,
+                    "_prompt_first_run",
+                    return_value=(settings, "local", False, None, False, False),
+                ),
+                patch.object(cmd_init, "_sandboxes_possible", return_value=possible),
+                patch(
+                    "defenseclaw.bootstrap._quiet_guardrail_setup",
+                    return_value=StepResult("Guardrail", "pass", "test"),
+                ),
+            ):
+                result = self._invoke(["--skip-install"])
+            self.assertIn("not started (you chose not to start it)", result.output)
+            self.assertNotIn("--no-start-gateway", result.output)
+            self.assertEqual(
+                "Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup" in result.output,
+                possible,
+                result.output,
+            )
+
+        for flags, want in (
+            (["--no-start-gateway"], "not started (--no-start-gateway)"),
+            ([], "not started (init starts it only with --start-gateway)"),
+        ):
+            self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-word-"))
+            self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+            result = self._invoke([
+                "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+                "--skip-install", "--no-verify", "--json-summary", *flags,
+            ])
+            summary = json.loads(result.output)
+            sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
+            self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
+
     def test_guided_opencode_primary_records_complete_roster_once(self):
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands import cmd_init
