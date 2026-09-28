@@ -2486,7 +2486,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         activity.set_class(panel != "activity", "hidden")
         overview_visible = panel == "overview"
-        scroller.set_class(overview_visible, "overview-scroll")
+        scroller.set_class(overview_visible or self.help_open, "overview-scroll")
         # The acknowledgement frame is intentionally cheap, but any control
         # bar it reveals must already reflect the current model.  Deferring
         # button visibility/disabled state to the later content snapshot made
@@ -3212,6 +3212,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def action_toggle_help(self) -> None:
         self.help_open = not self.help_open
         self._render_chrome()
+        if self.help_open:
+            try:
+                self.query_one("#body-scroll", VerticalScroll).scroll_home(animate=False)
+            except NoMatches:
+                pass
 
     @on(Tabs.TabActivated, "#tabs")
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
@@ -4038,7 +4043,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         body_scroller: VerticalScroll | None = None
         try:
             body_scroller = self.query_one("#body-scroll", VerticalScroll)
-            body_scroller.set_class(overview_active, "overview-scroll")
+            # The help sheet is taller than 80x24 too, so it scrolls the same way.
+            body_scroller.set_class(overview_active or self.help_open, "overview-scroll")
         except Exception:  # noqa: BLE001 - the wrapper is always present; never break a render.
             pass
         if overview_active:
@@ -10089,7 +10095,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def _handle_active_panel_key(self, event: events.Key) -> bool:
         if self.help_open:
-            return False
+            return self._scroll_help_body(_panel_key(event))
         key = _panel_key(event)
         # 8.13: the connector filter is shared, so ``m`` opens the filter
         # picker on the signal panes too (Alerts/Audit/Logs). These panes
@@ -10190,6 +10196,30 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self._handle_setup_key(_vim_key(key), character=_typed_character(event))
             return self._apply_setup_action(action)
         return False
+
+    def _scroll_help_body(self, key: str) -> bool:
+        """Scroll the ``?`` sheet; at 80x24 most of it is below the fold."""
+
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return False
+        key = key.lower()
+        if key in {"down", "j"}:
+            scroller.scroll_relative(y=3, animate=False, immediate=True)
+        elif key in {"up", "k"}:
+            scroller.scroll_relative(y=-3, animate=False, immediate=True)
+        elif key in {"pagedown", "page_down", "space", "ctrl+f"}:
+            scroller.scroll_page_down(animate=False)
+        elif key in {"pageup", "page_up", "ctrl+b"}:
+            scroller.scroll_page_up(animate=False)
+        elif key == "home":
+            scroller.scroll_to(y=0, animate=False, immediate=True)
+        elif key == "end":
+            scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+        else:
+            return False
+        return True
 
     def _scroll_overview_body(self, key: str) -> bool:
         """Handle fast keyboard scrolling for the dense Overview dashboard."""
@@ -14383,7 +14413,7 @@ def _truncate_for_strip(value: str, width: int) -> str:
 
 
 def _palette_risk_style(badge: str) -> str:
-    """Colour for a palette ``[category/risk]`` badge: danger stands out."""
+    """Colour for a palette category/risk badge: danger stands out."""
 
     risk = badge.rstrip("]").rpartition("/")[2]
     if risk == "destructive":

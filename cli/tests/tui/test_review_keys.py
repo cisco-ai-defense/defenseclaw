@@ -86,3 +86,19 @@ def test_registries_move_with_j_and_k(tmp_path) -> None:
     assert model.selected_source().id == "two"
     assert model.handle_key("k").handled
     assert model.selected_source().id == "one"
+
+
+async def test_help_sheet_scrolls_to_its_end_at_80x24(tmp_path) -> None:
+    from fixtures import screen_text
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("sandboxes")
+        await pilot.pause()
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert "Press ? again to close" not in screen_text(app)
+        await pilot.press("end")
+        await pilot.pause()
+        assert "Press ? again to close" in screen_text(app)
