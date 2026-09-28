@@ -2627,6 +2627,13 @@ func rollbackSetupTransactionWithRuntime(
 		if transaction.PreviousState == nil && !restoreStoppedFreshRuntime {
 			return nil
 		}
+		// An enterprise deployment installed since the operation began owns
+		// the hook port now. Leave the restored per-user runtime stopped; its
+		// gateway start would be refused and hold the journal open.
+		if refusal := refuseRuntimeRestoreBesideEnterprise(); refusal != nil {
+			reportRuntimeRestoreSkipped(refusal)
+			return nil
+		}
 		gatewayPath := filepath.Join(transaction.InstallRoot, "bin", "defenseclaw-gateway.exe")
 		_, err := startServices(gatewayPath, transaction.DataRoot, restoreServices)
 		return err
