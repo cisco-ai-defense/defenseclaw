@@ -41,7 +41,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache, lru_cache
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -381,6 +381,28 @@ def _construct_text_scalar(loader: _StrictLoader, node: Any) -> str:
 _StrictLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_text_scalar)
 _StrictLoader.add_constructor("tag:yaml.org,2002:binary", _construct_text_scalar)
 
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+
+
+class _V8SourceLoader(_StrictLoader):
+    """_StrictLoader that reads booleans as the gateway does.
+
+    PyYAML resolves YAML 1.1, where ``yes``/``no``/``on``/``off`` are
+    booleans too. Go's yaml.v3 uses the YAML 1.2 core schema and reads them
+    as strings, so the v8 schema refuses ``yolo: no`` in the gateway; resolve
+    only the core-schema spellings here so validation agrees. (The v7
+    upgrade converter keeps _StrictLoader.)
+    """
+
+
+_V8SourceLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+    for first, resolvers in _StrictLoader.yaml_implicit_resolvers.items()
+}
+_V8SourceLoader.add_implicit_resolver(
+    _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
 
 def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> ValidatedV8Config:
     """Parse and validate one exact-v8 source without reading secrets or network."""
@@ -464,7 +486,7 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
             raise V8ConfigError(source_name, "$", "utf-8", "save the configuration as UTF-8") from exc
         _preflight_yaml_structure(text, source_name)
         try:
-            document = yaml.load(text, Loader=_StrictLoader)
+            document = yaml.load(text, Loader=_V8SourceLoader)
         except (RecursionError, OverflowError):
             raise V8ConfigError(
                 source_name,
@@ -673,10 +695,60 @@ def _validate_utf8_text(value: str, source_name: str, path: str) -> None:
         ) from None
 
 
+@cache
+def _go_schema_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a schema ``pattern`` with Go RE2's meaning of ``$``.
+
+    Outside a character class, RE2's ``$`` matches only at the end of the
+    text; Python's also matches before a final newline, so ``"codex\\n"``
+    would satisfy ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` here and fail the
+    gateway's schema. Such a ``$`` becomes ``\\Z``.
+    """
+
+    out: list[str] = []
+    i, n, in_class = 0, len(pattern), False
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            out.append(pattern[i : i + 2])
+            i += 2
+            continue
+        if in_class:
+            in_class = c != "]"
+        elif c == "[":
+            in_class = True
+            out.append(c)
+            i += 1
+            # A "]" right after "[" or "[^" is a member, not the end.
+            if pattern.startswith("^", i):
+                out.append("^")
+                i += 1
+            if pattern.startswith("]", i):
+                out.append("]")
+                i += 1
+            continue
+        elif c == "$":
+            out.append(r"\Z")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return re.compile("".join(out))
+
+
+def _go_pattern_keyword(validator: Any, pattern: str, instance: Any, schema: Any) -> Any:
+    """The ``pattern`` keyword with RE2 anchors (see _go_schema_pattern)."""
+
+    from jsonschema.exceptions import ValidationError
+
+    if validator.is_type(instance, "string") and _go_schema_pattern(pattern).search(instance) is None:
+        yield ValidationError(f"{instance!r} does not match {pattern!r}")
+
+
 @lru_cache(maxsize=1)
 def _schema_validator() -> Any:
     try:
-        from jsonschema import Draft202012Validator
+        from jsonschema import Draft202012Validator, validators
     except ImportError as exc:  # pragma: no cover - integration guard for minimal wheels
         raise RuntimeError("v8 config validation requires the existing jsonschema dependency") from exc
     packaged = resources.files("defenseclaw").joinpath("_data", "config", "v8", "defenseclaw-config.schema.json")
@@ -690,7 +762,8 @@ def _schema_validator() -> Any:
             schema = json.load(stream)
     Draft202012Validator.check_schema(schema)
     _assert_schema_parity(schema)
-    return Draft202012Validator(schema)
+    go_anchored = validators.extend(Draft202012Validator, {"pattern": _go_pattern_keyword})
+    return go_anchored(schema)
 
 
 def _assert_schema_parity(schema: dict[str, Any]) -> None:

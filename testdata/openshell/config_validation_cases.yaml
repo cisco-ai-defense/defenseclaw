@@ -485,3 +485,46 @@ cases:
       config_version: 8
       openshell:
         workdir: {unmask: ['  ']}
+
+  - name: tri-state-yaml11-no
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        yolo: no
+
+  - name: tri-state-yaml11-off
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        admin: {allow_unblock: off}
+
+  - name: tri-state-core-booleans
+    valid: true
+    source: |
+      config_version: 8
+      openshell:
+        yolo: False
+        admin: {allow_unblock: TRUE, allow_mount: null}
+
+  - name: harness-name-with-trailing-newline
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        harnesses: ["codex\n"]
+
+  - name: egress-pattern-with-trailing-newline
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        egress: {block: ["paste.example\n"]}
+
+  - name: cpu-with-trailing-newline
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        resources: {cpu: "2\n"}
