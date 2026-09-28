@@ -18,9 +18,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -150,7 +152,7 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 	if status.Readiness.Gateway || status.CoverageComplete {
 		t.Fatalf("status reports the gateway ready without its API port: %+v", status.Readiness)
 	}
-	if got := messagesOf(status.Warnings, codeVerify); !strings.Contains(got, want) || !strings.Contains(got, "serves hooks on its socket and keeps retrying the port") {
+	if got := messagesOf(status.Errors, codeVerify); !strings.Contains(got, want) || !strings.Contains(got, "serves hooks on its socket and keeps retrying the port") {
 		t.Fatalf("status does not name the port holder: %s", got)
 	}
 	if got := messagesOf(h.run(Options{Action: ActionVerify}).Errors, codeVerify); !strings.Contains(got, want) {
@@ -170,7 +172,7 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 				if status.Readiness.Gateway {
 					t.Fatal("status reports the gateway ready without its API port")
 				}
-				got := messagesOf(status.Warnings, codeVerify)
+				got := messagesOf(status.Errors, codeVerify)
 				if !strings.Contains(got, "its API listener 127.0.0.1:18970 is not up (error: listen tcp 127.0.0.1:18970: bind: address already in use); the gateway keeps retrying the port") {
 					t.Fatalf("status does not explain the API listener: %s", got)
 				}
@@ -193,11 +195,19 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 		h.env.APIHealthGet = func(context.Context) (int, []byte, error) {
 			return 0, nil, errors.New(`Get "http://127.0.0.1:18970/health": EOF`)
 		}
+		// The hook socket is gone as well; Go's error for the request over it
+		// names the API address and the dial.
+		h.services.active[unitHookSocket] = false
+		h.env.HealthGet = func(context.Context) (int, []byte, error) {
+			return 0, nil, &url.Error{Op: "Get", URL: "http://127.0.0.1:18970/health", Err: &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ENOENT)}}
+		}
 		want := "the gateway API port 127.0.0.1:18970 is held by pid 31337 (uid 4242"
+		socket := "the gateway does not serve the hook socket " + h.env.Layout.HookSocketPath + ": the socket file does not exist"
 
 		status := h.run(Options{Action: ActionStatus})
-		if got := messagesOf(status.Warnings, codeVerify); !strings.Contains(got, want) || strings.Contains(got, "EOF") || !strings.Contains(got, "enterprise linux repair`") {
-			t.Fatalf("status does not name the port holder: %s", got)
+		if got := messagesOf(status.Errors, codeVerify); !strings.Contains(got, want) || strings.Contains(got, "EOF") || !strings.Contains(got, "enterprise linux repair`") ||
+			!strings.Contains(got, socket) || strings.Contains(got, "http://") {
+			t.Fatalf("status does not name the port holder and the missing hook socket: %s", got)
 		}
 		if status.Readiness.Gateway {
 			t.Fatal("status reports the gateway ready")
@@ -228,7 +238,7 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 					return answer, []byte(`{"api":{"state":"running"}}`), nil
 				}
 				status := h.run(Options{Action: ActionStatus})
-				got := messagesOf(status.Warnings, codeVerify)
+				got := messagesOf(status.Errors, codeVerify)
 				if !strings.Contains(got, "is held by pid 94782 (uid 4243") || !strings.Contains(got, "serves hooks on its socket and keeps retrying the port") {
 					t.Fatalf("status does not name the port holder: %s", got)
 				}
@@ -270,8 +280,8 @@ func TestEarlierGatewayIsProbedOnTheAPIPort(t *testing.T) {
 			}
 			h.env.Runner = lsofRunner{Runner: h.runner, output: "p94782\nu4243\nf5\n"}
 			status := h.run(Options{Action: ActionStatus})
-			if status.Readiness.Gateway || !strings.Contains(messagesOf(status.Warnings, codeVerify), "is held by pid 94782 (uid 4243") {
-				t.Fatalf("an answer from another holder of the API port was trusted: %+v %+v", status.Readiness, status.Warnings)
+			if status.Readiness.Gateway || !strings.Contains(messagesOf(status.Errors, codeVerify), "is held by pid 94782 (uid 4243") {
+				t.Fatalf("an answer from another holder of the API port was trusted: %+v %+v", status.Readiness, status.Errors)
 			}
 		})
 	}

@@ -406,7 +406,7 @@ func hookSocketPeer(ctx context.Context, path string) (peercred.Credentials, err
 func (e *Env) gatewayServing(ctx context.Context, gateway Unit, serviceUID int) error {
 	peer, err := e.HookSocketPeer(ctx)
 	if err != nil {
-		return fmt.Errorf("the gateway does not serve the hook socket %s: %w", e.Layout.HookSocketPath, err)
+		return e.hookSocketProblem(err)
 	}
 	if peer.UID != serviceUID && peer.UID != 0 {
 		return fmt.Errorf("the hook socket %s is served by uid %d, not the %s service account (uid %d)", e.Layout.HookSocketPath, peer.UID, e.Layout.ServiceUser, serviceUID)
