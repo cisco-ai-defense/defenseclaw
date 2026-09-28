@@ -3556,6 +3556,16 @@
               "host_header": {
                 "$ref": "#/$defs/boundedString"
               },
+              "auth": {
+                "type": "string",
+                "description": "Authentication mode: passthrough (forward client auth), api_key (use api_key_env), none (strip auth), aws_sigv4 (Phase 2).",
+                "enum": [
+                  "passthrough",
+                  "api_key",
+                  "none",
+                  "aws_sigv4"
+                ]
+              },
               "api_key_env": {
                 "$ref": "#/$defs/envName"
               },

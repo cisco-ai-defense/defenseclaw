@@ -343,8 +343,21 @@ type RoutingModelBackend struct {
 	Model        string   `mapstructure:"model"             yaml:"model"`
 	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
 	HostHeader   string   `mapstructure:"host_header"       yaml:"host_header,omitempty"`
+	Auth         string   `mapstructure:"auth"              yaml:"auth,omitempty"`
 	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
 	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
+}
+
+// EffectiveAuth returns the resolved auth mode for a routing backend.
+// Empty auth is inferred: api_key if api_key_env is set, passthrough otherwise.
+func (b RoutingModelBackend) EffectiveAuth() string {
+	if b.Auth != "" {
+		return strings.ToLower(strings.TrimSpace(b.Auth))
+	}
+	if b.APIKeyEnv != "" {
+		return "api_key"
+	}
+	return "passthrough"
 }
 
 type RoutingSignalConfig struct {

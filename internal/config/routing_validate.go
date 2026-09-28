@@ -96,6 +96,18 @@ func (r *RoutingConfig) Validate() error {
 		if model.APIKeyEnv != "" && !routingEnvNamePattern.MatchString(model.APIKeyEnv) {
 			return fmt.Errorf("models[%d].api_key_env %q is not a valid environment variable name", i, model.APIKeyEnv)
 		}
+		if auth := strings.ToLower(strings.TrimSpace(model.Auth)); auth != "" {
+			switch auth {
+			case "passthrough", "api_key", "none":
+			case "aws_sigv4":
+				return fmt.Errorf("models[%d].auth %q is not yet supported (planned for Phase 2)", i, model.Auth)
+			default:
+				return fmt.Errorf("models[%d].auth %q is unsupported (supported: passthrough, api_key, none, aws_sigv4)", i, model.Auth)
+			}
+			if auth == "api_key" && model.APIKeyEnv == "" {
+				return fmt.Errorf("models[%d].auth is api_key but api_key_env is not set", i)
+			}
+		}
 	}
 	if r.Enabled && len(r.Models) == 0 {
 		return fmt.Errorf("models must contain at least one backend when routing is enabled")

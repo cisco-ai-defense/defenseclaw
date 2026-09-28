@@ -700,6 +700,7 @@ func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
 			Model:      model.Model,
 			BaseURL:    model.BaseURL,
 			HostHeader: model.HostHeader,
+			Auth:       model.EffectiveAuth(),
 			APIKeyEnv:  model.APIKeyEnv,
 		})
 	}

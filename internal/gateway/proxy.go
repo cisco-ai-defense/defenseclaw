@@ -800,6 +800,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	if isZstdBody(body) {
+		if decompressed, err := decompressZstd(body); err == nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] zstd: decompressed %d → %d bytes\n", len(body), len(decompressed))
+			body = decompressed
+			r.Header.Del("Content-Encoding")
+			r.Header.Del("Content-Length")
+		} else {
+			fmt.Fprintf(os.Stderr, "[guardrail] zstd: decompress failed: %v\n", err)
+		}
+	}
+	// Log body model field for debugging
+	if idx := bytes.Index(body, []byte(`"model"`)); idx >= 0 {
+		end := idx + 60
+		if end > len(body) {
+			end = len(body)
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] body-model-region: %s\n", string(body[idx:end]))
+	}
 
 	targetOrigin := r.Header.Get("X-DC-Target-URL")
 	// Native-binary connectors (codex, zeptoclaw) can't inject
@@ -818,6 +836,47 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
+	if targetOrigin == "" && p.modelRouter != nil {
+		var routePartial struct {
+			Model    string        `json:"model"`
+			Messages []ChatMessage `json:"messages"`
+			Stream   bool          `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &routePartial)
+		requestModel := strings.TrimSpace(routePartial.Model)
+		if requestModel == "" {
+			requestModel = bedrockModelFromPath(r.URL.Path)
+		}
+		decision := p.modelRouter.Route(r.Context(), &ModelRouterInput{
+			Model:        requestModel,
+			RequestModel: requestModel,
+			Messages:     routePartial.Messages,
+			Stream:       routePartial.Stream,
+			Metadata: map[string]interface{}{
+				"defenseclaw.connector": p.connectorName(),
+			},
+		})
+		if passthroughRouteIsAnthropicMessages(decision) {
+			targetOrigin = decision.TargetURL
+			if decision.APIKeyOverride {
+				connForwardKey = decision.APIKey
+			}
+			if decision.Model != "" {
+				// Bedrock Converse/Invoke take the model from the URL.
+				// A body "model" field is rejected as an extra input.
+				if isBedrockNativeModelPath(r.URL.Path) {
+					if rewritten := rewriteBedrockModelPath(r.URL.Path, decision.Model); rewritten != r.URL.Path {
+						r.URL.Path = rewritten
+						r.URL.RawPath = ""
+					}
+				} else {
+					body = patchModelInBody(body, decision.Model)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: semantic-router hydration model=%q base=%s\n",
+				decision.Model, scrubURLSecrets(decision.TargetURL))
+		}
+	}
 	// Direct-provider fallback: when neither the fetch interceptor nor a
 	// connector supplied an upstream (e.g. ZeptoClaw configured with only
 	// api_base and no api_key, or any agent pointed straight at the
@@ -827,9 +886,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// so the Responses API (/v1/responses) and other provider-native
 	// passthrough paths reach the configured custom provider instead of
 	// being rejected with 400.
+	directProviderHydrated := false
 	if targetOrigin == "" {
 		if base := strings.TrimSpace(p.cfg.LLM.BaseURL); base != "" {
-			cfgModel := p.cfg.Model
+			cfgModel := p.effectiveDirectProviderModel()
 			if cfgModel == "" {
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: llm.base_url set but no llm.model configured — cannot hydrate upstream auth\n")
 			} else if !localKeyResolutionDisabled || tokenResolver != nil {
@@ -839,7 +899,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				} else if resolvedKey != "" {
 					targetOrigin = base
 					connForwardKey = resolvedKey
+					directProviderHydrated = true
+					if !strings.Contains(r.URL.Path, "/invoke") {
+						body = patchModelInBody(body, cfgModel)
+					}
 					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: direct-provider hydration model=%q base=%s\n",
+						cfgModel, scrubURLSecrets(base))
+				} else if clientAuth := r.Header.Get("Authorization"); clientAuth != "" {
+					// No provider key configured but the client sent
+					// an Authorization header — passthrough the client's
+					// own credentials (e.g. Codex OAuth tokens).
+					targetOrigin = base
+					connForwardKey = strings.TrimPrefix(clientAuth, "Bearer ")
+					directProviderHydrated = true
+					if !strings.Contains(r.URL.Path, "/invoke") {
+						body = patchModelInBody(body, cfgModel)
+					}
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: client-auth passthrough hydration model=%q base=%s\n",
 						cfgModel, scrubURLSecrets(base))
 				} else {
 					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: no API key available for configured model %q\n", cfgModel)
@@ -853,6 +929,81 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header and no llm.base_url configured")
 		return
 	}
+	// Semantic router override: when a router is configured and the
+	// passthrough has a resolved target, let the classifier reclassify
+	// and potentially redirect to a different backend. This enables
+	// intent-based routing for hook-only connectors in hybrid proxy mode.
+	var bedrockTranslateNeeded bool
+	var bedrockTranslateToOpenAI bool
+	var routerDecision *ModelRouterDecision
+	fmt.Fprintf(os.Stderr, "[routing] passthrough router check: modelRouter=%v bodyLen=%d\n", p.modelRouter != nil, len(body))
+	if p.modelRouter != nil {
+		var routePartial struct {
+			Model    string        `json:"model"`
+			Messages []ChatMessage `json:"messages"`
+			Stream   bool          `json:"stream"`
+		}
+		routeBody := body
+		if isZstdBody(routeBody) {
+			if dec, err := decompressZstd(routeBody); err == nil {
+				routeBody = dec
+			}
+		}
+		_ = json.Unmarshal(routeBody, &routePartial)
+		requestModel := strings.TrimSpace(routePartial.Model)
+		if requestModel == "" {
+			requestModel = bedrockModelFromPath(r.URL.Path)
+		}
+		var decision *ModelRouterDecision
+		if detailed, ok := p.modelRouter.(detailedModelRouter); ok {
+			outcome := detailed.RouteDetailed(r.Context(), &ModelRouterInput{
+				Model:        requestModel,
+				RequestModel: requestModel,
+				Messages:     routePartial.Messages,
+				Stream:       routePartial.Stream,
+				Metadata: map[string]interface{}{
+					"defenseclaw.connector": p.connectorName(),
+				},
+			})
+			decision = outcome.Decision
+			if decision != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: semantic-router override decision=%s model=%q base=%s\n",
+					outcome.Result, decision.Model, scrubURLSecrets(decision.TargetURL))
+			}
+		} else {
+			decision = p.modelRouter.Route(r.Context(), &ModelRouterInput{
+				Model:        requestModel,
+				RequestModel: requestModel,
+				Messages:     routePartial.Messages,
+				Stream:       routePartial.Stream,
+			})
+		}
+		if decision != nil {
+			routerDecision = decision
+			if decision.TargetURLOverride && decision.TargetURL != "" {
+				targetOrigin = decision.TargetURL
+				directProviderHydrated = true
+			}
+			if decision.APIKeyOverride {
+				connForwardKey = decision.APIKey
+			}
+			if shouldTranslateBedrockToOpenAI(r.URL.Path, decision) {
+				body, r.URL.Path = bedrockToOpenAIRequest(body, r.URL.Path, decision.Model)
+				r.URL.RawPath = ""
+				bedrockTranslateNeeded = true
+				bedrockTranslateToOpenAI = true
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→openai translation model=%q\n", decision.Model)
+			} else if shouldTranslateBedrockToAnthropic(r.URL.Path, decision) {
+				body, r.URL.Path = bedrockToAnthropicRequest(body, r.URL.Path, decision.Model)
+				r.URL.RawPath = ""
+				bedrockTranslateNeeded = true
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→anthropic translation model=%q\n", decision.Model)
+			} else if decision.Model != "" && !strings.Contains(r.URL.Path, "/invoke") {
+				body = patchModelInBody(body, decision.Model)
+			}
+		}
+	}
+	_ = routerDecision
 	if connForwardKey != "" && r.Header.Get("X-AI-Auth") == "" {
 		r.Header.Set("X-AI-Auth", "Bearer "+connForwardKey)
 	}
@@ -880,7 +1031,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	branch := "passthrough"
 	bodyShape := BodyShapeNone
-	if isKnownProviderDomain(targetForMatch) {
+	if isKnownProviderDomain(targetForMatch) || directProviderHydrated {
 		branch = "known"
 	} else {
 		if shape, ok := isLLMShapedBody(body); ok {
@@ -1258,6 +1409,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
 		return
 	}
+	if routerDecision != nil && routerDecision.HostHeader != "" {
+		hostHeader := strings.TrimSpace(routerDecision.HostHeader)
+		if strings.ContainsAny(hostHeader, "\r\n\t /\\") {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid routing host_header")
+			return
+		}
+		upstreamReq.Host = hostHeader
+	}
 	// Pin ContentLength to the (possibly-mutated) body size so the Go
 	// http client doesn't try to use the client-supplied length or fall
 	// back to chunked encoding. Needed because notification injection
@@ -1313,14 +1472,28 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	// Set the single resolved auth header for the upstream provider.
 	if upstreamAuth != "" {
-		// Anthropic expects x-api-key, Azure expects api-key, others use Authorization.
-		switch provider {
-		case "anthropic":
-			upstreamReq.Header.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		case "azure":
-			upstreamReq.Header.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		default:
+		key := strings.TrimPrefix(upstreamAuth, "Bearer ")
+		// Anthropic Messages (including Bedrock's /anthropic compatibility
+		// route) wants x-api-key + anthropic-version, not Authorization.
+		if passthroughUsesAnthropicAPIKey(provider, upstreamURL) {
+			upstreamReq.Header.Set("x-api-key", key)
+			if strings.TrimSpace(upstreamReq.Header.Get("anthropic-version")) == "" {
+				upstreamReq.Header.Set("anthropic-version", "2023-06-01")
+			}
+		} else if provider == "azure" {
+			upstreamReq.Header.Set("api-key", key)
+		} else {
 			upstreamReq.Header.Set("Authorization", upstreamAuth)
+		}
+	}
+
+	// Bedrock translation: rewrite auth headers for the upstream.
+	if bedrockTranslateNeeded && connForwardKey != "" {
+		if bedrockTranslateToOpenAI {
+			upstreamReq.Header.Del("Authorization")
+			upstreamReq.Header.Set("Authorization", "Bearer "+connForwardKey)
+		} else {
+			bedrockToAnthropicHeaders(upstreamReq, connForwardKey)
 		}
 	}
 
@@ -1331,6 +1504,35 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer resp.Body.Close()
+
+	// Bedrock response translation: convert the upstream response format
+	// back to Bedrock eventstream so Claude Code in Bedrock mode can consume it.
+	if bedrockTranslateNeeded {
+		contentType := resp.Header.Get("Content-Type")
+		if bedrockTranslateToOpenAI {
+			if strings.Contains(contentType, "text/event-stream") {
+				fmt.Fprintf(os.Stderr, "[guardrail] translating OpenAI SSE → Bedrock eventstream\n")
+				if err := openAISSEToBedrockEventstream(w, resp); err != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] bedrock-translate stream error: %v\n", err)
+				}
+				return
+			}
+			if translateNonStreamingOpenAIToBedrock(w, resp) {
+				return
+			}
+		} else {
+			if strings.Contains(contentType, "text/event-stream") {
+				fmt.Fprintf(os.Stderr, "[guardrail] translating Anthropic SSE → Bedrock eventstream\n")
+				if err := anthropicSSEToBedrockEventstream(w, resp); err != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] bedrock-translate stream error: %v\n", err)
+				}
+				return
+			}
+			if translateNonStreamingAnthropicToBedrock(w, resp) {
+				return
+			}
+		}
+	}
 
 	// Determine whether the upstream response is streaming (SSE).
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
@@ -2161,7 +2363,7 @@ func inferProviderFromURL(targetURL string) string {
 // entry in “~/.defenseclaw/custom-providers.json“ for base_url, base
 // provider type, and TLS — see :func:`NewProviderForLLMConfig`.
 func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider {
-	cfgModel := p.cfg.Model
+	cfgModel := p.effectiveDirectProviderModel()
 	if cfgModel == "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] no X-DC-Target-URL and no configured model — cannot route\n")
 		return nil
@@ -2204,6 +2406,54 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	return provider
 }
 
+func (p *GuardrailProxy) effectiveDirectProviderModel() string {
+	if p == nil || p.cfg == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(p.cfg.LLM.Model); model != "" {
+		return model
+	}
+	return strings.TrimSpace(p.cfg.Model)
+}
+
+func (p *GuardrailProxy) effectiveDirectProviderAPIKeyEnv() string {
+	if p == nil || p.cfg == nil {
+		return ""
+	}
+	if envName := strings.TrimSpace(p.cfg.LLM.APIKeyEnv); envName != "" {
+		return envName
+	}
+	return strings.TrimSpace(p.cfg.APIKeyEnv)
+}
+
+// passthroughRouteIsAnthropicMessages reports whether a semantic-router
+// backend can accept Claude Code's native /v1/messages payload. OpenAI-
+// compatible backends (for example a local vLLM/Qwen endpoint) need
+// transcoding, which this path does not perform.
+func passthroughRouteIsAnthropicMessages(decision *ModelRouterDecision) bool {
+	if decision == nil || !decision.TargetURLOverride || strings.TrimSpace(decision.TargetURL) == "" {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(decision.Provider))
+	if provider == "anthropic" {
+		return true
+	}
+	target := strings.ToLower(decision.TargetURL)
+	return strings.Contains(target, "/anthropic")
+}
+
+func passthroughUsesAnthropicAPIKey(provider, targetURL string) bool {
+	target := strings.ToLower(strings.TrimSpace(targetURL))
+	if strings.Contains(target, "/anthropic") {
+		return true
+	}
+	// Native Bedrock Converse/Invoke authenticate with Authorization: Bearer.
+	if isBedrockNativeModelPath(target) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(provider), "anthropic")
+}
+
 // resolveDirectProviderUpstreamKey returns the upstream API key to use
 // when the proxy is operating in direct-provider mode (no
 // X-DC-Target-URL header, no connector-supplied key). Used by both the
@@ -2234,9 +2484,9 @@ func (p *GuardrailProxy) resolveDirectProviderUpstreamKey(ctx context.Context, c
 	if inboundKey != "" {
 		return inboundKey, nil
 	}
-	if p.cfg != nil && p.cfg.APIKeyEnv != "" {
+	if envName := p.effectiveDirectProviderAPIKeyEnv(); envName != "" {
 		dotenvPath := filepath.Join(p.dataDir, ".env")
-		return ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath), nil
+		return ResolveAPIKey(envName, dotenvPath), nil
 	}
 	return "", nil
 }

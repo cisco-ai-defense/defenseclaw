@@ -148,6 +148,8 @@ type ModelRouterDecision struct {
 
 	// TargetURL overrides X-DC-Target-URL (provider base URL).
 	TargetURL string
+	// HostHeader overrides the HTTP Host header for virtual-hosted upstreams.
+	HostHeader string
 	// TargetURLOverride distinguishes clearing the connector's original
 	// upstream from keeping it. Every resolved backend sets this so a route to
 	// a different provider cannot accidentally reuse the original endpoint.
@@ -173,11 +175,13 @@ type ModelRouterDecision struct {
 // alias returned by the semantic router. Credentials stay in DefenseClaw and
 // are never sent to the classifier.
 type ModelRouterBackend struct {
-	Name      string
-	Provider  string
-	Model     string
-	BaseURL   string
-	APIKeyEnv string
+	Name       string
+	Provider   string
+	Model      string
+	BaseURL    string
+	HostHeader string
+	Auth       string // passthrough, api_key, none (resolved via EffectiveAuth)
+	APIKeyEnv  string
 }
 
 // SetModelRouter installs an embedded model router into the proxy.
