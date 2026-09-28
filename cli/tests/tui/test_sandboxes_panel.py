@@ -279,6 +279,21 @@ def test_a_restarted_daemon_resets_the_resume_point() -> None:
     assert model.add_events([{**BLOCKED, "seq": 1}]) == []
 
 
+def test_a_feed_that_started_over_is_read_from_its_start() -> None:
+    model = _model()
+    last = {**ALLOWED, "seq": 40, "time": "2026-09-27T12:00:00Z"}
+    model.add_events([last], toast=False)
+    # The daemon still holds the resume point, or only newer events pushed it out.
+    assert model.resume_point_lost([last, {**BLOCKED, "seq": 41}]) is False
+    assert model.resume_point_lost([{**BLOCKED, "seq": 45}]) is False
+    # A restarted daemon numbers from one again: nothing at or after 40, or
+    # another event under that number.
+    assert model.resume_point_lost([]) is True
+    assert model.resume_point_lost([{**BLOCKED, "seq": 40, "time": "2026-09-27T13:00:00Z"}]) is True
+    model.reset_resume_point()
+    assert model.last_seq == 0 and model.resume_point_lost([]) is False
+
+
 def test_backlog_replay_never_toasts() -> None:
     model = _model()
     assert model.add_events([BLOCKED], toast=False) == []
@@ -1174,6 +1189,50 @@ def test_the_stream_loop_resumes_after_the_last_sequence(monkeypatch) -> None:
     app._sandbox_stream_loop()  # noqa: SLF001
     assert opened == [8]
     assert [(events[0]["seq"], toast) for events, toast in delivered] == [(8, False), (9, True)]
+
+
+def test_the_stream_loop_reads_a_restarted_daemons_feed_from_its_start(monkeypatch) -> None:
+    app = DefenseClawTUI(config=_config())
+    app.sandbox_model.add_events([{**ALLOWED, "seq": 40}], toast=False)
+    reads: list[int] = []
+    opened: list[int] = []
+
+    class Stream:
+        def __iter__(self):
+            app._sandbox_stream_stop.set()  # noqa: SLF001
+            return iter(())
+
+        def close(self) -> None:
+            pass
+
+    class Client:
+        def sandbox_activity(self, since: int = 0, **_kwargs):
+            reads.append(since)
+            # The restarted daemon has published two events since it started.
+            return [event for event in ({**ALLOWED, "seq": 1}, {**BLOCKED, "seq": 2}) if event["seq"] > since]
+
+        def open_sandbox_activity_stream(self, since: int = 0, **_kwargs):
+            opened.append(since)
+            return Stream()
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(sandbox_panel, "sandbox_client", lambda _config, timeout=5: Client())
+
+    def deliver(callback, *args):
+        if callback == app._on_sandbox_events:  # noqa: SLF001
+            events, toast = args
+            app.sandbox_model.add_events(events, toast=toast)
+        elif callback == app._on_sandbox_resume:  # noqa: SLF001
+            callback(*args)
+        return True
+
+    monkeypatch.setattr(app, "_deliver_from_thread", deliver)
+    app._sandbox_stream_loop()  # noqa: SLF001
+    assert reads == [39, 0]
+    assert opened == [2]
+    assert any(row.host == "webhook.site" for row in app.sandbox_model.feed)
 
 
 @pytest.mark.asyncio

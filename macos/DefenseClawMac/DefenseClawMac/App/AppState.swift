@@ -250,9 +250,6 @@ final class AppState {
     @ObservationIgnored private var sandboxRefreshInProgress = false
     /// The first activity read returns the daemon's buffer; it never notifies.
     @ObservationIgnored private var sandboxActivitySynced = false
-    /// When the daemon started (from /health uptime): a restarted daemon
-    /// numbers its activity from 1 again, so the resume point starts over.
-    @ObservationIgnored private var sandboxDaemonStartedAt: Date?
 
     // UI state
     var selectedPanel: PanelID = .overview
@@ -498,7 +495,6 @@ final class AppState {
         sandboxActionFailed = false
         sandboxActionsInFlight = []
         sandboxActivitySynced = false
-        sandboxDaemonStartedAt = nil
 
         connectorFilter = ""
         connectorStatsCache = [:]
@@ -943,15 +939,6 @@ final class AppState {
         guard !sandboxRefreshInProgress, !installationBindInProgress, gatewayReachable, sandboxesWatched else { return }
         sandboxRefreshInProgress = true
         defer { sandboxRefreshInProgress = false }
-        if health.uptimeMs > 0 {
-            let startedAt = Date().addingTimeInterval(-Double(health.uptimeMs) / 1000)
-            if let previous = sandboxDaemonStartedAt, startedAt.timeIntervalSince(previous) > 30 {
-                sandbox.lastSeq = 0
-                sandbox.activity = []
-                sandboxActivitySynced = false
-            }
-            sandboxDaemonStartedAt = startedAt
-        }
         let generation = installationGeneration
         let status: SandboxStatus
         do {
@@ -965,15 +952,32 @@ final class AppState {
         var asks: [SandboxAsk]? = status.enabled ? nil : []
         var events: [SandboxActivity] = []
         var listError = ""
+        var feedStartedOver = false
         if status.enabled {
             do { rows = try await gateway.sandboxes() } catch { listError = SandboxDecoding.message(for: error) }
             do { asks = try await gateway.sandboxApprovals() } catch {
                 if listError.isEmpty { listError = SandboxDecoding.message(for: error) }
             }
-            events = (try? await gateway.sandboxActivity(since: sandbox.lastSeq)) ?? []
+            // Read from one event early: a restarted daemon numbers its
+            // events from one again, which resuming after the old number
+            // would skip (resumePointLost).
+            do {
+                events = try await gateway.sandboxActivity(since: max(0, sandbox.lastSeq - 1))
+                if sandbox.resumePointLost(events) {
+                    feedStartedOver = true
+                    events = try await gateway.sandboxActivity(since: 0)
+                }
+            } catch {
+                events = []
+            }
         }
         guard installationSnapshotIsCurrent(generation) else { return }
         var next = sandbox
+        if feedStartedOver {
+            // The new daemon's buffer is read as at start: no notifications.
+            next.restartFeed()
+            sandboxActivitySynced = false
+        }
         next.apply(status: status, sandboxes: rows, asks: asks)
         if !listError.isEmpty { next.error = listError }
         let notes = next.merge(events: events, notify: sandboxActivitySynced)

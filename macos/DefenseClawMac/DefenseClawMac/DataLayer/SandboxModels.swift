@@ -159,6 +159,13 @@ struct SandboxActivity: Identifiable, Sendable, Hashable {
     var id: String { "\(seq)|\(kind)|\(host)" }
     var isBlockedDestination: Bool { kind == "egress.blocked" && !host.isEmpty }
 
+    /// The same feed event (unblock marks aside): a daemon that restarted
+    /// numbers its events from one again, so a sequence number alone is not.
+    func isSameEvent(as other: SandboxActivity) -> Bool {
+        seq == other.seq && time == other.time && kind == other.kind && sandbox == other.sandbox
+            && host == other.host && port == other.port
+    }
+
     var glyph: String {
         switch kind {
         case "egress.allowed": "✓"
@@ -222,6 +229,9 @@ struct SandboxSnapshot: Sendable {
     var asks: [SandboxAsk] = []
     var activity: [SandboxActivity] = []
     var lastSeq = 0
+    /// The event lastSeq names, which tells a daemon that started its feed
+    /// over from one that stayed quiet (resumePointLost).
+    var resumeEvent: SandboxActivity?
     var fetchedAt: Date?
     var error = ""
     /// (sandbox|host) → when it was last notified, so a flapping destination
@@ -294,6 +304,30 @@ struct SandboxSnapshot: Sendable {
         fetchedAt = now
     }
 
+    /// Whether the daemon's feed started over, from a read of the events
+    /// after lastSeq - 1. The feed keeps the event lastSeq names until newer
+    /// events push it out, so a feed that still counts on answers with it
+    /// (or newer ones). An empty answer, or another event under that number,
+    /// is a new feed: the daemon restarted and numbers from one again. The
+    /// daemon's uptime cannot tell: it stops while the Mac sleeps.
+    func resumePointLost(_ events: [SandboxActivity]) -> Bool {
+        guard lastSeq > 0 else { return false }
+        let feed = events.filter { $0.kind != "dropped" }
+        if feed.isEmpty { return true }
+        // Only newer events: they pushed the resume point out of the feed.
+        guard let same = feed.first(where: { $0.seq == lastSeq }) else { return false }
+        guard let resumeEvent else { return false }
+        return !same.isSameEvent(as: resumeEvent)
+    }
+
+    /// Read the daemon's feed from its start again (after resumePointLost):
+    /// the old events' numbers mean nothing to the new feed.
+    mutating func restartFeed() {
+        lastSeq = 0
+        resumeEvent = nil
+        activity = []
+    }
+
     /// Append new events (by sequence number) and return what to notify.
     mutating func merge(events: [SandboxActivity], notify: Bool, now: Date = Date()) -> [SandboxNotification] {
         var out: [SandboxNotification] = []
@@ -302,6 +336,7 @@ struct SandboxSnapshot: Sendable {
                 // A "dropped" marker shares its sequence with the next event.
                 if event.seq > 0 && event.seq <= lastSeq { continue }
                 lastSeq = max(lastSeq, event.seq)
+                if event.seq > 0, event.seq == lastSeq { resumeEvent = event }
             }
             if event.kind == "egress.unblocked", !event.host.isEmpty {
                 // Reason is the scope: "always" lifts the host everywhere.

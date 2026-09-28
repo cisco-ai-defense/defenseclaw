@@ -845,6 +845,9 @@ class SandboxesPanelModel:
     error: str = ""
     fetched_at: datetime | None = None
     last_seq: int = 0
+    # The event last_seq names, which tells a daemon that started its feed
+    # over from one that stayed quiet (resume_point_lost).
+    _resume_event: ActivityRow | None = None
     stream_state: str = "idle"
     admin: AdminPolicy = field(default_factory=AdminPolicy)
     wrappers: tuple[str, ...] = ()
@@ -929,6 +932,8 @@ class SandboxesPanelModel:
                     continue
                 else:
                     self.last_seq = max(self.last_seq, row.seq)
+                if row.seq and row.seq == self.last_seq:
+                    self._resume_event = row
             if row.kind == "egress.unblocked" and row.host:
                 # Scope "always" lifts the host in every sandbox.
                 self.mark_unblocked(row.sandbox, row.host, always=row.reason == "always")
@@ -945,6 +950,31 @@ class SandboxesPanelModel:
                 self._apply_ask_event(row)
         self._follow_selection(selection)
         return notices
+
+    def resume_point_lost(self, events: Any) -> bool:
+        """Whether the daemon's feed started over, from a read of the events after ``last_seq - 1``.
+
+        The feed keeps the event ``last_seq`` names until newer events push it
+        out, so a feed that still counts on answers with it (or with newer
+        ones). An empty answer, or another event under that number, is a new
+        feed: the daemon restarted and numbers its events from one again, so
+        resuming after ``last_seq`` would skip its first events.
+        """
+        if self.last_seq <= 0:
+            return False
+        rows = [row for row in (decode_activity(raw) for raw in _list(events)) if row and row.kind != "dropped"]
+        if not rows:
+            return True
+        same = next((row for row in rows if row.seq == self.last_seq), None)
+        if same is None:
+            # Only newer events: they pushed the resume point out of the feed.
+            return False
+        return self._resume_event is not None and same.key != self._resume_event.key
+
+    def reset_resume_point(self) -> None:
+        """Read the daemon's feed from its start again (after resume_point_lost)."""
+        self.last_seq = 0
+        self._resume_event = None
 
     def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False, lifted_by: str = "unblocked") -> None:
         """Mark the feed's earlier blocks of ``host`` as lifted.

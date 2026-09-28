@@ -26,6 +26,7 @@ struct SandboxModelTests {
         sortsRunningSandboxesFirstAndKeepsPendingAsks()
         mergesEventsBySequenceAndNotifiesOnce()
         droppedMarkersDoNotSwallowTheNextEvent()
+        aFeedThatStartedOverIsReadFromItsStart()
         resolvedAsksLeaveTheSnapshot()
         headlineExplainsEachState()
         activitySummariesArePlain()
@@ -144,6 +145,25 @@ struct SandboxModelTests {
             ["seq": 10, "kind": "egress.allowed", "host": "a"],
         ]]), notify: true)
         expect(snapshot.activity.map(\.kind) == ["dropped", "egress.allowed"], "marker plus event")
+    }
+
+    private static func aFeedThatStartedOverIsReadFromItsStart() {
+        var snapshot = SandboxSnapshot()
+        let last: [String: Any] = ["seq": 40, "kind": "egress.allowed", "host": "a.example", "time": "2026-09-27T12:00:00Z"]
+        _ = snapshot.merge(events: SandboxDecoding.activity(from: ["events": [last]]), notify: false)
+        func lost(_ events: [[String: Any]]) -> Bool {
+            snapshot.resumePointLost(SandboxDecoding.activity(from: ["events": events]))
+        }
+        var newer = blocked
+        newer["seq"] = 45
+        expect(!lost([last, newer]), "the daemon still holds the resume point")
+        expect(!lost([newer]), "only newer events pushed it out")
+        expect(lost([]), "a restarted daemon with fewer events")
+        var other = last
+        other["time"] = "2026-09-27T13:00:00Z"
+        expect(lost([other]), "another event under that number")
+        snapshot.restartFeed()
+        expect(snapshot.lastSeq == 0 && snapshot.activity.isEmpty && !lost([]), "read from the start again")
     }
 
     private static func resolvedAsksLeaveTheSnapshot() {

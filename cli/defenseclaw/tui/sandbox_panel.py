@@ -380,6 +380,14 @@ class SandboxPanelMixin:
             if client is None:
                 return
             try:
+                resume = self.sandbox_model.last_seq
+                if resume:
+                    # Read from one event early: a daemon that restarted
+                    # numbers its events from one again, and resuming after
+                    # the old number would skip its first events.
+                    probe = client.sandbox_activity(since=resume - 1)
+                    if not self._deliver_from_thread(self._on_sandbox_resume, probe):
+                        return
                 if self.sandbox_model.last_seq == 0:
                     backlog = client.sandbox_activity()
                     if not self._deliver_from_thread(self._on_sandbox_events, backlog, False):
@@ -413,6 +421,15 @@ class SandboxPanelMixin:
         self.sandbox_model.stream_state = state
         if getattr(self, "active_panel", "") == "sandboxes" and not getattr(self, "help_open", False):
             self._render_chrome()  # type: ignore[attr-defined]
+
+    def _on_sandbox_resume(self, probe: list[dict[str, Any]]) -> None:
+        """Start the feed over when the daemon's no longer holds the resume point.
+
+        The stream loop then reads the new daemon's backlog (without toasts,
+        as at start) and follows from its end.
+        """
+        if self.sandbox_model.resume_point_lost(probe):
+            self.sandbox_model.reset_resume_point()
 
     def _on_sandbox_events(self, events: list[dict[str, Any]], toast: bool) -> None:
         # Stream events (toast=True) are live; the one buffered backlog read is not.
