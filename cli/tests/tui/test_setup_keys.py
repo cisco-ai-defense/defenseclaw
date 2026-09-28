@@ -127,8 +127,10 @@ def test_wizard_list_moves_in_display_order(tmp_path, monkeypatch) -> None:
 
     app._handle_setup_key("down")  # noqa: SLF001
 
+    # The last task of a group hands on to the next group's first task.
+    assert setup_catalog.wizard_group(order[2]) != setup_catalog.wizard_group(order[3])
     assert app.setup_model.active_wizard is order[3]
-    assert app._setup_cursor() == setup_catalog.row_for(order[3])  # noqa: SLF001
+    assert app._setup_cursor() == setup_catalog.task_row(order[3]) == 0  # noqa: SLF001
 
 
 @pytest.mark.parametrize("view", setup_keys.SETUP_VIEWS)

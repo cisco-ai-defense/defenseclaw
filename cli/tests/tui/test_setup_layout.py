@@ -86,7 +86,7 @@ async def test_setup_views_keep_primary_content_on_screen_at_80x24(hermetic) -> 
         app.action_switch_panel("setup")
         await pilot.pause()
         await pilot.pause()
-        first_task = setup_catalog.display_rows()[1].label
+        first_task = setup_catalog.wizard_label(setup_catalog.display_order()[0])
         _assert_on_screen(app, first_task, max_body_lines=2)
 
         await pilot.press("enter")  # goal menu
