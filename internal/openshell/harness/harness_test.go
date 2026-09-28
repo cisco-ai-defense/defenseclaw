@@ -17,6 +17,10 @@
 package harness
 
 import (
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -232,8 +236,9 @@ func TestInstallStepsPinContract(t *testing.T) {
 }
 
 // TestNpmPinnedInstallChecksDigests pins the checks every npm-installed
-// hook-only harness runs: the registry integrity before, the native sha256
-// for both Linux architectures after, and the base image copy removed.
+// harness runs: the downloaded tarball's SHA-512 against the pinned registry
+// integrity before the install from that tarball, the native sha256 for
+// both Linux architectures after, and the base image copy removed.
 func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 	for _, tc := range []struct {
 		spec *Spec
@@ -250,10 +255,15 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 				t.Fatal(err)
 			}
 			run := steps[0].Run
+			sum, err := tc.pin.integritySHA512()
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, want := range []string{
-				`npm view "$pkg" dist.integrity`,
-				shellQuote(tc.pin.Integrity),
-				`npm install -g --no-fund --no-audit --prefix "$root" "$pkg"`,
+				`npm pack "$pkg"`,
+				`sha512sum "$tgz"`,
+				shellQuote(sum),
+				`npm install -g --no-fund --no-audit --prefix "$root" "$tgz"`,
 				"aarch64) bin=",
 				"x86_64) bin=",
 				shellQuote(tc.pin.Native["aarch64"].SHA256),
@@ -264,6 +274,9 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 				if !strings.Contains(run, want) {
 					t.Errorf("install step lacks %q:\n%s", want, run)
 				}
+			}
+			if strings.Contains(run, `"$pkg";`) || strings.Contains(run, "npm view") {
+				t.Errorf("the install does not come from the verified tarball: %s", run)
 			}
 			if (tc.base != "") != strings.Contains(run, "npm uninstall -g") || (tc.base != "" && !strings.Contains(run, tc.base)) {
 				t.Errorf("base image copy handling: %s", run)
@@ -285,6 +298,89 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 	}
 	if _, err := openCodePin.installRun("/opt/x", "1.18.20", "opencode", ""); err == nil {
 		t.Fatal("a release without pinned digests rendered")
+	}
+}
+
+// TestNpmPinnedInstallVerifiesTheTarball runs a pinned install against a
+// fake npm whose registry serves the tarball and platform package the test
+// chooses while its metadata names the pinned integrity (a registry can
+// answer the two requests differently): the install must come from the
+// downloaded tarball, and only when its SHA-512 is the pinned integrity and
+// the native executable it installs has the pinned sha256.
+func TestNpmPinnedInstallVerifiesTheTarball(t *testing.T) {
+	// The install runs with PATH=<fake npm>:/usr/bin:/bin.
+	for _, tool := range []string{"/bin/sh", "/usr/bin/sha512sum", "/usr/bin/sha256sum"} {
+		if _, err := os.Stat(tool); err != nil {
+			t.Skipf("%s is required", tool)
+		}
+	}
+	pinned, native := []byte("the reviewed package tarball\n"), []byte("the reviewed native executable\n")
+	tarSum, nativeSum := sha512.Sum512(pinned), sha256.Sum256(native)
+	pin := npmPin{
+		Package: "@dc-test/tool", Version: "1.0.0",
+		Integrity: "sha512-" + base64.StdEncoding.EncodeToString(tarSum[:]),
+		Native:    map[string]npmNative{},
+	}
+	// Every architecture this test may run on (arm64 is macOS's name).
+	for _, arch := range []string{"aarch64", "arm64", "x86_64"} {
+		pin.Native[arch] = npmNative{Path: "lib/node_modules/@dc-test/tool/bin/native", SHA256: hex.EncodeToString(nativeSum[:])}
+	}
+	run, err := pin.installRun("/opt/x", "1.0.0", "dctool", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		tarball, native []byte
+		failure         string
+	}{
+		"pinned bytes":         {tarball: pinned, native: native},
+		"other package bytes":  {tarball: []byte("a tarball the registry swapped in\n"), native: native, failure: "is not the pinned integrity"},
+		"other platform bytes": {tarball: pinned, native: []byte("another executable\n"), failure: "is not the pinned"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			served := filepath.Join(dir, "served")
+			writeFile(t, served+"/tool.tgz", tc.tarball)
+			writeFile(t, served+"/native", tc.native)
+			// The registry answers a metadata query with the pinned
+			// integrity whatever it serves; npm pack writes the served
+			// tarball to the working directory; npm install records its
+			// arguments and lays out the package.
+			npm := "#!/bin/sh\ncase \"$1\" in\n" +
+				"  view) echo " + shellQuote(pin.Integrity) + " ;;\n" +
+				"  pack) cp " + shellQuote(served+"/tool.tgz") + " dc-test-tool-1.0.0.tgz ;;\n" +
+				"  install) printf '%s\\n' \"$@\" >" + shellQuote(dir+"/install-args") + "; root=\"$6\"; mkdir -p \"$root/bin\" \"$root/lib/node_modules/@dc-test/tool/bin\"; " +
+				"cp " + shellQuote(served+"/native") + " \"$root/lib/node_modules/@dc-test/tool/bin/native\" ;;\n" +
+				"esac\n"
+			bin := filepath.Join(dir, "bin")
+			writeFile(t, bin+"/npm", []byte(npm))
+			if err := os.Chmod(bin+"/npm", 0o755); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(dir, "root")
+			script := strings.NewReplacer("root='/opt/x'", "root="+shellQuote(root), "install -d -o root -g root -m 0755", "install -d -m 0755",
+				"/usr/local/bin/dctool", filepath.Join(dir, "dctool")).Replace(run)
+			cmd := exec.Command("/bin/sh", "-c", script)
+			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "TMPDIR=" + dir}
+			out, err := cmd.CombinedOutput()
+			args, _ := os.ReadFile(filepath.Join(dir, "install-args"))
+			if tc.failure != "" {
+				if err == nil || !strings.Contains(string(out), tc.failure) {
+					t.Fatalf("install passed or failed for another reason: %v\n%s", err, out)
+				}
+				if tc.failure == "is not the pinned integrity" && len(args) != 0 {
+					t.Fatalf("npm install ran with an unverified tarball: %s", args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("install: %v\n%s", err, out)
+			}
+			lines := strings.Split(strings.TrimSpace(string(args)), "\n")
+			if tgz := lines[len(lines)-1]; !strings.HasPrefix(tgz, dir+"/") || !strings.HasSuffix(tgz, "/dc-test-tool-1.0.0.tgz") {
+				t.Fatalf("npm install got %q, not the downloaded tarball", lines)
+			}
+		})
 	}
 }
 

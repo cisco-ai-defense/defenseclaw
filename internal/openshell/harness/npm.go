@@ -17,6 +17,9 @@
 package harness
 
 import (
+	"crypto/sha512"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"sort"
@@ -24,11 +27,13 @@ import (
 )
 
 // npmPin pins one npm-distributed harness release: the registry integrity of
-// its top-level package (npm then verifies the downloaded tarball against
-// it) and the sha256 of the native executable the package installs, per
-// Linux architecture. The native binary is what OpenShell pins by hash and
-// what makes every model request, so a registry that served other bytes
-// fails the image build.
+// its top-level package tarball and the sha256 of the native executable the
+// package installs, per Linux architecture. The build downloads the tarball
+// once, installs from that file only when its SHA-512 is the pinned
+// integrity, and then requires the native executable's digest, so a
+// registry that served other bytes for the package, or for the platform
+// package that carries the executable, fails the image build. The native
+// binary is what OpenShell pins by hash and what makes every model request.
 type npmPin struct {
 	// Package is the npm package name.
 	Package string
@@ -58,6 +63,9 @@ func (p npmPin) validate() error {
 	if p.Package == "" || !npmPathRE.MatchString(p.Package) || !npmIntegrityRE.MatchString(p.Integrity) || len(p.Native) == 0 {
 		return fmt.Errorf("harness: invalid npm pin for %q", p.Package)
 	}
+	if _, err := p.integritySHA512(); err != nil {
+		return err
+	}
 	for arch, native := range p.Native {
 		if !npmPathRE.MatchString(arch) || !npmPathRE.MatchString(native.Path) || strings.Contains(native.Path, "..") || !sha256HexRE.MatchString(native.SHA256) {
 			return fmt.Errorf("harness: invalid %s native pin for %s", arch, p.Package)
@@ -66,9 +74,21 @@ func (p npmPin) validate() error {
 	return nil
 }
 
+// integritySHA512 is the pinned integrity as the hex SHA-512 sha512sum
+// prints.
+func (p npmPin) integritySHA512() (string, error) {
+	sum, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.Integrity, "sha512-"))
+	if err != nil || len(sum) != sha512.Size {
+		return "", fmt.Errorf("harness: npm pin for %q has a malformed integrity", p.Package)
+	}
+	return hex.EncodeToString(sum), nil
+}
+
 // installRun returns the RUN body that installs version of the pinned
-// package into root (root-owned), links command onto /usr/local/bin and
-// checks the registry integrity before and the native digest after the
+// package into root (root-owned) and links command onto /usr/local/bin. It
+// downloads the package tarball with `npm pack`, checks it against the
+// pinned integrity, installs from that verified file (npm fetches only the
+// dependencies from the registry) and checks the native digest after the
 // install. uninstallBase names a copy of the package the base image ships
 // globally, removed first so it can never shadow the pin.
 func (p npmPin) installRun(root, version, command, uninstallBase string) (string, error) {
@@ -78,16 +98,25 @@ func (p npmPin) installRun(root, version, command, uninstallBase string) (string
 	if version != p.Version {
 		return "", fmt.Errorf("harness: %s %s has no pinned digests (pinned %s)", p.Package, version, p.Version)
 	}
+	sum, err := p.integritySHA512()
+	if err != nil {
+		return "", err
+	}
 	spec := p.Package + "@" + version
 	var b strings.Builder
 	b.WriteString("set -eu; root=" + shellQuote(root) + "; pkg=" + shellQuote(spec) + "; ")
 	if uninstallBase != "" {
 		b.WriteString("npm uninstall -g " + shellQuote(uninstallBase) + " >/dev/null 2>&1 || true; ")
 	}
-	b.WriteString(`got="$(npm view "$pkg" dist.integrity 2>/dev/null)"; `)
-	b.WriteString(`[ "$got" = ` + shellQuote(p.Integrity) + ` ] || { echo "$pkg registry integrity '$got' is not the pinned one" >&2; exit 1; }; `)
+	b.WriteString(`tmp="$(mktemp -d)"; `)
+	b.WriteString(`(cd "$tmp" && npm pack "$pkg" >/dev/null); `)
+	b.WriteString(`n=0; for f in "$tmp"/*.tgz; do if [ -f "$f" ]; then tgz="$f"; n=$((n + 1)); fi; done; `)
+	b.WriteString(`[ "$n" -eq 1 ] || { echo "npm pack $pkg left $n tarballs" >&2; exit 1; }; `)
+	b.WriteString(`got="$(sha512sum "$tgz" | cut -d' ' -f1)"; `)
+	b.WriteString(`[ "$got" = ` + shellQuote(sum) + ` ] || { echo "$pkg tarball sha512 $got is not the pinned integrity ` + p.Integrity + `" >&2; exit 1; }; `)
 	b.WriteString(`install -d -o root -g root -m 0755 "$root"; `)
-	b.WriteString(`npm install -g --no-fund --no-audit --prefix "$root" "$pkg"; `)
+	b.WriteString(`npm install -g --no-fund --no-audit --prefix "$root" "$tgz"; `)
+	b.WriteString(`rm -rf "$tmp"; `)
 	b.WriteString(`case "$(uname -m)" in `)
 	arches := make([]string, 0, len(p.Native))
 	for arch := range p.Native {
