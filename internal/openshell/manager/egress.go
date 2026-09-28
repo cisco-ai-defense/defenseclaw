@@ -22,8 +22,11 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -324,42 +327,202 @@ func recoverCredential(sb *openshell.Sandbox, username string) (egress.Credentia
 }
 
 // egressSink turns proxy events into telemetry and feed events off the
-// proxy's goroutines: the proxy must never block on either.
+// proxy's goroutines: the proxy must never block on either. Every sandbox
+// shares its queue, so one sandbox's refusals are folded and paced before
+// they reach it (admitBlocked), and a large-upload finding the full queue
+// cannot take waits in overflow instead of being dropped.
 type egressSink struct {
 	m       *Manager
-	ch      chan egress.Event
+	ch      chan sinkItem
 	dropped atomic.Uint64
+	// wake tells run that overflow holds findings.
+	wake chan struct{}
+	// blocked paces each sandbox's distinct refusals into the queue.
+	blocked *rateGate
+
+	mu       sync.Mutex
+	recent   map[refusalKey]*refusal
+	overflow []egress.Event
+}
+
+// sinkItem is one queued proxy event; repeats counts the refusals like it
+// that were folded into it (admitBlocked).
+type sinkItem struct {
+	ev      egress.Event
+	repeats int
+}
+
+// refusalKey is what makes refusals repeats of one another.
+type refusalKey struct {
+	sandbox, host string
+	port          int
+	category      egress.Category
+	rule          string
+}
+
+// refusal is the fold of one refusalKey's repeats since its first record.
+type refusal struct {
+	since   time.Time
+	repeats int
+	last    egress.Event
 }
 
 const egressSinkBuffer = 4096
 
 func newEgressSink(m *Manager) *egressSink {
-	return &egressSink{m: m, ch: make(chan egress.Event, egressSinkBuffer)}
+	return &egressSink{m: m, ch: make(chan sinkItem, egressSinkBuffer), wake: make(chan struct{}, 1),
+		blocked: newRateGate(blockedBurst, blockedRate), recent: map[refusalKey]*refusal{}}
 }
 
 // EgressEvent implements egress.EventSink.
 func (s *egressSink) EgressEvent(e egress.Event) {
-	select {
-	case s.ch <- e:
-	default:
-		if n := s.dropped.Add(1); n == 1 || n%1000 == 0 {
-			s.m.logf("egress telemetry backlog: %d events dropped", n)
+	it := sinkItem{ev: e}
+	if e.Kind == egress.EventBlocked {
+		ok, repeats := s.admitBlocked(e)
+		if !ok {
+			return
 		}
+		it.repeats = repeats
+	}
+	s.enqueue(it)
+}
+
+// admitBlocked folds a refusal into an earlier one of the same request
+// within blockCoalesceWindow (flush records the count) and paces the
+// sandbox's distinct refusals (blockedBurst, blockedRate): a workload
+// refused thousands of times a second must not crowd the other sandboxes'
+// events, or its own findings, out of the shared queue. An admitted
+// refusal carries the repeats of an ended window flush has not recorded.
+func (s *egressSink) admitBlocked(e egress.Event) (bool, int) {
+	now := s.m.now()
+	k := refusalKey{sandbox: e.SandboxName, host: e.Host, port: e.Port, category: e.Category, rule: e.Rule}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.recent[k]
+	if r != nil && now.Sub(r.since) < blockCoalesceWindow {
+		r.repeats++
+		r.last = e
+		return false, 0
+	}
+	if !s.blocked.take(e.SandboxName, now) {
+		return false, 0
+	}
+	carried := 0
+	if r != nil {
+		carried = r.repeats
+	}
+	s.recent[k] = &refusal{since: now}
+	return true, carried
+}
+
+// enqueue queues an item without ever blocking the proxy. A full queue
+// drops it and counts the drop, except a large-upload finding, which waits
+// in overflow.
+func (s *egressSink) enqueue(it sinkItem) {
+	select {
+	case s.ch <- it:
+		return
+	default:
+	}
+	if it.ev.Kind == egress.EventLargeUpload {
+		s.mu.Lock()
+		kept := len(s.overflow) < maxSinkOverflow
+		if kept {
+			s.overflow = append(s.overflow, it.ev)
+		}
+		s.mu.Unlock()
+		if kept {
+			select {
+			case s.wake <- struct{}{}:
+			default:
+			}
+			return
+		}
+	}
+	if n := s.dropped.Add(1); n == 1 || n%1000 == 0 {
+		s.m.logf("egress telemetry backlog: %d events dropped", n)
 	}
 }
 
 func (s *egressSink) run(ctx context.Context) {
+	flush := time.NewTicker(sinkFlushInterval)
+	defer flush.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case e := <-s.ch:
-			s.m.egressEvent(ctx, e)
+		case it := <-s.ch:
+			s.m.egressEvent(ctx, it.ev, it.repeats)
+		case <-s.wake:
+			s.drainOverflow(ctx)
+		case <-flush.C:
+			s.drainOverflow(ctx)
+			s.flush(ctx)
 		}
 	}
 }
 
-func (m *Manager) egressEvent(ctx context.Context, e egress.Event) {
+// drainOverflow processes the findings the full queue could not take.
+func (s *egressSink) drainOverflow(ctx context.Context) {
+	s.mu.Lock()
+	list := s.overflow
+	s.overflow = nil
+	s.mu.Unlock()
+	for _, e := range list {
+		s.m.egressEvent(ctx, e, 0)
+	}
+}
+
+// flush records the refusals folded into an earlier one whose window
+// ended (one record naming the count), forgets the ended windows, and
+// reports the refusals and feed events each sandbox's pacing held back.
+func (s *egressSink) flush(ctx context.Context) {
+	now := s.m.now()
+	var folded []sinkItem
+	s.mu.Lock()
+	for k, r := range s.recent {
+		if now.Sub(r.since) < blockCoalesceWindow {
+			continue
+		}
+		if r.repeats > 0 {
+			folded = append(folded, sinkItem{ev: r.last, repeats: r.repeats})
+		}
+		delete(s.recent, k)
+	}
+	s.mu.Unlock()
+	sort.Slice(folded, func(i, j int) bool { return folded[i].ev.Time.Before(folded[j].ev.Time) })
+	for _, it := range folded {
+		// The last of the repeats stands for them all.
+		s.m.egressEvent(ctx, it.ev, it.repeats-1)
+	}
+	for _, h := range s.blocked.drain(now) {
+		s.m.logf("sandbox %s: %d refused egress requests to further destinations were not recorded one by one (more than %d a second)",
+			h.key, h.n, blockedRate)
+		s.m.publishHeldBack(h.key, h.n, "refused requests to further destinations were not recorded one by one")
+	}
+	for _, h := range s.m.egressFeed.drain(now) {
+		s.m.publishHeldBack(h.key, h.n, "egress events were not shown one by one")
+	}
+}
+
+// publishHeldBack tells the feed how many of a sandbox's egress events its
+// pacing held back.
+func (m *Manager) publishHeldBack(sandbox string, n int, what string) {
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sandbox, Source: sandboxapi.SourceProxy,
+		Reason: "flood", Message: fmt.Sprintf("… %d more %s (this sandbox makes more than the feed shows)", n, what)})
+}
+
+// publishEgress publishes one of a sandbox's egress events to the activity
+// feed that every sandbox shares, paced per sandbox (feedBurst, feedRate);
+// flush reports what the pacing held back.
+func (m *Manager) publishEgress(ev sandboxapi.ActivityEvent) {
+	if !m.egressFeed.take(ev.Sandbox, m.now()) {
+		return
+	}
+	m.feed.Publish(ev)
+}
+
+func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) {
 	m.mu.Lock()
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
@@ -377,10 +540,16 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event) {
 	switch e.Kind {
 	case egress.EventAllowed, egress.EventBlocked:
 		blocked := e.Kind == egress.EventBlocked
+		reason, more := e.Reason, ""
+		if repeats > 0 {
+			// Refusals folded into this one (egressSink.admitBlocked).
+			more = fmt.Sprintf(" (and %d more like it)", repeats)
+			reason += more
+		}
 		ev := audit.SandboxEgressEvent{
 			Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
 			Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: blocked,
-			DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
+			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
 		}
 		if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
@@ -391,9 +560,9 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event) {
 			msg := "✓ " + e.Host
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
-				msg = "✗ " + e.Host + " (" + categoryText(e) + ")"
+				msg = "✗ " + e.Host + " (" + categoryText(e) + ")" + more
 			}
-			m.feed.Publish(sandboxapi.ActivityEvent{
+			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
 				Source: sandboxapi.SourceProxy, Category: string(e.Category), Rule: e.Rule, Unblockable: blocked && e.Unblockable,
 				Reason: truncate(e.Reason, 300), Message: msg,

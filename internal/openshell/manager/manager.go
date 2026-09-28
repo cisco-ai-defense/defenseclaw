@@ -197,12 +197,15 @@ type Manager struct {
 	logf      func(string, ...any)
 	host      HostUser
 
-	feed      *Feed
-	creds     *egress.CredentialStore
-	unblocks  *egress.MemoryUnblocks
-	batcher   *triage.Batcher
-	sink      *egressSink
-	toolCalls *hookTamperTracker
+	feed *Feed
+	// egressFeed paces each sandbox's egress events onto the shared feed
+	// (publishEgress).
+	egressFeed *rateGate
+	creds      *egress.CredentialStore
+	unblocks   *egress.MemoryUnblocks
+	batcher    *triage.Batcher
+	sink       *egressSink
+	toolCalls  *hookTamperTracker
 	// tamperStops tracks the stops hook tamper started.
 	tamperStops sync.WaitGroup
 
@@ -306,20 +309,21 @@ func New(opts Options) (*Manager, error) {
 	}
 	unblocks, _ := egress.NewMemoryUnblocks()
 	m := &Manager{
-		opts:      opts,
-		ws:        opts.Workspace,
-		tel:       opts.Telemetry,
-		records:   newRecordStore(opts.DataDir),
-		now:       opts.Now,
-		logf:      opts.Logf,
-		host:      host,
-		feed:      NewFeed(DefaultFeedSize, opts.Now),
-		creds:     egress.NewCredentialStore(),
-		unblocks:  unblocks,
-		toolCalls: newHookTamperTracker(),
-		boxes:     map[string]*box{},
-		approvals: map[string]*approval{},
-		startedAt: opts.Now(),
+		opts:       opts,
+		ws:         opts.Workspace,
+		tel:        opts.Telemetry,
+		records:    newRecordStore(opts.DataDir),
+		now:        opts.Now,
+		logf:       opts.Logf,
+		host:       host,
+		feed:       NewFeed(DefaultFeedSize, opts.Now),
+		egressFeed: newRateGate(feedBurst, feedRate),
+		creds:      egress.NewCredentialStore(),
+		unblocks:   unblocks,
+		toolCalls:  newHookTamperTracker(),
+		boxes:      map[string]*box{},
+		approvals:  map[string]*approval{},
+		startedAt:  opts.Now(),
 	}
 	if m.tel == nil {
 		m.tel = nopTelemetry{}
