@@ -46,3 +46,17 @@ async def test_first_row_is_on_screen_at_80x24(tmp_path, panel: str, keys: tuple
             await pilot.press(key)
             await pilot.pause()
         assert row_text in screen_text(app)
+
+
+async def test_open_alert_detail_leaves_its_row_visible_at_80x24(tmp_path) -> None:
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_switch_panel("alerts")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        text = screen_text(app)
+        # The table row and the detail pane's own lines are both on screen.
+        assert text.count("skill://alpha") >= 2
+        assert "Details: token found" in text

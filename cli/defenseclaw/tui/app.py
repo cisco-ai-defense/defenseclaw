@@ -702,6 +702,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         display: none;
     }
 
+    /* Short terminals: a 16-row detail pane left the table only its header,
+       so the row being described was off screen. */
+    #detail-panel.compact {
+        max-height: 7;
+        margin-top: 0;
+        padding: 0 2;
+    }
+
     #detail-panel-body {
         height: auto;
         width: 1fr;
@@ -4040,6 +4048,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # On short terminals the 11-row output log left the Activity history
         # (the 1/2 tabs, command list and gateway activity) no rows at all.
         activity.set_class(0 < self.size.height < 30, "compact")
+        try:
+            self.query_one("#detail-panel", VerticalScroll).set_class(0 < self.size.height < 30, "compact")
+        except NoMatches:
+            pass
         self._render_overview_scope_indicator()
         # The Overview body can exceed the viewport (metric tiles + notices +
         # SERVICES/CONFIG/ENFORCEMENT/SCANNERS + the CONNECTORS roster), so let
