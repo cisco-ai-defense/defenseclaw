@@ -258,16 +258,20 @@ class HintEngine:
                 "Ctrl+C to cancel · A for live output"
             )
             return f"⟳ {label}{elapsed_str}{tail}"
-        if hint := self._missing_credentials_hint(status):
+        from defenseclaw.tui.panels.setup_keys import SETUP_VIEWS, keys_hint
+
+        view = state.panel_view if state.panel_view in SETUP_VIEWS else "wizards"
+        # The missing-keys nudge belongs on the task list, not inside a form.
+        if view == "wizards" and (hint := self._missing_credentials_hint(status)):
             return hint
-        return "j/k or [] choose wizard · Enter opens form · backtick config editor · r credentials · G restart."
+        return keys_hint(view, state.panel_conditions)
 
     def _first_run_hint(self, state: HintState, status: StatusModel | None) -> str:
         if self._command_running(state, status):
             return "First-run setup is applying. Press Ctrl+C to cancel. Output streams in Activity."
-        if hint := self._missing_credentials_hint(status):
-            return hint
-        return "First-run setup: j/k choose field · h/l change value · Ctrl+R apply."
+        from defenseclaw.tui.panels.setup_keys import keys_hint
+
+        return keys_hint("first-run")
 
 
 class HintBar(_Static):
