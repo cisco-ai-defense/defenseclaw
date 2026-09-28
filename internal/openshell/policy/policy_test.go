@@ -21,7 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,14 +89,14 @@ func goldenCases() map[string]Input {
 	return cases
 }
 
+// TestRenderGolden pins every rendered shape byte for byte, its strict
+// round trip, and (for the built-in profiles) that it only uses keys
+// OpenShell accepted.
 func TestRenderGolden(t *testing.T) {
 	update := os.Getenv("DEFENSECLAW_UPDATE_GOLDEN") == "1"
 	for name, in := range goldenCases() {
 		t.Run(name, func(t *testing.T) {
-			p, err := Render(in)
-			if err != nil {
-				t.Fatalf("Render: %v", err)
-			}
+			p := mustRender(t, in)
 			out, err := MarshalYAML(p)
 			if err != nil {
 				t.Fatalf("MarshalYAML: %v", err)
@@ -124,6 +124,9 @@ func TestRenderGolden(t *testing.T) {
 			if !reflect.DeepEqual(back, p) {
 				t.Fatalf("round trip changed the policy:\n got %#v\nwant %#v", back, p)
 			}
+			if len(in.ExtraRules) == 0 {
+				assertAcceptedKeys(t, out)
+			}
 		})
 	}
 }
@@ -138,82 +141,32 @@ var acceptedKeys = map[string]bool{
 	"host": true, "port": true, "protocol": true, "tls": true, "access": true, "enforcement": true, "path": true,
 }
 
-func collectKeys(t *testing.T, node *yaml.Node, underRules bool, keys map[string]bool) {
+// assertAcceptedKeys fails on any key of the policy document (other than
+// rule names) that OpenShell was never seen to accept.
+func assertAcceptedKeys(t *testing.T, out []byte) {
 	t.Helper()
-	switch node.Kind {
-	case yaml.DocumentNode, yaml.SequenceNode:
-		for _, child := range node.Content {
-			collectKeys(t, child, false, keys)
-		}
-	case yaml.MappingNode:
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			key := node.Content[i].Value
-			if !underRules {
-				keys[key] = true
-			}
-			collectKeys(t, node.Content[i+1], key == "network_policies", keys)
-		}
+	var node yaml.Node
+	if err := yaml.Unmarshal(out, &node); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestBuiltInProfilesEmitOnlyAcceptedKeys(t *testing.T) {
-	for name, in := range goldenCases() {
-		if len(in.ExtraRules) > 0 {
-			continue
-		}
-		p, err := Render(in)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out, err := MarshalYAML(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var node yaml.Node
-		if err := yaml.Unmarshal(out, &node); err != nil {
-			t.Fatal(err)
-		}
-		keys := map[string]bool{}
-		collectKeys(t, &node, false, keys)
-		for key := range keys {
-			if !acceptedKeys[key] {
-				t.Errorf("%s: key %q was never validated against OpenShell", name, key)
+	var walk func(node *yaml.Node, underRules bool)
+	walk = func(node *yaml.Node, underRules bool) {
+		switch node.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for _, child := range node.Content {
+				walk(child, false)
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				key := node.Content[i].Value
+				if !underRules && !acceptedKeys[key] {
+					t.Errorf("key %q was never validated against OpenShell", key)
+				}
+				walk(node.Content[i+1], key == "network_policies")
 			}
 		}
 	}
-}
-
-func TestRenderProfileNetworkRules(t *testing.T) {
-	for _, tc := range []struct {
-		profile  Profile
-		wantRule bool
-		mode     EgressMode
-	}{
-		{ProfileOpen, true, EgressAllowByDefault},
-		{ProfileBalanced, true, EgressAllowlist},
-		{ProfileStrict, false, EgressOff},
-	} {
-		p, err := Render(baseInput(tc.profile, "claudecode"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		rule, ok := p.NetworkPolicies[EgressRuleName]
-		if ok != tc.wantRule {
-			t.Fatalf("%s: egress rule present = %t", tc.profile, ok)
-		}
-		if ok {
-			ep := rule.Endpoints[0]
-			if ep.Host != EgressHost || ep.Port != 18972 || ep.Protocol != "tcp" || ep.TLS != v1.NetworkTLSModeSkip || rule.Binaries[0].Path != AnyBinary {
-				t.Fatalf("%s: egress rule = %#v", tc.profile, rule)
-			}
-		}
-		if len(p.NetworkPolicies) != map[bool]int{true: 1, false: 0}[tc.wantRule] {
-			t.Fatalf("%s: unexpected rules %v", tc.profile, p.NetworkPolicies)
-		}
-		if EgressModeFor(tc.profile) != tc.mode {
-			t.Fatalf("%s: egress mode = %s", tc.profile, EgressModeFor(tc.profile))
-		}
-	}
+	walk(&node, false)
 }
 
 // TestRenderIngressRule pins the ingress rule of a sandbox without an
@@ -222,17 +175,11 @@ func TestRenderProfileNetworkRules(t *testing.T) {
 func TestRenderIngressRule(t *testing.T) {
 	for _, profile := range []Profile{ProfileOpen, ProfileBalanced, ProfileStrict} {
 		in := baseInput(profile, "claudecode")
-		p, err := Render(in)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := p.NetworkPolicies[IngressRuleName]; ok {
+		if _, ok := mustRender(t, in).NetworkPolicies[IngressRuleName]; ok {
 			t.Fatalf("%s: ingress rule without IngressRule", profile)
 		}
 		in.IngressRule = true
-		if p, err = Render(in); err != nil {
-			t.Fatal(err)
-		}
+		p := mustRender(t, in)
 		rule, ok := p.NetworkPolicies[IngressRuleName]
 		if !ok || rule.Name != IngressRuleName || len(rule.Endpoints) != 1 || len(rule.Binaries) != 1 || rule.Binaries[0].Path != AnyBinary {
 			t.Fatalf("%s: ingress rule = %#v", profile, rule)
@@ -246,76 +193,33 @@ func TestRenderIngressRule(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var node yaml.Node
-		if err := yaml.Unmarshal(out, &node); err != nil {
-			t.Fatal(err)
-		}
-		keys := map[string]bool{}
-		collectKeys(t, &node, false, keys)
-		for key := range keys {
-			if !acceptedKeys[key] {
-				t.Errorf("%s: key %q was never validated against OpenShell", profile, key)
-			}
-		}
-		back, err := ParseYAML(out)
-		if err != nil {
-			t.Fatalf("%s: the rendered policy does not parse back: %v", profile, err)
-		}
-		if _, ok := back.NetworkPolicies[IngressRuleName]; !ok {
-			t.Fatalf("%s: the ingress rule did not survive YAML", profile)
+		assertAcceptedKeys(t, out)
+		if back, err := ParseYAML(out); err != nil || !reflect.DeepEqual(back.NetworkPolicies[IngressRuleName], rule) {
+			t.Fatalf("%s: the ingress rule did not survive YAML: %v", profile, err)
 		}
 	}
 	// An extra rule may not take the ingress rule's name.
 	in := baseInput(ProfileOpen, "codex")
-	in.ExtraRules = map[string]v1.NetworkPolicyRule{IngressRuleName: {
-		Endpoints: []v1.PolicyNetworkEndpoint{{Host: "example.org", Port: 443, Protocol: "rest"}},
-		Binaries:  []v1.PolicyNetworkBinary{{Path: AnyBinary}},
-	}}
+	in.ExtraRules = map[string]v1.NetworkPolicyRule{IngressRuleName: anyRule("example.org", 443)}
 	if _, err := Render(in); err == nil {
 		t.Fatal("an extra rule took the ingress rule's name")
 	}
 }
 
+// TestRenderFilesystem covers what the goldens do not pin: nested harness
+// roots outside the base read-only set collapse into their parent, and mount
+// targets under the workdir are enforced by their mount alone.
 func TestRenderFilesystem(t *testing.T) {
-	p, err := Render(goldenCases()["balanced-claudecode-context"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	rw := p.Filesystem.ReadWrite
-	ro := p.Filesystem.ReadOnly
-	for _, want := range []string{"/work/myapp", "/tmp", "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/sandbox", "/context/scratch"} {
-		if !contains(rw, want) {
-			t.Errorf("read_write missing %s: %v", want, rw)
-		}
-	}
-	for _, want := range []string{"/usr", "/etc", "/proc", "/opt", "/context/lib"} {
-		if !contains(ro, want) {
-			t.Errorf("read_only missing %s: %v", want, ro)
-		}
-	}
-	// Nested grants collapse into their parent.
-	harness := mustRender(t, goldenCases()["open-claudecode"])
-	if contains(harness.Filesystem.ReadOnly, "/opt/defenseclaw-harness/claudecode") || !contains(harness.Filesystem.ReadOnly, "/opt") {
-		t.Errorf("harness root under /opt did not collapse: %v", harness.Filesystem.ReadOnly)
-	}
 	outside := baseInput(ProfileOpen, "claudecode")
 	outside.HarnessReadOnly = []string{"/nix/store/claude", "/nix/store/claude/bin"}
-	if got := mustRender(t, outside).Filesystem.ReadOnly; !contains(got, "/nix/store/claude") || contains(got, "/nix/store/claude/bin") {
+	if got := mustRender(t, outside).Filesystem.ReadOnly; !slices.Contains(got, "/nix/store/claude") || slices.Contains(got, "/nix/store/claude/bin") {
 		t.Errorf("harness roots outside the base = %v", got)
 	}
+	fs := mustRender(t, goldenCases()["balanced-claudecode-context"]).Filesystem
 	for _, inside := range []string{"/work/myapp/.git/hooks", "/work/myapp/.env"} {
-		if contains(ro, inside) || contains(rw, inside) {
+		if slices.Contains(fs.ReadOnly, inside) || slices.Contains(fs.ReadWrite, inside) {
 			t.Errorf("%s is under the workdir and must be enforced by its mount only", inside)
 		}
-	}
-	if !sort.StringsAreSorted(rw) || !sort.StringsAreSorted(ro) {
-		t.Fatal("filesystem lists must be sorted")
-	}
-	if !p.Filesystem.IncludeWorkdir || p.Landlock.Compatibility != LandlockHardRequirement {
-		t.Fatal("base filesystem/landlock settings changed")
-	}
-	if p.Process.RunAsUser != "1000" || p.Process.RunAsGroup != "1000" {
-		t.Fatalf("process = %#v", p.Process)
 	}
 }
 
@@ -324,6 +228,11 @@ func TestRenderRejectsUnsafeInput(t *testing.T) {
 		in := baseInput(ProfileOpen, "codex")
 		fn(&in)
 		return in
+	}
+	withRule := func(fn func(*v1.NetworkPolicyRule)) Input {
+		r := anyRule("example.org", 443)
+		fn(&r)
+		return mutate(func(in *Input) { in.ExtraRules = map[string]v1.NetworkPolicyRule{"x": r} })
 	}
 	cases := map[string]Input{
 		"unknown-profile":    mutate(func(in *Input) { in.Profile = "yolo" }),
@@ -358,23 +267,11 @@ func TestRenderRejectsUnsafeInput(t *testing.T) {
 		"rule-to-ingress": mutate(func(in *Input) {
 			in.ExtraRules = map[string]v1.NetworkPolicyRule{"x": anyRule("host.openshell.internal", 18971)}
 		}),
-		"rule-no-binaries": mutate(func(in *Input) {
-			in.ExtraRules = map[string]v1.NetworkPolicyRule{"x": {Endpoints: []v1.PolicyNetworkEndpoint{{Host: "example.org", Port: 443}}}}
-		}),
-		"rule-terminate-tls": mutate(func(in *Input) {
-			r := anyRule("example.org", 443)
-			r.Endpoints[0].TLS = v1.NetworkTLSModeTerminate
-			in.ExtraRules = map[string]v1.NetworkPolicyRule{"x": r}
-		}),
-		"rule-credential-binding": mutate(func(in *Input) {
-			r := anyRule("example.org", 443)
+		"rule-no-binaries":   withRule(func(r *v1.NetworkPolicyRule) { r.Binaries = nil }),
+		"rule-terminate-tls": withRule(func(r *v1.NetworkPolicyRule) { r.Endpoints[0].TLS = v1.NetworkTLSModeTerminate }),
+		"rule-l7-on-tcp":     withRule(func(r *v1.NetworkPolicyRule) { r.Endpoints[0].Access = v1.NetworkAccessPresetFull }),
+		"rule-credential-binding": withRule(func(r *v1.NetworkPolicyRule) {
 			r.Endpoints[0].CredentialBinding = &types.NetworkCredentialBinding{Provider: "p"}
-			in.ExtraRules = map[string]v1.NetworkPolicyRule{"x": r}
-		}),
-		"rule-l7-on-tcp": mutate(func(in *Input) {
-			r := anyRule("example.org", 443)
-			r.Endpoints[0].Access = v1.NetworkAccessPresetFull
-			in.ExtraRules = map[string]v1.NetworkPolicyRule{"x": r}
 		}),
 	}
 	for name, in := range cases {
@@ -396,6 +293,13 @@ func TestRenderKeepsExtraRulesOffReservedEndpoints(t *testing.T) {
 			ep.Protocol = "tcp"
 		}
 		return map[string]v1.NetworkPolicyRule{"x": {Endpoints: []v1.PolicyNetworkEndpoint{ep}, Binaries: []v1.PolicyNetworkBinary{{Path: "/**"}}}}
+	}
+	render := func(ep v1.PolicyNetworkEndpoint, hostPorts []int) error {
+		in := baseInput(ProfileOpen, "codex")
+		in.HostPorts = hostPorts
+		in.ExtraRules = endpoint(ep)
+		_, err := Render(in)
+		return err
 	}
 	refused := map[string]struct {
 		ep        v1.PolicyNetworkEndpoint
@@ -443,28 +347,19 @@ func TestRenderKeepsExtraRulesOffReservedEndpoints(t *testing.T) {
 	}
 	for name, tc := range refused {
 		t.Run(name, func(t *testing.T) {
-			in := baseInput(ProfileOpen, "codex")
-			in.HostPorts = tc.hostPorts
-			in.ExtraRules = endpoint(tc.ep)
-			_, err := Render(in)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
+			if err := render(tc.ep, tc.hostPorts); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want one mentioning %q", err, tc.want)
 			}
 		})
 	}
 
 	// Consented host ports themselves may not name a reserved listener.
-	for name, ports := range map[string][]int{
-		"consent-ingress": {18971}, "consent-egress": {18972}, "consent-api": {18970},
-		"consent-gateway": {17670}, "consent-out-of-range": {70000}, "consent-zero": {0},
-	} {
-		t.Run(name, func(t *testing.T) {
-			in := baseInput(ProfileOpen, "codex")
-			in.HostPorts = ports
-			if _, err := Render(in); err == nil {
-				t.Fatal("reserved or invalid host port consented")
-			}
-		})
+	for _, port := range []int{18971, 18972, 18970, 17670, 70000, 0} {
+		in := baseInput(ProfileOpen, "codex")
+		in.HostPorts = []int{port}
+		if _, err := Render(in); err == nil {
+			t.Errorf("reserved or invalid host port %d consented", port)
+		}
 	}
 	// Custom API and gateway ports move the reservation with them.
 	moved := baseInput(ProfileOpen, "codex")
@@ -493,14 +388,9 @@ func TestRenderKeepsExtraRulesOffReservedEndpoints(t *testing.T) {
 		"public-v6-allowed-ip": {v1.PolicyNetworkEndpoint{Host: "db.example.org", Port: 5432, AllowedIPs: []string{"2001:db8::/32"}}, nil},
 	}
 	for name, tc := range accepted {
-		t.Run(name, func(t *testing.T) {
-			in := baseInput(ProfileOpen, "codex")
-			in.HostPorts = tc.hostPorts
-			in.ExtraRules = endpoint(tc.ep)
-			if _, err := Render(in); err != nil {
-				t.Fatalf("Render: %v", err)
-			}
-		})
+		if err := render(tc.ep, tc.hostPorts); err != nil {
+			t.Errorf("%s: Render: %v", name, err)
+		}
 	}
 }
 
@@ -512,10 +402,7 @@ func anyRule(host string, port uint32) v1.NetworkPolicyRule {
 }
 
 func TestMarshalYAMLRefusesUnrepresentableFields(t *testing.T) {
-	p, err := Render(baseInput(ProfileStrict, "codex"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := mustRender(t, baseInput(ProfileStrict, "codex"))
 	p.NetworkPolicies["x"] = v1.NetworkPolicyRule{
 		Name:      "x",
 		Endpoints: []v1.PolicyNetworkEndpoint{{Host: "example.org", Port: 443, Protocol: "rest", AllowEncodedSlash: true}},
@@ -585,23 +472,28 @@ func TestParseProfile(t *testing.T) {
 	if _, err := ParseProfile("permissive"); err == nil {
 		t.Fatal("unknown profile accepted")
 	}
+	// The egress proxy's mode follows the profile; strict renders no
+	// egress rule at all (see the goldens).
+	for profile, mode := range map[Profile]EgressMode{ProfileOpen: EgressAllowByDefault, ProfileBalanced: EgressAllowlist, ProfileStrict: EgressOff} {
+		if got := EgressModeFor(profile); got != mode {
+			t.Errorf("EgressModeFor(%s) = %s, want %s", profile, got, mode)
+		}
+	}
 }
 
 func TestValidateRejectsExternalPolicies(t *testing.T) {
-	p := mustRender(t, baseInput(ProfileOpen, "codex"))
-	p.NetworkMiddlewares = map[string]types.NetworkMiddlewareConfig{"m": {Name: "m"}}
-	if err := Validate(p); err == nil {
-		t.Fatal("middleware accepted")
-	}
-	p = mustRender(t, baseInput(ProfileOpen, "codex"))
-	p.Filesystem.ReadOnly = append(p.Filesystem.ReadOnly, "/work/myapp")
-	if err := Validate(p); err == nil {
-		t.Fatal("path listed read-only and read-write accepted")
-	}
-	p = mustRender(t, baseInput(ProfileOpen, "codex"))
-	p.NetworkPolicies = nil
-	if err := Validate(p); err == nil {
-		t.Fatal("nil network policies accepted")
+	for name, mutate := range map[string]func(*v1.SandboxPolicy){
+		"middleware": func(p *v1.SandboxPolicy) {
+			p.NetworkMiddlewares = map[string]types.NetworkMiddlewareConfig{"m": {Name: "m"}}
+		},
+		"read-only and read-write": func(p *v1.SandboxPolicy) { p.Filesystem.ReadOnly = append(p.Filesystem.ReadOnly, "/work/myapp") },
+		"nil network policies":     func(p *v1.SandboxPolicy) { p.NetworkPolicies = nil },
+	} {
+		p := mustRender(t, baseInput(ProfileOpen, "codex"))
+		mutate(p)
+		if err := Validate(p); err == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 	if err := Validate(nil); err == nil {
 		t.Fatal("nil policy accepted")
@@ -615,13 +507,4 @@ func mustRender(t *testing.T, in Input) *v1.SandboxPolicy {
 		t.Fatal(err)
 	}
 	return p
-}
-
-func contains(list []string, want string) bool {
-	for _, v := range list {
-		if v == want {
-			return true
-		}
-	}
-	return false
 }
