@@ -152,7 +152,7 @@ keep it, records the harnesses, offers shell wrappers and builds the harness ima
 	f.BoolVar(&o.NoWrappers, "no-wrappers", false, "do not offer the shell wrappers")
 	f.BoolVar(&o.NonInteractive, "non-interactive", false, "never prompt: take the defaults and skip steps that need consent")
 	f.BoolVarP(&o.Yes, "yes", "y", false, "answer every question with its default")
-	f.StringSliceVar(&o.Harnesses, "harness", nil, "harness to set up (repeatable; default: openshell.harnesses, else claude and codex)")
+	f.StringSliceVar(&o.Harnesses, "harness", nil, "harness to set up, added to openshell.harnesses (repeatable; default: openshell.harnesses, else claude and codex)")
 	f.BoolVar(&o.UpstreamTelemetry, "upstream-telemetry", false, "keep OpenShell's anonymous usage telemetry on")
 	f.BoolVar(&o.SkipImages, "skip-images", false, "do not build the harness images now (the first run builds them)")
 	f.BoolVar(&o.RestartGateway, "restart-gateway", false, "restart the OpenShell gateway to apply its configuration even while sandboxes run on it")
@@ -194,12 +194,13 @@ func newSandboxRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <harness> [flags] [-- harness-args...]",
 		Short: "Run a harness in a sandbox on this folder",
-		Long: `Runs the harness (claude, codex) in a new sandbox on the current folder: live-mounted
-by default with a pre-session snapshot, or a copy with --copy. Skip-permissions mode is
-on by default; --safe keeps the harness's own prompts. The harness gets your terminal;
-when it exits you get a summary, a review of changed files that can run code on your
-machine, and the choice to keep or undo the changes. Arguments after -- go to the
-harness.`,
+		Long: `Runs the harness in a new sandbox on the current folder: live-mounted by default
+with a pre-session snapshot, or a copy with --copy. The harness is claude, codex,
+copilot, opencode, kiro, hermes, openhands, omnigent or agy (amp, cursor-agent and devin
+are not verified yet, so they do not run). Skip-permissions mode is on by default;
+--safe keeps the harness's own prompts. The harness gets your terminal; when it exits
+you get a summary, a review of changed files that can run code on your machine, and
+the choice to keep or undo the changes. Arguments after -- go to the harness.`,
 		Example: `  defenseclaw sandbox run claude
   defenseclaw sandbox run codex --copy --name fix-tests
   defenseclaw sandbox run claude --detach --prompt "fix the failing tests"

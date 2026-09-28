@@ -143,7 +143,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "harness",
                 "stringSlice",
-                "harness to set up (repeatable; default: openshell.harnesses, else claude and codex)",
+                "harness to set up, added to openshell.harnesses "
+                "(repeatable; default: openshell.harnesses, else claude and codex)",
                 metavar="HARNESS",
             ),
             _Flag("upstream-telemetry", "bool", "keep OpenShell's anonymous usage telemetry on"),
@@ -176,12 +177,13 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ("run",),
         "Run a harness in a sandbox on this folder",
         long=(
-            "Runs the harness (claude, codex) in a new sandbox on the current folder: live-mounted "
-            "by default with a pre-session snapshot, or a copy with --copy. Skip-permissions mode is "
-            "on by default; --safe keeps the harness's own prompts. The harness gets your terminal; "
-            "when it exits you get a summary, a review of changed files that can run code on your "
-            "machine, and the choice to keep or undo the changes. Arguments after -- go to the "
-            "harness."
+            "Runs the harness in a new sandbox on the current folder: live-mounted by default "
+            "with a pre-session snapshot, or a copy with --copy. The harness is claude, codex, "
+            "copilot, opencode, kiro, hermes, openhands, omnigent or agy (amp, cursor-agent and devin "
+            "are not verified yet, so they do not run). Skip-permissions mode is on by default; "
+            "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
+            "you get a summary, a review of changed files that can run code on your machine, and "
+            "the choice to keep or undo the changes. Arguments after -- go to the harness."
         ),
         args=(_Arg("harness"), _Arg("harness_args", required=False, many=True)),
         flags=(

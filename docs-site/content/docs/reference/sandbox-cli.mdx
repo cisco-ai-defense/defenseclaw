@@ -43,9 +43,9 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   the terminal, the copy-mode workspace, the image builds, and the installer.
   `pack`, `image`, `enable`, `disable`, and `doctor` work without the daemon.
 - **Harness names.** A harness can be named by the command you type
-  (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `amp`,
-  `cursor-agent`, `devin`), by its connector name (`claudecode`), or by its
-  display name. Setup and the image commands default to
+  (`claude`, `codex`, `opencode`, `copilot`, `agy`, `amp`, `cursor-agent`,
+  `devin`), by its connector name (`claudecode`, `kiro`), or by its display
+  name. Setup and the image commands default to
   `openshell.harnesses`, and then to Claude Code and Codex. Amp, Cursor Agent,
   and Devin CLI are not verified end to end yet: their images build, but they
   never pass the hook check, so no sandbox runs them. The
@@ -113,7 +113,7 @@ defenseclaw sandbox setup --non-interactive --skip-images
 {/* AUTOGEN-BEGIN: sandbox-flags setup */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
-| `--harness` | text, repeatable or comma-separated |  | Harness to set up (repeatable; default: openshell.harnesses, else claude and codex). |
+| `--harness` | text, repeatable or comma-separated |  | Harness to set up, added to openshell.harnesses (repeatable; default: openshell.harnesses, else claude and codex). |
 | `--install-openshell` | switch |  | Install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo). |
 | `--no-mounts` | switch |  | Leave bind mounts off; every run then works on a copy. |
 | `--no-wrappers` | switch |  | Do not offer the shell wrappers. |

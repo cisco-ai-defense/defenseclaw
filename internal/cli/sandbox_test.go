@@ -25,12 +25,14 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
@@ -178,6 +180,63 @@ func TestSandboxRunArgs(t *testing.T) {
 	if err := cmd.Args(cmd, cmd.Flags().Args()); err == nil {
 		t.Error("exec without -- accepted")
 	}
+}
+
+// TestSandboxRunHelpNamesEveryHarness pins that `run --help` names every
+// harness the way the command line takes it (sandboxcli.HarnessArg), and
+// that the Python stub's `run` help is the same text (manual test R2-73).
+func TestSandboxRunHelpNamesEveryHarness(t *testing.T) {
+	run, _, err := sandboxCmd.Find([]string{"run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Join(strings.Fields(run.Long), " ")
+	for _, h := range harness.Names() {
+		spec, _ := harness.Get(h)
+		name := sandboxcli.HarnessArg(spec)
+		if !regexp.MustCompile(`[ (]` + regexp.QuoteMeta(name) + `[ ,)]`).MatchString(long) {
+			t.Errorf("run --help does not name %s (%s):\n%s", name, spec.DisplayName, long)
+		}
+		if got, err := sandboxcli.ResolveHarness(name); err != nil || got.Name != spec.Name {
+			t.Errorf("run %s resolves to %v, %v; want %s", name, got, err, spec.Name)
+		}
+	}
+	if stub := pythonStubLong(t, "run"); stub != long {
+		t.Errorf("the Python stub's run help differs from the Go one:\n stub: %s\n   go: %s", stub, long)
+	}
+}
+
+// pythonStubLong is the long help of the Python stub of a sandbox command
+// (cli/defenseclaw/commands/cmd_sandbox.py), its string literals joined
+// and its whitespace collapsed.
+func pythonStubLong(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "commands", "cmd_sandbox.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	i := strings.Index(src, `("`+path+`",),`)
+	if i < 0 {
+		t.Fatalf("cmd_sandbox.py has no stub for %s", path)
+	}
+	j := strings.Index(src[i:], "long=(\n")
+	if j < 0 {
+		t.Fatalf("the %s stub has no long=( … ) help", path)
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(src[i+j+len("long=(\n"):], "\n") {
+		line = strings.TrimSpace(line)
+		if line == ")," {
+			break
+		}
+		s, err := strconv.Unquote(line)
+		if err != nil {
+			t.Fatalf("the %s stub's help line %q is not a plain string literal: %v", path, line, err)
+		}
+		b.WriteString(s)
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
 }
 
 // Every command that can ask a question takes --yes, the answer the
