@@ -1,19 +1,22 @@
 ---
 title: Terminal UI (TUI)
-description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it, a tour of the panels, and the Sandboxes panel for OpenShell sandboxes.
+description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it, a tour of the panels, the Policies panel for policies and rule packs, Setup, and the Sandboxes panel for OpenShell sandboxes.
 keywords:
   - DefenseClaw TUI
   - defenseclaw tui
   - terminal UI
   - dashboard
   - Sandboxes panel
+  - Policies panel
+  - policy picker
+  - rule pack
   - OpenShell sandbox wizard
 ---
 
 The DefenseClaw **TUI** is a full-screen, keyboard-driven dashboard over the
 `defenseclaw` CLI. It surfaces the gateway status, your scanned inventory
 (skills, MCPs, and plugins), alerts, logs, audit trail, OpenShell sandboxes,
-and setup — all in one place. Operator actions use the same supported CLI and gateway surfaces, so
+policies and rule packs, and setup — all in one place. Operator actions use the same supported CLI and gateway surfaces, so
 you do not have to memorize their syntax.
 
 ## Open the TUI
@@ -35,11 +38,13 @@ the panels have data to show.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or the config editor types digits), or cycle with `Tab` /
-`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name.
+`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
+terminal every tab stays on screen: the most-used tabs keep their names and
+the rest show only their key.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
-| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install) and policy, at-a-glance health |
+| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, at-a-glance health |
 | `2` | Alerts | Recent guardrail and hook alerts |
 | `3` | Skills | Scanned skill inventory |
 | `4` | MCPs | Scanned MCP servers |
@@ -52,7 +57,8 @@ Setup form or the config editor types digits), or cycle with `Tab` /
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |
-| `0` | Setup | Connector and gateway setup |
+| `P` | Policies | Named policies, guardrail rule packs and sandbox packs; activate a policy or switch a rule pack ([below](#policies-panel)) |
+| `0` | Setup | Setup tasks grouped by goal, and the config editor ([below](#setup-panel)) |
 
 The Overview panel's **AI Agents** metric intentionally excludes `local_model`
 rows so a large model cache cannot hide agent activity. Open **AI Discovery**
@@ -74,6 +80,74 @@ pressing `D` runs Doctor in the background to refresh the view. Failed
 credential checks also feed the bounded missing-credential notice without
 exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
 for the on-disk format.
+
+## Policies panel
+
+Press `P` (or `p` on Overview) to open **Policies**. DefenseClaw has three
+independent policy layers, and the panel shows each one in its own view; press
+`1`, `2` or `3` to switch.
+
+| View | What it shows |
+| --- | --- |
+| Policies | Every named policy (built-in and your own) with the active one marked, and what it blocks: the lowest severity the guardrail blocks and alerts on, and the lowest severity that blocks an install. Wider terminals add the firewall default and the description. |
+| Rule packs | The guardrail rule pack each active connector uses, and whether it comes from the global setting or a per-connector override. |
+| Sandbox packs | The OpenShell sandbox packs (read-only; not shown on Windows). |
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Policies: pick a policy to activate. Rule packs: switch the pack for all connectors or for one |
+| `i` | Details of the highlighted row |
+| `r` | Refresh |
+
+**Activating a policy.** The picker previews what changes from the active
+policy: block, alert and install levels, the firewall default, human approval,
+and whether the policy replaces your webhooks or changes your Cisco AI Defense
+settings. A confirm step follows. It turns red and asks twice when the change
+weakens protection. The TUI then runs `defenseclaw policy activate NAME`, which
+also reloads the running gateway; if the gateway is stopped, it loads the
+policy when it starts.
+
+**Switching a rule pack.** Pick the scope (all connectors, or one), then the
+pack: `default`, `strict`, `permissive`, a pack found under
+`~/.defenseclaw/policies/guardrail/`, or a folder you type. The pack is checked
+with `defenseclaw guardrail validate-pack --json` first, and an invalid pack is
+refused. A global switch lists the per-connector overrides it clears. The TUI
+then runs `defenseclaw guardrail use-pack PACK [--connector NAME]`.
+
+Overview's **Policy posture** reads, for example, `strict · block MEDIUM+ ·
+alert LOW+`, and the status line shows `policy <name> · <mode>`.
+
+## Setup panel
+
+Press `0` for **Setup**. Tasks are grouped by goal: **Get protected**,
+**Guardrail & scanning**, **Alerts & telemetry** and **Gateway & advanced**.
+The line above the list sums up readiness (for example `6 ok · 2 need
+attention`); press `i` for the checks, their fix commands, and what the
+highlighted task runs. The hint line and `?` list only the keys of the view
+you are in.
+
+In a task form, `Enter` on a text field (or just start typing) opens a text box:
+`Enter` saves the value, `Esc` cancels, and `Ctrl+T` shows a hidden secret.
+`←`/`→` or `Space` change a choice, and `Ctrl+R` runs the task. Secrets you
+enter for **API keys & secrets** reach `defenseclaw keys set --value-stdin` on
+standard input, never on the command line. Follow-up commands run only after
+the previous one succeeds.
+
+Press `c` for the **config editor**:
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Shift+Tab` or `←` / `→` | Previous or next section |
+| `g` | Pick a section from a grouped list |
+| `/` | Find a field by name or key in any section |
+| `Enter` | Edit the field (text box) or change a choice |
+| `S` | Review the changes and save |
+| `R` | Revert unsaved changes |
+| `w` | Back to the task list |
+
+Keys the TUI can't save show as read-only rows; their hint says where to change
+them (in `config.yaml`, or with `defenseclaw setup <connector>` for connector
+hooks). Only problems in fields you changed block a save.
 
 ## Sandboxes panel
 
@@ -249,11 +323,12 @@ rules.
 
 | Key | Action |
 | --- | --- |
-| `?` | Toggle the help overlay |
-| `Ctrl+K` or `:` | Open the command palette (search-and-run any command) |
+| `?` | Toggle the help overlay (scroll it with `j`/`k` or `PgUp`/`PgDn`) |
+| `Ctrl+K` or `:` | Open the command palette (search-and-run any command; the Risk column marks what changes things) |
 | `Ctrl+P` | Jump to a panel by name |
+| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it) |
 | `Ctrl+\` | Theme picker |
-| `D` | Run `defenseclaw doctor` in the background and toast the result |
-| `Y` | Copy the last command's output |
+| `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
+| `Y` | Copy the last command's output (works on every panel) |
 | `Ctrl+S` | Save the last run to a log file |
 | `Ctrl+C` | Quit the TUI |
