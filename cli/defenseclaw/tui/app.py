@@ -11149,10 +11149,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
             )
         if self.setup_model.goal_active:
-            return (
-                ("Goal", "What it does"),
-                tuple((goal.label, goal.summary) for goal in self.setup_model.goals),
-            )
+            columns = ("Goal", "What it does")
+            labels = [goal.label for goal in self.setup_model.goals]
+            # On a narrow terminal long goal names ("Set up a proxy connector
+            # with the local stack") wrap too, so the description keeps room
+            # to be read in full.
+            width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+            if width and width - max(map(len, labels), default=0) - 12 < 36:
+                labels = ["\n".join(textwrap.wrap(label, 30)) if len(label) > 30 else label for label in labels]
+            rows = tuple(zip(labels, (goal.summary for goal in self.setup_model.goals), strict=True))
+            return columns, self._wrap_last_table_column(columns, rows)
         if self.setup_model.form_active:
             columns = ("Field", "Value", "Kind", "Hint")
             rows = tuple(
