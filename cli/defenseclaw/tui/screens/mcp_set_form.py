@@ -132,7 +132,10 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
 
     #mcp-set-dialog {{
         width: 90;
+        max-width: 96%;
         height: auto;
+        max-height: 96%;
+        overflow-y: auto;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
         background: {DEFAULT_TOKENS.surface_panel};
@@ -230,7 +233,10 @@ class MCPSetFormScreen(ModalScreen[MCPSetResult | None]):
         try:
             result = self.values().build_result()
         except MCPSetValidationError as exc:
-            self.query_one("#mcp-set-status", Static).update(str(exc))
+            status = self.query_one("#mcp-set-status", Static)
+            status.update(str(exc))
+            # On short terminals the form scrolls; show why Enter did nothing.
+            status.scroll_visible(animate=False)
             return
         self.dismiss(result)
 

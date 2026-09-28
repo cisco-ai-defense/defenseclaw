@@ -70,6 +70,8 @@ class DetailScreen(ModalScreen[None]):
 
     #detail-dialog {{
         width: 92;
+        max-width: 96%;
+        height: auto;
         max-height: 85%;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
