@@ -19,11 +19,15 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
 
 func TestReadUserMCPServersForConnectorSkipsProjectScopes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox MCP inventory serves Linux and macOS sandboxes; Windows finds the profile through USERPROFILE, not HOME")
+	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")

@@ -31,6 +31,7 @@ import (
 )
 
 func TestCLIArgv(t *testing.T) {
+	skipOnWindows(t)
 	cli := openshell.CLI{Gateway: "openshell"}
 	// cmd is the argv of an openshell subcommand on the default gateway.
 	cmd := func(sub, rest string) string { return "openshell " + sub + " -g openshell --workspace default " + rest }

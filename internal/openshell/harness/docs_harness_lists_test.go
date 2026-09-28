@@ -17,6 +17,7 @@
 package harness
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -104,6 +105,7 @@ func docsFile(t *testing.T, elem ...string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")) // CRLF on a Windows checkout
 	return string(raw)
 }
 

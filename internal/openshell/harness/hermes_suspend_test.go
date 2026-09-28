@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,9 @@ import (
 // supervisor's notice instead of raising (the sandbox refuses it), and
 // every other kill() is untouched.
 func TestHermesSuspendShim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the shim handles POSIX job-control signals in Linux and macOS sandboxes")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required")

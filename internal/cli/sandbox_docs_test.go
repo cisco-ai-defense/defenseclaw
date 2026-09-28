@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -148,6 +149,7 @@ func TestSandboxCLIReferenceDocs(t *testing.T) {
 	}
 	page := filepath.Join(filepath.Dir(filename), "..", "..", "docs-site", "content", "docs", "reference", sandboxDocsPage)
 	raw, err := os.ReadFile(page)
+	raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")) // CRLF on a Windows checkout
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,6 +247,7 @@ func TestSandboxDocsExitStatuses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 		_, after, ok := strings.Cut(string(raw), from)
 		if !ok {
 			t.Fatalf("%s has no %q", rel, from)

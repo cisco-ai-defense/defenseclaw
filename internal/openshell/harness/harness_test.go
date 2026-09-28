@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -60,6 +61,9 @@ func shParses(t *testing.T, what, script string) {
 }
 
 func TestRegistry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
+	}
 	if want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode", "openhands"}; !slices.Equal(Names(), want) || !sort.StringsAreSorted(Names()) {
 		t.Fatalf("Names() = %v, want %v", Names(), want)
 	}
@@ -524,6 +528,9 @@ func TestLaunchArgv(t *testing.T) {
 // the hosts that bypass the proxy so OpenShell can inject credentials, and
 // no secret-bearing variable (those come from providers, never --env).
 func TestEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
+	}
 	const proxy = "http://b1:secret@host.openshell.internal:18972"
 	mantleWest := "bedrock-mantle.us-west-2.api.aws,host.openshell.internal"
 	for _, tc := range []struct {

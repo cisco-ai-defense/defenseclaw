@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -97,6 +98,8 @@ func TestSandboxCommandManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read %s (DEFENSECLAW_UPDATE_GOLDEN=1 writes it): %v", golden, err)
 	}
+	// A Windows checkout gives the golden CRLF line endings.
+	want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(got, want) {
 		t.Fatalf("the sandbox command tree changed; update %s with DEFENSECLAW_UPDATE_GOLDEN=1 and the Python stubs", golden)
 	}
@@ -198,7 +201,7 @@ func pythonStubLong(t *testing.T, path string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := string(data)
+	src := strings.ReplaceAll(string(data), "\r\n", "\n") // CRLF on a Windows checkout
 	i := strings.Index(src, `("`+path+`",),`)
 	if i < 0 {
 		t.Fatalf("cmd_sandbox.py has no stub for %s", path)
@@ -339,6 +342,9 @@ func TestSandboxHintsNameCommandsThatExist(t *testing.T) {
 // test L11). Other commands still need the configuration, and a broken one
 // is reported.
 func TestSandboxPackCommandsWithoutAConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sandbox commands refuse Windows before they read config.yaml")
+	}
 	prev := cfg
 	t.Cleanup(func() { cfg = prev })
 	home := t.TempDir()
