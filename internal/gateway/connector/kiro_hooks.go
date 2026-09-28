@@ -4,9 +4,11 @@
 package connector
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 )
 
@@ -370,7 +372,8 @@ func kiroBuiltInAgentName(name string) bool {
 // `kiro-cli` runs. A per-user install keeps a custom default the user chose
 // (Setup adds DefenseClaw's hooks to that agent instead); force, for a
 // managed install, replaces it, because a managed install never edits the
-// user's agents. Teardown restores the file when it is unchanged.
+// user's agents. Teardown takes the setting out again
+// (removeKiroDefaultAgentSetting).
 func patchKiroDefaultAgentSetting(path string, force bool) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -387,7 +390,13 @@ func patchKiroDefaultAgentSetting(path string, force bool) error {
 	return writeJSONObject(path, cfg)
 }
 
-func removeKiroDefaultAgentSetting(path string) error {
+// removeKiroDefaultAgentSetting takes DefenseClaw's chat.defaultAgent out of
+// the Kiro CLI settings file and keeps every other key, including the ones
+// the user or Kiro added after Setup. backup is the file as Setup first found
+// it (nil for none): the default agent it named, which a managed install
+// replaces, is put back, and when nothing else in the file changed since,
+// so are its exact bytes.
+func removeKiroDefaultAgentSetting(path string, backup *managedFileBackup) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -397,7 +406,31 @@ func removeKiroDefaultAgentSetting(path string) error {
 		return nil
 	}
 	delete(cfg, kiroDefaultAgentSettingKey)
-	if len(cfg) == 0 {
+	existed := backup != nil && backup.Existed
+	var pristine map[string]interface{}
+	if existed {
+		pristine = map[string]interface{}{}
+		if len(bytes.TrimSpace(backup.PristineBytes)) > 0 {
+			decoder := json.NewDecoder(bytes.NewReader(backup.PristineBytes))
+			decoder.UseNumber()
+			if decoder.Decode(&pristine) != nil {
+				pristine = nil
+			}
+		}
+	}
+	if previous, ok := pristine[kiroDefaultAgentSettingKey]; ok {
+		if name, _ := previous.(string); strings.TrimSpace(name) != kiroManagedAgentName {
+			cfg[kiroDefaultAgentSettingKey] = previous
+		}
+	}
+	if pristine != nil && reflect.DeepEqual(cfg, pristine) {
+		mode := os.FileMode(backup.Mode)
+		if mode == 0 {
+			mode = 0o600
+		}
+		return atomicWriteFile(path, backup.PristineBytes, mode)
+	}
+	if len(cfg) == 0 && !existed {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}

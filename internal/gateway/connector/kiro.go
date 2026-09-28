@@ -147,18 +147,18 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if err := removeStaleKiroDefaultOverlay(command); err != nil {
 		errs = append(errs, fmt.Errorf("kiro remove stale kiro_default overlay: %w", err))
 	}
+	// The settings file is the user's: only DefenseClaw's default-agent
+	// setting comes out, never a whole earlier copy, which would drop the
+	// keys added since Setup captured it.
 	settingsPath := kiroSettingsPath()
-	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("kiro restore settings: %w", err))
-	} else if restored {
-		discardManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName)
+	backup, err := loadManagedFileBackupForTransform(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath)
+	if err == nil {
+		err = removeKiroDefaultAgentSetting(settingsPath, backup)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("kiro remove default agent setting: %w", err))
 	} else {
-		if removeErr := removeKiroDefaultAgentSetting(settingsPath); removeErr != nil && !os.IsNotExist(removeErr) {
-			errs = append(errs, fmt.Errorf("kiro remove default agent setting: %w", removeErr))
-		} else {
-			discardManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName)
-		}
+		discardManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName)
 	}
 	return errors.Join(errs...)
 }
