@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -135,7 +136,13 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 			summary.LeftBehind = append(summary.LeftBehind, sandboxapi.MCPLeftBehind{Name: displayMCPName(s.Name), Reason: s.Reason})
 		}
 		var dropped []string
-		servers, summary.LeftBehind, dropped = importMCPServers(in.spec.Name, entries, summary.LeftBehind)
+		servers, summary.LeftBehind, dropped = importMCPServers(in.spec.Name, entries, summary.LeftBehind, in.eff.MCP.HostPorts)
+		for _, s := range servers {
+			if port, ok := hostPortOfMCP(s.URL); ok {
+				notices = append(notices, fmt.Sprintf("MCP: %s reaches port %d on this machine as %s:%d; it connects once you approve the sandbox's ask for the port",
+					displayMCPName(s.Name), port, openshellHostAlias, port))
+			}
+		}
 		if !allowProject && in.spec.Name == "codex" {
 			servers, summary.LeftBehind = dropShadowedMCPServers(servers, project, summary.LeftBehind)
 		}
@@ -178,8 +185,12 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 // that may be secrets never enter the sandbox: environment values and HTTP
 // headers are dropped (their names are returned for the notice), and
 // servers only this machine can reach, or that the harness cannot run,
-// stay behind.
-func importMCPServers(harnessName string, entries []config.MCPServerEntry, skipped []sandboxapi.MCPLeftBehind) ([]connector.SandboxMCPServer, []sandboxapi.MCPLeftBehind, []string) {
+// stay behind. A server on this machine's loopback whose port is one of
+// the run's accepted host ports (hostPorts) comes along, pointed at
+// host.openshell.internal; for another port, the reason names the
+// --host-port that would bring it.
+func importMCPServers(harnessName string, entries []config.MCPServerEntry, skipped []sandboxapi.MCPLeftBehind,
+	hostPorts []int) ([]connector.SandboxMCPServer, []sandboxapi.MCPLeftBehind, []string) {
 	var servers []connector.SandboxMCPServer
 	var dropped []string
 	seen := map[string]bool{}
@@ -224,8 +235,12 @@ func importMCPServers(harnessName string, entries []config.MCPServerEntry, skipp
 				continue
 			}
 			if localMCPURL(s.URL) {
-				skip(name, "runs on this machine, which the sandbox cannot reach")
-				continue
+				rewritten, why := hostPortMCPURL(s.URL, hostPorts)
+				if rewritten == "" {
+					skip(name, why)
+					continue
+				}
+				s.URL = rewritten
 			}
 		default:
 			skip(name, "no command or URL")
@@ -271,6 +286,57 @@ func dropShadowedMCPServers(servers []connector.SandboxMCPServer, project []stri
 		kept = append(kept, s)
 	}
 	return kept, skipped
+}
+
+// localMCPUnreachable is why a server only this machine reaches stays
+// behind.
+const localMCPUnreachable = "runs on this machine, which the sandbox cannot reach"
+
+// hostPortMCPURL points a server URL on this machine's loopback (a
+// localMCPURL) at host.openshell.internal when its port is one of the
+// run's accepted host ports, through which the sandbox reaches the host's
+// loopback. Otherwise it returns "" and why the server stays behind: for a
+// loopback HTTP server, the --host-port that would bring it along. HTTPS
+// stays behind: the server's certificate names localhost, not the alias.
+func hostPortMCPURL(raw string, hostPorts []int) (string, string) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", localMCPUnreachable
+	}
+	host := strings.ToLower(u.Hostname())
+	loopback := host == "localhost" || strings.HasSuffix(host, ".localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		loopback = ip.IsLoopback()
+	}
+	if !loopback {
+		return "", localMCPUnreachable
+	}
+	port, err := strconv.Atoi(u.Port())
+	if u.Port() == "" {
+		port, err = map[string]int{"http": 80, "https": 443}[strings.ToLower(u.Scheme)], nil
+	}
+	if err != nil || port <= 0 || port > 65535 {
+		return "", localMCPUnreachable
+	}
+	if strings.ToLower(u.Scheme) != "http" {
+		return "", "runs on this machine over " + strings.ToUpper(u.Scheme) + ", whose certificate cannot name " + openshellHostAlias
+	}
+	if !slices.Contains(hostPorts, port) {
+		return "", fmt.Sprintf("%s; run the sandbox with --host-port %d to bring it along", localMCPUnreachable, port)
+	}
+	u.Host = net.JoinHostPort(openshellHostAlias, strconv.Itoa(port))
+	return u.String(), ""
+}
+
+// hostPortOfMCP reports the host port an imported server reaches through
+// host.openshell.internal.
+func hostPortOfMCP(raw string) (int, bool) {
+	u, err := url.Parse(raw)
+	if raw == "" || err != nil || !strings.EqualFold(u.Hostname(), openshellHostAlias) {
+		return 0, false
+	}
+	port, err := strconv.Atoi(u.Port())
+	return port, err == nil && port > 0
 }
 
 // localMCPURL reports a remote server URL only the host can reach: a

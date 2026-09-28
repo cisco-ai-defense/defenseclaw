@@ -163,7 +163,7 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 	for _, l := range sb.MCP.LeftBehind {
 		left = append(left, l.Name+"="+l.Reason)
 	}
-	for _, want := range []string{"risky=blocked by DefenseClaw", "off=disabled", "local-db=runs on this machine, which the sandbox cannot reach", "(unprintable name)=not usable in a sandbox"} {
+	for _, want := range []string{"risky=blocked by DefenseClaw", "off=disabled", "local-db=runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 5432 to bring it along", "(unprintable name)=not usable in a sandbox"} {
 		if !slices.Contains(left, want) {
 			t.Fatalf("left behind = %v, missing %q", left, want)
 		}
@@ -388,7 +388,7 @@ func TestImportMCPServers(t *testing.T) {
 		{Name: "g"},
 		{Name: "h", URL: "https://user:pw@example.com/mcp"},
 		{Name: "i", Command: "srv", Env: map[string]string{"B": "2", "A": "1"}},
-	}, nil)
+	}, nil, nil)
 	var names []string
 	for _, s := range servers {
 		names = append(names, s.Name)
@@ -405,7 +405,7 @@ func TestImportMCPServers(t *testing.T) {
 	}
 	want := map[string]string{
 		"c": "Codex does not support SSE servers", "d": "runs on this machine, which the sandbox cannot reach",
-		"e": "runs on this machine, which the sandbox cannot reach", "f": "unsupported transport http",
+		"e": "runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 9 to bring it along", "f": "unsupported transport http",
 		"g": "no command or URL", "h": "not usable in a sandbox",
 	}
 	for name, reason := range want {
