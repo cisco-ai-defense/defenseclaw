@@ -3327,12 +3327,7 @@ targets:
             $outputPath = ''
             switch ($action) {
                 'plan' {
-                    # Upgrade and Repair plan with --validate-only.
-                    $validationPlan = [bool](
-                        $Arguments.Count -eq 9 -and
-                        [string]$Arguments[8] -ceq '--validate-only'
-                    )
-                    if (($Arguments.Count -ne 8 -and -not $validationPlan) -or
+                    if ($Arguments.Count -ne 8 -or
                         [string]$Arguments[4] -cne '--manifest' -or
                         [string]$Arguments[6] -cne '--output') {
                         throw 'target-runtime plan mock received unexpected arguments'

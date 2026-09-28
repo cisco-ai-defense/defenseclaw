@@ -3599,8 +3599,9 @@ function Initialize-DefenseClawManagedRoot {
     # their transaction; rewriting them to the bootstrap DACL there removed
     # that entry, so an action that failed before its managed ACLs were
     # applied again left a running gateway that could not start again. With
-    # -KeepProtectedAcl an existing protected DACL, already proven
-    # administrator-controlled above, is kept; an inherited one is replaced.
+    # -KeepProtectedAcl (standalone only) an existing protected DACL,
+    # already proven administrator-controlled above, is kept; an inherited
+    # one is replaced.
     # PowerShell names are case-insensitive: this must not reuse the
     # parameter's name.
     $existingAclKept = $false
@@ -13467,7 +13468,12 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         '--manifest', [string]$Layout.ManifestPath,
         '--output', $planPath
     )
-    if ($ValidationOnly) {
+    # Only a standalone Upgrade/Repair plan may carry a deferred account's
+    # pending root; Secure Client keeps its plan and message.
+    $standaloneValidation = [bool](
+        $ValidationOnly -and (Test-DefenseClawStandaloneProfile)
+    )
+    if ($standaloneValidation) {
         $planArguments += '--validate-only'
     }
     $planProbe = Invoke-DefenseClawGatewayCommand `
@@ -13486,7 +13492,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
             -Path $planPath `
             -TransactionDirectory $transactionDirectory) `
         -Layout $Layout `
-        -AllowPending:$ValidationOnly
+        -AllowPending:$standaloneValidation
     if ($ValidationOnly) {
         # A standalone deferred account's pending root (absent, or created by
         # the account before enrollment) is the guardian's to create or adopt
@@ -13496,13 +13502,17 @@ function Invoke-DefenseClawTargetRuntimePreparation {
                     [string]$_.baseline -ceq 'absent'
                 })
         if ($absentRoots.Count -gt 0) {
+            $absentNames = ''
+            if ($standaloneValidation) {
+                $absentNames = ' (' + (@($absentRoots |
+                        Microsoft.PowerShell.Core\ForEach-Object {
+                            [string]$_.data_dir
+                        }) -join ', ') + ')'
+            }
             throw (
                 'Upgrade/Repair refuses an enabled target with an absent ' +
-                'managed runtime root (' +
-                (@($absentRoots | Microsoft.PowerShell.Core\ForEach-Object {
-                    [string]$_.data_dir
-                }) -join ', ') +
-                '); add the target through a fresh Install'
+                "managed runtime root$absentNames; add the target through a " +
+                'fresh Install'
             )
         }
         # No user object was mutated, so no rollback ownership is journaled.
@@ -24107,7 +24117,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -Label 'InstallRoot' `
                 -RequiredBase $script:ProgramFiles `
                 -AllowUsersRead `
-                -KeepProtectedAcl)
+                -KeepProtectedAcl:(Test-DefenseClawStandaloneProfile))
         }
         if ($null -ne $installPreparationIntent) {
             $stateRootCreatedForTransaction = [bool](
@@ -24126,7 +24136,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 -Path $layout.StateRoot `
                 -Label 'StateRoot' `
                 -RequiredBase $script:ProgramData `
-                -KeepProtectedAcl)
+                -KeepProtectedAcl:(Test-DefenseClawStandaloneProfile))
         }
         New-DefenseClawLayoutDirectories -Layout $layout
         $pendingRecovery = Recover-DefenseClawPendingTransaction `
