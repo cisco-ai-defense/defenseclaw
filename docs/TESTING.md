@@ -9,6 +9,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make test` | Python CLI unit tests plus focused Go gateway/test packages |
 | `make cli-test` | Python `pytest` suite under `cli/tests/` |
 | `make cli-test-cov` | Python pytest coverage report |
+| `make tui-test` | Textual TUI suite under `cli/tests/tui/` |
 | `make gateway-test` | Race-enabled Go tests for gateway and `test/` |
 | `make security-suite-test` | Deterministic security + PII coverage suite (regex + stubbed judge); see [SECURITY-TEST-SUITE.md](SECURITY-TEST-SUITE.md) |
 | `make security-suite-eval` | Live LLM-judge scoring of the security + PII corpus (needs `DEFENSECLAW_LLM_KEY`) |
@@ -33,6 +34,45 @@ npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.tes
 
 # Rego policy tests
 opa test policies/rego/ -v
+```
+
+## TUI Tests
+
+The Textual TUI (`cli/defenseclaw/tui/`) is tested mostly without a running
+app. Write tests in this order:
+
+1. **Unit tests first.** Test the pure panel models (`panels/*.py`),
+   services (`services/*_state.py`) and helpers directly. This is where
+   behaviour, key handling and command intents are covered.
+2. **At most two Pilot tests per new screen**, at `size=(80, 24)`, built on
+   `fixtures.snapshot_app(tmp_path)` (a fake-data app that never reads the
+   real home, gateway or SQLite). Prove the screen opens, its primary
+   content is on screen, and it closes.
+3. **Journeys only for mutating flows**: one happy path from the key press to
+   the argv captured by a fake `app.executor.run`, plus one real regression.
+
+`cli/tests/tui/test_smoke.py` covers every panel in `PANELS`, the cheap
+modals and global key routing at 80x24, so a new panel is smoke-tested
+automatically. Tests that call `app.run_test(` are marked `tui_pilot`
+automatically; `-m "not tui_pilot"` runs only the unit tests. The TUI
+`conftest.py` stubs agent discovery for every test and the CLI's quiet
+`--json` loads for Pilot tests.
+
+Don't:
+
+- assert UI copy, except security or contract strings
+- use sleeps to wait for the app (await `pilot.pause()` or the worker)
+- assert private attributes where a model API exists
+- touch real host discovery, the network or a gateway
+- compare golden SVG snapshots
+
+Run the suite with `make tui-test`, or in parallel with
+`.venv/bin/python -m pytest cli/tests/tui -q -n 4`. To see what a screen
+looks like without a terminal, print it as text:
+
+```bash
+.venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --panel setup --size 80x24
+.venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --keys : "text:policy list" enter
 ```
 
 ## End-to-End Tests
