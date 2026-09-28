@@ -291,6 +291,49 @@ func TestPOSIXWrapperBehaviour(t *testing.T) {
 	}
 }
 
+// TestPOSIXWrapperReplacesAlias: an alias of the harness defined earlier in
+// the rc file (Claude Code's installer writes one) must neither break the
+// function definition nor keep running the harness natively.
+func TestPOSIXWrapperReplacesAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shells only")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dc")
+	writeScript(t, bin, "#!/bin/sh\nprintf 'sandbox:'; for a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\n")
+	native := filepath.Join(dir, "native-claude")
+	writeScript(t, native, "#!/bin/sh\necho native\n")
+	for _, tc := range []struct {
+		shell Shell
+		bin   string
+		// prelude makes a non-interactive shell expand aliases.
+		prelude string
+		args    []string
+	}{
+		{Bash, "bash", "shopt -s expand_aliases\n", []string{"--norc", "-c"}},
+		{Zsh, "zsh", "", []string{"-f", "-c"}},
+	} {
+		sh, err := exec.LookPath(tc.bin)
+		if err != nil {
+			t.Logf("%s not installed", tc.bin)
+			continue
+		}
+		for _, alias := range []string{native, native + " --from-alias"} {
+			rc := filepath.Join(t.TempDir(), "rc")
+			writeScript(t, rc, tc.prelude+"alias claude='"+alias+"'\n")
+			if _, err := Enable(tc.shell, rc, bin, claude); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(sh, append(tc.args, `. "$1" && claude -p x`, "x", rc)...)
+			cmd.Env = []string{"PATH=/usr/bin:/bin"}
+			out, err := cmd.CombinedOutput()
+			if got := strings.TrimSpace(string(out)); err != nil || got != "sandbox:[sandbox][run][claude][--][-p][x]" {
+				t.Errorf("%s with alias %q: %v: %q", tc.bin, alias, err, got)
+			}
+		}
+	}
+}
+
 func TestFishWrapperSyntax(t *testing.T) {
 	fish, err := exec.LookPath("fish")
 	if err != nil {

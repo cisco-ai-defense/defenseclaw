@@ -168,6 +168,11 @@ func Render(shell Shell, b Block) (string, error) {
 		}
 		switch shell {
 		case Bash, Zsh:
+			// An alias of the same name (Claude Code's installer adds one)
+			// would expand inside the definition, a syntax error that
+			// leaves the alias running the harness natively, and would
+			// win over the function when typed.
+			fmt.Fprintf(&sb, "unalias %s 2>/dev/null || true\n", w.Command)
 			fmt.Fprintf(&sb, "%s() {\n", w.Command)
 			fmt.Fprintf(&sb, "  if [ -n \"${%s:-}\" ] || [ -n \"${%s:-}\" ]; then command %s \"$@\"; return; fi\n", EnvBypass, envNested, w.Command)
 			fmt.Fprintf(&sb, "  if [ ! -x %s ]; then echo '%s' >&2; return 127; fi\n", bin, missingMessage(w.Command))
