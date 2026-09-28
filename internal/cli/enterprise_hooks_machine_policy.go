@@ -25,12 +25,19 @@ import (
 
 // applyEnterpriseHookMachinePolicyPreferences copies the administrator's
 // machine-wide hook-policy choices from config into one install/verify
-// request: the Claude Code managed-hooks-only opt-out.
+// request: the Claude Code managed-hooks-only opt-out and the Cursor
+// foreign-hook allowlist. The allowlist is always non-nil here so the
+// published protected state follows the configuration exactly.
 func applyEnterpriseHookMachinePolicyPreferences(opts *enterprisehooks.InstallOptions) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks: config is not loaded")
 	}
+	approved, err := cfg.ApprovedForeignHooksForConnector("cursor")
+	if err != nil {
+		return err
+	}
 	opts.ClaudeCodeAllowUnmanagedHooks = cfg.ClaudeCodeAllowUnmanagedHooks()
+	opts.CursorApprovedForeignHooks = approved
 	return nil
 }
 

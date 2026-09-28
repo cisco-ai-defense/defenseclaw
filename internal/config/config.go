@@ -1422,6 +1422,12 @@ type AgentHookConfig struct {
 	// user, project, local and plugin hooks run beside DefenseClaw's managed
 	// hooks; status and verify report the opt-out.
 	AllowUnmanagedHooks bool `mapstructure:"allow_unmanaged_hooks" yaml:"allow_unmanaged_hooks,omitempty"`
+	// ApprovedForeignHooks lists sha256 digests of user- or project-level
+	// hook handlers that the managed hook accepts for connectors without a
+	// vendor managed-hooks-only setting (Cursor). The managed hook denies
+	// tool calls while any other preToolUse hook is registered and names the
+	// digest to approve in its message.
+	ApprovedForeignHooks []string `mapstructure:"approved_foreign_hooks" yaml:"approved_foreign_hooks,omitempty"`
 }
 
 // ClaudeCodeAllowUnmanagedHooks reports the administrator opt-out from the
@@ -1431,6 +1437,50 @@ func (c *Config) ClaudeCodeAllowUnmanagedHooks() bool {
 		return false
 	}
 	return c.ClaudeCode.AllowUnmanagedHooks || c.ConnectorHooks["claudecode"].AllowUnmanagedHooks
+}
+
+// ApprovedForeignHooksForConnector returns the normalized (lowercase hex,
+// sorted, de-duplicated) sha256 allowlist for a connector's foreign-hook
+// guard. It always returns a non-nil slice so machine-policy writers treat
+// the configured value, even an empty one, as authoritative. Entries may be
+// written with or without a "sha256:" prefix; malformed entries are
+// reported as an error rather than silently widening or narrowing the list.
+func (c *Config) ApprovedForeignHooksForConnector(name string) ([]string, error) {
+	result := []string{}
+	if c == nil {
+		return result, nil
+	}
+	seen := map[string]struct{}{}
+	for _, raw := range c.ConnectorHookConfig(name).ApprovedForeignHooks {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		value = strings.TrimPrefix(value, "sha256:")
+		if !validApprovedHookDigest(value) {
+			return nil, fmt.Errorf(
+				"config: connector_hooks.%s.approved_foreign_hooks entry %q is not a sha256 hex digest",
+				name,
+				raw,
+			)
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func validApprovedHookDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // EffectiveFailMode returns the per-connector POLICY-LAYER fail

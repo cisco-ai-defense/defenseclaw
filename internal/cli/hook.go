@@ -463,6 +463,8 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	}
 	if enterpriseManaged {
 		opts.ManagedEnterprise = true
+		opts.ApprovedForeignHooks, opts.ForeignHookTrustedExecutable, opts.ForeignHookProfileHome =
+			enterpriseManagedHookRuntimeForeignHookPolicy(connector)
 		if managedRuntimeFailure == "" {
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}

@@ -36,8 +36,16 @@ func TestApplyEnterpriseHookMachinePolicyPreferencesFollowsConfig(t *testing.T) 
 	if opts.ClaudeCodeAllowUnmanagedHooks {
 		t.Fatal("default config opted out of the Claude managed-hooks-only lock")
 	}
+	if opts.CursorApprovedForeignHooks == nil || len(opts.CursorApprovedForeignHooks) != 0 {
+		t.Fatalf("default allowlist = %#v, want authoritative empty list", opts.CursorApprovedForeignHooks)
+	}
+
+	digest := strings.Repeat("c", 64)
 	cfg = &config.Config{
 		ClaudeCode: config.AgentHookConfig{AllowUnmanagedHooks: true},
+		ConnectorHooks: map[string]config.AgentHookConfig{
+			"cursor": {ApprovedForeignHooks: []string{"sha256:" + strings.ToUpper(digest)}},
+		},
 	}
 	opts = enterprisehooks.InstallOptions{}
 	if err := applyEnterpriseHookMachinePolicyPreferences(&opts); err != nil {
@@ -45,6 +53,16 @@ func TestApplyEnterpriseHookMachinePolicyPreferencesFollowsConfig(t *testing.T) 
 	}
 	if !opts.ClaudeCodeAllowUnmanagedHooks {
 		t.Fatal("claude_code.allow_unmanaged_hooks was not applied")
+	}
+	if len(opts.CursorApprovedForeignHooks) != 1 || opts.CursorApprovedForeignHooks[0] != digest {
+		t.Fatalf("allowlist = %v", opts.CursorApprovedForeignHooks)
+	}
+
+	cfg = &config.Config{ConnectorHooks: map[string]config.AgentHookConfig{
+		"cursor": {ApprovedForeignHooks: []string{"nope"}},
+	}}
+	if err := applyEnterpriseHookMachinePolicyPreferences(&enterprisehooks.InstallOptions{}); err == nil {
+		t.Fatal("malformed allowlist accepted")
 	}
 }
 

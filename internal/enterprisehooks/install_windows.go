@@ -503,6 +503,8 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
 		HookExecutable:     hookExecutable,
+
+		CursorApprovedForeignHooks: opts.CursorApprovedForeignHooks,
 	}
 	// The standalone Amp and OpenCode plugins run the administrator-owned
 	// hook binary for the foreign-hook guard. Install and verify share this

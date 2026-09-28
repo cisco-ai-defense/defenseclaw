@@ -250,6 +250,14 @@ type SetupOpts struct {
 	// cannot run beside DefenseClaw's managed hooks. It has no effect on
 	// per-user hook registrations.
 	ClaudeCodeAllowUnmanagedHooks bool
+
+	// CursorApprovedForeignHooks is the administrator allowlist
+	// (connector_hooks.cursor.approved_foreign_hooks) of sha256 handler
+	// digests that the managed Cursor hook accepts in user- or project-level
+	// hook files. nil means "not supplied by this caller": machine-policy
+	// writers keep the allowlist already published in protected state. A
+	// non-nil (possibly empty) slice replaces it.
+	CursorApprovedForeignHooks []string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

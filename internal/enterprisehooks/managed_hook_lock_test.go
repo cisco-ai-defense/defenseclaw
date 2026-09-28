@@ -17,6 +17,7 @@
 package enterprisehooks
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -45,5 +46,56 @@ func TestClaudeManagedHooksOnlyStateNames(t *testing.T) {
 	}
 	if got := ClaudeManagedHooksOnlyState(true); got != ClaudeManagedHooksOnlyDisabledByAdmin {
 		t.Fatalf("opt-out state = %q", got)
+	}
+}
+
+func TestCanonicalWindowsCursorApprovedForeignHooks(t *testing.T) {
+	a := strings.Repeat("a", 64)
+	b := strings.Repeat("b", 64)
+	got, err := canonicalWindowsCursorApprovedForeignHooks([]string{" SHA256:" + strings.ToUpper(b), a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != a || got[1] != b {
+		t.Fatalf("canonical allowlist = %v", got)
+	}
+	if err := validateWindowsCursorApprovedForeignHooks(got); err != nil {
+		t.Fatalf("canonical allowlist rejected: %v", err)
+	}
+	if err := validateWindowsCursorApprovedForeignHooks([]string{b, a}); err == nil {
+		t.Fatal("unsorted published allowlist accepted")
+	}
+	if err := validateWindowsCursorApprovedForeignHooks([]string{}); err == nil {
+		t.Fatal("empty-but-present published allowlist accepted")
+	}
+	if err := validateWindowsCursorApprovedForeignHooks(nil); err != nil {
+		t.Fatalf("omitted allowlist rejected: %v", err)
+	}
+	if empty, err := canonicalWindowsCursorApprovedForeignHooks([]string{}); err != nil || empty != nil {
+		t.Fatalf("empty config = (%v, %v), want omitted", empty, err)
+	}
+	for _, bad := range []string{"", "abc", strings.Repeat("g", 64), "md5:" + a} {
+		if _, err := canonicalWindowsCursorApprovedForeignHooks([]string{bad}); err == nil {
+			t.Fatalf("malformed digest %q accepted", bad)
+		}
+	}
+	tooMany := make([]string, maxWindowsCursorApprovedForeignHooks+1)
+	for index := range tooMany {
+		tooMany[index] = fmt.Sprintf("%064x", index)
+	}
+	if _, err := canonicalWindowsCursorApprovedForeignHooks(tooMany); err == nil {
+		t.Fatal("oversized allowlist accepted")
+	}
+	equal, err := equalWindowsCursorApprovedForeignHooks([]string{a, b}, []string{b, "sha256:" + a})
+	if err != nil || !equal {
+		t.Fatalf("equivalent configured allowlist = (%v, %v)", equal, err)
+	}
+	equal, err = equalWindowsCursorApprovedForeignHooks(nil, []string{a})
+	if err != nil || equal {
+		t.Fatalf("stale published allowlist = (%v, %v), want mismatch", equal, err)
+	}
+	equal, err = equalWindowsCursorApprovedForeignHooks(nil, []string{})
+	if err != nil || !equal {
+		t.Fatalf("empty allowlists = (%v, %v), want equal", equal, err)
 	}
 }
