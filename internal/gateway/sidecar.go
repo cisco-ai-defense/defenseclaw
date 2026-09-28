@@ -234,6 +234,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: prepare guardrail local-pattern activation: %w", err)
 	}
+	initialHarnessRules := prepareInitialSandboxHarnessRules(cfg)
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 
@@ -485,6 +486,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// its router before that router is part of a runnable Sidecar.
 	publishRulePackOverrides(initialRules)
 	publishLocalPatternsOverride(initialPatterns)
+	for name, compiled := range initialHarnessRules {
+		publishConnectorRulePackOverrides(name, compiled)
+	}
 	router.SetRulePack(rp)
 	sidecar.setEventRouter(router)
 	sidecar.publishConfig(cfg)
@@ -1535,6 +1539,15 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 	if len(activeConnectors) == 1 && len(enabledManual) == 1 {
 		candidate.active = candidate.connectors[enabledManual[0]]
 	}
+	// Harnesses enabled only for OpenShell sandboxes scan with their own
+	// effective pack too (sandboxHarnessRulePackConnectors).
+	for _, name := range sandboxHarnessRulePackConnectors(cfg) {
+		rp, loadErr := loadSandboxHarnessRulePack(cache, cfg, name)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		candidate.connectors[name] = rp
+	}
 
 	if cfg.ApplicationProtection.Enabled {
 		// The global automatic-protection override can apply to a connector
@@ -1818,7 +1831,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		publishLocalPatternsOverride(rulePackCandidate.activePatterns)
 	}
 	publishConnectorRulePackGeneration(
-		current.ActiveConnectors(),
+		ruleManagedConnectors(current),
 		rulePackCandidate.connectorRules,
 	)
 	if s.router != nil {
