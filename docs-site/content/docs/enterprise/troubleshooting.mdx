@@ -74,6 +74,7 @@ one can appear.
 | `lifecycle_launch_failed` | Windows | The PowerShell 7 lifecycle did not start, or it printed no result | Read the message and `enterprise-lifecycle.log` |
 | `lifecycle_error` | Windows | The lifecycle reported a failure without a stable code | Read `errors[].message` and `enterprise-lifecycle.log` |
 | `not_ready` | Windows | The run finished, but the deployment is not healthy | Run `verify`, then read the gateway and guardian logs |
+| `gateway_start_failed` | Windows | `status` or `verify` found the gateway service not running; the message gives the last error the service logged and the log path | Fix what the error names. If it says `Access is denied`, run `repair` from an elevated prompt |
 | `preflight_failed` | Windows | A check before the lifecycle started failed | Read the message |
 | `change_failed` | Linux, macOS | `enterprise secret set` or another protected-state change could not be written before `ensure` applied it | Read the message. Check that you ran it as root and that the secrets folder is writable by root |
 
@@ -93,6 +94,8 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `selinux_relabel` | Linux | `restorecon` failed after the files were written |
 | `per_user_hooks_remaining` | Linux, macOS | Uninstall could not remove some users' hook registrations |
 | `user_registrations_pending`, `user_registrations_failed` | Windows | Uninstall could not act as some users (they were signed out, or the uninstall did not run as LocalSystem), or a per-user removal failed. The warning lists each connector and user SID. What stays is inert |
+| `deleted_account_rows` | Windows | A local account was deleted but its profile folder is still there, so DefenseClaw keeps its enrollment rows. Remove the profile (System Properties > Advanced > User Profiles) to revoke them. Domain and Microsoft Entra accounts are not checked, because their lookup also fails while the directory cannot be reached |
+| `enrollment_pending_account_folder` | Windows | An account that is not enrolled yet created its own `%USERPROFILE%\.defenseclaw`, for example when an agent it ran before enrollment was refused. DefenseClaw takes over the folder when the account next signs in; `repair` leaves it alone until then |
 | `hook_contract_unverified` | all | A user runs an agent version that has no verified DefenseClaw hook contract, so that agent runs without DefenseClaw hooks. `security_complete` is `false` and `verify` fails |
 | `agent_unprotected` | all | The enumerator found an agent installed for a user but could not enroll it; the message gives the reason. `security_complete` is `false` and `verify` fails. See [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled) |
 | `guardian_target_failed` | Linux, macOS | The guardian could not install or repair hooks for one user and connector; the message gives the reason. Every other user stays protected |

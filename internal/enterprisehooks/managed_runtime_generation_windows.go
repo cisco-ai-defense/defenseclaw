@@ -887,7 +887,12 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	// has published the first immutable generation. Authenticate the existing
 	// target-owned data root independently so that an absent hooks child can be
 	// distinguished from an untrusted data root without weakening the strict
-	// two-root validator used by publication and verification.
+	// two-root validator used by publication and verification. A standalone
+	// data directory the account created itself before enrollment holds no
+	// managed runtime (it has no hooks child), so with no selected generation
+	// it has nothing to retire, as for an absent one; the guardian adopts it
+	// at enrollment.
+	accountCreated := false
 	if err := validateWindowsUserPathElement(
 		validated.DataDir,
 		target,
@@ -895,10 +900,13 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		true,
 		true,
 	); err != nil {
-		return 0, fmt.Errorf(
-			"enterprise hooks: managed runtime generation directory is untrusted: %w",
-			err,
-		)
+		if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+			return 0, fmt.Errorf(
+				"enterprise hooks: managed runtime generation directory is untrusted: %w",
+				err,
+			)
+		}
+		accountCreated = true
 	}
 	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
@@ -918,6 +926,18 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 
 		// Re-authenticate DataDir while holding the selector transaction before
 		// using selector absence to authorize the empty pre-activation case.
+		if accountCreated {
+			if selected {
+				return fmt.Errorf(
+					"enterprise hooks: selected managed runtime generation directory is absent: %w",
+					os.ErrNotExist,
+				)
+			}
+			if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
+				return errors.New("enterprise hooks: managed runtime generation directory changed while it was retired")
+			}
+			return nil
+		}
 		if err := validateWindowsUserPathElement(
 			validated.DataDir,
 			target,

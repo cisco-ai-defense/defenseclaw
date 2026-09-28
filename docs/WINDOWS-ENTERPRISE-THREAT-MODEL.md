@@ -847,6 +847,17 @@ authority.
     Codex treat a hook that exits without code 2 or times out as
     non-blocking, so both run the call after the user kills or stops their
     own hook.
+23. The managed OpenCode plugin
+    (`C:\Program Files\Cisco\DefenseClaw\share\opencode\defenseclaw.js`)
+    grants `BUILTIN\Users` `FILE_WRITE_ATTRIBUTES` besides read and execute,
+    because OpenCode's Bun runtime opens every module with that right and
+    cannot load the plugin without it. With it a standard account can change
+    the plugin's attributes, including setting a reparse point that leaves the
+    plugin unreadable. OpenCode skips a plugin it cannot load and runs without
+    DefenseClaw for every account; it does not fail closed. The guardian
+    restores the plugin on its next pass (about a minute), and
+    `enterprise policy verify` reports it untrusted until then. Tracked in
+    issue #930.
 
 ## Certification gate
 
