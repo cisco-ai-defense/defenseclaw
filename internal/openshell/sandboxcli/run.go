@@ -679,8 +679,14 @@ func driverClamp(v sandboxapi.Violation) bool {
 
 // driverCopyNote is the copy note of a run on a driver without host mounts.
 func driverCopyNote(d openshell.Driver) string {
-	return "copy mode: " + mountRefusal(d) + "; the agent works on a copy, and your folder gets its changes only through `" + CommandName + " pull`"
+	return "copy mode: " + mountRefusal(d) + "; " + copyBackText
 }
+
+// copyBackText ends a copy note with how the copy's work reaches the
+// folder: the session's end offers to bring it back (endCopy), and a run
+// that does not ask (a headless run, --yes, a skip) leaves it for pull.
+const copyBackText = "the agent works on a copy, and your folder changes only when you bring its work back: " +
+	"at the end of the session, or later with `" + CommandName + " pull`"
 
 func nameTakenError(name string, headless bool) error {
 	resume := "`" + CommandName + " connect " + name + "`"
@@ -913,8 +919,7 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) st
 		case "openshell.admin.allow_mount":
 			why = "your organization does not allow live mounts"
 		}
-		return "copy mode: " + why + " (" + s.Origin + "); the agent works on a copy, and your folder gets its changes only through `" +
-			CommandName + " pull`"
+		return "copy mode: " + why + " (" + s.Origin + "); " + copyBackText
 	}
 	if !d.HostMounts && settingValue(ex.Settings, "workdir.mode") != config.OpenShellWorkdirCopy {
 		// A daemon whose policy does not clamp for the driver itself.
