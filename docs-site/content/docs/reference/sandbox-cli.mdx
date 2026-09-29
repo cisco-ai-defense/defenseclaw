@@ -417,9 +417,12 @@ harness directly.
 
 `run` remembers, for the sandbox it created, the harness options after
 `--` (not a prompt), the `--credential` names and hosts, the `--env` names
-and the banner's model line; secret values are never kept. `connect`, and a
-shell wrapper's resume, pass those options again before any new ones, and
-show the same Model and Secret lines as the run.
+and the banner's model line; secret values are never kept. The options
+stop at the first word that is not one, except for OmniGent, whose every
+argument is kept in order (the agent path included), an OpenCode project
+path, and Hermes's `chat`. `connect`, and a shell wrapper's resume, pass
+those options again before any new ones, and show the same Model and Secret
+lines as the run.
 
 ```bash
 defenseclaw sandbox run claude

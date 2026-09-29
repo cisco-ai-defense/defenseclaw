@@ -1079,6 +1079,72 @@ func TestLaunchOptionsKeepOptionsNotPrompts(t *testing.T) {
 	}
 }
 
+// Certification OG-M1: a first word that is not an option is a prompt or a
+// one-off subcommand for most harnesses, but launch configuration for
+// some, and the options after it were lost with it (OmniGent's documented
+// `-- <agent path> --model <m>` kept nothing). Every harness that takes
+// such a word is here.
+func TestLaunchOptionsKeepALeadingLaunchOperand(t *testing.T) {
+	agent := "/usr/local/lib/defenseclaw/omnigent/agent"
+	for _, c := range []struct {
+		harness string
+		args    []string
+		want    []string
+	}{
+		// OmniGent's run takes the agent as its one operand, options on
+		// either side, and no prompt word: everything is kept, in order.
+		{"omnigent", []string{agent, "--model", "mock-model"}, []string{agent, "--model", "mock-model"}},
+		{"omnigent", []string{"--model", "mock-model", agent, "--system-prompt", "be terse"}, []string{"--model", "mock-model", agent, "--system-prompt", "be terse"}},
+		{"omnigent", []string{agent, "-p", "fix it"}, nil},
+		// OpenCode's project directory, when it reads as a path.
+		{"opencode", []string{"./web", "-m", "anthropic/claude-sonnet-5"}, []string{"./web", "-m", "anthropic/claude-sonnet-5"}},
+		{"opencode", []string{"-m", "anthropic/claude-sonnet-5", "."}, []string{"-m", "anthropic/claude-sonnet-5", "."}},
+		{"opencode", []string{"session", "list"}, nil},
+		{"opencode", []string{"run", "fix it"}, nil},
+		// Hermes's chat is the interactive session a bare hermes starts.
+		{"hermes", []string{"chat", "-m", "gpt-5-mini", "--provider", "defenseclaw"}, []string{"chat", "-m", "gpt-5-mini", "--provider", "defenseclaw"}},
+		{"hermes", []string{"sessions", "list"}, nil},
+		// A prompt word, or a subcommand of its own.
+		{"claudecode", []string{"fix it", "--model", "sonnet"}, nil},
+		{"cursor", []string{"fix it", "--model", "gpt-5"}, nil},
+		{"kiro", []string{"fix it", "--model", "claude-sonnet-4"}, nil},
+		{"codex", []string{"fix it", "-m", "mock-model"}, nil},
+		{"amp", []string{"threads", "continue", "T-1"}, nil},
+		{"openhands", []string{"mcp", "list"}, nil},
+		{"devin", []string{"src", "--model", "swe-1"}, nil},
+	} {
+		if got := launchOptions(harnessSpec(t, c.harness), c.args); !slices.Equal(got, c.want) {
+			t.Errorf("%s: launchOptions(%q) = %q, want %q", c.harness, c.args, got, c.want)
+		}
+	}
+}
+
+// Certification OG-M1 end to end: `connect` after an OmniGent run with the
+// agent path first starts OmniGent with the agent and model again, in the
+// run's order, before the arguments given now.
+func TestConnectKeepsOmniGentsAgentAndModel(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["OPENAI_API_KEY"] = "sk-mock"
+	noChanges(ta)
+	agent := "/usr/local/lib/defenseclaw/omnigent/agent"
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "omnigent", Name: "og", LLM: "none", Credentials: []string{"OPENAI_API_KEY=host.openshell.internal:38937"},
+		Env: []string{"OPENAI_BASE_URL=http://host.openshell.internal:38937/v1"}, Args: []string{agent, "--model", "mock-model"}}))
+	if len(ta.term.runs) != 1 || !strings.HasSuffix(strings.Join(ta.term.runs[0], " "), " run "+agent+" --model mock-model") {
+		t.Fatalf("run argv = %q", ta.term.runs)
+	}
+	ta.term.runs = nil
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "og"}))
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "og", Args: []string{"--resume", "conv_abc123"}}))
+	if len(ta.term.runs) != 2 {
+		t.Fatalf("terminal runs = %q", ta.term.runs)
+	}
+	for i, want := range []string{" run " + agent + " --model mock-model", " run " + agent + " --model mock-model --resume conv_abc123"} {
+		if got := strings.Join(ta.term.runs[i], " "); !strings.HasSuffix(got, want) {
+			t.Errorf("connect %d argv = %q, want it to end %q", i, got, want)
+		}
+	}
+}
+
 // Manual R2-21 and R2-7: `connect` after a run gives the harness the run's
 // options again (a Codex endpoint override), before the ones given now,
 // and its banner has the run's Model and Secret lines.
