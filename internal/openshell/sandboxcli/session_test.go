@@ -388,6 +388,11 @@ func TestSessionSummary(t *testing.T) {
 			" -- --continue (the `claude --resume …` Claude Code printed resumes it in this sandbox too: the shell wrapper is on)"}},
 		{name: "continue codex", opts: RunOptions{Harness: "codex"}, setup: continueHint("sk-mock", false),
 			want: []string{"-- resume --last (the `codex resume …` Codex printed would run it on this machine, outside the sandbox)"}},
+		// OmniGent prints `Resume: omnigent run <agent> --model <m> --resume
+		// <id>` at /quit, and a plain connect started a new conversation
+		// (OG-U2).
+		{name: "continue omnigent", opts: RunOptions{Harness: "omnigent", Args: []string{"--model", "gpt-5-mini"}}, setup: continueHint("sk-mock", false),
+			want: []string{cont + " -- --continue (the `omnigent run …` OmniGent printed would run it on this machine, outside the sandbox)"}},
 		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
 			ta.IO.TTY = false
 			noChanges(ta)

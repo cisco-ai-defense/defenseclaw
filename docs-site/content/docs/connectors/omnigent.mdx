@@ -225,6 +225,15 @@ exist only in the image; nothing on your host changes.
   word. Ctrl+T shows the results of later calls. The session summary names
   the blocking rule, and `defenseclaw sandbox activity --sandbox <name>`
   lists every block.
+- **Continuing a conversation.** `defenseclaw sandbox connect <name>` starts
+  a new OmniGent conversation.
+  `defenseclaw sandbox connect <name> -- --continue` continues the sandbox
+  agent's latest one, and a kept sandbox's session end names that command.
+  The `Resume: omnigent run … --resume <id>` line OmniGent prints at `/quit`
+  runs OmniGent on this machine, outside the sandbox, unless the `omnigent`
+  shell wrapper is on (`defenseclaw sandbox enable omnigent`). The wrapper
+  sends it into the folder's sandbox; the sandbox drops the `run` it
+  forwards, since the launcher runs `omnigent run` already.
 - **One server.** OmniGent reuses a running local server or host daemon that
   it finds in its records under `~/.omnigent`. It does not check which
   configuration that process started with. Before every start the launcher

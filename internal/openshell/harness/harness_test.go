@@ -498,6 +498,24 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{OmniGentLauncherPath, "run", "--model=openai.gpt-oss-120b"}},
 		{"omnigent-openai-model", OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID, Args: []string{"--model", "gpt-5-mini"}},
 			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
+		// `sandbox connect NAME -- --continue` continues the sandbox agent's
+		// latest conversation (OG-U2).
+		{"omnigent-continue", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "--continue"}},
+			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", "--continue"}},
+		// The shell wrapper forwards `omnigent run …` as typed, OmniGent's
+		// own resume hint among them, after the sandbox's stored arguments
+		// on a resume: the subcommand is dropped, not taken for the agent.
+		{"omnigent-wrapped-run", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"run", "--model", "gpt-5-mini"}},
+			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
+		{"omnigent-wrapped-resume", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "run",
+			connector.SandboxCanonicalDir("omnigent") + "/agent", "--model", "mock-model", "--resume", "b2b58f42"}},
+			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", connector.SandboxCanonicalDir("omnigent") + "/agent",
+				"--model", "mock-model", "--resume", "b2b58f42"}},
+		// An option's value, the agent, and anything after it stay.
+		{"omnigent-run-as-values", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
+			[]string{OmniGentLauncherPath, "run", "-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
+		{"omnigent-resume-picker", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--resume", "--model=m", "run"}},
+			[]string{OmniGentLauncherPath, "run", "--resume", "--model=m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := tc.spec.LaunchArgv(tc.opts)

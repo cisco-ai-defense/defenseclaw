@@ -387,14 +387,15 @@ the pull or apply failed), so they aren't lost, and the end says so. A pull
 that fails because the disk is full says whose disk: this machine's, or on a
 Mac the MicroVM's own (`overlay_disk_mib`).
 
-A kept sandbox's resume line is followed, for Claude Code, Codex, OpenCode
-and GitHub Copilot CLI, by the command that continues the same conversation
-inside the sandbox, for example
+A kept sandbox's resume line is followed, for Claude Code, Codex, OpenCode,
+GitHub Copilot CLI and OmniGent, by the command that continues the same
+conversation inside the sandbox, for example
 `defenseclaw sandbox connect myapp-7f3a -- --continue` (Codex:
 `-- resume --last`). A plain `connect` starts a new conversation. The
-`claude --resume <id>` or `codex resume <id>` line the harness itself prints
-runs it on this machine, outside the sandbox, unless the shell wrapper is on
-(`sandbox enable`), which sends it into the folder's sandbox.
+`claude --resume <id>`, `codex resume <id>` or `omnigent run … --resume <id>`
+line the harness itself prints runs it on this machine, outside the sandbox,
+unless the shell wrapper is on (`sandbox enable`), which sends it into the
+folder's sandbox.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
@@ -537,8 +538,8 @@ sessions can share a sandbox (a second `claude` in the folder offers to
 resume it): neither one's end stops it, undoes the folder or deletes it
 (`--rm`) under the other, and the one that ends first names the review and
 undo commands for later. To continue the harness's last conversation,
-pass its own flag: `-- --continue` for Claude Code, `-- resume --last` for
-Codex.
+pass its own flag: `-- --continue` for Claude Code and OmniGent,
+`-- resume --last` for Codex.
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a

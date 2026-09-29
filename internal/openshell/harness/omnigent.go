@@ -77,7 +77,7 @@ var OmniGent = register(&Spec{
 			}
 			argv = append(argv, cp.LaunchArgs...)
 		}
-		return append(argv, opts.Args...), nil
+		return append(argv, omnigentPassThrough(opts.Args)...), nil
 	},
 	credentialProfiles: []CredentialProfile{
 		{
@@ -113,6 +113,42 @@ var OmniGent = register(&Spec{
 // omnigentMantleModel is the Mantle model the Bedrock profile defaults to:
 // an OpenAI open-weight model Mantle serves on its Responses route.
 const omnigentMantleModel = "openai.gpt-oss-20b"
+
+// omnigentRunValueOptions are the options of OmniGent 0.13.0's run command
+// that take a value; -r/--resume takes one only when an argument that is
+// not an option follows.
+var omnigentRunValueOptions = map[string]bool{
+	"--tools": true, "--harness": true, "--from-openclaw": true, "--model": true, "-p": true, "--prompt": true,
+	"--system-prompt": true, "--fork": true, "--server": true, "--profile": true,
+}
+
+// omnigentPassThrough drops OmniGent's run subcommand from the pass-through
+// arguments. The launch runs `omnigent run` itself, and the shell wrapper
+// forwards `omnigent run …` as typed (OmniGent's own exit hint, `Resume:
+// omnigent run <agent> --model <m> --resume <id>`, among them), which would
+// start `omnigent run run …`, with "run" taken for the agent. Only the
+// first positional argument is dropped, and only when it is "run"; the
+// values of run's options are skipped to find it.
+func omnigentPassThrough(args []string) []string {
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "run":
+			return append(append([]string(nil), args[:i]...), args[i+1:]...)
+		case a == "--":
+			return args
+		case omnigentRunValueOptions[a]:
+			i++
+		case a == "-r" || a == "--resume":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case !strings.HasPrefix(a, "-"):
+			// The agent.
+			return args
+		}
+	}
+	return args
+}
 
 // hasFlag reports whether args pass the long option name, alone or as
 // name=value.

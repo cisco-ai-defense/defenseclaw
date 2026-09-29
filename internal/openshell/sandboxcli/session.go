@@ -822,6 +822,9 @@ var continueArgs = map[string]string{
 	"codex":      "resume --last",
 	"opencode":   "--continue",
 	"copilot":    "--continue",
+	// OmniGent's run --continue picks the sandbox agent's latest
+	// conversation.
+	"omnigent": "--continue",
 }
 
 // ownResumeHint is the resume command a harness prints as it exits. Typed
@@ -830,6 +833,7 @@ var continueArgs = map[string]string{
 var ownResumeHint = map[string]string{
 	"claudecode": "claude --resume",
 	"codex":      "codex resume",
+	"omnigent":   "omnigent run",
 }
 
 // continueHint names the command that continues this conversation inside
