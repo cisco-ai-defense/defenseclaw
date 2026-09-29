@@ -373,6 +373,10 @@ type RecordedSandbox struct {
 	// Retained marks a sandbox that is gone, whose record keeps only its
 	// pre-session snapshot.
 	Retained bool
+	// Images are the images it was created from, by tag and by ID: its
+	// overlay image and, on a driver sent its own image names, the run
+	// image or alias it boots. Empty ones are left out.
+	Images []string
 }
 
 // RecordedSandboxes lists the sandboxes recorded under dataDir, for sandbox
@@ -382,7 +386,13 @@ func RecordedSandboxes(dataDir string) []RecordedSandbox {
 	recs, _ := newRecordStore(dataDir).loadAll()
 	out := make([]RecordedSandbox, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, RecordedSandbox{Name: r.Name, Retained: r.Retained})
+		rs := RecordedSandbox{Name: r.Name, Retained: r.Retained}
+		for _, ref := range []string{r.Image, r.ImageID, r.RunImage, r.RunImageID} {
+			if ref != "" {
+				rs.Images = append(rs.Images, ref)
+			}
+		}
+		out = append(out, rs)
 	}
 	return out
 }

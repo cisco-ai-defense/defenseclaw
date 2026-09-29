@@ -727,7 +727,7 @@ func (r *doctorRun) diskCheck(root string) Check {
 	prune := &Fix{
 		Summary: "remove DefenseClaw's unused sandbox images (rather than `docker system prune`, which also removes " +
 			"every stopped container, unused network and build cache on this machine, other users' too)",
-		Command: "defenseclaw sandbox image prune",
+		Command: pruneCommand,
 	}
 	switch {
 	case free < DiskFailBytes:

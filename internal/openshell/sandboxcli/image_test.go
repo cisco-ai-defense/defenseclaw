@@ -20,6 +20,7 @@ package sandboxcli
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,29 +40,49 @@ func vmSandbox(name, runImage, runImageID string) sandboxapi.Sandbox {
 }
 
 // prepareVMDisk makes the disk the MicroVM driver prepares from imageID in
-// the fixture home's image cache.
-func prepareVMDisk(t *testing.T, ta *testApp, imageID string) {
+// the fixture home's image cache, and returns its directory.
+func prepareVMDisk(t *testing.T, ta *testApp, imageID string) string {
 	t.Helper()
 	dir := filepath.Join(ta.home, ".local", "state", "openshell", "vm-driver", "images",
 		"sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-1000-1000-sha256-"+strings.TrimPrefix(imageID, "sha256:"))
 	writeFile(t, filepath.Join(dir, "rootfs.ext4"), strings.Repeat("x", 4096))
+	return dir
 }
 
 // Prune keeps every image the daemon's sandboxes run, by tag and ID, run
 // images included, and takes the MicroVM driver's repositories along; it
-// says which were kept for a sandbox and what OpenShell keeps of the run
-// images it removed.
+// says which were kept for a sandbox, and removes the MicroVM disk of each
+// image it removed that Docker no longer has and no sandbox boots.
 func TestImagePruneKeepsTheSandboxesImages(t *testing.T) {
 	runID := "sha256:" + strings.Repeat("b", 64)
 	ta := newTestApp(t, "", vmSandbox("vm-a", "defenseclaw.invalid/sandbox-run:claudecode-y-u1000", runID), sampleSandbox("dk-b"))
-	goneID := "sha256:" + strings.Repeat("c", 64)
-	prepareVMDisk(t, ta, goneID)
-	ta.images.pruneReport = &image.PruneReport{
-		Removed: []string{"defenseclaw.invalid/sandbox-run:claudecode-old-u1000"}, RemovedRunImageIDs: []string{goneID},
-		Kept:  []string{"defenseclaw.invalid/sandbox-run:claudecode-y-u1000", "defenseclaw/sandbox:claudecode-x-u1000"},
-		InUse: []string{"defenseclaw.invalid/sandbox-run:claudecode-y-u1000"},
+	goneID, stillID := "sha256:"+strings.Repeat("c", 64), "sha256:"+strings.Repeat("d", 64)
+	gone, still, booted := prepareVMDisk(t, ta, goneID), prepareVMDisk(t, ta, stillID), prepareVMDisk(t, ta, runID)
+	// OpenShell's own state in the cache, which prune never touches.
+	cache := filepath.Dir(gone)
+	own := []string{filepath.Join(cache, "overlay-templates"), filepath.Join(cache, "sandbox-bootstrap-rootfs-ext4-openshell-0.1.1"),
+		filepath.Join(cache, filepath.Base(gone)+".staging-1")}
+	for _, dir := range own {
+		writeFile(t, filepath.Join(dir, "rootfs.ext4"), "x")
 	}
-	ta.ok(t, ta.ImagePrune(bg, false))
+	ta.images.presentIDs = map[string]bool{stillID: true}
+	ta.images.pruneReport = &image.PruneReport{
+		Removed:         []string{"defenseclaw.invalid/sandbox-run:claudecode-old-u1000"},
+		RemovedImageIDs: []string{goneID, stillID, runID},
+		Kept:            []string{"defenseclaw.invalid/sandbox-run:claudecode-y-u1000", "defenseclaw/sandbox:claudecode-x-u1000"},
+		InUse:           []string{"defenseclaw.invalid/sandbox-run:claudecode-y-u1000"},
+	}
+	ta.ok(t, ta.ImagePrune(bg, true))
+	if out := ta.output(); !strings.Contains(out, "would remove the 2 MicroVM disks OpenShell prepared from these images in ~/.local/state/openshell/vm-driver/images (8.0 KiB)") {
+		t.Fatalf("dry run:\n%s", out)
+	}
+	for _, dir := range append([]string{gone, still, booted}, own...) {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("the dry run removed %s", dir)
+		}
+	}
+	ta.images.pruned = nil
+	ta.ok(t, ta.fresh().ImagePrune(bg, false))
 	if len(ta.images.pruned) != 1 {
 		t.Fatalf("Prune calls = %d", len(ta.images.pruned))
 	}
@@ -80,27 +101,45 @@ func TestImagePruneKeepsTheSandboxesImages(t *testing.T) {
 		"removed defenseclaw.invalid/sandbox-run:claudecode-old-u1000",
 		"kept defenseclaw.invalid/sandbox-run:claudecode-y-u1000 (a sandbox runs it)",
 		"kept defenseclaw/sandbox:claudecode-x-u1000 (current)",
-		"OpenShell keeps the 1 MicroVM disk(s) it prepared from these images",
-		"~/.local/state/openshell/vm-driver/images",
+		"removed the 1 MicroVM disk OpenShell prepared from these images in ~/.local/state/openshell/vm-driver/images, freeing 4.0 KiB",
+		"kept the 1 MicroVM disk OpenShell prepared from these images in ~/.local/state/openshell/vm-driver/images (4.0 KiB): Docker still has the images they were prepared from",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}
 	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatalf("the disk of the removed image is still there: %v", err)
+	}
+	for _, dir := range append([]string{still, booted}, own...) {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("prune removed %s", dir)
+		}
+	}
 }
 
 // Without the daemon's list the MicroVM run images and aliases are left
-// alone, and prune says so.
+// alone, and so are the disks of the images removed: which sandboxes boot
+// them is not known.
 func TestImagePruneWithoutTheDaemonLeavesRunImagesAlone(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
-	ta.images.pruneReport = &image.PruneReport{RunImagesLeft: []string{"defenseclaw.invalid/sandbox-run:a", "defenseclaw.invalid/sandbox:b"}}
-	ta.ok(t, ta.ImagePrune(bg, true))
-	if opts := ta.images.pruned[0]; opts.AliasRepository != "" || len(opts.Keep) != 0 || !opts.DryRun {
+	id := "sha256:" + strings.Repeat("c", 64)
+	disk := prepareVMDisk(t, ta, id)
+	ta.images.pruneReport = &image.PruneReport{RunImagesLeft: []string{"defenseclaw.invalid/sandbox-run:a", "defenseclaw.invalid/sandbox:b"},
+		Removed: []string{"defenseclaw/sandbox:claudecode-old-u1000"}, RemovedImageIDs: []string{id}}
+	ta.ok(t, ta.ImagePrune(bg, false))
+	if opts := ta.images.pruned[0]; opts.AliasRepository != "" || len(opts.Keep) != 0 || opts.DryRun {
 		t.Fatalf("prune options without the daemon = %+v", opts)
 	}
-	if out := ta.output(); !strings.Contains(out, "left 2 MicroVM run image(s) and alias(es) (defenseclaw.invalid/sandbox...) alone") {
+	out := ta.output()
+	if !strings.Contains(out, "left 2 MicroVM run image(s) and alias(es) (defenseclaw.invalid/sandbox...) alone") ||
+		!strings.Contains(out, "left the 1 MicroVM disk OpenShell prepared from these images (4.0 KiB in ~/.local/state/openshell/vm-driver/images): "+
+			"the DefenseClaw daemon did not answer, so which sandboxes boot them is not known") {
 		t.Fatalf("output:\n%s", out)
+	}
+	if _, err := os.Stat(disk); err != nil {
+		t.Fatalf("prune without the daemon removed a MicroVM disk: %v", err)
 	}
 }
 
@@ -133,15 +172,67 @@ func TestImageRemoveTakesTheRunImages(t *testing.T) {
 		t.Fatalf("store image IDs = %v", ids)
 	}
 
-	prepareVMDisk(t, ta, runID)
+	disk := prepareVMDisk(t, ta, runID)
 	ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-x-u1000"}}
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
-	if out := ta.output(); !strings.Contains(out, "OpenShell keeps the 1 MicroVM disk(s) it prepared from these images") {
+	if out := ta.output(); !strings.Contains(out, "and the 1 MicroVM disk OpenShell prepared from them (4.0 KiB in ~/.local/state/openshell/vm-driver/images)") {
 		t.Fatalf("teardown plan:\n%s", out)
 	}
 	if _, err := os.Stat(store.Path()); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat(disk); err != nil {
+		t.Fatalf("the dry run removed the MicroVM disk: %v", err)
+	}
+}
+
+// Teardown removes the MicroVM disks prepared from the images it removes
+// once no sandbox is left that boots one; one it could not delete keeps
+// them.
+func TestTeardownRemovesTheMicroVMDisks(t *testing.T) {
+	run := func(t *testing.T, failDelete bool) (*testApp, string) {
+		ta := newTestApp(t, "", vmSandbox("vm-a", "defenseclaw.invalid/sandbox-run:claudecode-y-u1000", "sha256:"+strings.Repeat("b", 64)))
+		store := image.NewStore(ta.dataDir())
+		owner, err := store.Owner()
+		if err != nil {
+			t.Fatal(err)
+		}
+		runID := "sha256:" + strings.Repeat("b", 64)
+		doc := map[string]any{"version": 1, "owner": owner, "images": []map[string]any{},
+			"run_images": []map[string]any{{"tag": "defenseclaw.invalid/sandbox-run:claudecode-y-u1000", "image_id": runID, "owner": owner}}}
+		data, _ := json.Marshal(doc)
+		writeFile(t, store.Path(), string(data))
+		disk := prepareVMDisk(t, ta, runID)
+		ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-x-u1000"}}
+		if failDelete {
+			ta.daemon.errors = map[string]*sandboxapi.Error{
+				http.MethodDelete + " " + sandboxapi.PathSandboxes + "/vm-a": {Code: sandboxapi.CodeInternal, Message: "the gateway failed"}}
+		}
+		err = ta.Teardown(bg, TeardownOptions{Yes: true})
+		if failDelete != (err != nil) {
+			t.Fatalf("teardown: %v\n%s", err, ta.output())
+		}
+		return ta, disk
+	}
+	t.Run("sandboxes gone", func(t *testing.T) {
+		ta, disk := run(t, false)
+		if _, err := os.Stat(disk); !os.IsNotExist(err) {
+			t.Fatalf("the MicroVM disk is still there: %v\n%s", err, ta.output())
+		}
+		if out := ta.output(); !strings.Contains(out, "removed the 1 MicroVM disk OpenShell prepared from them in ~/.local/state/openshell/vm-driver/images, freeing 4.0 KiB") {
+			t.Fatalf("teardown:\n%s", out)
+		}
+	})
+	t.Run("a sandbox left", func(t *testing.T) {
+		ta, disk := run(t, true)
+		if _, err := os.Stat(disk); err != nil {
+			t.Fatalf("the MicroVM disk of a sandbox left was removed: %v", err)
+		}
+		if out := ta.output(); !strings.Contains(out, "kept the 1 MicroVM disk OpenShell prepared from them (4.0 KiB in ~/.local/state/openshell/vm-driver/images): "+
+			"1 sandbox that may boot them could not be deleted") {
+			t.Fatalf("teardown:\n%s", out)
+		}
+	})
 }
 
 // An image removed from Docker (`docker rmi`) keeps its record, built and

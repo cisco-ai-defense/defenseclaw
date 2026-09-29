@@ -235,8 +235,13 @@ directory recorded, or that nothing recorded. It forgets, and names, the
 records of images Docker no longer has. On a MicroVM (vm) gateway it
 also removes the run images and aliases of superseded harness images, and only
 while the daemon answers: without its list of sandboxes it leaves them alone.
-OpenShell keeps the MicroVM disk it prepared from a removed image; prune says
-how much space those disks take.
+With that list it also removes the MicroVM disk OpenShell prepared from each
+image it removed (about 5 GB each, in the `images` folder of the MicroVM
+driver's state directory, `~/.local/state/openshell/vm-driver` by default) and
+says how much it freed. It removes a disk only when Docker no longer has its
+image and no sandbox is recorded with that image, and it never removes the
+driver's other state there. `--dry-run` says which disks it would remove. A
+start of an image whose disk is gone prepares it again (about a minute).
 
 ```bash
 defenseclaw sandbox image prune --dry-run
@@ -306,7 +311,9 @@ remaining provider uses: this data directory's ingress profiles, the legacy
 `defenseclaw-ingress` profile, and the shared model-credential and
 `--credential` profiles, including ones another DefenseClaw data directory
 imported. The daemons import them again when they need them. Another daemon's
-ingress profile is never removed. Teardown restores the OpenShell gateway
+ingress profile is never removed. With the images it removes the MicroVM
+disks OpenShell prepared from them, once no sandbox that could boot one is
+left, as `sandbox image prune` does. Teardown restores the OpenShell gateway
 config that setup changed, unless the file changed since. It also removes the
 shell wrappers and sets `openshell.enabled: false`. OpenShell itself stays
 installed. `defenseclaw uninstall` runs teardown for you. It works without a

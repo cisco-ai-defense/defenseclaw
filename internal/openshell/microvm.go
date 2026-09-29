@@ -439,19 +439,21 @@ func (r *doctorRun) vmResourcesCheck() Check {
 // vmStateDir is the MicroVM driver's state directory, which holds its
 // prepared images.
 func (r *doctorRun) vmStateDir() string {
-	if dir := r.vmConfig().StateDir; filepath.IsAbs(dir) {
-		return filepath.Clean(dir)
-	}
 	home, err := r.HomeDir()
-	if err != nil || !filepath.IsAbs(home) {
-		return ""
+	if err != nil {
+		home = ""
 	}
-	return filepath.Join(home, ".local", "state", "openshell", "vm-driver")
+	return VMStateDir(r.vmConfig().StateDir, home)
 }
+
+// pruneCommand removes DefenseClaw's superseded harness images, and the
+// MicroVM disks prepared from them.
+const pruneCommand = "defenseclaw sandbox image prune"
 
 // vmDiskCheck measures the free space where the MicroVM driver keeps its
 // prepared images, and what they take: OpenShell's cache, which it keeps
-// after the sandboxes go and DefenseClaw never deletes.
+// after the sandboxes go. `sandbox image prune` and teardown remove the
+// disks of the images they remove, and nothing else of it.
 func (r *doctorRun) vmDiskCheck() Check {
 	c := Check{ID: CheckIDDisk, Title: checkTitles[CheckIDDisk]}
 	dir := r.vmStateDir()
@@ -473,10 +475,13 @@ func (r *doctorRun) vmDiskCheck() Check {
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), dir)
 	if n, size := preparedDisks(filepath.Join(dir, "images")); n > 0 {
-		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), which DefenseClaw never deletes",
-			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size))
+		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes",
+			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
 	}
-	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir}
+	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
+		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
+		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
+		Command: pruneCommand}
 	switch {
 	case free < VMDiskFailBytes:
 		c.Status, c.Fix = StatusFail, fix

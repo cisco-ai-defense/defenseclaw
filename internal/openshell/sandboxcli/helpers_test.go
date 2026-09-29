@@ -518,6 +518,10 @@ type fakeImages struct {
 	missing map[string]bool
 	// gone are the recorded tags Docker no longer has (Gone).
 	gone map[string]bool
+	// presentIDs are the image IDs Docker still has (GoneIDs: every other
+	// one is gone), and goneIDsErr its failure.
+	presentIDs map[string]bool
+	goneIDsErr error
 	// pruned are the options of each Prune; pruneReport, when set, is its
 	// answer.
 	pruned      []image.PruneOptions
@@ -552,6 +556,21 @@ func (f *fakeImages) Gone(_ context.Context, recs []image.Record) (map[string]bo
 	for _, r := range recs {
 		if f.gone[r.Tag] {
 			out[r.Tag] = true
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeImages) GoneIDs(_ context.Context, ids []string) (map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.goneIDsErr != nil {
+		return nil, f.goneIDsErr
+	}
+	out := map[string]bool{}
+	for _, id := range ids {
+		if !f.presentIDs[id] {
+			out[id] = true
 		}
 	}
 	return out, nil

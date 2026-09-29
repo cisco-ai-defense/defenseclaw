@@ -46,6 +46,9 @@ type ImageService interface {
 	List() ([]image.Record, error)
 	// Gone returns the tags of recs Docker no longer has (image.Builder.Gone).
 	Gone(ctx context.Context, recs []image.Record) (map[string]bool, error)
+	// GoneIDs returns the image IDs among ids Docker holds no image of
+	// (image.Builder.GoneIDs).
+	GoneIDs(ctx context.Context, ids []string) (map[string]bool, error)
 	// Prune removes superseded images (image.Builder.Prune).
 	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
 	// Remove deletes every image this data dir built or named: its overlay
@@ -106,6 +109,11 @@ func (b *builderImages) List() ([]image.Record, error) { return b.store().List()
 func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[string]bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
 	return builder.Gone(ctx, recs)
+}
+
+func (b *builderImages) GoneIDs(ctx context.Context, ids []string) (map[string]bool, error) {
+	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	return builder.GoneIDs(ctx, ids)
 }
 
 func (b *builderImages) Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error) {
@@ -351,13 +359,18 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 // ImagePrune removes superseded overlay images. The images the daemon's
 // sandboxes run are kept. The MicroVM driver's run images and aliases,
 // which no container holds, are pruned only with that list: without the
-// daemon they are left alone.
+// daemon they are left alone. So are the disks the MicroVM driver prepared
+// from the images it removed: with the list, the disk of each image ID it
+// removed, that no sandbox is recorded with and that Docker no longer
+// has, is removed too, and nothing else of OpenShell's image cache.
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
 	opts := image.PruneOptions{DryRun: dryRun}
 	vm, _ := openshell.LookupDriver(string(openshell.DriverVM))
+	listed := false
 	if api, err := a.api(); err == nil {
 		if list, err := api.List(ctx); err == nil {
+			listed = true
 			for _, sb := range list {
 				for _, ref := range []string{sb.Image, sb.ImageID, sb.RunImage, sb.RunImageID} {
 					if ref != "" {
@@ -406,33 +419,113 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 		a.note(fmt.Sprintf("left %d MicroVM run image(s) and alias(es) (%s...) alone: the DefenseClaw daemon did not answer, so which sandboxes run them is not known",
 			n, vm.ImageRepository))
 	}
-	if note := a.vmDiskNote(vm, rep.RemovedRunImageIDs); note != "" {
-		a.note(note)
+	// The disks the MicroVM driver prepared from the images removed, which
+	// no sandbox the daemon listed boots.
+	if set := a.vmDisksOf(rep.RemovedImageIDs, refSet(opts.Keep)); len(set.disks) > 0 {
+		if listed {
+			a.removeVMDisks(ctx, set, dryRun, "these images")
+		} else {
+			a.note(fmt.Sprintf("left the %s OpenShell prepared from these images (%s in %s): the DefenseClaw daemon did not answer, so which sandboxes boot them is not known",
+				plural(int64(len(set.disks)), "MicroVM disk", "MicroVM disks"), humanBytes(set.size), a.tildePath(set.dir)))
+		}
 	}
 	return nil
 }
 
-// vmDiskNote says how much of the MicroVM driver's image cache the disks it
-// prepared from the images ids take, which OpenShell keeps after the images
-// are gone and DefenseClaw never removes; "" when there are none. The cache
-// is under the user's home, where the gateway runs as the user.
-func (a *App) vmDiskNote(vm openshell.Driver, ids []string) string {
-	home, err := a.Home()
-	if err != nil || vm.ImageCache == "" {
-		return ""
+func refSet(refs []string) map[string]bool {
+	out := map[string]bool{}
+	for _, r := range refs {
+		out[r] = true
 	}
-	dir := filepath.Join(home, vm.ImageCache)
-	var count int
-	var size int64
+	return out
+}
+
+// vmDiskSet is what the MicroVM driver keeps of some images: the root
+// disks it prepared from them in its image cache, which OpenShell keeps
+// after the images and sandboxes are gone.
+type vmDiskSet struct {
+	dir   string
+	disks []image.VMDisk
+	// ids are the image IDs each disk was prepared from, in disks' order.
+	ids  []string
+	size int64
+}
+
+// vmImageCache is the MicroVM driver's image cache: images under the
+// state_dir the gateway's configuration sets, else under
+// ~/.local/state/openshell/vm-driver of this user, whom the gateway runs
+// as. "" when neither is known.
+func (a *App) vmImageCache() string {
+	stateDir := ""
+	if st, err := a.Gateway.State(); err == nil && st != nil {
+		stateDir = st.VM.StateDir
+	}
+	home, err := a.Home()
+	if err != nil {
+		home = ""
+	}
+	return openshell.VMImageCache(stateDir, home)
+}
+
+// vmDisksOf lists the disks the MicroVM driver prepared from the images
+// ids, leaving out those of an image refs names (the images sandboxes are
+// recorded with, by tag and ID).
+func (a *App) vmDisksOf(ids []string, refs map[string]bool) vmDiskSet {
+	set := vmDiskSet{dir: a.vmImageCache()}
+	if set.dir == "" {
+		return set
+	}
 	for _, id := range ids {
-		for _, d := range image.VMDisks(dir, id) {
-			count++
-			size += d.Bytes
+		if refs[id] {
+			continue
+		}
+		for _, d := range image.VMDisks(set.dir, id) {
+			set.disks, set.ids = append(set.disks, d), append(set.ids, id)
+			set.size += d.Bytes
 		}
 	}
-	if count == 0 {
-		return ""
+	return set
+}
+
+// removeVMDisks removes the disks of set whose image Docker no longer has
+// (a disk of an image that is still there stays: a sandbox could boot it
+// again), and says what it freed; with dryRun it says what it would
+// remove. what names the images the disks come from. The driver prepares a
+// disk again from an image it boots without one. Nothing else of
+// OpenShell's state is removed.
+func (a *App) removeVMDisks(ctx context.Context, set vmDiskSet, dryRun bool, what string) {
+	count := func(n int, size int64) string {
+		return fmt.Sprintf("%s OpenShell prepared from %s in %s (%s)", plural(int64(n), "MicroVM disk", "MicroVM disks"), what, a.tildePath(set.dir), humanBytes(size))
 	}
-	return fmt.Sprintf("OpenShell keeps the %d MicroVM disk(s) it prepared from these images (%s in %s); DefenseClaw does not remove them",
-		count, humanBytes(size), a.tildePath(dir))
+	if dryRun {
+		a.ok("would remove the " + count(len(set.disks), set.size))
+		return
+	}
+	gone, err := a.Images.GoneIDs(ctx, slices.Compact(slices.Sorted(slices.Values(set.ids))))
+	if err != nil {
+		a.warn("kept the " + count(len(set.disks), set.size) + ": could not ask Docker whether their images are gone: " + err.Error())
+		return
+	}
+	var removed, kept int
+	var freed, keptSize int64
+	for i, d := range set.disks {
+		if !gone[set.ids[i]] {
+			kept++
+			keptSize += d.Bytes
+			continue
+		}
+		if err := image.RemoveVMDisk(d); err != nil {
+			a.warn("could not remove the MicroVM disk " + a.tildePath(d.Path) + ": " + err.Error())
+			continue
+		}
+		removed++
+		freed += d.Bytes
+	}
+	if removed > 0 {
+		a.ok(fmt.Sprintf("removed the %s OpenShell prepared from %s in %s, freeing %s",
+			plural(int64(removed), "MicroVM disk", "MicroVM disks"), what, a.tildePath(set.dir), humanBytes(freed)))
+	}
+	if kept > 0 {
+		a.note("kept the " + count(kept, keptSize) + ": Docker still has the images they were prepared from")
+	}
 }

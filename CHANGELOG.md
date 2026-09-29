@@ -341,6 +341,14 @@ deleted.
   that it does not start at login) and that DefenseClaw cannot restart it.
   The doctor's disk line counts only the MicroVM disks prepared from images,
   not the driver's overlay templates and bootstrap rootfs.
+- `sandbox image prune` and `sandbox teardown` on a Mac give back the disk
+  of what they remove: the MicroVM disk (about 5 GB) OpenShell prepared from
+  each image ID they removed, in `<state_dir>/images`, and say how much they
+  freed (`--dry-run`: what they would). Only `sandbox-prepared-rootfs-*`
+  directories of IDs Docker no longer has and no sandbox is recorded with are
+  removed, and only while the daemon (or, for teardown, the gateway) listed
+  the sandboxes; OpenShell's other state stays. The doctor's disk fix names
+  prune and `lsof +L1` for space a backup or indexing app still holds.
 - On every driver, a harness image removed from Docker (`docker rmi`) no
   longer shows as built and hook-verified: `sandbox image list` names it
   apart from the table (`"missing": true` in JSON), `image prune` says it
