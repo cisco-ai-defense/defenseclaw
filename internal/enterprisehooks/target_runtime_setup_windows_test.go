@@ -544,6 +544,14 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
+	// Every standalone per-user connector needs a bounded fresh-root
+	// contract: without one, a failed first install's rollback refused the
+	// whole plan and left the created root behind.
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		manifest.Targets = append(manifest.Targets, ManifestTarget{
+			UserHome: home, SID: target.String(), DataDir: filepath.Join(home, ".defenseclaw"), Connector: name, AgentVersion: "1.0.0",
+		})
+	}
 	digest := strings.Repeat("7", 64)
 	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
 	if err != nil {
@@ -565,7 +573,14 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	}
 	spec := specs[windowsManagedRuntimeRootKey(plan.Roots[0].SID, plan.Roots[0].UserHome)]
 	known := writeWindowsManagedRuntimeCleanupFixture(t, plan.Roots[0], target, spec)
-	for index, connectorName := range []string{"codex", "claudecode", "cursor"} {
+	if len(spec.backupFiles) == 0 {
+		t.Fatal("per-user connector cleanup contract has no connector backup records")
+	}
+	generations := make([]string, 0, len(spec.generationConnectors))
+	for connectorName := range spec.generationConnectors {
+		generations = append(generations, connectorName)
+	}
+	for index, connectorName := range generations {
 		leaf, err := windowsManagedRuntimeBundleLeaf(
 			connectorName,
 			fmt.Sprintf("%032x", index+1),
@@ -1152,6 +1167,39 @@ func writeWindowsManagedRuntimeCleanupFixture(
 		}
 		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
 		paths = append(paths, path)
+	}
+	if len(spec.backupFiles) > 0 {
+		descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mkdir := func(path string) {
+			if _, err := os.Lstat(path); err == nil {
+				return
+			}
+			name, err := windows.UTF16PtrFromString(path)
+			if err == nil {
+				err = windows.CreateDirectory(name, &windows.SecurityAttributes{
+					Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor,
+				})
+			}
+			if err != nil {
+				t.Fatalf("create exact connector backup directory %s: %v", path, err)
+			}
+		}
+		backupRoot := filepath.Join(root.DataDir, windowsManagedRuntimeCleanupBackupDir)
+		mkdir(backupRoot)
+		for connectorName, records := range spec.backupFiles {
+			mkdir(filepath.Join(backupRoot, connectorName))
+			for leaf := range records {
+				path := filepath.Join(backupRoot, connectorName, leaf)
+				if err := os.WriteFile(path, []byte("managed backup record"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+				paths = append(paths, path)
+			}
+		}
 	}
 	// Elevated gateway creation may legitimately select BA as the SQLite owner.
 	// Preserve the exact protected safe DACL while exercising that owner form.

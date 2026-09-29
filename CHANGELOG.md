@@ -190,6 +190,16 @@ rest also reach per-user installs.
   earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
   only the `hooks` mapping, keeping every byte outside it, and removes all of
   DefenseClaw's approvals.
+- **A failed first Windows standalone install rolls back accounts with
+  per-user agents.** For an account whose `%USERPROFILE%\.defenseclaw` the
+  install created, rollback refused the whole plan when the account had an
+  Amp, Antigravity, Copilot, Devin, Hermes or OpenCode row, and left the
+  folder behind. Each of these connectors now has a bounded list of the
+  files its managed install writes there (runtime sidecars, hook scripts,
+  scoped tokens, runtime generations, the executable selection and its own
+  config backup records), and rollback removes exactly those; any other
+  file, such as the backups of displaced user hooks, still keeps the folder.
+  Stale OpenCode runtime generations are now also cleaned up (#927).
 
 ### Added
 

@@ -1517,7 +1517,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot", "antigravity", "devin", "hermes", "opencode"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue
