@@ -309,8 +309,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			changes.UnsetEnv = []string{openshell.EnvTelemetryEnabled}
 		}
 	}
-	// Switching the driver strands the other driver's sandboxes.
+	// Switching the driver strands the other driver's sandboxes. The
+	// gateway runs MicroVMs once it restarts on them: a restart not given
+	// leaves it on docker.
 	switching := microVM && rep.Driver != openshell.DriverVM
+	switched := false
 	if changes.EnableBindMounts || changes.ComputeDriver != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
 		plan, err := a.Gateway.Plan(ctx, changes)
 		if err != nil {
@@ -337,6 +340,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 				if err != nil {
 					return fmt.Errorf("change the gateway configuration: %w", err)
 				}
+				switched = switching
 				if microVM {
 					a.ok("gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs")
 				} else {
@@ -361,12 +365,22 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			if err := a.Gateway.Restart(ctx); err != nil {
 				return fmt.Errorf("restart the OpenShell gateway: %w", err)
 			}
+			switched = true
 			a.ok("gateway restarted: it runs sandboxes in OpenShell MicroVMs")
 		}
 	}
+	onMicroVMs := microVM && (!switching || switched)
+	// On a Docker VM without Landlock (Docker Desktop) no sandbox starts
+	// until the gateway runs MicroVMs.
+	stuck := microVM && !onMicroVMs && failed(rep, openshell.CheckIDLandlock)
 	switch {
-	case microVM:
+	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
+	case stuck:
+		a.warn("the gateway still runs the docker driver, where no sandbox can start (Docker Desktop's Linux VM has no Landlock); " +
+			"it runs sandboxes in MicroVMs once it restarts on them")
+	case microVM:
+		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs once it restarts on them")
 	case copyOnly:
 		a.note("without bind mounts every run works on a copy (`--copy`)")
 	}
@@ -473,7 +487,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	} else {
 		skipped = append(skipped, "harness images (--skip-images; the first run builds them, or `"+CommandName+" image build`)")
 	}
-	if microVM {
+	if onMicroVMs {
 		a.note("the first run of each image prepares its MicroVM disk (about a minute, and about 5 GB, which OpenShell keeps)")
 	}
 	a.importIngressProfile(ctx)
@@ -484,6 +498,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.note("skipped: " + s)
 	}
 	a.println()
+	if stuck {
+		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
+			CommandName + " run " + cmd + "`")
+		return nil
+	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
 }

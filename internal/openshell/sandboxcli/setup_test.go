@@ -658,6 +658,40 @@ func TestSetupSwitchesADockerDesktopMacToMicroVMs(t *testing.T) {
 	}
 }
 
+// TestSetupSaysASwitchNotAppliedLeavesDocker: a switch waits for the
+// gateway restart, which --yes does not give while a sandbox runs on the
+// gateway. Setup then does not say every run works on a copy in a
+// MicroVM, or that it is done: on Docker Desktop no sandbox can start
+// until the gateway runs MicroVMs.
+func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.IO.TTY = false
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
+	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+	runningOn(t, ta, 1)
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	if ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
+		t.Fatalf("applied %d, restarts %d", ta.gateway.applied, ta.gateway.restarts)
+	}
+	has(t, ta.output(), "the gateway still runs the docker driver, where no sandbox can start (Docker Desktop's Linux VM has no Landlock); "+
+		"it runs sandboxes in MicroVMs once it restarts on them",
+		"skipped: the OpenShell gateway change above",
+		"not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`defenseclaw sandbox setup --restart-gateway`)")
+	lacks(t, ta.output(), "every run works on a copy (the MicroVM driver", "prepares its MicroVM disk", "Done →")
+
+	// With --restart-gateway the switch is applied.
+	ta = setupApp(t, "", "", false)
+	ta.IO.TTY = false
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
+	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+	runningOn(t, ta, 1)
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, RestartGateway: true, NoWrappers: true, SkipImages: true}))
+	has(t, ta.output(), "every run works on a copy (the MicroVM driver", "Done →")
+	lacks(t, ta.output(), "still runs the docker driver", "not ready for sandboxes yet")
+}
+
 // TestSetupOnAMacAlreadyOnMicroVMs asks nothing about the driver or
 // mounts, and restarts nothing when the configuration is current; a
 // configuration that selects MicroVMs on a gateway not restarted since
