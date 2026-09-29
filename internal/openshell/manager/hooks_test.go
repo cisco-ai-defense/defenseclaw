@@ -551,20 +551,36 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassProcess, Binary: "/usr/bin/git"}, now())
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: "example.org", Port: 443}, now())
 	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/opt/defenseclaw-harness-evil/bin/claude", Host: "example.org", Port: 443}, now())
+	// Certification AG-MAC-F4: a `sandbox exec` curl through the egress
+	// proxy, with no harness running, raised the alarm. Neither the
+	// proxy's own events nor OpenShell's record of curl's connection to
+	// the proxy are the harness's.
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: openshellHostAlias, Port: testEgressPort,
+		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now(), FirstSeen: true}, 0)
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventClosed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now()}, 0)
 	if n := silence(); n != 0 {
 		t.Fatalf("commands outside the harness raised %d hook_silence finding(s)", n)
 	}
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+	// The harness's own connection to the proxy is its activity.
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
+		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
 	silence()
 	if silence() != 1 || !e.get("quietbox").Hooks.Silent {
 		t.Fatal("the harness active without hooks raised no single hook_silence finding")
+	}
+	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
+	advance(15 * time.Minute)
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+	if silence() != 2 || !e.get("quietbox").Hooks.Silent {
+		t.Fatal("the harness active long after its last hook raised no second hook_silence finding")
 	}
 	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
 	if e.get("quietbox").Hooks.Silent {
 		t.Fatal("a hook did not clear the silence")
 	}
 	advance(time.Hour)
-	if silence() != 1 {
+	if silence() != 2 {
 		t.Fatal("an idle harness raised a finding")
 	}
 }

@@ -471,7 +471,7 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	if args[0] == "--help" || args[0] == "-h" {
 		a.println(spec.Command + " is not installed on this machine; DefenseClaw runs " + spec.DisplayName + " in a sandbox.")
-		a.println("  " + CommandName + " run " + spec.Command + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
+		a.println("  " + CommandName + " run " + HarnessArg(spec) + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
 		return nil
 	}
 	var latest image.Record
@@ -484,7 +484,7 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	if latest.HarnessVersion == "" {
 		return fmt.Errorf("%s is not installed on this machine, and no %s sandbox image is built yet (`%s image build %s`)",
-			spec.Command, spec.DisplayName, CommandName, spec.Command)
+			spec.Command, spec.DisplayName, CommandName, HarnessArg(spec))
 	}
 	a.println(latest.HarnessVersion + " (" + spec.DisplayName + ", in the DefenseClaw sandbox image)")
 	return nil
@@ -691,8 +691,14 @@ func driverClamp(v sandboxapi.Violation) bool {
 
 // driverCopyNote is the copy note of a run on a driver without host mounts.
 func driverCopyNote(d openshell.Driver) string {
-	return "copy mode: " + mountRefusal(d) + "; the agent works on a copy, and your folder gets its changes only through `" + CommandName + " pull`"
+	return "copy mode: " + mountRefusal(d) + "; " + copyBackText
 }
+
+// copyBackText ends a copy note with how the copy's work reaches the
+// folder: the session's end offers to bring it back (endCopy), and a run
+// that does not ask (a headless run, --yes, a skip) leaves it for pull.
+const copyBackText = "the agent works on a copy, and your folder changes only when you bring its work back: " +
+	"at the end of the session, or later with `" + CommandName + " pull`"
 
 func nameTakenError(name string, headless bool) error {
 	resume := "`" + CommandName + " connect " + name + "`"
@@ -925,8 +931,7 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) st
 		case "openshell.admin.allow_mount":
 			why = "your organization does not allow live mounts"
 		}
-		return "copy mode: " + why + " (" + s.Origin + "); the agent works on a copy, and your folder gets its changes only through `" +
-			CommandName + " pull`"
+		return "copy mode: " + why + " (" + s.Origin + "); " + copyBackText
 	}
 	if !d.HostMounts && settingValue(ex.Settings, "workdir.mode") != config.OpenShellWorkdirCopy {
 		// A daemon whose policy does not clamp for the driver itself.
@@ -1000,7 +1005,7 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 		}
 		return true, false, nil
 	default:
-		a.note("nothing started; `" + CommandName + " run " + spec.Command + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
+		a.note("nothing started; `" + CommandName + " run " + HarnessArg(spec) + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
 			"` resumes " + holder.Name + ", `" + CommandName + " delete " + holder.Name + "` frees the folder")
 		return false, false, nil
 	}

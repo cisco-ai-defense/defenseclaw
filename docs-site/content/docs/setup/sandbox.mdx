@@ -324,7 +324,7 @@ drop a harness from it, edit `openshell.harnesses` in `config.yaml`.
 | Hermes Agent | `hermes` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
 | OpenHands | `openhands` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
 | OmniGent | `omnigent` | managed | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
-| Antigravity | `agy` | user | Verified with a mock Gemini API. A `GEMINI_API_KEY` against Google and a Google sign-in are not tested live. |
+| Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API. A `GEMINI_API_KEY` against Google and a Google sign-in are not tested live. |
 | Cursor Agent | `cursor-agent` | managed | Unverified: the Cursor Agent CLI needs a Cursor account before its first turn, and no mock can stand in for it. |
 | Amp | `amp` | user | Unverified: every Amp run needs an Amp account API key (`AMP_API_KEY`). |
 | Devin CLI | `devin` | user | Unverified: the Devin CLI needs a Devin account login before its first turn. |
@@ -371,7 +371,7 @@ On a Mac the run works on a copy (see [macOS](#macos)). It says so before
 it copies anything, and the first start of an image says it takes longer:
 
 ```text
-  copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, and your folder gets its changes only through `defenseclaw sandbox pull`
+  copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull`
   Copying ~/code/myapp (secrets are held back)…
 
   Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)

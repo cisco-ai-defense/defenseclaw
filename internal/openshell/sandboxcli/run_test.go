@@ -1088,8 +1088,11 @@ func TestDiskFullIsNamed(t *testing.T) {
 // boot of an image says it takes a while. The docker driver's runs are
 // unchanged.
 func TestRunOnTheMicroVMDriver(t *testing.T) {
+	// Certification OG-U9: the note said the folder got its changes only
+	// through `sandbox pull`, while the session's end offers to bring them
+	// back itself.
 	const note = "copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, " +
-		"and your folder gets its changes only through `defenseclaw sandbox pull`"
+		"and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull`"
 	driver := func(name string, more ...func(*testApp)) func(*testApp) {
 		return func(ta *testApp) {
 			ta.daemon.status.Gateway.Driver = name

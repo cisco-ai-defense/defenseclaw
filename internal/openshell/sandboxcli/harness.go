@@ -60,7 +60,7 @@ func harnessList() string {
 	var parts []string
 	for _, h := range harness.Names() {
 		spec, _ := harness.Get(h)
-		parts = append(parts, spec.Command+" ("+spec.DisplayName+")")
+		parts = append(parts, HarnessArg(spec)+" ("+spec.DisplayName+")")
 	}
 	return strings.Join(parts, ", ")
 }

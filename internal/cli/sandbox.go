@@ -220,8 +220,9 @@ func newSandboxRunCmd() *cobra.Command {
 		Long: `Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)
 live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS
 (the MicroVM driver) every run works on a copy. The harness is claude, codex,
-copilot, opencode, kiro, hermes, openhands, omnigent or agy (amp, cursor-agent and devin
-are not verified yet, so they do not run). Skip-permissions mode is on by default;
+copilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy,
+works too; amp, cursor-agent and devin are not verified yet, so they do not run).
+Skip-permissions mode is on by default;
 --safe keeps the harness's own prompts. The harness gets your terminal; when it exits
 you get a summary, a review of changed files that can run code on your machine, and
 the choice to keep or undo the changes (from a copy: to bring them back, or leave them

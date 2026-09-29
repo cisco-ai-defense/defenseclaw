@@ -1403,9 +1403,11 @@ compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF process or
   network events of the harness's own binaries under its install root,
-  egress, native OTLP) for `HookSilence` without a single hook request.
-  Commands the harness did not start, such as the CLI's probe, a copy-mode
-  upload or pull, or your own `sandbox exec`, do not count.
+  their connections to the egress proxy included, native OTLP) for
+  `HookSilence` without a single hook request. Commands the harness did not
+  start, such as the CLI's probe, a copy-mode upload or pull, or your own
+  `sandbox exec`, do not count, and neither do the egress proxy's own
+  events, which cannot tell the harness's requests from theirs.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
   a tool that ran without a verdict. Per binding, the manager records each
   pre-tool decision and pairs it with the call's post-tool event. A

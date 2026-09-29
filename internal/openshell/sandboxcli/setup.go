@@ -812,11 +812,17 @@ func (a *App) restartImpact(ctx context.Context) string {
 // runs, and the harness is named by its connector name instead.
 var launchedCommands = map[string]string{"kiro-cli-chat": "kiro-cli"}
 
+// namelessCommands are harness commands that do not say which harness they
+// run: the harness is named by its connector name, as `image build`,
+// `image list` and openshell.harnesses name it (Antigravity's agy).
+var namelessCommands = map[string]bool{"agy": true}
+
 // HarnessArg is how a user names spec on the command line (`sandbox run`,
-// --harness): the command they type for it (claude, codex, agy), or its
-// connector name when that command is one they never type (kiro).
+// --harness, `image build`): the command they type for it (claude, codex),
+// or its connector name when that command is one they never type (kiro) or
+// does not name the harness (antigravity, whose agy is accepted too).
 func HarnessArg(spec *harness.Spec) string {
-	if _, ok := launchedCommands[spec.Command]; ok {
+	if _, ok := launchedCommands[spec.Command]; ok || namelessCommands[spec.Command] {
 		return spec.Name
 	}
 	return spec.Command

@@ -489,6 +489,38 @@ func TestSandboxHooksFailClosed(t *testing.T) {
 	}
 }
 
+// Certification AG-MAC-F6: the sandbox Antigravity hook's deny says why it
+// failed closed. An HTTP 400 for a malformed (empty) hook input told agy
+// "DefenseClaw policy service is unavailable." while DefenseClaw was up and
+// had refused the request; only an unreachable DefenseClaw (a transport
+// failure, a 5xx) is reported so. Every case still denies the tool call.
+func TestSandboxAntigravityHookDenySaysWhy(t *testing.T) {
+	agy := newSandboxHookHarness(t, NewAntigravityConnector(), "1.2.12")
+	token := map[string]string{SandboxTokenEnv: "tok"}
+	for _, tc := range []struct {
+		name, stdin string
+		env         map[string]string
+		responses   []string
+		want        string
+	}{
+		{"malformed input", "", token, []string{`400|{"error":"invalid JSON"}`}, "DefenseClaw hook request was refused (HTTP 400), so the tool call is blocked."},
+		{"rate limited", antigravityPreToolUse, token, []string{`429|{"error":"slow down"}`}, "DefenseClaw hook request was refused (HTTP 429), so the tool call is blocked."},
+		{"no verdict", antigravityPreToolUse, token, []string{`200|{"ok":true}`}, "DefenseClaw answered the hook request without a verdict, so the tool call is blocked."},
+		{"not json", antigravityPreToolUse, token, []string{`200|<html>proxy</html>`}, "DefenseClaw answered the hook request without a verdict, so the tool call is blocked."},
+		{"ingress down", antigravityPreToolUse, token, []string{"exit:7", "exit:7"}, "DefenseClaw policy service is unavailable."},
+		{"relay 500", antigravityPreToolUse, token, []string{`500|placeholder did not resolve`}, "DefenseClaw policy service is unavailable."},
+		{"no token", antigravityPreToolUse, nil, []string{allowResponse}, "DefenseClaw hook has no valid sandbox binding token, so the tool call is blocked."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := agy.run(t, SandboxHookDir+"/antigravity-hook.sh", []string{"PreToolUse"}, tc.stdin, tc.env, tc.responses)
+			got := lastJSON(run)
+			if run.exitCode != 0 || got["decision"] != "deny" || got["reason"] != tc.want {
+				t.Fatalf("exit %d stdout %q, want a deny with reason %q; stderr=%s", run.exitCode, run.stdout, tc.want, run.stderr)
+			}
+		})
+	}
+}
+
 // TestSandboxHookFailClosedNamesThePrompt pins the wording the harness shows
 // when the ingress is down: a prompt hook blocks the prompt, a tool hook the
 // tool call.

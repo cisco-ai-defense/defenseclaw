@@ -50,7 +50,8 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `hermes`,
   `openhands`, `omnigent`, `agy`, `amp`, `cursor-agent`, `devin`), by its
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
-  Setup and the image commands default to `openshell.harnesses`, and then to
+  Help and hints name Kiro and Antigravity by their connector names, as
+  `image build` and `image list` do. Setup and the image commands default to `openshell.harnesses`, and then to
   Claude Code and Codex. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
@@ -440,9 +441,12 @@ harness directly.
 
 `run` remembers, for the sandbox it created, the harness options after
 `--` (not a prompt), the `--credential` names and hosts, the `--env` names
-and the banner's model line; secret values are never kept. `connect`, and a
-shell wrapper's resume, pass those options again before any new ones, and
-show the same Model and Secret lines as the run.
+and the banner's model line; secret values are never kept. The options
+stop at the first word that is not one, except for OmniGent, whose every
+argument is kept in order (the agent path included), an OpenCode project
+path, and Hermes's `chat`. `connect`, and a shell wrapper's resume, pass
+those options again before any new ones, and show the same Model and Secret
+lines as the run.
 
 ```bash
 defenseclaw sandbox run claude
