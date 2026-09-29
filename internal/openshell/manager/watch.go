@@ -522,7 +522,12 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 			outcome = hookConnRefused
 		}
 		m.observeHookConnection(ctx, b, outcome, at)
-	case m.opts.EgressPort, 0:
+	case m.opts.EgressPort:
+		// A connection to the egress proxy is the harness's activity when
+		// its own binary made it (the proxy cannot tell); it is no model
+		// call, which goes around the proxy.
+		m.markWork(b, at, harnessActivity(harnessName, r.Binary), false)
+	case 0:
 	default:
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		m.markWork(b, at, ofHarness, ofHarness && r.Allowed())
