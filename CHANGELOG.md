@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Findings keep the ids of the shipped rules.** A finding from a bundled
+  rule tagged `credential` (for example `PATH-AWS-CREDS`, `C2-METADATA-AWS`
+  or `exfil.secret_read_and_egress_oneliner`) was stored and exported as
+  `redacted.secret.id-…`, so the findings dashboards and `rule_id` filters
+  could not name it. Every rule id in the default, strict and permissive
+  packs is now kept; ids that only a custom pack defines are still keyed.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
