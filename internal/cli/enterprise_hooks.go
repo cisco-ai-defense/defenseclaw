@@ -1469,7 +1469,9 @@ func runEnterpriseHookVerifyGenerationConsistent(
 			// publication window. Preserve their original fail-closed result.
 			return last, err
 		}
-		failed := err != nil || last.Failures != 0 || last.AuthorizationErr != nil
+		// A deleted account's excused rows fail every pass until the
+		// enumerator drops them; retrying cannot change them.
+		failed := err != nil || last.Failures != len(last.Excused) || last.AuthorizationErr != nil
 		if stable && !failed {
 			return last, nil
 		}
