@@ -76,12 +76,12 @@ rest also reach per-user installs.
   enterprise deployments reported it unprotected. The reviewed range is now
   `>=1.18.10,<1.19.0`, checked against OpenCode 1.18.33.
 - **The gateway reports the OpenClaw fleet client off when OpenClaw is not
-  installed.** OpenClaw is `defenseclaw init`'s default connector, so an
-  install without OpenClaw dialed `127.0.0.1:18789` without end and showed the
-  gateway as reconnecting. When agent discovery found no OpenClaw and
-  `gateway.host` is on this machine, the gateway reports it disabled with
-  "OpenClaw is not installed", and doctor expects that. A `gateway.host` on
-  another machine or `gateway.fleet_mode: enabled` still dials.
+  installed.** OpenClaw is the default connector, so an install without
+  OpenClaw dialed `127.0.0.1:18789` without end and showed the gateway as
+  reconnecting. When agent discovery found no OpenClaw and `gateway.host` is a
+  loopback address, the gateway reports it disabled with "OpenClaw is not
+  installed", and doctor expects that. Any other `gateway.host`, or
+  `gateway.fleet_mode: enabled`, still dials.
 - **`defenseclaw version` skips the OpenClaw plugin when OpenClaw is not
   configured.** On installs of other connectors the plugin row read
   `(not installed)` and `missing`, and a plugin left from an earlier OpenClaw
