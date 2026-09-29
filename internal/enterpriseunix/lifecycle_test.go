@@ -365,6 +365,25 @@ func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
 	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 		t.Fatal("binaries installed despite an unresolved credential reference")
 	}
+
+	// While the installed config references it, the credential is not
+	// removed: the gateway could not start without it.
+	referenced := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "galileo-api-key"))
+	unused := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "unused-key"))
+	for path, body := range map[string]string{h.env.P(h.env.Layout.ConfigPath): raw, referenced: "key", unused: "key"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.env.RemoveSecret("galileo-api-key"); err == nil || !exists(referenced) {
+		t.Fatalf("RemoveSecret of a referenced credential = %v, want a refusal that keeps it", err)
+	}
+	if err := h.env.RemoveSecret("unused-key"); err != nil || exists(unused) {
+		t.Fatalf("RemoveSecret of an unreferenced credential = %v, want it removed", err)
+	}
 }
 
 // A refused ensure (invalid config, or a payload it will not install)

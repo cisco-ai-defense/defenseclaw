@@ -11,6 +11,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -78,6 +79,33 @@ func ResolveObservabilityV8ProtectedCredential(secretsDir, name string) (string,
 		return "", false
 	}
 	return string(value), true
+}
+
+// ObservabilityV8CredentialReference returns where an enabled destination of
+// a v8 source references the protected credential name, or "" when none
+// does. It reads no secret; a source that fails to compile for another
+// reason reports "".
+func ObservabilityV8CredentialReference(sourceName string, raw []byte, defaultDataDir, name string) string {
+	_, err := ParseCompileObservabilityV8(sourceName, raw, ObservabilityV8CompileOptions{
+		DefaultDataDir: defaultDataDir, Secrets: observabilityV8CredentialProbe{missing: name},
+	})
+	var secretError *V8SecretReferenceError
+	if errors.As(err, &secretError) && secretError.Credential && secretError.Reference == name {
+		return secretError.Path
+	}
+	return ""
+}
+
+// observabilityV8CredentialProbe resolves every reference except the
+// protected credential missing, without reading any secret.
+type observabilityV8CredentialProbe struct{ missing string }
+
+func (observabilityV8CredentialProbe) ResolveObservabilitySecret(string) (string, bool) {
+	return "probe", true
+}
+
+func (probe observabilityV8CredentialProbe) ResolveObservabilityCredential(name string) (string, bool) {
+	return "probe", name != probe.missing
 }
 
 type V8SecretReferenceError struct {

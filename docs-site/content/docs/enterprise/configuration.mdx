@@ -406,10 +406,10 @@ Before it applies a config, the lifecycle checks that every credential an
 enabled destination references is stored and passes the file checks in
 [Where the key is stored](/docs/enterprise/ai-defense-key#where-the-key-is-stored).
 Otherwise it refuses the config, names the credential and the destination
-field, and keeps the running config. Remove the reference from the config
-before you remove the credential: on Linux and macOS, `enterprise secret
-remove` deletes the file first, and the `ensure` it runs then fails on the
-config that still names it. To rotate a credential,
+field, and keeps the running config. `enterprise secret remove` likewise
+refuses a credential that an enabled destination of the installed config
+still references, because the gateway could not start without it: remove
+the reference and apply the config first. To rotate a credential,
 run `enterprise secret set` again with the same name. Outside the standalone
 profile a credential reference never resolves, so a config with an enabled
 destination that uses one is refused.

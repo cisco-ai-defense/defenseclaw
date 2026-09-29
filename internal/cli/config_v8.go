@@ -319,6 +319,13 @@ type loadedConfigV8File struct {
 }
 
 func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8FileWithCredentials(path, defaultDataDir, "")
+}
+
+// loadConfigV8FileWithCredentials is loadConfigV8File resolving protected
+// credential references from credentialsDir; empty derives it from a
+// standalone source's own path.
+func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -356,7 +363,7 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 	compiled, err := config.ParseCompileObservabilityV8(
 		absPath,
 		raw,
-		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir},
+		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir, CredentialsDir: credentialsDir},
 	)
 	if err != nil {
 		return nil, err

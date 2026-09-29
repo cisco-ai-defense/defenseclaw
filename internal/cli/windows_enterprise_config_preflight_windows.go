@@ -38,7 +38,9 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 		managed.WindowsServiceAccountEnv: layout.ServiceUser,
 	})
 	defer restore()
-	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir); err != nil {
+	// The administrator's config may sit anywhere, so credential references
+	// resolve from the deployment's secrets directory, as in the service.
+	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir, layout.SecretsDir); err != nil {
 		return fmt.Errorf("%v; fix the config and run again (nothing was changed)", err)
 	}
 	return nil
