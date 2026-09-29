@@ -195,6 +195,9 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"antigravity-pin", Antigravity, "", []string{"sha512sum -c", "1.2.12-5784551402897408", "aarch64)", "x86_64)", "is not the pinned"}, nil},
 		{"antigravity-below-contract", Antigravity, "1.1.7", nil, ErrUnknownContract},
 		{"antigravity-unpinned-build", Antigravity, "1.2.13", nil, nil},
+		// Inside the host contract (>=0.7.0), but its image never fires
+		// AfterAgentResponse (RT-A-2).
+		{"omnigent-below-sandbox-floor", OmniGent, "0.12.0", nil, ErrUnknownContract},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steps, err := tc.spec.InstallSteps(tc.version)

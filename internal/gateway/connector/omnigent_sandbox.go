@@ -40,6 +40,36 @@ const (
 	OmnigentSandboxConfigPath = OmnigentSandboxConfigHome + "/config.yaml"
 )
 
+// OmnigentSandboxMinVersion is the oldest OmniGent DefenseClaw's sandbox
+// images accept. The sandbox agent's openai-agents harness runs in
+// OmniGent's runner, whose stream the server relays, and before 0.13.0 the
+// server evaluated the response phase only for an assistant message posted
+// to its events route, which a runner-relayed harness never posts: 0.13.0
+// added the relay's own response-phase check (server/routes/_sessions
+// _relay_response_policy_deny_reason). An image of 0.12.0, inside the host
+// contract, failed the hook-fire probe with "hook AfterAgentResponse never
+// fired" (RT-A-2), so a sandbox refuses anything older before it builds.
+const OmnigentSandboxMinVersion = "0.13.0"
+
+// omnigentSandboxHookContracts is omnigent-custom-policy-v1 as DefenseClaw's
+// OpenShell images run it: the Linux host contract from
+// OmnigentSandboxMinVersion. It keeps the host contract's ID, so a binding
+// that pins it resolves to the same events and capabilities.
+func omnigentSandboxHookContracts() []HookContract {
+	contracts := hookContractsForOS("omnigent", "linux")
+	for i := range contracts {
+		contracts[i].MinAgentVersion = OmnigentSandboxMinVersion
+		contracts[i].Notes = append(contracts[i].Notes,
+			"Sandbox images start at OmniGent "+OmnigentSandboxMinVersion+": before it the server never evaluated the response phase (AfterAgentResponse) for the sandbox agent, whose runner it relays.")
+	}
+	return contracts
+}
+
+// omnigentSandboxRefusal is why a sandbox refuses an OmniGent the host
+// contract accepts.
+const omnigentSandboxRefusal = "OmniGent before " + OmnigentSandboxMinVersion + " never runs the response policy phase (AfterAgentResponse) for the sandbox agent, " +
+	"whose runner its server relays, so its image cannot pass the hook-fire probe; sandbox images accept >=" + OmnigentSandboxMinVersion + ",<0.14.0"
+
 // OmnigentSandboxPolicyDir holds the root-owned policy bridge; the harness
 // install adds it to the OmniGent environment's import path.
 var OmnigentSandboxPolicyDir = SandboxCanonicalDir("omnigent")

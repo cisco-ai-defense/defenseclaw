@@ -464,6 +464,84 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			t.Fatalf("fix %+v\n%s", c.Fix, r)
 		}
 	})
+	// Homebrew reports no start time, and a gateway it does not run has no
+	// service: the start of the openshell-gateway process ps lists decides
+	// whether DefenseClaw's pending-restart mark is still pending (retest:
+	// a mark from Sep 28 18:12 warned under a gateway started Sep 29 04:37).
+	t.Run("restart mark older than the gateway", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			markAge time.Duration
+			etime   string
+			pending string
+		}{
+			{"restarted since", 10 * time.Hour, "01:30:00", ""},
+			{"restarted days after", 50 * time.Hour, "1-02:03:04", ""},
+			{"not restarted since", time.Hour, "02:00:00", "gateway.toml, but the gateway has not been restarted since it changed"},
+			{"in the mark's second", 0, "00:00", "but the gateway has not been restarted since it changed"},
+			{"no start known", 10 * time.Hour, "", "gateway.toml; restart the gateway if you have not since it changed"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f, prefix := release(t)
+				f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+				if tc.etime != "" {
+					f.runner.On("ps -o etime= -p 7976", "   "+tc.etime+"\n", nil)
+				} else {
+					f.runner.On("ps -o etime= -p 7976", "", errors.New("exit status 1"))
+				}
+				mark := filepath.Join(f.dir, ".defenseclaw-restart-pending")
+				at := time.Now().Add(-tc.markAge)
+				writeFile(t, mark, at.UTC().Format(time.RFC3339Nano)+"\n", 0o600)
+				if err := os.Chtimes(mark, at, at); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"gateway.toml", "gateway.env"} {
+					if _, err := os.Stat(filepath.Join(f.dir, name)); err == nil {
+						old := at.Add(-time.Minute)
+						if err := os.Chtimes(filepath.Join(f.dir, name), old, old); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				r := f.run()
+				if tc.pending != "" {
+					expectCheck(t, r, openshell.CheckIDVMIdentity, warn, tc.pending)
+					return
+				}
+				expectCheck(t, r, openshell.CheckIDVMIdentity, pass, "sandboxes run as 501:20, your user")
+			})
+		}
+	})
+	// The start ps reports is only good to the second: a gateway.toml
+	// written just before the gateway started, in its second, is loaded
+	// (it warned on this Mac, gateway.toml at 04:37:34.4 under a gateway
+	// started at 04:37:34), and one written well after it is not.
+	t.Run("configuration written as the gateway started", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			after   time.Duration
+			pending bool
+		}{
+			{"in the start's second", 900 * time.Millisecond, false},
+			{"a minute after", time.Minute, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f, prefix := release(t)
+				f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+				f.runner.On("ps -o etime= -p 7976", "   01:00:00\n", nil)
+				at := time.Now().Add(-time.Hour).Add(tc.after)
+				if err := os.Chtimes(filepath.Join(f.dir, "gateway.toml"), at, at); err != nil {
+					t.Fatal(err)
+				}
+				r := f.run()
+				if tc.pending {
+					expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "but the gateway has not been restarted since it changed")
+					return
+				}
+				expectCheck(t, r, openshell.CheckIDVMIdentity, pass, "sandboxes run as 501:20, your user")
+			})
+		}
+	})
 	// A gateway that does not answer proves nothing.
 	t.Run("gateway down", func(t *testing.T) {
 		f, prefix := release(t)

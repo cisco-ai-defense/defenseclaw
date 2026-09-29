@@ -272,6 +272,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	replayed := at.Before(m.startedAt)
 	switch r.Class {
 	case ocsf.ClassConfig:
+		if settingsReload(r) {
+			m.noteSettingsReload(b, at)
+		}
 		m.noteSyntheticAddress(b, r.Message)
 	case ocsf.ClassNetwork, ocsf.ClassHTTP:
 		host := m.namedHost(b, triage.NormalizeHost(r.Host), r.Port)
@@ -513,9 +516,11 @@ func ownHostName(host, recorded string) bool {
 func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at time.Time, harnessName string) {
 	switch r.Port {
 	case m.opts.IngressPort:
-		outcome := hookConnAttempt
+		outcome := hookConnAllowed
 		switch {
-		case !r.Denied() || policyReloadCut(r):
+		case !r.Denied():
+		case policyReloadCut(r):
+			outcome = hookConnReloadCut
 		case mappingDenial(r):
 			outcome = hookConnMappingDenied
 		default:
@@ -561,6 +566,17 @@ func harnessFetchDenial(harnessName string, r ocsf.Record, host string) bool {
 		}
 	}
 	return false
+}
+
+// settingsReload reports OpenShell's record of reloading the sandbox's
+// settings: its settings poll saw the policy or the provider environment
+// change ("CONFIG:DETECTED [INFO] Settings poll: config change detected
+// [old_revision:… new_revision:… policy_changed:false
+// provider_env_changed:true]"). A reload drops the transparent mappings of
+// the names the sandbox looked up; the next lookup maps them again.
+func settingsReload(r ocsf.Record) bool {
+	return strings.EqualFold(r.Activity, "DETECTED") &&
+		(strings.EqualFold(r.Context["policy_changed"], "true") || strings.EqualFold(r.Context["provider_env_changed"], "true"))
 }
 
 // policyReloadCut reports a connection OpenShell closed because the

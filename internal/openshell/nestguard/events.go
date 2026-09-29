@@ -267,10 +267,11 @@ const maxUnwatched = 1024
 func GitGitlinks(ctx context.Context, root string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	cmd, err := gitsafe.Command(ctx, root, "ls-files", "--stage", "-z")
+	cmd, cleanup, err := gitsafe.Command(ctx, root, "ls-files", "--stage", "-z")
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {

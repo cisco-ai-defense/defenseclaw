@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -34,10 +35,15 @@ import (
 //     sandbox's policy does not allow DefenseClaw's port, as when another
 //     daemon replaced the ingress provider profile. This is reported at
 //     once, also after hooks that did get through. A transparent-mapping
-//     denial is reported only when no authenticated request follows it
-//     within hookAttemptGrace: OpenShell answers so too while it
-//     republishes the host alias's mapping (a policy or provider reload),
-//     and the client's next request gets through.
+//     denial is reported only when neither a connection that gets through
+//     nor an authenticated request follows it within hookAttemptGrace, and
+//     not at all when it comes within reloadMappingWindow of OpenShell
+//     reloading the sandbox's settings while the host alias's reported
+//     mapping covers the port (reloadMappingLocked): a reload maps the
+//     host alias afresh on the next lookup, and a client still connecting
+//     to the address it looked up before is denied until it looks it up
+//     again. A hook that is not retried (OpenCode's plugin event as it
+//     opens) or a harness that quits leaves no request after it.
 //   - OpenShell let a hook connect to the ingress, but no authenticated
 //     request (hook, OTLP or notify) followed within hookAttemptGrace: the
 //     ingress does not answer, or the sandbox token never reached the hook.
@@ -64,6 +70,13 @@ const (
 	// hookAttemptGrace is how long an ingress connection OpenShell reported
 	// may go without an authenticated request.
 	hookAttemptGrace = 15 * time.Second
+	// reloadMappingWindow is how long after OpenShell reloads a sandbox's
+	// settings a client may still connect to the host alias address it
+	// looked up before: OpenCode's runtime (Bun) keeps a lookup for 30 s.
+	// Every change of a gateway-global provider profile reloads every
+	// running sandbox: a sandbox's --credential profile imported, or
+	// deleted with its sandbox, by any DefenseClaw daemon on the gateway.
+	reloadMappingWindow = 45 * time.Second
 	// harnessStartupGrace is how long after a session starts a model call is
 	// still taken for the harness's start-up: the Codex TUI asks its model
 	// endpoint for the model list as it opens, before any prompt, so that
@@ -82,9 +95,13 @@ type hookReach struct {
 	firstWork    time.Time
 	firstAttempt time.Time
 	// mappingDenied is when OpenShell denied an ingress connection's
-	// transparent mapping with no authenticated request since: a refusal
-	// once hookAttemptGrace passes (confirmMappingDenialLocked).
+	// transparent mapping with no connection through or authenticated
+	// request since: a refusal once hookAttemptGrace passes
+	// (confirmMappingDenialLocked).
 	mappingDenied time.Time
+	// reloaded is when OpenShell last reported reloading the sandbox's
+	// settings in the session (noteSettingsReload).
+	reloaded time.Time
 	// since and reason are set while the hooks do not reach DefenseClaw;
 	// noHookYet when no hook request of the session was seen at all.
 	since     time.Time
@@ -113,25 +130,36 @@ func (m *Manager) noteWorkLocked(b *box) {
 type hookConnection int
 
 const (
-	// hookConnAttempt: allowed, or closed by a policy reload.
-	hookConnAttempt hookConnection = iota
+	// hookConnAllowed: allowed.
+	hookConnAllowed hookConnection = iota
+	// hookConnReloadCut: closed by a policy reload (policyReloadCut).
+	hookConnReloadCut
 	// hookConnRefused: refused by the sandbox's policy.
 	hookConnRefused
 	// hookConnMappingDenied: the host alias's transparent mapping did not
-	// cover it, which a mapping OpenShell republished under the connection
-	// also causes.
+	// cover it, which a mapping OpenShell dropped under the client on a
+	// reload also causes.
 	hookConnMappingDenied
 )
 
 // observeHookConnection records OpenShell's view of one connection or
 // request from the sandbox to the ingress, made at at. Refused ones are
-// reported at once, mapping denials no authenticated request follows once
-// hookAttemptGrace passes (checkReach). A record from before the session
-// (replayed after a watch resumed) only counts.
+// reported at once, mapping denials that nothing answers once
+// hookAttemptGrace passes (checkReach); a mapping denial a settings reload
+// explains (reloadMappingLocked) is neither a refusal nor an attempt. A
+// record from before the session (replayed after a watch resumed) only
+// counts.
 func (m *Manager) observeHookConnection(ctx context.Context, b *box, outcome hookConnection, at time.Time) {
 	now := m.now()
 	m.mu.Lock()
 	current := b.sessionOn() && !at.Before(b.started)
+	if outcome == hookConnMappingDenied && current && m.reloadMappingLocked(b, now) {
+		m.mu.Unlock()
+		return
+	}
+	if outcome == hookConnReloadCut && current {
+		b.reach.reloaded = now
+	}
 	if current && b.reach.firstAttempt.IsZero() {
 		b.reach.firstAttempt = now
 	}
@@ -140,10 +168,14 @@ func (m *Manager) observeHookConnection(ctx context.Context, b *box, outcome hoo
 	case refused:
 		b.hooks.ingressRefused++
 		if current {
-			b.hooks.lastIngressRefused = now
+			b.hooks.lastIngressRefused, b.hooks.refusedByMapping = now, false
 		}
 	case outcome == hookConnMappingDenied && current && b.reach.mappingDenied.IsZero():
 		b.reach.mappingDenied = now
+	case outcome == hookConnAllowed && current:
+		// The mapping covers the port after all: what this connection's
+		// request does is the attempt check's.
+		b.reach.mappingDenied = time.Time{}
 	}
 	m.mu.Unlock()
 	if refused && current {
@@ -151,9 +183,32 @@ func (m *Manager) observeHookConnection(ctx context.Context, b *box, outcome hoo
 	}
 }
 
-// confirmMappingDenialLocked turns an ingress mapping denial no
-// authenticated request followed within hookAttemptGrace into a refusal.
-// Callers hold Manager.mu.
+// noteSettingsReload records OpenShell reloading the sandbox's settings
+// (its policy or its provider environment), reported at at.
+func (m *Manager) noteSettingsReload(b *box, at time.Time) {
+	now := m.now()
+	m.mu.Lock()
+	if b.sessionOn() && !at.Before(b.started) {
+		b.reach.reloaded = now
+	}
+	m.mu.Unlock()
+}
+
+// reloadMappingLocked reports that a denial of the ingress's transparent
+// mapping at now is a settings reload's: OpenShell reloaded the sandbox's
+// settings within reloadMappingWindow, and the host alias mapping it last
+// reported covers the ingress port. A mapping that leaves the port out
+// (another daemon's ingress profile) explains no denial. Callers hold
+// Manager.mu.
+func (m *Manager) reloadMappingLocked(b *box, now time.Time) bool {
+	at := b.reach.reloaded
+	return !at.IsZero() && now.Sub(at) < reloadMappingWindow &&
+		b.rec.HostAlias != nil && slices.Contains(b.rec.HostAlias.Ports, m.opts.IngressPort)
+}
+
+// confirmMappingDenialLocked turns an ingress mapping denial nothing
+// answered within hookAttemptGrace into a refusal. Callers hold
+// Manager.mu.
 func (b *box) confirmMappingDenialLocked(now time.Time) {
 	at := b.reach.mappingDenied
 	if at.IsZero() || now.Sub(at) < hookAttemptGrace {
@@ -161,7 +216,7 @@ func (b *box) confirmMappingDenialLocked(now time.Time) {
 	}
 	b.reach.mappingDenied = time.Time{}
 	b.hooks.ingressRefused++
-	b.hooks.lastIngressRefused = at
+	b.hooks.lastIngressRefused, b.hooks.refusedByMapping = at, true
 }
 
 // ingressAnsweredLocked records an authenticated ingress request: a mapping
@@ -186,6 +241,10 @@ func (m *Manager) unreachableLocked(b *box, now time.Time) (reason string, noHoo
 	// fires its first hooks only with the first prompt).
 	authenticated := inSession(b.hooks.lastOTLP) || inSession(b.hooks.lastNotify)
 	switch {
+	case refused && b.hooks.refusedByMapping:
+		return fmt.Sprintf("OpenShell denied the hooks' connections to the DefenseClaw ingress (%s:%d): its mapping of %s in the sandbox "+
+			"does not cover the port, as when another DefenseClaw daemon on this machine replaced the ingress provider profile",
+			openshellHostAlias, m.opts.IngressPort, openshellHostAlias), false
 	case refused:
 		return fmt.Sprintf("OpenShell refused the hooks' connections to the DefenseClaw ingress (%s:%d): the sandbox's network policy "+
 			"does not allow it, as when another DefenseClaw daemon on this machine replaced the ingress provider profile",

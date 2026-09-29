@@ -451,9 +451,18 @@ func TestSessionSummary(t *testing.T) {
 		return func(ta *testApp) {
 			noChanges(ta)
 			ta.env["OPENAI_API_KEY"] = env
+			ta.daemon.toolCalls = 1
 			if wrapped {
 				ta.Cfg.OpenShell.Wrappers = []string{"claudecode"}
 			}
+		}
+	}
+	// A session without a turn: the harness printed no resume line of its
+	// own (Copilot CLI prints one only after a prompt; retest RT-C2-1).
+	noTurn := func(env string, wrapped bool) func(*testApp) {
+		return func(ta *testApp) {
+			continueHint(env, wrapped)(ta)
+			ta.daemon.toolCalls = 0
 		}
 	}
 	const cont = "continue this conversation: defenseclaw sandbox connect " + sbName
@@ -533,6 +542,12 @@ func TestSessionSummary(t *testing.T) {
 		// openhands:MAC-OSH-OH-7).
 		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
 			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
+		{name: "continue copilot without a turn", opts: RunOptions{Harness: "copilot"}, setup: noTurn("sk-mock", false),
+			want: []string{"-- --continue (a `copilot --resume …` line of GitHub Copilot CLI works only inside the sandbox)"},
+			not:  []string{"printed above"}},
+		{name: "continue claude with the wrapper without a turn", opts: claude, setup: noTurn("", true), want: []string{cont +
+			" -- --continue (a `claude --resume …` line of Claude Code resumes it in this sandbox too: the shell wrapper is on)"},
+			not: []string{"printed"}},
 		{name: "continue kiro", opts: RunOptions{Harness: "kiro"}, setup: continueHint("sk-mock", false),
 			want: []string{"-- --resume (the `kiro-cli --resume-id …` Kiro CLI printed above works only inside the sandbox)"}},
 		{name: "continue hermes", opts: RunOptions{Harness: "hermes"}, setup: continueHint("sk-mock", false),
@@ -544,6 +559,11 @@ func TestSessionSummary(t *testing.T) {
 		// (OG-U2).
 		{name: "continue omnigent", opts: RunOptions{Harness: "omnigent", Args: []string{"--model", "gpt-5-mini"}}, setup: continueHint("sk-mock", false),
 			want: []string{cont + " -- --continue (the `omnigent run …` OmniGent printed above works only inside the sandbox)"}},
+		// agy prints "Resume with -c (or command below): agy
+		// --conversation=<id>" at /quit, and nothing named the sandbox's
+		// continue (AG-RT-1).
+		{name: "continue antigravity", opts: RunOptions{Harness: "antigravity"}, setup: continueHint("", false),
+			want: []string{"→ " + cont + " -- -c (the `agy --conversation …` Antigravity printed above works only inside the sandbox)"}},
 		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
 			ta.IO.TTY = false
 			noChanges(ta)

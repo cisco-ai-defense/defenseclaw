@@ -192,6 +192,9 @@ type hookStats struct {
 	// refused.
 	ingressRefused     int64
 	lastIngressRefused time.Time
+	// refusedByMapping is set when the last refusal was a transparent
+	// mapping denial nothing answered (confirmMappingDenialLocked).
+	refusedByMapping bool
 	// failed counts the hook posts the ingress answered with an error;
 	// lastFailure says how the last one was answered. failureNoticeAt is
 	// when the feed last reported failures, unnoticed how many came since.

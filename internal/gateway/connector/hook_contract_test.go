@@ -601,6 +601,43 @@ func TestOmniGentV070ContractPreservesPostPhaseDenyWithoutPostPhaseAsk(t *testin
 	}
 }
 
+// TestOmniGentSandboxStartsAt0130: OmniGent 0.12.0, inside the host
+// contract, built an image that failed the hook-fire probe ("hook
+// AfterAgentResponse never fired", RT-A-2): before 0.13.0 the server never
+// evaluates the response phase for the runner-relayed sandbox agent. A
+// sandbox refuses it before the build, saying why; the host contract keeps
+// its range.
+func TestOmniGentSandboxStartsAt0130(t *testing.T) {
+	for _, version := range []string{"0.7.0", "0.12.0", "0.12.9"} {
+		got := ResolveSandboxHookContract("omnigent", version)
+		if got.Status != HookCompatibilityUnknown || !strings.Contains(got.Reason, "OmniGent before 0.13.0 never runs the response policy phase (AfterAgentResponse)") ||
+			!strings.Contains(got.Reason, "sandbox images accept >=0.13.0,<0.14.0") {
+			t.Fatalf("sandbox %s = %q (%s), want refused with the reason", version, got.Status, got.Reason)
+		}
+		if host := resolveHookContractForOS("omnigent", "omnigent "+version, "linux"); host.Status != HookCompatibilityKnown {
+			t.Fatalf("host %s = %q, want the host contract unchanged", version, host.Status)
+		}
+	}
+	for _, version := range []string{"0.13.0", "0.13.4"} {
+		got := ResolveSandboxHookContract("omnigent", version)
+		if got.Status != HookCompatibilityKnown || got.Contract.ContractID != "omnigent-custom-policy-v1" || got.Contract.MinAgentVersion != OmnigentSandboxMinVersion {
+			t.Fatalf("sandbox %s = %q %+v, want omnigent-custom-policy-v1 from %s", version, got.Status, got.Contract, OmnigentSandboxMinVersion)
+		}
+		host := ResolveHookContract("omnigent", "omnigent "+version).Contract
+		if !reflect.DeepEqual(got.Contract.Events, host.Events) || !reflect.DeepEqual(got.Contract.Capabilities, host.Capabilities) {
+			t.Fatalf("sandbox contract %+v differs from the host's %+v beyond its floor", got.Contract, host)
+		}
+	}
+	// Past the reviewed range both refuse, with the generic reason.
+	if got := ResolveSandboxHookContract("omnigent", "0.14.0"); got.Status != HookCompatibilityUnknown || strings.Contains(got.Reason, "response policy phase") {
+		t.Fatalf("sandbox 0.14.0 = %q (%s)", got.Status, got.Reason)
+	}
+	// A binding that pins the contract ID still resolves on the host side.
+	if c, ok := hookContractByIDForOS("omnigent", "omnigent-custom-policy-v1", "linux"); !ok || c.MinAgentVersion != "0.7.0" {
+		t.Fatalf("contract by ID = %+v, %v", c, ok)
+	}
+}
+
 // TestContentEnvelopeKeyDeclarations pins every connector to the official
 // top-level payload shape. The generic decoder must never open an undeclared
 // sub-object, including an inferred Hermes extra envelope.

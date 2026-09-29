@@ -108,41 +108,36 @@ var safeEnvKeysExact = map[string]struct{}{
 //     git cannot read or write user config from the operator account,
 //   - sets GIT_TERMINAL_PROMPT=0 so a credential prompt does not hang.
 //
-// The temp HOME is namespaced under os.TempDir and is left in place
-// for the lifetime of the calling process; it is empty so it does
-// not persist any data that git might write.
+// The temp HOME is a new private directory under os.TempDir for this
+// command. The returned cleanup removes it: call it (defer it) once the
+// command has finished. Left to the OS, the directories piled up, one
+// per process, in a TMPDIR that no housekeeping empties. cleanup is
+// never nil when err is nil, and calling it more than once is harmless.
 //
 // Note: this still executes the local repository content via the
 // commands we choose. Callers should always pair gitsafe.Command
 // with a closed allow-list of git subcommands AND should not invoke
 // commands that actually run in-repo executables (git submodule
 // foreach, git filter-repo, etc).
-func Command(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+func Command(ctx context.Context, dir string, args ...string) (cmd *exec.Cmd, cleanup func(), err error) {
 	if len(args) == 0 {
-		return nil, errors.New("gitsafe: no git arguments supplied")
+		return nil, nil, errors.New("gitsafe: no git arguments supplied")
 	}
 	if dir == "" {
-		return nil, errors.New("gitsafe: empty working directory")
+		return nil, nil, errors.New("gitsafe: empty working directory")
 	}
 	full := append([]string{}, safeGitFlags...)
 	full = append(full, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
+	home, cleanup := safeHomeDir()
+	cmd = exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
-	cmd.Env = scrubbedEnv()
-	return cmd, nil
+	cmd.Env = scrubbedEnv(home)
+	return cmd, cleanup, nil
 }
 
-// scrubbedEnv returns the env slice for the safe child. Cached temp
-// HOME directory creation failures fall back to os.DevNull-style
-// values that git treats as "no such file" without invoking helpers.
-func scrubbedEnv() []string {
-	tmpHome, err := safeHomeDir()
-	if err != nil {
-		// /dev/null is not a directory, so git treats lookups
-		// against it as ENOTDIR and falls back to defaults
-		// without ever opening anything user-controlled.
-		tmpHome = os.DevNull
-	}
+// scrubbedEnv returns the env slice for the safe child, with home as
+// its HOME and XDG_CONFIG_HOME.
+func scrubbedEnv(tmpHome string) []string {
 	out := make([]string, 0, 32)
 	for _, e := range os.Environ() {
 		eq := strings.IndexByte(e, '=')
@@ -176,29 +171,20 @@ func scrubbedEnv() []string {
 	return out
 }
 
-// safeHomeDir creates (or reuses) a per-process empty directory that
-// git can use as $HOME without finding any operator-supplied config.
-// The directory is intentionally created under os.TempDir so it gets
-// cleaned by normal OS housekeeping; we keep one per process to
-// avoid creating one per command.
-var (
-	cachedHomeOnce sync.Once
-	cachedHome     string
-	cachedHomeErr  error
-)
-
-func safeHomeDir() (string, error) {
-	cachedHomeOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "defenseclaw-gitsafe-home-")
-		if err != nil {
-			cachedHomeErr = err
-			return
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			// Best-effort; mkdir already created with the umask.
-			_ = err
-		}
-		cachedHome = filepath.Clean(dir)
-	})
-	return cachedHome, cachedHomeErr
+// safeHomeDir creates an empty private directory that git can use as
+// $HOME without finding any operator-supplied config, and the func that
+// removes it. When the directory cannot be created, git gets os.DevNull
+// instead: it is not a directory, so git treats lookups against it as
+// ENOTDIR and falls back to defaults without ever opening anything
+// user-controlled.
+func safeHomeDir() (string, func()) {
+	dir, err := os.MkdirTemp("", "defenseclaw-gitsafe-home-")
+	if err != nil {
+		return os.DevNull, func() {}
+	}
+	// MkdirTemp creates it 0700 already; this only undoes an odd umask.
+	_ = os.Chmod(dir, 0o700)
+	dir = filepath.Clean(dir)
+	var once sync.Once
+	return dir, func() { once.Do(func() { _ = os.RemoveAll(dir) }) }
 }

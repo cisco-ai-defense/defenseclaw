@@ -372,12 +372,15 @@ func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
 		return inst
 	}
 	wantErr(t, ta.Setup(bg, SetupOptions{}), "on macOS OpenShell must come from the nvidia/openshell/openshell Homebrew formula")
-	has(t, ta.output(), "✓ OpenShell 0.1.1\n",
+	// The machine line marks the OpenShell setup refuses on the next line,
+	// as the TUI's machine check does (RT-A-1: it showed "✓ OpenShell
+	// 0.1.1").
+	has(t, ta.output(), "  ✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula\n",
 		"✗ Gateway service: the nvidia/openshell/openshell Homebrew formula is not installed\n",
 		"→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell 0.1.1 found here "+
 			"was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway and remove that OpenShell, "+
 			"then run `defenseclaw sandbox setup --install-openshell`")
-	lacks(t, ta.output(), "Install OpenShell", "is needed")
+	lacks(t, ta.output(), "Install OpenShell", "is needed", "✓ OpenShell")
 	if inst.ran {
 		t.Fatal("the installer ran")
 	}
@@ -389,7 +392,8 @@ func TestSetupNamesTheHomebrewGatewayItNeeds(t *testing.T) {
 		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService}
 	})
 	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-	has(t, ta.output(), "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+	has(t, ta.output(), "✓ OpenShell 0.1.1\n", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+	lacks(t, ta.output(), "not from Homebrew")
 }
 
 func TestSetupStopsOnHostFailure(t *testing.T) {

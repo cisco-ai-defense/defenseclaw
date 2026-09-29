@@ -260,7 +260,13 @@ exist only in the image; nothing on your host changes.
   call first. Command rules judge the sandbox agent's `sys_os_shell` calls.
 - **Install pin.** The image installs OmniGent 0.13.0 from PyPI as a
   root-owned `uv tool` on a private CPython 3.12.13. The build refuses a
-  version outside the reviewed contract (`>=0.7.0,<0.14.0`).
+  version outside `>=0.13.0,<0.14.0`, a narrower range than the host
+  contract's (`>=0.7.0,<0.14.0`): before 0.13.0 OmniGent's server never runs
+  the response policy phase for the sandbox agent, whose runner it relays,
+  so an image of an older release would fail the hook-fire probe (`hook
+  AfterAgentResponse never fired`). An older
+  `openshell.image.harness_versions.omnigent` pin, such as `"0.12.0"`, is
+  refused before the build starts, with that reason.
 - **Model access.** The sandbox agent names no model, and OmniGent sends a
   run without one to Databricks. Pick one of these profiles:
   - the regional `defenseclaw-bedrock-mantle-openai-<region>`: the launcher
