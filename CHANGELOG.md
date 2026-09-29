@@ -401,6 +401,16 @@ deleted.
   harness whose own suspend fails (Copilot CLI) is explained at once in the
   terminal's title, and the notice after it exits (and Hermes' at once) says
   there is nothing to bring back with `fg`.
+- `sandbox delete` of a copy-mode sandbox says where its work last went and
+  when (`fix-tests's work was last applied to ~/code/myapp at 14:03; nothing
+  newer is left in it`, or the branch or patch file), and its warning about
+  unpulled work names that too (#964). `sandbox stop` of a copy-mode sandbox
+  that no detached run or other session is using looks at its copy first:
+  after a `pull --apply` (or `--branch`, `--patch-out`) of the running
+  sandbox, `delete` of the stopped one no longer warns that it "may hold work
+  … it was not checked". A later pull of a state that went to a branch or
+  patch file counts as brought back too. Every driver, Linux `--copy`
+  included.
 - Harness start-up fixes from the macOS certification, on both drivers: the
   Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
   the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no

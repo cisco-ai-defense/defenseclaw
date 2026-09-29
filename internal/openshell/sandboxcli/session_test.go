@@ -1336,9 +1336,107 @@ func TestDeleteKnowsTheSessionChangedNothing(t *testing.T) {
 	sb := copySandbox("copybox")
 	ta.daemon.add(sb)
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
-	ta.markCleanCopy(&sb)
+	ta.markStoppedCopy(&sb, true)
 	sb.StartedAt = ta.Now().Add(time.Minute)
 	ta.daemon.add(sb)
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"copybox"}}))
 	has(t, ta.output(), "may hold work that was never pulled back")
+}
+
+// `sandbox delete` of a copy-mode sandbox says where its work last went
+// (applied to the folder, a branch or a patch file, and when): in a note
+// when nothing newer is left in it, in its warning when something may be.
+// `sandbox stop` looks at the copy of a sandbox nothing else runs in: after
+// a `pull --apply` of the running sandbox, the stop marks it handed over,
+// so `delete` no longer says it was not checked (#964).
+func TestDeleteSaysWhereTheWorkWent(t *testing.T) {
+	// Applied at the session's end.
+	ta := newTestApp(t, "a\n")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	at := ta.clock(ta.Now())
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	has(t, ta.output(), "copybox's work was last applied to ~/proj at "+at+"; nothing newer is left in it")
+	lacks(t, ta.output(), "may hold work")
+
+	// `pull --apply` while it runs, then `sandbox stop`.
+	running := func(ta *testApp) {
+		sb := copySandbox("fix-tests")
+		sb.Phase, sb.Project = "ready", ta.project
+		ta.daemon.add(sb)
+		ta.copy.pull = &workspace.PullResult{Name: "fix-tests", Project: ta.project, Result: "r1", Effective: "r1",
+			Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}}
+		ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
+	}
+	ta = newTestApp(t, "")
+	running(ta)
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Apply: true}))
+	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests"}))
+	if st := ta.stoppedCopyOf(ta.daemon.sandboxes["fix-tests"]); st == nil || !st.Clean {
+		t.Fatalf("stop marked %+v", st)
+	}
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
+	has(t, ta.output(), "fix-tests's work was last applied to ~/proj at "+at+"; nothing newer is left in it")
+	lacks(t, ta.output(), "may hold work", "not checked")
+
+	// Work after that apply: the stop marks nothing, and delete's warning
+	// names the apply.
+	ta = newTestApp(t, "")
+	running(ta)
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Apply: true}))
+	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnpulled}
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests"}))
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
+	has(t, ta.output(), "may hold work that was never pulled back (it is not running, so it was not checked; its work was last applied to ~/proj at "+at+")")
+
+	// Another session still attached: the stop does not look (the session
+	// can change the copy up to the stop).
+	ta = newTestApp(t, "")
+	running(ta)
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, Applied: true, Branch: "dc/fix-tests"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Branch: true}))
+	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
+	release := ta.holdSession("fix-tests")
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests"}))
+	release()
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
+	has(t, ta.output(), "(it is not running, so it was not checked; its work was last put on branch dc/fix-tests at "+at+")")
+
+	// An undone apply is not where the work went any more.
+	ta = newTestApp(t, "")
+	running(ta)
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Apply: true}))
+	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests"}))
+	ta.copy.undo = &workspace.UndoApplyResult{Name: "fix-tests", Project: ta.project, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}}
+	ta.ok(t, ta.Undo(bg, UndoOptions{Name: "fix-tests", Yes: true}))
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
+	has(t, ta.output(), "may hold work that was never pulled back (it is not running, so it was not checked)")
+	lacks(t, ta.output(), "its work was last")
+}
+
+// What runs in a running copy-mode sandbox (a session attached to it, a
+// `sandbox exec`) can change its copy: what the copy held as the sandbox
+// last stopped is forgotten, so a stop outside this CLI does not bring the
+// mark back (#964).
+func TestWhatRunsInASandboxDropsItsStopMark(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := copySandbox("box")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.copy.pending = map[string]workspace.CopyWork{"box": workspace.CopyWorkNone}
+	ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
+	stopped := sb
+	stopped.Phase = "stopped"
+	if !ta.cleanCopy(&stopped) {
+		t.Fatal("the stop did not mark the copy handed over")
+	}
+	// Running again (not started by this CLI), and a command runs in it.
+	ta.daemon.add(sb)
+	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"true"}}))
+	if ta.cleanCopy(&stopped) {
+		t.Fatal("the mark outlived a command in the sandbox")
+	}
 }

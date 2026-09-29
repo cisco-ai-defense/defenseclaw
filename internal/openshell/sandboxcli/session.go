@@ -90,6 +90,10 @@ type session struct {
 	// stopped a sandbox it had found running.
 	interrupted bool
 	undoStopped bool
+	// handedOver is set once nothing of the work the pull at a copy-mode
+	// session's end found is left to bring back: finish records it for a
+	// sandbox it stops (markStoppedCopy).
+	handedOver bool
 
 	// hooksWarned is set once the live warning that the session's hooks do
 	// not reach DefenseClaw went out (hooks.go); noHooks once the session
@@ -149,9 +153,11 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
-	// While the harness runs, other sessions' ends leave the sandbox alone.
+	// While the harness runs, other sessions' ends leave the sandbox alone,
+	// and what its copy held as it last stopped is no longer known.
 	release := s.app.holdSession(s.sb.Name)
 	defer release()
+	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
 	defer stop()
 	if headless || !s.app.IO.TTY {
@@ -194,9 +200,11 @@ var loginShell = []string{"sh", "-c", "if command -v bash >/dev/null 2>&1; then 
 // attachShell runs a login shell in the project folder with the terminal
 // (`connect --shell`).
 func (s *session) attachShell(ctx context.Context) (int, error) {
-	// While the shell runs, other sessions' ends leave the sandbox alone.
+	// While the shell runs, other sessions' ends leave the sandbox alone,
+	// and what its copy held as it last stopped is no longer known.
 	release := s.app.holdSession(s.sb.Name)
 	defer release()
+	s.app.forgetStoppedCopy(s.sb.Name)
 	stop := s.beginSession(ctx)
 	defer stop()
 	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
@@ -829,6 +837,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 			a.warn("could not stop " + name + ": " + apiError(err).Error())
 			return nil
 		}
+		s.markStopped()
 	}
 	next := "resume: " + CommandName + " connect " + name
 	if s.headless {
@@ -1118,6 +1127,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
+	s.handedOver = pull.HandedOver()
 	rev := &sandboxapi.ReviewResponse{Summary: pullSummary(pull), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after, endedElsewhere)
@@ -1135,7 +1145,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		} else {
 			a.note("the sandbox changed nothing")
 		}
-		s.markHandedOver(after)
+		s.handedOver = true
 		return s.finish(ctx, false)
 	}
 	mode := ""
@@ -1190,19 +1200,20 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.warn(err.Error())
 		s.keepUnpulled()
 	} else {
-		s.markHandedOver(after)
+		s.handedOver = true
 	}
 	return s.finish(ctx, false)
 }
 
-// markHandedOver records, for a sandbox this session's end stops, that
-// nothing in its copy is left to bring back (the pull found nothing new,
-// or it was applied or handed over as a branch or a patch), so `delete`
-// of it stopped need not warn about work it cannot check. A sandbox that
-// keeps running can still change, so it is not marked.
-func (s *session) markHandedOver(after *sandboxapi.Sandbox) {
-	if s.started && !s.liveRun && s.others == 0 {
-		s.app.markCleanCopy(after)
+// markStopped records, for a copy-mode sandbox this session's end stopped
+// after its pull, that nothing in its copy is left to bring back
+// (markStoppedCopy) when the pull found nothing new or went to the folder,
+// a branch or a patch, so `delete` of it stopped need not warn about work
+// it cannot check. A sandbox that keeps running can still change, so it is
+// not marked.
+func (s *session) markStopped() {
+	if s.handedOver {
+		s.app.markStoppedCopy(s.sb, true)
 	}
 }
 

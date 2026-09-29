@@ -178,30 +178,34 @@ func (a *App) detachedRun(ctx context.Context, cli openshell.CLI, sb *sandboxapi
 // stop`, undo): a detached run still going is confirmed on a terminal
 // (unless yes) and said otherwise, marked interrupted, and its log kept on
 // this machine; a finished run's log is kept too. It returns false when the
-// user keeps the run going.
-func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, yes bool) (bool, error) {
+// user keeps the run going, and whether no detached run is known to be
+// going (idle).
+func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, yes bool) (ok, idle bool, err error) {
 	if sb.Phase != "ready" {
-		return true, nil
+		return true, true, nil
 	}
 	run, err := a.detachedRun(ctx, cli, sb)
-	if err != nil || run.State == runNone {
+	if err != nil {
 		// Without an answer the stop goes ahead, as it did before runs
 		// were checked.
-		return true, nil
+		return true, false, nil
+	}
+	if run.State == runNone {
+		return true, true, nil
 	}
 	if run.State == runRunning {
 		what := sb.Name + "'s detached run" + a.startedText(run.Started) + " is still going; stopping the sandbox ends it"
 		if a.IO.TTY && !yes {
 			ok, err := a.ask(what+". Stop anyway?", false, false)
 			if err != nil || !ok {
-				return false, err
+				return false, false, err
 			}
 		} else {
 			a.warn(what)
 		}
 	}
 	a.keepRunLog(ctx, cli, sb, run)
-	return true, nil
+	return true, run.State != runRunning, nil
 }
 
 // keepRunLog marks a detached run the coming stop ends as interrupted and
@@ -246,8 +250,9 @@ type savedRun struct {
 }
 
 // cliStateDir is where the CLI keeps what it remembers of a sandbox: the
-// run log it kept at a stop and the undo point the user accepted (M2). The
-// daemon never reads it; `sandbox delete` removes it.
+// run log it kept at a stop, the undo point the user accepted (M2), the
+// run's options and where a copy's work went (runstate.go). The daemon
+// never reads it; `sandbox delete` removes it.
 func (a *App) cliStateDir(name string) (string, error) {
 	if !openshell.ValidSandboxName(name) {
 		return "", fmt.Errorf("%w: sandbox %q", openshell.ErrInvalidName, name)

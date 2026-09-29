@@ -165,7 +165,7 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 	if err == nil {
 		err = establishBaseline(ctx, rec, opts.Exec)
 	}
-	if err == nil && last != nil && !last.handedOver() {
+	if err == nil && last != nil && !last.HandedOver() {
 		rec.Warnings = append(rec.Warnings, fmt.Sprintf("the last pull of sandbox %s (%s) was never applied and is discarded", name, last.PulledAt.Format(time.RFC3339)))
 	}
 	if err == nil {
@@ -219,7 +219,7 @@ func PendingWork(ctx context.Context, dataDir, name string, ex Execer) (CopyWork
 	last := lastPullOf(dataDir, rec)
 	if ex == nil {
 		switch {
-		case last != nil && !last.handedOver():
+		case last != nil && !last.HandedOver():
 			return CopyWorkUnapplied, nil
 		case len(live) == 0:
 			return CopyWorkNone, nil
@@ -251,7 +251,7 @@ func pendingWork(ctx context.Context, ex Execer, live []*CopyRecord, last *PullR
 			return CopyWorkUnpulled, nil
 		}
 	}
-	if last != nil && !last.handedOver() {
+	if last != nil && !last.HandedOver() {
 		return CopyWorkUnapplied, nil
 	}
 	return CopyWorkNone, nil

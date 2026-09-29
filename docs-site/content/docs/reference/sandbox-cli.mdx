@@ -687,6 +687,12 @@ detached run is still going, `stop` asks first on a terminal (`--yes` skips
 the question; without a terminal it warns), marks the run interrupted and
 keeps its log for `sandbox logs`.
 
+For a copy-mode sandbox that no detached run and no other session is using,
+`stop` first looks at its copy. When nothing in it is left to bring back (it
+is as it was uploaded, or as its last pull took it and that pull went to your
+folder, a branch or a patch file), `delete` of the stopped sandbox does not
+warn about unpulled work, as after a session that brought everything back.
+
 ```bash
 defenseclaw sandbox stop myapp-7f3a
 ```
@@ -730,8 +736,14 @@ and their undo point (snapshot) unless you pass `--keep-snapshot`. Asks once per
 sandbox unless you pass `--yes`. A copy-mode sandbox holding work that was
 never pulled back (or a pull never applied) is named in the question, which
 then defaults to no; `teardown` lists such sandboxes before it asks. A
-stopped copy-mode sandbox whose last session found nothing to bring back is
-not warned about.
+stopped copy-mode sandbox is not warned about when what stopped it (a
+session's end, a `pull` that started it, or `stop`) found nothing left in it
+to bring back. For a copy-mode sandbox whose work came back, `delete` says
+where it last went and when, and so does its warning:
+
+```text
+  fix-tests's work was last applied to ~/code/myapp at 14:03; nothing newer is left in it
+```
 
 ```bash
 defenseclaw sandbox delete myapp-7f3a
@@ -945,7 +957,8 @@ With nothing new it says so and asks nothing, and `sandbox delete` of the
 stopped sandbox does not warn about work it holds. `sandbox undo` of the
 apply starts the next pull from the uploaded copy again, so the undone work
 is offered anew. A branch or a patch file does not move that point: your
-folder does not have those changes.
+folder does not have those changes. A later pull of the same state still
+counts as brought back, so `delete` does not warn about it.
 
 ```bash
 defenseclaw sandbox pull fix-tests

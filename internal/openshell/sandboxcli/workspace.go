@@ -308,7 +308,7 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 	}
 	if res.Undone {
 		// The undone work is in the sandbox alone again.
-		a.forgetCleanCopy(sb.Name)
+		a.forgetApply(sb)
 	}
 	if stdout != nil {
 		return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: res})
@@ -548,39 +548,41 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	}
 	cli := a.cli(gateway)
 	// handedOver is set once nothing of the sandbox's work is left to bring
-	// back; a sandbox this pull started, and stops again, is then marked so
-	// (markCleanCopy), and `delete` of it stopped need not warn.
+	// back. A sandbox this pull started is stopped again and marked so
+	// (markStoppedCopy): `delete` of it stopped need not warn.
 	handedOver := false
+	var res *workspace.PullResult
 	if sb.Phase != "ready" {
 		a.note("starting " + o.Name + " to read its work…")
+		a.forgetStoppedCopy(o.Name)
+		hooked := sb.Hooks.LastHookAt
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
-		defer func() {
-			if handedOver {
-				a.markCleanCopy(sb)
-			}
-		}()
 		// Leave it as it was found.
 		defer func() {
-			if _, err := api.Stop(context.WithoutCancel(ctx), o.Name); err != nil {
+			// A session that attached meanwhile (its hooks tell one that
+			// has ended already) may have changed the copy since the pull.
+			quiet := a.attachedSessions(o.Name) == 0
+			stopped, err := api.Stop(context.WithoutCancel(ctx), o.Name)
+			if err != nil {
 				a.warn("could not stop " + o.Name + " again: " + apiError(err).Error())
 				return
 			}
 			a.note("stopped " + o.Name + " again")
+			if res != nil && quiet && (stopped == nil || !stopped.Hooks.LastHookAt.After(hooked)) {
+				a.markStoppedCopy(sb, handedOver)
+			}
 		}()
 	}
-	res, err := a.pull(ctx, api, cli, sb, true)
-	if err != nil {
+	if res, err = a.pull(ctx, api, cli, sb, true); err != nil {
 		return err
 	}
 	if res.Kind == workspace.CopyPlain && o.applyMode() == workspace.ApplyBranch {
 		return fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
 			"bring them back with --apply or --patch-out FILE", o.Name)
 	}
-	if res.Empty() && res.Effective != "" && len(res.Blocking) == 0 {
-		handedOver = true
-	}
+	handedOver = res.HandedOver()
 	if stdout != nil && modes == 0 {
 		return writeJSON(stdout, res)
 	}
@@ -745,6 +747,10 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		opts.PatchPath = p
 	}
 	applied, err := a.Workspace.Apply(ctx, opts)
+	if err == nil {
+		// What `delete` says came back.
+		a.recordHandover(sb, applied)
+	}
 	report := sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspacePull, PullMode: string(opts.Mode)}
 	files := int64(len(res.Changes))
 	var added, removed int64

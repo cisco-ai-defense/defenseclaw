@@ -313,7 +313,7 @@ func testPullStartsFromTheLastApply(t *testing.T, e *env) {
 	if again := pull(t, e, fs, "c1"); !again.Empty() || again.Since != first.Effective || len(again.Review.Flags) != 0 {
 		t.Fatalf("pull after the apply: since %q (want %q), changes %s, flags %s", again.Since, first.Effective, changePaths(again.Changes), riskFlags(again))
 	}
-	if pr, err := LoadPull(e.data, "c1"); err != nil || !pr.handedOver() {
+	if pr, err := LoadPull(e.data, "c1"); err != nil || !pr.HandedOver() {
 		t.Fatalf("an empty pull after an apply is not handed over: %+v, %v", pr, err)
 	}
 
@@ -509,6 +509,32 @@ func TestCopyGatesSensitiveAndBlocking(t *testing.T) {
 	}
 	if _, err := apply(e, "c1", ApplyBranch, func(o *ApplyOptions) { o.AcceptSensitive = true }); err == nil {
 		t.Fatal("existing branch reused without Force")
+	}
+}
+
+// TestCopyPullOfAStateAlreadyBroughtBack: a pull of the state the last one
+// took, from the same point, counts as brought back when that one went to a
+// branch or a patch file (a new capture of uncommitted work is another
+// commit of the same tree), so the sandbox is not held for work that is in
+// the patch; new work is not (#964).
+func TestCopyPullOfAStateAlreadyBroughtBack(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	pull(t, e, fs, "c1")
+	if _, err := apply(e, "c1", ApplyPatch, func(o *ApplyOptions) { o.PatchPath = filepath.Join(e.root, "c1.patch") }); err != nil {
+		t.Fatal(err)
+	}
+	if same := pull(t, e, fs, "c1"); !same.HandedOver() || same.Empty() {
+		t.Fatalf("a pull of the state the patch took: %+v", same)
+	}
+	if work, err := PendingWork(bg, e.data, "c1", nil); err != nil || work == CopyWorkUnapplied {
+		t.Fatalf("stopped after it: %v, %v", work, err)
+	}
+	fs.write(remoteRepo+"/agent.txt", "more agent work\n")
+	if next := pull(t, e, fs, "c1"); next.HandedOver() {
+		t.Fatalf("a pull of new work counts as brought back: %+v", next)
 	}
 }
 

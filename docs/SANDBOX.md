@@ -1280,7 +1280,21 @@ Nothing is applied without a review: a session without a terminal, or with
    work brought back once is not offered again and what the operator took
    back of it stays taken back. `UndoApply` removes the mark (the next pull
    starts from the baseline) and drops a kept pull that started from it. A
-   branch or patch does not set it.
+   branch or patch does not set it. A pull with the last pull's sandbox
+   HEAD, result tree and `Since`, when that pull was applied, is marked
+   applied too (`AppliedAt`), so a new look at a state that went to a branch
+   or patch is not work to lose.
+
+The CLI keeps, per copy-mode sandbox, `cli/copy-handover.json`: where the
+work last went (the mode, the folder, branch or patch file, and when), and
+what the copy held as a pull that started the sandbox, a session's end or
+`sandbox stop` stopped it (nothing left to bring back). `sandbox delete`
+words its question from it, and every start of the sandbox drops the second
+part. `sandbox stop` looks at the copy (`PendingWork` with the sandbox's
+transport) only when no detached run and no other session is going, and
+records nothing when a hook request reached the daemon between the look and
+the stop; a pull that started the sandbox records nothing when a session
+attached meanwhile.
 
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
@@ -1296,6 +1310,7 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 <data_dir>/shadows/<project-key>.git         shadow git directory
 <data_dir>/sandboxes/<name>/workspace/       mask files and mount state
 <data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
+<data_dir>/sandboxes/<name>/cli/             the CLI's: run options, kept run log, copy hand-over
 <data_dir>/sandboxes/bindings.json           ingress bindings
 <data_dir>/sandboxes/images.json             overlay image records
 <data_dir>/sandboxes/manager/<name>.json     the daemon's sandbox record

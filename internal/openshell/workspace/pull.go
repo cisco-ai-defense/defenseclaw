@@ -93,9 +93,10 @@ type PullResult struct {
 // Empty reports whether the agent changed nothing that would be applied.
 func (p *PullResult) Empty() bool { return len(p.Changes) == 0 }
 
-// handedOver reports whether nothing of the pull is lost when the copy is
-// replaced: it was applied, or it holds no change Apply could land.
-func (p *PullResult) handedOver() bool {
+// HandedOver reports whether nothing of the pull is lost when the copy is
+// replaced: it was applied (or a pull of the same state from the same
+// point was), or it holds no change Apply could land.
+func (p *PullResult) HandedOver() bool {
 	return p.AppliedAt != nil || (p.Empty() && p.Effective != "" && len(p.Blocking) == 0)
 }
 
@@ -187,6 +188,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
+	last := lastPullOf(opts.DataDir, rec)
 	// Not Idempotent: two captures must never run at once (they share the
 	// scratch index, the result ref and the bundle).
 	res, err := opts.Exec.Exec(ctx, opts.Name, ExecRequest{Argv: []string{"sh", "-c", captureScript(rec, true)}, Timeout: timeout})
@@ -267,6 +269,14 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 		if f.Kind == RiskSubmodule {
 			pr.Blocking = append(pr.Blocking, "submodule change: "+f.Detail)
 		}
+	}
+	if last != nil && last.AppliedAt != nil && last.ResultTree != "" && last.SandboxHead == pr.SandboxHead &&
+		last.ResultTree == pr.ResultTree && last.Since == pr.Since {
+		// The sandbox's state and the point its changes start from are the
+		// last pull's, which went to a branch or a patch file: this one is
+		// there too (a capture of uncommitted work is another commit of the
+		// same tree each time).
+		pr.AppliedAt = last.AppliedAt
 	}
 	return savePull(lay, pr)
 }
