@@ -144,6 +144,11 @@ func patchKiroV2AgentHooks(path, hookScript string) error {
 		cfg["name"] = kiroManagedAgentName
 	}
 	seedKiroDefaultAgentOverlay(cfg)
+	if list, ok := cfg["hooks"].([]interface{}); ok {
+		// An agent Kiro upgraded to the universal form keeps that form.
+		cfg["hooks"] = reconcileKiroUniversalHooks(list, hookScript)
+		return writeJSONObject(path, cfg)
+	}
 	hooks := ensureJSONObject(cfg, "hooks")
 	migrateKiroV2StopAlias(hooks, hookScript)
 	for _, spec := range kiroV2HookSpecs {
@@ -172,6 +177,89 @@ func kiroV2HookTimeoutIs(raw interface{}, want int) bool {
 	return false
 }
 
+// The universal agent form. Kiro's /upgrade-agent, and the "Enable
+// auto-upgrade" choice kiro-cli --v3 offers at start, rewrite a CLI 2.x
+// agent's event-keyed hooks into one array read by both engines ("Upgrade
+// V2 agent configs to universal (V2 + V3) format"): each entry is
+// {"name", "trigger", "matcher", "action": {"type": "command", "command"},
+// "timeout"}, with the 2.x event as the trigger, the matcher unchanged and
+// the timeout in seconds (10 for a hook that set none), and the old file
+// kept as <agent>.json.bak. Measured on kiro-cli 2.24.1: the 2.x engine
+// reads that form with the same glob matchers, and an entry with
+// "timeout": 30 whose hook took 12 s still blocked. Setup keeps an agent in
+// the form it finds, so the user's own entries survive, and verification
+// and teardown read both forms.
+
+// kiroUniversalHookTimeoutSeconds is the universal form's timeout of
+// DefenseClaw's entries (kiroV2HookTimeoutMillis in seconds).
+const kiroUniversalHookTimeoutSeconds = kiroV2HookTimeoutMillis / 1000
+
+// kiroUniversalEntryOwned reports whether a universal-form entry is
+// DefenseClaw's: its action runs the hook command exactly
+// (kiroV2EntryOwned), so a user's own entry is never claimed.
+func kiroUniversalEntryOwned(item interface{}, hookScript string) bool {
+	obj, _ := item.(map[string]interface{})
+	if obj == nil {
+		return false
+	}
+	return kiroV2EntryOwned(obj["action"], hookScript)
+}
+
+// kiroUniversalHookEntry is DefenseClaw's universal-form entry for one
+// CLI 2.x event, in the shape Kiro's upgrade writes.
+func kiroUniversalHookEntry(event, matcher, hookScript string) map[string]interface{} {
+	return map[string]interface{}{
+		"name":    "defenseclaw-" + event,
+		"trigger": event,
+		"matcher": matcher,
+		"action":  map[string]interface{}{"type": "command", "command": hookScript},
+		"timeout": kiroUniversalHookTimeoutSeconds,
+	}
+}
+
+// reconcileKiroUniversalHooks replaces DefenseClaw's universal-form entries
+// (an agentStop one included) with one per kiroV2HookSpecs event and keeps
+// every other entry in place.
+func reconcileKiroUniversalHooks(list []interface{}, hookScript string) []interface{} {
+	kept := removeKiroOwnedUniversalHooks(list, hookScript)
+	for _, spec := range kiroV2HookSpecs {
+		kept = append(kept, kiroUniversalHookEntry(spec.event, spec.matcher, hookScript))
+	}
+	return kept
+}
+
+// removeKiroOwnedUniversalHooks drops DefenseClaw's universal-form entries.
+func removeKiroOwnedUniversalHooks(list []interface{}, hookScript string) []interface{} {
+	kept := make([]interface{}, 0, len(list)+len(kiroV2HookSpecs))
+	for _, item := range list {
+		if !kiroUniversalEntryOwned(item, hookScript) {
+			kept = append(kept, item)
+		}
+	}
+	return kept
+}
+
+// kiroUniversalHooksCurrent reports whether a universal-form hook list holds
+// DefenseClaw's entry for every kiroV2HookSpecs event with the matcher and
+// timeout this build writes.
+func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
+	for _, spec := range kiroV2HookSpecs {
+		current := false
+		for _, item := range list {
+			obj, _ := item.(map[string]interface{})
+			if kiroUniversalEntryOwned(item, hookScript) && obj["trigger"] == spec.event && obj["matcher"] == spec.matcher &&
+				kiroV2HookTimeoutIs(obj["timeout"], kiroUniversalHookTimeoutSeconds) {
+				current = true
+				break
+			}
+		}
+		if !current {
+			return false
+		}
+	}
+	return true
+}
+
 func removeKiroV2AgentHooks(path, hookScript string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -179,6 +267,20 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 	}
 	if len(cfg) == 0 {
 		return nil
+	}
+	if list, ok := cfg["hooks"].([]interface{}); ok {
+		if kept := removeKiroOwnedUniversalHooks(list, hookScript); len(kept) == 0 {
+			delete(cfg, "hooks")
+		} else {
+			cfg["hooks"] = kept
+		}
+		if kiroV2AgentIsDefenseClawOverlay(cfg) {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			return nil
+		}
+		return writeJSONObject(path, cfg)
 	}
 	hooks, _ := cfg["hooks"].(map[string]interface{})
 	if hooks == nil {
@@ -246,6 +348,9 @@ func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 	if !containsHookScript(cfg, hookScript) {
 		return false, nil
 	}
+	if list, ok := cfg["hooks"].([]interface{}); ok {
+		return kiroUniversalHooksCurrent(list, hookScript), nil
+	}
 	hooks, _ := cfg["hooks"].(map[string]interface{})
 	for _, spec := range kiroV2HookSpecs {
 		list, _ := hooks[spec.event].([]interface{})
@@ -309,8 +414,17 @@ func kiroV2AgentIsDefenseClawOverlay(cfg map[string]interface{}) bool {
 	if name = strings.TrimSpace(name); name != "" && name != kiroManagedAgentName && name != kiroBuiltInDefaultAgentName {
 		return false
 	}
-	hooks, _ := cfg["hooks"].(map[string]interface{})
-	return len(hooks) == 0
+	switch hooks := cfg["hooks"].(type) {
+	case nil:
+		return true
+	case map[string]interface{}:
+		return len(hooks) == 0
+	case []interface{}:
+		// The universal form Kiro's /upgrade-agent writes.
+		return len(hooks) == 0
+	default:
+		return false
+	}
 }
 
 func seedKiroDefaultAgentOverlay(cfg map[string]interface{}) {

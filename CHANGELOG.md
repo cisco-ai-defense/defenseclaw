@@ -479,6 +479,11 @@ deleted.
   did not stop the tool). Every DefenseClaw agent hook now sets
   `timeout_ms` 30000; the gateway rewrites a host agent at its next start,
   and the Kiro sandbox image rebuilds.
+- Kiro CLI on the host: an agent that Kiro upgraded to its universal (V2 +
+  V3) format, which `kiro-cli --v3` offers at start and `/upgrade-agent`
+  does, lost the hooks you had added to it at DefenseClaw's next setup, and
+  teardown left DefenseClaw's entries in it. Setup, verification and
+  teardown now read that format and change only DefenseClaw's own entries.
 
 ### Legacy OpenShell standalone sandbox removed
 
