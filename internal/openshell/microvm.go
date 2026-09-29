@@ -134,7 +134,7 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		}
 		checks = []Check{landlock, docker, r.buildKit,
 			{ID: CheckIDDockerHostNetwork, Title: checkTitles[CheckIDDockerHostNetwork], Status: StatusSkip, Detail: "the MicroVM driver does not use Docker's network"},
-			r.vmFileSharingCheck(), r.vmDriverCheck(ctx), r.vmIdentityCheck(), r.vmResourcesCheck(), r.vmDiskCheck()}
+			r.vmFileSharingCheck(), r.vmDriverCheck(ctx), r.vmIdentityCheck(ctx), r.vmResourcesCheck(), r.vmDiskCheck()}
 	} else {
 		landlock := r.dockerVMLandlockCheck(ctx)
 		hostNet, sharing, disk := r.dockerDriverChecks(r.dockerRoot)
@@ -454,7 +454,7 @@ func (r *doctorRun) vmConfig() VMConfig {
 // vmIdentityCheck checks that the driver runs sandboxes as this user,
 // whom DefenseClaw's images are built for: the driver's default,
 // 1000:1000, leaves HOME unwritable and the hooks unable to run.
-func (r *doctorRun) vmIdentityCheck() Check {
+func (r *doctorRun) vmIdentityCheck(ctx context.Context) Check {
 	c := Check{ID: CheckIDVMIdentity, Title: "MicroVM sandbox user"}
 	if r.config == nil {
 		c.Status, c.Detail = StatusSkip, "gateway configuration unreadable"
@@ -468,8 +468,13 @@ func (r *doctorRun) vmIdentityCheck() Check {
 		c.Fix = &Fix{Summary: fmt.Sprintf("set sandbox_uid = %d and sandbox_gid = %d under [openshell.drivers.vm] in %s and restart the gateway "+
 			"(gateway-wide: every MicroVM sandbox on it then runs as you)", want.UID, want.GID, r.config.TOMLPath),
 			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMIdentity: &want})}
-	case restartPending(r.config, r.service):
-		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s; restart the gateway if you have not since it changed", want, r.config.TOMLPath)
+	case restartPending(r.config, r.gatewayStartedAt(ctx)):
+		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s, but the gateway has not been restarted since it changed", want, r.config.TOMLPath)
+		if r.gatewayStartedAt(ctx).IsZero() {
+			// No start time known: DefenseClaw's mark says only that no
+			// restart of its own followed its change.
+			c.Detail = fmt.Sprintf("%s in %s; restart the gateway if you have not since it changed", want, r.config.TOMLPath)
+		}
 		c.Fix = &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	default:
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("sandboxes run as %s, your user", want)

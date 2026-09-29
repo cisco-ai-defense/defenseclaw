@@ -369,6 +369,17 @@ exec's `/proc/<pid>/environ` (Yama `ptrace_scope` 1), while it can read its
 `cmdline` and `status` and signal it. A process that leaves the tree
 (`setsid` and a double fork) keeps running until the sandbox stops.
 
+What the command leaves running when it exits normally is its own (a server
+started on purpose), and `sandbox-env` has the terminal supervisor keep it
+(`--keep-leftovers`). With `--tty`, though, OpenShell 0.1.1 keeps the exec
+open while a process of its terminal's session still runs (a `nohup`'d one,
+which the exit's SIGHUP does not end), for about 30 seconds, and then ends
+it with status 74 and no message (measured with `bash -c 'nohup sleep 304
+>/dev/null 2>&1 & exit'`; the same command with `--no-tty` returns at once).
+So the wrapper also passes `--say-kept`: half a second after the command
+exits, the supervisor names what still runs in its session ("defenseclaw:
+the command left 1 process running in the sandbox: sleep 304. …").
+
 The profile fragment and `sandbox-env` also put
 `/usr/local/lib/defenseclaw/shims` first on `PATH`. It holds a shim named
 after the harness command (`claude`, `codex`, `opencode`, `copilot`, …) that
@@ -1572,9 +1583,19 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
   hooks that got through. A connection OpenShell closes because the policy
   changed while it was open ("policy generation is stale"; every policy
   reload does that) is no refusal and only counts as an attempt. A
-  transparent-mapping denial (`transparent_tcp_mapping_denied`), which
-  OpenShell also answers while it republishes the host alias's mapping, is a
-  refusal only when no authenticated request follows it within 15 seconds.
+  transparent-mapping denial (`transparent_tcp_mapping_denied`) is a refusal
+  only when neither a connection that gets through nor an authenticated
+  request follows it within 15 seconds, and none at all within 45 seconds of
+  the supervisor reporting a settings reload (`Settings poll: config change
+  detected` with `policy_changed` or `provider_env_changed` true) while the
+  host alias mapping it last reported covers the ingress port: the reload
+  drops the host alias's mapping, and a client that still connects to the
+  address it looked up before (OpenCode's Bun runtime keeps a lookup for 30
+  seconds) is denied until it looks the name up again. That denial is no
+  attempt either: a hook that is not retried, such as OpenCode's plugin event
+  as it opens, or a harness that quits leaves no request after it. A mapping
+  that leaves the ingress port out (another daemon's ingress profile) is a
+  refusal, and the warning says the mapping does not cover the port.
 - OpenShell lets a hook connect but no authenticated request (hook, OTLP or
   notify) follows within 15 seconds: the ingress does not answer, or the
   sandbox token did not reach the hook.
@@ -1945,6 +1966,16 @@ These were measured on the pinned releases inside the community base image
   but not the nested session's tools. `opencode run --auto` is the headless
   skip-permissions mode. The base image ships OpenCode 1.2.18, which is
   outside every hook contract. The image removes it.
+- **OpenCode 1.18.31 can lose a shell command's output.** Its bash tool
+  reads the command's output in a fiber forked into a scope that closes as
+  soon as the exit code arrives, which interrupts the reader: output it had
+  not read yet is dropped, and the tool reports "(no output)" to the TUI and
+  the model although the command ran. Seen once, on the first tool call of a
+  new MicroVM sandbox (`echo dce2e-allowed > /tmp/dce2e-allowed.txt && cat
+  /tmp/dce2e-allowed.txt`, whose file was written); the next call, and the
+  same first call in an earlier round, returned the output. It is OpenCode's
+  race, not the supervisor's or the plugin's (which only reads the result in
+  `tool.execute.after`).
 - **OpenCode plugins share the process, so the tier is user.** OpenCode
   imports every plugin into the process the DefenseClaw plugin runs in: the
   `{plugin,plugins}/*.{js,ts}` files and `{tool,tools}` custom tools of every
@@ -2385,7 +2416,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Behaviour | Design consequence |
 | --- | --- |
 | Any network policy update, even an unrelated rule, closes in-flight connections. So does the first settings poll, about 10 to 12 seconds after each sandbox start, and every global profile import. | Egress decisions live in the proxy, not in OpenShell rules. The policy renders deterministically. Profiles are imported once at setup; a create that must import one (a new `--credential` host, a new image's binaries) first tells the running sandboxes and waits, up to 30 seconds, until none has a hook in flight. The manager must start the harness only after the first settings poll (about 15 seconds) and batch rare policy updates for moments when no hook is in flight (`sandboxauth.InFlight`, `openshell.approvals.debounce_ms`, 3,000 ms by default). |
-| Any provider-profile change on the gateway, by any daemon, makes every running sandbox's supervisor report `Settings poll: config change detected [… policy_changed:false provider_env_changed:true]` within its next poll (measured: a `DeleteProviderProfile` from another daemon's sandbox delete, and an `ImportProviderProfiles` from another's create, each 5 to 12 seconds before), even for sandboxes that use none of the changed profiles. The supervisor then republishes its policy DNS mappings, which closes open connections ("policy generation is stale") and briefly denies new ones to the host alias. This is OpenShell's behaviour, not a DefenseClaw update. | The feed and the blocked counts leave out the connections such a reload closes and the denials of DefenseClaw's own ports, and a hook's mapping denial counts as a refusal only when no authenticated request follows it within 15 seconds. On a gateway shared by several daemons, expect these reloads whenever one of them creates or deletes a sandbox with its own credential or ingress profile. |
+| Any provider-profile change on the gateway, by any daemon, makes every running sandbox's supervisor report `Settings poll: config change detected [… policy_changed:false provider_env_changed:true]` within its next poll (measured: a `DeleteProviderProfile` from another daemon's sandbox delete, and an `ImportProviderProfiles` from another's create, each 5 to 12 seconds before), even for sandboxes that use none of the changed profiles. The supervisor then republishes its policy DNS mappings, which closes open connections ("policy generation is stale") and briefly denies new ones to the host alias. This is OpenShell's behaviour, not a DefenseClaw update. | The feed and the blocked counts leave out the connections such a reload closes and the denials of DefenseClaw's own ports, and a hook's mapping denial counts as a refusal only when nothing gets through within 15 seconds and no settings reload in the 45 seconds before it explains it. On a gateway shared by several daemons, expect these reloads whenever one of them creates or deletes a sandbox with its own credential or ingress profile. |
 | The relay drops about 0.3 to 0.7 percent of requests under concurrency, sometimes after the ingress acted. | Hooks retry once with an idempotency key, then fail closed; the ingress replays by key. |
 | `host.openshell.internal` reaches host `127.0.0.1` and the host sees a loopback client. | Separate sandbox listeners that trust credentials, never the source address. |
 | `protocol: tcp` alone on the proxy port is refused by the HTTP parser; `tcp` with `tls: skip` relays raw bytes. | The `defenseclaw_egress` rule uses `tcp` with `tls: skip`. |

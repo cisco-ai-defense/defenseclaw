@@ -420,7 +420,9 @@ the conversation is: typed on this machine it does not reach it, unless the
 shell wrapper is on
 (`sandbox enable`) for that command, which sends it into the folder's
 sandbox. DefenseClaw cannot keep that line off the screen, so its own line
-says so. To resume a particular conversation, pass the harness's own flag
+says so. After a session with no tool call it does not say the harness
+printed one: GitHub Copilot CLI, for one, prints its line only after a
+prompt. To resume a particular conversation, pass the harness's own flag
 and ID after `--`: `defenseclaw sandbox connect myapp-7f3a -- --resume <id>`.
 
 When you run interactively without `--name` and this folder already has a
@@ -605,6 +607,12 @@ goes after `--`.
 defenseclaw sandbox exec myapp-7f3a -- npm test
 defenseclaw sandbox exec fix-tests --no-tty -- git status --short
 ```
+
+What the command starts in the background keeps running after it exits.
+With a terminal, OpenShell keeps the exec open while such a process runs
+(a `nohup` server, say), for about 30 seconds, and then ends it with status
+74. DefenseClaw names the process as the command exits. Start a background
+server with `--no-tty` to get the prompt back at once.
 
 {/* AUTOGEN-BEGIN: sandbox-flags exec */}
 | Flag | Takes | Default | Description |

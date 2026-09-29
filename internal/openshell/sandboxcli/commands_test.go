@@ -744,6 +744,26 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	lacks(t, ta.output(), "applied 0 changes")
 }
 
+// An apply that had fewer paths to write than the pull changed says the
+// rest already matched the folder (retest RT-B-2: "3 files changed", then
+// "applied 2 changes" with nothing about the third, which an undo had left
+// on the host).
+func TestPullApplySaysWhatAlreadyMatched(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Changes: []workspace.TreeChange{
+		{Path: "README.md", Status: "M"}, {Path: "alpha.txt", Status: "A"}, {Path: "beta.txt", Status: "A"}}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyMerge, Applied: true,
+		Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}, {Path: "beta.txt", Status: "A"}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "applied 2 changes to ", "; 1 already matched your folder")
+	// Every path written: nothing more is said.
+	ta.out.Reset()
+	ta.copy.applied.Changes = append(ta.copy.applied.Changes, workspace.TreeChange{Path: "alpha.txt", Status: "A"})
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "applied 3 changes to ")
+	lacks(t, ta.output(), "already matched")
+}
+
 // A conflicted `pull --apply` exits 4 and says how to merge (manual test
 // L2: status 0 and no hint).
 func TestPullApplyConflictExitsWithItsOwnStatus(t *testing.T) {
@@ -870,6 +890,34 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 			if ta.IO.Out != io.Writer(ta.out) {
 				t.Fatal("stdout was not restored after the command")
 			}
+		})
+	}
+}
+
+// A pull with no mode that finds nothing to bring back says so, as --apply
+// does, instead of how to bring it back (retest RT-B-1: "bring it back with
+// --apply, --branch or --patch-out FILE" after "0 files changed … since the
+// last apply"). So does `review` of a copy-mode sandbox.
+func TestPullWithNothingToBringBackSaysSo(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		since   bool
+		preview bool
+		want    string
+	}{
+		{"since the last apply", true, false, "nothing new since the last apply to "},
+		{"nothing changed", false, false, "nothing to bring back"},
+		{"review since the last apply", true, true, "nothing new since the last apply to "},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "", copySandbox("copybox"))
+			ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+			if c.since {
+				ta.copy.pull.Since = strings.Repeat("d", 40)
+			}
+			ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", preview: c.preview}))
+			has(t, ta.output(), "copybox: 0 files changed", c.want)
+			lacks(t, ta.output(), "bring it back with", "nothing was applied")
 		})
 	}
 }

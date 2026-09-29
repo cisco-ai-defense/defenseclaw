@@ -599,6 +599,21 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	for _, b := range res.Blocking {
 		a.warn(b)
 	}
+	nothing := func() error {
+		if stdout == nil {
+			return nil
+		}
+		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
+	}
+	// With a mode or without: there is nothing to bring back either way.
+	if res.Empty() {
+		if res.Since != "" {
+			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
+		} else {
+			a.ok("nothing to bring back")
+		}
+		return nothing()
+	}
 	if modes == 0 {
 		switch {
 		case o.preview && res.Kind == workspace.CopyPlain:
@@ -611,20 +626,6 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			a.note("bring it back with --apply, --branch or --patch-out FILE")
 		}
 		return nil
-	}
-	nothing := func() error {
-		if stdout == nil {
-			return nil
-		}
-		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
-	}
-	if res.Empty() {
-		if res.Since != "" {
-			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
-		} else {
-			a.ok("nothing to bring back")
-		}
-		return nothing()
 	}
 	if res.Review.Sensitive() && !o.AcceptSensitive {
 		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
@@ -795,7 +796,13 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 	case applied.Mode == workspace.ApplyMerge && applied.UpToDate:
 		a.ok("nothing to apply: " + a.tildePath(sb.Project) + " already has these changes")
 	case applied.Mode == workspace.ApplyMerge:
-		a.ok(fmt.Sprintf("applied %s to %s", plural(int64(len(applied.Changes)), "change", "changes"), a.tildePath(sb.Project)))
+		line := fmt.Sprintf("applied %s to %s", plural(int64(len(applied.Changes)), "change", "changes"), a.tildePath(sb.Project))
+		if same := alreadyMatched(res.Changes, applied.Changes); same > 0 {
+			// The pull's count is against the copy's start; a path the
+			// folder already holds as the sandbox left it is not written.
+			line += fmt.Sprintf("; %d already matched your folder", same)
+		}
+		a.ok(line)
 		undo := "`" + CommandName + " undo " + sb.Name + "` reverts the apply"
 		if applied.PreApplyRef != "" {
 			a.note("your previous working tree is kept at " + applied.PreApplyRef + "; " + undo)
@@ -811,6 +818,23 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		a.warn(w)
 	}
 	return applied, nil
+}
+
+// alreadyMatched counts the pull's changed paths an apply did not write:
+// the folder already held them as the sandbox left them (an earlier
+// apply an undo did not take back, the same edit made on this machine).
+func alreadyMatched(pulled, written []workspace.TreeChange) int {
+	done := make(map[string]bool, len(written))
+	for _, c := range written {
+		done[c.Path] = true
+	}
+	n := 0
+	for _, c := range pulled {
+		if !done[c.Path] {
+			n++
+		}
+	}
+	return n
 }
 
 // findingLine renders a scanner finding like the flag lines above it:

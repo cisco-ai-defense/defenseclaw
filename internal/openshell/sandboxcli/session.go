@@ -100,6 +100,10 @@ type session struct {
 	hooksWarned bool
 	noHooks     bool
 	sawHooks    atomic.Bool
+	// hadTurn is set by the summary when the session made a tool call:
+	// the harness had a turn, so the resume line it prints as it exits is
+	// on the screen (Copilot CLI prints none without a prompt).
+	hadTurn bool
 
 	// notices are what the session announced while the harness owned the
 	// terminal (hooks.go), repeated in the summary.
@@ -887,7 +891,8 @@ var ownResumeHint = map[string]string{
 
 // continueHint names, last and not dimmed, the command that continues this
 // conversation inside the sandbox (a plain connect starts a new one), and
-// what the harness's own resume hint does.
+// what the harness's own resume hint does: the one it printed above after
+// a session with a turn, else one it may print.
 func (s *session) continueHint() {
 	if s.headless || s.shell || s.spec == nil || !s.sawHooks.Load() {
 		// No conversation to continue: no hook of the session reached
@@ -903,10 +908,15 @@ func (s *session) continueHint() {
 	line := "continue this conversation: " + CommandName + " connect " + s.sb.Name + " -- " + args
 	if own, ok := ownResumeHint[s.spec.Name]; ok {
 		wrapped := strings.Fields(own)[0] == s.spec.Command && a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name)
-		if wrapped {
+		switch {
+		case wrapped && s.hadTurn:
 			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed resumes it in this sandbox too: the shell wrapper is on)"
-		} else {
+		case wrapped:
+			line += " (a `" + own + " …` line of " + s.spec.DisplayName + " resumes it in this sandbox too: the shell wrapper is on)"
+		case s.hadTurn:
 			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed above works only inside the sandbox)"
+		default:
+			line += " (a `" + own + " …` line of " + s.spec.DisplayName + " works only inside the sandbox)"
 		}
 	}
 	a.line(a.style("→", ansiCyan, ansiBold) + " " + line)
@@ -973,6 +983,7 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
+	s.hadTurn = calls > 0
 	parts := []string{"Session ended"}
 	tools := plural(max(calls, 0), "tool call", "tool calls")
 	if restarted {

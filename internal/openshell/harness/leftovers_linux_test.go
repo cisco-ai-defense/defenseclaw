@@ -145,27 +145,48 @@ func TestLauncherEndsWhatTheHarnessLeftRunning(t *testing.T) {
 		}
 	})
 
-	t.Run("the sandbox exec wrapper keeps them", func(t *testing.T) {
-		dir := t.TempDir()
-		wrapper := filepath.Join(dir, "sandbox-env")
-		supervisor := filepath.Join(dir, "dc_supervisor.py")
-		if err := os.WriteFile(supervisor, shellFile(t, Codex, SupervisorPath).Data, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		script := strings.ReplaceAll(string(shellFile(t, Codex, SandboxEnvPath).Data), SupervisorPath, supervisor)
-		if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		stub := filepath.Join(dir, "stub")
-		if err := os.WriteFile(stub, []byte("#!/bin/bash\n( trap '' HUP; exec sleep 60 ) &\necho $! >\"${0%/*}/leftover\"\nexit 3\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		code, out := startPTY(t, dir, nil, wrapper, stub).wait()
-		if code != 3 || strings.Contains(out, "defenseclaw:") {
-			t.Fatalf("exit %d, want the stub's 3 and no notice:\n%s", code, out)
-		}
-		if pids := leftoverPIDs(t, dir, 1); !procAlive(pids[0]) {
-			t.Errorf("the command's leftover %d was ended", pids[0])
-		}
-	})
+	// It names what stays in the terminal's session, which holds
+	// OpenShell's --tty exec open for about 30 seconds and then ends it
+	// with status 74 and no word (retest H-RT-2: `sandbox exec --tty --
+	// bash -c 'nohup sleep 304 >/dev/null 2>&1 & exit'`). What the exit's
+	// SIGHUP ends is not named.
+	for _, tc := range []struct {
+		name, stub, notice string
+		kept               bool
+	}{
+		{"the sandbox exec wrapper keeps them", "( trap '' HUP; exec sleep 60 ) &", "left 1 process running in the sandbox: sleep 60. It keeps running", true},
+		{"a nohup'd command", "nohup sleep 61 >/dev/null 2>&1 &", "left 1 process running in the sandbox: sleep 61. It keeps running", true},
+		{"what the hangup ends", "sleep 62 &", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			wrapper := filepath.Join(dir, "sandbox-env")
+			supervisor := filepath.Join(dir, "dc_supervisor.py")
+			if err := os.WriteFile(supervisor, shellFile(t, Codex, SupervisorPath).Data, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			script := strings.ReplaceAll(string(shellFile(t, Codex, SandboxEnvPath).Data), SupervisorPath, supervisor)
+			if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			stub := filepath.Join(dir, "stub")
+			if err := os.WriteFile(stub, []byte("#!/bin/bash\n"+tc.stub+"\necho $! >\"${0%/*}/leftover\"\nexit 3\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			code, out := startPTY(t, dir, nil, wrapper, stub).wait()
+			if code != 3 {
+				t.Fatalf("exit %d, want the stub's 3:\n%s", code, out)
+			}
+			pids := leftoverPIDs(t, dir, 1)
+			if alive := procAlive(pids[0]); alive != tc.kept {
+				t.Errorf("the command's leftover %d running = %v, want %v", pids[0], alive, tc.kept)
+			}
+			switch {
+			case tc.notice == "" && strings.Contains(out, "defenseclaw:"):
+				t.Errorf("a notice for what the hangup ended:\n%s", out)
+			case tc.notice != "" && (!strings.Contains(out, "defenseclaw: the command "+tc.notice) || !strings.Contains(out, "(then status 74)")):
+				t.Errorf("the terminal does not name the kept process (%q):\n%s", tc.notice, out)
+			}
+		})
+	}
 }

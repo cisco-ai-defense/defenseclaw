@@ -446,6 +446,10 @@ type doctorRun struct {
 	// (processes).
 	procs     []process
 	procsDone bool
+	// started is when the running gateway started, once gatewayStartedAt
+	// has asked (startedDone).
+	started     time.Time
+	startedDone bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -1203,11 +1207,11 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		default:
 			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
-	case restartPending(st, r.service):
+	case restartPending(st, r.gatewayStartedAt(ctx)):
 		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
-		if r.service == nil || r.service.StartedAt.IsZero() {
-			// Homebrew reports no start time: DefenseClaw's mark says only
-			// that no restart of its own followed its change.
+		if r.gatewayStartedAt(ctx).IsZero() {
+			// No start time known: DefenseClaw's mark says only that no
+			// restart of its own followed its change.
 			mounts.Detail = "enabled in " + st.TOMLPath + "; restart the gateway if you have not since gateway.toml changed"
 		}
 	case unverified != nil && r.gateway != nil && r.gateway.Healthy:
@@ -1276,15 +1280,12 @@ func (r *doctorRun) bindMountSafety(ctx context.Context, st *GatewayConfigState,
 	return nil, nil
 }
 
-// restartPending reports configuration the running gateway has not
-// loaded: DefenseClaw's pending-restart mark from before the service last
-// started (or on Homebrew, which reports no start time), or a file changed
-// after the start. systemd reports the start to the microsecond.
-func restartPending(st *GatewayConfigState, svc *ServiceState) bool {
-	var started time.Time
-	if svc != nil {
-		started = svc.StartedAt
-	}
+// restartPending reports configuration the gateway that started at
+// started has not loaded: DefenseClaw's pending-restart mark from before
+// that start (or any mark when the start is unknown), or a file changed
+// after it. systemd reports the start to the microsecond, ps on a Mac to
+// the second (gatewayStartedAt).
+func restartPending(st *GatewayConfigState, started time.Time) bool {
 	if !st.RestartPendingSince.IsZero() && (started.IsZero() || !started.After(st.RestartPendingSince)) {
 		return true
 	}
@@ -1292,6 +1293,65 @@ func restartPending(st *GatewayConfigState, svc *ServiceState) bool {
 		return false
 	}
 	return st.TOMLModTime.Truncate(time.Microsecond).After(started) || st.EnvModTime.Truncate(time.Microsecond).After(started)
+}
+
+// gatewayStartedAt is when the running gateway started, to tell what
+// configuration it loaded: the service's start (systemd), else on a Mac the
+// start of the openshell-gateway process ps lists, which Homebrew's
+// service does not report and a gateway run another way has no service
+// for. It is zero when neither is known.
+func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
+	if r.service != nil && !r.service.StartedAt.IsZero() {
+		return r.service.StartedAt
+	}
+	if r.GOOS != "darwin" {
+		return time.Time{}
+	}
+	if r.startedDone {
+		return r.started
+	}
+	r.startedDone = true
+	gw := r.gatewayProcess(ctx)
+	if gw == nil {
+		return time.Time{}
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-o", "etime=", "-p", strconv.Itoa(gw.pid)}, Timeout: 10 * time.Second})
+	if err != nil {
+		return time.Time{}
+	}
+	up, ok := parseElapsed(strings.TrimSpace(string(out)))
+	if !ok {
+		return time.Time{}
+	}
+	// ps counts whole seconds: the start is taken a second early, so a
+	// mark written in the second the gateway started stays pending.
+	r.started = time.Now().Add(-up - time.Second)
+	return r.started
+}
+
+// parseElapsed reads ps's etime, "[[dd-]hh:]mm:ss".
+func parseElapsed(s string) (time.Duration, bool) {
+	var days int
+	if d, rest, ok := strings.Cut(s, "-"); ok {
+		n, err := strconv.Atoi(d)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		days, s = n, rest
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	total := 0
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || len(p) == 0 {
+			return 0, false
+		}
+		total = total*60 + n
+	}
+	return time.Duration(days)*24*time.Hour + time.Duration(total)*time.Second, true
 }
 
 func (c serviceCommand) String() string { return strings.Join(c.argv(), " ") }
