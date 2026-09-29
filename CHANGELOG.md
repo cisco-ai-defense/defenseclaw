@@ -91,11 +91,13 @@ rest also reach per-user installs.
 - **A command rule still blocks a write to a `~/` or `$HOME/` path.** A
   redirect target the shell expands (`> ~/out.txt`) made the parse partial,
   so a CRITICAL CEL match was only detected. CEL rules that cannot depend on
-  that redirect now see the command with a static target (built-ins: #925).
-- **A command rule blocks the first command of an `&&` or `||` list.** Any
-  list made the parse partial, so a CRITICAL CEL match was only detected.
-  CEL rules that cannot depend on the left-out commands now also see the
-  commands certain to run; later commands stay detection-only (#923).
+  that redirect now see the command with a static target. A built-in rule's
+  code check must hold with and without that target (#925).
+- **A command rule blocks every command of an `&&` or `||` list.** Any list
+  made the parse partial, so a rule that blocks `<cmd>` only detected
+  `cd <dir> && <cmd>` or `<cmd> || true`. A list is now judged as if all of
+  its commands run: if a rule blocks any of them, the whole tool call is
+  blocked (#923).
 - **Agents say that DefenseClaw policy made a block.** Rule verdicts reached
   the agent as `matched: <RULE-ID>:<redacted ...>`. They now say
   `DefenseClaw policy blocked this action (rule <RULE-ID>)` and not to retry
