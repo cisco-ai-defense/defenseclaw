@@ -175,15 +175,17 @@ reads the daemon's `/api/v1/sandbox` API every 5 seconds while the panel is
 open, and every 15 seconds in the background once sandboxes are on, and it
 follows the daemon's live activity feed. When a refresh fails, the panel keeps
 the last good snapshot and says how old it is, so a daemon restart does not
-look like "no sandboxes". Sandboxes run on Linux. On macOS the panel works,
-but no sandbox can start yet (see [macOS](/docs/setup/sandbox#macos)); on
-Windows the panel says sandboxes are not supported. The
+look like "no sandboxes". Sandboxes run on Linux, and on Apple-silicon Macs in
+OpenShell MicroVMs, where every run works on a copy (see
+[macOS](/docs/setup/sandbox#macos)); on Windows the panel says sandboxes are
+not supported. The
 [macOS app](/docs/macos-app#openshell-sandboxes) shows the same sandboxes in
 its menu bar, notifications and Sandboxes panel.
 
 The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
-`UNREACHABLE`), how many sandboxes run, how many asks wait, and your
-organization's policy when `openshell.admin` is set. `OFF` points to the
+`UNREACHABLE`), how many sandboxes run, how many asks wait, the gateway with
+its compute driver (`docker`, or `MicroVM` for OpenShell's `vm` driver), and
+your organization's policy when `openshell.admin` is set. `OFF` points to the
 [Sandbox wizard](#sandbox-wizard); `UNAVAILABLE` gives the daemon's reason and
 suggests `defenseclaw sandbox doctor`.
 
@@ -211,8 +213,9 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
 | `s` | Stop the sandbox (asks first); it is kept, so `c` resumes it |
 | `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
-| `U` | Undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot |
-| `R` | Review the changed files that can run code on your machine |
+| `U` | Undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
+| `R` | Review the changed files that can run code on your machine (a sandbox that mounts its folder) |
+| `P` | Pull the work of a sandbox that works on a copy: **Show what comes back** (`defenseclaw sandbox pull <name>`, which changes nothing), **Apply it to the project folder** (`--apply`, a 3-way merge that `U` reverts) or **Put it on branch** `dc/<name>` (`--branch`, which leaves your working tree alone). The command runs in this terminal: it shows the changes first and asks before it brings back a change that can run code on your machine. `p` still opens Policies |
 | `w` | Sandboxed by default: turn the shell wrapper on or off per harness (`defenseclaw sandbox enable` or `defenseclaw sandbox disable`) |
 | `r` | Refresh now |
 
@@ -222,8 +225,9 @@ block lists cannot be lifted here. When `openshell.admin.allow_unblock` is
 and what to do instead, and a host your `openshell.egress.unblocked` lists but
 the policy blocks again says "your saved unblock is off". The confirmations of
 delete, undo and the "always" choices start on **Cancel**. A sandbox that
-works on a copy has no undo or review; bring its work back with
-`defenseclaw sandbox pull <name>`.
+works on a copy has no review: `P` brings its work back, and `U` reverts the
+last apply. The KEYS line and the details window offer `P pull` in place of
+`R review` for such a sandbox.
 
 ### Alerts and notifications
 
@@ -263,7 +267,9 @@ could lift.
   folder that contains it, and top-level system folders are refused.
 - **Name** (optional), **Network profile** (the pack's, `open`, `balanced` or
   `strict`), **Work on a copy** (`--copy`) and **Keep the harness's own
-  permission prompts** (`--safe`).
+  permission prompts** (`--safe`). When the gateway runs OpenShell's MicroVM
+  driver, which mounts no host folders, **Work on a copy** is ticked and
+  locked, and the dialog says that pull (`P`) brings the changes back.
 
 `Ctrl+S` starts and `Esc` cancels. When another sandbox already mounts the
 folder live (stopped or not; a folder takes one live mount), the TUI asks
@@ -290,9 +296,9 @@ rather than a finished setup.
 | --- | --- | --- |
 | Harnesses (Claude Code, Codex, Amp, Antigravity, GitHub Copilot CLI, Cursor Agent, Devin CLI, Hermes Agent, Kiro CLI, OmniGent, OpenCode, OpenHands) | `--harness <name>` for each one on | The ones in `openshell.harnesses`, else Claude Code and Codex; only harnesses `openshell.admin.allowed_harnesses` allows are listed |
 | Credentials | none | Names the model key `defenseclaw sandbox run` would share with each harness, never its value: `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code; `OPENAI_API_KEY`, `CODEX_API_KEY` or the API key a `codex login --with-api-key` stored in `auth.json` (in `$CODEX_HOME`, else `~/.codex`) for Codex. A ChatGPT login is not shared, and neither is `AWS_BEARER_TOKEN_BEDROCK` unless you run with `--llm bedrock`, so neither is counted |
-| This machine | none | Docker, Landlock, OpenShell and bind-mount status, one per line, from a `sandbox doctor` check that runs when the form opens |
-| Install OpenShell | `--install-openshell` | On when OpenShell is missing or its gateway needs attention: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS |
-| Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy. Turning bind mounts on restarts the OpenShell gateway (see below) |
+| This machine | none | Docker, Landlock, OpenShell and bind-mount status, one per line, from a `sandbox doctor` check that runs when the form opens. When the gateway runs (or is set to run) OpenShell's MicroVM driver, Landlock reads `Landlock (MicroVM)`, and the MicroVM driver's own check (e2fsprogs, the driver's signature) takes the place of the bind-mount line |
+| Install OpenShell | `--install-openshell` | On when OpenShell is missing, its gateway needs attention, or the MicroVM driver's check fails: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS. On macOS it also lets setup install e2fsprogs, which the MicroVM driver needs |
+| Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw only ever mounts the folder you launch from. Off: every run works on a copy. Turning bind mounts on restarts the OpenShell gateway (see below). Not shown on macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no host folders, and the form says so under **MicroVMs** |
 | Disable OpenShell Telemetry | `--upstream-telemetry` when off | On. Changing it restarts the OpenShell gateway (see below). Not shown on macOS: the Homebrew gateway does not read `gateway.env`, so setup cannot turn OpenShell's telemetry off there |
 | Shell Wrappers | `--wrappers` or `--no-wrappers` | Off. On makes the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them |
 | Build Images Now | `--skip-images` when off | On. The first build downloads about 3 GB; off leaves it to the first run |

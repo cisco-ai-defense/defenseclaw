@@ -34,11 +34,13 @@ Monitoring, Notifications and Connection tabs.
 
 ## OpenShell sandboxes
 
-<Callout type="warn" title="Sandboxes cannot run on a Mac yet">
-OpenShell needs Landlock, and Docker Desktop's Linux VM kernel has none, so no
-sandbox can start on a Mac today (see [macOS](/docs/setup/sandbox#macos)). The
-Sandbox wizard's `doctor` action shows the check. The views below are in place
-for when this changes; macOS support is tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992).
+<Callout type="info" title="On a Mac, sandboxes are MicroVMs that work on a copy">
+Docker Desktop's Linux VM kernel has no Landlock, so on a Mac DefenseClaw runs
+sandboxes in OpenShell MicroVMs (OpenShell's `vm` driver: Apple silicon only,
+experimental upstream). A MicroVM mounts no host folders, so every run works
+on a copy of your project, and `defenseclaw sandbox pull <name>` brings the
+changes back (see [macOS](/docs/setup/sandbox#macos)). The status line names
+the gateway's driver: `(MicroVM)`, or `(docker)`.
 </Callout>
 
 When sandboxes are on (see the [sandbox guide](/docs/setup/sandbox)), the app
@@ -105,7 +107,9 @@ The panel has four parts:
 - **Sandboxes:** a table with Name, Phase, Harness, Pack/Profile, Mode, Up,
   Sites (contacted and blocked) and Alerts (hover for the list).
 - **The selected sandbox:** its harness, project, skip-permissions mode, tool
-  calls, last tool block, undo snapshot and alerts, with these actions:
+  calls, last tool block, undo, the run image when it has one (on a MicroVM
+  gateway, the image its harness settings are baked into) and alerts, with
+  these actions:
   - **Stop** stops it; `defenseclaw sandbox connect <name>` resumes it.
   - **Review changes** runs `defenseclaw sandbox review <name>`.
   - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
@@ -113,8 +117,18 @@ The panel has four parts:
     pre-session snapshot.
   - **Copy connect command** copies the resume command.
 
-  A sandbox that works on a copy has no review or undo here; bring its work
-  back with `defenseclaw sandbox pull <name>`.
+  A sandbox that works on a copy (every sandbox on a MicroVM gateway) has no
+  review. Instead:
+  - **Copy pull command** copies `defenseclaw sandbox pull <name>`. In
+    Terminal it shows the changes, and `--apply`, `--branch` or
+    `--patch-out FILE` brings them back.
+  - **Pull to branch** runs `defenseclaw sandbox pull <name> --branch`: the
+    work lands on branch `dc/<name>` and your working tree stays as it is. A
+    change that can run code on your Mac is not brought back this way; pull
+    it in Terminal, where it asks.
+  - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
+    which reverts the last `pull --apply`. Edits you made since stay; if one
+    changed the same files, nothing is reverted and Activity says why.
 - **Asks:** each waiting ask with **Approve**, **Always…** (asks first: every
   future sandbox may reach the destination too) and **Reject**.
 - **Activity:** the 60 newest events of the live feed. A blocked destination
@@ -136,14 +150,18 @@ are unavailable while the installation is read-only.
 `defenseclaw sandbox setup --non-interactive` plus the flags your answers
 choose. Its fields are the action (`setup`, or `doctor` to only check this
 machine), **Claude Code** and **Codex** (at least one; defaults follow
-`openshell.harnesses`), **Mount the project folder**, **Shell wrappers** and
-**Build images now**. There is no telemetry question: the Homebrew gateway
-does not read `gateway.env`, so setup cannot turn OpenShell's anonymous usage
-telemetry off on a Mac (see [sandbox setup](/docs/setup/sandbox)).
+`openshell.harnesses`), **Shell wrappers** and **Build images now**. There is
+no telemetry question: the Homebrew gateway does not read `gateway.env`, so
+setup cannot turn OpenShell's anonymous usage telemetry off on a Mac (see
+[sandbox setup](/docs/setup/sandbox)). Nor is there a mounts question: setup
+sets `compute_driver = "vm"` in the gateway's `gateway.toml`, restarts the
+gateway once, and every run works on a copy. The first run of each image
+prepares its MicroVM disk, which takes about a minute and 5 GB.
 
-The app never installs OpenShell. When OpenShell is missing, run this in
-Terminal first; it installs NVIDIA's `nvidia/openshell` Homebrew formula and
-starts its gateway with `brew services`:
+The app never installs OpenShell. When OpenShell or e2fsprogs (which the
+MicroVM driver formats its disks with) is missing, run this in Terminal first;
+it installs NVIDIA's `nvidia/openshell` Homebrew formula and e2fsprogs, and
+starts the gateway with `brew services`:
 
 ```bash
 defenseclaw sandbox setup --install-openshell
