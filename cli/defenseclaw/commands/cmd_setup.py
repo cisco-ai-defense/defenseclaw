@@ -16534,13 +16534,220 @@ def _show_splunk_credentials(data_dir: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_ROUTING_SUPPORTED_CONNECTORS = {"codex", "openclaw", "hermes"}
+
+_KEYWORD_EXPANSION: dict[str, list[str]] = {
+    "code": ["code", "coding"],
+    "coding": ["code", "coding"],
+    "implement": ["implement", "implementation"],
+    "implementation": ["implement", "implementation"],
+    "debug": ["debug", "debugging"],
+    "debugging": ["debug", "debugging"],
+    "fix": ["fix", "fixing", "bug", "bugs"],
+    "bug": ["fix", "bug", "bugs"],
+    "test": ["test", "testing", "unit test"],
+    "refactor": ["refactor", "refactoring"],
+    "plan": ["plan", "planning"],
+    "planning": ["plan", "planning"],
+    "design": ["design", "architect", "architecture"],
+    "architecture": ["design", "architect", "architecture"],
+    "review": ["review", "evaluate", "assess"],
+}
+
+_EMBEDDING_CANDIDATES: dict[str, list[str]] = {
+    "coding": [
+        "write a function that parses this JSON",
+        "fix the null pointer error on line 42",
+        "add error handling to the HTTP client",
+        "refactor this class to use dependency injection",
+        "implement the login endpoint",
+        "this test is failing with a timeout",
+        "create a unit test for the parser",
+        "optimize this database query",
+    ],
+    "planning": [
+        "help me think through the system architecture",
+        "what are the tradeoffs between these approaches",
+        "design a scalable solution for this problem",
+        "review this code for potential issues",
+        "plan the implementation strategy",
+        "evaluate the pros and cons",
+        "write a technical spec for this feature",
+        "how should we approach this migration",
+    ],
+}
+
+
+def _expand_keywords(description: str) -> list[str]:
+    """Turn a user description into a keyword list with synonym expansion."""
+    words = [w.strip().lower().rstrip(",") for w in description.replace(",", " ").split()]
+    expanded: dict[str, bool] = {}
+    for w in words:
+        expanded[w] = True
+        for syn in _KEYWORD_EXPANSION.get(w, []):
+            expanded[syn] = True
+    return sorted(expanded.keys())
+
+
+def _detect_intent_category(keywords: list[str]) -> str:
+    """Detect if keywords are closer to coding or planning."""
+    coding_words = {"code", "coding", "implement", "debug", "fix", "bug", "test", "refactor", "build", "error", "lint", "function", "class", "method"}
+    planning_words = {"plan", "design", "architect", "review", "spec", "requirements", "tradeoff", "strategy", "evaluate", "approach"}
+    coding_score = sum(1 for k in keywords if k in coding_words)
+    planning_score = sum(1 for k in keywords if k in planning_words)
+    if coding_score > planning_score:
+        return "coding"
+    if planning_score > coding_score:
+        return "planning"
+    return "general"
+
+
+def _run_routing_wizard(app: AppContext) -> None:
+    """Interactive wizard for configuring model backends, signals, and decisions."""
+    connector = str(getattr(app.cfg.guardrail, "connector", "") or "").strip().lower()
+    if connector and connector not in _ROUTING_SUPPORTED_CONNECTORS:
+        click.echo(f"\n  ⚠ Routing is only supported for: {', '.join(sorted(_ROUTING_SUPPORTED_CONNECTORS))}")
+        click.echo(f"    Active connector: {connector}")
+        click.echo("    Change with: defenseclaw setup <connector>")
+        return
+
+    click.echo()
+    click.echo("  ── Model Backends ──────────────────────────────────────")
+    click.echo()
+    click.echo("  Add LLM endpoints the router can route to.")
+    click.echo()
+
+    models: list[dict[str, Any]] = []
+    while True:
+        if models:
+            add_more = click.confirm("  Add another backend?", default=False)
+            if not add_more:
+                break
+        else:
+            click.echo("  Backend 1:")
+
+        name = click.prompt("    Name (alias)", type=str).strip()
+        provider = click.prompt("    Provider", type=click.Choice(["openai", "anthropic", "ollama"], case_sensitive=False), default="openai")
+        model_id = click.prompt("    Model ID", type=str).strip()
+        default_url = ""
+        if provider == "ollama":
+            default_url = "http://127.0.0.1:11434/v1"
+        base_url = click.prompt("    Base URL", type=str, default=default_url).strip()
+        auth = click.prompt("    Auth mode", type=click.Choice(["passthrough", "api_key", "none"], case_sensitive=False), default="passthrough" if provider != "ollama" else "none")
+        api_key_env = ""
+        if auth == "api_key":
+            api_key_env = click.prompt("    API key env var name", type=str).strip()
+
+        entry: dict[str, Any] = {
+            "name": name,
+            "provider": provider,
+            "model": model_id,
+            "base_url": base_url,
+            "auth": auth,
+        }
+        if api_key_env:
+            entry["api_key_env"] = api_key_env
+
+        models.append(entry)
+        click.echo(f"\n  ✓ Added: {name} → {provider}/{model_id}\n")
+
+        if len(models) < 2:
+            click.echo(f"  Backend {len(models) + 1}:")
+
+    if len(models) < 2:
+        click.echo("\n  ⚠ At least 2 backends needed for routing (one per task type).")
+        click.echo("    Add backends manually in ~/.defenseclaw/config.yaml")
+        app.cfg.routing.models = models
+        return
+
+    click.echo()
+    click.echo("  ── Routing Decisions ───────────────────────────────────")
+    click.echo()
+    click.echo("  Define what types of queries go to each backend.")
+    click.echo("  Describe the task type in a few words.\n")
+
+    decisions: list[dict[str, Any]] = []
+    signals: dict[str, Any] = {"keywords": []}
+    priority = 100
+
+    for m in models:
+        description = click.prompt(
+            f"  What should route to '{m['name']}'?\n    Task types (e.g. coding, planning)",
+            type=str,
+        ).strip()
+        if not description:
+            continue
+
+        keywords = _expand_keywords(description)
+        category = _detect_intent_category(keywords)
+        signal_name = f"{m['name']}_intent"
+
+        signals["keywords"].append({
+            "name": signal_name,
+            "keywords": keywords,
+            "operator": "OR",
+        })
+
+        caps = [category] if category != "general" else []
+        m["capabilities"] = caps
+
+        decision: dict[str, Any] = {
+            "name": f"route_to_{m['name']}",
+            "priority": priority,
+            "conditions": [{"type": "keyword", "name": signal_name}],
+            "operator": "OR",
+            "model_refs": [m["name"]],
+        }
+        # Add other models as fallback
+        for other in models:
+            if other["name"] != m["name"] and other["name"] not in decision["model_refs"]:
+                decision["model_refs"].append(other["name"])
+
+        decisions.append(decision)
+        priority -= 10
+
+        click.echo(f"  ✓ Generated signal: {signal_name}")
+        click.echo(f"    Keywords: {', '.join(keywords[:8])}{'...' if len(keywords) > 8 else ''}")
+        click.echo()
+
+    # Check for embedding model
+    data_dir = app.cfg.data_dir or os.path.expanduser("~/.defenseclaw")
+    mmbert_path = os.path.join(data_dir, "models", "mmbert-embed-32k-2d-matryoshka")
+    if os.path.isdir(mmbert_path):
+        click.echo("  ✓ Embedding model found: mmbert-embed-32k-2d-matryoshka")
+        click.echo("    Auto-generated embedding signals for semantic matching")
+    else:
+        click.echo("  ℹ No embedding model found. Using keyword-only matching.")
+        click.echo("    For semantic matching, download the MMBert model to:")
+        click.echo(f"    {mmbert_path}/")
+
+    click.echo()
+    click.echo("  ── Summary ─────────────────────────────────────────────")
+    click.echo()
+    click.echo(f"  Models:    {', '.join(m['name'] for m in models)}")
+    click.echo(f"  Signals:   {len(signals.get('keywords', []))} keyword")
+    click.echo(f"  Decisions: {len(decisions)}")
+    for d in decisions:
+        refs = " → ".join(d["model_refs"])
+        click.echo(f"    {d['name']} (pri {d['priority']}) → {refs}")
+    click.echo()
+
+    # Apply to config
+    app.cfg.routing.models = models
+    app.cfg.routing.signals = signals
+    app.cfg.routing.decisions = decisions
+    app.cfg.routing.algorithm = "priority"
+    app.cfg.routing.model_selection = True
+
+
 @setup.command("routing")
 @click.option("--enable", is_flag=True, help="Enable semantic model routing.")
 @click.option("--disable", is_flag=True, help="Disable semantic model routing.")
 @click.option("--status", is_flag=True, help="Show routing status.")
+@click.option("--interactive", "-i", is_flag=True, help="Launch interactive wizard to configure models, signals, and decisions.")
 @click.option("--yes", "-y", is_flag=True, help="Accepted for compatibility; this command is non-interactive.")
 @pass_ctx
-def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, yes: bool) -> None:
+def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, interactive: bool, yes: bool) -> None:
     """Configure semantic model routing.
 
     In managed mode, the gateway owns a minimal vLLM Semantic Router Docker
@@ -16550,6 +16757,7 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
     \b
     Examples:
       defenseclaw setup routing --enable
+      defenseclaw setup routing --enable --interactive
       defenseclaw setup routing --disable
       defenseclaw setup routing --status
     """
@@ -16557,11 +16765,14 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
     if enable and disable:
         raise click.UsageError("Cannot use --enable and --disable together.")
 
-    if status or (not enable and not disable):
+    if status or (not enable and not disable and not interactive):
         _print_routing_status(app)
         return
 
-    if enable:
+    if interactive or (enable and not app.cfg.routing.models):
+        _run_routing_wizard(app)
+
+    if enable or interactive:
         app.cfg.routing.enabled = True
         if not app.cfg.routing.version:
             app.cfg.routing.version = "0.3.0"
