@@ -17,8 +17,9 @@ Antigravity). Only these files may still name them:
 * the old Desktop connector: the two legacy-migration modules and their tests,
   and the two native Windows install-state compatibility lists, which let Setup
   and the uninstaller read state written by pre-release builds;
-* both connectors: ``CHANGELOG.md`` and the "Renamed and removed connectors"
-  section of the upgrade guide.
+* both connectors: ``CHANGELOG.md``, the "Renamed and removed connectors"
+  section of the upgrade guide, and the enterprise manual test plan, whose
+  migration rows configure the retired ids.
 
 ``openwiki/`` is generated and excluded. This test is scanned like any other
 file, so it builds every retired name from fragments (and the old Desktop
@@ -89,7 +90,7 @@ DESKTOP_ONLY_FILES = frozenset(
     }
 )
 # Files that may name either retired connector.
-UNRESTRICTED_FILES = frozenset({"CHANGELOG.md"})
+UNRESTRICTED_FILES = frozenset({"CHANGELOG.md", "docs/ENTERPRISE-TEST-PLAN.md"})
 UPGRADE_GUIDE = "docs-site/content/docs/get-started/upgrade.mdx"
 UPGRADE_SECTION = "## Renamed and removed connectors"
 EXCLUDED_PREFIXES = ("openwiki/",)
