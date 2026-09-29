@@ -1623,13 +1623,14 @@ func (c *hookOnlyConnector) managedPluginArtifactDrift(opts SetupOpts) (string, 
 
 // ManagedPluginArtifactDrift compares conn's managed in-agent plugin (Amp,
 // OpenCode) with the bytes Setup renders for opts, and returns the plugin
-// path when the installed file is missing or differs. The standalone Unix
-// guardian relies on it rather than on the ownership markers or the
-// recorded digests (the contract lock and the custody receipt): the user
-// can edit the plugin and those digests together, and the agent runs every
-// line of the plugin. It returns "" for a connector without a managed
-// plugin. The file is read with the caller's credentials, bounded and
-// without following a link.
+// path when the installed file is missing or differs. The standalone
+// guardian (Linux, macOS and Windows) relies on it rather than on the
+// ownership markers or the recorded digests (the contract lock and the
+// custody receipt): the user can edit the plugin and those digests together,
+// a package upgrade leaves the previous release's plugin with both intact,
+// and the agent runs every line of the plugin. It returns "" for a
+// connector without a managed plugin. The file is read with the caller's
+// credentials, bounded and without following a link.
 func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) {
 	plugin, ok := conn.(interface {
 		managedPluginArtifactDrift(SetupOpts) (string, error)

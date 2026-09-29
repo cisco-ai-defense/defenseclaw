@@ -1172,6 +1172,17 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	if !present {
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
 	}
+	// A standalone per-user plugin (Amp, OpenCode) is code the agent runs.
+	// After a package upgrade it still carries its ownership markers and the
+	// digest recorded at its last write, so it is also compared with this
+	// release's render and reinstalled when it differs.
+	if windowsEnterpriseStandaloneProcess() && windowsStandaloneInAgentPluginConnector(target.conn.Name()) {
+		if path, err := connector.ManagedPluginArtifactDrift(target.conn, target.setup); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", target.conn.Name(), path, err)
+		} else if path != "" {
+			return fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", target.conn.Name(), path)
+		}
+	}
 	if err := connector.ValidateManagedHookRuntimeState(target.dataDir, target.conn.Name(), target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s runtime sidecars are invalid: %w", target.conn.Name(), err)
 	}
