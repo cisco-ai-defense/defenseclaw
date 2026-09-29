@@ -12,6 +12,19 @@ import (
 	"strings"
 )
 
+// kiroV3MatchAllTools is the .kiro/hooks matcher for every tool. Kiro's v3
+// agent engine (kiro-cli --v3, whose agent server is @kiro/agent 0.66.8 in
+// kiro-cli 2.24.1) and Kiro IDE 1.1.14 compile a hook's matcher with
+// JavaScript's RegExp and test the tool name unanchored, so ".*" matches
+// every tool (execute_bash, fs_write, read_file, ...). Measured live on
+// kiro-cli 2.24.1 --v3: PreToolUse and PostToolUse hooks with ".*" or with
+// no matcher fire for every tool call; "*", the CLI 2.x glob
+// (kiroV2MatchAllTools), is not a valid regular expression, so Kiro logs
+// "Hook matcher regex failed to compile" and the hook never fires. The two
+// configs therefore keep different matchers. The CLI 2.x engine does not
+// read .kiro/hooks at all.
+const kiroV3MatchAllTools = ".*"
+
 var kiroV3HookSpecs = []struct {
 	name        string
 	description string
@@ -19,8 +32,8 @@ var kiroV3HookSpecs = []struct {
 	matcher     string
 }{
 	{"defenseclaw-user-prompt", "DefenseClaw prompt inspection", "UserPromptSubmit", ""},
-	{"defenseclaw-pre-tool", "DefenseClaw tool-use inspection", "PreToolUse", ".*"},
-	{"defenseclaw-post-tool", "DefenseClaw tool-use audit", "PostToolUse", ".*"},
+	{"defenseclaw-pre-tool", "DefenseClaw tool-use inspection", "PreToolUse", kiroV3MatchAllTools},
+	{"defenseclaw-post-tool", "DefenseClaw tool-use audit", "PostToolUse", kiroV3MatchAllTools},
 	{"defenseclaw-stop", "DefenseClaw session stop", "Stop", ""},
 }
 
@@ -31,7 +44,12 @@ var kiroV3HookSpecs = []struct {
 // postToolUse hooks never ran, so no tool call was checked. The prompt and
 // stop triggers ignore the matcher. Setup replaces DefenseClaw's own entries
 // on every run, so the first gateway start after an upgrade rewrites an old
-// agent file.
+// agent file. kiro-cli --v3 also runs the selected agent's hooks, but reads
+// their matchers as regular expressions (kiroV3MatchAllTools): measured on
+// 2.24.1, these "*" entries do not fire there for tools or at the end of a
+// turn, so each of those events reaches DefenseClaw once, through
+// .kiro/hooks; the agent's userPromptSubmit entry still fires under --v3,
+// so a v3 prompt is checked twice (once per config).
 const kiroV2MatchAllTools = "*"
 
 var kiroV2HookSpecs = []struct {

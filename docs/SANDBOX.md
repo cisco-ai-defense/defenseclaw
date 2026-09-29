@@ -2068,9 +2068,18 @@ These were measured on the pinned releases inside the community base image
   read-only directory, and the launcher refuses to start when the agent is
   missing. The launcher pins `HOME` and drops every `KIRO_*`, `Q_*`,
   `AMAZON_Q_*`, `ASBX_KIRO_*` and `KAS_*` variable except `KIRO_API_KEY` and
-  `KIRO_MOCK_CHAT_RESPONSE`. `--v3` and `--agent-engine` select a different
-  engine that was not measured, and `--cloud` runs the session in a remote
-  sandbox; the launcher pins `--v2` and refuses those switches.
+  `KIRO_MOCK_CHAT_RESPONSE`. `--v3` and `--agent-engine` select Kiro's v3
+  engine and `--cloud` runs the session in a remote sandbox; the launcher
+  pins `--v2` and refuses those switches. Measured on a host (#953, kiro-cli
+  2.24.1 `--v3` against a loopback model stand-in): the v3 engine runs the
+  selected agent's hooks and those of `.kiro/hooks` files in the project and
+  in `~/.kiro/hooks`, reads a matcher as a regular expression, so the
+  agent's `*` tool hooks never fire there, sends PascalCase event names and
+  calls the shell tool `execute_bash`, and fires `PostToolUse` also for a
+  call the user refused at its permission prompt. Running v3 in a sandbox
+  would need agent entries that match under both engines (no matcher does),
+  the v3 event names in the hook contract and the tamper pairing, and the
+  v3 agent server in the image.
   The image settings select the DefenseClaw agent by default and set
   `telemetry.enabled false`, `app.disableAutoupdates true`,
   `chat.greeting.enabled false` and `chat.disableTrustAllConfirmation true`

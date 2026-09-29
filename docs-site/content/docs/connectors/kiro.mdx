@@ -21,6 +21,15 @@ rewrites DefenseClaw's entries the first time it starts after an upgrade, and
 `defenseclaw setup kiro` rewrites them too. Hook entries you added yourself
 are not changed.
 
+The `.kiro/hooks` file keeps the matcher `.*` on purpose. Kiro IDE and the
+v3 engine of `kiro-cli --v3` read a matcher as a regular expression, so `.*`
+matches every tool there, and `*` is not a valid regular expression: a hook
+with it never runs. Measured on kiro-cli 2.24.1: with `--v3`, the
+`PreToolUse` and `PostToolUse` hooks with `.*` (or with no matcher) fire for
+every tool call, and the agent's `*` tool hooks do not, so each tool call
+reaches DefenseClaw once. Bare `kiro-cli` (the 2.x engine) does not read
+`.kiro/hooks` at all.
+
 ## What each surface can veto
 
 In action mode DefenseClaw vetoes wherever Kiro honors the veto, and records a

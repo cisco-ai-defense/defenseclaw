@@ -9,12 +9,61 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf16"
 )
+
+// The two Kiro hook configs need different "every tool" matchers (measured
+// live on kiro-cli 2.24.1): the CLI 2.x engine reads an agent hook's matcher
+// as a glob, the v3 engine (kiro-cli --v3, and Kiro IDE) reads a .kiro/hooks
+// matcher as a regular expression tested unanchored against the tool name.
+// Swapping them silences every tool hook of that engine (#953).
+func TestKiroMatchersFollowEachEngine(t *testing.T) {
+	tools := []string{"shell", "execute_bash", "fs_write", "fs_read", "read_file", "str_replace", "use_aws"}
+	re, err := regexp.Compile(kiroV3MatchAllTools)
+	if err != nil {
+		t.Fatalf("v3 matcher %q is not a regular expression: %v", kiroV3MatchAllTools, err)
+	}
+	for _, tool := range tools {
+		if !re.MatchString(tool) {
+			t.Errorf("v3 matcher %q does not match %s", kiroV3MatchAllTools, tool)
+		}
+		if ok, err := path.Match(kiroV2MatchAllTools, tool); err != nil || !ok {
+			t.Errorf("CLI 2.x glob %q does not match %s", kiroV2MatchAllTools, tool)
+		}
+		// "." is literal in a glob: the matcher earlier releases wrote into
+		// the agent ran no CLI 2.x tool hook.
+		if ok, _ := path.Match(kiroV3MatchAllTools, tool); ok {
+			t.Errorf("the regular expression %q matched %s as a glob", kiroV3MatchAllTools, tool)
+		}
+	}
+	// Kiro's v3 engine drops a hook whose matcher does not compile.
+	if _, err := regexp.Compile(kiroV2MatchAllTools); err == nil {
+		t.Errorf("the CLI 2.x glob %q compiles as a regular expression; the v3 engine would run it", kiroV2MatchAllTools)
+	}
+	for _, spec := range kiroV3HookSpecs {
+		switch spec.trigger {
+		case "PreToolUse", "PostToolUse":
+			if spec.matcher != kiroV3MatchAllTools {
+				t.Errorf("v3 %s matcher = %q, want %q", spec.trigger, spec.matcher, kiroV3MatchAllTools)
+			}
+		default:
+			if spec.matcher != "" {
+				t.Errorf("v3 %s has matcher %q; Kiro ignores it there", spec.trigger, spec.matcher)
+			}
+		}
+	}
+	for _, spec := range kiroV2HookSpecs {
+		if spec.matcher != kiroV2MatchAllTools {
+			t.Errorf("CLI 2.x %s matcher = %q, want %q", spec.event, spec.matcher, kiroV2MatchAllTools)
+		}
+	}
+}
 
 func TestKiroSetupWritesV3AndDefaultAgentHooks(t *testing.T) {
 	home := t.TempDir()
@@ -313,6 +362,10 @@ func assertKiroV3Hooks(t *testing.T, path, script string) {
 		}
 		if obj["enabled"] != true {
 			t.Fatalf("%s hook %s is not enabled", path, name)
+		}
+		// Kiro's v3 engine reads the matcher as a regular expression.
+		if trigger, _ := obj["trigger"].(string); (trigger == "PreToolUse" || trigger == "PostToolUse") && obj["matcher"] != kiroV3MatchAllTools {
+			t.Fatalf("%s hook %s matcher = %#v, want the regular expression %q", path, name, obj["matcher"], kiroV3MatchAllTools)
 		}
 		seen[name] = true
 	}
