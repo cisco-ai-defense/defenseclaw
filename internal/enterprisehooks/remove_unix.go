@@ -132,6 +132,17 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) error {
 	if rel, err := filepath.Rel(home, dataDir); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not inside the user home %s", dataDir, home)
 	}
+	// The purge deletes everything in the folder, so only DefenseClaw's own
+	// folder, and never through a link, which would name the user's files.
+	if filepath.Base(dataDir) != ".defenseclaw" {
+		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not a .defenseclaw folder", dataDir)
+	}
+	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err := validateUserDataDir(home, dataDir, uid); err != nil {
+		return err
+	}
 	reg := opts.Registry
 	if reg == nil {
 		reg = connector.NewDefaultRegistry()
