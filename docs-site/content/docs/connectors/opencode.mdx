@@ -267,7 +267,11 @@ replaces that list, so name every harness you want:
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
   and Codex sandboxes only.
 - **Image and verification.** The image installs OpenCode 1.18.31, replacing
-  the base image's OpenCode 1.2.18, which no hook contract covers. Verified
+  the base image's OpenCode 1.2.18, which no hook contract covers. It also
+  records OpenCode's plugin package, `@opencode-ai/plugin`, as installed in
+  `~/.config/opencode`, so a new sandbox does not download it (about 20 MiB
+  from registry.npmjs.org) at every start; nothing in the sandbox imports
+  it, since the launcher refuses every plugin but DefenseClaw's. Verified
   end to end: against a mock model the plugin's hooks reached DefenseClaw and
   a blocked tool call had no effect, also with `plugin: []` in user and
   project config, and the launcher refused planted plugins. In a live sandbox

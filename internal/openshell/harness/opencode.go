@@ -85,6 +85,9 @@ var OpenCode = register(&Spec{
 		return []InstallStep{{
 			Comment: "Replace the base image's OpenCode with the pinned " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
 			Run:     run + "; " + check,
+		}, {
+			Comment: "Record OpenCode " + version + "'s plugin package as installed in the image HOME's config directory, so a new sandbox does not download it at every start",
+			Run:     openCodePluginRecordRun(OpenCodeGlobalConfigDir, version),
 		}}, nil
 	},
 	launcher: openCodeLauncher,
@@ -137,6 +140,35 @@ var OpenCode = register(&Spec{
 
 // OpenCodeLauncherPath is the in-image OpenCode launcher.
 const OpenCodeLauncherPath = LauncherDir + "/opencode-launch"
+
+// OpenCodeGlobalConfigDir is OpenCode's global config directory in the
+// image HOME (the sandbox sets no XDG_CONFIG_HOME).
+const OpenCodeGlobalConfigDir = connector.SandboxHomeDir + "/.config/opencode"
+
+// openCodePluginRecordRun records OpenCode's plugin package,
+// @opencode-ai/plugin at version, as installed in the config directory dir.
+//
+// At every start OpenCode 1.18.31 installs that package into each writable
+// config directory, in the background (Npm.install): about 29 packages and
+// 20 MiB from registry.npmjs.org into ~/.config/opencode for every new
+// sandbox, outside the pinned image. It skips the install when the
+// directory has a node_modules and its package-lock.json lists, in the root
+// package, every package.json dependency and @opencode-ai/plugin (it
+// compares names, not versions or files). Nothing in the sandbox imports the
+// package: the DefenseClaw plugin imports only node: builtins, and the
+// launcher refuses every other plugin and custom tool, the code that would.
+// So the image writes that record and an empty node_modules, pinned to the
+// harness version, rather than the packages. HOME's final chown makes them
+// the workload's, like the rest of HOME: removing them only brings back
+// OpenCode's own install.
+func openCodePluginRecordRun(dir, version string) string {
+	deps := `{"@opencode-ai/plugin":"` + version + `"}`
+	pkg := `{"dependencies":` + deps + `}`
+	lock := `{"name":"opencode","lockfileVersion":3,"requires":true,"packages":{"":{"dependencies":` + deps + `}}}`
+	return `set -eu; d=` + shellQuote(dir) + `; install -d -m 0755 "$d/node_modules"; ` +
+		`printf '%s\n' ` + shellQuote(pkg) + ` >"$d/package.json"; ` +
+		`printf '%s\n' ` + shellQuote(lock) + ` >"$d/package-lock.json"`
+}
 
 // openCodeBundledProviderSDKs are the provider SDK packages OpenCode 1.18.31
 // ships inside its executable. A provider (in config or the model catalog)

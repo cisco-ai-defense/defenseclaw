@@ -1285,7 +1285,16 @@ modes and owners are set in the tar headers) and streams it to
    integrity, and its native executable must match a pinned sha256 per
    architecture. Binaries move to root-owned
    `/opt/defenseclaw-harness/<harness>`, so a native installer's copy under
-   `$HOME` never becomes the pinned binary.
+   `$HOME` never becomes the pinned binary. The OpenCode image also records
+   `@opencode-ai/plugin` at the pinned version as installed in
+   `/sandbox/.config/opencode` (`package.json`, a `package-lock.json` whose
+   root package lists it, and an empty `node_modules`): OpenCode 1.18.31
+   installs that package, about 29 packages and 20 MiB from
+   registry.npmjs.org, into each writable config directory at every start
+   unless the lock lists it (it compares names only), and nothing in the
+   sandbox imports it, since the launcher refuses every other plugin and
+   custom tool. Measured with the pinned binary: the record stops the
+   registry request.
 3. Copies DefenseClaw's files root-owned and read-only under
    `/usr/local/lib/defenseclaw` (hooks in `hooks/`, launchers in `bin/`),
    the harness's managed configuration, and the user-owned first-run files

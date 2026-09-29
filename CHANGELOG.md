@@ -344,6 +344,11 @@ deleted.
 - An interactive OpenCode session's banner has a `Keys` line: Esc
   interrupts a turn, and Ctrl-C (OpenCode's quit key, also mid-turn) ends
   the session.
+- A new OpenCode sandbox no longer downloads `@opencode-ai/plugin` and its
+  dependencies (about 20 MiB from registry.npmjs.org) at start: the image
+  records the pinned version as installed in `~/.config/opencode`, which
+  OpenCode's install check accepts. Both drivers; the OpenCode image
+  rebuilds.
 
 ### Legacy OpenShell standalone sandbox removed
 
