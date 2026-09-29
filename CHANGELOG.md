@@ -93,6 +93,18 @@ rest also reach per-user installs.
   including Galileo. Other hook decisions, such as a blocked prompt, and the
   `/api/v1/inspect/*` routes produce an `apply_guardrail` span with the same
   status, event and attributes; that span no longer reports `OK` for a block.
+- **Local observability dashboards show the findings and blocks that
+  happened.** The Findings tiles, top rule and per-rule activity panel count
+  `finding.observed` records in Loki, because a Prometheus counter misses a
+  rule's first finding; the per-rule panel no longer fails with
+  `Cannot read properties of undefined (reading 'config')` on an empty
+  range, and the top rule and top target tiles show the name instead of
+  `Value #A`. The Blocked events **Hook surface** filter lists the hook
+  surfaces the panels filter on, the recent guardrail event panels include
+  `hook_decision` records, Agent360 opens on one agent instead of an **All**
+  that matched nothing once two agents existed, and the AI runtime tiles and
+  discovery error rate show data. The local observability guide explains
+  when to set `observability.metric_policy.temporality: cumulative`.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
