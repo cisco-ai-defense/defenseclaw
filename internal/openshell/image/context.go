@@ -311,11 +311,14 @@ func NewContext(spec BuildSpec) (*Context, error) {
 // that answers localhost with SERVFAIL, so every program that resolved
 // localhost failed there: Antigravity CLI would not start. nss-myhostname
 // (Ubuntu's libnss-myhostname) answers localhost, localhost.localdomain,
-// *.localhost and the hostname with loopback addresses, and _gateway and
-// _outbound with the default route's, which a MicroVM has none of (only
-// its loopback is configured); it does no network I/O. It is asked after
-// /etc/hosts and before DNS, so a localhost query never leaves the
-// sandbox. Go programs linked with cgo hand these names to libc when
+// *.localhost and the hostname with loopback addresses, and it does no
+// network I/O. It would answer _gateway and _outbound with the default
+// route's, which a MicroVM has none of (only its loopback is configured),
+// so those names go on to the relay, which answers every name but
+// localhost, even a nonexistent one, with a synthetic 198.18.x.x address;
+// the egress proxy refuses a connection to _gateway's as an invalid
+// destination. It is asked after /etc/hosts and before DNS, so a
+// localhost query never leaves the sandbox. Go programs linked with cgo hand these names to libc when
 // nsswitch.conf names myhostname; Go's own resolver and static musl
 // programs read /etc/hosts and DNS themselves and still cannot resolve
 // localhost in a MicroVM, which the hook-fire probe's MicroVM scenario
