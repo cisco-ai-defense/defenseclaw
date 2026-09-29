@@ -516,6 +516,8 @@ type fakeImages struct {
 	removed []string
 	// missing are harnesses whose image is not built yet (Current).
 	missing map[string]bool
+	// gone are the recorded tags Docker no longer has (Gone).
+	gone map[string]bool
 	// pruned are the options of each Prune; pruneReport, when set, is its
 	// answer.
 	pruned      []image.PruneOptions
@@ -541,6 +543,18 @@ func (f *fakeImages) List() ([]image.Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]image.Record(nil), f.recs...), nil
+}
+
+func (f *fakeImages) Gone(_ context.Context, recs []image.Record) (map[string]bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]bool{}
+	for _, r := range recs {
+		if f.gone[r.Tag] {
+			out[r.Tag] = true
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeImages) Prune(_ context.Context, opts image.PruneOptions) (image.PruneReport, error) {

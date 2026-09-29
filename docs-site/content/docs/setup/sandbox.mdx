@@ -1249,7 +1249,9 @@ The command exits 1 when a check fails. With `--json` it prints the report
 as JSON and always exits 0; the report's `ok` field says whether every check
 passed, and `ready` says that sandboxes are also turned on. While
 `openshell.enabled` is false the last line reads **not ready for sandboxes
-yet** instead. The image check skips harnesses your organization or the
+yet** instead. The image check warns about a configured harness whose image
+is not built, lists every other harness image built for you too, and counts
+no image Docker no longer has. It skips harnesses your organization or the
 pack doesn't allow, and says so.
 
 `defenseclaw doctor` shows the same checks as rows in its **Sandbox**

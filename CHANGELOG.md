@@ -341,6 +341,12 @@ deleted.
   that it does not start at login) and that DefenseClaw cannot restart it.
   The doctor's disk line counts only the MicroVM disks prepared from images,
   not the driver's overlay templates and bootstrap rootfs.
+- On every driver, a harness image removed from Docker (`docker rmi`) no
+  longer shows as built and hook-verified: `sandbox image list` names it
+  apart from the table (`"missing": true` in JSON), `image prune` says it
+  forgets its record, and the doctor's image check does not count it. That
+  check also lists every harness image built for you, not only the
+  configured harnesses'.
 
 ### Legacy OpenShell standalone sandbox removed
 

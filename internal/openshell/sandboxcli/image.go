@@ -44,6 +44,8 @@ type ImageService interface {
 	// daemon uses it without building).
 	Current(spec *harness.Spec) (bool, error)
 	List() ([]image.Record, error)
+	// Gone returns the tags of recs Docker no longer has (image.Builder.Gone).
+	Gone(ctx context.Context, recs []image.Record) (map[string]bool, error)
 	// Prune removes superseded images (image.Builder.Prune).
 	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
 	// Remove deletes every image this data dir built or named: its overlay
@@ -100,6 +102,11 @@ func (b *builderImages) Current(h *harness.Spec) (bool, error) {
 }
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }
+
+func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[string]bool, error) {
+	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	return builder.Gone(ctx, recs)
+}
 
 func (b *builderImages) Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
@@ -281,33 +288,63 @@ func (a *App) harnesses(names []string) ([]*harness.Spec, error) {
 	return out, nil
 }
 
-// ImageList prints the recorded overlay images.
-func (a *App) ImageList(format OutputFormat) error {
+// listedImage is a recorded overlay image as `image list --json` shows it:
+// Missing marks one Docker no longer has (removed with `docker rmi`), whose
+// record still says built and verified.
+type listedImage struct {
+	image.Record
+	Missing bool `json:"missing,omitempty"`
+}
+
+// ImageList prints the recorded overlay images Docker still has, and names
+// the recorded ones it no longer has: the next run of their harness builds
+// them again, and `image prune` forgets their records.
+func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 	a.defaults()
 	recs, err := a.Images.List()
 	if err != nil {
 		return err
 	}
 	sort.Slice(recs, func(i, j int) bool { return recs[i].BuiltAt.After(recs[j].BuiltAt) })
+	var gone map[string]bool
+	var goneErr error
+	if len(recs) > 0 {
+		gone, goneErr = a.Images.Gone(ctx, recs)
+	}
 	if format == OutputJSON {
-		if recs == nil {
-			recs = []image.Record{}
+		listed := make([]listedImage, 0, len(recs))
+		for _, r := range recs {
+			listed = append(listed, listedImage{Record: r, Missing: gone[r.Tag]})
 		}
-		return writeJSON(a.IO.Out, map[string]any{"images": recs})
+		return writeJSON(a.IO.Out, map[string]any{"images": listed})
 	}
 	if len(recs) == 0 {
 		a.note("no images yet; `" + CommandName + " image build` builds them")
 		return nil
 	}
 	rows := make([][]string, 0, len(recs))
+	var missing []string
 	for _, r := range recs {
+		if gone[r.Tag] {
+			missing = append(missing, fmt.Sprintf("%s (%s %s)", r.Tag, r.Connector, r.HarnessVersion))
+			continue
+		}
 		verified := "no"
 		if r.HookFireVerified {
 			verified = "yes"
 		}
 		rows = append(rows, []string{r.Tag, r.Connector, r.HarnessVersion, verified, fmt.Sprint(r.UID), r.BuiltAt.Local().Format("2006-01-02 15:04")})
 	}
-	a.table([]string{"TAG", "HARNESS", "VERSION", "HOOKS VERIFIED", "UID", "BUILT"}, rows)
+	if len(rows) > 0 {
+		a.table([]string{"TAG", "HARNESS", "VERSION", "HOOKS VERIFIED", "UID", "BUILT"}, rows)
+	}
+	if len(missing) > 0 {
+		a.note(fmt.Sprintf("recorded but no longer in Docker: %s; the next run of the harness builds its image again, and `%s image prune` forgets the record",
+			strings.Join(missing, ", "), CommandName))
+	}
+	if goneErr != nil {
+		a.note("could not ask Docker which of these images it still has: " + goneErr.Error())
+	}
 	return nil
 }
 
@@ -339,11 +376,18 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	if dryRun {
 		verb = "would remove"
 	}
-	if len(rep.Removed) == 0 {
+	if len(rep.Removed) == 0 && len(rep.ForgottenStale) == 0 {
 		a.ok("nothing to prune")
 	}
 	for _, t := range rep.Removed {
 		a.ok(verb + " " + t)
+	}
+	forget := "forgot"
+	if dryRun {
+		forget = "would forget"
+	}
+	for _, t := range rep.ForgottenStale {
+		a.ok(forget + " the record of " + t + " (no longer in Docker)")
 	}
 	for _, t := range rep.Kept {
 		if slices.Contains(rep.InUse, t) {

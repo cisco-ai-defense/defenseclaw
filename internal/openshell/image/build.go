@@ -209,6 +209,32 @@ func (b *Builder) imageID(ctx context.Context, tag string) (string, error) {
 	return id, nil
 }
 
+// Gone returns the tags of recs that Docker no longer has as DefenseClaw
+// sandbox images (removed with `docker rmi`, say), whose records still say
+// built and hook-verified. Current does not select them, and Prune forgets
+// them (PruneReport.ForgottenStale).
+func (b *Builder) Gone(ctx context.Context, recs []Record) (map[string]bool, error) {
+	byRepo := map[string][]string{}
+	for _, r := range recs {
+		if repo, _, ok := strings.Cut(r.Tag, ":"); ok && repositoryRE.MatchString(repo) {
+			byRepo[repo] = append(byRepo[repo], r.Tag)
+		}
+	}
+	gone := map[string]bool{}
+	for repo, tags := range byRepo {
+		present, err := b.listTags(ctx, repo, "label="+LabelSandboxImage+"=1")
+		if err != nil {
+			return nil, err
+		}
+		for _, tag := range tags {
+			if !present[tag] {
+				gone[tag] = true
+			}
+		}
+	}
+	return gone, nil
+}
+
 // PruneOptions select what Prune removes.
 type PruneOptions struct {
 	// Repository limits pruning to one image repository (default

@@ -143,3 +143,71 @@ func TestImageRemoveTakesTheRunImages(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An image removed from Docker (`docker rmi`) keeps its record, built and
+// hook-verified: the list names it apart from the images Docker has, JSON
+// marks it missing, and prune says it forgets the record (KR-F8, HERMES-7).
+func TestImageListNamesImagesGoneFromDocker(t *testing.T) {
+	ta := newTestApp(t, "")
+	built := ta.Now()
+	ta.images.recs = []image.Record{
+		{Tag: "defenseclaw/sandbox:kiro-3f7c-u1000", Connector: "kiro", HarnessVersion: "2.24.1", HookFireVerified: true, UID: 1000, BuiltAt: built},
+		{Tag: "defenseclaw/sandbox:claudecode-1a2b-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, UID: 1000, BuiltAt: built},
+	}
+	ta.images.gone = map[string]bool{"defenseclaw/sandbox:kiro-3f7c-u1000": true}
+	ta.ok(t, ta.ImageList(bg, OutputText))
+	out := ta.output()
+	table, note, _ := strings.Cut(out, "recorded but no longer in Docker")
+	if !strings.Contains(table, "defenseclaw/sandbox:claudecode-1a2b-u1000") || strings.Contains(table, "kiro") ||
+		!strings.Contains(note, ": defenseclaw/sandbox:kiro-3f7c-u1000 (kiro 2.24.1); the next run of the harness builds its image again, "+
+			"and `defenseclaw sandbox image prune` forgets the record") {
+		t.Fatalf("image list:\n%s", out)
+	}
+
+	ta.ok(t, ta.fresh().ImageList(bg, OutputJSON))
+	var doc struct {
+		Images []struct {
+			Tag              string `json:"tag"`
+			HookFireVerified bool   `json:"hook_fire_verified"`
+			Missing          bool   `json:"missing"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(ta.out.Bytes(), &doc); err != nil || len(doc.Images) != 2 {
+		t.Fatalf("image list --json = %s, %v", ta.output(), err)
+	}
+	for _, img := range doc.Images {
+		if img.Missing != strings.Contains(img.Tag, "kiro") || !img.HookFireVerified {
+			t.Fatalf("image list --json: %+v", img)
+		}
+	}
+
+	ta.images.pruneReport = &image.PruneReport{ForgottenStale: []string{"defenseclaw/sandbox:kiro-3f7c-u1000"}}
+	ta.ok(t, ta.fresh().ImagePrune(bg, true))
+	if out := ta.output(); !strings.Contains(out, "would forget the record of defenseclaw/sandbox:kiro-3f7c-u1000 (no longer in Docker)") ||
+		strings.Contains(out, "nothing to prune") {
+		t.Fatalf("image prune --dry-run:\n%s", out)
+	}
+}
+
+// The doctor's image check lists every harness built for this user, not
+// only the configured ones, and counts no image Docker no longer has
+// (KR-F9, MAC-OSH-OH-6).
+func TestDoctorImagesCoverEveryBuiltHarness(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.HostDoctor = hostReport(nil)
+	ready := func(connector, version string) image.Record {
+		r := readyImages(ta)[0]
+		r.Tag, r.Connector, r.HarnessVersion = "defenseclaw/sandbox:"+connector, connector, version
+		return r
+	}
+	ta.images.recs = []image.Record{ready("claudecode", "2.1.156"), ready("codex", "0.146.0"), ready("kiro", "2.24.1"), ready("openhands", "1.16.0")}
+	ta.images.gone = map[string]bool{"defenseclaw/sandbox:codex": true, "defenseclaw/sandbox:openhands": true}
+	c := ta.runDoctor(bg).Get(CheckIDImages)
+	if c == nil || c.Status != "warn" || c.Detail != "not built yet: codex (the first run builds it, which takes a while); hook-verified: claudecode 2.1.156, kiro 2.24.1" {
+		t.Fatalf("images check = %+v", c)
+	}
+	ta.images.gone = nil
+	if c := ta.runDoctor(bg).Get(CheckIDImages); c.Status != "pass" || c.Detail != "hook-verified: claudecode 2.1.156, codex 0.146.0, kiro 2.24.1, openhands 1.16.0" {
+		t.Fatalf("images check = %+v", c)
+	}
+}

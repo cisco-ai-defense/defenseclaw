@@ -211,7 +211,11 @@ defenseclaw sandbox image build codex --force --verbose
 
 ### `sandbox image list`
 
-Lists the recorded harness images, newest first.
+Lists the recorded harness images, newest first. An image removed from Docker
+(with `docker rmi`, say) is not in the table: a note names it, the next run of
+its harness builds the image again, and `sandbox image prune` forgets its
+record. With `--output json` every recorded image is listed, and one Docker no
+longer has carries `"missing": true`.
 
 ```bash
 defenseclaw sandbox image list --output json
@@ -227,7 +231,8 @@ defenseclaw sandbox image list --output json
 
 Removes superseded harness images. It keeps the current images and the images
 the daemon's sandboxes run, and leaves images that another DefenseClaw data
-directory recorded, or that nothing recorded. On a MicroVM (vm) gateway it
+directory recorded, or that nothing recorded. It forgets, and names, the
+records of images Docker no longer has. On a MicroVM (vm) gateway it
 also removes the run images and aliases of superseded harness images, and only
 while the daemon answers: without its list of sandboxes it leaves them alone.
 OpenShell keeps the MicroVM disk it prepared from a removed image; prune says
