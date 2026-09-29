@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
@@ -508,13 +509,6 @@ type VMDisk struct {
 	Bytes int64
 }
 
-// preparedDiskPrefix starts the name of each root disk the vm driver
-// prepares from an image. OpenShell 0.1.1 names them
-// sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-501-20-sha256-<image ID>
-// on a gateway that sets sandbox_uid and sandbox_gid, and
-// ...-image-account-sha256-<image ID> on one that does not.
-const preparedDiskPrefix = "sandbox-prepared-rootfs-"
-
 // VMDisks lists the root disks under cacheDir the vm driver prepared from
 // imageID. An unreadable cache holds none.
 func VMDisks(cacheDir, imageID string) []VMDisk {
@@ -530,7 +524,7 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 	var out []VMDisk
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasPrefix(name, preparedDiskPrefix) || !strings.HasSuffix(name, suffix) {
+		if !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !strings.HasSuffix(name, suffix) {
 			continue
 		}
 		d := VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}

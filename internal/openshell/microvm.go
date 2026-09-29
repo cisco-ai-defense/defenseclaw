@@ -436,9 +436,9 @@ func (r *doctorRun) vmDiskCheck() Check {
 		return c
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), dir)
-	if n, size := preparedImages(filepath.Join(dir, "images")); n > 0 {
+	if n, size := preparedDisks(filepath.Join(dir, "images")); n > 0 {
 		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), which DefenseClaw never deletes",
-			plural(n, "prepared MicroVM image", "prepared MicroVM images"), humanBytes(size))
+			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size))
 	}
 	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir}
 	switch {
@@ -454,15 +454,27 @@ func (r *doctorRun) vmDiskCheck() Check {
 	return c
 }
 
-// preparedImages counts the images the driver prepared under dir and the
-// disk they take (allocated, not their larger sparse size).
-func preparedImages(dir string) (n int, size uint64) {
+// PreparedDiskPrefix starts the name of each directory under the MicroVM
+// driver's image cache (<state_dir>/images) that holds a root disk it
+// prepared from an image. OpenShell 0.1.1 names them
+// sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-501-20-sha256-<image ID>
+// on a gateway that sets sandbox_uid and sandbox_gid, and
+// ...-image-account-sha256-<image ID> on one that does not. The cache holds
+// the driver's own state next to them (overlay-templates, the
+// sandbox-bootstrap-rootfs-* it boots every MicroVM with, .staging
+// directories of a preparation under way), which is not a prepared disk.
+const PreparedDiskPrefix = "sandbox-prepared-rootfs-"
+
+// preparedDisks counts the root disks the driver prepared from images under
+// dir (PreparedDiskPrefix) and the disk they take (allocated, not their
+// larger sparse size).
+func preparedDisks(dir string) (n int, size uint64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, 0
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") || strings.Contains(e.Name(), ".staging") {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), PreparedDiskPrefix) || strings.Contains(e.Name(), ".staging") {
 			continue
 		}
 		n++

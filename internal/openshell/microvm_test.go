@@ -271,16 +271,21 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			want: checkWant{"disk", warn, "8.0 GiB free under"}, fix: &fixWant{text: "about 5 GB", manual: true}},
 		{name: "disk too full", setup: func(f *doctorFixture) { f.diskFree = 4 << 30 },
 			want: checkWant{"disk", fail, "MicroVM sandboxes need at least 6.0 GiB"}},
+		// Only the disks prepared from images count: the driver's overlay
+		// templates, the bootstrap rootfs every MicroVM boots with and a
+		// preparation under way are its own state.
 		{name: "prepared images", setup: func(f *doctorFixture) {
 			images := filepath.Join(f.home, "vm-state", "images")
-			for _, name := range []string{"sandbox-prepared-rootfs-ext4-a", "sandbox-prepared-rootfs-ext4-b", "x.staging-1"} {
+			for _, name := range []string{"sandbox-prepared-rootfs-ext4-a", "sandbox-prepared-rootfs-ext4-b", "sandbox-prepared-rootfs-ext4-c.staging-1",
+				"overlay-templates", "sandbox-bootstrap-rootfs-ext4-openshell-0.1.1", "x.staging-1"} {
 				if err := os.MkdirAll(filepath.Join(images, name), 0o700); err != nil {
 					f.t.Fatal(err)
 				}
 				writeFile(f.t, filepath.Join(images, name, "rootfs.ext4"), strings.Repeat("x", 1<<16), 0o600)
 			}
+			writeFile(f.t, filepath.Join(images, "sandbox-prepared-rootfs-stray-file"), "x", 0o600)
 			vmTOML("[openshell.drivers.vm]\n", "[openshell.drivers.vm]\nstate_dir = \""+filepath.Join(f.home, "vm-state")+"\"\n")(f)
-		}, want: checkWant{"disk", pass, "; OpenShell keeps 2 prepared MicroVM images there ("}},
+		}, want: checkWant{"disk", pass, "; OpenShell keeps 2 MicroVM disks prepared from images there ("}},
 
 		// Docker is still where the harness images are built.
 		{name: "docker down", setup: func(f *doctorFixture) {
