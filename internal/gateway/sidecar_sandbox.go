@@ -208,6 +208,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		IngressAddr:        ingressAddr,
 		EgressAddr:         egressAddr,
 		DefenseClawVersion: manager.ImageVersion(),
+		GatewayResources:   manager.GatewayConfigResources(""),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 	})

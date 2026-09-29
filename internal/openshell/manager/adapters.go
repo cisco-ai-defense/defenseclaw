@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -188,6 +189,26 @@ func (DefaultWorkspace) ReviewDiff(ctx context.Context, dataDir, name string) ([
 
 func (DefaultWorkspace) DeleteCopy(dataDir, name string) error {
 	return workspace.DeleteCopy(dataDir, name)
+}
+
+// GatewayConfigResources is Options.GatewayResources read from the local
+// gateway's configuration in dir ("" is OpenShell's user configuration
+// directory, openshell.GatewayConfigurator.Dir): the vm driver's
+// [openshell.drivers.vm] vcpus and mem_mib, the gateway.env variables that
+// override them, and the driver's defaults for what neither sets. The
+// daemon runs as the user whose gateway it drives, so these are that
+// gateway's files.
+func GatewayConfigResources(dir string) func() (packs.Resources, error) {
+	return func() (packs.Resources, error) {
+		// A configurator per read: Read fills in its defaults, and
+		// creates and starts read concurrently.
+		st, err := (&openshell.GatewayConfigurator{Dir: dir}).Read()
+		if err != nil {
+			return packs.Resources{}, err
+		}
+		r := st.VM.Resources()
+		return packs.Resources{CPU: strconv.FormatInt(r.VCPUs, 10), Memory: strconv.FormatInt(r.MemMiB, 10) + "Mi"}, nil
+	}
 }
 
 // ProfileImporter imports platform-scoped provider profiles in their YAML

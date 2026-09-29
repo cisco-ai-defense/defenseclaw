@@ -21,7 +21,9 @@ package manager
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -188,6 +190,37 @@ func TestResourcesOnVM(t *testing.T) {
 	}
 	shared.CPU = "4"
 	e.startBox("grows", sandboxapi.StartRequest{})
+}
+
+// The daemon reads what every MicroVM gets from its gateway's
+// configuration: gateway.env over gateway.toml, and the driver's defaults
+// for what neither sets. A configuration it cannot parse is an error, so
+// an administrator's maximum refuses the create (TestResourcesOnVM).
+func TestGatewayConfigResources(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, data string) {
+		t.Helper()
+		must(t, os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600))
+	}
+	read := GatewayConfigResources(dir)
+	// Both files are in dir, so a Mac's Homebrew copies are never read.
+	write(openshell.GatewayEnvFile, "")
+	write(openshell.GatewayTOMLFile, "")
+	if got, err := read(); err != nil || got != (packs.Resources{CPU: "2", Memory: "2048Mi"}) {
+		t.Fatalf("defaults = %+v, %v", got, err)
+	}
+	write(openshell.GatewayTOMLFile, "[openshell.drivers.vm]\nvcpus = 6\nmem_mib = 8192\n")
+	if got, err := read(); err != nil || got != (packs.Resources{CPU: "6", Memory: "8192Mi"}) {
+		t.Fatalf("gateway.toml = %+v, %v", got, err)
+	}
+	write(openshell.GatewayEnvFile, "OPENSHELL_VM_DRIVER_VCPUS=3\n")
+	if got, err := read(); err != nil || got != (packs.Resources{CPU: "3", Memory: "8192Mi"}) {
+		t.Fatalf("gateway.env over gateway.toml = %+v, %v", got, err)
+	}
+	write(openshell.GatewayTOMLFile, "[openshell.drivers.vm\n")
+	if got, err := read(); err == nil {
+		t.Fatalf("an unparsable gateway.toml read as %+v", got)
+	}
 }
 
 // One gateway runs one driver: a sandbox created on docker does not start
