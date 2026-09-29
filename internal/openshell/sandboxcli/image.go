@@ -19,6 +19,7 @@ package sandboxcli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -280,8 +281,15 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 	started := a.Now()
 	rec, built, err := a.Images.Build(ctx, spec, microVM, force, log)
 	if err != nil {
-		if logPath != "" {
-			return fmt.Errorf("%s image: %w (build log: %s)", spec.DisplayName, err, logPath)
+		// A build refused before docker build ran has nothing in its log.
+		if logPath != "" && !errors.Is(err, image.ErrNoBuildKit) {
+			// A failed docker build ends with the last lines docker
+			// printed, one per line: the log path goes after them.
+			sep := " "
+			if strings.Contains(err.Error(), "\n") {
+				sep = "\n"
+			}
+			return fmt.Errorf("%s image: %w%s(build log: %s)", spec.DisplayName, err, sep, logPath)
 		}
 		return fmt.Errorf("%s image: %w", spec.DisplayName, err)
 	}

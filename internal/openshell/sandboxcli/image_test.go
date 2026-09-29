@@ -20,6 +20,8 @@ package sandboxcli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -436,5 +438,44 @@ func TestDoctorImagesCoverEveryMicroVMHarness(t *testing.T) {
 	if c.Status != "warn" || c.Fix == nil || c.Fix.Command != CommandName+" image build kiro --force" ||
 		c.Detail != "not checked for an OpenShell MicroVM yet: kiro (the next run checks it first, which takes a while); hook-verified: claudecode 2.1.156, codex 0.146.0" {
 		t.Fatalf("images check = %+v", c)
+	}
+}
+
+// A failed build shows the last lines docker printed, then names the build
+// log on a line of its own; the log keeps all of it. A failure of one line
+// keeps the log on that line.
+func TestImageBuildFailureShowsDockersLastLines(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.images.buildOutput = "#1 [internal] load build definition from Dockerfile\n#9 ERROR: boom\nERROR: failed to build\n"
+	ta.images.buildErr = fmt.Errorf("openshell image: docker build defenseclaw/sandbox:claudecode-x-u1000: %w",
+		&image.BuildError{Err: &image.CommandError{Args: []string{"build"}, ExitCode: 1}, Output: "#9 ERROR: boom\nERROR: failed to build"})
+	logPath := filepath.Join(ta.dataDir(), "logs", "sandbox-image-claudecode.log")
+	err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claudecode"}})
+	want := "Claude Code image: openshell image: docker build defenseclaw/sandbox:claudecode-x-u1000: docker build exited 1; " +
+		"the last lines docker printed:\n    #9 ERROR: boom\n    ERROR: failed to build\n(build log: " + logPath + ")"
+	var buildErr *image.BuildError
+	if err == nil || err.Error() != want || !errors.As(err, &buildErr) {
+		t.Fatalf("ImageBuild error:\n%v\nwant:\n%s", err, want)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != ta.images.buildOutput {
+		t.Fatalf("build log = %q, %v", data, err)
+	}
+
+	ta.images.buildErr = errors.New("openshell image: inspect defenseclaw/sandbox:claudecode-x-u1000 returned no image")
+	err = ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claudecode"}})
+	if want := "Claude Code image: " + ta.images.buildErr.Error() + " (build log: " + logPath + ")"; err == nil || err.Error() != want {
+		t.Fatalf("ImageBuild error = %v, want %s", err, want)
+	}
+}
+
+// A build refused because docker would not use BuildKit never ran docker
+// build: its error says why and how to fix it, and names no build log.
+func TestImageBuildWithoutBuildKitNamesNoBuildLog(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.images.buildErr = fmt.Errorf("openshell image: docker build defenseclaw/sandbox:claudecode-x-u1000: %w; install Docker's buildx plugin",
+		image.ErrNoBuildKit)
+	err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claudecode"}})
+	if want := "Claude Code image: " + ta.images.buildErr.Error(); err == nil || err.Error() != want || !errors.Is(err, image.ErrNoBuildKit) {
+		t.Fatalf("ImageBuild error = %v, want %s", err, want)
 	}
 }

@@ -532,6 +532,10 @@ type fakeImages struct {
 	// MicroVM scenario, and microVMInconclusive why that scenario settled
 	// nothing (neither: it passes).
 	microVMProblem, microVMInconclusive map[string]string
+	// buildOutput is what Build writes to the build log; buildErr, when
+	// set, fails it.
+	buildOutput string
+	buildErr    error
 }
 
 func (f *fakeImages) Current(spec *harness.Spec, _ bool) (bool, error) {
@@ -540,9 +544,15 @@ func (f *fakeImages) Current(spec *harness.Spec, _ bool) (bool, error) {
 	return !f.missing[spec.Name], nil
 }
 
-func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, microVM, _ bool, _ io.Writer) (image.Record, bool, error) {
+func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, microVM, _ bool, log io.Writer) (image.Record, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if log != nil {
+		_, _ = io.WriteString(log, f.buildOutput)
+	}
+	if f.buildErr != nil {
+		return image.Record{}, true, f.buildErr
+	}
 	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true,
 		MicroVM: microVM, MicroVMVerified: microVM && f.microVMProblem[spec.Name] == "" && f.microVMInconclusive[spec.Name] == "",
 		MicroVMProblem: f.microVMProblem[spec.Name], MicroVMInconclusive: f.microVMInconclusive[spec.Name]}

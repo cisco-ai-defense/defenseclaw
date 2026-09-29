@@ -23,6 +23,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,12 +39,22 @@ import (
 )
 
 // fakeDocker answers docker CLI invocations from a handler and records them.
+// It has the buildx plugin unless noBuildx is set; the handler never sees
+// `docker buildx version`. It runs in env, not the test's environment.
 type fakeDocker struct {
-	mu      sync.Mutex
-	calls   [][]string
-	stdin   map[int][]byte
-	handler func(args []string, stdin []byte) (stdout string, exit int)
+	mu       sync.Mutex
+	calls    [][]string
+	stdin    map[int][]byte
+	handler  func(args []string, stdin []byte) (stdout string, exit int)
+	noBuildx bool
+	env      map[string]string
 }
+
+func (f *fakeDocker) Getenv(key string) string { return f.env[key] }
+
+// dockerWithoutBuildx is what `docker buildx version` prints without the
+// plugin.
+const dockerWithoutBuildx = "docker: unknown command: docker buildx\n\nRun 'docker --help' for more information\n"
 
 func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	var in []byte
@@ -56,6 +68,14 @@ func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.W
 	}
 	f.stdin[len(f.calls)-1] = in
 	f.mu.Unlock()
+	if len(args) == 2 && args[0] == "buildx" && args[1] == "version" {
+		if f.noBuildx {
+			_, _ = io.WriteString(stderr, dockerWithoutBuildx)
+			return &CommandError{Args: args, ExitCode: 1}
+		}
+		_, _ = io.WriteString(stdout, "github.com/docker/buildx v0.30.1 c6f062d0eef6a18ae703d0433e2c8a4dd34d4513\n")
+		return nil
+	}
 	out, exit := f.handler(args, in)
 	if stdout != nil {
 		_, _ = io.WriteString(stdout, out)
@@ -294,6 +314,125 @@ func TestGoneNamesImagesRemovedFromDocker(t *testing.T) {
 	}
 }
 
+// TestBuildFailureReportsTheEndOfDockersOutput: the error of a failed
+// build ends with the last lines docker printed, made safe to show, even
+// when the builder's log discards them (the daemon's), and the log still
+// gets all of it. An interrupted build is reported without them.
+func TestBuildFailureReportsTheEndOfDockersOutput(t *testing.T) {
+	var out strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&out, "#%d [internal] step %d\n", i, i)
+	}
+	out.WriteString("#201 \x1b[31mERROR: failed to build: the --chmod option requires BuildKit\x1b[0m\n")
+	out.WriteString("#201 fetch https://bob:hunter2hunter2@registry.example/v2/ with NPM_TOKEN=npm_" + strings.Repeat("a", 36) + "\n")
+	docker := func() *fakeDocker {
+		return &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+			if args[0] == "build" {
+				return out.String(), 1
+			}
+			return "", 1 // nothing is built
+		}}
+	}
+	for _, log := range []*bytes.Buffer{nil, {}} {
+		b := &Builder{Docker: docker(), Store: testStore(t)}
+		if log != nil {
+			b.Log = log
+		}
+		_, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{})
+		var buildErr *BuildError
+		var cmdErr *CommandError
+		if !errors.As(err, &buildErr) || !errors.As(err, &cmdErr) || cmdErr.ExitCode != 1 {
+			t.Fatalf("Build error = %#v", err)
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			"docker build exited 1; the last lines docker printed:\n    #",
+			"\n    #200 [internal] step 200\n    #201 ERROR: failed to build: the --chmod option requires BuildKit\n",
+			"\n    #201 fetch https://bob:[redacted]@registry.example/v2/ with NPM_TOKEN=[redacted]\n    fake failure",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("Build error lacks %q:\n%s", want, msg)
+			}
+		}
+		if n := strings.Count(buildErr.Output, "\n") + 1; n != buildTailLines || strings.Contains(msg, "step 1\n") ||
+			strings.Contains(msg, "hunter2") || strings.Contains(msg, "npm_aaaa") || strings.Contains(msg, "\x1b") {
+			t.Fatalf("Build error (%d lines of output):\n%s", n, msg)
+		}
+		if log != nil && log.String() != out.String()+"fake failure" {
+			t.Fatalf("the build log got %q", log.String())
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b := &Builder{Docker: docker(), Store: testStore(t)}
+	_, err := b.Build(ctx, testSpec(harness.ClaudeCode), BuildOptions{})
+	var buildErr *BuildError
+	if err == nil || errors.As(err, &buildErr) || strings.Contains(err.Error(), "step 200") {
+		t.Fatalf("interrupted Build error = %v", err)
+	}
+}
+
+// TestBuildRefusesADockerWithoutBuildKit: a docker without its buildx
+// plugin, or with DOCKER_BUILDKIT off (or not a boolean), would build with
+// the legacy builder, which runs the harness install and then fails on the
+// first COPY --chmod; the build is refused before docker build runs, with
+// the fix. DOCKER_BUILDKIT=1 with the plugin builds. DOCKER_BUILDKIT is
+// read from the environment docker runs in (Docker.Getenv), so this
+// process's, set to the opposite here, changes nothing.
+func TestBuildRefusesADockerWithoutBuildKit(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "1")
+	fix := "install Docker's buildx plugin"
+	for name, tc := range map[string]struct {
+		noBuildx  bool
+		env, want string
+	}{
+		"no buildx plugin": {true, "", "docker's buildx plugin is not available (`docker buildx version`: docker: unknown command: docker buildx), " +
+			"so docker build would fall back to the legacy builder"},
+		"DOCKER_BUILDKIT=0": {false, "0", "DOCKER_BUILDKIT=0 turns BuildKit off, and docker's legacy builder cannot build the sandbox images " +
+			"(their Dockerfile uses COPY --chmod); unset DOCKER_BUILDKIT, or set it to 1"},
+		"DOCKER_BUILDKIT=false": {true, "false", "DOCKER_BUILDKIT=false turns BuildKit off"},
+		"DOCKER_BUILDKIT=maybe": {false, "maybe", `DOCKER_BUILDKIT="maybe" is not true or false`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			docker := &fakeDocker{noBuildx: tc.noBuildx, env: map[string]string{"DOCKER_BUILDKIT": tc.env},
+				handler: func([]string, []byte) (string, int) { return "", 1 }}
+			store := testStore(t)
+			b := &Builder{Docker: docker, Store: store}
+			_, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{})
+			if !errors.Is(err, ErrNoBuildKit) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Build error = %v, want %q", err, tc.want)
+			}
+			if tc.env == "" && !strings.Contains(err.Error(), fix) {
+				t.Fatalf("Build error = %v, want the fix %q", err, fix)
+			}
+			if n := docker.count("build"); n != 0 {
+				t.Fatalf("docker build ran %d times", n)
+			}
+			if records, _ := store.List(); len(records) != 0 {
+				t.Fatalf("a refused build was recorded: %v", records)
+			}
+		})
+	}
+	t.Setenv("DOCKER_BUILDKIT", "0")
+	c := mustContext(t, testSpec(harness.Codex))
+	docker := imageDocker(t, c, goodProbeOutput(c))
+	docker.env = map[string]string{"DOCKER_BUILDKIT": "1"}
+	b := &Builder{Docker: docker, Store: testStore(t)}
+	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{SkipHookFire: true}); err != nil {
+		t.Fatalf("Build with DOCKER_BUILDKIT=1: %v", err)
+	}
+}
+
+// CLI runs docker in this process's environment, so that is where its
+// DOCKER_BUILDKIT comes from.
+func TestCLIReadsThisProcesssEnvironment(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "0")
+	if got := (CLI{}).Getenv("DOCKER_BUILDKIT"); got != "0" {
+		t.Fatalf("CLI.Getenv(DOCKER_BUILDKIT) = %q, want 0", got)
+	}
+}
+
 func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	store := testStore(t)
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -422,6 +561,9 @@ func (d *fakeDaemon) expect(c *Context) {
 	d.contexts[c.Tag] = c
 }
 
+// Getenv: the daemon's docker runs in an empty environment.
+func (d *fakeDaemon) Getenv(string) string { return "" }
+
 func (d *fakeDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Writer, args ...string) error {
 	if stdin != nil {
 		_, _ = io.Copy(io.Discard, stdin)
@@ -430,6 +572,8 @@ func (d *fakeDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Writer
 	defer d.mu.Unlock()
 	fail := func() error { return &CommandError{Args: args, ExitCode: 1} }
 	switch {
+	case args[0] == "buildx" && args[1] == "version":
+		return nil
 	case args[0] == "build":
 		labels := map[string]string{}
 		tag := ""

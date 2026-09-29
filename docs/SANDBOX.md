@@ -1383,6 +1383,23 @@ modes and owners are set in the tar headers) and streams it to
 4. Creates `/work` root-owned, chowns `/sandbox` to the run-as uid and gid,
    and switches to the `sandbox` user.
 
+The Dockerfile, like a run image's, uses BuildKit-only syntax (`COPY
+--chmod`). Every build first runs `docker buildx version` and reads
+`DOCKER_BUILDKIT` from the environment docker runs in (`image.Docker.Getenv`),
+and refuses (`image.ErrNoBuildKit`, with the fix) a docker that would use the
+legacy builder, before `docker build` runs. It reads `DOCKER_BUILDKIT` as
+docker does: any value that is set, spaces and all, must parse as a boolean,
+or `docker build` refuses to run, so the build is refused too. A failed build
+returns an `image.BuildError` whose message ends with the last 40 lines (at
+most 8 KiB) docker printed, terminal escapes and control characters removed
+and anything shaped like a credential redacted. It reaches the CLI's error,
+the daemon's create error and its `OPENSHELL_IMAGE_BUILD_FAILED` log line,
+because the daemon builds without a build log. The create's
+`OPENSHELL_SANDBOX_FAILED` line and its failed sandbox-health record
+(`error_summary`, which is exported) leave the lines out and end with the
+build's failure (`docker build exited 1`), so the output is logged once and
+never exported.
+
 The tag is `defenseclaw/sandbox:<harness>-<hash>-u<uid>`, where `<hash>` is
 the first 16 hex digits of a content hash over every input: the base digest,
 harness and version, hook contract, uid and gid, ingress port, fail mode,
@@ -2442,6 +2459,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost, and with only a loopback interface `_gateway` and `_outbound` find nothing. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, and setup refuses it (the installer would find that CLI and install nothing): stop that gateway and remove that OpenShell, then `setup --install-openshell` installs the formula. While such a gateway answers, the doctor does not fail it: `vm-driver` passes on the driver the gateway reports (found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`), and `gateway-service` warns, saying how it runs (the launchd label from `launchctl list`, or started by hand) and that DefenseClaw cannot restart it, with setup's way on as its fix; the TUI's machine check refuses it as setup does. With no gateway answering, `gateway-service` fails as not installed, with the same fix, and `vm-driver` checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
+| `docker build` uses BuildKit only through the buildx CLI plugin, which docker looks for in the `cli-plugins` directory of its config (`DOCKER_CONFIG`, else `~/.docker`), where Docker Desktop links it: a `HOME` or `DOCKER_CONFIG` without that directory hides it. Without it, or with `DOCKER_BUILDKIT=0`, docker falls back to the legacy builder with only a deprecation notice; it runs every step before the first `COPY --chmod` and then fails with `the --chmod option requires BuildKit`, and a caller that discards docker's output sees `docker build exited 1` and nothing else. The same holds for Docker Engine on Linux without the `docker-buildx-plugin` package. | Every image build checks `docker buildx version` and `DOCKER_BUILDKIT` first and refuses with the fix, before `docker build` runs; the doctor's `docker-buildkit` check reports the same, and a failed build's error carries the last lines docker printed. The daemon builds in the environment it started with. |
 
 ## Supported platforms and versions
 
@@ -2464,12 +2482,13 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
   Docker VM with Landlock on a Mac (Colima, OrbStack) may work, untested.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
-  or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
-  systemd linger, the gateway service, CLI, ssh connection sharing,
-  registration, mTLS files, gateway version and driver, global policy, bind
-  mounts, OpenShell telemetry and the sandbox ports; on a vm gateway also `vm-driver` (e2fsprogs, the
-  Hypervisor signature, image architecture), `vm-identity` and
-  `vm-resources`, and the disk of the prepared-rootfs cache.
+  or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
+  host networking, file sharing, disk), systemd linger, the gateway service,
+  CLI, ssh connection sharing, registration, mTLS files, gateway version and
+  driver, global policy, bind mounts, OpenShell telemetry and the sandbox
+  ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor
+  signature, image architecture), `vm-identity` and `vm-resources`, and the
+  disk of the prepared-rootfs cache.
 
 ## Code map
 

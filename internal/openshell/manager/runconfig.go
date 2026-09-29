@@ -206,8 +206,7 @@ func (m *Manager) deliverRunConfig(ctx context.Context, d openshell.Driver, name
 // runImageError reports a run image or alias that could not be made.
 func (m *Manager) runImageError(img image.Record, err error) error {
 	m.logf("%s: %s: run image: %v", gatewaylog.ErrCodeOpenShellImageBuildFailed, img.Connector, err)
-	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "the sandbox image with this run's harness settings could not be made from " + img.Tag,
-		Detail: err.Error()}
+	return newImageError("the sandbox image with this run's harness settings could not be made from "+img.Tag, err)
 }
 
 // runFileSecretEnv are the variables a harness's run files pin whose value

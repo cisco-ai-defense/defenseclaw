@@ -309,6 +309,10 @@ type hookFireDocker struct {
 	runs int
 }
 
+// Getenv implements image.Docker: the fake runs in an empty environment,
+// not the test's.
+func (*hookFireDocker) Getenv(string) string { return "" }
+
 func (d *hookFireDocker) Run(_ context.Context, _ io.Reader, stdout, _ io.Writer, args ...string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

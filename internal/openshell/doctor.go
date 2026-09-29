@@ -65,6 +65,7 @@ const (
 	CheckIDUser              = "user"
 	CheckIDLandlock          = "landlock"
 	CheckIDDocker            = "docker"
+	CheckIDDockerBuildKit    = "docker-buildkit"
 	CheckIDDockerHostNetwork = "docker-host-network"
 	CheckIDDockerFileSharing = "docker-file-sharing"
 	CheckIDVMDriver          = "vm-driver"
@@ -326,6 +327,8 @@ type Doctor struct {
 	// SSHShim makes the ssh the OpenShell CLI runs with (NewSSHShim over
 	// PATH by default); the check removes it afterwards.
 	SSHShim func() (*SSHShim, error)
+	// Getenv reads the environment docker runs in (DOCKER_BUILDKIT).
+	Getenv func(string) string
 }
 
 func (d *Doctor) defaults() {
@@ -400,6 +403,9 @@ func (d *Doctor) defaults() {
 	if d.SSHShim == nil {
 		d.SSHShim = func() (*SSHShim, error) { return NewSSHShim(os.Getenv("PATH")) }
 	}
+	if d.Getenv == nil {
+		d.Getenv = os.Getenv
+	}
 }
 
 // doctorRun carries facts between checks.
@@ -427,12 +433,13 @@ type doctorRun struct {
 	driverErr error
 	// Off Linux the machine checks depend on the compute driver: they are
 	// made once it is known (macChecks) and inserted at machineAt, after
-	// the user check. dockerFound and dockerRoot are the Docker check made
-	// on the way; landlock is the Landlock verdict.
+	// the user check. dockerFound, dockerRoot and buildKit are the Docker
+	// checks made on the way; landlock is the Landlock verdict.
 	machineAt   int
 	machineDone bool
 	dockerFound Check
 	dockerRoot  string
+	buildKit    Check
 	landlock    CheckStatus
 	micro       *MicroVMHost
 	// procs are this user's processes, once a Mac's check has listed them
@@ -486,6 +493,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		// checkGateway: those checks keep their place (macChecks).
 		r.machineAt = len(r.report.Checks)
 		r.dockerFound, r.dockerRoot = r.dockerCheck(ctx)
+		r.buildKit = r.buildKitCheck(ctx)
 	}
 	r.checkLinger(ctx)
 	r.checkService(ctx)
@@ -583,6 +591,7 @@ type dockerInfo struct {
 func (r *doctorRun) checkDocker(ctx context.Context) {
 	c, root := r.dockerCheck(ctx)
 	r.add(c)
+	r.add(r.buildKitCheck(ctx))
 	hostNet, sharing, disk := r.dockerDriverChecks(root)
 	r.add(hostNet)
 	r.add(sharing)
@@ -647,6 +656,26 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 		c.Status = StatusPass
 	}
 	return c, info.DockerRootDir
+}
+
+// buildKitCheck checks that `docker build` would use BuildKit, which the
+// sandbox image Dockerfiles need (BuildKitProblem).
+func (r *doctorRun) buildKitCheck(ctx context.Context) Check {
+	c := Check{ID: CheckIDDockerBuildKit, Title: "Docker BuildKit"}
+	if !r.docker {
+		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
+		return c
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "docker", Args: BuildKitArgs, Timeout: 30 * time.Second})
+	if problem, fix := BuildKitProblem(r.GOOS, r.Getenv("DOCKER_BUILDKIT"), out, err); problem != "" {
+		c.Status, c.Detail, c.Fix = StatusFail, problem, &Fix{Summary: fix}
+		return c
+	}
+	c.Status, c.Detail = StatusPass, "docker build uses BuildKit"
+	if v := BuildKitVersion(out); v != "" {
+		c.Detail += " (buildx " + v + ")"
+	}
+	return c
 }
 
 func firstJSONLine(out []byte) []byte {

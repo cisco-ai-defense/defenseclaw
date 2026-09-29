@@ -132,7 +132,7 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		if docker.Status == StatusFail {
 			docker.Detail += "; DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it (docker export)"
 		}
-		checks = []Check{landlock, docker,
+		checks = []Check{landlock, docker, r.buildKit,
 			{ID: CheckIDDockerHostNetwork, Title: checkTitles[CheckIDDockerHostNetwork], Status: StatusSkip, Detail: "the MicroVM driver does not use Docker's network"},
 			r.vmFileSharingCheck(), r.vmDriverCheck(ctx), r.vmIdentityCheck(), r.vmResourcesCheck(), r.vmDiskCheck()}
 	} else {
@@ -145,7 +145,7 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 			vmDriver = r.vmDriverCheck(ctx)
 		}
 		skip := "the gateway runs the docker driver (a switch to MicroVMs sets it)"
-		checks = []Check{landlock, docker, hostNet, sharing, vmDriver,
+		checks = []Check{landlock, docker, r.buildKit, hostNet, sharing, vmDriver,
 			{ID: CheckIDVMIdentity, Title: "MicroVM sandbox user", Status: StatusSkip, Detail: skip},
 			{ID: CheckIDVMResources, Title: "MicroVM resources", Status: StatusSkip, Detail: skip}, disk}
 	}
