@@ -118,6 +118,15 @@ func logEnterpriseForeignHookBlocks(stderr io.Writer, user string, blocks []ente
 	}
 }
 
+// removedForeignHookPaths lists the files a cleanup removed hooks from.
+func removedForeignHookPaths(result enterprisepolicy.CleanupResult) []string {
+	paths := []string{}
+	for _, finding := range result.Removed {
+		paths = append(paths, finding.Path)
+	}
+	return paths
+}
+
 func foreignGuardLogField(value string, limit int) string {
 	value = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
@@ -145,6 +154,7 @@ func reconcileEnterpriseForeignHooks(opts enterprisehooks.InstallOptions) {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 			finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 	}
+	recordEnterpriseForeignHookRemovals(os.Stderr, enterpriseForeignHookAccountID(opts.OwnerSID, opts.OwnerUID), opts.ConnectorName, removedForeignHookPaths(result))
 	for _, finding := range result.Reported {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: %s hook in %s left in place (%s)\n", finding.Connector, finding.Path, finding.Reason)
 	}

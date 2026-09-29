@@ -8,11 +8,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type foreignSessionResult struct {
@@ -35,6 +40,11 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 			managedHookLedgerTarget{User: "bob", UID: userScopedTestUID(1002), Connector: "claudecode", OK: true},
 		)
 	}
+	guardianDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, guardianDir)
+	restoreValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate })
 	api, _, _ := newUserScopedTestServer(t, true, ledger, map[string]string{alice: "alice", bob: "bob"})
 	handler := api.tokenAuth(api.managedHookSocketMux())
 	aliceToken := userScopedTestToken(t, connector.UserScopedHookCredential, "claudecode", alice)
@@ -83,6 +93,37 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	if status, _ := call(handler, "gateway-master-token", clean, ""); status != http.StatusForbidden {
 		t.Fatalf("master token must not access the session route: %d", status)
 	}
+	// The guardian removed alice's Claude Code hook at clock 200 (and a Codex
+	// one later): only her Claude Code processes started before then are
+	// denied, naming the file.
+	removed := "/home/alice/.claude/settings.json"
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{
+		{Identity: alice, Connector: "claudecode", Path: removed, At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:200"},
+		{Identity: alice, Connector: "codex", Path: "/home/alice/.codex/hooks.json", At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:900"},
+	}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(guardianDir, enterprisepolicy.ForeignHookRemovalsFile), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withProcess := func(process string) map[string]any {
+		return map[string]any{
+			"key":           map[string]any{"connector": "claudecode", "session": "s-3", "process": process},
+			"session_start": true,
+			"decision":      map[string]any{"deny": false},
+		}
+	}
+	if _, result := call(handler, aliceToken, withProcess(runtime.GOOS+":b:4242:100"), ""); !result.Deny || !strings.Contains(result.Reason, removed) || !strings.Contains(result.Reason, "restart the agent") {
+		t.Fatalf("an agent process that started before the removal must be denied, naming the file: %+v", result)
+	}
+	if _, result := call(handler, aliceToken, withProcess(runtime.GOOS+":b:4343:300"), ""); result.Deny {
+		t.Fatalf("an agent process that started after the removal (and before the other connector's) must be allowed: %+v", result)
+	}
+	if _, result := call(handler, bobToken, withProcess(runtime.GOOS+":b:4444:100"), ""); result.Deny {
+		t.Fatalf("another account's agent must not be affected: %+v", result)
+	}
+
 	// The record survives a gateway process restart because it is stored in
 	// the gateway data directory, not in an APIServer memory cache.
 	restarted := NewAPIServer("", nil, nil, nil, nil, api.scannerCfg)
