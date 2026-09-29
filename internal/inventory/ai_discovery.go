@@ -172,6 +172,11 @@ type AIDiscoveryOptions struct {
 	// winpath.IsInteractiveUserSID predicate, which also admits Microsoft
 	// Entra ID users; the Secure Client profile keeps its historical filter.
 	StandaloneEnterprise bool
+	// UserScanDir is the spool of per-user scans the hook guardian writes
+	// in the standalone profile on Linux and macOS (UserScanDirForConfig).
+	// When set, full scans ingest it and this service's own process
+	// detector, which its sandbox blinds, is left to those scans.
+	UserScanDir string
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -345,7 +350,12 @@ type AISignal struct {
 	FirstSeen          time.Time       `json:"first_seen"`
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
-	EvidenceHash       string          `json:"-"`
+	// UserID (a uid) and UserName name the account a per-user scan ran as.
+	// The gateway takes both from the guardian's spool record, never from
+	// the scan's own output.
+	UserID       string `json:"user_id,omitempty"`
+	UserName     string `json:"user,omitempty"`
+	EvidenceHash string `json:"-"`
 	// ModelProvenanceHubResolvedAt is an internal freshness marker for optional
 	// Hub enrichment. It is mirrored by aiStoredSignal but never returned by the
 	// API or sent to telemetry sinks.
@@ -438,6 +448,9 @@ type AIDiscoverySummary struct {
 	Errors            int               `json:"errors"`
 	DetectorErrors    map[string]string `json:"detector_errors,omitempty"`
 	DetectorDurations map[string]int    `json:"detector_durations_ms,omitempty"`
+	// DetectorNotes names detectors another source covers, for example the
+	// process detector when per-user scans provide it.
+	DetectorNotes map[string]string `json:"detector_notes,omitempty"`
 }
 
 type AIDiscoveryReport struct {
@@ -568,6 +581,10 @@ type ContinuousDiscoveryService struct {
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   AIDiscoveryObservabilityV8
+
+	// processOwners, when set, limits the process detector to processes of
+	// these owners (the account name or uid of a per-user scan).
+	processOwners map[string]bool
 }
 
 type scanResponse struct {
@@ -693,6 +710,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		HomeDirs:             append([]string{}, ad.HomeDirs...),
 		ManagedEnterprise:    managed.IsManagedEnterprise(cfg.DeploymentMode),
 		StandaloneEnterprise: cfg.StandaloneEnterprise(),
+		UserScanDir:          UserScanDirForConfig(cfg),
 	})
 }
 
@@ -1247,6 +1265,7 @@ type scanStats struct {
 	FilesScanned      int
 	Errors            int
 	DetectorErrors    map[string]string
+	DetectorNotes     map[string]string
 	DedupeSuppressed  int
 	DetectorDurations map[string]int
 	// ModelAPIConclusive keys are provider + detector pairs for which a
@@ -1308,10 +1327,16 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		add(out)
 	}
 
-	measure("process", func() ([]AISignal, int, error) {
-		out, err := s.detectProcesses()
-		return out, 0, err
-	})
+	if s.opts.UserScanDir != "" {
+		// This service's sandbox hides other accounts' processes; each
+		// user's own scan reports them.
+		stats.DetectorNotes = map[string]string{"process": userScanProcessNote}
+	} else {
+		measure("process", func() ([]AISignal, int, error) {
+			out, err := s.detectProcesses()
+			return out, 0, err
+		})
+	}
 	if !full {
 		sortAISignals(signals)
 		return signals, stats
@@ -1354,6 +1379,18 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	}
 	if s.opts.IncludeShellHistory {
 		measure("shell_history", func() ([]AISignal, int, error) { return s.detectShellHistory() })
+	}
+	if s.opts.UserScanDir != "" {
+		measure("user_scan", func() ([]AISignal, int, error) {
+			out, files, errs := s.detectUserScans(time.Now().UTC())
+			for key, detail := range errs {
+				stats.DetectorErrors[key] = detail
+			}
+			if len(errs) > 0 {
+				return out, files, errors.New("per-user scan records are incomplete")
+			}
+			return out, files, nil
+		})
 	}
 
 	sortAISignals(signals)
@@ -1552,6 +1589,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		Errors:            stats.Errors,
 		DetectorErrors:    stats.DetectorErrors,
 		DetectorDurations: stats.DetectorDurations,
+		DetectorNotes:     stats.DetectorNotes,
 	}
 	if stats.Errors > 0 {
 		summary.Result = "partial"
@@ -2223,6 +2261,23 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	procs, err := processSnapshot()
 	if err != nil {
 		return nil, fmt.Errorf("process snapshot: %w", err)
+	}
+	if len(s.processOwners) > 0 {
+		owned := procs[:0]
+		for _, proc := range procs {
+			// Linux ps shows a user name longer than eight characters
+			// truncated ("longname+"); there the owner of /proc/<pid>
+			// decides.
+			owner := s.processOwners[proc.User]
+			if !owner {
+				uid := processOwnerUID(proc.PID)
+				owner = uid != "" && s.processOwners[uid]
+			}
+			if owner {
+				owned = append(owned, proc)
+			}
+		}
+		procs = owned
 	}
 	if len(procs) == 0 {
 		return nil, nil
@@ -3778,6 +3833,8 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 	report.Summary.Source = AISourceExternal
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
+		// Account attribution comes only from the guardian's per-user scans.
+		report.Signals[i].UserID, report.Signals[i].UserName = "", ""
 		// Provenance country/publisher claims are catalog-controlled. An
 		// external discovery client may supply the model ID, but it cannot
 		// impersonate a higher-confidence publisher rule on outbound events.

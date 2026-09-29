@@ -1989,6 +1989,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	return run, nil
 }
 
+// enterpriseHookAfterWatchReconcile runs after each successful reconcile of
+// the long-running guardian, never the one-shot reconcile command. The
+// standalone Unix guardian starts its per-user AI discovery scans here.
+var enterpriseHookAfterWatchReconcile = func(context.Context, io.Writer, enterpriseHookReconcileRun) {}
+
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks watch: config is not loaded")
@@ -2064,6 +2069,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			repairRetryNeeded = true
 			return false, err
 		}
+		enterpriseHookAfterWatchReconcile(cmd.Context(), cmd.ErrOrStderr(), run)
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
 		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil {
 			// Match the runEnterpriseHookReconcileOnce error path: mark

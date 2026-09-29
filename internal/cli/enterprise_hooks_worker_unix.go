@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -55,6 +56,9 @@ const (
 	enterpriseHookWorkerOpApply          = "apply"
 	enterpriseHookWorkerOpDiscover       = "discover"
 	enterpriseHookWorkerOpForeignCleanup = "foreign_cleanup"
+	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
+	// of the user's own home (standalone profile).
+	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
@@ -136,6 +140,14 @@ type enterpriseHookWorkerRequest struct {
 	// and the presence of the agent CLIs, executing nothing: the parent
 	// asks for it in a home other users may have written to.
 	StaticDiscovery bool `json:"static_discovery,omitempty"`
+	// AIDiscovery carries the settings and signature catalog of the
+	// ai_discovery operation; the worker cannot read the managed config.
+	AIDiscovery *enterpriseHookWorkerAIDiscovery `json:"ai_discovery,omitempty"`
+}
+
+type enterpriseHookWorkerAIDiscovery struct {
+	Options inventory.UserScanOptions `json:"options"`
+	Catalog []inventory.AISignature   `json:"catalog"`
 }
 
 // enterpriseHookWorkerForeignCleanup is one connector's foreign-hook
@@ -178,7 +190,10 @@ type enterpriseHookWorkerResponse struct {
 	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
 	BlocksDropped int                             `json:"blocks_dropped,omitempty"`
 	BlocksError   string                          `json:"blocks_error,omitempty"`
-	Error         string                          `json:"error,omitempty"`
+	// AIDiscovery is the user's scan report (user-influenced; the guardian
+	// validates it before the gateway reads it).
+	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
+	Error       string                       `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -285,6 +300,16 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			response.BlocksError = err.Error()
 		}
 		return respond(response, 0)
+	case enterpriseHookWorkerOpAIDiscovery:
+		if request.AIDiscovery == nil {
+			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
+		}
+		// End with a partial report rather than be killed at the timeout.
+		scanCtx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerTimeout*3/4)
+		defer cancel()
+		report := inventory.ScanUserHome(scanCtx, filepath.Clean(request.Home), request.User, request.UID,
+			request.AIDiscovery.Options, request.AIDiscovery.Catalog)
+		return respond(enterpriseHookWorkerResponse{AIDiscovery: &report}, 0)
 	default:
 		return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("unknown operation %q", request.Operation)}, 3)
 	}

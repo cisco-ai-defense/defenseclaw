@@ -278,6 +278,32 @@ Stops the scanner and clears the `ai_discovery.*` block. Existing audit events a
   </Tab>
 </Tabs>
 
+### Per-user scans in standalone enterprise
+
+In the standalone enterprise profile the gateway runs as a service account
+that cannot read user homes or see other accounts' processes. The hook
+guardian therefore runs the static scan for each user in the target
+manifest, as that user, every `scan_interval_min`, while `ai_discovery` is
+enabled:
+
+- The scan reads only that user's home and sees only that user's processes.
+  Home-relative `scan_roots` apply; other roots, loopback probes and
+  environment names stay with the gateway's own scan, which still covers
+  machine-wide binaries and applications.
+- The guardian checks each result and writes it to the `ai-discovery`
+  directory of the authorization ledger (`root`, readable by the gateway's
+  group). The gateway adds it to its inventory on every full scan.
+- Each signal carries `user` and `user_id` from the account the guardian
+  started the scan for, never from the scan's own output. Managed
+  `ai_component.observed` records and the per-entry skill, plugin and MCP
+  records carry the same user.
+- The gateway's own process detector does not run; the scan summary reports
+  `detector_notes.process: provided by per-user scans`.
+- A user's results turn `gone` when the user leaves the manifest, or three
+  scan intervals after the user's last successful scan.
+- `mode`, `include_shell_history`, `include_package_manifests` and
+  `store_raw_local_paths` apply as usual.
+
 ### Tunable knobs
 
 `agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:

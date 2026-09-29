@@ -2116,7 +2116,7 @@ func modelAggregatesToSignals(s *ContinuousDiscoveryService, aggregates map[stri
 		}
 		product, vendor := localModelArtifactProduct(candidate.provider)
 		signature := AISignature{
-			ID: "local-model-artifact", Name: product, Vendor: vendor,
+			ID: localModelArtifactSignatureID, Name: product, Vendor: vendor,
 			Category: SignalLocalModel, Confidence: 0.9, CuratorConfidence: 0.9, Specificity: 0.9,
 		}
 		signal := s.signalFromEvidence(signature, SignalLocalModel, "model_file", candidate.evidence)
