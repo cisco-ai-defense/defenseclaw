@@ -172,8 +172,9 @@ func hermesStandaloneOptions(t *testing.T, home string) InstallOptions {
 // removed the shared _hardening.sh) left the Hermes config pointing at a
 // missing or changed script while every check stayed green and no repair
 // ran. The standalone verification now compares the hook runtime files
-// with the digests the install recorded, so the guardian's verify-or-repair
-// pass re-renders them.
+// with the digests the install recorded and with this release's render, so
+// the guardian's verify-or-repair pass re-renders them, also after a package
+// upgrade.
 func TestStandaloneVerifyReportsAndRepairsAChangedHookScript(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
@@ -204,6 +205,30 @@ func TestStandaloneVerifyReportsAndRepairsAChangedHookScript(t *testing.T) {
 		}},
 		{"deleted _hardening.sh", filepath.Join(hooks, "_hardening.sh"), "missing", os.Remove},
 		{"deleted inspect-tool.sh", filepath.Join(hooks, "inspect-tool.sh"), "missing", os.Remove},
+		// After a package upgrade the script still matches the digest
+		// recorded at its last write but carries the previous release's
+		// render, so the digest alone kept verification green.
+		{"previous release's hermes-hook.sh", script, "differs from the rendered template", func(path string) error {
+			previous := append(append([]byte{}, original...), "# previous release\n"...)
+			if err := os.WriteFile(path, previous, 0o700); err != nil {
+				return err
+			}
+			lockPath := filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")
+			body, err := os.ReadFile(lockPath)
+			if err != nil {
+				return err
+			}
+			var lock map[string]any
+			if err := json.Unmarshal(body, &lock); err != nil {
+				return err
+			}
+			digests := lock["connectors"].(map[string]any)["hermes"].(map[string]any)["hook_script_digests"].(map[string]any)
+			digests[filepath.Base(path)] = fmt.Sprintf("sha256:%x", sha256.Sum256(previous))
+			if body, err = json.Marshal(lock); err != nil {
+				return err
+			}
+			return os.WriteFile(lockPath, body, 0o600)
+		}},
 	} {
 		if err := change.apply(change.path); err != nil {
 			t.Fatal(err)

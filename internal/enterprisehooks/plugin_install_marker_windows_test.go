@@ -115,3 +115,42 @@ func TestWindowsStandalonePluginInstallMarkerIsCreatedAndVerified(t *testing.T) 
 		t.Fatalf("no marker to verify: %v", err)
 	}
 }
+
+// After a package upgrade a standalone per-user plugin keeps the previous
+// release's render with its markers and recorded digest intact. Verification
+// reports it while the guardian can reinstall it in the user's session, and
+// not otherwise: for a signed-out user the failure withheld enrollment
+// publication for every other user and failed the upgrade's readiness check.
+func TestWindowsStandalonePluginRenderDriftWaitsForTheUserSession(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	dir := t.TempDir()
+	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(dir, "opencode"))
+	plugin := filepath.Join(dir, "opencode", "plugins", "defenseclaw.js")
+	if err := os.MkdirAll(filepath.Dir(plugin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plugin, []byte("// an earlier release's render\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repairable := true
+	previous := windowsEnterpriseTargetRepairable
+	windowsEnterpriseTargetRepairable = func(windowsGenericManagedTarget) bool { return repairable }
+	t.Cleanup(func() { windowsEnterpriseTargetRepairable = previous })
+	dataDir := filepath.Join(dir, ".defenseclaw")
+	target := windowsGenericManagedTarget{home: dir, dataDir: dataDir, conn: connector.NewOpenCodeConnector(), setup: connector.SetupOpts{
+		DataDir: dataDir, APIAddr: "127.0.0.1:18970", ManagedEnterprise: true, HookFailMode: "closed",
+	}}
+
+	if err := verifyWindowsStandalonePluginRender(target); err == nil || !strings.Contains(err.Error(), plugin) {
+		t.Fatalf("signed-in verify = %v, want the drift of %s", err, plugin)
+	}
+	repairable = false
+	if err := verifyWindowsStandalonePluginRender(target); err != nil {
+		t.Fatalf("signed-out verify = %v, want the repair left to the sign-in reconcile", err)
+	}
+	repairable = true
+	setStandaloneProfileForTest(t, false)
+	if err := verifyWindowsStandalonePluginRender(target); err != nil {
+		t.Fatalf("Secure Client verify changed: %v", err)
+	}
+}
