@@ -1373,7 +1373,13 @@ modes and owners are set in the tar headers) and streams it to
    hash and tag are those of the images before it, and its build fetches
    nothing more than it did. `MicroVM` is part of the content hash only
    when set, and of `images.json` (`microvm`), so the two kinds of image of
-   one harness never select or prune each other. (The digest-pinned base
+   one harness never select each other, and prune keeps the newest of each
+   kind. The exception is a gateway known to run the vm driver
+   (`PruneOptions.MicroVMGateway`, set only with the daemon's sandbox list):
+   it never boots a docker driver image again, so its prune removes every
+   docker driver image, however new, with its run images, aliases and
+   prepared disks, unless a sandbox runs it. Records from before
+   `microvm` existed are docker driver images. (The digest-pinned base
    has `curl` but not `jq`, so every build still runs `apt-get update` and
    installs the archive's current `jq` there.)
 2. Installs the harness at a version whose Linux hook contract is known. Any

@@ -352,18 +352,28 @@ func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harn
 // MicroVM gateway boots only an image built for it, which answers
 // localhost itself; a docker gateway's images stay as they were.
 func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
+	if d, ok := a.gatewayDriverKnown(ctx); ok {
+		return d
+	}
+	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
+	return d
+}
+
+// gatewayDriverKnown is the compute driver gatewayDriverNow finds when the
+// daemon or the gateway's configuration says which (a configuration that
+// names none selects docker), and false when neither does.
+func (a *App) gatewayDriverKnown(ctx context.Context) (openshell.Driver, bool) {
 	if api, err := a.api(); err == nil {
 		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
-			return gatewayDriver(st)
+			return gatewayDriver(st), true
 		}
 	}
 	if st, err := a.Gateway.State(); err == nil && st != nil {
 		if d, ok := st.Driver(); ok {
-			return d
+			return d, true
 		}
 	}
-	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
-	return d
+	return openshell.Driver{}, false
 }
 
 // defaultHarnesses are the harnesses setup selects, and image commands and
@@ -463,7 +473,10 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 // daemon they are left alone. So are the disks the MicroVM driver prepared
 // from the images it removed: with the list, the disk of each image ID it
 // removed, that no sandbox is recorded with and that Docker no longer
-// has, is removed too, and nothing else of OpenShell's image cache.
+// has, is removed too, and nothing else of OpenShell's image cache. With
+// the list, on a gateway known to boot only MicroVM images, the images
+// built for the docker driver (those recorded before MicroVM images
+// existed included) are superseded too (image.PruneOptions.MicroVMGateway).
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
 	opts := image.PruneOptions{DryRun: dryRun}
@@ -480,6 +493,9 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 				}
 			}
 			opts.AliasRepository = vm.ImageRepository
+			if d, ok := a.gatewayDriverKnown(ctx); ok {
+				opts.MicroVMGateway = image.MicroVMTarget(d)
+			}
 		}
 	}
 	rep, err := a.Images.Prune(ctx, opts)

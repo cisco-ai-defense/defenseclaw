@@ -260,6 +260,16 @@ type PruneOptions struct {
 	Keep []string
 	// DryRun reports without removing.
 	DryRun bool
+	// MicroVMGateway says the gateway sandboxes start on boots only the
+	// images built for the MicroVM driver (MicroVMTarget of its compute
+	// driver, known). Every overlay image built for the docker driver,
+	// those recorded before MicroVM images existed included, is then
+	// superseded, however new: it is removed unless Keep names it, and so
+	// are the run images and aliases the vm driver made from it, whose
+	// image IDs (and so the disks it prepared from them) RemovedImageIDs
+	// names. Unset (a docker gateway, or one whose driver is not known),
+	// the newest images of both kinds are kept.
+	MicroVMGateway bool
 }
 
 // PruneReport lists what Prune did.
@@ -292,7 +302,8 @@ type PruneReport struct {
 // Prune removes overlay images this store built, in one repository, except,
 // per (connector, uid, gid, ingress port, docker or MicroVM image), the most
 // recent image and the most recent hook-verified one (what Store.Current
-// selects for an unchanged spec), plus opts.Keep, and forgets store records
+// selects for an unchanged spec; on a MicroVM gateway, opts.MicroVMGateway,
+// only of the MicroVM images), plus opts.Keep, and forgets store records
 // whose image no longer exists. An image is removed only when this store recorded it under its own
 // owner and the image carries that owner label; every other DefenseClaw
 // image is reported, never removed, so data dirs sharing a Docker daemon (or
@@ -352,6 +363,11 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 			continue
 		}
 		candidates = append(candidates, r)
+		if opts.MicroVMGateway && !r.MicroVM {
+			// The gateway never boots it again: Store.Current selects
+			// only a MicroVM image for its sandboxes.
+			continue
+		}
 		id := identity{r.Connector, r.UID, r.GID, r.IngressPort, r.MicroVM}
 		if cur, ok := latest[id]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 			latest[id] = r

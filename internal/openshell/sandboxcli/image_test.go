@@ -194,6 +194,38 @@ func TestImageBuildSaysWhatCannotStartInAMicroVM(t *testing.T) {
 	}
 }
 
+// FIN-A-1: prune supersedes the docker driver's images only on a gateway
+// known to boot MicroVM images, and only with the daemon's list of the
+// images sandboxes run: a docker gateway, one DefenseClaw does not drive,
+// or a daemon that does not answer prunes as before.
+func TestImagePruneTakesTheGatewayDriversTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, daemon string
+		configured   openshell.ComputeDriver
+		noDaemon     bool
+		want         bool
+	}{
+		{name: "vm gateway", daemon: "vm", want: true},
+		{name: "docker gateway", daemon: "docker", configured: openshell.DriverVM},
+		{name: "daemon too old to say", configured: openshell.DriverVM, want: true},
+		{name: "a driver DefenseClaw does not drive", daemon: "podman"},
+		{name: "no daemon", noDaemon: true, configured: openshell.DriverVM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.daemon
+			ta.gateway.state.ComputeDriver = tc.configured
+			if tc.noDaemon {
+				ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+			}
+			ta.ok(t, ta.ImagePrune(bg, true))
+			if opts := ta.images.pruned[0]; opts.MicroVMGateway != tc.want {
+				t.Fatalf("prune options = %+v, want MicroVMGateway=%t", opts, tc.want)
+			}
+		})
+	}
+}
+
 // Without the daemon's list the MicroVM run images and aliases are left
 // alone, and so are the disks of the images removed: which sandboxes boot
 // them is not known.

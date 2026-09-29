@@ -240,7 +240,12 @@ directory recorded, or that nothing recorded. It forgets, and names, the
 records of images Docker no longer has. On a MicroVM (vm) gateway it
 also removes the run images and aliases of superseded harness images, and only
 while the daemon answers: without its list of sandboxes it leaves them alone.
-With that list it also removes the MicroVM disk OpenShell prepared from each
+With that list, a MicroVM gateway's prune also counts every harness image built
+for the docker driver as superseded, however new it is (images recorded before
+DefenseClaw built MicroVM images are such images). Such an image goes with its
+run images and aliases unless a sandbox runs it. A docker gateway's prune, or
+one that cannot tell which driver the gateway runs, keeps the newest image of
+both kinds. With that list it also removes the MicroVM disk OpenShell prepared from each
 image it removed (about 5 GB each, in the `images` folder of the MicroVM
 driver's state directory, `~/.local/state/openshell/vm-driver` by default) and
 says how much it freed. It removes a disk only when Docker no longer has its
