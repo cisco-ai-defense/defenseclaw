@@ -55,7 +55,10 @@ type Record struct {
 	FailMode string `json:"fail_mode"`
 	// Owner is the Store.Owner of the data dir that built the image; Prune
 	// removes only images this store recorded under its own owner.
-	Owner   string    `json:"owner"`
+	Owner string `json:"owner"`
+	// MicroVM marks an image built for the MicroVM driver
+	// (BuildSpec.MicroVM).
+	MicroVM bool      `json:"microvm,omitempty"`
 	BuiltAt time.Time `json:"built_at"`
 	// Binaries maps the required commands to their in-image realpaths.
 	Binaries []Binary `json:"binaries"`
@@ -74,8 +77,26 @@ type Record struct {
 	// localhost in /etc/hosts). A driver without a hosts file
 	// (openshell.Driver.HostsFile) boots only an image that has it.
 	MicroVMVerified bool `json:"microvm_verified,omitempty"`
-	// MicroVMProblem says why the MicroVM scenario failed.
+	// MicroVMProblem says why the harness cannot work in a MicroVM: the
+	// MicroVM scenario found that it resolves names on its own
+	// (HookFireResult.MicroVMProblem). It stays until the image is checked
+	// again (`sandbox image build <harness> --force`).
 	MicroVMProblem string `json:"microvm_problem,omitempty"`
+	// MicroVMInconclusive says why the last MicroVM scenario settled
+	// nothing (HookFireResult.MicroVMInconclusive); the image stays
+	// unchecked for a MicroVM (MicroVMUnchecked).
+	MicroVMInconclusive string `json:"microvm_inconclusive,omitempty"`
+}
+
+// MicroVMUnchecked reports whether r, an image for the MicroVM driver
+// whose hooks verified, has no MicroVM verdict: the probe's MicroVM
+// scenario never passed and never found that the harness cannot resolve
+// localhost (it did not settle, MicroVMInconclusive, or never ran). Build
+// probes such a cached image again, and so does a sandbox on the MicroVM
+// driver before it boots one; a definitive MicroVMProblem is not probed
+// again unless asked (Force).
+func (r Record) MicroVMUnchecked() bool {
+	return r.MicroVM && r.HookFireVerified && !r.MicroVMVerified && r.MicroVMProblem == ""
 }
 
 // NetworkRealpaths lists the realpaths for profiles.Input.Binaries.
@@ -207,7 +228,8 @@ func recordMatches(r Record, c *Context) bool {
 		r.IngressPort == c.Spec.IngressPort &&
 		r.DefenseClawVersion == c.Spec.DefenseClawVersion &&
 		r.FailMode == c.Spec.FailMode &&
-		r.Owner == c.Spec.Owner
+		r.Owner == c.Spec.Owner &&
+		r.MicroVM == c.Spec.MicroVM
 }
 
 // Put inserts or replaces the record with r.Tag.

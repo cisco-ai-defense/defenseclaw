@@ -464,7 +464,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			build := assume || len(o.Harnesses) > 0
 			if !build {
 				// A current image is only checked, not built: no need to ask.
-				current, err := a.Images.Current(s)
+				current, err := a.Images.Current(s, microVM)
 				build = err == nil && current
 			}
 			if !build {
@@ -479,7 +479,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 					s.DisplayName, CommandName, HarnessArg(s), CommandName, HarnessArg(s)))
 				continue
 			}
-			if err := a.buildImage(ctx, s, false, false); err != nil {
+			if err := a.buildImage(ctx, s, microVM, false, false); err != nil {
 				return err
 			}
 		}

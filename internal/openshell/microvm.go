@@ -134,8 +134,7 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		}
 		checks = []Check{landlock, docker,
 			{ID: CheckIDDockerHostNetwork, Title: checkTitles[CheckIDDockerHostNetwork], Status: StatusSkip, Detail: "the MicroVM driver does not use Docker's network"},
-			{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing], Status: StatusSkip, Detail: "the MicroVM driver does not use Docker's file sharing"},
-			r.vmDriverCheck(ctx), r.vmIdentityCheck(), r.vmResourcesCheck(), r.vmDiskCheck()}
+			r.vmFileSharingCheck(), r.vmDriverCheck(ctx), r.vmIdentityCheck(), r.vmResourcesCheck(), r.vmDiskCheck()}
 	} else {
 		landlock := r.dockerVMLandlockCheck(ctx)
 		hostNet, sharing, disk := r.dockerDriverChecks(r.dockerRoot)
@@ -152,6 +151,55 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 	}
 	r.landlock = checks[0].Status
 	r.report.Checks = slices.Insert(r.report.Checks, r.machineAt, checks...)
+}
+
+// dockerDesktopSharing are the directories Docker Desktop for Mac shares
+// with its VM by default; its settings store names them only once they are
+// changed.
+var dockerDesktopSharing = []string{"/Users", "/Volumes", "/private", "/tmp", "/var/folders"}
+
+// vmFileSharingCheck is the Docker file sharing check of a gateway on the
+// MicroVM driver. Its sandboxes mount no host folders, but the hook-fire
+// probe that checks every image built for them runs the harness in a
+// Docker container with a MicroVM's /etc/hosts and /etc/resolv.conf,
+// which it mounts from the system temp directory (image.Builder.TempDir):
+// Docker Desktop shares it by default (/var/folders, the user's $TMPDIR,
+// and /tmp). Unshared, every image stays unchecked for a MicroVM, which
+// the gateway then refuses to boot.
+func (r *doctorRun) vmFileSharingCheck() Check {
+	c := Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
+	tmp := filepath.Clean(r.TempDir())
+	what := " (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)"
+	switch {
+	case !r.docker:
+		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
+		return c
+	case !r.desktop:
+		c.Status, c.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
+		return c
+	}
+	dd, err := r.DockerDesktop()
+	shared := dockerDesktopSharing
+	switch {
+	case err != nil || dd == nil:
+		c.Status, c.Detail = StatusWarn, "could not read the Docker Desktop settings"
+		if err != nil {
+			c.Detail += ": " + err.Error()
+		}
+		c.Fix = &Fix{Summary: "make sure " + tmp + " is under a shared directory (Docker Desktop → Settings → Resources → File sharing)"}
+		return c
+	case dd.FileSharing != nil:
+		shared = dd.FileSharing
+	}
+	resolved, _ := filepath.EvalSymlinks(tmp)
+	if sharedDir(shared, tmp) || (resolved != "" && sharedDir(shared, resolved)) {
+		c.Status, c.Detail = StatusPass, tmp+" is shared with Docker Desktop"+what
+		return c
+	}
+	c.Status = StatusFail
+	c.Detail = tmp + " is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image" + what
+	c.Fix = &Fix{Summary: "add " + tmp + " in Docker Desktop → Settings → Resources → File sharing (it is shared by default: /var/folders and /tmp)"}
+	return c
 }
 
 // microVMHost finds what the MicroVM driver needs on this Mac.

@@ -140,17 +140,20 @@ type fakeImages struct {
 	err error
 	// fixedUID keeps rec's UID/GID instead of the build spec's.
 	fixedUID bool
+	// resolved are the specs Resolve was asked for.
+	resolved []image.BuildSpec
 	fakeRunImages
 }
 
 func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, _ bool) (image.Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.resolved = append(f.resolved, spec)
 	if f.err != nil {
 		return image.Record{}, f.err
 	}
 	rec := f.rec
-	rec.Connector = spec.Harness.Name
+	rec.Connector, rec.MicroVM = spec.Harness.Name, spec.MicroVM
 	if !f.fixedUID {
 		rec.UID, rec.GID = spec.UID, spec.GID
 	}

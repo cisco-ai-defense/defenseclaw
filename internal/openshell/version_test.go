@@ -18,6 +18,7 @@ package openshell
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,31 @@ func TestCheckSupportedWindow(t *testing.T) {
 		if strings.HasPrefix(want, "upgrade") && (strings.Contains(err.Error(), "remove") || strings.Contains(err.Error(), "destroy")) {
 			t.Errorf("%s message asks for a cleanup the installer does not need: %q", v, err)
 		}
+	}
+}
+
+// The pinned libnss-myhostname files: one per architecture the base image
+// ships, each by the exact version and a sha256, from a place that keeps
+// the file after a newer version supersedes it in the archive's pool.
+func TestNSSMyhostnamePins(t *testing.T) {
+	urlRE := regexp.MustCompile(`^https://(snapshot\.ubuntu\.com/ubuntu/[0-9]{8}T[0-9]{6}Z/pool/universe/s/systemd|launchpadlibrarian\.net/[0-9]+)/libnss-myhostname_([^_/]+)_([a-z0-9]+)\.deb$`)
+	shaRE := regexp.MustCompile(`^[0-9a-f]{64}$`)
+	if len(NSSMyhostnameDebs) != 2 {
+		t.Fatalf("pinned architectures: %v", NSSMyhostnameDebs)
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		deb, ok := NSSMyhostnameDebs[arch]
+		if !ok || !shaRE.MatchString(deb.SHA256) || len(deb.URLs) < 2 {
+			t.Fatalf("%s pin = %+v", arch, deb)
+		}
+		for _, u := range deb.URLs {
+			m := urlRE.FindStringSubmatch(u)
+			if m == nil || m[2] != NSSMyhostnameVersion || m[3] != arch {
+				t.Errorf("%s: %s is not the %s %s file on the snapshot archive or Launchpad", arch, u, NSSMyhostnameVersion, arch)
+			}
+		}
+	}
+	if NSSMyhostnameDebs["amd64"].SHA256 == NSSMyhostnameDebs["arm64"].SHA256 {
+		t.Fatal("both architectures pin one file")
 	}
 }

@@ -327,7 +327,7 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 	if cache == "" {
 		return false
 	}
-	img, err := m.image(ctx, cfg, spec, false)
+	img, err := m.image(ctx, cfg, spec, d, false)
 	if err != nil {
 		// The image is built first, and then prepared.
 		return true

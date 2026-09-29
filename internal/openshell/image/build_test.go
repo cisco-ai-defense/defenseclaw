@@ -163,6 +163,81 @@ func TestBuildRecordsVerifiedImage(t *testing.T) {
 	}
 }
 
+// An image for the MicroVM driver is its own image: its own tag and
+// record (Record.MicroVM), which a docker build of the same harness never
+// selects, and the other way round; and prune keeps the current image of
+// each, as a machine that ran both drivers boots either.
+func TestBuildKeepsDockerAndMicroVMImagesApart(t *testing.T) {
+	store := testStore(t)
+	specs := map[bool]BuildSpec{false: testSpec(harness.Codex)}
+	vm := testSpec(harness.Codex)
+	vm.MicroVM = true
+	specs[true] = vm
+	recs := map[bool]Record{}
+	for _, microVM := range []bool{false, true} {
+		c := mustContext(t, specs[microVM])
+		b := &Builder{Docker: imageDocker(t, c, goodProbeOutput(c)), Store: store}
+		rec, err := b.Build(context.Background(), specs[microVM], BuildOptions{SkipHookFire: true})
+		if err != nil {
+			t.Fatalf("Build(MicroVM=%t): %v", microVM, err)
+		}
+		if rec.MicroVM != microVM || rec.Tag != c.Tag {
+			t.Fatalf("MicroVM=%t: record %+v", microVM, rec)
+		}
+		recs[microVM] = rec
+	}
+	if recs[false].Tag == recs[true].Tag {
+		t.Fatalf("both images are tagged %s", recs[false].Tag)
+	}
+	for _, microVM := range []bool{false, true} {
+		c := mustContext(t, specs[microVM])
+		if !recordMatches(recs[microVM], c) || recordMatches(recs[!microVM], c) {
+			t.Fatalf("MicroVM=%t matches the wrong record", microVM)
+		}
+		// A record that names the same content for the other driver is
+		// not this image.
+		other := recs[microVM]
+		other.MicroVM = !microVM
+		if recordMatches(other, c) {
+			t.Fatalf("MicroVM=%t matches a record for the other driver", microVM)
+		}
+	}
+
+	store = testStore(t)
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for _, r := range []struct {
+		tag     string
+		built   time.Duration
+		microVM bool
+	}{
+		{"e-repo:codex-docker-u1000", 0, false},
+		{"e-repo:codex-docker-old-u1000", -time.Hour, false},
+		{"e-repo:codex-vm-u1000", time.Hour, true},
+	} {
+		if err := store.Put(Record{Tag: r.tag, Connector: "codex", UID: 1000, GID: 1000, IngressPort: 18971, BuiltAt: t0.Add(r.built),
+			HookFireVerified: true, Owner: testOwner, MicroVM: r.microVM}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tags := "e-repo:codex-docker-u1000\ne-repo:codex-docker-old-u1000\ne-repo:codex-vm-u1000"
+	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+		switch {
+		case args[0] == "image" && args[1] == "ls":
+			return tags, 0
+		case args[0] == "image" && args[1] == "rm":
+			return "", 0
+		}
+		return "", 1
+	}}
+	report, err := (&Builder{Docker: docker, Store: store}).Prune(context.Background(), PruneOptions{Repository: "e-repo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(report.Removed, ",") != "e-repo:codex-docker-old-u1000" || strings.Join(report.Kept, ",") != "e-repo:codex-docker-u1000,e-repo:codex-vm-u1000" {
+		t.Fatalf("removed %v, kept %v", report.Removed, report.Kept)
+	}
+}
+
 // TestBuildFailures: an image that fails the static probe is removed and
 // never recorded, an unknown hook contract is refused before docker runs,
 // and a docker failure is reported as one.

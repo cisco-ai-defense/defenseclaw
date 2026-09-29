@@ -757,6 +757,38 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	}
 }
 
+// Setup builds the images for the driver it sets the gateway up on: on a
+// Mac the MicroVM ones, which answer localhost themselves, also when the
+// gateway has not restarted on the vm driver yet; on Linux the docker ones.
+func TestSetupBuildsTheImagesForItsDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mac     bool
+		driver  openshell.ComputeDriver
+		microVM bool
+	}{
+		{"linux", false, openshell.DriverDocker, false},
+		{"mac on MicroVMs", true, openshell.DriverVM, true},
+		{"mac switching to MicroVMs", true, openshell.DriverDocker, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, "", "", false)
+			ta.IO.TTY = false
+			if tc.mac {
+				ta.GOOS = "darwin"
+				ta.App.Gateway = emptyPlans{ta.gateway}
+				ta.HostDoctor = macReport(tc.driver, nil)
+			}
+			ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+			_, _ = useGateway(ta)
+			ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, NoWrappers: true, Harnesses: []string{"claude"}}))
+			if len(ta.images.recs) != 1 || ta.images.recs[0].MicroVM != tc.microVM {
+				t.Fatalf("built %+v, want MicroVM=%t:\n%s", ta.images.recs, tc.microVM, ta.output())
+			}
+		})
+	}
+}
+
 // TestSetupInstallsWhatTheMicroVMDriverNeeds: e2fsprogs and the driver's
 // Hypervisor signature follow the OpenShell install's consent: a question
 // (no by default) on a terminal, yes with --yes or --install-openshell,
@@ -1132,6 +1164,46 @@ func TestDoctorVerdict(t *testing.T) {
 	has(t, ta.output(), "hook-verified: claudecode 2.1.156; codex not allowed by your organization's policy (openshell.admin.allowed_harnesses)",
 		"ready for sandboxes")
 	lacks(t, ta.output(), "image build codex", "not built yet: codex")
+}
+
+// The doctor's image check counts the images for the driver the gateway
+// runs: a MicroVM gateway boots only an image built for it, so the image a
+// docker gateway ran is not built for it yet.
+func TestDoctorCountsTheImagesForTheGatewayDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		driver       openshell.ComputeDriver
+		microVMImage bool
+		// verdict is the MicroVM check's: "pass", "problem" or "" (it
+		// settled nothing).
+		verdict string
+		want    string
+	}{
+		{"docker image, docker gateway", openshell.DriverDocker, false, "", "hook-verified: claudecode 2.1.156"},
+		{"docker image, vm gateway", openshell.DriverVM, false, "", "not built yet: claudecode"},
+		{"MicroVM image, vm gateway", openshell.DriverVM, true, "pass", "hook-verified: claudecode 2.1.156"},
+		{"MicroVM image, docker gateway", openshell.DriverDocker, true, "pass", "not built yet: claudecode"},
+		// The next run checks an unsettled image again, and refuses one the
+		// check found cannot start in a MicroVM: neither is ready.
+		{"unchecked MicroVM image", openshell.DriverVM, true, "", "not checked for an OpenShell MicroVM yet: claudecode"},
+		{"MicroVM image with a problem", openshell.DriverVM, true, "problem", "cannot start in an OpenShell MicroVM: claudecode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.Cfg.OpenShell.Harnesses = []string{"claudecode"}
+			ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) { r.Driver = tc.driver })
+			ta.images.recs = readyImages(ta)
+			ta.images.recs[0].MicroVM = tc.microVMImage
+			switch tc.verdict {
+			case "pass":
+				ta.images.recs[0].MicroVMVerified = true
+			case "problem":
+				ta.images.recs[0].MicroVMProblem = "it could not resolve localhost"
+			}
+			_ = ta.RunDoctor(bg, DoctorOptions{})
+			has(t, ta.output(), tc.want)
+		})
+	}
 }
 
 // TestDoctorWrapperHintNamesAConfiguredHarness pins that the doctor's

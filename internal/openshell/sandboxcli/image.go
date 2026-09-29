@@ -38,20 +38,24 @@ import (
 // ImageService builds, lists and removes the overlay images.
 type ImageService interface {
 	// Build builds (and hook-verifies) spec's image unless a verified one
-	// is current; log receives the docker build output.
-	Build(ctx context.Context, spec *harness.Spec, force bool, log io.Writer) (image.Record, bool, error)
-	// Current reports whether spec's image is built and hook-verified (the
-	// daemon uses it without building).
-	Current(spec *harness.Spec) (bool, error)
+	// is current; log receives the docker build output. microVM builds the
+	// image for the MicroVM driver (image.BuildSpec.MicroVM), the one a
+	// gateway on that driver boots.
+	Build(ctx context.Context, spec *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error)
+	// Current reports whether spec's image for the MicroVM driver
+	// (microVM) or the docker driver is built and hook-verified (the daemon
+	// uses it without building).
+	Current(spec *harness.Spec, microVM bool) (bool, error)
 	List() ([]image.Record, error)
 	// Gone returns the tags of recs Docker no longer has (image.Builder.Gone).
 	Gone(ctx context.Context, recs []image.Record) (map[string]bool, error)
 	// GoneIDs returns the image IDs among ids Docker holds no image of
 	// (image.Builder.GoneIDs).
 	GoneIDs(ctx context.Context, ids []string) (map[string]bool, error)
-	// Size is the size in Docker of spec's current hook-verified image, or
-	// of the image ref when spec is nil; 0 when there is none.
-	Size(ctx context.Context, spec *harness.Spec, ref string) (uint64, error)
+	// Size is the size in Docker of spec's current image for the MicroVM
+	// driver (microVM) or the docker driver, or of the image ref when spec
+	// is nil; 0 when there is none.
+	Size(ctx context.Context, spec *harness.Spec, microVM bool, ref string) (uint64, error)
 	// Prune removes superseded images (image.Builder.Prune).
 	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
 	// Remove deletes every image this data dir built or named: its overlay
@@ -67,11 +71,11 @@ type builderImages struct {
 
 func (b *builderImages) store() *image.Store { return image.NewStore(b.app.dataDir()) }
 
-func (b *builderImages) spec(h *harness.Spec) image.BuildSpec {
+func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
 	a := b.app
 	bs := image.BuildSpec{
 		Harness: h, UID: os.Getuid(), GID: os.Getgid(), FailMode: connector.SandboxFailMode,
-		DefenseClawVersion: manager.ImageVersion(),
+		DefenseClawVersion: manager.ImageVersion(), MicroVM: microVM,
 	}
 	if a.Cfg != nil {
 		bs.HarnessVersion = a.Cfg.OpenShell.Image.HarnessVersions[h.Name]
@@ -81,13 +85,15 @@ func (b *builderImages) spec(h *harness.Spec) image.BuildSpec {
 	return bs
 }
 
-func (b *builderImages) Build(ctx context.Context, h *harness.Spec, force bool, log io.Writer) (image.Record, bool, error) {
+func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: log}
-	spec := b.spec(h)
+	spec := b.spec(h, microVM)
 	if !force {
+		// An image for the MicroVM driver not checked for it yet is
+		// probed again by the build (image.Record.MicroVMUnchecked).
 		if rec, ok, err := builder.Current(spec); err != nil {
 			return image.Record{}, false, err
-		} else if ok && rec.HookFireVerified {
+		} else if ok && rec.HookFireVerified && !rec.MicroVMUnchecked() {
 			return rec, false, nil
 		}
 	}
@@ -101,10 +107,12 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, force bool, 
 	return rec, true, nil
 }
 
-func (b *builderImages) Current(h *harness.Spec) (bool, error) {
+func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	rec, ok, err := builder.Current(b.spec(h))
-	return ok && rec.HookFireVerified, err
+	rec, ok, err := builder.Current(b.spec(h, microVM))
+	// A MicroVM image whose MicroVM check settled nothing is checked
+	// again before its next sandbox, so it is not current yet.
+	return ok && rec.HookFireVerified && !rec.MicroVMUnchecked(), err
 }
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }
@@ -114,10 +122,10 @@ func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[stri
 	return builder.Gone(ctx, recs)
 }
 
-func (b *builderImages) Size(ctx context.Context, h *harness.Spec, ref string) (uint64, error) {
+func (b *builderImages) Size(ctx context.Context, h *harness.Spec, microVM bool, ref string) (uint64, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
 	if h != nil {
-		rec, ok, err := builder.Current(b.spec(h))
+		rec, ok, err := builder.Current(b.spec(h, microVM))
 		if err != nil || !ok {
 			return 0, err
 		}
@@ -234,7 +242,8 @@ type ImageBuildOptions struct {
 }
 
 // ImageBuild builds the harnesses' overlay images (default: the
-// configured openshell.harnesses, else every supported harness).
+// configured openshell.harnesses, else every supported harness), for the
+// compute driver the gateway runs (gatewayDriverNow).
 func (a *App) ImageBuild(ctx context.Context, o ImageBuildOptions) error {
 	if err := a.CheckSupported(); err != nil {
 		return err
@@ -243,15 +252,16 @@ func (a *App) ImageBuild(ctx context.Context, o ImageBuildOptions) error {
 	if err != nil {
 		return err
 	}
+	microVM := image.MicroVMTarget(a.gatewayDriverNow(ctx))
 	for _, spec := range specs {
-		if err := a.buildImage(ctx, spec, o.Force, o.Verbose); err != nil {
+		if err := a.buildImage(ctx, spec, microVM, o.Force, o.Verbose); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose bool) error {
+func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force, verbose bool) error {
 	var log io.Writer = io.Discard
 	logPath := ""
 	if verbose {
@@ -268,7 +278,7 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 	}
 	a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
 	started := a.Now()
-	rec, built, err := a.Images.Build(ctx, spec, force, log)
+	rec, built, err := a.Images.Build(ctx, spec, microVM, force, log)
 	if err != nil {
 		if logPath != "" {
 			return fmt.Errorf("%s image: %w (build log: %s)", spec.DisplayName, err, logPath)
@@ -289,16 +299,24 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 			a.warn(warning)
 		}
 	}
-	if !rec.MicroVMVerified && rec.MicroVMProblem != "" {
-		// Docker sandboxes run it; a MicroVM gateway refuses it.
-		a.warn(spec.DisplayName + " cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + rec.MicroVMProblem)
+	if !rec.MicroVM || rec.MicroVMVerified {
+		return nil
+	}
+	recheck := "`" + CommandName + " image build " + spec.Name + " --force`"
+	switch {
+	case rec.MicroVMProblem != "":
+		a.warn(spec.DisplayName + " cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + rec.MicroVMProblem +
+			"; " + recheck + " checks it again")
+	case rec.MicroVMInconclusive != "":
+		a.warn(spec.DisplayName + "'s image is not checked for an OpenShell MicroVM yet: " + rec.MicroVMInconclusive +
+			"; the next `" + CommandName + " run " + spec.Name + "` on the vm driver checks it again, as does " + recheck)
 	}
 	return nil
 }
 
 // vmDiskShortage judges the free space where the gateway's compute driver d
-// would prepare a disk from spec's current image (or, with spec nil, the
-// image ref) for what, when d prepares one (the MicroVM driver): an error
+// would prepare a disk from spec's current image for d (or, with spec nil,
+// the image ref) for what, when d prepares one (the MicroVM driver): an error
 // below the floor, a warning below the recommended space
 // (openshell.VMDiskShortage). Nothing on another driver, or when the space
 // cannot be measured.
@@ -315,13 +333,16 @@ func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harn
 		return "", nil
 	}
 	// An image to build first: its size is not known yet.
-	size, _ := a.Images.Size(ctx, spec, ref)
+	size, _ := a.Images.Size(ctx, spec, image.MicroVMTarget(d), ref)
 	return openshell.VMDiskShortage(a.tildePath(dir), free, size, what)
 }
 
 // gatewayDriverNow is the compute driver of the gateway sandboxes start
 // on: the one the daemon reports, else the one the gateway's configuration
-// selects (docker when it names none, or cannot be read).
+// selects (OPENSHELL_COMPUTE_DRIVER or compute_driver; docker when it
+// names none, or cannot be read). The harness images are built for it: a
+// MicroVM gateway boots only an image built for it, which answers
+// localhost itself; a docker gateway's images stay as they were.
 func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
 	if api, err := a.api(); err == nil {
 		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
@@ -329,7 +350,7 @@ func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
 		}
 	}
 	if st, err := a.Gateway.State(); err == nil && st != nil {
-		if d, ok := openshell.LookupDriver(string(st.ComputeDriver)); ok {
+		if d, ok := st.Driver(); ok {
 			return d
 		}
 	}

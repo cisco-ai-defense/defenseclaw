@@ -104,8 +104,7 @@ func TestHookFireProbeStartsOmniGentOnATerminal(t *testing.T) {
 		if tty == nil {
 			t.Fatalf("crash=%t: no interactive run: %+v (%v)", crash, res.Runs, err)
 		}
-		// The interactive run comes before the MicroVM scenario's.
-		last := sim.scripts[len(sim.scripts)-2]
+		last := sim.scripts[len(sim.scripts)-1]
 		if !strings.Contains(last, harness.OmniGentLauncherPath) || strings.Contains(last, "'-p'") ||
 			!strings.Contains(last, shQuote(builtinAllowPrompt)) || !strings.Contains(last, " '/exit' ") {
 			t.Fatalf("interactive run script does not type the prompt into the TUI:\n%s", last)

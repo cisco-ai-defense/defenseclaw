@@ -221,8 +221,17 @@ func (d *layerDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Write
 // it, in a daemon that holds it.
 func runBase(t *testing.T) (*Builder, *layerDaemon, Record) {
 	t.Helper()
-	c := mustContext(t, testSpec(harness.ClaudeCode))
+	return runBaseFor(t, testSpec(harness.ClaudeCode))
+}
+
+// runBaseFor is runBase for an overlay image built from spec.
+func runBaseFor(t *testing.T, spec BuildSpec) (*Builder, *layerDaemon, Record) {
+	t.Helper()
+	c := mustContext(t, spec)
 	base := recordFor(c, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), true)
+	if spec.MicroVM {
+		base.MicroVM, base.MicroVMVerified = true, true
+	}
 	daemon := newLayerDaemon(t)
 	labels := maps.Clone(c.Labels)
 	daemon.addBase(base, labels)
@@ -340,6 +349,27 @@ func TestRunImageBuildsRecordsAndReuses(t *testing.T) {
 	daemon.tags[ri.Tag] = other.ImageID
 	if _, ok, _ := b.RecordedRunImage(ctx, base, files, testAliasRepo); ok {
 		t.Fatal("a moved tag was reused")
+	}
+}
+
+// An overlay image built for the MicroVM driver renders its build context
+// again with the MicroVM step, so a run image is made from it: before, the
+// rendering left the step out, its content hash never matched the record,
+// and every Claude Code and Codex sandbox on a Mac was refused.
+func TestRunImageFromAMicroVMImage(t *testing.T) {
+	spec := testSpec(harness.ClaudeCode)
+	spec.MicroVM = true
+	b, _, base := runBaseFor(t, spec)
+	files := claudeRunFiles(`{"env":{}}`)
+	ri, err := b.RunImage(context.Background(), base, files, testAliasRepo)
+	if err != nil {
+		t.Fatalf("RunImage of a MicroVM image: %v", err)
+	}
+	if ri.BaseImageID != base.ImageID || ri.Alias {
+		t.Fatalf("run image = %+v", ri)
+	}
+	if found, ok, err := b.RecordedRunImage(context.Background(), base, files, testAliasRepo); err != nil || !ok || !reflect.DeepEqual(found, ri) {
+		t.Fatalf("RecordedRunImage = %+v, %v, %v", found, ok, err)
 	}
 }
 

@@ -36,6 +36,12 @@ type Builder struct {
 	Log io.Writer
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// TempDir is where the hook-fire probe writes the files it mounts into
+	// a probe container (default os.TempDir()). On a Mac, Docker Desktop
+	// shares /private, /tmp and /var/folders (the user's $TMPDIR) by
+	// default, where a data dir such as /opt/cisco/defenseclaw/runtime is
+	// not shared.
+	TempDir string
 }
 
 // BuildOptions tune one build.
@@ -60,7 +66,8 @@ type BuildOptions struct {
 // diagnosis) and Build returns the ErrHooksNotFired error. A new build is
 // recorded with HookFireVerified unset (a rebuild clears an earlier
 // verdict); a cached image keeps its verdict and is probed again only when
-// it is not verified yet.
+// it is not verified yet, or, built for the MicroVM driver, not checked for
+// it yet (Record.MicroVMUnchecked).
 func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) (Record, error) {
 	c, err := b.Context(spec)
 	if err != nil {
@@ -71,7 +78,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 			return Record{}, err
 		} else if ok && recordMatches(rec, c) {
 			if id, err := b.imageID(ctx, c.Tag); err == nil && id == rec.ImageID {
-				if rec.HookFireVerified || opts.SkipHookFire {
+				if (rec.HookFireVerified && !rec.MicroVMUnchecked()) || opts.SkipHookFire {
 					return rec, nil
 				}
 				return b.verifyBuilt(ctx, c, rec, opts)
@@ -109,6 +116,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		DefenseClawVersion: c.Spec.DefenseClawVersion,
 		FailMode:           c.Spec.FailMode,
 		Owner:              c.Spec.Owner,
+		MicroVM:            c.Spec.MicroVM,
 		BuiltAt:            b.now().UTC(),
 		NetworkBinaries:    res.NetworkBinary,
 	}
@@ -282,10 +290,10 @@ type PruneReport struct {
 }
 
 // Prune removes overlay images this store built, in one repository, except,
-// per (connector, uid, gid, ingress port), the most recent image and the
-// most recent hook-verified one (what Store.Current selects for an unchanged
-// spec), plus opts.Keep, and forgets store records whose image no longer
-// exists. An image is removed only when this store recorded it under its own
+// per (connector, uid, gid, ingress port, docker or MicroVM image), the most
+// recent image and the most recent hook-verified one (what Store.Current
+// selects for an unchanged spec), plus opts.Keep, and forgets store records
+// whose image no longer exists. An image is removed only when this store recorded it under its own
 // owner and the image carries that owner label; every other DefenseClaw
 // image is reported, never removed, so data dirs sharing a Docker daemon (or
 // a data dir that lost images.json) never delete images another one runs.
@@ -323,6 +331,7 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	type identity struct {
 		connector         string
 		uid, gid, ingress int
+		microVM           bool
 	}
 	latest := map[identity]Record{}
 	verified := map[identity]Record{}
@@ -343,7 +352,7 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 			continue
 		}
 		candidates = append(candidates, r)
-		id := identity{r.Connector, r.UID, r.GID, r.IngressPort}
+		id := identity{r.Connector, r.UID, r.GID, r.IngressPort, r.MicroVM}
 		if cur, ok := latest[id]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 			latest[id] = r
 		}

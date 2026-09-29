@@ -436,7 +436,7 @@ func baseDirs(base Record) (map[string]bool, error) {
 	c, err := NewContext(BuildSpec{
 		Harness: h, HarnessVersion: base.HarnessVersion, BaseImage: base.BaseImage, UID: base.UID, GID: base.GID,
 		IngressPort: base.IngressPort, FailMode: base.FailMode, DefenseClawVersion: base.DefenseClawVersion,
-		Repository: repo, Owner: base.Owner,
+		Repository: repo, Owner: base.Owner, MicroVM: base.MicroVM,
 	})
 	if err != nil || c.ContentHash != base.ContentHash || c.Tag != base.Tag {
 		return nil, fmt.Errorf("openshell image: %s is not the image this DefenseClaw builds from its record; rebuild it (`defenseclaw sandbox image build %s --force`)",

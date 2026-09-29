@@ -463,9 +463,11 @@ const (
 	// allow prompt and quits (interactiveLaunches).
 	ScenarioInteractive = "interactive"
 	// ScenarioMicroVM runs the allow prompt again with the name resolution
-	// of an OpenShell MicroVM (below). Its verdict is kept apart
-	// (HookFireResult.MicroVMProblem, Record.MicroVMVerified): only a
-	// driver without a hosts file (openshell.Driver.HostsFile) needs it.
+	// of an OpenShell MicroVM (below), for an image built for the MicroVM
+	// driver (BuildSpec.MicroVM) only. Its verdict is kept apart
+	// (HookFireResult.MicroVMProblem and MicroVMInconclusive,
+	// Record.MicroVMVerified): only a driver without a hosts file
+	// (openshell.Driver.HostsFile) needs it, and it never fails the probe.
 	ScenarioMicroVM = "microvm"
 )
 
@@ -632,10 +634,22 @@ type hookFireScenario struct {
 type HookFireResult struct {
 	Network HookFireNetwork `json:"network"`
 	Runs    []HookFireRun   `json:"runs"`
-	// MicroVMProblem says why the harness does not work with a MicroVM's
-	// name resolution (ScenarioMicroVM); empty when it does. It does not
-	// fail the probe: only a MicroVM gateway refuses such an image.
+	// MicroVMProblem says why the harness cannot work with a MicroVM's
+	// name resolution (ScenarioMicroVM): it failed there and printed a
+	// failed lookup of localhost, which it resolves on its own. It is the
+	// one definitive MicroVM verdict besides a pass; empty when the run
+	// passed, did not settle (MicroVMInconclusive) or was not run (an
+	// image for the docker driver). It does not fail the probe: only a
+	// MicroVM gateway refuses such an image.
 	MicroVMProblem string `json:"microvm_problem,omitempty"`
+	// MicroVMInconclusive says why the MicroVM run settled nothing: it
+	// could not run at all (a mount Docker refused, a timeout, an address
+	// relay mode could not learn), or the harness failed there without a
+	// failed lookup of localhost (a hook not observed, an exit), which a
+	// flaky run does as well. The image stays unchecked for a MicroVM
+	// (Record.MicroVMUnchecked), so its next build or sandbox on the
+	// MicroVM driver runs the probe again.
+	MicroVMInconclusive string `json:"microvm_inconclusive,omitempty"`
 }
 
 // VerifyHooks runs the hook-fire probe against the recorded image of c and
@@ -649,7 +663,8 @@ type HookFireResult struct {
 // marked verified by a probe of its predecessor. A probe that could not run
 // leaves the record unchanged. Build calls VerifyHooks for every fresh image.
 // MicroVMVerified is set with HookFireVerified when the MicroVM scenario
-// passed too, and MicroVMProblem says why it did not.
+// passed too; MicroVMProblem says why the harness cannot work in a
+// MicroVM, and MicroVMInconclusive why the scenario settled nothing.
 func (b *Builder) VerifyHooks(ctx context.Context, c *Context, opts HookFireOptions) (Record, HookFireResult, error) {
 	if !opts.builtin() && opts.Block == nil {
 		return Record{}, HookFireResult{}, errors.New("openshell image: VerifyHooks needs a block scenario: an image is verified only once a denied tool call is proven not to run")
@@ -683,8 +698,8 @@ func (b *Builder) VerifyHooks(ctx context.Context, c *Context, opts HookFireOpti
 		if verified {
 			r.HookFireVerifiedAt = verifiedAt
 		}
-		r.MicroVMVerified = verified && res.MicroVMProblem == "" && ranScenario(res, ScenarioMicroVM)
-		r.MicroVMProblem = res.MicroVMProblem
+		r.MicroVMVerified = verified && c.Spec.MicroVM && ranScenario(res, ScenarioMicroVM) && res.MicroVMProblem == "" && res.MicroVMInconclusive == ""
+		r.MicroVMProblem, r.MicroVMInconclusive = res.MicroVMProblem, res.MicroVMInconclusive
 		return nil
 	})
 	if err != nil {
@@ -961,13 +976,24 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		}
 		sideEffect(tty, ttySc, prefix)
 	}
-	vmSc := hookFireScenario{name: ScenarioMicroVM, prompt: opts.Prompt, sideEffect: opts.AllowSideEffect, wantSideEffect: true,
-		microVM: true, hostGateway: allow.hostGateway}
-	vm, err := run(vmSc)
-	if err != nil {
-		return result, err
+	if c.Spec.MicroVM {
+		// A run that could not run at all (a mount Docker refused, a
+		// timeout, an address it could not learn) says nothing about the
+		// hooks the runs above proved, nor about the harness in a MicroVM:
+		// it leaves the image unchecked for one, and only an interrupted
+		// probe fails.
+		vmSc := hookFireScenario{name: ScenarioMicroVM, prompt: opts.Prompt, sideEffect: opts.AllowSideEffect, wantSideEffect: true,
+			microVM: true, hostGateway: allow.hostGateway}
+		vm, err := run(vmSc)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			return result, err
+		case err != nil:
+			result.MicroVMInconclusive = "the hook-fire probe could not run " + c.Spec.Harness.DisplayName + " with an OpenShell MicroVM's name resolution: " + err.Error()
+		default:
+			result.MicroVMProblem, result.MicroVMInconclusive = microVMVerdict(c.Spec.Harness.DisplayName, vm, vmSc, required)
+		}
 	}
-	result.MicroVMProblem = microVMProblem(c.Spec.Harness.DisplayName, vm, vmSc, required)
 	if len(problems) > 0 {
 		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %w: %s", c.Tag, ErrHooksNotFired, strings.Join(problems, "; "))
 	}
@@ -989,26 +1015,28 @@ func sideEffectProblem(r HookFireRun, sc hookFireScenario) string {
 	return ""
 }
 
-// microVMProblem says why harness did not work in the MicroVM scenario's
-// run r, or "" when it did: every required hook fired and the allowed tool
-// call ran. A harness that could not resolve localhost is named as such,
-// with the line it printed.
-func microVMProblem(harnessName string, r HookFireRun, sc hookFireScenario, required []string) string {
+// microVMVerdict judges the MicroVM scenario's run r of harness: both
+// empty when it worked (every required hook fired and the allowed tool
+// call ran). A harness that failed and printed a failed lookup of
+// localhost resolves names on its own, which the image cannot answer:
+// that is the problem, with the line it printed. Any other failure is
+// inconclusive: it says what went wrong, and the image is checked again.
+func microVMVerdict(harnessName string, r HookFireRun, sc hookFireScenario, required []string) (problem, inconclusive string) {
 	problems := requiredHookProblems(r, required)
 	if p := sideEffectProblem(r, sc); p != "" {
 		problems = append(problems, p)
 	}
 	if len(problems) == 0 {
-		return ""
+		return "", ""
 	}
 	if line, ok := openshell.LocalhostLookupFailure(r.Output); ok {
 		return fmt.Sprintf("%s cannot resolve localhost in an OpenShell MicroVM: it printed %q. A MicroVM's /etc/hosts is empty and its DNS relay "+
-			"does not answer localhost; the image answers localhost there only to programs that use the system resolver (nss-myhostname)", harnessName, line)
+			"does not answer localhost; the image answers localhost there only to programs that use the system resolver (nss-myhostname)", harnessName, line), ""
 	}
 	if r.ExitCode != 0 {
 		problems = append([]string{fmt.Sprintf("%s exited %d", harnessName, r.ExitCode)}, problems...)
 	}
-	return "with the name resolution of an OpenShell MicroVM (an empty /etc/hosts, and a DNS relay that does not answer localhost), " + strings.Join(problems, "; ")
+	return "", "with the name resolution of an OpenShell MicroVM (an empty /etc/hosts, and a DNS relay that does not answer localhost), " + strings.Join(problems, "; ")
 }
 
 // ranScenario reports whether res holds a run of scenario.
@@ -1282,20 +1310,20 @@ func (b *Builder) hookFireRun(
 }
 
 // microVMMounts writes the MicroVM scenario's /etc/hosts and
-// /etc/resolv.conf (hookFireNet.microVMFiles) to a new directory next to
-// the image store (the system temp directory without one), where Docker
-// Desktop's file sharing reaches them, and returns their read-only mounts
-// and what removes them.
+// /etc/resolv.conf (hookFireNet.microVMFiles) to a new directory under
+// Builder.TempDir (the system temp directory), which Docker Desktop's file
+// sharing reaches by default wherever the data dir is, and returns their
+// read-only mounts and what removes them.
 func (b *Builder) microVMMounts(netw hookFireNet, hostGateway string) ([]RunFile, func(), error) {
 	hosts, resolv, err := netw.microVMFiles(hostGateway)
 	if err != nil {
 		return nil, nil, err
 	}
-	parent := ""
-	if b.Store != nil {
-		parent = filepath.Dir(b.Store.Path())
+	parent := b.TempDir
+	if parent == "" {
+		parent = os.TempDir()
 	}
-	dir, err := os.MkdirTemp(parent, "hookfire-microvm-")
+	dir, err := os.MkdirTemp(parent, "defenseclaw-hookfire-microvm-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("openshell image: hook-fire MicroVM scenario: %w", err)
 	}

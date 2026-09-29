@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -118,26 +119,76 @@ func TestImagePruneKeepsTheSandboxesImages(t *testing.T) {
 	}
 }
 
+// `sandbox image build` builds the image the gateway's compute driver
+// boots: the MicroVM one (which answers localhost itself) when the
+// daemon's gateway runs the vm driver, or, when the daemon does not say,
+// when the gateway's configuration selects it; the docker one otherwise.
+func TestImageBuildTargetsTheGatewayDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		daemon     string
+		noGateway  bool
+		configured openshell.ComputeDriver
+		microVM    bool
+	}{
+		{name: "docker gateway", daemon: "docker", configured: openshell.DriverVM},
+		{name: "vm gateway", daemon: "vm", microVM: true},
+		{name: "daemon too old to say", configured: openshell.DriverVM, microVM: true},
+		{name: "daemon without a gateway", noGateway: true, configured: openshell.DriverVM, microVM: true},
+		{name: "nothing says", noGateway: true},
+		{name: "a driver DefenseClaw does not drive", daemon: "podman"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.daemon
+			if tc.noGateway {
+				ta.daemon.status.Gateway = nil
+			}
+			ta.gateway.state.ComputeDriver = tc.configured
+			ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claude"}}))
+			if len(ta.images.recs) != 1 || ta.images.recs[0].MicroVM != tc.microVM {
+				t.Fatalf("built %+v, want MicroVM=%t", ta.images.recs, tc.microVM)
+			}
+		})
+	}
+}
+
 // AG-MAC-F2: an image whose hooks verify but whose harness cannot start
 // with a MicroVM's name resolution is built (docker sandboxes run it), and
 // the build says a MicroVM gateway refuses it, with the probe's reason.
+// A MicroVM run that settled nothing is said as such: the image is not
+// checked for a MicroVM yet, and the next run on the vm driver, or a
+// forced build, checks it again. Both warnings name the forced build.
 func TestImageBuildSaysWhatCannotStartInAMicroVM(t *testing.T) {
 	const why = `Antigravity cannot resolve localhost in an OpenShell MicroVM: it printed "lookup localhost on 127.0.0.53:53: server misbehaving"`
+	const unsettled = "the hook-fire probe could not run Codex with an OpenShell MicroVM's name resolution: the run timed out"
 	ta := newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
 	ta.images.microVMProblem = map[string]string{"antigravity": why}
-	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity", "claude"}}))
+	ta.images.microVMInconclusive = map[string]string{"codex": unsettled}
+	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity", "claude", "codex"}}))
 	out := ta.output()
 	for _, want := range []string{
 		"Antigravity 1.2.12: defenseclaw/sandbox:antigravity, hooks verified",
-		"Antigravity cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + why,
+		"Antigravity cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + why +
+			"; `defenseclaw sandbox image build antigravity --force` checks it again",
+		"Codex's image is not checked for an OpenShell MicroVM yet: " + unsettled +
+			"; the next `defenseclaw sandbox run codex` on the vm driver checks it again, as does `defenseclaw sandbox image build codex --force`",
 		"Claude Code ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Count(out, "cannot start in an OpenShell MicroVM") != 1 {
-		t.Fatalf("only Antigravity cannot start in a MicroVM:\n%s", out)
+	if strings.Count(out, "cannot start in an OpenShell MicroVM") != 1 || strings.Count(out, "not checked for an OpenShell MicroVM") != 1 {
+		t.Fatalf("only Antigravity cannot start in a MicroVM, and only Codex is not checked:\n%s", out)
+	}
+	// A docker gateway's images say nothing about MicroVMs.
+	ta = newTestApp(t, "")
+	ta.images.microVMProblem = map[string]string{"antigravity": why}
+	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity"}}))
+	if strings.Contains(ta.output(), "MicroVM") {
+		t.Fatalf("a docker image build mentions MicroVMs:\n%s", ta.output())
 	}
 }
 

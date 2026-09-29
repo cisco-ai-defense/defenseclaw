@@ -127,7 +127,7 @@ func TestHookFireScriptedMockDrivesKiro(t *testing.T) {
 				if err != nil {
 					t.Fatalf("HookFireProbe: %v", err)
 				}
-				if len(res.Runs) != 4 || res.Runs[1].SideEffectPresent == nil || *res.Runs[1].SideEffectPresent || res.MicroVMProblem != "" {
+				if len(res.Runs) != 3 || res.Runs[1].SideEffectPresent == nil || *res.Runs[1].SideEffectPresent || res.MicroVMProblem != "" {
 					t.Fatalf("result = %+v", res)
 				}
 				return

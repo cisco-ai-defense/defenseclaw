@@ -46,6 +46,9 @@ const (
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
 	// and gh, among others).
 	DefaultBaseImage = "ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e"
+	// NSSMyhostnameVersion is the libnss-myhostname release in
+	// NSSMyhostnameDebs.
+	NSSMyhostnameVersion = "255.4-1ubuntu8.17"
 
 	// DefaultWorkspace is the OpenShell workspace (tenant) sandboxes are
 	// created in when the operator does not choose one. Since 0.1.0 the
@@ -55,6 +58,45 @@ const (
 	// gateway installs.
 	DefaultGatewayName = "openshell"
 )
+
+// PinnedDeb is one architecture's file of a pinned Debian package.
+type PinnedDeb struct {
+	// URLs serve the same file and are tried in order.
+	URLs []string
+	// SHA256 is the file's digest, as the Packages index of its release
+	// publishes it; a build refuses any other file.
+	SHA256 string
+}
+
+// NSSMyhostnameDebs are the libnss-myhostname NSSMyhostnameVersion packages
+// of Ubuntu 24.04 (universe; the noble-security and noble-updates release
+// when pinned), the release of DefaultBaseImage, by `dpkg
+// --print-architecture`. The images built for OpenShell's MicroVM driver
+// install the one of their architecture so that localhost resolves in a
+// MicroVM (image.BuildSpec.MicroVM); the images for the docker driver do
+// not. Each is fetched from Ubuntu's snapshot archive, which keeps every
+// file it published, else from Launchpad's librarian, which keeps Ubuntu's
+// builds: the archive's own pool drops a version once a newer one
+// supersedes it. The package depends only on libc6 (>= 2.38) and libcap2
+// (>= 1:2.10), which DefaultBaseImage carries on both architectures
+// (2.39-0ubuntu8.7 and 1:2.66-5ubuntu2.4), so it installs with `dpkg -i`
+// and no package index. Review it with DefaultBaseImage.
+var NSSMyhostnameDebs = map[string]PinnedDeb{
+	"amd64": {
+		URLs: []string{
+			"https://snapshot.ubuntu.com/ubuntu/20260929T000000Z/pool/universe/s/systemd/libnss-myhostname_255.4-1ubuntu8.17_amd64.deb",
+			"https://launchpadlibrarian.net/871327436/libnss-myhostname_255.4-1ubuntu8.17_amd64.deb",
+		},
+		SHA256: "5014f50bd8a717629a626e799d2c453316e3985893625ec41d12ac1a82bfcd54",
+	},
+	"arm64": {
+		URLs: []string{
+			"https://snapshot.ubuntu.com/ubuntu/20260929T000000Z/pool/universe/s/systemd/libnss-myhostname_255.4-1ubuntu8.17_arm64.deb",
+			"https://launchpadlibrarian.net/871327181/libnss-myhostname_255.4-1ubuntu8.17_arm64.deb",
+		},
+		SHA256: "5f39fb3175f068aad4ab0b39479fb0ad1265343982fdc19983f8dfa659e74465",
+	},
+}
 
 // SandboxPolicy is the typed OpenShell sandbox policy the renderer produces
 // and the client submits.
