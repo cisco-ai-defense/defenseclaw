@@ -11,10 +11,12 @@
 // OpenShell sandboxes: the Sandboxes panel, the menu-bar section and the
 // Overview card. All three render AppState.sandbox (pulse-refreshed from the
 // daemon's /api/v1/sandbox API). Unblock and ask decisions go to the daemon;
-// stop, review and undo run the CLI so their output lands in Activity (stop
-// and undo also keep a detached run's log there for `sandbox logs`).
-// Harness sessions (run, connect) need a terminal, so the app offers the
-// command to copy rather than a window pretending to be one.
+// stop, review, undo and a pull to a branch run the CLI so their output lands
+// in Activity (stop and undo also keep a detached run's log there for
+// `sandbox logs`). Harness sessions (run, connect) need a terminal, and so
+// does a pull that applies to the working tree after showing the changes,
+// so the app offers the command to copy rather than a window pretending to
+// be one.
 
 import AppKit
 import SwiftUI
@@ -75,11 +77,21 @@ struct SandboxesView: View {
             isPresented: Binding(get: { confirmUndo != nil }, set: { if !$0 { confirmUndo = nil } }),
             presenting: confirmUndo
         ) { row in
-            Button("Undo everything", role: .destructive) { runCLI("Undo \(row.name)", ["sandbox", "undo", row.name, "--yes"]) }
+            // The CLI undoes a mounted project's session, or reverts a copy's
+            // last `pull --apply` in the project folder.
+            Button(row.copyMode ? "Revert the apply" : "Undo everything", role: .destructive) {
+                runCLI("Undo \(row.name)", ["sandbox", "undo", row.name, "--yes"])
+            }
         } message: { row in
-            Text("Puts \(row.project.isEmpty ? "the project folder" : row.project) back to its pre-session snapshot. "
-                + "The sandbox is stopped first (a detached run still going ends; its log is kept). "
-                + "Activity lists what undo cannot restore.")
+            if row.copyMode {
+                Text("Reverts the last `pull --apply` of \(row.name) in "
+                    + "\(row.project.isEmpty ? "the project folder" : row.project). Edits you made since stay; "
+                    + "if one changed the same files, nothing is reverted and Activity says why.")
+            } else {
+                Text("Puts \(row.project.isEmpty ? "the project folder" : row.project) back to its pre-session snapshot. "
+                    + "The sandbox is stopped first (a detached run still going ends; its log is kept). "
+                    + "Activity lists what undo cannot restore.")
+            }
         }
         .confirmationDialog(
             "Always allow \(confirmAlways?.destination ?? "")?",
@@ -195,8 +207,8 @@ struct SandboxesView: View {
                 ("Skip-permissions", row.yolo ? "on" : "off"),
                 ("Tool calls", "\(row.toolCalls) (\(row.toolBlocked) blocked)"),
                 ("Last tool block", row.lastBlocked.isEmpty ? "—" : row.lastBlocked),
-                ("Undo", row.undoAvailable ? "available" : "no snapshot"),
-            ])
+                ("Undo", row.undoLabel),
+            ] + (row.runImage.isEmpty ? [] : [("Run image", row.runImage)]))
             ForEach(row.alerts, id: \.self) { alert in
                 Label(alert, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -205,13 +217,24 @@ struct SandboxesView: View {
             HStack {
                 Button("Stop…") { confirmStop = row }
                     .disabled(!row.running)
-                Button("Review changes") {
-                    runCLI("Review \(row.name)", ["sandbox", "review", row.name], mutation: false)
+                if row.copyMode {
+                    // A copy's work comes back through pull, which shows it
+                    // first; applying it merges into the working tree, so it
+                    // runs in a terminal. A branch leaves the tree alone.
+                    Button("Copy pull command") { copy(row.pullCommand) }
+                        .help("Paste it in a terminal: it shows the changes, then --apply, --branch or --patch-out FILE brings them back.")
+                    Button("Pull to branch") {
+                        runCLI("Pull \(row.name) to branch dc/\(row.name)", row.pullToBranchArguments)
+                    }
+                    .help("Puts \(row.name)'s work on branch dc/\(row.name); your working tree stays as it is.")
+                } else {
+                    Button("Review changes") {
+                        runCLI("Review \(row.name)", ["sandbox", "review", row.name], mutation: false)
+                    }
                 }
-                .disabled(row.workdirMode == "copy")
-                .help(row.workdirMode == "copy" ? "Copy-mode work comes back with: defenseclaw sandbox pull \(row.name)" : "")
                 Button("Undo…") { confirmUndo = row }
-                    .disabled(!row.undoAvailable || row.workdirMode == "copy")
+                    .disabled(!row.undoOffered)
+                    .help(row.copyMode ? "Reverts the last pull --apply of \(row.name)" : "")
                 Button("Copy connect command") { copy("defenseclaw sandbox connect \(row.name)") }
             }
             .controlSize(.small)
