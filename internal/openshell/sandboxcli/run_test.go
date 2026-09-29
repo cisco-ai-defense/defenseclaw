@@ -615,7 +615,12 @@ func TestRunCopySession(t *testing.T) {
 			if r := ta.bodies("POST", "copybox/workspace"); len(r) != 2 || !strings.Contains(r[0], `"operation":"upload"`) || !strings.Contains(r[1], `"pull_mode":"apply"`) {
 				t.Fatalf("workspace reports = %q", r)
 			}
-			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)")
+			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)",
+				"⚠ nested repository vendor/lib is not copied")
+			// The held-back secrets are named once (cert copilot:F5).
+			if out := ta.output(); strings.Count(out, ".env") != 1 || !strings.Contains(out, "⚠ 1 secret file held back from the copy: .env") {
+				t.Fatalf("held-back lines:\n%s", out)
+			}
 		})
 	}
 }

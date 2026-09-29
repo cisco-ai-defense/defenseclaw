@@ -494,11 +494,10 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		}
 		candidates = append(candidates, p)
 	}
-	files, heldBack, warnings, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
 	if err != nil {
 		return err
 	}
-	rec.Warnings = append(rec.Warnings, warnings...)
 	rec.HeldBack = heldBack
 
 	stage := rec.Stage
@@ -698,11 +697,10 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 		sort.Strings(opaque)
 		rec.Warnings = append(rec.Warnings, "not copied: "+strings.Join(firstN(opaque, 5), ", "))
 	}
-	files, heldBack, warnings, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
+	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
 	if err != nil {
 		return err
 	}
-	rec.Warnings = append(rec.Warnings, warnings...)
 	rec.HeldBack = heldBack
 	if err := os.Mkdir(rec.Stage, 0o700); err != nil {
 		return err
@@ -747,14 +745,16 @@ func stagePlain(ctx context.Context, rec *CopyRecord, stageRoot string, scanOpts
 }
 
 // selectFiles applies the hold-back rules and the size preflight to the
-// candidate paths.
-func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, []string, error) {
+// candidate paths. It returns the files to copy and the ones held back,
+// which the record lists once (CopyRecord.HeldBack), not among its
+// warnings.
+func selectFiles(root string, candidates []string, scanOpts secretScanOptions, maxBytes int64, rec *CopyRecord) ([]stagedFile, []string, error) {
 	sort.Strings(candidates)
 	held, err := detectSecretsIn(root, candidates, scanOpts)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	heldSet := toSet(held.paths)
+	heldSet := toSet(held)
 	var files []stagedFile
 	var total int64
 	for _, rel := range candidates {
@@ -771,29 +771,25 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 		}
 		total += info.Size()
 		if total > maxBytes {
-			return nil, nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
+			return nil, nil, &TooLargeError{What: "the working tree", Size: total, Limit: maxBytes}
 		}
 		files = append(files, stagedFile{rel: rel, info: info})
 	}
-	return files, held.paths, held.warnings, nil
-}
-
-type heldBack struct {
-	paths    []string
-	warnings []string
+	return files, held, nil
 }
 
 // detectSecretsIn applies the mask rules to a fixed list of files (copy
-// mode ships exactly git's view of the working tree, not a directory walk).
-func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*heldBack, error) {
-	res := &heldBack{}
+// mode ships exactly git's view of the working tree, not a directory walk)
+// and returns the ones it holds back.
+func detectSecretsIn(root string, rels []string, opts secretScanOptions) ([]string, error) {
+	var held []string
 	budget := defaultMaxContentScanFiles
 	for _, rel := range rels {
 		if unmaskedBy(opts.unmask, rel) {
 			continue
 		}
 		if secretByName(opts.patterns, rel) {
-			res.paths = append(res.paths, rel)
+			held = append(held, rel)
 			continue
 		}
 		if !opts.contentScan || opts.detector == nil || budget <= 0 {
@@ -810,13 +806,10 @@ func detectSecretsIn(root string, rels []string, opts secretScanOptions) (*heldB
 			continue
 		}
 		if _, ok := opts.detector.DetectSecret(rel, content); ok {
-			res.paths = append(res.paths, rel)
+			held = append(held, rel)
 		}
 	}
-	if len(res.paths) > 0 {
-		res.warnings = append(res.warnings, fmt.Sprintf("%d secret file(s) held back from the copy: %s", len(res.paths), strings.Join(firstN(res.paths, 5), ", ")))
-	}
-	return res, nil
+	return held, nil
 }
 
 func copyFiles(src, dst string, files []stagedFile) error {

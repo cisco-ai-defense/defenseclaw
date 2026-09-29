@@ -530,13 +530,20 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 		return workspaceFailure("record the copy's baseline", err, "")
 	}
 	report("completed", up, "")
-	for _, w := range up.Warnings {
+	a.copyWarnings(up)
+	return nil
+}
+
+// copyWarnings prints what an upload or a refresh of a copy left out: the
+// secret files it held back (one line, however many) and the record's
+// other warnings.
+func (a *App) copyWarnings(rec *workspace.CopyRecord) {
+	if n := len(rec.HeldBack); n > 0 {
+		a.warn(plural(int64(n), "secret file", "secret files") + " held back from the copy: " + strings.Join(firstN(rec.HeldBack, 8), ", "))
+	}
+	for _, w := range rec.Warnings {
 		a.warn(w)
 	}
-	if len(up.HeldBack) > 0 {
-		a.note("held back: " + strings.Join(firstN(up.HeldBack, 8), "  "))
-	}
-	return nil
 }
 
 func firstN(list []string, n int) []string {

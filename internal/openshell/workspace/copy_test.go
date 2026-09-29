@@ -125,6 +125,13 @@ func TestStageGitProjectIsSanitized(t *testing.T) {
 	if strings.Join(rec.HeldBack, ",") != "certs/dev.pem,config/server.key" {
 		t.Fatalf("held back = %v", rec.HeldBack)
 	}
+	// The held-back list is reported from HeldBack alone, not again among
+	// the warnings (the run printed it twice).
+	for _, w := range rec.Warnings {
+		if strings.Contains(w, "certs/dev.pem") {
+			t.Fatalf("a warning repeats the held-back list: %q", w)
+		}
+	}
 	stage := rec.Stage
 	sg := func(args ...string) string { return runGit(t, e.home, stage, args...) }
 	if n := sg("rev-list", "--count", "HEAD"); n != "3" {

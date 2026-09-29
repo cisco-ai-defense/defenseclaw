@@ -424,12 +424,7 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	}
 	files, b := int64(rec.Files), rec.Bytes
 	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: "completed", FileCount: &files, ByteCount: &b})
-	for _, w := range rec.Warnings {
-		a.warn(w)
-	}
-	if len(rec.HeldBack) > 0 {
-		a.note("held back: " + strings.Join(firstN(rec.HeldBack, 8), "  "))
-	}
+	a.copyWarnings(rec)
 	return nil
 }
 
