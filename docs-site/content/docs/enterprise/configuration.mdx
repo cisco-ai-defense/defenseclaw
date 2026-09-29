@@ -346,6 +346,74 @@ end. The gateway's other HTTPS clients take the proxy from `HTTPS_PROXY`,
 - The MDM wrapper's `--https-proxy` (Linux and macOS) is used only to
   download the package. It does not configure the gateway.
 
+## Observability credentials
+
+A telemetry destination under `observability.destinations` often needs a
+credential, such as a Galileo API key or a Splunk HEC token. In the
+standalone profile, store it as a protected credential, like the
+[AI Defense key](/docs/enterprise/ai-defense-key), and reference it by name.
+Do not reference an environment variable: the gateway service does not get
+the variables of an administrator's shell, so `{env: NAME}`, `token_env`
+and `bearer_env` do not work in this profile.
+
+| Destination field | Credential reference | Replaces |
+| --- | --- | --- |
+| `headers.<name>` (`otlp`, `http_jsonl`) | `{credential: NAME}` | `{env: NAME}` |
+| `token_credential` (`splunk_hec`) | `NAME` | `token_env` |
+| `bearer_credential` (`http_jsonl`) | `NAME` | `bearer_env` |
+
+`NAME` follows the credential name rules of the AI Defense key: lowercase
+letters, digits and dashes, starting with a letter or digit. A destination
+sets either the credential field or the environment field, not both.
+
+1. **Store the credential**, the same way as the AI Defense key (see
+   [Store the key](/docs/enterprise/ai-defense-key#store-the-key) for
+   macOS, Windows and `--from-file`). On Linux:
+
+   ```bash
+   read -rs GALILEO_API_KEY
+   printf '%s' "$GALILEO_API_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin
+   unset GALILEO_API_KEY
+   ```
+
+   `enterprise secret set` needs an installed deployment. On a new host,
+   install with a config that does not reference the credential yet, or
+   with the destination set to `enabled: false`, which resolves no
+   credentials.
+2. **Reference it in the config** and apply the config as usual:
+
+   ```yaml title="config.yaml (excerpt)"
+   observability:
+     destinations:
+       - name: galileo
+         kind: otlp
+         preset: galileo
+         protocol: http/protobuf
+         endpoint: https://api.galileo.ai/otel/traces
+         headers:
+           Galileo-API-Key: {credential: galileo-api-key}
+           project: defenseclaw
+           logstream: production
+   ```
+
+The gateway reads the credential the same way as the AI Defense key: through
+systemd `LoadCredential=` on Linux with systemd 247 or later, through its group
+from the root-owned file on older Linux and on macOS, and as its service
+identity on Windows. The value never appears in the config, the effective
+configuration, status output or logs.
+
+Before it applies a config, the lifecycle checks that every credential an
+enabled destination references is stored and passes the file checks in
+[Where the key is stored](/docs/enterprise/ai-defense-key#where-the-key-is-stored).
+Otherwise it refuses the config, names the credential and the destination
+field, and keeps the running config. Remove the reference from the config
+before you remove the credential: on Linux and macOS, `enterprise secret
+remove` deletes the file first, and the `ensure` it runs then fails on the
+config that still names it. To rotate a credential,
+run `enterprise secret set` again with the same name. Outside the standalone
+profile a credential reference never resolves, so a config with an enabled
+destination that uses one is refused.
+
 ## Sample configs
 
 Each sample is an observe-mode starter: it inspects Codex, Claude Code,

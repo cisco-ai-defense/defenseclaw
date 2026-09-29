@@ -340,6 +340,33 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// An observability header naming a protected credential is refused before
+// any change until `enterprise secret set` has stored that credential.
+func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
+	h := newTestHost(t, "linux")
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	raw := string(DefaultConfig(h.env.Layout)) + `observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      preset: galileo
+      endpoint: https://api.galileo.ai/otel/traces
+      headers:
+        Galileo-API-Key: {credential: galileo-api-key}
+`
+	if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg})
+	requireError(t, r, codeConfig)
+	if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, "enterprise secret set --name galileo-api-key") {
+		t.Fatalf("errors = %+v, want the command that stores the credential", r.Errors)
+	}
+	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Fatal("binaries installed despite an unresolved credential reference")
+	}
+}
+
 // A refused ensure (invalid config, or a payload it will not install)
 // changes nothing, so its result reports the running deployment's services
 // and readiness. It printed services [] and readiness all false, which an

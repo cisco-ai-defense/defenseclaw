@@ -118,6 +118,13 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	case errors.As(err, &secretError):
 		result.Path = "$." + secretError.Path
 		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"
+		if secretError.Credential {
+			result.Reason = fmt.Sprintf(
+				"[secret_reference_unresolved] protected credential %q is not stored or not trusted; "+
+					"credential references resolve only in a standalone enterprise deployment, after `enterprise secret set --name %s`",
+				secretError.Reference, secretError.Reference,
+			)
+		}
 	case errors.As(err, &yamlError):
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)

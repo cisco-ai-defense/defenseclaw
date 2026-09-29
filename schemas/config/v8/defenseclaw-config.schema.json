@@ -1686,6 +1686,11 @@
       "type": "string",
       "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,255}$"
     },
+    "credentialName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+      "description": "Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile."
+    },
     "claw": {
       "type": "object",
       "additionalProperties": false,
@@ -2606,8 +2611,7 @@
       "required": [
         "name",
         "kind",
-        "endpoint",
-        "token_env"
+        "endpoint"
       ],
       "properties": {
         "name": {
@@ -2623,7 +2627,11 @@
           "$ref": "#/$defs/httpEndpoint"
         },
         "token_env": {
-          "$ref": "#/$defs/envName"
+          "$ref": "#/$defs/envName",
+          "description": "Required unless token_credential is set."
+        },
+        "token_credential": {
+          "$ref": "#/$defs/credentialName"
         },
         "index": {
           "type": "string",
@@ -2662,6 +2670,20 @@
       "allOf": [
         {
           "$ref": "#/$defs/sendRoutesExclusive"
+        },
+        {
+          "oneOf": [
+            {
+              "required": [
+                "token_env"
+              ]
+            },
+            {
+              "required": [
+                "token_credential"
+              ]
+            }
+          ]
         }
       ]
     },
@@ -2698,6 +2720,9 @@
         "bearer_env": {
           "$ref": "#/$defs/envName"
         },
+        "bearer_credential": {
+          "$ref": "#/$defs/credentialName"
+        },
         "headers": {
           "$ref": "#/$defs/headers"
         },
@@ -2723,6 +2748,14 @@
       "allOf": [
         {
           "$ref": "#/$defs/sendRoutesExclusive"
+        },
+        {
+          "not": {
+            "required": [
+              "bearer_env",
+              "bearer_credential"
+            ]
+          }
         }
       ]
     },
@@ -3019,6 +3052,9 @@
         },
         {
           "$ref": "#/$defs/secretEnvRef"
+        },
+        {
+          "$ref": "#/$defs/secretCredentialRef"
         }
       ]
     },
@@ -3034,6 +3070,19 @@
         }
       },
       "description": "Explicit secret-provider reference name. Runtime resolution checks the DefenseClaw key store first, then the named environment variable; resolved bytes never enter effective configuration."
+    },
+    "secretCredentialRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential"
+      ],
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/credentialName"
+        }
+      },
+      "description": "Protected credential reference of a standalone enterprise deployment. The gateway reads the credential stored with enterprise secret set; resolved bytes never enter effective configuration."
     },
     "signalOverrides": {
       "type": "object",

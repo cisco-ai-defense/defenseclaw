@@ -25,15 +25,17 @@ import (
 // names the file, the location in it and the reason, from the same safe
 // diagnostic `config-v8 validate` prints. Environment-backed secret
 // references are the gateway's to resolve in its own service identity, so
-// their absence here is not an error. The process environment is restored
-// afterwards: the compiler loads the data directory's .env.
+// their absence here is not an error; a protected credential reference must
+// name a credential already stored in the secrets directory. The process
+// environment is restored afterwards: the compiler loads the data
+// directory's .env.
 func validateStandaloneGatewayConfig(configPath, dataDir string) error {
 	restore := snapshotProcessEnvironment()
 	defer restore()
 	loaded, err := loadConfigV8File(configPath, dataDir)
 	if err != nil {
 		var secretError *config.V8SecretReferenceError
-		if errors.As(err, &secretError) {
+		if errors.As(err, &secretError) && !secretError.Credential {
 			return nil
 		}
 		failure := configV8ValidationFailure(err)
