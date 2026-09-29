@@ -13,14 +13,30 @@
 package enterpriseunix
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// failingReconcileRunner fails `enterprise hooks reconcile` with err.
+type failingReconcileRunner struct {
+	Runner
+	err error
+}
+
+func (r failingReconcileRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if strings.HasPrefix(strings.Join(args, " "), "enterprise hooks reconcile ") {
+		return CommandResult{ExitCode: 1}, r.err
+	}
+	return r.Runner.Run(ctx, name, args...)
+}
 
 // After an enrolled account was deleted, verify failed
 // ("openhands for user bob is not protected: target account ... does
@@ -30,7 +46,11 @@ import (
 // that broke a path in its own home (its Amp plugins folder replaced by a
 // file) failed verify for the whole host until it undid the change; that
 // target is reported for the account only, while the same refusal of a path
-// outside the account's home still fails verify.
+// outside the account's home still fails verify. reconcile also failed for
+// the account's own path, giving the guardian command line, the manifest
+// path and the guardian's log output (a foreign-hook guard line) as the
+// reason. It no longer fails for that path, and it names any other failed
+// target in the words of its warning.
 func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -44,17 +64,20 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			if before := h.run(Options{Action: ActionStatus}); !before.SecurityComplete {
 				t.Fatalf("the test host must start security-complete: %+v %+v", before.Readiness, before.Warnings)
 			}
-			writeState := func(ampPath string) {
-				state, _ := json.Marshal(map[string]any{"results": []map[string]any{
-					{"user": "alice", "connector": "codex", "ok": true},
-					{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`},
-					{"user": "carol", "user_home": "/home/carol", "connector": "amp", "ok": false, "error": "enterprise hooks: hook config parent is not a directory: " + ampPath},
-				}})
-				if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
-					t.Fatal(err)
+			bob := map[string]any{"user": "bob", "connector": "openhands", "ok": false, "error": `enterprise hooks: target account "bob" does not exist: no such account`}
+			writeState := func(ampPath string, deleted ...map[string]any) {
+				results := append([]map[string]any{{"user": "alice", "connector": "codex", "ok": true}}, deleted...)
+				results = append(results, map[string]any{"user": "carol", "user_home": "/home/carol", "connector": "amp", "ok": false, "error": "enterprise hooks: hook config parent is not a directory: " + ampPath})
+				state, _ := json.Marshal(map[string]any{"results": results})
+				// Dated after the next reconcile starts, as the receipt of its report is.
+				receipt, _ := json.Marshal(map[string]any{"updated_at": time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano), "failure_count": len(results) - 1})
+				for path, data := range map[string][]byte{filepath.Join(h.env.Layout.DataDir, guardianStateFile): state, filepath.Join(h.env.Layout.GuardianAuthDir, guardianActivationFile): receipt} {
+					if err := os.WriteFile(h.env.P(path), data, 0o640); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
-			writeState("/home/carol/.config/amp/plugins")
+			writeState("/home/carol/.config/amp/plugins", bob)
 			status := h.run(Options{Action: ActionStatus})
 			if hasWarning(status, codeGuardianTargetFailed) {
 				t.Fatalf("one account's target is reported as a protection failure: %+v", status.Warnings)
@@ -73,11 +96,29 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			if !hasWarning(verify, codeGuardianTargetAccountRemoved) || !hasWarning(verify, codeGuardianTargetUserPath) {
 				t.Fatalf("verify does not report the account targets: %+v", verify.Warnings)
 			}
-			writeState("/home/dave/.config/amp/plugins")
+			// The guardian's reconcile exits 1 for a failed target.
+			failed := errors.New("the guardian reconcile command exited 1")
+			h.services.failStart[unitGuardianOneshot] = failed
+			h.env.Runner = failingReconcileRunner{Runner: h.runner, err: failed}
+			writeState("/home/carol/.config/amp/plugins")
+			reconcile := h.run(Options{Action: ActionReconcile})
+			requireOK(t, reconcile)
+			if !hasWarning(reconcile, codeGuardianTargetUserPath) {
+				t.Fatalf("reconcile does not report the account's own path: %+v", reconcile.Warnings)
+			}
+			if goos == "linux" && !strings.Contains(strings.Join(h.runner.calls, "\n"), "systemctl reset-failed "+unitGuardianOneshot) {
+				t.Fatalf("the reconcile oneshot is left failed: %v", h.runner.calls)
+			}
+			writeState("/home/dave/.config/amp/plugins", bob)
 			verify = h.run(Options{Action: ActionVerify})
 			requireError(t, verify, codeVerify)
 			if !hasWarning(verify, codeGuardianTargetFailed) || verify.SecurityComplete {
 				t.Fatalf("a refused path outside the account's home does not fail verify: %+v", verify.Warnings)
+			}
+			reconcile = h.run(Options{Action: ActionReconcile})
+			requireError(t, reconcile, codeReconcile)
+			if got := messagesOf(reconcile.Errors, codeReconcile); !strings.Contains(got, "amp for user carol is not protected: hook config parent is not a directory: /home/dave/.config/amp/plugins") || strings.Contains(got, failed.Error()) {
+				t.Fatalf("reconcile does not name the failed target: %+v", reconcile.Errors)
 			}
 		})
 	}

@@ -1408,16 +1408,43 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	l.republishMachinePolicy(record)
+	since := env.Now()
 	var err error
 	if env.GOOS == "linux" {
 		err = env.Services.Start(ctx, Unit{Name: unitGuardianOneshot})
 	} else {
 		_, err = env.runGatewayCLI(ctx, "enterprise", "hooks", "reconcile", "--manifest", env.Layout.ManifestPath, "--json")
 	}
-	if err != nil {
+	// `enterprise hooks reconcile` exits 1 when it could not protect a
+	// target, after writing a report that names each one. describe reports
+	// those targets for their accounts, so the reconcile fails for them in
+	// the same words (not with the command line and its log output), and not
+	// at all for a path an account broke in its own home, which verify does
+	// not fail on either. The oneshot's failed state would only repeat the
+	// report.
+	targets := err != nil && l.guardianTargetFailedSince(since)
+	if targets && env.GOOS == "linux" {
+		_, _ = env.Runner.Run(ctx, "systemctl", "reset-failed", unitGuardianOneshot)
+	}
+	if err != nil && !targets {
 		r.AddError(codeReconcile, err.Error())
 	}
 	l.describe(ctx, record, false)
+	if targets {
+		named := false
+		for _, warning := range r.Warnings {
+			switch warning.Code {
+			case codeHookContractUnverified, codeGuardianTargetFailed, codeGuardianTargetAccountRemoved:
+				r.AddError(codeReconcile, warning.Message)
+				named = true
+			case codeGuardianTargetUserPath:
+				named = true
+			}
+		}
+		if !named {
+			r.AddError(codeReconcile, err.Error())
+		}
+	}
 	return 0
 }
 

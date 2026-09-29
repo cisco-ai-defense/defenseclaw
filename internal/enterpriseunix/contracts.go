@@ -188,6 +188,30 @@ func (l *lifecycle) guardianReportedAt() (time.Time, bool) {
 	return updated, err == nil
 }
 
+// guardianActivationFile is the guardian's activation receipt in
+// GuardianAuthDir (hookGuardianActivationFile in internal/cli): the last
+// file a guardian reconcile writes, after its target report.
+const guardianActivationFile = "activation.json"
+
+// guardianTargetFailedSince reports whether a guardian reconcile finished
+// writing its report at or after since and could not protect a target.
+func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
+	env := l.env
+	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, guardianActivationFile)), 4<<20)
+	if err != nil {
+		return false
+	}
+	var activation struct {
+		UpdatedAt    string `json:"updated_at"`
+		FailureCount int    `json:"failure_count"`
+	}
+	if json.Unmarshal(data, &activation) != nil {
+		return false
+	}
+	updated, err := time.Parse(time.RFC3339Nano, activation.UpdatedAt)
+	return err == nil && !updated.Before(since) && activation.FailureCount > 0
+}
+
 // codeAgentUnprotected names an agent the enumerator found installed for an
 // eligible user but could not enroll; it runs without DefenseClaw hooks.
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
