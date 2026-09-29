@@ -63,7 +63,7 @@ the last `pull --apply`.
 | Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On a Mac, Docker Desktop running: DefenseClaw builds the harness images in Docker, and OpenShell's MicroVM driver reads them from it. |
 | Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. Without it OpenShell refuses to start a sandbox. On a Mac each MicroVM boots OpenShell's own Linux kernel, which has Landlock (Docker Desktop's VM kernel has none, see [macOS](#macos)). |
 | Mac | Apple silicon, [Homebrew](https://brew.sh), and Homebrew's `e2fsprogs`, which the MicroVM driver formats its disks with. Setup offers to install it. |
-| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, the MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, the MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`, until `sandbox image prune` or teardown removes that image. |
 | Linux login | `sudo loginctl enable-linger $USER` is recommended, so the OpenShell gateway keeps running after you log out. |
 
 You don't need OpenShell installed beforehand: setup offers to install it.
@@ -1167,10 +1167,14 @@ Teardown takes these steps, in order:
 8. **config**: turns `openshell.enabled` off in `config.yaml`.
 
 On a Mac, restoring the gateway configuration also takes the gateway off the
-MicroVM driver (back to the `gateway.toml` from before setup). The prepared
-MicroVM disks stay in `~/.local/state/openshell/vm-driver/images`, about 5 GB
-for each image a sandbox started: they belong to OpenShell, which keeps
-them, so teardown names that folder and its size and leaves it.
+MicroVM driver (back to the `gateway.toml` from before setup). With the images,
+teardown removes the MicroVM disks OpenShell prepared from them (about 5 GB for
+each image a sandbox started, in `~/.local/state/openshell/vm-driver/images`,
+or the `images` folder of the gateway's `state_dir`), and says how much it
+freed. It removes a disk only once Docker no longer has its image and no
+sandbox is left that could boot it: when a sandbox could not be deleted, or no
+daemon or gateway listed them, it keeps the disks and says why. It never
+removes anything else of OpenShell's state there.
 
 OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
 and stops if teardown fails (where sandboxes are not supported, such as a
@@ -1249,7 +1253,9 @@ The command exits 1 when a check fails. With `--json` it prints the report
 as JSON and always exits 0; the report's `ok` field says whether every check
 passed, and `ready` says that sandboxes are also turned on. While
 `openshell.enabled` is false the last line reads **not ready for sandboxes
-yet** instead. The image check skips harnesses your organization or the
+yet** instead. The image check warns about a configured harness whose image
+is not built, lists every other harness image built for you too, and counts
+no image Docker no longer has. It skips harnesses your organization or the
 pack doesn't allow, and says so.
 
 `defenseclaw doctor` shows the same checks as rows in its **Sandbox**
@@ -1266,7 +1272,7 @@ section, and skips them while `openshell.enabled` is off.
 | ``stage the project copy: the copy (files and history) is …, above the … limit`` | Raise `openshell.workdir.max_upload_mb` in `config.yaml`, or make the project smaller (a shallower history: `openshell.workdir.git_depth`). On a Mac a copy is the only way the project runs. |
 | ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. |
 | The doctor's **vm-identity** check fails, or a create on a Mac says the MicroVM driver runs sandboxes as another uid | The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so the harness images DefenseClaw built for you would not match. Run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway. |
-| On macOS, with OpenShell installed outside Homebrew (for example from NVIDIA's release binaries), the machine check finds it but the doctor's **Gateway service** check fails | DefenseClaw finds that `openshell`, but on macOS it manages only the gateway of NVIDIA's `nvidia/openshell` Homebrew formula, which it starts and restarts with `brew services`. It does not manage a gateway you installed or run another way. To let DefenseClaw manage the gateway, install the formula with `defenseclaw sandbox setup --install-openshell`. |
+| On macOS, with OpenShell installed outside Homebrew (for example from NVIDIA's release binaries), the doctor's **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it`` | DefenseClaw finds that `openshell`. While its gateway answers, the doctor's **MicroVM driver** check passes on the driver the gateway runs (naming the binary when it finds it), and the **Gateway service** check says how the gateway runs: under launchd (a LaunchAgent of your own), or started by hand, which it warns does not start again at login. On macOS DefenseClaw starts and restarts only the gateway of NVIDIA's `nvidia/openshell` Homebrew formula, with `brew services`, so restart yours yourself after a change that needs it. With no gateway answering, both checks fail as not installed. To let DefenseClaw manage the gateway, install the formula with `defenseclaw sandbox setup --install-openshell`. |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
@@ -1279,7 +1285,8 @@ section, and skips them while `openshell.enabled` is off.
 | An image build fails | The error from `setup` or `image build` names the build log, `~/.defenseclaw/logs/sandbox-image-<harness>.log`. `defenseclaw sandbox image build <harness> --verbose` streams the build instead. |
 | A tool cannot reach a site | Look for the block in `defenseclaw sandbox activity`, then unblock it. Git over SSH and databases don't go through the web proxy: use HTTPS remotes, or `--host-port` for a service on your machine. |
 | Project folder mounts show as disabled | Run `defenseclaw sandbox doctor --fix`, or setup again. On a Mac on the MicroVM driver the doctor skips this check: every run works on a copy. |
-| Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. On a Mac, the MicroVM driver's prepared disks (about 5 GB for each image it started, in `~/.local/state/openshell/vm-driver/images`) belong to OpenShell: the doctor shows their size, and DefenseClaw does not remove them. |
+| ``not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about … from its image in …`` (macOS) | The first start of an image prepares a disk of about the image's size on the volume of `~/.local/state/openshell/vm-driver`, and the run is refused before anything is copied when that volume lacks it. Free space there: `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them (see the next row). A warning that only some space is free means the start goes ahead with little to spare. |
+| Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. On a Mac, the MicroVM driver keeps a prepared disk of about 5 GB for each image it started, in `~/.local/state/openshell/vm-driver/images`: the doctor shows their size, and prune removes the disks of the images it removes (see [`sandbox image prune`](/docs/reference/sandbox-cli#sandbox-image-prune)). If the space does not come back, an app that backs up or indexes your files may still hold a removed disk open: `lsof +L1` lists such files, and the space returns when the app lets go. |
 
 Exit statuses: 3 means the platform or deployment is unsupported (Windows,
 WSL2, an Intel Mac, `managed_enterprise`, or running as root), 4 means `pull --apply` left

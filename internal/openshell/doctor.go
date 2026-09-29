@@ -407,6 +407,10 @@ type doctorRun struct {
 	dockerRoot  string
 	landlock    CheckStatus
 	micro       *MicroVMHost
+	// procs are this user's processes, once a Mac's check has listed them
+	// (processes).
+	procs     []process
+	procsDone bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -461,6 +465,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkRegistration()
 	r.checkGateway(ctx)
 	r.macChecks(ctx)
+	r.unmanagedService(ctx)
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
 	r.report.Driver = r.driver()
@@ -722,7 +727,7 @@ func (r *doctorRun) diskCheck(root string) Check {
 	prune := &Fix{
 		Summary: "remove DefenseClaw's unused sandbox images (rather than `docker system prune`, which also removes " +
 			"every stopped container, unused network and build cache on this machine, other users' too)",
-		Command: "defenseclaw sandbox image prune",
+		Command: pruneCommand,
 	}
 	switch {
 	case free < DiskFailBytes:

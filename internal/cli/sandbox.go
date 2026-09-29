@@ -765,12 +765,12 @@ func newSandboxImageCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List the harness images",
 		Args:  cobra.NoArgs,
-		RunE: sandboxRunE(func(_ context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
 				return err
 			}
-			return app.ImageList(out)
+			return app.ImageList(ctx, out)
 		}),
 	}
 	outputFlag(list)

@@ -23,6 +23,7 @@ import (
 	"io"
 	"maps"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -209,6 +210,32 @@ func (b *Builder) imageID(ctx context.Context, tag string) (string, error) {
 	return id, nil
 }
 
+// Gone returns the tags of recs that Docker no longer has as DefenseClaw
+// sandbox images (removed with `docker rmi`, say), whose records still say
+// built and hook-verified. Current does not select them, and Prune forgets
+// them (PruneReport.ForgottenStale).
+func (b *Builder) Gone(ctx context.Context, recs []Record) (map[string]bool, error) {
+	byRepo := map[string][]string{}
+	for _, r := range recs {
+		if repo, _, ok := strings.Cut(r.Tag, ":"); ok && repositoryRE.MatchString(repo) {
+			byRepo[repo] = append(byRepo[repo], r.Tag)
+		}
+	}
+	gone := map[string]bool{}
+	for repo, tags := range byRepo {
+		present, err := b.listTags(ctx, repo, "label="+LabelSandboxImage+"=1")
+		if err != nil {
+			return nil, err
+		}
+		for _, tag := range tags {
+			if !present[tag] {
+				gone[tag] = true
+			}
+		}
+	}
+	return gone, nil
+}
+
 // PruneOptions select what Prune removes.
 type PruneOptions struct {
 	// Repository limits pruning to one image repository (default
@@ -234,10 +261,13 @@ type PruneReport struct {
 	// InUse are the kept images Keep names.
 	InUse          []string
 	ForgottenStale []string
-	// RemovedRunImageIDs are the image IDs of the run images removed: the
-	// vm driver keeps the disk it prepared from each (VMDisks), which
-	// DefenseClaw does not remove.
-	RemovedRunImageIDs []string
+	// RemovedImageIDs are the image IDs of the images removed (on a dry
+	// run, that would be), overlay images, run images and aliases alike,
+	// that no image the prune keeps or leaves in place has and Keep does not
+	// name: the vm driver keeps the disk it prepared from each (VMDisks). A
+	// caller removes such a disk only once Docker no longer has its image
+	// (GoneIDs).
+	RemovedImageIDs []string
 	// RunImagesLeft are the recorded run images and aliases a prune
 	// without AliasRepository left alone.
 	RunImagesLeft []string
@@ -379,6 +409,7 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	sort.Strings(report.ForgottenStale)
 	sort.Strings(report.Unrecorded)
 	sort.Strings(report.Foreign)
+	report.RemovedImageIDs = removedImageIDs(records, runs, opts.Keep, &report)
 	if !opts.DryRun {
 		if err := b.Store.Remove(append(append([]string(nil), report.Removed...), report.ForgottenStale...)...); err != nil {
 			return report, err
@@ -477,11 +508,84 @@ func (b *Builder) pruneRunImages(ctx context.Context, opts PruneOptions, owner s
 			}
 		}
 		report.Removed = append(report.Removed, r.Tag)
-		if !r.Alias {
-			report.RemovedRunImageIDs = append(report.RemovedRunImageIDs, r.ImageID)
-		}
 	}
 	return nil
+}
+
+// removedImageIDs are PruneReport.RemovedImageIDs: the IDs of the removed
+// tags, less those of every recorded image that stays (kept, another data
+// dir's, or not pruned in this repository) and those Keep names.
+func removedImageIDs(records []Record, runs []RunImage, keep []string, report *PruneReport) []string {
+	removed := map[string]bool{}
+	for _, t := range report.Removed {
+		removed[t] = true
+	}
+	stale := map[string]bool{}
+	for _, t := range report.ForgottenStale {
+		stale[t] = true
+	}
+	held := map[string]bool{}
+	for _, ref := range keep {
+		held[ref] = true
+	}
+	ids := map[string]bool{}
+	note := func(tag, id string) {
+		switch {
+		case removed[tag]:
+			ids[id] = true
+		case !stale[tag]:
+			held[id] = true
+		}
+	}
+	for _, r := range records {
+		note(r.Tag, r.ImageID)
+	}
+	for _, r := range runs {
+		note(r.Tag, r.ImageID)
+	}
+	var out []string
+	for id := range ids {
+		if imageIDRE.MatchString(id) && !held[id] {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ImageSize is the size of the image ref (a tag or an image ID) in Docker,
+// its layers uncompressed: about what the MicroVM driver's root disk
+// prepared from it takes.
+func (b *Builder) ImageSize(ctx context.Context, ref string) (uint64, error) {
+	out, err := output(ctx, b.Docker, nil, "image", "inspect", "--format", "{{.Size}}", ref)
+	if err != nil {
+		return 0, fmt.Errorf("openshell image: inspect %s: %w", ref, err)
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("openshell image: inspect %s returned the size %q", ref, out)
+	}
+	return n, nil
+}
+
+// GoneIDs returns those of the image IDs ids that Docker holds no image of
+// (`docker image ls --all`), untagged ones included.
+func (b *Builder) GoneIDs(ctx context.Context, ids []string) (map[string]bool, error) {
+	listed, err := output(ctx, b.Docker, nil, "image", "ls", "--all", "--no-trunc", "--quiet")
+	if err != nil {
+		return nil, fmt.Errorf("openshell image: list images: %w", err)
+	}
+	present := map[string]bool{}
+	for _, line := range strings.Split(listed, "\n") {
+		present[strings.TrimSpace(line)] = true
+	}
+	gone := map[string]bool{}
+	for _, id := range ids {
+		if imageIDRE.MatchString(id) && !present[id] {
+			gone[id] = true
+		}
+	}
+	return gone, nil
 }
 
 // listTags lists the tags of repo whose images match every docker filter.

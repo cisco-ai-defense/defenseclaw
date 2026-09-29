@@ -156,6 +156,13 @@ type Options struct {
 	// error, leaves them unknown: an openshell.admin.max_resources then
 	// refuses every such sandbox, since it cannot be judged.
 	GatewayResources func() (packs.Resources, error)
+	// VMDiskFree reports, on a gateway whose compute driver prepares a disk
+	// from each image it boots (openshell.Driver.ImageCache: the vm
+	// driver's), where it keeps them and the free space there, which the
+	// daemon's user shares with the gateway. A create whose image has no
+	// disk prepared yet is refused when the room for one is missing
+	// (openshell.VMDiskShortage). Nil, or an error, skips that check.
+	VMDiskFree func() (dir string, free uint64, err error)
 	// SettleDelay waits for the first settings poll after a start
 	// (DefaultSettleDelay); negative skips it.
 	SettleDelay       time.Duration

@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -102,7 +104,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
 		}
-		rep.Checks = append(rep.Checks, a.imagesCheck(), a.wrappersCheck(), a.adminCheck())
+		rep.Checks = append(rep.Checks, a.imagesCheck(ctx), a.wrappersCheck(), a.adminCheck())
 	}
 	return rep
 }
@@ -196,7 +198,13 @@ func gatewayText(g *sandboxapi.Gateway) string {
 	return "OpenShell " + g.Version + " gateway " + g.Name
 }
 
-func (a *App) imagesCheck() openshell.Check {
+// imagesCheck reports the hook-verified harness images a sandbox can start
+// from: the configured harnesses' (openshell.harnesses, else
+// defaultHarnesses), which it warns about when one is not built, and every
+// other harness built for this user and DefenseClaw (`sandbox run kiro`
+// builds one without configuring it). An image Docker no longer has does
+// not count, whatever its record says.
+func (a *App) imagesCheck(ctx context.Context) openshell.Check {
 	c := openshell.Check{ID: CheckIDImages, Title: "Harness images"}
 	specs, err := a.harnesses(nil)
 	if err != nil {
@@ -213,20 +221,37 @@ func (a *App) imagesCheck() openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, err.Error()
 		return c
 	}
-	var ready, missing []string
-	for _, spec := range specs {
-		found := false
-		for _, r := range recs {
-			if r.Connector == spec.Name && r.HookFireVerified && r.UID == os.Getuid() &&
-				r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
-				found = true
-				ready = append(ready, spec.Name+" "+r.HarnessVersion)
-				break
+	// Docker unreachable: the Docker check says so, and the records stand.
+	gone, _ := a.Images.Gone(ctx, recs)
+	newest := map[string]image.Record{}
+	for _, r := range recs {
+		if r.HookFireVerified && r.UID == os.Getuid() && !gone[r.Tag] &&
+			r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
+			if cur, ok := newest[r.Connector]; !ok || r.BuiltAt.After(cur.BuiltAt) {
+				newest[r.Connector] = r
 			}
 		}
-		if !found {
+	}
+	var ready, missing []string
+	covered := map[string]bool{}
+	for _, spec := range specs {
+		covered[spec.Name] = true
+		if r, ok := newest[spec.Name]; ok {
+			ready = append(ready, spec.Name+" "+r.HarnessVersion)
+		} else {
 			missing = append(missing, spec.Name)
 		}
+	}
+	var others []*harness.Spec
+	for name := range newest {
+		if spec, ok := harness.Get(name); ok && !covered[name] {
+			others = append(others, spec)
+		}
+	}
+	others, _ = a.allowedHarnesses(others)
+	sort.Slice(others, func(i, j int) bool { return others[i].Name < others[j].Name })
+	for _, spec := range others {
+		ready = append(ready, spec.Name+" "+newest[spec.Name].HarnessVersion)
 	}
 	switch {
 	case len(missing) == 0:
@@ -234,6 +259,9 @@ func (a *App) imagesCheck() openshell.Check {
 	default:
 		c.Status = openshell.StatusWarn
 		c.Detail = "not built yet: " + strings.Join(missing, ", ") + " (the first run builds it, which takes a while)"
+		if len(ready) > 0 {
+			c.Detail += "; hook-verified: " + strings.Join(ready, ", ")
+		}
 		c.Fix = &openshell.Fix{Summary: "build the images now", Command: CommandName + " image build " + strings.Join(missing, " ")}
 	}
 	if forbidden != "" {

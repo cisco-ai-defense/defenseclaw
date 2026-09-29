@@ -1086,6 +1086,30 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 			want: []string{"Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)"}},
 		{name: "a new image and its first boot", input: "a\n", setup: driver("vm", firstBoot, missing), opts: run,
 			want: []string{"(building its image first, which can take a few minutes; then the first start prepares its MicroVM disk: about a minute)"}},
+		// The disk a first boot prepares needs about the image's size and
+		// headroom where the driver keeps it: short of the floor the run is
+		// refused before anything is copied or created, and short of the
+		// recommended space it is warned about (OC-F1).
+		{name: "a first boot on a full disk", setup: driver("vm", firstBoot, func(ta *testApp) {
+			ta.diskFree, ta.images.sizes = 2<<30, map[string]uint64{"claudecode": 7 << 30}
+		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about 7.0 GiB from its image in "+
+			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 8.0 GiB is needed; free space on that volume first "+
+			"(`defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)")},
+		{name: "a first boot of an image to build on a full disk", setup: driver("vm", firstBoot, missing, func(ta *testApp) { ta.diskFree = 5 << 30 }),
+			do: refused(run, "a disk of about 5.0 GiB from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 6.0 GiB is needed")},
+		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }), opts: run,
+			want: []string{"only 10.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start prepares a MicroVM disk of about 5.0 GiB there " +
+				"(12.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
+			check: func(t *testing.T, ta *testApp) {
+				if ta.creates() != 1 || !strings.HasPrefix(ta.diskProbed, ta.home) {
+					t.Fatalf("creates %d, disk probed at %q", ta.creates(), ta.diskProbed)
+				}
+			}},
+		// A disk prepared already needs no room, and docker prepares none.
+		{name: "no first boot on a full disk", input: "a\n", setup: driver("vm", func(ta *testApp) { ta.diskFree = 1 << 30 }), opts: run,
+			not: []string{"free disk space", "is free in"}},
+		{name: "docker on a full disk", input: "y\n", setup: driver("docker", firstBoot, func(ta *testApp) { ta.diskFree = 1 << 30 }), opts: run,
+			not: []string{"free disk space", "is free in"}},
 		// On docker the mount, --context and the limits go to the daemon.
 		{name: "the docker driver mounts", input: "y\n", setup: driver("docker"),
 			opts: RunOptions{Harness: "claude", Context: []string{"/srv/lib"}, CPU: "2", NoSnapshot: true}, check: func(t *testing.T, ta *testApp) {

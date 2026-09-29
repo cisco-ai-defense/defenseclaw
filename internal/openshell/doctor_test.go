@@ -468,9 +468,12 @@ func TestDoctorChecks(t *testing.T) {
 				{"gateway-service", pass, "nvidia/openshell/openshell"},
 				// The Homebrew service's wrapper sources gateway.env too (M8).
 				{"telemetry", skip, "DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from /"}}},
+		// No formula and no gateway answering (one that answers is
+		// TestDoctorOnReleaseBinaries').
 		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {
 			f.onBrew()
 			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		}, want: []checkWant{{"gateway-service", fail, "nvidia/openshell/openshell is not installed"}}, fix: &fixWant{command: install}},
 
 		{name: "cli missing", setup: func(f *doctorFixture) { f.found["openshell"] = false }, want: []checkWant{{"openshell-cli", fail, "not on PATH"}}},

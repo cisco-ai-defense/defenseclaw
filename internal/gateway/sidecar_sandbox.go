@@ -209,6 +209,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		EgressAddr:         egressAddr,
 		DefenseClawVersion: manager.ImageVersion(),
 		GatewayResources:   manager.GatewayConfigResources(""),
+		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 	})

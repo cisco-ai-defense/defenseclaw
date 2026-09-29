@@ -197,6 +197,28 @@ func TestBuildFailures(t *testing.T) {
 	}
 }
 
+// Gone names the recorded images Docker no longer has as DefenseClaw
+// sandbox images, one `image ls` per repository.
+func TestGoneNamesImagesRemovedFromDocker(t *testing.T) {
+	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+		if args[0] == "image" && args[1] == "ls" && containsSeq(args, "--filter", "label="+LabelSandboxImage+"=1") {
+			return "e-repo:claudecode-a-u1000\ne-repo:<none>\nother:codex-b-u1000\n", 0
+		}
+		t.Errorf("unexpected docker call %v", args)
+		return "", 1
+	}}
+	b := &Builder{Docker: docker, Store: testStore(t)}
+	gone, err := b.Gone(context.Background(), []Record{{Tag: "e-repo:claudecode-a-u1000"}, {Tag: "e-repo:kiro-c-u1000"},
+		{Tag: "other:codex-b-u1000"}, {Tag: "other:hermes-d-u1000"}, {Tag: "not a tag"}})
+	if err != nil || len(gone) != 2 || !gone["e-repo:kiro-c-u1000"] || !gone["other:hermes-d-u1000"] || docker.count("image", "ls") != 2 {
+		t.Fatalf("Gone = %v, %v (calls %v)", gone, err, docker.calls)
+	}
+	docker.handler = func([]string, []byte) (string, int) { return "", 1 }
+	if _, err := b.Gone(context.Background(), []Record{{Tag: "e-repo:kiro-c-u1000"}}); err == nil {
+		t.Fatal("Gone without Docker reported nothing gone")
+	}
+}
+
 func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	store := testStore(t)
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)

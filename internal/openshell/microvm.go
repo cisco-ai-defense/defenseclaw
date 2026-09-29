@@ -74,6 +74,11 @@ type MicroVMHost struct {
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
+	// DriverRunning reports that the answering gateway runs the MicroVM
+	// driver, so it is installed, whether DefenseClaw found where
+	// (DriverBinary) or not: OpenShell's release binaries outside
+	// Homebrew, for one.
+	DriverRunning bool `json:"driver_running,omitempty"`
 	// HypervisorSigned reports that DriverBinary carries Apple's
 	// Hypervisor entitlement; SignatureUnknown that codesign could not
 	// tell.
@@ -95,9 +100,9 @@ func (m *MicroVMHost) Problems() []string {
 			"the driver formats every MicroVM's disks with its mke2fs and debugfs")
 	}
 	switch {
-	case m.DriverBinary == "":
+	case m.DriverBinary == "" && !m.DriverRunning:
 		out = append(out, vmDriverBinary+" is not installed (the "+GatewayFormula+" formula installs it)")
-	case !m.HypervisorSigned && m.SignatureUnknown == "":
+	case m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == "":
 		out = append(out, m.DriverBinary+" is not signed for Apple's Hypervisor ("+hypervisorEntitlement+"), so it cannot start a MicroVM")
 	}
 	return out
@@ -157,7 +162,8 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 			m.OnPath = filepath.Dir(mke2fs)
 		}
 	}
-	m.DriverBinary = r.findVMDriver()
+	m.DriverRunning = r.running.Name == DriverVM
+	m.DriverBinary = r.findVMDriver(ctx)
 	if m.DriverBinary != "" {
 		out, err := r.Runner.Output(ctx, Command{Name: "codesign", Args: []string{"-d", "--entitlements", "-", m.DriverBinary}, Timeout: 30 * time.Second})
 		switch {
@@ -190,8 +196,11 @@ func executable(p string) bool {
 
 // findVMDriver is the openshell-driver-vm the gateway starts: the one in
 // [openshell.drivers.vm] driver_dir, else the formula's (libexec, else
-// bin, of the keg under the Homebrew prefix).
-func (r *doctorRun) findVMDriver() string {
+// bin, of the keg under the Homebrew prefix), else the one next to the
+// openshell-gateway on PATH (in its directory or the libexec beside it, as
+// OpenShell's release archives lay them out). A gateway that runs the
+// driver from anywhere else names it through its running process.
+func (r *doctorRun) findVMDriver(ctx context.Context) string {
 	var dirs []string
 	if r.config != nil && filepath.IsAbs(r.config.VM.DriverDir) {
 		dirs = append(dirs, r.config.VM.DriverDir)
@@ -200,10 +209,33 @@ func (r *doctorRun) findVMDriver() string {
 		keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
 		dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
 	}
+	if gw, err := r.LookPath(GatewayBinary); err == nil && filepath.IsAbs(gw) {
+		bins := []string{filepath.Dir(gw)}
+		if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {
+			bins = append(bins, filepath.Dir(real))
+		}
+		for _, bin := range bins {
+			dirs = append(dirs, bin, filepath.Join(filepath.Dir(bin), "libexec"))
+		}
+	}
 	for _, dir := range dirs {
 		if p := filepath.Join(dir, vmDriverBinary); executable(p) {
 			return p
 		}
+	}
+	if r.running.Name != DriverVM || r.GOOS != "darwin" {
+		return ""
+	}
+	parent := 0
+	if gw := r.gatewayProcess(ctx); gw != nil {
+		parent = gw.pid
+	}
+	p := findProcess(r.processes(ctx), vmDriverBinary, parent)
+	if p == nil && parent != 0 {
+		p = findProcess(r.processes(ctx), vmDriverBinary, 0)
+	}
+	if p != nil && executable(p.path) {
+		return p.path
 	}
 	return ""
 }
@@ -260,6 +292,10 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 		c.Status, c.Detail = StatusFail, strings.Join(append(problems, warnings...), "; ")
 	case len(warnings) > 0:
 		c.Status, c.Detail = StatusWarn, strings.Join(warnings, "; ")
+	case m.DriverBinary == "":
+		// The gateway runs it: it is installed and starts.
+		c.Status = StatusPass
+		c.Detail = fmt.Sprintf("e2fsprogs in %s; the gateway runs %s (DefenseClaw did not find where, to check its signature)", m.E2fsprogs, vmDriverBinary)
 	default:
 		c.Status = StatusPass
 		c.Detail = fmt.Sprintf("e2fsprogs in %s; %s signed for Apple's Hypervisor", m.E2fsprogs, m.DriverBinary)
@@ -275,7 +311,7 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 				}
 				return nil
 			}}
-	case m.DriverBinary == "":
+	case m.DriverBinary == "" && !m.DriverRunning:
 		c.Fix = &Fix{Summary: "install OpenShell from its Homebrew formula", Command: installOpenShellCommand}
 	case c.Status == StatusWarn && m.SignatureUnknown == "":
 		c.Fix = &Fix{Summary: "build the harness images again on this Mac", Command: "defenseclaw sandbox image build --force"}
@@ -403,19 +439,21 @@ func (r *doctorRun) vmResourcesCheck() Check {
 // vmStateDir is the MicroVM driver's state directory, which holds its
 // prepared images.
 func (r *doctorRun) vmStateDir() string {
-	if dir := r.vmConfig().StateDir; filepath.IsAbs(dir) {
-		return filepath.Clean(dir)
-	}
 	home, err := r.HomeDir()
-	if err != nil || !filepath.IsAbs(home) {
-		return ""
+	if err != nil {
+		home = ""
 	}
-	return filepath.Join(home, ".local", "state", "openshell", "vm-driver")
+	return VMStateDir(r.vmConfig().StateDir, home)
 }
+
+// pruneCommand removes DefenseClaw's superseded harness images, and the
+// MicroVM disks prepared from them.
+const pruneCommand = "defenseclaw sandbox image prune"
 
 // vmDiskCheck measures the free space where the MicroVM driver keeps its
 // prepared images, and what they take: OpenShell's cache, which it keeps
-// after the sandboxes go and DefenseClaw never deletes.
+// after the sandboxes go. `sandbox image prune` and teardown remove the
+// disks of the images they remove, and nothing else of it.
 func (r *doctorRun) vmDiskCheck() Check {
 	c := Check{ID: CheckIDDisk, Title: checkTitles[CheckIDDisk]}
 	dir := r.vmStateDir()
@@ -423,24 +461,20 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Status, c.Detail = StatusWarn, "the MicroVM driver's state directory is unknown (no home directory)"
 		return c
 	}
-	measured := dir
-	for {
-		if _, err := os.Stat(measured); err == nil || filepath.Dir(measured) == measured {
-			break
-		}
-		measured = filepath.Dir(measured)
-	}
-	free, err := r.DiskFree(measured)
+	free, err := FreeUnder(r.DiskFree, dir)
 	if err != nil {
 		c.Status, c.Detail = StatusWarn, fmt.Sprintf("could not measure free space under %s: %v", dir, err)
 		return c
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), dir)
-	if n, size := preparedImages(filepath.Join(dir, "images")); n > 0 {
-		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), which DefenseClaw never deletes",
-			plural(n, "prepared MicroVM image", "prepared MicroVM images"), humanBytes(size))
+	if n, size := preparedDisks(filepath.Join(dir, "images")); n > 0 {
+		c.Detail += fmt.Sprintf("; OpenShell keeps %s there (%s), and `%s` removes those of the images it removes",
+			plural(n, "MicroVM disk prepared from an image", "MicroVM disks prepared from images"), humanBytes(size), pruneCommand)
 	}
-	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir}
+	fix := &Fix{Summary: "free space on this volume: the first start of each harness image prepares a MicroVM disk of about 5 GB in " + dir +
+		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
+		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
+		Command: pruneCommand}
 	switch {
 	case free < VMDiskFailBytes:
 		c.Status, c.Fix = StatusFail, fix
@@ -454,15 +488,27 @@ func (r *doctorRun) vmDiskCheck() Check {
 	return c
 }
 
-// preparedImages counts the images the driver prepared under dir and the
-// disk they take (allocated, not their larger sparse size).
-func preparedImages(dir string) (n int, size uint64) {
+// PreparedDiskPrefix starts the name of each directory under the MicroVM
+// driver's image cache (<state_dir>/images) that holds a root disk it
+// prepared from an image. OpenShell 0.1.1 names them
+// sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-501-20-sha256-<image ID>
+// on a gateway that sets sandbox_uid and sandbox_gid, and
+// ...-image-account-sha256-<image ID> on one that does not. The cache holds
+// the driver's own state next to them (overlay-templates, the
+// sandbox-bootstrap-rootfs-* it boots every MicroVM with, .staging
+// directories of a preparation under way), which is not a prepared disk.
+const PreparedDiskPrefix = "sandbox-prepared-rootfs-"
+
+// preparedDisks counts the root disks the driver prepared from images under
+// dir (PreparedDiskPrefix) and the disk they take (allocated, not their
+// larger sparse size).
+func preparedDisks(dir string) (n int, size uint64) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, 0
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") || strings.Contains(e.Name(), ".staging") {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), PreparedDiskPrefix) || strings.Contains(e.Name(), ".staging") {
 			continue
 		}
 		n++

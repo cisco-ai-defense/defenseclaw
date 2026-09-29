@@ -258,6 +258,18 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if _, err := spec.LaunchArgv(pre); err != nil {
 		return err
 	}
+	// A first start on MicroVMs prepares a disk of about the image's size:
+	// on a volume without the room it is refused before anything is
+	// copied or created.
+	if ex.VMFirstBoot {
+		warning, err := a.vmDiskShortage(ctx, drv, spec, "", "this sandbox's first start")
+		if err != nil {
+			return err
+		}
+		if warning != "" {
+			a.warn(warning)
+		}
+	}
 	var copyRec *workspace.CopyRecord
 	if copyMode {
 		// Stage first: a project that cannot be copied (too large, a
