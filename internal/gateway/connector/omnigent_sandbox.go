@@ -54,6 +54,14 @@ var OmnigentSandboxPolicyModulePath = path.Join(OmnigentSandboxPolicyDir, omnige
 // still passes the DefenseClaw policy.
 var OmnigentSandboxAgentPath = path.Join(OmnigentSandboxPolicyDir, "agent")
 
+// omnigentSandboxAgent is the sandbox agent's spec. A DefenseClaw deny
+// reaches the user only through the model: OmniGent 0.13.0's TUI hides tool
+// results until Ctrl+T (with no setting to show them), the deny reason
+// travels only as the denied call's tool result, a policy result has no
+// field meant for the user (result, reason, data, state_updates,
+// set_labels), and the TUI does not render the server's
+// response.policy_denied event. So the prompt asks the model to pass the
+// reason on.
 const omnigentSandboxAgent = `# DefenseClaw OmniGent agent for OpenShell sandboxes (root-owned).
 # OpenShell is the sandbox: OmniGent's own bubblewrap sandbox cannot nest
 # inside it, so the shell runs in the caller process. Every request, model
@@ -76,6 +84,11 @@ prompt: |
   You are a coding agent working in the current directory, which is the
   user's project inside a DefenseClaw OpenShell sandbox. Use your sys_os_*
   tools to read, edit and run what the task needs.
+
+  DefenseClaw checks every tool call, and the user's terminal does not show
+  tool results. When a tool result says the call was denied by policy, tell
+  the user that DefenseClaw blocked it and quote the reason the result
+  gives, word for word, before you go on.
 `
 
 // SandboxArtifacts renders the OmniGent overlay: the policy bridge and the

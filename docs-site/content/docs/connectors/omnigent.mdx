@@ -217,6 +217,14 @@ exist only in the image; nothing on your host changes.
   process on the `openai-agents` harness. The managed configuration names it
   as `default_agent`, so `omnigent run --model <model>` starts it. Every
   request, model call and tool call still passes the DefenseClaw policy.
+- **Blocked tool calls.** OmniGent's TUI hides tool results until you press
+  Ctrl+T, and a DefenseClaw block reaches it only as the blocked call's result
+  (`Denied by policy: <reason>`). OmniGent's policy results have no field
+  meant for the user. So the sandbox agent's instructions tell the model to
+  say that DefenseClaw blocked the call and to quote the reason word for
+  word. Ctrl+T shows the results of later calls. The session summary names
+  the blocking rule, and `defenseclaw sandbox activity --sandbox <name>`
+  lists every block.
 - **One server.** OmniGent reuses a running local server or host daemon that
   it finds in its records under `~/.omnigent`. It does not check which
   configuration that process started with. Before every start the launcher

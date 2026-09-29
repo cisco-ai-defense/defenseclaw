@@ -67,6 +67,21 @@ func TestOmnigentSandboxArtifacts(t *testing.T) {
 	if err := verifyOmnigentSandboxConfig(config); err != nil {
 		t.Fatalf("rendered config rejected: %v", err)
 	}
+	// OmniGent's TUI hides tool results, the only place a deny reason
+	// shows, so the sandbox agent tells the model to pass it on (OG-U1).
+	var agent struct {
+		Name   string `yaml:"name"`
+		Prompt string `yaml:"prompt"`
+	}
+	if err := yaml.Unmarshal(sandboxFile(t, artifacts, filepath.Join(OmnigentSandboxAgentPath, "config.yaml")).Data, &agent); err != nil {
+		t.Fatal(err)
+	}
+	prompt := strings.Join(strings.Fields(agent.Prompt), " ")
+	for _, want := range []string{"denied by policy", "tell the user that DefenseClaw blocked it", "word for word"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("sandbox agent prompt lacks %q:\n%s", want, agent.Prompt)
+		}
+	}
 	telemetryOn := omnigentSandboxConfig()
 	telemetryOn["telemetry"] = true
 	telemetryOnYAML, err := yaml.Marshal(telemetryOn)
