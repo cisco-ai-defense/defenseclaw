@@ -384,6 +384,41 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			t.Fatalf("fix %+v\n%s", c.Fix, r)
 		}
 	})
+	// The formula's post-install step signs only the formula's driver: a
+	// release driver without the entitlement gets a fix that names it,
+	// which doctor --fix does not run.
+	t.Run("unsigned release driver", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.runner.On(codesign, "code object is not signed at all", errors.New("exit status 1"))
+		r := f.run()
+		driver := filepath.Join(prefix, "libexec", "openshell-driver-vm")
+		c := expectCheck(t, r, openshell.CheckIDVMDriver, fail, driver+" is not signed for Apple's Hypervisor")
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || strings.Contains(c.Fix.Command, "brew postinstall") ||
+			!strings.Contains(c.Fix.Summary, driver) || !strings.Contains(c.Fix.Summary, "com.apple.security.hypervisor") {
+			t.Fatalf("driver fix = %+v", c.Fix)
+		}
+		if r.MicroVM.DriverFromFormula {
+			t.Fatalf("a release driver counts as the formula's: %+v", r.MicroVM)
+		}
+	})
+	// The formula's driver that the running gateway names by its Cellar
+	// path is the formula's too.
+	t.Run("formula driver from ps", func(t *testing.T) {
+		f := newDoctorFixture(t)
+		f.onMicroVMs()
+		_ = os.Remove(f.vmDriverPath())
+		driver := filepath.Join(f.brew, "Cellar", "openshell", "0.1.1", "libexec", "openshell-driver-vm")
+		touchExecutable(t, driver)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", " 7976  7974   501 "+filepath.Join(f.brew, "Cellar", "openshell", "0.1.1", "bin", "openshell-gateway")+"\n"+
+			" 7989  7976   501 "+driver+"\n", nil)
+		f.runner.On(codesign, "code object is not signed at all", errors.New("exit status 1"))
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMDriver, fail, driver+" is not signed for Apple's Hypervisor")
+		if c.Fix == nil || !c.Fix.Automatic || c.Fix.Command != "brew postinstall nvidia/openshell/openshell" || !r.MicroVM.DriverFromFormula {
+			t.Fatalf("driver fix = %+v, microvm %+v", c.Fix, r.MicroVM)
+		}
+	})
 	// The driver next to the openshell-gateway on PATH, in the libexec
 	// beside its bin, is found without asking ps.
 	t.Run("on PATH", func(t *testing.T) {

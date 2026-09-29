@@ -693,6 +693,12 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		a.ok("e2fsprogs installed")
 		changed = true
 	}
+	if m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == "" && !m.DriverFromFormula {
+		// The formula's post-install step signs only the formula's driver.
+		a.bad("MicroVM driver: " + m.DriverBinary + " is not signed for Apple's Hypervisor")
+		a.note("→ " + openshell.VMDriverSigningFix(m.DriverBinary) + ", then run `" + CommandName + " setup` again")
+		return nil, &Silent{Err: fmt.Errorf("the OpenShell MicroVM driver needs %s signed for Apple's Hypervisor", m.DriverBinary)}
+	}
 	if m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == "" {
 		yes, err := consent("Re-run the OpenShell formula's post-install step so its MicroVM driver is signed for Apple's Hypervisor? (" + openshell.ResignVMDriverCommand + ")")
 		if err != nil {

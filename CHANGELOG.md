@@ -339,6 +339,9 @@ deleted.
   driver it runs (naming the binary when found), and `gateway-service` says
   how the gateway runs (a launchd label, or started by hand, which warns
   that it does not start at login) and that DefenseClaw cannot restart it.
+  A driver outside the formula's keg that lacks the Hypervisor entitlement
+  gets a fix that names it; `doctor --fix` and setup re-sign only the
+  formula's driver (`brew postinstall` signs no other).
   The doctor's disk line counts only the MicroVM disks prepared from images,
   not the driver's overlay templates and bootstrap rootfs.
 - The first start of an image on MicroVMs prepares a disk of about the

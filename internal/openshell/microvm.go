@@ -74,6 +74,10 @@ type MicroVMHost struct {
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
+	// DriverFromFormula reports that DriverBinary is the one in the
+	// nvidia/openshell/openshell formula's keg, the only one the
+	// formula's post-install step (ResignVMDriverCommand) signs.
+	DriverFromFormula bool `json:"driver_from_formula,omitempty"`
 	// DriverRunning reports that the answering gateway runs the MicroVM
 	// driver, so it is installed, whether DefenseClaw found where
 	// (DriverBinary) or not: OpenShell's release binaries outside
@@ -164,6 +168,7 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 	}
 	m.DriverRunning = r.running.Name == DriverVM
 	m.DriverBinary = r.findVMDriver(ctx)
+	m.DriverFromFormula = r.inFormulaKeg(m.DriverBinary)
 	if m.DriverBinary != "" {
 		out, err := r.Runner.Output(ctx, Command{Name: "codesign", Args: []string{"-d", "--entitlements", "-", m.DriverBinary}, Timeout: 30 * time.Second})
 		switch {
@@ -240,6 +245,44 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 	return ""
 }
 
+// VMDriverSigningFix is what to do about a MicroVM driver outside the
+// Homebrew formula that is not signed for Apple's Hypervisor: the
+// formula's post-install step signs only its own.
+func VMDriverSigningFix(driver string) string {
+	return "sign " + driver + " with the " + hypervisorEntitlement + " entitlement (codesign), or install OpenShell from its " +
+		GatewayFormula + " Homebrew formula, which signs its own driver"
+}
+
+// inFormulaKeg reports whether p lies in the nvidia/openshell/openshell
+// formula's keg under the Homebrew prefix (opt/openshell, or the Cellar
+// directory it links to).
+func (r *doctorRun) inFormulaKeg(p string) bool {
+	prefix := r.Gateway.BrewPrefix
+	if p == "" || prefix == "" {
+		return false
+	}
+	name := path.Base(GatewayFormula)
+	var roots []string
+	for _, root := range []string{filepath.Join(prefix, "opt", name), filepath.Join(prefix, "Cellar", name)} {
+		roots = append(roots, root)
+		if real, err := filepath.EvalSymlinks(root); err == nil {
+			roots = append(roots, real)
+		}
+	}
+	paths := []string{p}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		paths = append(paths, real)
+	}
+	for _, p := range paths {
+		for _, root := range roots {
+			if rel, err := filepath.Rel(root, p); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hasEntitlement reports whether `codesign -d --entitlements -` output
 // grants key, in the "[Key] ... [Bool] true" form or as a plist.
 func hasEntitlement(out, key string) bool {
@@ -284,7 +327,9 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 	if m.E2fsprogs == "" {
 		cmds, steps = append(cmds, InstallE2fsprogsCommand), append(steps, func(ctx context.Context) error { return brew(ctx, r.Runner, "install", "e2fsprogs") })
 	}
-	if m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == "" {
+	// The formula's post-install step signs the formula's driver only.
+	unsigned := m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == ""
+	if unsigned && m.DriverFromFormula {
 		cmds, steps = append(cmds, ResignVMDriverCommand), append(steps, func(ctx context.Context) error { return brew(ctx, r.Runner, "postinstall", GatewayFormula) })
 	}
 	switch {
@@ -311,6 +356,8 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 				}
 				return nil
 			}}
+	case unsigned:
+		c.Fix = &Fix{Summary: VMDriverSigningFix(m.DriverBinary)}
 	case m.DriverBinary == "" && !m.DriverRunning:
 		c.Fix = &Fix{Summary: "install OpenShell from its Homebrew formula", Command: installOpenShellCommand}
 	case c.Status == StatusWarn && m.SignatureUnknown == "":
