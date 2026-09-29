@@ -231,12 +231,16 @@ func TestLaunchersScrubTheEnvironment(t *testing.T) {
 		{"python", []string{"PYTHONPATH=" + planted, "PYTHONHOME=" + planted, "PYTHONSTARTUP=" + startup, "PYTHONUSERBASE=" + planted,
 			"PYTHONPYCACHEPREFIX=" + planted, "PYTHONWARNINGS=ignore::planted.Warning", "PYTHONBREAKPOINT=planted.hook", "PYTHONINSPECT=1", "PYTHONSAFEPATH="},
 			nil, true},
+		// Node's experimental-proxy warning is silenced with the proxy
+		// (#951), unless the caller asks for Node's warnings.
 		{"egress", []string{"HTTPS_PROXY=http://elsewhere:1", "no_proxy=*", openshell.EnvEgressURL + "=" + testEgressProxy, openshell.EnvEgressBypass + "=" + bypass},
 			map[string]string{"HTTPS_PROXY": testEgressProxy, "HTTP_PROXY": testEgressProxy, "https_proxy": testEgressProxy, "http_proxy": testEgressProxy,
-				"NODE_USE_ENV_PROXY": "1", "NO_PROXY": bypass, "no_proxy": bypass}, false},
-		{"no egress", nil, unsetAll("HTTPS_PROXY", "https_proxy", "NODE_USE_ENV_PROXY", "NO_PROXY"), false},
+				"NODE_USE_ENV_PROXY": "1", "NODE_NO_WARNINGS": "1", "NO_PROXY": bypass, "no_proxy": bypass}, false},
+		{"egress with node warnings", []string{"NODE_NO_WARNINGS=0", openshell.EnvEgressURL + "=" + testEgressProxy},
+			map[string]string{"NODE_USE_ENV_PROXY": "1", "NODE_NO_WARNINGS": "0"}, false},
+		{"no egress", nil, unsetAll("HTTPS_PROXY", "https_proxy", "NODE_USE_ENV_PROXY", "NODE_NO_WARNINGS", "NO_PROXY"), false},
 		{"malformed egress", []string{"HTTPS_PROXY=" + caller, openshell.EnvEgressURL + "=http://x y@host:1"},
-			map[string]string{"HTTPS_PROXY": caller, "https_proxy": unset, "NODE_USE_ENV_PROXY": unset}, false},
+			map[string]string{"HTTPS_PROXY": caller, "https_proxy": unset, "NODE_USE_ENV_PROXY": unset, "NODE_NO_WARNINGS": unset}, false},
 	}
 	pythonHarness := map[string]bool{"hermes": true, "openhands": true, "omnigent": true}
 	for _, name := range Names() {

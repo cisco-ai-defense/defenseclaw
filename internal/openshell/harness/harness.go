@@ -731,6 +731,9 @@ func (s *Spec) Env(opts EnvOptions) (map[string]string, error) {
 			env[key] = opts.EgressProxyURL
 		}
 		env["NODE_USE_ENV_PROXY"] = "1"
+		// Node's experimental-proxy warning (see egressEnvScript); a
+		// request's --env replaces it.
+		env["NODE_NO_WARNINGS"] = "1"
 		env[openshell.EnvEgressURL] = opts.EgressProxyURL
 	}
 	sort.Strings(noProxy)

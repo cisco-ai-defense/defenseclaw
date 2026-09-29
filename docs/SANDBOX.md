@@ -335,7 +335,8 @@ The harness spec builds the environment passed to `openshell sandbox create
   strict profile sets no proxy. `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
   (and their lowercase forms) and `NODE_USE_ENV_PROXY=1` are passed too, but
   OpenShell 0.1.1 drops them at create, so the workload gets them from the
-  shell fragment below.
+  shell fragment below. `NODE_NO_WARNINGS=1` goes with the proxy (see the
+  fragment below).
 - `DEFENSECLAW_SANDBOX_ID` and `DEFENSECLAW_SANDBOX_NAME` identify the
   sandbox. The ID is also meant to tell a nested DefenseClaw launch that it
   already runs sandboxed.
@@ -364,7 +365,22 @@ One shell fragment (`egressEnvScript` in
 `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and
 `NODE_USE_ENV_PROXY=1` from those two variables, only for a well-formed
 `http://` URL and in place of any proxy settings the caller's environment
-carries. It runs wherever a process starts in a DefenseClaw image:
+carries. With `NODE_USE_ENV_PROXY=1`, the base image's Node 22 prints
+`(node:…) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental` at
+every start: above Codex's and Copilot CLI's TUI (their Node wrappers) and
+in the output of every `node`, `npm` or `npx` command the agent runs
+([#951](https://github.com/cisco-ai-defense/defenseclaw/issues/951)). So the
+fragment also exports `NODE_NO_WARNINGS=1`, which hides that warning and
+every other Node process warning (deprecations included) on every Node
+release. `NODE_OPTIONS=--disable-warning=UNDICI-EHPA` would hide only that
+one, but a project's Node older than 20.11 refuses to start with it, so
+only the Codex and Copilot launchers pass it, to their own Node wrapper
+(Codex blanks it again for its commands; Copilot's inherit it). The
+fragment keeps a `NODE_NO_WARNINGS` the environment already has: to see
+Node's warnings, create the sandbox with `--env NODE_NO_WARNINGS=0`
+(`sandbox run <harness> --new --env NODE_NO_WARNINGS=0` for a folder that
+has one), or `unset NODE_NO_WARNINGS` in a sandbox shell. It runs wherever
+a process starts in a DefenseClaw image:
 
 | Start | How it gets the proxy |
 | --- | --- |
@@ -1998,11 +2014,13 @@ call, a read of `~/.ssh/id_rsa`. A tool call's plain `curl` (no `--proxy`)
 reached example.org through the DefenseClaw proxy the launcher exported, the
 proxy blocked webhook.site, and a connection that bypassed the proxy was
 refused by OpenShell. Besides the model endpoint, OpenCode contacted
-`models.opencode.ai` (its model catalog) and `registry.npmjs.org` (it
-installs its plugin SDK into each config directory in the background; a
-failure is only logged). Since the launcher exports the proxy, those
-registry installs go through the DefenseClaw proxy and succeed. Copilot CLI
-in offline bring-your-own-provider mode contacted nothing else.
+`models.opencode.ai` (its model catalog). The OpenCode image now records
+OpenCode's plugin package as installed in `~/.config/opencode` (see
+[overlay images](#overlay-images)), so a new sandbox no longer downloads it
+from `registry.npmjs.org` at start; a writable config directory the image
+does not record, such as a project's own `.opencode`, still gets OpenCode's
+background install, through the DefenseClaw proxy. Copilot CLI in offline
+bring-your-own-provider mode contacted nothing else.
 
 Kiro CLI ran the same checks end to end in an OpenShell 0.1.1 sandbox
 through its scripted-response mode, which replays the E2E scenarios in place
@@ -2118,12 +2136,17 @@ These were measured on the pinned releases inside the community base image
   GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
   GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
   the per-plan Copilot API hosts) come from the CLI, not from a live run: no
-  Copilot-entitled account was available. With the proxy settings, Copilot's
-  Node printed its `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
-  above the TUI at every start, so the launcher passes
-  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
-  Copilot's tool commands inherit it (a Node older than 20.11 would refuse
-  the flag).
+  Copilot-entitled account was available. With the proxy settings, Copilot
+  printed Node's `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
+  above the TUI at every start. It comes from Copilot's npm launcher
+  (`npm-loader.js`, run by the image's Node 22), not from the native
+  single-executable CLI the launcher starts, which ignores `NODE_OPTIONS`
+  but printed no warning (1.0.88 on Linux arm64 with `NODE_USE_ENV_PROXY=1`:
+  `--version`, a `-p` run and a TUI prompt). The DefenseClaw launcher passes
+  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex, which
+  silences the npm launcher, and the sandbox's `NODE_NO_WARNINGS=1` does the
+  same for it and for Copilot's tool commands. Those inherit the
+  `NODE_OPTIONS` too (a Node older than 20.11 would refuse the flag).
   In the interactive TUI every hook waits out Copilot's 30-second hook
   timeout ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)),
   on the Docker driver and in the macOS MicroVM alike: the sandbox's seccomp
@@ -2317,6 +2340,32 @@ These were measured on the pinned releases inside the community base image
   The login check comes before the trust check, so the bypass is unverified
   in a real turn. The login credential lands in
   `~/.local/share/devin/credentials.toml`.
+- **Antigravity CLI 1.2.12.** The first interactive start with a Gemini API
+  key shows a colour-scheme picker, then "Terms of Service & Data Use", whose
+  "Yes, I agree to help improve Antigravity CLI by allowing Google to collect
+  and use my Interactions data" box is ticked by default, then "Do you trust
+  the contents of this project?" for the working directory
+  ([#963](https://github.com/cisco-ai-defense/defenseclaw/issues/963)).
+  Done on the terms screen writes
+  `~/.gemini/antigravity-cli/cache/onboarding.json` (`onboardingComplete`
+  and `consumerOnboardingComplete` true), and a start that finds it skips
+  both screens. Folder trust is an exact path in `trustedWorkspaces` of
+  `~/.gemini/antigravity-cli/settings.json`: a trusted parent does not cover
+  its subfolders. The data-sharing choice is kept nowhere on disk: `/settings`
+  shows Enable Telemetry on for the rest of a session that left the box
+  ticked, and off at the next start. So the image seeds that onboarding
+  record, workload-owned, which accepts Google's Antigravity CLI terms for
+  the user with data sharing off (the box is never ticked, and Enable
+  Telemetry is off), and the launcher adds the exact working directory under
+  `/work` or `/sandbox` to `trustedWorkspaces` at every start: a sandbox
+  starts at agy's prompt. A start without `GEMINI_API_KEY` still asks how to
+  sign in; a Google sign-in inside a sandbox is untested, and a Business
+  sign-in with a Google Cloud project keeps its own terms
+  (`enterpriseOnboardingComplete` stays false). Enable Telemetry off does not
+  stop agy's start-up requests to `antigravity-unleash.goog` (feature flags)
+  and `play.googleapis.com` (usage logging), about 15 KB sent in a measured
+  start with the box unticked or ticked alike; block those hosts with
+  `openshell.egress.block` if your organization requires it.
 
 ## Policy packs and admin constraints
 

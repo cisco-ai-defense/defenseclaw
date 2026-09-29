@@ -105,6 +105,7 @@ var Antigravity = register(&Spec{
 		"restore ~/.gemini/config/hooks.json from the root-owned canonical copy (an edit made during a session is undone at the next start)",
 		"refuse to start when a hooks.json agy adds to the global one (the workspace's and every --add-dir directory's .agents/hooks.json, their and the user's plugins', ~/.gemini/antigravity-cli/hooks.json) reuses a DefenseClaw hook key, as JSON decodes it",
 		"select the gemini model provider in ~/.gemini/antigravity-cli/settings.json when GEMINI_API_KEY is set (an API key skips the Google sign-in)",
+		"trust the exact working directory under /work or /sandbox in ~/.gemini/antigravity-cli/settings.json (trustedWorkspaces), so agy does not ask whether to trust the folder",
 	},
 })
 
@@ -214,28 +215,39 @@ var antigravityLauncher = `#!/bin/bash -p
 # agy has no managed hook tier: its global hooks live in
 # ~/.gemini/config/hooks.json, which this restores from the root-owned
 # canonical copy before every start. A workspace, --add-dir or plugin
-# hooks.json that reuses a DefenseClaw hook key is refused. With
-# GEMINI_API_KEY set it selects agy's gemini model provider, then execs the
-# pinned agy.
+# hooks.json that reuses a DefenseClaw hook key is refused. It trusts the
+# working directory and, with GEMINI_API_KEY set, selects agy's gemini model
+# provider, then execs the pinned agy.
 set -u
 ` + launcherPreamble + `home="${HOME:-/sandbox}"
 workspace="$(pwd -P 2>/dev/null || pwd)"
 ` + antigravityHookKeyGuard + restoreUserHooksScript("agy", connector.AntigravitySandboxCanonicalHooksPath, "$home/.gemini/config", "$home/.gemini/config/hooks.json",
 	"$home/.gemini", "$home/.gemini/config", "$home/.gemini/config/hooks.json") + `
-# An API key skips the Google sign-in only with the gemini model provider.
+# agy asks whether to trust a workspace, by its exact path, at its first
+# start there; every project is under /work or /sandbox. An API key skips
+# the Google sign-in only with the gemini model provider.
 settings="$home/.gemini/antigravity-cli/settings.json"
-if [ -n "${GEMINI_API_KEY:-}" ] && [ -x /usr/bin/jq ] && [ ! -L "$settings" ] && { [ ! -e "$settings" ] || [ -f "$settings" ]; } && /bin/mkdir -p "$home/.gemini/antigravity-cli" 2>/dev/null; then
+ag_trust=""
+case "$workspace" in
+  /work/*|/sandbox|/sandbox/*) ag_trust="$workspace" ;;
+esac
+ag_gemini=""
+[ -n "${GEMINI_API_KEY:-}" ] && ag_gemini=1
+if { [ -n "$ag_trust" ] || [ -n "$ag_gemini" ]; } && [ -x /usr/bin/jq ] && [ ! -L "$settings" ] && { [ ! -e "$settings" ] || [ -f "$settings" ]; } && /bin/mkdir -p "$home/.gemini/antigravity-cli" 2>/dev/null; then
   current='{}'
   if [ -s "$settings" ]; then
     current="$(/bin/cat "$settings" 2>/dev/null)" || current='{}'
   fi
   tmp="$(/usr/bin/mktemp "$settings.XXXXXX" 2>/dev/null)" || tmp=""
   if [ -n "$tmp" ]; then
-    if printf '%s' "$current" | /usr/bin/jq '(if type == "object" then . else {} end) | .modelProvider = "gemini"' >"$tmp" 2>/dev/null; then
+    if printf '%s' "$current" | /usr/bin/jq --arg d "$ag_trust" --arg g "$ag_gemini" '(if type == "object" then . else {} end)
+        | if $g == "" then . else .modelProvider = "gemini" end
+        | if $d == "" then . else .trustedWorkspaces = (((.trustedWorkspaces | if type == "array" then . else [] end) + [$d]) | unique) end' >"$tmp" 2>/dev/null; then
       /bin/mv -f "$tmp" "$settings"
     else
       /bin/rm -f "$tmp"
     fi
   fi
 fi
+unset ag_trust ag_gemini
 ` + launcherExec(`/usr/local/bin/agy "$@"`)

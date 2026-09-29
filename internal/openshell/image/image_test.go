@@ -667,7 +667,7 @@ func TestDockerfileCreatesUserDirs(t *testing.T) {
 		{harness.Amp, "/sandbox/.config /sandbox/.config/amp /sandbox/.config/amp/plugins"},
 		{harness.Hermes, "/sandbox/.hermes"},
 		{harness.OpenHands, "/sandbox/.openhands"},
-		{harness.Antigravity, "/sandbox/.gemini /sandbox/.gemini/config"},
+		{harness.Antigravity, "/sandbox/.gemini /sandbox/.gemini/antigravity-cli /sandbox/.gemini/antigravity-cli/cache /sandbox/.gemini/config"},
 	} {
 		c := mustContext(t, testSpec(tc.spec))
 		df := string(c.Dockerfile)

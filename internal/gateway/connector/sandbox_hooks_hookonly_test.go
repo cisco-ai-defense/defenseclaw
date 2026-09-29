@@ -19,6 +19,8 @@
 package connector
 
 import (
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -54,6 +56,26 @@ func TestHookOnlySandboxArtifacts(t *testing.T) {
 		if c.Owner != SandboxOwnerRoot || u.Owner != SandboxOwnerUser || string(c.Data) != string(u.Data) || len(c.Data) == 0 {
 			t.Fatalf("%s canonical %s / user %s hooks differ", a.Connector, c.Owner, u.Owner)
 		}
+	}
+}
+
+// TestAntigravitySandboxPreacceptsOnboarding (#963): the agy image seeds,
+// workload-owned in HOME, the onboarding record agy 1.2.12 writes after its
+// colour-scheme and terms screens (consumer onboarding done, the
+// data-sharing box never ticked), and leaves enterprise onboarding, a
+// Google Cloud project's terms, to the organization.
+func TestAntigravitySandboxPreacceptsOnboarding(t *testing.T) {
+	f := sandboxFile(t, sandboxArtifactsFor(t, NewAntigravityConnector(), "1.2.12"), AntigravitySandboxOnboardingPath)
+	if f.Owner != SandboxOwnerUser || f.Mode != 0o600 || f.Path != "/sandbox/.gemini/antigravity-cli/cache/onboarding.json" {
+		t.Fatalf("onboarding record %s owner %s mode %v", f.Path, f.Owner, f.Mode)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(f.Data, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]interface{}{"consumerOnboardingComplete": true, "enterpriseOnboardingComplete": false, "onboardingComplete": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("onboarding record = %s", f.Data)
 	}
 }
 

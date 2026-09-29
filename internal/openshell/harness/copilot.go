@@ -200,8 +200,9 @@ case "$dir" in
     ;;
 esac
 
-# Copilot builds on Node's EnvHttpProxyAgent, which warns at every start
-# that it is experimental, above the TUI. This fixed NODE_OPTIONS silences
-# only that warning (Copilot's tool commands inherit it); the caller's
-# NODE_OPTIONS is dropped with the other start-up variables.
+# Copilot's npm launcher runs on the image's Node, which warns at every start
+# that the EnvHttpProxyAgent behind NODE_USE_ENV_PROXY is experimental, above
+# the TUI (the native CLI it starts does not). This fixed NODE_OPTIONS
+# silences only that warning (Copilot's tool commands inherit it); the
+# caller's NODE_OPTIONS is dropped with the other start-up variables.
 ` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)
