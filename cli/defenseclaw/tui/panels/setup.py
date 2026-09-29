@@ -217,6 +217,22 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
 # "running" badge (``mark_wizard_complete``).
 WIZARD_COMMAND_FAMILIES: frozenset[str] = frozenset(command[0] for command in WIZARD_COMMANDS.values() if command)
 
+
+def _wizard_action_family(wizard: SetupWizard) -> tuple[str, ...]:
+    """The argv prefix a wizard's sibling actions share (``()``: no fallback).
+
+    Its WIZARD_COMMANDS entry without the action word: ``agent discovery``
+    for ``agent discovery enable``, ``guardrail`` for ``guardrail status``.
+    A bare ``setup`` family is shared by most tasks, so it never matches, and
+    the Sandbox task finishes only on its own setup and doctor runs.
+    """
+
+    command = WIZARD_COMMANDS.get(wizard, ())
+    family = command[:-1] if len(command) >= 2 else command
+    if wizard == SetupWizard.SANDBOX or family in {(), ("setup",)}:
+        return ()
+    return family
+
 # The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
 ADMIN_POLICY_MESSAGE = "blocked by your organization's DefenseClaw policy"
 # Choice value for pack-governed openshell keys left unset.
@@ -1466,19 +1482,21 @@ class SetupPanelModel:
             # The Sandbox wizard's doctor action; other sandbox commands
             # (enable, disable, ...) never mark the wizard.
             best = SetupWizard.SANDBOX
-        if best is None:
-            # A wizard with several actions runs commands its WIZARD_COMMANDS
-            # prefix doesn't cover (Guardrail actions runs guardrail
-            # block-message / hilt / fail-mode, AI discovery runs disable,
-            # Splunk dashboards runs destroy): finish the running wizard of
-            # the same command family, or its row spins forever.
-            running = [
-                wizard
-                for wizard, status in self.wizard_status.items()
-                if status == "running..." and WIZARD_COMMANDS.get(wizard, ())[:1] == tuple(args[:1])
-            ]
-            if len(running) == 1:
-                best = running[0]
+        # A wizard with several actions runs sibling commands its
+        # WIZARD_COMMANDS prefix doesn't cover (Guardrail actions runs
+        # guardrail block-message / hilt / fail-mode, AI discovery runs
+        # disable, Splunk dashboards runs destroy): the one running wizard
+        # whose action family matches more of the argv than any prefix did
+        # finishes, or its row spins forever.
+        running = [
+            (wizard, len(family))
+            for wizard, status in self.wizard_status.items()
+            if status == "running..."
+            and (family := _wizard_action_family(wizard))
+            and tuple(args[: len(family)]) == family
+        ]
+        if len(running) == 1 and running[0][1] > best_len:
+            best = running[0][0]
         if best is None:
             return
         if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
