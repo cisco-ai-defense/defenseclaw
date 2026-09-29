@@ -229,7 +229,8 @@ block, ask, or decision authority.
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run claude` runs Claude Code in an NVIDIA OpenShell
-sandbox on Linux (not yet on macOS): the agent sees only your project folder,
+sandbox, on Linux or, on an Apple-silicon Mac, in a MicroVM that works on a
+copy of your folder: the agent sees only your project folder,
 and DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/setup/sandbox)
 covers setup, the session and every flag. The files below exist only in the
 sandbox image; your own Claude Code configuration does not change.

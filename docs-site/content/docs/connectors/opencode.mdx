@@ -226,7 +226,8 @@ asset declarations.
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run opencode` runs OpenCode in an NVIDIA OpenShell
-sandbox on Linux (not yet on macOS): the agent sees only your project folder,
+sandbox, on Linux or, on an Apple-silicon Mac, in a MicroVM that works on a
+copy of your folder: the agent sees only your project folder,
 and the DefenseClaw plugin gates every tool call. The [sandbox guide](/docs/setup/sandbox)
 covers setup, the session and every flag. The first run builds the OpenCode
 image; `defenseclaw sandbox image build opencode` builds it ahead of time.
