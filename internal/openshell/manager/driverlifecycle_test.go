@@ -192,6 +192,56 @@ func TestResourcesOnVM(t *testing.T) {
 	e.startBox("grows", sandboxapi.StartRequest{})
 }
 
+// The list and a sandbox's view warn about a MicroVM sandbox's resources
+// as its start judges them: by what every MicroVM gets now, not what the
+// record kept at create, and with the fix that works on the vm driver
+// (lower vcpus and mem_mib), not "delete it and run it again", which
+// every new MicroVM would fail the same way.
+func TestTheViewJudgesVMResourcesAsTheStartDoes(t *testing.T) {
+	shared := packs.Resources{CPU: "4", Memory: "2048Mi"}
+	e := newVMEnv(t, func(c *config.Config) { c.OpenShell.Admin.MaxResources = config.OpenShellResourcesConfig{CPU: "4"} })
+	useOpenCode(t, e)
+	e.m.opts.GatewayResources = func() (packs.Resources, error) { return shared, nil }
+	e.create(sandboxapi.CreateRequest{Name: "vmcap", Harness: "opencode", Copy: true})
+	e.stopBox("vmcap")
+	const over = "your organization caps sandbox cpu at 2, and every sandbox on the vm driver gets 4 ([openshell.drivers.vm] vcpus), " +
+		"so it cannot start until that is lowered (`defenseclaw sandbox doctor --fix`)"
+	warnings := func() []string {
+		t.Helper()
+		list, err := e.m.List(t.Context())
+		must(t, err)
+		sb, err := e.m.Get(t.Context(), "vmcap")
+		must(t, err)
+		if len(list) != 1 || !slices.Equal(list[0].Warnings, sb.Warnings) {
+			t.Fatalf("list %+v and view %+v differ", list, sb)
+		}
+		return sb.Warnings
+	}
+
+	// The organization lowers the maximum below what every MicroVM gets.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MaxResources.CPU = "2" })
+	if w := warnings(); !slices.Contains(w, over) || findWarning(w, "your organization now caps") != "" {
+		t.Fatalf("warnings = %q", w)
+	}
+	_, err := e.m.Start(t.Context(), "vmcap", sandboxapi.StartRequest{})
+	wantCode(t, err, sandboxapi.CodeAdminViolation)
+
+	// `doctor --fix` lowers vcpus: the warning goes, and the start works.
+	shared.CPU = "2"
+	if w := warnings(); len(w) != 0 {
+		t.Fatalf("warnings after the fix = %q", w)
+	}
+	e.startBox("vmcap", sandboxapi.StartRequest{})
+	e.stopBox("vmcap")
+
+	// vcpus raised above the maximum after the create: warned before the
+	// start is refused.
+	shared.CPU = "8"
+	if w := findWarning(warnings(), "your organization caps sandbox cpu at 2, and every sandbox on the vm driver gets 8"); w == "" {
+		t.Fatalf("no warning for vcpus raised since the create")
+	}
+}
+
 // The daemon reads what every MicroVM gets from its gateway's
 // configuration: gateway.env over gateway.toml, and the driver's defaults
 // for what neither sets. A configuration it cannot parse is an error, so

@@ -412,9 +412,71 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	v := m.view(b)
 	proxy := m.proxy
 	bindingID := b.rec.BindingID
+	shared := sharedLimitsOf(b)
 	m.mu.Unlock()
 	m.decorate(&v, proxy, bindingID)
-	return v
+	views := []sandboxapi.Sandbox{v}
+	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
+	return views[0]
+}
+
+// sharedLimitsOf is the driver of a box judged by the cpu and memory
+// every sandbox of it gets (a driver without per-sandbox limits); ""
+// for the others and for a deleted one. Callers hold Manager.mu.
+func sharedLimitsOf(b *box) openshell.ComputeDriver {
+	if d, _ := openshell.LookupDriver(b.rec.Driver); !d.SandboxLimits && !b.retained {
+		return d.Name
+	}
+	return ""
+}
+
+// sharedLimitsWarnings warns on each view whose driver (drivers[i]) has
+// no per-sandbox limits when the cpu and memory every sandbox of it gets
+// now exceed the organization's openshell.admin.max_resources: the start
+// judges those values (checkStart), not what the record kept at create,
+// and a new sandbox would get them too, so the fix is to lower them.
+// Callers must not hold Manager.mu (the values are read from the
+// gateway's configuration).
+func (m *Manager) sharedLimitsWarnings(views []sandboxapi.Sandbox, drivers []openshell.ComputeDriver) {
+	max := m.config().OpenShell.Admin.MaxResources
+	if strings.TrimSpace(max.CPU) == "" && strings.TrimSpace(max.Memory) == "" {
+		return
+	}
+	warnings := map[openshell.ComputeDriver]string{}
+	for i := range views {
+		name := drivers[i]
+		if name == "" {
+			continue
+		}
+		w, ok := warnings[name]
+		if !ok {
+			d, _ := openshell.LookupDriver(string(name))
+			w = m.sharedLimitsWarning(d, max)
+			warnings[name] = w
+		}
+		if w != "" {
+			views[i].Warnings = append(slices.Clip(views[i].Warnings), w)
+		}
+	}
+}
+
+// sharedLimitsWarning is sharedLimitsWarnings' text for driver d; "" when
+// what its sandboxes get fits the maximum.
+func (m *Manager) sharedLimitsWarning(d openshell.Driver, max config.OpenShellResourcesConfig) string {
+	var shared *packs.Resources
+	if m.opts.GatewayResources != nil {
+		if res, err := m.opts.GatewayResources(); err == nil {
+			shared = &res
+		}
+	}
+	v := sharedResourcesViolation(d, shared, max)
+	switch {
+	case v == nil:
+		return ""
+	case shared == nil:
+		return v.Message + ", so it cannot start"
+	}
+	return v.Message + ", so it cannot start until that is lowered (`defenseclaw sandbox doctor --fix`)"
 }
 
 // decorate adds what view leaves out because it needs I/O or other locks:
@@ -529,9 +591,13 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.Warnings = append(v.Warnings, sessionDrift(r, e, v.SessionYolo, v.Yolo)...)
 		}
 	}
-	if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
-		v.Warnings = append(slices.Clip(v.Warnings), res.Message+
-			" (it keeps its current limits until it stops, and cannot start again)")
+	// A driver without per-sandbox limits (vm) is judged by what every
+	// sandbox of it gets now, which needs I/O (sharedLimitsWarnings).
+	if d, _ := openshell.LookupDriver(r.Driver); d.SandboxLimits {
+		if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
+			v.Warnings = append(slices.Clip(v.Warnings), res.Message+
+				" (it keeps its current limits until it stops, and cannot start again)")
+		}
 	}
 	if created := recordDriver(r); b.elsewhere != "" && b.otherDriver {
 		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on the "+string(created)+
