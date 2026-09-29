@@ -259,11 +259,11 @@ account is fixed, the next reconcile (within a minute) clears the warning.
 
 When the guardian is refused by a path in the user's own home (a link, a
 file where a folder belongs or a folder where a file belongs, or a folder
-the user made unreadable), `status` and `verify` report it for that account
-as the warning `guardian_target_user_path`, which names the path. It does
-not fail `verify`, `detect.sh --require-healthy` or `security_complete`,
-because only that account is affected and the user could have made the
-change themselves. Any other reason the account cannot be protected is
+the user made unreadable), `status`, `verify` and `reconcile` report it for
+that account as the warning `guardian_target_user_path`, which names the
+path. It does not fail `reconcile`, `verify`, `detect.sh --require-healthy`
+or `security_complete`, because only that account is affected and the user
+could have made the change themselves. Any other reason the account cannot be protected is
 reported as `guardian_target_failed`: it sets `security_complete: false`,
 `verify` fails, and `detect.sh --require-healthy` reports the device as not
 compliant.
