@@ -6,13 +6,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 )
 
@@ -310,6 +315,39 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 	if opts.FailMode != "closed" || !opts.StrictAvailability || !opts.ManagedEnterprise ||
 		opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason {
 		t.Fatalf("unregistered managed SID did not force closed options: %+v", opts)
+	}
+
+	// A registered account that has not signed in since it was enrolled has
+	// no runtime generation yet: the standalone hook says it is not enrolled
+	// yet instead of "gateway unreachable"; Secure Client keeps its reason.
+	previousStandalone := standaloneEnterpriseHookCheck
+	t.Cleanup(func() { standaloneEnterpriseHookCheck = previousStandalone })
+	for _, standalone := range []bool{false, true} {
+		standaloneEnterpriseHookCheck = func(string) bool { return standalone }
+		stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+			return enterprisehooks.WindowsManagedHookRuntime{Connector: "claudecode", PolicyActive: true}, fmt.Errorf(
+				"enterprise hooks: registered SID is absent from the managed runtime generation selector: %w",
+				enterprisehooks.ErrWindowsManagedRuntimeGenerationPending,
+			)
+		})
+		if enterpriseManagedHookRuntimeNoop("claudecode") {
+			t.Fatal("a registered account without a runtime was treated as a no-op")
+		}
+		opts = buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+		want := "enterprise_managed_runtime_state_invalid"
+		if standalone {
+			want = enterprisehooks.WindowsManagedEnrollmentPendingReason
+		}
+		if opts.ManagedRuntimeFailure != want || opts.FailMode != "closed" {
+			t.Fatalf("standalone=%t: runtime failure %q fail mode %q, want %q closed", standalone, opts.ManagedRuntimeFailure, opts.FailMode, want)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	opts.ExplainUnenrolledAccount = true
+	opts.Stdin, opts.Stdout, opts.Stderr = strings.NewReader("{}"), &stdout, &stderr
+	if code := hookexec.Run(context.Background(), opts); code == 0 ||
+		!strings.Contains(stderr.String(), "this account is not enrolled") || strings.Contains(stderr.String(), "gateway unreachable") {
+		t.Fatalf("pending account: code %d stderr %q, want a block that names the enrollment", code, stderr.String())
 	}
 }
 

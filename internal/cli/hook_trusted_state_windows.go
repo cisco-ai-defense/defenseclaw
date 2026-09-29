@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -398,16 +399,21 @@ func enterpriseManagedHookRuntimeForceClosed() bool {
 
 func enterpriseManagedHookRuntimeFailureReason() string {
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
-	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
-	if !nativeEnterpriseHookRuntimeSnapshot.prepared ||
-		nativeEnterpriseHookRuntimeSnapshot.err == nil {
+	prepared := nativeEnterpriseHookRuntimeSnapshot.prepared
+	err := nativeEnterpriseHookRuntimeSnapshot.err
+	nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if !prepared || err == nil {
 		return ""
 	}
-	if strings.Contains(
-		nativeEnterpriseHookRuntimeSnapshot.err.Error(),
-		enterprisehooks.WindowsManagedSIDUnregisteredReason,
-	) {
+	if strings.Contains(err.Error(), enterprisehooks.WindowsManagedSIDUnregisteredReason) {
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
+	}
+	// A registered account with no runtime has not signed in since it was
+	// enrolled. Only the standalone hook says so; Secure Client keeps its
+	// reason.
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) &&
+		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+		return enterprisehooks.WindowsManagedEnrollmentPendingReason
 	}
 	return "enterprise_managed_runtime_state_invalid"
 }
