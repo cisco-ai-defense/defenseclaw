@@ -32,12 +32,15 @@ import (
 )
 
 // buildFailingDocker is a Docker daemon without images whose builds print
-// output and fail. It has the buildx plugin unless noBuildx is set.
+// output and fail. It has the buildx plugin unless noBuildx is set, and
+// runs in an empty environment.
 type buildFailingDocker struct {
 	output   string
 	noBuildx bool
 	builds   *int
 }
+
+func (buildFailingDocker) Getenv(string) string { return "" }
 
 func (d buildFailingDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	if stdin != nil {
@@ -62,8 +65,10 @@ func (d buildFailingDocker) Run(_ context.Context, stdin io.Reader, stdout, stde
 
 // TestCreateReportsTheEndOfAFailedImageBuild: the daemon builds without a
 // build log, so a create whose image build fails carries the last lines
-// docker printed, in its error and in the daemon log.
+// docker printed, in its error and in the daemon log. DOCKER_BUILDKIT
+// here is not the environment the builder's docker runs in.
 func TestCreateReportsTheEndOfAFailedImageBuild(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "0")
 	e := newEnv(t, nil)
 	var mu sync.Mutex
 	var logs []string
@@ -103,7 +108,6 @@ func TestCreateReportsTheEndOfAFailedImageBuild(t *testing.T) {
 // buildx plugin (another HOME or DOCKER_CONFIG hides it) refuses the image
 // build before docker build runs, and the create error says how to fix it.
 func TestCreateNamesTheMissingBuildxPlugin(t *testing.T) {
-	t.Setenv("DOCKER_BUILDKIT", "")
 	e := newEnv(t, nil)
 	builds := 0
 	e.m.opts.Images = BuilderImages{Builder: &image.Builder{

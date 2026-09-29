@@ -43,7 +43,9 @@ var BuildKitArgs = []string{"buildx", "version"}
 // of DOCKER_BUILDKIT docker sees, out and err the outcome of `docker
 // BuildKitArgs...`.
 func BuildKitProblem(goos, env string, out []byte, err error) (problem, fix string) {
-	if v := strings.TrimSpace(env); v != "" {
+	// As docker reads it: any value that is set, spaces and all, must parse
+	// as a boolean, or docker build refuses to run.
+	if v := env; v != "" {
 		on, perr := strconv.ParseBool(v)
 		switch {
 		case perr != nil:

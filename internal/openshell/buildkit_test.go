@@ -38,10 +38,17 @@ func TestBuildKitProblem(t *testing.T) {
 		fix       string
 	}{
 		{goos: "darwin", out: ok},
-		{goos: "linux", env: " true ", out: ok},
 		{goos: "linux", env: "1", out: ok},
+		{goos: "linux", env: "TRUE", out: ok},
+		{goos: "darwin", env: "t", out: ok},
 		{goos: "darwin", env: "0", out: ok, problem: "DOCKER_BUILDKIT=0 turns BuildKit off", fix: "unset DOCKER_BUILDKIT, or set it to 1"},
+		{goos: "linux", env: "F", out: ok, problem: "DOCKER_BUILDKIT=F turns BuildKit off", fix: "unset DOCKER_BUILDKIT, or set it to 1"},
 		{goos: "linux", env: "yes", out: ok, problem: `DOCKER_BUILDKIT="yes" is not true or false`, fix: "unset DOCKER_BUILDKIT"},
+		// docker parses the value as it is set, so padding, or only spaces,
+		// makes docker build refuse to run ("DOCKER_BUILDKIT environment
+		// variable expects boolean value").
+		{goos: "linux", env: " true ", out: ok, problem: `DOCKER_BUILDKIT=" true " is not true or false`, fix: "unset DOCKER_BUILDKIT"},
+		{goos: "darwin", env: " ", out: ok, problem: `DOCKER_BUILDKIT=" " is not true or false`, fix: "unset DOCKER_BUILDKIT"},
 		{goos: "darwin", out: []byte("\ndocker: unknown command: docker buildx\n\nRun 'docker --help'\n"), err: exit1,
 			problem: "(`docker buildx version`: docker: unknown command: docker buildx), so docker build would fall back to the legacy builder",
 			fix:     "(Docker Desktop provides it)"},

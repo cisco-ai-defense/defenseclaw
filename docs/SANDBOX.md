@@ -1295,8 +1295,11 @@ modes and owners are set in the tar headers) and streams it to
 
 The Dockerfile, like a run image's, uses BuildKit-only syntax (`COPY
 --chmod`). Every build first runs `docker buildx version` and reads
-`DOCKER_BUILDKIT`, and refuses (`image.ErrNoBuildKit`, with the fix) a docker
-that would use the legacy builder, before `docker build` runs. A failed build
+`DOCKER_BUILDKIT` from the environment docker runs in (`image.Docker.Getenv`),
+and refuses (`image.ErrNoBuildKit`, with the fix) a docker that would use the
+legacy builder, before `docker build` runs. It reads `DOCKER_BUILDKIT` as
+docker does: any value that is set, spaces and all, must parse as a boolean,
+or `docker build` refuses to run, so the build is refused too. A failed build
 returns an `image.BuildError` whose message ends with the last 40 lines (at
 most 8 KiB) docker printed, terminal escapes and control characters removed
 and anything shaped like a credential redacted. It reaches the CLI's error,

@@ -37,13 +37,19 @@ import (
 // args through a shell.
 type Docker interface {
 	Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error
+	// Getenv reads the environment the commands run in, which docker also
+	// takes settings from (DOCKER_BUILDKIT, see checkBuildKit).
+	Getenv(key string) string
 }
 
-// CLI runs the docker binary.
+// CLI runs the docker binary, in this process's environment.
 type CLI struct {
 	// Binary defaults to "docker".
 	Binary string
 }
+
+// Getenv implements Docker: docker runs in this process's environment.
+func (CLI) Getenv(key string) string { return os.Getenv(key) }
 
 // Run implements Docker.
 func (c CLI) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
@@ -149,7 +155,8 @@ func (e *buildKitError) Error() string        { return e.problem + "; " + e.fix 
 func (e *buildKitError) Is(target error) bool { return target == ErrNoBuildKit }
 
 // checkBuildKit refuses, with the fix, a docker that would not build with
-// BuildKit: DOCKER_BUILDKIT turns it off, or `docker buildx version` fails.
+// BuildKit: DOCKER_BUILDKIT, in the environment d runs docker in, turns it
+// off or is not a boolean, or `docker buildx version` fails.
 // A legacy build would run every step before the first COPY --chmod (the
 // harness install, a download of about 3 GB) and only then stop.
 func checkBuildKit(ctx context.Context, d Docker) error {
@@ -163,7 +170,7 @@ func checkBuildKit(ctx context.Context, d Docker) error {
 		// docker did not run at all; the build would fail the same way.
 		return err
 	}
-	if problem, fix := openshell.BuildKitProblem(runtime.GOOS, os.Getenv("DOCKER_BUILDKIT"), out.Bytes(), err); problem != "" {
+	if problem, fix := openshell.BuildKitProblem(runtime.GOOS, d.Getenv("DOCKER_BUILDKIT"), out.Bytes(), err); problem != "" {
 		return &buildKitError{problem: problem, fix: fix}
 	}
 	return nil

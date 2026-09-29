@@ -40,14 +40,17 @@ import (
 
 // fakeDocker answers docker CLI invocations from a handler and records them.
 // It has the buildx plugin unless noBuildx is set; the handler never sees
-// `docker buildx version`.
+// `docker buildx version`. It runs in env, not the test's environment.
 type fakeDocker struct {
 	mu       sync.Mutex
 	calls    [][]string
 	stdin    map[int][]byte
 	handler  func(args []string, stdin []byte) (stdout string, exit int)
 	noBuildx bool
+	env      map[string]string
 }
+
+func (f *fakeDocker) Getenv(key string) string { return f.env[key] }
 
 // dockerWithoutBuildx is what `docker buildx version` prints without the
 // plugin.
@@ -277,8 +280,11 @@ func TestBuildFailureReportsTheEndOfDockersOutput(t *testing.T) {
 // plugin, or with DOCKER_BUILDKIT off (or not a boolean), would build with
 // the legacy builder, which runs the harness install and then fails on the
 // first COPY --chmod; the build is refused before docker build runs, with
-// the fix. DOCKER_BUILDKIT=1 with the plugin builds.
+// the fix. DOCKER_BUILDKIT=1 with the plugin builds. DOCKER_BUILDKIT is
+// read from the environment docker runs in (Docker.Getenv), so this
+// process's, set to the opposite here, changes nothing.
 func TestBuildRefusesADockerWithoutBuildKit(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "1")
 	fix := "install Docker's buildx plugin"
 	for name, tc := range map[string]struct {
 		noBuildx  bool
@@ -292,8 +298,8 @@ func TestBuildRefusesADockerWithoutBuildKit(t *testing.T) {
 		"DOCKER_BUILDKIT=maybe": {false, "maybe", `DOCKER_BUILDKIT="maybe" is not true or false`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("DOCKER_BUILDKIT", tc.env)
-			docker := &fakeDocker{noBuildx: tc.noBuildx, handler: func([]string, []byte) (string, int) { return "", 1 }}
+			docker := &fakeDocker{noBuildx: tc.noBuildx, env: map[string]string{"DOCKER_BUILDKIT": tc.env},
+				handler: func([]string, []byte) (string, int) { return "", 1 }}
 			store := testStore(t)
 			b := &Builder{Docker: docker, Store: store}
 			_, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{})
@@ -311,11 +317,22 @@ func TestBuildRefusesADockerWithoutBuildKit(t *testing.T) {
 			}
 		})
 	}
-	t.Setenv("DOCKER_BUILDKIT", "1")
+	t.Setenv("DOCKER_BUILDKIT", "0")
 	c := mustContext(t, testSpec(harness.Codex))
-	b := &Builder{Docker: imageDocker(t, c, goodProbeOutput(c)), Store: testStore(t)}
+	docker := imageDocker(t, c, goodProbeOutput(c))
+	docker.env = map[string]string{"DOCKER_BUILDKIT": "1"}
+	b := &Builder{Docker: docker, Store: testStore(t)}
 	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{SkipHookFire: true}); err != nil {
 		t.Fatalf("Build with DOCKER_BUILDKIT=1: %v", err)
+	}
+}
+
+// CLI runs docker in this process's environment, so that is where its
+// DOCKER_BUILDKIT comes from.
+func TestCLIReadsThisProcesssEnvironment(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "0")
+	if got := (CLI{}).Getenv("DOCKER_BUILDKIT"); got != "0" {
+		t.Fatalf("CLI.Getenv(DOCKER_BUILDKIT) = %q, want 0", got)
 	}
 }
 
@@ -446,6 +463,9 @@ func (d *fakeDaemon) expect(c *Context) {
 	defer d.mu.Unlock()
 	d.contexts[c.Tag] = c
 }
+
+// Getenv: the daemon's docker runs in an empty environment.
+func (d *fakeDaemon) Getenv(string) string { return "" }
 
 func (d *fakeDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Writer, args ...string) error {
 	if stdin != nil {

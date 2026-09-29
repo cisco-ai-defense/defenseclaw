@@ -63,7 +63,11 @@ type layerDaemon struct {
 	extraLayers int
 	// noBuildx is a docker without its buildx plugin.
 	noBuildx bool
+	// env is the environment docker runs in, not the test's.
+	env map[string]string
 }
+
+func (d *layerDaemon) Getenv(key string) string { return d.env[key] }
 
 type fakeImage struct {
 	layers []string
@@ -428,18 +432,47 @@ func TestRunImageRefusals(t *testing.T) {
 }
 
 // A run image is built with BuildKit too (its Dockerfile uses COPY
-// --chmod): a docker without the buildx plugin is refused before docker
-// build runs, and no run image is recorded (only the alias it builds FROM).
+// --chmod): a docker without the buildx plugin, or whose environment has
+// DOCKER_BUILDKIT off, is refused before docker build runs, and no run
+// image is recorded (only the alias it builds FROM). The environment is the
+// one docker runs in, not this process's.
 func TestRunImageRefusesADockerWithoutBuildKit(t *testing.T) {
-	t.Setenv("DOCKER_BUILDKIT", "")
-	b, daemon, base := runBase(t)
-	daemon.noBuildx = true
-	_, err := b.RunImage(context.Background(), base, claudeRunFiles(`{"env":{}}`+"\n"), testAliasRepo)
-	if !errors.Is(err, ErrNoBuildKit) || !strings.Contains(err.Error(), "docker: unknown command: docker buildx") {
-		t.Fatalf("RunImage = %v, want ErrNoBuildKit", err)
+	t.Setenv("DOCKER_BUILDKIT", "1")
+	for name, tc := range map[string]struct {
+		noBuildx bool
+		env      map[string]string
+		want     string
+	}{
+		"no buildx plugin":  {noBuildx: true, want: "docker: unknown command: docker buildx"},
+		"DOCKER_BUILDKIT=0": {env: map[string]string{"DOCKER_BUILDKIT": "0"}, want: "DOCKER_BUILDKIT=0 turns BuildKit off"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b, daemon, base := runBase(t)
+			daemon.noBuildx, daemon.env = tc.noBuildx, tc.env
+			_, err := b.RunImage(context.Background(), base, claudeRunFiles(`{"env":{}}`+"\n"), testAliasRepo)
+			if !errors.Is(err, ErrNoBuildKit) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("RunImage = %v, want ErrNoBuildKit with %q", err, tc.want)
+			}
+			if runs, _ := b.Store.RunImages(); daemon.count("build") != 0 || len(runs) != 1 || !runs[0].Alias {
+				t.Fatalf("builds %d, run images recorded %+v", daemon.count("build"), runs)
+			}
+		})
 	}
-	if runs, _ := b.Store.RunImages(); daemon.count("build") != 0 || len(runs) != 1 || !runs[0].Alias {
-		t.Fatalf("builds %d, run images recorded %+v", daemon.count("build"), runs)
+}
+
+// DOCKER_BUILDKIT in this process's environment is not the docker the
+// builder runs: a test shell with DOCKER_BUILDKIT=0 (or "yes") does not
+// refuse a build whose docker has BuildKit.
+func TestRunImageIgnoresThisProcesssDockerBuildKit(t *testing.T) {
+	for _, env := range []string{"0", "yes"} {
+		t.Setenv("DOCKER_BUILDKIT", env)
+		b, daemon, base := runBase(t)
+		if _, err := b.RunImage(context.Background(), base, claudeRunFiles(`{"env":{}}`+"\n"), testAliasRepo); err != nil {
+			t.Fatalf("RunImage with DOCKER_BUILDKIT=%s here: %v", env, err)
+		}
+		if daemon.count("build") != 1 {
+			t.Fatalf("DOCKER_BUILDKIT=%s here: %d builds", env, daemon.count("build"))
+		}
 	}
 }
 
