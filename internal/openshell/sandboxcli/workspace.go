@@ -570,7 +570,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			a.note("stopped " + o.Name + " again")
 		}()
 	}
-	res, err := a.pull(ctx, api, cli, sb)
+	res, err := a.pull(ctx, api, cli, sb, true)
 	if err != nil {
 		return err
 	}
@@ -674,13 +674,15 @@ func (o PullOptions) applyMode() workspace.ApplyMode {
 	return workspace.ApplyPatch
 }
 
-// pull captures the sandbox's work.
-func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox) (*workspace.PullResult, error) {
+// pull captures the sandbox's work, saying so when announce is set.
+func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox, announce bool) (*workspace.PullResult, error) {
 	var review []string
 	if eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: sb.Pack, Harness: sb.Harness, Project: sb.Project, Profile: sb.Profile, Copy: true}); err == nil {
 		review = eff.Workspace.Review
 	}
-	a.note("Pulling " + sb.Name + "'s work…")
+	if announce {
+		a.note("Pulling " + sb.Name + "'s work…")
+	}
 	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: review})
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))

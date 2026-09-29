@@ -246,6 +246,50 @@ func TestDockerfileShape(t *testing.T) {
 	}
 }
 
+// TestDockerfileAnswersLocalhost pins AG-MAC-F1: every image resolves
+// localhost without /etc/hosts, which a MicroVM boots empty. nss-myhostname
+// is installed as root, asked right after files and before dns, and the
+// build fails unless it answers localhost with 127.0.0.1; the step runs
+// before the harness is installed, so the harness's own version check
+// already runs with it.
+func TestDockerfileAnswersLocalhost(t *testing.T) {
+	for _, name := range harness.Names() {
+		h, _ := harness.Get(name)
+		df := string(mustContext(t, testSpec(h)).Dockerfile)
+		at := strings.Index(df, localhostStep)
+		if at < 0 || strings.Count(df, localhostStep) != 1 {
+			t.Fatalf("%s: Dockerfile carries the localhost step %d times:\n%s", name, strings.Count(df, localhostStep), df)
+		}
+		root, user := strings.Index(df, "USER root\n"), strings.LastIndex(df, "\nUSER sandbox\n")
+		steps, err := h.InstallSteps(h.DefaultVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root < 0 || root > at || user < at || len(steps) == 0 || strings.Index(df, "RUN "+steps[0].Run+"\n") < at {
+			t.Fatalf("%s: the localhost step is not a root step before the harness install:\n%s", name, df)
+		}
+	}
+	for _, want := range []string{
+		"getent -s hosts:myhostname hosts localhost",
+		"apt-get install -y --no-install-recommends libnss-myhostname",
+		// The postinst appends myhostname after dns: it moves right after files.
+		`s/[[:space:]]+myhostname([[:space:]]|$)/\1/g;s/^hosts:([[:space:]]+)files([[:space:]]|$)/hosts:\1files myhostname\2/`,
+		`grep -Eq '^hosts:[[:space:]]+files myhostname([[:space:]]|$)' /etc/nsswitch.conf || `,
+		`getent -s hosts:myhostname ahosts localhost | grep -q '^127\.0\.0\.1[[:space:]]' || `,
+	} {
+		if !strings.Contains(localhostStep, want) {
+			t.Errorf("localhost step lacks %q:\n%s", want, localhostStep)
+		}
+	}
+	// Only loopback names: no hosts file is written and no resolver added.
+	run := localhostStep[strings.Index(localhostStep, "\nRUN ")+1:]
+	for _, forbidden := range []string{"/etc/hosts", "/etc/resolv.conf", "nameserver", "mdns", "resolve "} {
+		if strings.Contains(run, forbidden) {
+			t.Errorf("localhost step contains %q", forbidden)
+		}
+	}
+}
+
 // TestContextCarriesShellEnvironment: every image carries the login-shell
 // profile, the sandbox exec wrapper and the harness shim, root-owned, and
 // leaves the system /etc/profile.d directory alone.

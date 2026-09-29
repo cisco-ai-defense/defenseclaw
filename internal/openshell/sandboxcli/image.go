@@ -289,6 +289,10 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 			a.warn(warning)
 		}
 	}
+	if !rec.MicroVMVerified && rec.MicroVMProblem != "" {
+		// Docker sandboxes run it; a MicroVM gateway refuses it.
+		a.warn(spec.DisplayName + " cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + rec.MicroVMProblem)
+	}
 	return nil
 }
 

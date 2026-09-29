@@ -214,6 +214,25 @@ not the driver's name or `runtime.GOOS`.
   `<state_dir>/images`, never the driver's other state (overlay templates,
   the bootstrap rootfs, a preparation under way). A later start of such an
   image prepares it again.
+- **Name resolution.** A MicroVM's `/etc/hosts` is empty (OpenShell 0.1.1:
+  the driver makes the root disk from a `docker export`, whose init layer
+  puts an empty file over the image's, and its guest init writes none), and
+  its loopback DNS relay at `127.0.0.53` answers `localhost` with SERVFAIL.
+  Antigravity CLI 1.2.12 exited at start there ("lookup localhost on
+  127.0.0.53:53: server misbehaving"), and any dev server, local MCP server
+  or test that resolves localhost failed the same way. Every overlay image
+  answers localhost with `nss-myhostname` (see [Build](#build)): glibc
+  programs, Node, Python and Go programs linked with cgo (agy is one) now
+  resolve it. Go's own resolver (a Go binary built without cgo, or with
+  `netgo`) and statically linked musl programs read `/etc/hosts` and DNS
+  themselves and still cannot, until OpenShell writes `/etc/hosts`. The
+  hook-fire probe runs every harness with a MicroVM's name resolution too,
+  and a driver without a hosts file (`HostsFile` in the driver table) boots
+  only an image that passed that run: `create` refuses any other with the
+  probe's reason. A harness that exits at once in a sandbox where localhost
+  does not resolve is named as such in the end-of-session summary, with
+  what to do (a sandbox made before the images answered localhost is
+  deleted and made again).
 - **Stops.** A MicroVM stopped without a flush brings back empty what its
   workload wrote since the last one (OpenShell 0.1.1; `StopFlushes` is off
   for vm). The daemon's stop runs `sync` in the sandbox first. Every gateway
@@ -1307,7 +1326,14 @@ modes and owners are set in the tar headers) and streams it to
 `docker build --pull=false -t <tag> -`. The Dockerfile:
 
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
-   (`/usr/bin:/bin:/usr/sbin:/sbin`).
+   (`/usr/bin:/bin:/usr/sbin:/sbin`), and `nss-myhostname`
+   (`libnss-myhostname`), asked right after `files` and before `dns`
+   (`hosts: files myhostname dns`). It answers `localhost`,
+   `localhost.localdomain`, `*.localhost` and the hostname with loopback
+   addresses and does no network I/O, so localhost resolves in a MicroVM,
+   whose `/etc/hosts` is empty (see [compute drivers](#compute-drivers)).
+   Docker's `/etc/hosts` still answers first on the docker driver. The build
+   fails unless the module answers `localhost` with `127.0.0.1`.
 2. Installs the harness at a version whose Linux hook contract is known. Any
    other version fails before the build starts. Claude Code 2.1.156 is
    relocated from the digest-pinned base image, and no other Claude Code
@@ -1370,6 +1396,19 @@ them. The hooks must still fire, and none of the planted programs may run.
 container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
 `test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
 configuration below against the real harnesses.
+
+The probe ends with the allowed run once more, with an OpenShell MicroVM's
+name resolution: an `/etc/hosts` that names neither `localhost` nor the
+hostname (only the stand-in ingress and, in relay mode,
+`host.docker.internal`), the guest's `resolv.conf` pointed at a resolver no
+server answers at (the container's own `127.0.0.53` in relay mode; the
+stand-in's address on the host network, where `127.0.0.53` is
+systemd-resolved), and the image's own `nsswitch.conf`. Its verdict is kept
+apart (`MicroVMVerified` and `MicroVMProblem` in `images.json`): a harness
+that needs a real `/etc/hosts` still verifies for the docker driver, and
+`sandbox image build` says that a MicroVM gateway refuses it, and why. A
+harness that could not resolve localhost there is named with the line it
+printed.
 
 Kiro CLI has no model endpoint a mock can stand in for; its own
 scripted-response mode (`KIRO_MOCK_CHAT_RESPONSE`, with a placeholder
@@ -2362,6 +2401,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
 | Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
+| In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image installs `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost, and with only a loopback interface `_gateway` and `_outbound` find nothing. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, and setup refuses it (the installer would find that CLI and install nothing): stop that gateway and remove that OpenShell, then `setup --install-openshell` installs the formula. While such a gateway answers, the doctor does not fail it: `vm-driver` passes on the driver the gateway reports (found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`), and `gateway-service` warns, saying how it runs (the launchd label from `launchctl list`, or started by hand) and that DefenseClaw cannot restart it, with setup's way on as its fix; the TUI's machine check refuses it as setup does. With no gateway answering, `gateway-service` fails as not installed, with the same fix, and `vm-driver` checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
 
 ## Supported platforms and versions

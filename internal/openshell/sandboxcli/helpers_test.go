@@ -528,6 +528,9 @@ type fakeImages struct {
 	// answer.
 	pruned      []image.PruneOptions
 	pruneReport *image.PruneReport
+	// microVMProblem, by harness, is why a built image fails the probe's
+	// MicroVM scenario (none: it passes).
+	microVMProblem map[string]string
 }
 
 func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
@@ -539,7 +542,8 @@ func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
 func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, _ bool, _ io.Writer) (image.Record, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true}
+	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true,
+		MicroVMVerified: f.microVMProblem[spec.Name] == "", MicroVMProblem: f.microVMProblem[spec.Name]}
 	f.built = append(f.built, spec.Name)
 	f.recs = append(f.recs, rec)
 	return rec, true, nil

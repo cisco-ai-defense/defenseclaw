@@ -68,6 +68,14 @@ type Record struct {
 	HookFireVerified bool `json:"hook_fire_verified,omitempty"`
 	// HookFireVerifiedAt is when that probe passed.
 	HookFireVerifiedAt time.Time `json:"hook_fire_verified_at,omitzero"`
+	// MicroVMVerified is set by VerifyHooks with HookFireVerified when the
+	// probe's MicroVM scenario passed as well: the harness started and its
+	// hooks fired with an OpenShell MicroVM's name resolution (no
+	// localhost in /etc/hosts). A driver without a hosts file
+	// (openshell.Driver.HostsFile) boots only an image that has it.
+	MicroVMVerified bool `json:"microvm_verified,omitempty"`
+	// MicroVMProblem says why the MicroVM scenario failed.
+	MicroVMProblem string `json:"microvm_problem,omitempty"`
 }
 
 // NetworkRealpaths lists the realpaths for profiles.Input.Binaries.

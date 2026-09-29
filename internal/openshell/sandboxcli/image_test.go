@@ -118,6 +118,29 @@ func TestImagePruneKeepsTheSandboxesImages(t *testing.T) {
 	}
 }
 
+// AG-MAC-F2: an image whose hooks verify but whose harness cannot start
+// with a MicroVM's name resolution is built (docker sandboxes run it), and
+// the build says a MicroVM gateway refuses it, with the probe's reason.
+func TestImageBuildSaysWhatCannotStartInAMicroVM(t *testing.T) {
+	const why = `Antigravity cannot resolve localhost in an OpenShell MicroVM: it printed "lookup localhost on 127.0.0.53:53: server misbehaving"`
+	ta := newTestApp(t, "")
+	ta.images.microVMProblem = map[string]string{"antigravity": why}
+	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity", "claude"}}))
+	out := ta.output()
+	for _, want := range []string{
+		"Antigravity 1.2.12: defenseclaw/sandbox:antigravity, hooks verified",
+		"Antigravity cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + why,
+		"Claude Code ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "cannot start in an OpenShell MicroVM") != 1 {
+		t.Fatalf("only Antigravity cannot start in a MicroVM:\n%s", out)
+	}
+}
+
 // Without the daemon's list the MicroVM run images and aliases are left
 // alone, and so are the disks of the images removed: which sandboxes boot
 // them is not known.
