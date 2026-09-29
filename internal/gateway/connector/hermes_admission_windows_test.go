@@ -73,6 +73,44 @@ func TestHermesConnectorLifecycleWithProtectedAdmission(t *testing.T) {
 	}
 }
 
+// On a managed Windows target the guardian owns <data dir>'s protection.
+// Hermes' lifecycle used to re-protect it under the user's token, which the
+// hardened DACL refuses (teardown failed with Access is denied) and which
+// rewrote the inherited entries of its other subfolders so an administrator
+// could not remove them; it now leaves that DACL alone.
+func TestHermesManagedLifecycleKeepsTheDataDirProtection(t *testing.T) {
+	dataDir := filepath.Join(testenv.PrivateTempDir(t), ".defenseclaw")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)(A;OICI;FR;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dataDir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	sddl := func() string {
+		sd, err := windows.GetNamedSecurityInfo(dataDir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sd.String()
+	}
+	before := sddl()
+	if err := prepareHermesLifecycleDataDir(SetupOpts{DataDir: dataDir, ManagedEnterprise: true}); err != nil {
+		t.Fatalf("managed data dir: %v", err)
+	}
+	if got := sddl(); got != before {
+		t.Fatalf("managed data dir DACL changed: %s -> %s", before, got)
+	}
+}
+
 func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutation(t *testing.T) {
 	tests := []struct {
 		name      string

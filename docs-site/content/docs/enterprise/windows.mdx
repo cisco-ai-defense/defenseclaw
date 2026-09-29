@@ -546,8 +546,10 @@ registrations. Users who are signed out during the uninstall keep theirs as
 well: no guardian is left to clean them at their next sign-in. The uninstall
 result names what stays: the `user_registrations_pending` warning lists each
 connector and user SID it could not act as, and `user_registrations_failed`
-lists removals that failed. To clean every user, run the uninstall as
-LocalSystem while they are signed in.
+lists removals that failed, including a registration that a connector's
+removal left in the user's agent configuration (the message names the file).
+To clean every user, run the uninstall as LocalSystem while they are signed
+in.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes

@@ -354,6 +354,28 @@ func hookConfigFileKind(mode os.FileMode) string {
 	}
 }
 
+// OwnedHookConfigReferences returns the hook config files of conn that still
+// reference DefenseClaw's own hook commands for opts. After a teardown it
+// names a registration the teardown left, for example one its restore of the
+// pre-setup file brought back.
+func OwnedHookConfigReferences(conn Connector, opts SetupOpts) ([]string, error) {
+	needles := ownedHookCommandNeedles(opts, conn)
+	if len(needles) == 0 {
+		return nil, nil
+	}
+	var remaining []string
+	for _, path := range HookConfigPathsForConnector(conn, opts) {
+		present, err := configFileReferencesHook(path, needles)
+		if err != nil {
+			return remaining, err
+		}
+		if present {
+			remaining = append(remaining, path)
+		}
+	}
+	return remaining, nil
+}
+
 // configFileReferencesHook reports whether the file at path contains any of
 // the owned hook command needles. A missing file reports false (not present)
 // rather than an error: a deleted connector config is exactly the tamper case
