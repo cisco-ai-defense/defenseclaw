@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -1358,5 +1359,67 @@ func TestEnterpriseHookWorkerCredentialKeepsSupplementaryGroups(t *testing.T) {
 	enterprisehooks.SetStandaloneResolver(supplementaryGroupResolver{err: errors.New("sssd: backend offline")})
 	if got := enterpriseHookWorkerGroupIDs(account); got != nil {
 		t.Fatalf("an unavailable directory falls back to the primary group only: %v", got)
+	}
+}
+
+// The guardian spools each enrolled user's AI Discovery scan with the
+// account it started the worker for, whatever the worker's report claims,
+// strips the raw paths the administrator did not keep, and drops the record
+// of a user the manifest no longer enrolls.
+func TestStandaloneAIDiscoveryPassSpoolsEachScanAsItsAccount(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}
+	if err := os.MkdirAll(filepath.Join(alice, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(alice, ".codex", "config.toml"), []byte("model = \"x\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AIDiscovery.Enabled = true
+	dir := inventory.UserScanDirForConfig(cfg)
+	stale := filepath.Join(dir, "4242.json")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stale, []byte("{}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if request.Operation != enterpriseHookWorkerOpAIDiscovery || request.AIDiscovery == nil || account.User != "alice" {
+			t.Errorf("unexpected worker request %+v for %+v", request, account)
+			return enterpriseHookWorkerResponse{}, errors.New("unexpected request")
+		}
+		options := request.AIDiscovery.Options
+		options.StoreRawLocalPaths = true // a worker that keeps paths anyway
+		report := inventory.ScanUserHome(ctx, account.Home, account.User, account.UID, options, request.AIDiscovery.Catalog)
+		for i := range report.Signals {
+			report.Signals[i].UserName, report.Signals[i].UserID = "mallory", "0"
+		}
+		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion, AIDiscovery: &report}, nil
+	}
+
+	runEnterpriseHookAIDiscoveryPass(context.Background(), io.Discard, dir, []enterpriseHookReconcileRow{
+		{User: "alice", UserHome: alice, Connector: "codex", OK: true, UID: uid},
+	})
+
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the record of an account the manifest does not enroll must go: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, strconv.Itoa(uid)+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record inventory.UserScanRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.UID != uid || record.User != "alice" || len(record.Report.Signals) == 0 {
+		t.Fatalf("record = uid %d user %q with %d signals, want alice's scan", record.UID, record.User, len(record.Report.Signals))
+	}
+	if strings.Contains(string(data), alice) || strings.Contains(string(data), "mallory") {
+		t.Fatalf("the spooled report kept a raw path or the worker's account claim: %s", data)
 	}
 }

@@ -51,7 +51,7 @@ All paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Machine-policy summary | `etc/machine-policy.json` | Readable by users |
 | Lifecycle state | `lifecycle`, including `last-package-result.json`, `last-activation-failure.log`, the last applied config and a rejected one | `root`, `0700` |
 | Gateway data | `runtime` | `_defenseclaw`, `0700` (the device identity key needs a private directory) |
-| Authorization ledger | `hook-guardian-state` | `root:_defenseclaw`, `0750` |
+| Authorization ledger | `hook-guardian-state`, with each enrolled user's latest AI Discovery scan in `ai-discovery/` | `root:_defenseclaw`, `0750` |
 | Hook socket | `run/hook.sock` | Directory `_defenseclaw`, `0755` |
 | Logs | `/Library/Logs/Cisco/DefenseClaw`, with the gateway's logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
 | LaunchDaemons | `/Library/LaunchDaemons/com.cisco.defenseclaw.*.plist` | `root`, `0644` |
@@ -61,7 +61,7 @@ The daemons:
 | Label | Runs as | What it does |
 | --- | --- | --- |
 | `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Binds `127.0.0.1:18970` and `run/hook.sock`. |
-| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
+| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
 | `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
 | `com.cisco.defenseclaw.apply` | root | Runs `ensure --reason path` when `etc/config.yaml`, `etc/secrets` or `etc/policies` changes |
@@ -348,6 +348,10 @@ The packaging ships no PPPC (Privacy Preferences Policy Control) profile.
 The guardian works only in hidden dot-directories inside each user's home,
 such as `~/.claude`, `~/.codex` and `~/.config`. macOS privacy controls (TCC)
 do not protect those folders, so no profile is needed.
+
+The per-user AI Discovery scan also walks the home for package manifests.
+Without a profile, macOS keeps it out of TCC-protected folders, and it skips
+them.
 
 If your organization moves agent configuration into a TCC-protected folder,
 such as Desktop, Documents or iCloud Drive, deploy a PPPC profile that grants
