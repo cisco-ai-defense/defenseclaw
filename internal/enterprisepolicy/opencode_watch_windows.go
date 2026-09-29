@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -159,29 +160,39 @@ func watchDirectoryChanges(ctx context.Context, dir string, notify chan<- struct
 	defer windows.CloseHandle(cancelled)
 	stop := context.AfterFunc(ctx, func() { _ = windows.SetEvent(cancelled) })
 	defer stop()
-	// Only the notification matters; the change records are not read.
-	buffer := make([]byte, 4096)
+	// The kernel writes the change records and the completion status after
+	// ReadDirectoryChanges returns, so they must not live on this goroutine's
+	// stack, which can move. Keep them pinned on the heap; every return below
+	// follows the read's completion. Only the notification matters; the
+	// change records are not read.
+	read := &struct {
+		overlapped windows.Overlapped
+		buffer     [4096]byte
+	}{}
+	var pinner runtime.Pinner
+	pinner.Pin(read)
+	defer pinner.Unpin()
 	for {
 		if err := windows.ResetEvent(done); err != nil {
 			return err
 		}
-		overlapped := windows.Overlapped{HEvent: done}
-		if err := windows.ReadDirectoryChanges(handle, &buffer[0], uint32(len(buffer)), false,
-			openCodeWatchFilter, nil, &overlapped, 0); err != nil {
+		read.overlapped = windows.Overlapped{HEvent: done}
+		if err := windows.ReadDirectoryChanges(handle, &read.buffer[0], uint32(len(read.buffer)), false,
+			openCodeWatchFilter, nil, &read.overlapped, 0); err != nil {
 			return fmt.Errorf("watch %s: %w", dir, err)
 		}
 		openCodeWatchArmed()
 		event, err := windows.WaitForMultipleObjects([]windows.Handle{done, cancelled}, false, windows.INFINITE)
 		var transferred uint32
 		if err != nil || event != windows.WAIT_OBJECT_0 {
-			_ = windows.CancelIoEx(handle, &overlapped)
-			_ = windows.GetOverlappedResult(handle, &overlapped, &transferred, true)
+			_ = windows.CancelIoEx(handle, &read.overlapped)
+			_ = windows.GetOverlappedResult(handle, &read.overlapped, &transferred, true)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return fmt.Errorf("watch %s: wait: %v", dir, err)
 		}
-		if err := windows.GetOverlappedResult(handle, &overlapped, &transferred, false); err != nil {
+		if err := windows.GetOverlappedResult(handle, &read.overlapped, &transferred, false); err != nil {
 			return fmt.Errorf("watch %s: %w", dir, err)
 		}
 		select {
