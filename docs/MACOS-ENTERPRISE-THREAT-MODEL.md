@@ -220,10 +220,12 @@ not-found answers.
    while the same request for a running daemon is refused. Both jobs do fixed, idempotent work from
    root-owned inputs, so the effect is extra root lifecycle runs (an
    `ensure` that reports `noop`), growth of `lifecycle.log`, and lock
-   contention: an administrator's own run that starts meanwhile waits for
-   the lock or exits `75`. It cannot change the configuration or the
-   deployment. launchd has no per-job permission for `kickstart`; watch
-   `lifecycle.log` for runs nobody requested.
+   contention: an administrator's own run or the daily `verify` that
+   starts meanwhile waits for the lock or exits `75`, and a `verify` that
+   exits `75` reports `lifecycle_busy` in `verify.log` instead of its
+   checks. It cannot change the configuration or the deployment. launchd
+   has no per-job permission for `kickstart`; watch `lifecycle.log` for
+   runs nobody requested.
 10. macOS has no `protected_hardlinks` setting, so a standard user can
     hard-link any root-owned DefenseClaw file that sits in a directory they
     can search (the binaries, `etc/config.yaml`, `etc/managed-runtime.json`,
