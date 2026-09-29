@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -89,12 +90,47 @@ func TestImagePruneKeepsTheSandboxesImages(t *testing.T) {
 	}
 }
 
+// `sandbox image build` builds the image the gateway's compute driver
+// boots: the MicroVM one (which answers localhost itself) when the
+// daemon's gateway runs the vm driver, or, when the daemon does not say,
+// when the gateway's configuration selects it; the docker one otherwise.
+func TestImageBuildTargetsTheGatewayDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		daemon     string
+		noGateway  bool
+		configured openshell.ComputeDriver
+		microVM    bool
+	}{
+		{name: "docker gateway", daemon: "docker", configured: openshell.DriverVM},
+		{name: "vm gateway", daemon: "vm", microVM: true},
+		{name: "daemon too old to say", configured: openshell.DriverVM, microVM: true},
+		{name: "daemon without a gateway", noGateway: true, configured: openshell.DriverVM, microVM: true},
+		{name: "nothing says", noGateway: true},
+		{name: "a driver DefenseClaw does not drive", daemon: "podman"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.daemon
+			if tc.noGateway {
+				ta.daemon.status.Gateway = nil
+			}
+			ta.gateway.state.ComputeDriver = tc.configured
+			ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claude"}}))
+			if len(ta.images.recs) != 1 || ta.images.recs[0].MicroVM != tc.microVM {
+				t.Fatalf("built %+v, want MicroVM=%t", ta.images.recs, tc.microVM)
+			}
+		})
+	}
+}
+
 // AG-MAC-F2: an image whose hooks verify but whose harness cannot start
 // with a MicroVM's name resolution is built (docker sandboxes run it), and
 // the build says a MicroVM gateway refuses it, with the probe's reason.
 func TestImageBuildSaysWhatCannotStartInAMicroVM(t *testing.T) {
 	const why = `Antigravity cannot resolve localhost in an OpenShell MicroVM: it printed "lookup localhost on 127.0.0.53:53: server misbehaving"`
 	ta := newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
 	ta.images.microVMProblem = map[string]string{"antigravity": why}
 	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity", "claude"}}))
 	out := ta.output()

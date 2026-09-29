@@ -229,7 +229,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		return nil, err
 	}
 
-	img, err := m.image(ctx, cfg, spec, !in.req.NoBuild)
+	img, err := m.image(ctx, cfg, spec, gw.Driver, !in.req.NoBuild)
 	if err != nil {
 		return nil, err
 	}
@@ -860,8 +860,10 @@ func (m *Manager) credentialProvider(ctx context.Context, gw *Gateway, c credent
 	}
 }
 
-// image resolves the harness overlay image for this host user.
-func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.Spec, build bool) (image.Record, error) {
+// image resolves the harness overlay image for this host user and the
+// compute driver d the sandbox runs on: an image for the MicroVM driver
+// answers localhost itself (image.MicroVMTarget).
+func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.Spec, d openshell.Driver, build bool) (image.Record, error) {
 	if m.opts.Images == nil {
 		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "no image builder is configured")
 	}
@@ -869,7 +871,7 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 	bs := image.BuildSpec{
 		Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
 		UID: uid, GID: gid, IngressPort: m.opts.IngressPort, FailMode: connector.SandboxFailMode,
-		DefenseClawVersion: m.opts.DefenseClawVersion,
+		DefenseClawVersion: m.opts.DefenseClawVersion, MicroVM: image.MicroVMTarget(d),
 	}
 	rec, err := m.opts.Images.Resolve(ctx, bs, build)
 	switch {

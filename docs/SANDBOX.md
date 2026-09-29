@@ -206,10 +206,14 @@ not the driver's name or `runtime.GOOS`.
   its loopback DNS relay at `127.0.0.53` answers `localhost` with SERVFAIL.
   Antigravity CLI 1.2.12 exited at start there ("lookup localhost on
   127.0.0.53:53: server misbehaving"), and any dev server, local MCP server
-  or test that resolves localhost failed the same way. Every overlay image
-  answers localhost with `nss-myhostname` (see [Build](#build)): glibc
-  programs, Node, Python and Go programs linked with cgo (agy is one) now
-  resolve it. Go's own resolver (a Go binary built without cgo, or with
+  or test that resolves localhost failed the same way. The overlay images
+  built for the vm driver (`BuildSpec.MicroVM`, which the daemon sets from
+  the driver its gateway reports and `sandbox image build` from the
+  daemon's gateway or the gateway configuration) answer localhost with a
+  pinned `nss-myhostname` (see [Build](#build)): glibc programs, Node,
+  Python and Go programs linked with cgo (agy is one) now resolve it. The
+  images for the docker driver, whose sandboxes get Docker's `/etc/hosts`,
+  are built as before, byte for byte. Go's own resolver (a Go binary built without cgo, or with
   `netgo`) and statically linked musl programs read `/etc/hosts` and DNS
   themselves and still cannot, until OpenShell writes `/etc/hosts`. The
   hook-fire probe runs every harness with a MicroVM's name resolution too,
@@ -1293,14 +1297,27 @@ modes and owners are set in the tar headers) and streams it to
 `docker build --pull=false -t <tag> -`. The Dockerfile:
 
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
-   (`/usr/bin:/bin:/usr/sbin:/sbin`), and `nss-myhostname`
-   (`libnss-myhostname`), asked right after `files` and before `dns`
-   (`hosts: files myhostname dns`). It answers `localhost`,
-   `localhost.localdomain`, `*.localhost` and the hostname with loopback
-   addresses and does no network I/O, so localhost resolves in a MicroVM,
-   whose `/etc/hosts` is empty (see [compute drivers](#compute-drivers)).
-   Docker's `/etc/hosts` still answers first on the docker driver. The build
-   fails unless the module answers `localhost` with `127.0.0.1`.
+   (`/usr/bin:/bin:/usr/sbin:/sbin`). An image for the vm driver
+   (`BuildSpec.MicroVM`) also installs `nss-myhostname`, asked right after
+   `files` and before `dns` (`hosts: files myhostname dns`). It answers
+   `localhost`, `localhost.localdomain`, `*.localhost` and the hostname
+   with loopback addresses and does no network I/O, so localhost resolves
+   in a MicroVM, whose `/etc/hosts` is empty (see
+   [compute drivers](#compute-drivers)). The package is pinned next to the
+   base image (`NSSMyhostnameDebs` in `internal/openshell/version.go`):
+   Ubuntu 24.04's `libnss-myhostname` 255.4-1ubuntu8.17 for amd64 and
+   arm64, downloaded from Ubuntu's snapshot archive (Launchpad's librarian
+   as fallback), checked with `sha256sum -c` and installed with `dpkg -i`.
+   It needs only the base's `libc6` and `libcap2`, so no package index is
+   fetched, and two images with one content hash carry the same module.
+   The build fails unless the module answers `localhost` with `127.0.0.1`.
+   An image for the docker driver has no such step: its Dockerfile, content
+   hash and tag are those of the images before it, and its build fetches
+   nothing more than it did. `MicroVM` is part of the content hash only
+   when set, and of `images.json` (`microvm`), so the two kinds of image of
+   one harness never select or prune each other. (The digest-pinned base
+   has `curl` but not `jq`, so every build still runs `apt-get update` and
+   installs the archive's current `jq` there.)
 2. Installs the harness at a version whose Linux hook contract is known. Any
    other version fails before the build starts. Claude Code 2.1.156 is
    relocated from the digest-pinned base image, and no other Claude Code
@@ -2274,7 +2291,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor and teardown name the cache and its size, and DefenseClaw never deletes it. |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
-| In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image installs `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost, and with only a loopback interface `_gateway` and `_outbound` find nothing. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
+| In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost, and with only a loopback interface `_gateway` and `_outbound` find nothing. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
 
 ## Supported platforms and versions

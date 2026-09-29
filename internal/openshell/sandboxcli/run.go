@@ -273,7 +273,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 
 	a.println()
-	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o, ex.VMFirstBoot))
+	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o, drv, ex.VMFirstBoot))
 	sb, err := api.Create(ctx, req)
 	if err != nil && !copyMode && sandboxapi.IsCode(err, sandboxapi.CodeNeedsCopy) {
 		// A linked worktree, a git directory outside the folder and the
@@ -717,14 +717,14 @@ func (a *App) freeName(ctx context.Context, api API, project string) (string, er
 	return "", errors.New("could not pick a free sandbox name; pass --name")
 }
 
-// buildNote says, when the harness image is missing, that the run builds
-// it first, and when the gateway's MicroVM driver has not prepared the
-// image the sandbox boots (firstBoot, the daemon's
-// Explain.VMFirstBoot), that its first start prepares it.
-func (a *App) buildNote(spec *harness.Spec, o RunOptions, firstBoot bool) string {
+// buildNote says, when the harness image for the gateway's compute driver
+// d is missing, that the run builds it first, and when the gateway's
+// MicroVM driver has not prepared the image the sandbox boots (firstBoot,
+// the daemon's Explain.VMFirstBoot), that its first start prepares it.
+func (a *App) buildNote(spec *harness.Spec, o RunOptions, d openshell.Driver, firstBoot bool) string {
 	var parts []string
 	if !o.NoBuild {
-		if ok, err := a.Images.Current(spec); err == nil && !ok {
+		if ok, err := a.Images.Current(spec, image.MicroVMTarget(d)); err == nil && !ok {
 			// Sizes and times differ by harness and by what the build cache
 			// already holds.
 			parts = append(parts, "building its image first, which can take a few minutes")

@@ -55,7 +55,10 @@ type Record struct {
 	FailMode string `json:"fail_mode"`
 	// Owner is the Store.Owner of the data dir that built the image; Prune
 	// removes only images this store recorded under its own owner.
-	Owner   string    `json:"owner"`
+	Owner string `json:"owner"`
+	// MicroVM marks an image built for the MicroVM driver
+	// (BuildSpec.MicroVM).
+	MicroVM bool      `json:"microvm,omitempty"`
 	BuiltAt time.Time `json:"built_at"`
 	// Binaries maps the required commands to their in-image realpaths.
 	Binaries []Binary `json:"binaries"`
@@ -207,7 +210,8 @@ func recordMatches(r Record, c *Context) bool {
 		r.IngressPort == c.Spec.IngressPort &&
 		r.DefenseClawVersion == c.Spec.DefenseClawVersion &&
 		r.FailMode == c.Spec.FailMode &&
-		r.Owner == c.Spec.Owner
+		r.Owner == c.Spec.Owner &&
+		r.MicroVM == c.Spec.MicroVM
 }
 
 // Put inserts or replaces the record with r.Tag.

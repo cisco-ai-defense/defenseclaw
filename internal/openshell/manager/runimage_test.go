@@ -290,6 +290,35 @@ func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
 	e.create(sandboxapi.CreateRequest{Name: "dk-ok", Copy: true})
 }
 
+// A sandbox boots the image built for its gateway's compute driver: a
+// MicroVM gateway's answers localhost itself (image.BuildSpec.MicroVM), a
+// docker gateway's is the image it always was.
+func TestCreateResolvesTheImageForTheGatewayDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     func(*testing.T) *harnessEnv
+		microVM bool
+	}{
+		{"docker", func(t *testing.T) *harnessEnv { return newEnv(t, nil) }, false},
+		{"vm", func(t *testing.T) *harnessEnv { return newVMEnv(t, nil) }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := tc.env(t)
+			e.create(sandboxapi.CreateRequest{Name: "img-" + tc.name, Copy: true})
+			e.images.mu.Lock()
+			defer e.images.mu.Unlock()
+			if len(e.images.resolved) == 0 {
+				t.Fatal("no image resolved")
+			}
+			for _, spec := range e.images.resolved {
+				if spec.MicroVM != tc.microVM {
+					t.Fatalf("resolved %s image with MicroVM=%t, want %t", spec.Harness.Name, spec.MicroVM, tc.microVM)
+				}
+			}
+		})
+	}
+}
+
 // A hooks-only harness is sent its overlay image's alias under the
 // driver's repository, which no registry serves.
 func TestCreateOnVMSendsTheAlias(t *testing.T) {

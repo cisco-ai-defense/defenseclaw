@@ -108,6 +108,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		DefenseClawVersion: c.Spec.DefenseClawVersion,
 		FailMode:           c.Spec.FailMode,
 		Owner:              c.Spec.Owner,
+		MicroVM:            c.Spec.MicroVM,
 		BuiltAt:            b.now().UTC(),
 		NetworkBinaries:    res.NetworkBinary,
 	}
@@ -252,9 +253,9 @@ type PruneReport struct {
 }
 
 // Prune removes overlay images this store built, in one repository, except,
-// per (connector, uid, gid, ingress port), the most recent image and the
-// most recent hook-verified one (what Store.Current selects for an unchanged
-// spec), plus opts.Keep, and forgets store records whose image no longer
+// per (connector, uid, gid, ingress port, docker or MicroVM image), the most
+// recent image and the most recent hook-verified one (what Store.Current
+// selects for an unchanged spec), plus opts.Keep, and forgets store records whose image no longer
 // exists. An image is removed only when this store recorded it under its own
 // owner and the image carries that owner label; every other DefenseClaw
 // image is reported, never removed, so data dirs sharing a Docker daemon (or
@@ -293,6 +294,7 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	type identity struct {
 		connector         string
 		uid, gid, ingress int
+		microVM           bool
 	}
 	latest := map[identity]Record{}
 	verified := map[identity]Record{}
@@ -313,7 +315,7 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 			continue
 		}
 		candidates = append(candidates, r)
-		id := identity{r.Connector, r.UID, r.GID, r.IngressPort}
+		id := identity{r.Connector, r.UID, r.GID, r.IngressPort, r.MicroVM}
 		if cur, ok := latest[id]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 			latest[id] = r
 		}

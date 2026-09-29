@@ -757,6 +757,38 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	}
 }
 
+// Setup builds the images for the driver it sets the gateway up on: on a
+// Mac the MicroVM ones, which answer localhost themselves, also when the
+// gateway has not restarted on the vm driver yet; on Linux the docker ones.
+func TestSetupBuildsTheImagesForItsDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mac     bool
+		driver  openshell.ComputeDriver
+		microVM bool
+	}{
+		{"linux", false, openshell.DriverDocker, false},
+		{"mac on MicroVMs", true, openshell.DriverVM, true},
+		{"mac switching to MicroVMs", true, openshell.DriverDocker, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, "", "", false)
+			ta.IO.TTY = false
+			if tc.mac {
+				ta.GOOS = "darwin"
+				ta.App.Gateway = emptyPlans{ta.gateway}
+				ta.HostDoctor = macReport(tc.driver, nil)
+			}
+			ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+			_, _ = useGateway(ta)
+			ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, NoWrappers: true, Harnesses: []string{"claude"}}))
+			if len(ta.images.recs) != 1 || ta.images.recs[0].MicroVM != tc.microVM {
+				t.Fatalf("built %+v, want MicroVM=%t:\n%s", ta.images.recs, tc.microVM, ta.output())
+			}
+		})
+	}
+}
+
 // TestSetupInstallsWhatTheMicroVMDriverNeeds: e2fsprogs and the driver's
 // Hypervisor signature follow the OpenShell install's consent: a question
 // (no by default) on a terminal, yes with --yes or --install-openshell,

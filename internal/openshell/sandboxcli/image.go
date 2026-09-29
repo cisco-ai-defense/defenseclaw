@@ -38,11 +38,14 @@ import (
 // ImageService builds, lists and removes the overlay images.
 type ImageService interface {
 	// Build builds (and hook-verifies) spec's image unless a verified one
-	// is current; log receives the docker build output.
-	Build(ctx context.Context, spec *harness.Spec, force bool, log io.Writer) (image.Record, bool, error)
-	// Current reports whether spec's image is built and hook-verified (the
-	// daemon uses it without building).
-	Current(spec *harness.Spec) (bool, error)
+	// is current; log receives the docker build output. microVM builds the
+	// image for the MicroVM driver (image.BuildSpec.MicroVM), the one a
+	// gateway on that driver boots.
+	Build(ctx context.Context, spec *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error)
+	// Current reports whether spec's image for the MicroVM driver
+	// (microVM) or the docker driver is built and hook-verified (the daemon
+	// uses it without building).
+	Current(spec *harness.Spec, microVM bool) (bool, error)
 	List() ([]image.Record, error)
 	// Prune removes superseded images (image.Builder.Prune).
 	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
@@ -59,11 +62,11 @@ type builderImages struct {
 
 func (b *builderImages) store() *image.Store { return image.NewStore(b.app.dataDir()) }
 
-func (b *builderImages) spec(h *harness.Spec) image.BuildSpec {
+func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
 	a := b.app
 	bs := image.BuildSpec{
 		Harness: h, UID: os.Getuid(), GID: os.Getgid(), FailMode: connector.SandboxFailMode,
-		DefenseClawVersion: manager.ImageVersion(),
+		DefenseClawVersion: manager.ImageVersion(), MicroVM: microVM,
 	}
 	if a.Cfg != nil {
 		bs.HarnessVersion = a.Cfg.OpenShell.Image.HarnessVersions[h.Name]
@@ -73,9 +76,9 @@ func (b *builderImages) spec(h *harness.Spec) image.BuildSpec {
 	return bs
 }
 
-func (b *builderImages) Build(ctx context.Context, h *harness.Spec, force bool, log io.Writer) (image.Record, bool, error) {
+func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: log}
-	spec := b.spec(h)
+	spec := b.spec(h, microVM)
 	if !force {
 		if rec, ok, err := builder.Current(spec); err != nil {
 			return image.Record{}, false, err
@@ -93,9 +96,9 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, force bool, 
 	return rec, true, nil
 }
 
-func (b *builderImages) Current(h *harness.Spec) (bool, error) {
+func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	rec, ok, err := builder.Current(b.spec(h))
+	rec, ok, err := builder.Current(b.spec(h, microVM))
 	return ok && rec.HookFireVerified, err
 }
 
@@ -201,7 +204,8 @@ type ImageBuildOptions struct {
 }
 
 // ImageBuild builds the harnesses' overlay images (default: the
-// configured openshell.harnesses, else every supported harness).
+// configured openshell.harnesses, else every supported harness), for the
+// compute driver the gateway runs (imageDriver).
 func (a *App) ImageBuild(ctx context.Context, o ImageBuildOptions) error {
 	if err := a.CheckSupported(); err != nil {
 		return err
@@ -210,15 +214,37 @@ func (a *App) ImageBuild(ctx context.Context, o ImageBuildOptions) error {
 	if err != nil {
 		return err
 	}
+	microVM := image.MicroVMTarget(a.imageDriver(ctx))
 	for _, spec := range specs {
-		if err := a.buildImage(ctx, spec, o.Force, o.Verbose); err != nil {
+		if err := a.buildImage(ctx, spec, microVM, o.Force, o.Verbose); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose bool) error {
+// imageDriver is the compute driver the harness images are built for: the
+// one the daemon's gateway reports when the daemon says, else the one the
+// gateway's configuration selects (OPENSHELL_COMPUTE_DRIVER or
+// compute_driver), else docker. A MicroVM gateway boots only an image
+// built for it, which answers localhost itself; a docker gateway's images
+// stay as they were.
+func (a *App) imageDriver(ctx context.Context) openshell.Driver {
+	if api, err := a.api(); err == nil {
+		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
+			return gatewayDriver(st)
+		}
+	}
+	if st, err := a.Gateway.State(); err == nil {
+		if d, ok := st.Driver(); ok {
+			return d
+		}
+	}
+	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
+	return d
+}
+
+func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force, verbose bool) error {
 	var log io.Writer = io.Discard
 	logPath := ""
 	if verbose {
@@ -235,7 +261,7 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 	}
 	a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
 	started := a.Now()
-	rec, built, err := a.Images.Build(ctx, spec, force, log)
+	rec, built, err := a.Images.Build(ctx, spec, microVM, force, log)
 	if err != nil {
 		if logPath != "" {
 			return fmt.Errorf("%s image: %w (build log: %s)", spec.DisplayName, err, logPath)
