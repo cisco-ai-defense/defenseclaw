@@ -52,9 +52,10 @@ import (
 //  2. Stage: record the intent in the root-only lifecycle directory, then
 //     write key B beside A (connector.PendingUserScopedTokenKeyPath) under
 //     the guardian's reconcile lock. The gateway now accepts the credentials
-//     of both keys. The rotation waits until /health names A and B and has
-//     the gateway prove, for every user, that it accepts that user's B
-//     credential, before any user is moved.
+//     of both keys. Still holding the lock, so no reconcile moves a user
+//     yet, the rotation waits until /health names A and B and has the
+//     gateway prove, for every user, that it accepts that user's B
+//     credential.
 //  3. Prepare: the guardian renders every target from B, and a further
 //     reconcile verifies the installed hooks. Every target must be attested
 //     current, verified and on B in the same roster (manifest digest), and
@@ -541,20 +542,20 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 
 	prepareErr := func() error {
 		lastID := ""
+		// The reconcile lock stays held until the gateway has proved B for
+		// every user, so neither this rotation nor the guardian's own watch
+		// and interval passes move a user to B before then.
 		if err := env.withReconcileLock(ctx, func() error {
 			owner := fileOwner{UID: record.ServiceUID, GID: record.ServiceGID}
 			if err := env.writeFileAtomic(env.stagedUserKeyPath(), []byte(keyB+"\n"), 0o600, owner); err != nil {
-				return err
+				return fmt.Errorf("stage the new key: %w", err)
 			}
 			lastID = env.attestationID()
-			return nil
+			if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idA, idB}); err != nil {
+				return fmt.Errorf("the gateway did not start accepting the new key: %w", err)
+			}
+			return l.proveKey(ctx, keyB, selected)
 		}); err != nil {
-			return fmt.Errorf("stage the new key: %w", err)
-		}
-		if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idA, idB}); err != nil {
-			return fmt.Errorf("the gateway did not start accepting the new key: %w", err)
-		}
-		if err := l.proveKey(ctx, keyB, selected); err != nil {
 			return err
 		}
 		for attempt := 1; ; attempt++ {

@@ -21,10 +21,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // guardianServices runs a simulated hook guardian reconcile whenever the
@@ -82,7 +84,11 @@ func newRotationHost(t *testing.T) *rotationHost {
 			for _, uid := range []string{"1001", "1002"} {
 				credential, _ := connector.UserScopedHookAPIToken(key, name, uid)
 				if connector.UserScopedCredentialKeyID(credential) == keyID {
-					h.events = append(h.events, "proved "+connector.UserScopedTokenKeyFingerprint(key))
+					event := "proved " + connector.UserScopedTokenKeyFingerprint(key)
+					if h.reconcileLockHeld() {
+						event += " (reconcile lock held)"
+					}
+					h.events = append(h.events, event)
 					return connector.UserScopedListenerProof(credential, name, nonce)
 				}
 			}
@@ -90,6 +96,21 @@ func newRotationHost(t *testing.T) *rotationHost {
 		return "", errors.New("HTTP 401")
 	}
 	return h
+}
+
+// reconcileLockHeld reports whether a guardian reconcile would have to wait
+// for the reconcile lock right now.
+func (h *rotationHost) reconcileLockHeld() bool {
+	file, err := os.OpenFile(filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianReconcileLockFile), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+	return false
 }
 
 func (h *rotationHost) liveKeys() []string {
@@ -175,9 +196,11 @@ func TestRotateCredentialsMovesEveryUserBeforeTheKeyCommits(t *testing.T) {
 	if !slices.Equal(h.liveKeyIDs(), []string{idB}) {
 		t.Fatalf("the previous key is still accepted: %v", h.liveKeyIDs())
 	}
-	firstProof, firstRender := slices.Index(h.events, "proved "+idB), slices.Index(h.events, "rendered "+idB)
+	// The first proofs run under the reconcile lock, so the guardian's own
+	// watch and interval passes cannot move a user before them either.
+	firstProof, firstRender := slices.Index(h.events, "proved "+idB+" (reconcile lock held)"), slices.Index(h.events, "rendered "+idB)
 	if firstProof < 0 || firstRender < 0 || firstProof > firstRender {
-		t.Fatalf("a user was moved before the gateway accepted the new key: %v", h.events)
+		t.Fatalf("a user could be moved before the gateway accepted the new key: %v", h.events)
 	}
 
 	h = newRotationHost(t)
