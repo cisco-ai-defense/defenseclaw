@@ -246,6 +246,9 @@ replaces that list, so name every harness you want:
 - **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
   command line only, so the plugin also shows DefenseClaw's reason in a toast
   (the model gets the same reason as the tool's error).
+- **Quitting in the middle of a tool call.** OpenCode does not end a shell
+  tool's command when it quits. DefenseClaw ends it when OpenCode exits,
+  before the pull or the review, and names it in the terminal.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs):
   OpenCode starts with `--auto`, which approves every permission OpenCode's
   config does not deny. `--safe`, or the `strict` pack, keeps OpenCode's

@@ -334,6 +334,13 @@ deleted.
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
   checks. On a Mac still on the Docker driver, a run that fails OpenShell's
   Landlock check names the switch.
+- A harness that exits while a command it started still runs (OpenCode quit
+  in the middle of a tool call) no longer leaves that command changing the
+  sandbox while DefenseClaw pulls or reviews the work: the launcher's
+  terminal-session supervisor adopts what the harness leaves, ends it before
+  the session's end (two seconds' grace, then `SIGTERM` and `SIGKILL`) and
+  names it. OmniGent's server and `sandbox exec` commands are kept. Both
+  drivers; the images rebuild.
 
 ### Legacy OpenShell standalone sandbox removed
 

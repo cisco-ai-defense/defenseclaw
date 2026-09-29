@@ -168,7 +168,9 @@ if [ -n "${HTTPS_PROXY:-}" ]; then
   OMNIGENT_RUNNER_ENV_PASSTHROUGH="${OMNIGENT_RUNNER_ENV_PASSTHROUGH:+$OMNIGENT_RUNNER_ENV_PASSTHROUGH,}` + omnigentRunnerProxyPassthrough + `"
   export OMNIGENT_RUNNER_ENV_PASSTHROUGH
 fi
-` + omnigentServerGuard + omnigentReuseGuard + launcherExec(`/usr/local/bin/omnigent "$@"`)
+` + omnigentServerGuard + omnigentReuseGuard + `# The host daemon and server omnigent run starts serve the next session too.
+dc_keep_leftovers=1
+` + launcherExec(`/usr/local/bin/omnigent "$@"`)
 
 // omnigentServerGuard keeps sessions on the sandbox's local server, the one
 // that loads DefenseClaw's policy: --server with a URL, or a server key in

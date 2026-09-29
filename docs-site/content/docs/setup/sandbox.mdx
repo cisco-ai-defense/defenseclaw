@@ -659,6 +659,20 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff
 - `u` restores the folder to its pre-session snapshot.
 - `d` shows the diff, then asks again.
 
+A harness can exit while a command it started still runs, for example when
+you quit OpenCode in the middle of a tool call. Before the summary,
+DefenseClaw gives such a command two seconds to finish, then ends it, so the
+review (or, on a copy, the pull) covers everything the session changed. The
+terminal names what was ended:
+
+```text
+defenseclaw: the harness exited with 1 command still running in the sandbox; ended it, so the session's work is final: sleep 200 && make test
+```
+
+This applies to terminal sessions. OmniGent keeps its server running for the
+next session, and a command you start with `defenseclaw sandbox exec` keeps
+what it starts in the background.
+
 The sandbox is then stopped, not deleted, so you can resume it later.
 `--rm` deletes it instead. `--yes` keeps the changes without asking, and
 `openshell.workdir.on_exit` (`ask`, `keep` or `undo`) sets the default for

@@ -155,6 +155,18 @@ export NODE_DISABLE_COMPILE_CACHE
 // and exits with the harness's status (128+n for signals). Ctrl-C (SIGINT)
 // and resizes (SIGWINCH) reach the harness as usual.
 //
+// Before it exits, the supervisor ends what the harness left running: a
+// harness that quits in the middle of a tool call (OpenCode's Ctrl-C) leaves
+// the tool's command running in a session of its own, where it would keep
+// changing the sandbox while DefenseClaw pulls or reviews the session's
+// work. The supervisor is a child subreaper, so those commands are
+// re-parented to it; they get two seconds to end on their own, then SIGTERM
+// and SIGKILL, and the terminal names them. A launcher whose harness keeps
+// a server running between sessions (OmniGent), and the `sandbox exec`
+// wrapper, set dc_keep_leftovers=1 before dc_launch, which passes
+// --keep-leftovers; the preamble unsets it, so the caller's environment
+// cannot.
+//
 // Without a terminal dc_launch execs COMMAND directly: headless and detached
 // runs keep the launcher's pid for the harness. Without /proc, or when the
 // supervisor or its interpreter (SupervisorInterpreter, which a base image
@@ -168,9 +180,10 @@ dc_foreground() {
   read -r rest rest own_pgrp rest rest tpgid rest <<<"${stat##*) }"
   [ "$tpgid" = "$own_pgrp" ]
 }
+unset dc_keep_leftovers
 dc_launch() {
   if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_foreground && [ -x ` + SupervisorPath + ` ] && [ -x ` + SupervisorInterpreter + ` ]; then
-    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` "$@"
+    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` ${dc_keep_leftovers:+--keep-leftovers} "$@"
   fi
   exec "$@"
 }
