@@ -48,8 +48,8 @@ type HookDecision struct {
 	// call's pre-tool event with its post-tool event.
 	ToolUseID string
 	// SessionID and ToolInput are the call's session and tool input. They
-	// name a call whose harness sends no per-call ID (Kiro CLI); ToolInput
-	// is empty when the event carries no tool input.
+	// name a call whose harness sends no per-call ID (Kiro CLI, Copilot
+	// CLI); ToolInput is empty when the event carries no tool input.
 	SessionID string
 	ToolInput json.RawMessage
 	// ResultStatus is the status a post-tool event reports (Amp's

@@ -81,12 +81,13 @@ func TestToolCallHooksClassify(t *testing.T) {
 }
 
 // Every sandboxed harness is listed, and each pairs by the identity its
-// hooks carry: a per-call ID, the call's content (Kiro CLI sends none), or
-// nothing (harnesses whose post-tool events on a denied call are unmeasured).
+// hooks carry: a per-call ID, the call's content (Kiro CLI and Copilot CLI
+// send none), or nothing (harnesses whose post-tool events on a denied call
+// are unmeasured).
 func TestToolCallHooksKeying(t *testing.T) {
 	want := map[string]toolCallKeying{
 		"claudecode": keyByID, "codex": keyByID, "cursor": keyByID, "opencode": keyByID, "amp": keyByID, "kiro": keyByContent,
-		"copilot": keyNone, "devin": keyNone, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
+		"copilot": keyByContent, "devin": keyNone, "hermes": keyNone, "openhands": keyNone, "antigravity": keyNone, "omnigent": keyNone,
 	}
 	if len(toolCallHooksByConnector) != len(want) {
 		t.Fatalf("toolCallHooksByConnector lists %d connectors, want %d", len(toolCallHooksByConnector), len(want))
@@ -312,7 +313,7 @@ func (e *harnessEnv) decider(sandbox, tool string) func(event, id, action string
 func TestHookTamperPerHarness(t *testing.T) {
 	for _, tc := range []struct {
 		connector, pre, post, status string
-		byContent                    bool // no per-call ID (Kiro CLI)
+		byContent                    bool // no per-call ID (Kiro CLI, Copilot CLI)
 		paired                       bool
 	}{
 		{connector: "claudecode", pre: "PreToolUse", post: "PostToolUse", paired: true},
@@ -321,7 +322,7 @@ func TestHookTamperPerHarness(t *testing.T) {
 		{connector: "opencode", pre: "tool.execute.before", post: "tool.execute.after", paired: true},
 		{connector: "amp", pre: "tool.call", post: "tool.result", status: "done", paired: true},
 		{connector: "kiro", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
-		{connector: "copilot", pre: "preToolUse", post: "postToolUse"},
+		{connector: "copilot", pre: "preToolUse", post: "postToolUse", byContent: true, paired: true},
 		{connector: "devin", pre: "PreToolUse", post: "PostToolUse"},
 		{connector: "hermes", pre: "pre_tool_call", post: "post_tool_call"},
 		{connector: "openhands", pre: "PreToolUse", post: "PostToolUse"},
@@ -392,6 +393,19 @@ func TestHookTamperPerHarness(t *testing.T) {
 				e.m.ObserveHookDecision(refused)
 				if len(hookTamperFindings(e)) != 2 {
 					t.Fatalf("a cancelled tool.result raised %+v", hookTamperFindings(e)[2:])
+				}
+			}
+			if tc.connector == "copilot" {
+				// A postToolUseFailure closes even a denied call without
+				// proving it ran, and identical calls pair one by one.
+				e.m.ObserveHookDecision(d(tc.pre, "block", "failed"))
+				e.m.ObserveHookDecision(d("postToolUseFailure", "allow", "failed"))
+				for _, dec := range []HookDecision{d(tc.pre, "allow", "twice"), d(tc.pre, "allow", "twice"),
+					d(tc.post, "allow", "twice"), d(tc.post, "allow", "twice")} {
+					e.m.ObserveHookDecision(dec)
+				}
+				if len(hookTamperFindings(e)) != 2 {
+					t.Fatalf("a postToolUseFailure or an identical call pair raised %+v", hookTamperFindings(e)[2:])
 				}
 			}
 		})

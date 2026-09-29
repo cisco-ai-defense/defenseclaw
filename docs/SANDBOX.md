@@ -1666,7 +1666,8 @@ compromised hook shows:
   | OpenCode | `tool.execute.before` | `tool.execute.after` | | the plugin's `callID` |
   | Amp | `tool.call` | `tool.result` with status `done` | `tool.result` with another status | the plugin's `toolUseID` |
   | Kiro CLI | `preToolUse` | `postToolUse` | | session, tool name and tool input |
-  | Copilot CLI, Devin CLI, Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
+  | Copilot CLI | `preToolUse` | `postToolUse` | `postToolUseFailure` | session, tool name and tool input |
+  | Devin CLI, Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
 
   A failure event closes a call but never proves tamper: Claude Code can
   report a failure before `PreToolUse` ran. Kiro CLI 2.24.1 sends no
@@ -1678,9 +1679,16 @@ compromised hook shows:
   share a key, so the ledger counts open ones, and each call's own verdict
   decides: a retried call that DefenseClaw now allows is not tamper, and a
   repeat of a call DefenseClaw allowed with the same input is not reported.
-  Copilot CLI and Devin CLI hooks carry no per-call ID either, and whether
-  their post-tool events fire for a call a hook denied is not measured, so
-  for them hook silence is the backstop. The same holds for Hermes,
+  Copilot CLI 1.0.88 sends no per-call ID either and is keyed the same way
+  (`sessionId`, `toolName` and `toolArgs`). Measured on the pinned release
+  through its bring-your-own-provider mode: `toolArgs` is the same object in
+  both events, `postToolUse` fires only for a tool that ran (not for one a
+  `preToolUse` deny blocked, nor for one the user refused at Copilot's
+  permission prompt, and neither sends `postToolUseFailure`), and parallel
+  or identical calls each get their own pair. Devin CLI hooks carry no
+  per-call ID either, and whether its `PostToolUse` fires for a call a hook
+  denied is not measured (no Devin account), so for it hook silence is the
+  backstop. The same holds for Hermes,
   OpenHands, Antigravity and OmniGent until their hook payloads are
   measured. Every harness's pre-tool events
   count in the session summary's tool calls and blocks.
@@ -2252,7 +2260,11 @@ These were measured on the pinned releases inside the community base image
   hooks' payloads carry `session_id`, `tool_name` and `tool_input` (and
   `tool_response` after the tool), but no per-call ID. Exit code
   2 from `preToolUse` blocks the tool (Kiro reports it as failed); any other
-  exit code shows as a warning and the tool runs. A missing or unparseable
+  exit code shows as a warning and the tool runs. So does a hook that has not
+  answered within its timeout: Kiro's default is about ten seconds (a
+  `preToolUse` hook that took 12 s and then exited 2 did not stop the tool),
+  so every DefenseClaw agent hook sets `timeout_ms` 30000, the envelope the
+  hook's two ingress attempts fit in. A missing or unparseable
   agent file makes Kiro print only `failed to set agent` and run the tool
   with no hooks. So the DefenseClaw agent lives alone in root-owned
   `/usr/local/lib/defenseclaw/kiro`, which the launcher forces
@@ -2261,9 +2273,18 @@ These were measured on the pinned releases inside the community base image
   read-only directory, and the launcher refuses to start when the agent is
   missing. The launcher pins `HOME` and drops every `KIRO_*`, `Q_*`,
   `AMAZON_Q_*`, `ASBX_KIRO_*` and `KAS_*` variable except `KIRO_API_KEY` and
-  `KIRO_MOCK_CHAT_RESPONSE`. `--v3` and `--agent-engine` select a different
-  engine that was not measured, and `--cloud` runs the session in a remote
-  sandbox; the launcher pins `--v2` and refuses those switches.
+  `KIRO_MOCK_CHAT_RESPONSE`. `--v3` and `--agent-engine` select Kiro's v3
+  engine and `--cloud` runs the session in a remote sandbox; the launcher
+  pins `--v2` and refuses those switches. Measured on a host (#953, kiro-cli
+  2.24.1 `--v3` against a loopback model stand-in): the v3 engine runs the
+  selected agent's hooks and those of `.kiro/hooks` files in the project and
+  in `~/.kiro/hooks`, reads a matcher as a regular expression, so the
+  agent's `*` tool hooks never fire there, sends PascalCase event names and
+  calls the shell tool `execute_bash`, and fires `PostToolUse` also for a
+  call the user refused at its permission prompt. Running v3 in a sandbox
+  would need agent entries that match under both engines (no matcher does),
+  the v3 event names in the hook contract and the tamper pairing, and the
+  v3 agent server in the image.
   The image settings select the DefenseClaw agent by default and set
   `telemetry.enabled false`, `app.disableAutoupdates true`,
   `chat.greeting.enabled false` and `chat.disableTrustAllConfirmation true`

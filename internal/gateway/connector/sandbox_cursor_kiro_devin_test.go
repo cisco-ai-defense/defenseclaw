@@ -100,7 +100,11 @@ func TestVerifyKiroSandboxAgentRejectsTampering(t *testing.T) {
 	}
 	assertTamperRejected(t, verifyKiroSandboxAgent, good, map[string][]byte{
 		// The regular expression ".*" matches no tool on Kiro 2.24.1.
-		"regex-matcher":   mutate(func(d map[string]interface{}) { hook(d, "preToolUse")["matcher"] = ".*" }),
+		"regex-matcher": mutate(func(d map[string]interface{}) { hook(d, "preToolUse")["matcher"] = ".*" }),
+		// Without timeout_ms Kiro gives up on the hook after about ten
+		// seconds and runs the tool.
+		"default-timeout": mutate(func(d map[string]interface{}) { delete(hook(d, "preToolUse"), "timeout_ms") }),
+		"short-timeout":   mutate(func(d map[string]interface{}) { hook(d, "preToolUse")["timeout_ms"] = 5000 }),
 		"other-command":   mutate(func(d map[string]interface{}) { hook(d, "stop")["command"] = "/bin/true" }),
 		"missing-trigger": mutate(func(d map[string]interface{}) { delete(d["hooks"].(map[string]interface{}), "postToolUse") }),
 		"extra-trigger":   mutate(func(d map[string]interface{}) { d["hooks"].(map[string]interface{})["agentSpawn"] = []interface{}{} }),
