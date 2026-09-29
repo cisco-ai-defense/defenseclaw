@@ -86,7 +86,8 @@ run on the analysis of the command with each list read as the sequence of its
 commands, so a rule that blocks `a; b` also blocks `a && b` and `a || b`.
 For a rule with no `parse` or lineage `authoritative` read (a command's
 `c.argv_complete` may be read), a match or non-match there counts as it does
-for `a; b`; other rules keep the regex fallback. A list with a
+for `a; b`; other rules keep the regex fallback, and a fallback finding
+blocks when that analysis proves it, as for `a; b`. A list with a
 runtime-expanded redirect target gets both treatments. A negated,
 background or coprocess statement in a list, a function definition or a
 here-document keeps the regex fallback, and its matches stay detection-only.

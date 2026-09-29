@@ -152,8 +152,9 @@ func dispatchTrustedAction(
 	// rules that do not read how complete the analysis is
 	// (listReductionCandidate) and the context checks run on the complete
 	// analysis of the list read as a sequence, which has every fact of the
-	// action, so there a non-match counts as it does for `a; b`. A list with
-	// a runtime-expanded redirect target is read as a sequence inside the
+	// action, so there a non-match counts as it does for `a; b`. A fallback
+	// finding that analysis proves may block too. A list with a
+	// runtime-expanded redirect target is read as a sequence inside the
 	// redirect-target view.
 	semanticFacts := facts
 	// viewCandidate is set when semanticFacts is a view, and reports whether
@@ -328,72 +329,105 @@ func dispatchTrustedAction(
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
 	}
 	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
-	legacyFindings := scanRuleGeneration(
+	scanned := scanRuleGeneration(
 		generation,
 		legacyText,
 		request.Input.Tool,
 		options,
 	)
-	legacyFindings = appendTrustedFIFOListenerBindShellFinding(
-		legacyFindings,
-		generation,
-		request.Input,
+	fallbackLanes := func(
+		legacyFindings []RuleFinding,
+		facts actionfacts.Facts,
+	) ([]RuleFinding, trustedActionTelemetry) {
+		legacyFindings = appendTrustedFIFOListenerBindShellFinding(
+			legacyFindings,
+			generation,
+			request.Input,
+			facts,
+		)
+		legacyFindings = appendTrustedBoundedExactFallbackFindings(
+			legacyFindings,
+			generation,
+			request.Input,
+			facts,
+		)
+		legacyFindings = appendTrustedWindowsPathFactFindings(
+			legacyFindings,
+			facts,
+			request.Input.Tool,
+			options,
+		)
+		legacyFindings = appendTrustedEmbeddedCommandFindings(
+			legacyFindings,
+			generation,
+			request.Input.Tool,
+			facts,
+			options,
+		)
+		legacyFindings, laneTelemetry := appendTrustedBashFallbackFindings(
+			legacyFindings,
+			generation,
+			request.Input,
+			request.Input.Tool,
+			facts,
+			options,
+			request.EnforcementCapable,
+			request.DowngradeReadOnlyDataArgs,
+		)
+		legacyFindings = filterTrustedLegacyActionContext(
+			generation,
+			legacyFindings,
+			request.Input,
+			request.Input.Tool,
+			facts,
+			request.DowngradeReadOnlyDataArgs,
+		)
+		legacyFindings = filterExactFallbackFindings(
+			legacyFindings,
+			request.Input,
+			facts,
+			request.EnforcementCapable,
+		)
+		return legacyFindings, laneTelemetry
+	}
+	legacyFindings, fallbackTelemetry := fallbackLanes(
+		append([]RuleFinding(nil), scanned...),
 		facts,
-	)
-	legacyFindings = appendTrustedBoundedExactFallbackFindings(
-		legacyFindings,
-		generation,
-		request.Input,
-		facts,
-	)
-	legacyFindings = appendTrustedWindowsPathFactFindings(
-		legacyFindings,
-		facts,
-		request.Input.Tool,
-		options,
-	)
-	legacyFindings = appendTrustedEmbeddedCommandFindings(
-		legacyFindings,
-		generation,
-		request.Input.Tool,
-		facts,
-		options,
-	)
-	var fallbackTelemetry trustedActionTelemetry
-	legacyFindings, fallbackTelemetry = appendTrustedBashFallbackFindings(
-		legacyFindings,
-		generation,
-		request.Input,
-		request.Input.Tool,
-		facts,
-		options,
-		request.EnforcementCapable,
-		request.DowngradeReadOnlyDataArgs,
 	)
 	telemetry.merge(fallbackTelemetry)
-	legacyFindings = filterTrustedLegacyActionContext(
-		generation,
-		legacyFindings,
-		request.Input,
-		request.Input.Tool,
-		facts,
-		request.DowngradeReadOnlyDataArgs,
-	)
-	legacyFindings = filterExactFallbackFindings(
-		legacyFindings,
-		request.Input,
-		facts,
-		request.EnforcementCapable,
-	)
-	findings = append(semanticFindings, legacyFindings...)
-	// A list read as a sequence has every fact of the action, so the context
-	// checks that decide whether a content or path finding may block judge it
-	// as that sequence too. A redirect-target view lacks the target's facts.
+	// A list read as a sequence has every fact of the action, so the checks
+	// that decide whether a fallback, content or path finding may block judge
+	// it as that sequence too. A redirect-target view lacks the target's facts.
 	contextFacts := facts
 	if viewCandidate != nil && !matchOnly {
 		contextFacts = semanticFacts
+		sequenceFindings, _ := fallbackLanes(scanned, semanticFacts)
+		legacyFindings = withSequenceProvenFindings(legacyFindings, sequenceFindings)
 	}
+	findings = append(semanticFindings, legacyFindings...)
 	return finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+}
+
+// withSequenceProvenFindings returns findings, the fallback findings checked
+// against the whole action, with each finding of sequence, the same findings
+// checked against a list read as a sequence, that may block there in place of
+// its rule's finding. A finding only the whole action proves stays as it was.
+func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding {
+	for _, proven := range sequence {
+		if !proven.contributesToEnforcement() ||
+			!proven.proof.authorizes(proven.RuleID) {
+			continue
+		}
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return finding.RuleID == proven.RuleID
+		})
+		if index < 0 {
+			findings = append(findings, proven)
+		} else {
+			findings[index] = proven
+		}
+	}
+	return findings
 }
 
 // redirectReductionCandidate reports whether a match of candidate on the view

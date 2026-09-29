@@ -329,6 +329,7 @@
 {"id":"remote-hostname-download-execute-control","rule_id":"exec.remote_ip_download_execute_same_artifact","command":"curl -fsS https://downloads.example.com/update -o /tmp/update; bash /tmp/update","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"fifo-listener-bind-shell","rule_id":"CMD-REVSHELL-NC","command":"nc -l 4444 < /tmp/.pipe | /bin/bash > /tmp/.pipe","is_attack":true,"expect_route":"fallback"}
 {"id":"global-ld-preload-install","rule_id":"persistence.global_ld_preload_install","command":"echo '/usr/local/lib/libguard.so' >> /etc/ld.so.preload","is_attack":true,"expect_route":"fallback","no_other_finding":true}
+{"id":"global-ld-preload-install-after-cd","rule_id":"persistence.global_ld_preload_install","command":"cd /repo && echo '/usr/local/lib/libguard.so' >> /etc/ld.so.preload","is_attack":true,"expect_route":"fallback","no_other_finding":true}
 {"id":"global-ld-preload-read-control","rule_id":"persistence.global_ld_preload_install","command":"cat /etc/ld.so.preload","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"process-local-ld-preload-control","rule_id":"persistence.global_ld_preload_install","command":"LD_PRELOAD=/usr/local/lib/libguard.so /usr/bin/true","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"global-ld-preload-clear-control","rule_id":"persistence.global_ld_preload_install","command":"echo '' > /etc/ld.so.preload","is_attack":false,"expect_route":"none","no_other_finding":true}
