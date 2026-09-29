@@ -351,6 +351,34 @@ def test_the_install_hint_says_how_openshell_is_installed(os_name: str, says: st
         assert says in hint and never not in hint, hint
 
 
+@pytest.mark.parametrize("service_status", ["warn", "fail"])
+def test_an_openshell_outside_the_homebrew_formula_is_refused_as_setup_refuses_it(service_status: str) -> None:
+    # sandboxcli/setup.go refuses it before it reads --install-openshell.
+    service = {"id": "gateway-service", "status": service_status, "detail": "runs under launchd (com.example.gw)"}
+    report = {
+        **READY,
+        "checks": [*READY["checks"][:3], service],
+        "service": {"manager": "brew", "unit": "nvidia/openshell/openshell", "installed": False},
+    }
+    check = sandbox_machine_check(report)
+    assert check.openshell_refused and not check.openshell_needed
+    assert "✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula" in check.summary.split("\n")
+    install = next(
+        f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "Install OpenShell"
+    )
+    assert install.value == "no" and "stop its gateway and remove it" in install.hint, install.hint
+    # The formula's own service, stopped, is still an install.
+    formula = {**report, "service": {"manager": "brew", "installed": True}}
+    assert sandbox_machine_check(formula).openshell_refused is False
+
+
+def test_a_warning_gateway_service_is_shown() -> None:
+    service = {"id": "gateway-service", "status": "warn", "detail": "runs but does not start at login"}
+    check = sandbox_machine_check({**READY, "checks": [*READY["checks"][:3], service]})
+    assert "⚠ OpenShell 0.1.1: runs but does not start at login" in check.summary.split("\n")
+    assert not check.openshell_needed and not check.openshell_refused
+
+
 def test_a_stopped_gateway_or_a_failed_doctor() -> None:
     service = {"id": "gateway-service", "status": "fail", "detail": "inactive"}
     stopped = {**READY, "checks": [*READY["checks"][:3], service]}

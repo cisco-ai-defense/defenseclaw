@@ -98,33 +98,37 @@ func (r *doctorRun) launchdLabel(ctx context.Context, pid int) string {
 	return ""
 }
 
-// unmanagedService judges, on a Mac, a healthy gateway that Homebrew's
-// service does not run: OpenShell's release binaries (the ones the formula
-// downloads) started by a LaunchAgent of the user's own, or by hand. The
-// service check said "not installed"; it says how the gateway runs
-// instead. DefenseClaw restarts the gateway through Homebrew's service
-// only, so it cannot restart this one.
+// unmanagedService judges, on a Mac, a gateway that Homebrew's service does
+// not run: OpenShell's release binaries (the ones the formula downloads)
+// started by a LaunchAgent of the user's own, or by hand. DefenseClaw
+// starts and restarts the gateway through Homebrew's service only, and
+// setup refuses an OpenShell installed another way (the installer would
+// find its CLI and install nothing), so the fix is setup's: stop that
+// gateway, remove that OpenShell, then install the formula. A healthy
+// gateway warns (its sandboxes run, but DefenseClaw cannot restart it)
+// and says how it runs instead of "not installed".
 func (r *doctorRun) unmanagedService(ctx context.Context) {
 	c := r.report.Get(CheckIDGatewayService)
-	if r.GOOS != "darwin" || c == nil || r.service == nil || r.service.Installed || r.gateway == nil || !r.gateway.Healthy {
+	if r.GOOS != "darwin" || c == nil || r.service == nil || r.service.Installed {
+		return
+	}
+	if r.report.OpenShellOutsideFormula() {
+		c.Fix = &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
+	}
+	if r.gateway == nil || !r.gateway.Healthy {
 		return
 	}
 	notBrew := "not Homebrew's " + GatewayFormula + " service"
-	c.Fix = nil
+	c.Status = StatusWarn
 	gw := r.gatewayProcess(ctx)
 	if gw == nil {
-		c.Status = StatusPass
 		c.Detail = "the gateway answers, but " + notBrew + " runs it (DefenseClaw could not tell what does), so DefenseClaw cannot restart it"
 		return
 	}
 	if label := r.launchdLabel(ctx, gw.pid); label != "" {
-		c.Status = StatusPass
 		c.Detail = fmt.Sprintf("%s runs under launchd (%s), %s, so DefenseClaw cannot restart it", gw.path, label, notBrew)
 		return
 	}
-	c.Status = StatusWarn
 	c.Detail = fmt.Sprintf("%s (process %d) was started by hand, %s: it does not start again at login, and DefenseClaw cannot restart it",
 		gw.path, gw.pid, notBrew)
-	c.Fix = &Fix{Summary: "start it again after you log in, or install OpenShell's Homebrew formula, whose service starts the gateway at login",
-		Command: installOpenShellCommand}
 }

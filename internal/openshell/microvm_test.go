@@ -363,9 +363,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, "e2fsprogs in "+f.e2fsprogs+"; "+driver+" signed for Apple's Hypervisor")
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
-		if c.Fix == nil || c.Fix.Automatic || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
-			t.Fatalf("service fix = %+v", c.Fix)
-		}
+		wantOutsideFormulaFix(t, c)
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
@@ -378,10 +376,11 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
 		f.runner.On("launchctl list", "PID\tStatus\tLabel\n7976\t0\tcom.example.openshell-gateway\n", nil)
 		r := f.run()
-		c := expectCheck(t, r, openshell.CheckIDGatewayService, pass, filepath.Join(prefix, "bin", "openshell-gateway")+
+		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" runs under launchd (com.example.openshell-gateway), not Homebrew's nvidia/openshell/openshell service, so DefenseClaw cannot restart it")
-		if c.Fix != nil || !r.OK() {
-			t.Fatalf("fix %+v\n%s", c.Fix, r)
+		wantOutsideFormulaFix(t, c)
+		if !r.OK() || !r.OpenShellOutsideFormula() {
+			t.Fatalf("outside the formula %v\n%s", r.OpenShellOutsideFormula(), r)
 		}
 	})
 	// The formula's post-install step signs only the formula's driver: a
@@ -432,7 +431,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		}
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, filepath.Join(prefix, "libexec", "openshell-driver-vm")+" signed for Apple's Hypervisor")
-		expectCheck(t, r, openshell.CheckIDGatewayService, pass, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)")
+		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"))
 	})
 	// ps lists nothing: the answering gateway still runs the driver.
 	t.Run("driver not found", func(t *testing.T) {
@@ -450,8 +449,18 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, fail, "openshell-driver-vm is not installed")
-		expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed")
+		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"))
 	})
+}
+
+// wantOutsideFormulaFix wants the gateway service fix setup gives for an
+// OpenShell installed another way than the Homebrew formula (setup refuses
+// it before it reads --install-openshell).
+func wantOutsideFormulaFix(t *testing.T, c *openshell.Check) {
+	t.Helper()
+	if c.Fix == nil || c.Fix.Automatic || c.Fix.Summary != openshell.OpenShellOutsideFormulaFix || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
+		t.Fatalf("service fix = %+v", c.Fix)
+	}
 }
 
 // TestDoctorFollowsTheDriverTheGatewayRuns: a gateway can run vm through

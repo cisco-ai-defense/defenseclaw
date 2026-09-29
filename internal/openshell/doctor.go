@@ -159,6 +159,20 @@ func (r *DoctorReport) OK() bool {
 	return true
 }
 
+// OpenShellOutsideFormula reports a Mac whose OpenShell CLI was installed
+// another way than the Homebrew formula DefenseClaw runs the gateway
+// through: setup refuses it (the installer would find the CLI and install
+// nothing), and OpenShellOutsideFormulaFix is the way on.
+func (r *DoctorReport) OpenShellOutsideFormula() bool {
+	cli := r.Get(CheckIDCLI)
+	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "brew" && !r.Service.Installed
+}
+
+// OpenShellOutsideFormulaFix is what to do about OpenShellOutsideFormula,
+// before installOpenShellCommand.
+const OpenShellOutsideFormulaFix = "on macOS DefenseClaw starts and restarts the gateway through the " + GatewayFormula +
+	" Homebrew formula's service: stop that gateway and remove the OpenShell installed another way, then install the formula"
+
 // Get returns the check with id, or nil.
 func (r *DoctorReport) Get(id string) *Check {
 	for i := range r.Checks {

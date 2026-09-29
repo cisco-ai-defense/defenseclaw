@@ -186,8 +186,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// through the Homebrew formula's service. An OpenShell installed
 	// another way is found, but its gateway is not one DefenseClaw can
 	// restart, and the installer, finding its CLI, would change nothing.
-	if cli := rep.Get(openshell.CheckIDCLI); a.GOOS == "darwin" && cli != nil && cli.Status != openshell.StatusFail &&
-		rep.Service != nil && rep.Service.Manager == "brew" && !rep.Service.Installed {
+	if a.GOOS == "darwin" && rep.OpenShellOutsideFormula() {
 		a.bad("Gateway service: the " + openshell.GatewayFormula + " Homebrew formula is not installed")
 		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell " +
 			rep.CLIVersion + " found here was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway " +
