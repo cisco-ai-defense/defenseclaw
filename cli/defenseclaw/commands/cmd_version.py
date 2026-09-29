@@ -54,7 +54,7 @@ class Component:
     version: str
     origin: str              # where we discovered it (path, "builtin", …)
     detail: str = ""         # free-form extras (commit, build date, …)
-    status: str = "ok"       # "ok" | "missing" | "error"
+    status: str = "ok"       # "ok" | "missing" | "error" | "skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +225,29 @@ def _plugin_component() -> Component:
     )
 
 
+def _openclaw_configured() -> bool:
+    """Whether OpenClaw is one of the configured connectors.
+
+    The plugin row is OpenClaw's; on an install of other connectors it is
+    neither missing nor drifting. A config that cannot be read keeps the row.
+    """
+    try:
+        from defenseclaw import config as config_module
+
+        return "openclaw" in config_module.load().active_connectors()
+    except Exception:  # noqa: BLE001 - version must run with any config state.
+        return True
+
+
+def _unused_plugin_component() -> Component:
+    return Component(
+        name="plugin",
+        version="(not used)",
+        origin="OpenClaw is not a configured connector",
+        status="skipped",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Drift analysis
 # ---------------------------------------------------------------------------
@@ -345,7 +368,7 @@ def version_cmd(as_json: bool, no_drift_exit: bool) -> None:
     components = [
         _cli_component(),
         _gateway_component(),
-        _plugin_component(),
+        _plugin_component() if _openclaw_configured() else _unused_plugin_component(),
     ]
     drift = _compute_drift(components)
 

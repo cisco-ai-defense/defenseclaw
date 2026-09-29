@@ -82,6 +82,10 @@ rest also reach per-user installs.
   `gateway.host` is on this machine, the gateway reports it disabled with
   "OpenClaw is not installed", and doctor expects that. A `gateway.host` on
   another machine or `gateway.fleet_mode: enabled` still dials.
+- **`defenseclaw version` skips the OpenClaw plugin when OpenClaw is not
+  configured.** On installs of other connectors the plugin row read
+  `(not installed)` and `missing`, and a plugin left from an earlier OpenClaw
+  setup counted as drift. The row now reads `(not used)` and `skipped`.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
