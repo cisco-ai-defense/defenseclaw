@@ -1050,15 +1050,22 @@ func compareEnterpriseHookGuardianRecordsExcusing(
 	if expected := strings.TrimSpace(expectedManifestSHA256); expected != "" && activation.ManifestSHA256 != expected {
 		issues = append(issues, fmt.Sprintf("guardian activation records manifest SHA-256 %s, expected %s", activation.ManifestSHA256, expected))
 	}
-	if state.OK && authorization.OK {
+	if (state.OK && authorization.OK) || excused > 0 {
 		protectedRows := enterpriseHookProtectedReconcileRows(state.Results)
+		authorizationTargets, activationTargets := authorization.ProtectedTargets, activation.ProtectedTargets
+		if excused > 0 {
+			// Both records carry forward the excused failed targets' prior
+			// rows; every other target must still match exactly.
+			authorizationTargets = enterpriseHookTargetsExceptFailed(authorizationTargets, state.Results)
+			activationTargets = enterpriseHookTargetsExceptFailed(activationTargets, state.Results)
+		}
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(protectedRows, authorization.ProtectedTargets, "authorization")...,
+			compareEnterpriseHookProtectedTargetSets(protectedRows, authorizationTargets, "authorization")...,
 		)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(protectedRows, activation.ProtectedTargets, "activation")...,
+			compareEnterpriseHookProtectedTargetSets(protectedRows, activationTargets, "activation")...,
 		)
 	} else {
 		for _, row := range state.Results {
@@ -1088,6 +1095,24 @@ func enterpriseHookProtectedReconcileRows(rows []enterpriseHookReconcileRow) []e
 		}
 	}
 	return protected
+}
+
+// enterpriseHookTargetsExceptFailed is a protected record's targets without
+// those that failed in results.
+func enterpriseHookTargetsExceptFailed(protected, results []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	failed := map[string]struct{}{}
+	for _, row := range results {
+		if key := enterpriseHookProtectedTargetKey(row); key != "" && !row.OK && !row.Pending {
+			failed[key] = struct{}{}
+		}
+	}
+	kept := make([]enterpriseHookReconcileRow, 0, len(protected))
+	for _, row := range protected {
+		if _, excused := failed[enterpriseHookProtectedTargetKey(row)]; !excused {
+			kept = append(kept, row)
+		}
+	}
+	return kept
 }
 
 // compareEnterpriseHookProtectedTargetSets diffs the reconcile-time target
