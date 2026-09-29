@@ -806,8 +806,8 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
         with _setup_patches():
             result = _invoke(["codex", "--yes"], self.app)
-        # Still fail-closed (non-zero exit), but as a plain error, not a traceback.
-        self.assertNotEqual(result.exit_code, 0)
+        # Still fail-closed, but as a plain ClickException (exit 1), not a traceback.
+        self.assertEqual(result.exit_code, 1, msg=result.output)
         self.assertIn("audit event couldn't be recorded", result.output)
         self.assertIn("--no-restart", result.output)
 
