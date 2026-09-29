@@ -512,6 +512,36 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			})
 		}
 	})
+	// The start ps reports is only good to the second: a gateway.toml
+	// written just before the gateway started, in its second, is loaded
+	// (it warned on this Mac, gateway.toml at 04:37:34.4 under a gateway
+	// started at 04:37:34), and one written well after it is not.
+	t.Run("configuration written as the gateway started", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			after   time.Duration
+			pending bool
+		}{
+			{"in the start's second", 900 * time.Millisecond, false},
+			{"a minute after", time.Minute, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f, prefix := release(t)
+				f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+				f.runner.On("ps -o etime= -p 7976", "   01:00:00\n", nil)
+				at := time.Now().Add(-time.Hour).Add(tc.after)
+				if err := os.Chtimes(filepath.Join(f.dir, "gateway.toml"), at, at); err != nil {
+					t.Fatal(err)
+				}
+				r := f.run()
+				if tc.pending {
+					expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "but the gateway has not been restarted since it changed")
+					return
+				}
+				expectCheck(t, r, openshell.CheckIDVMIdentity, pass, "sandboxes run as 501:20, your user")
+			})
+		}
+	})
 	// A gateway that does not answer proves nothing.
 	t.Run("gateway down", func(t *testing.T) {
 		f, prefix := release(t)

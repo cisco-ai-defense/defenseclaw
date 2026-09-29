@@ -450,6 +450,8 @@ type doctorRun struct {
 	// has asked (startedDone).
 	started     time.Time
 	startedDone bool
+	// startedApprox is set when started came from ps (to the second).
+	startedApprox bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -1207,7 +1209,7 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		default:
 			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
-	case restartPending(st, r.gatewayStartedAt(ctx)):
+	case r.restartPending(ctx, st):
 		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
 		if r.gatewayStartedAt(ctx).IsZero() {
 			// No start time known: DefenseClaw's mark says only that no
@@ -1280,20 +1282,39 @@ func (r *doctorRun) bindMountSafety(ctx context.Context, st *GatewayConfigState,
 	return nil, nil
 }
 
+// restartPending is restartPending for the running gateway. The start is
+// read first: it also says whether it came from ps (startedApprox).
+func (r *doctorRun) restartPending(ctx context.Context, st *GatewayConfigState) bool {
+	started := r.gatewayStartedAt(ctx)
+	return restartPending(st, started, r.startedApprox)
+}
+
 // restartPending reports configuration the gateway that started at
 // started has not loaded: DefenseClaw's pending-restart mark from before
 // that start (or any mark when the start is unknown), or a file changed
 // after it. systemd reports the start to the microsecond, ps on a Mac to
-// the second (gatewayStartedAt).
-func restartPending(st *GatewayConfigState, started time.Time) bool {
+// the second (gatewayStartedAt; approx).
+func restartPending(st *GatewayConfigState, started time.Time, approx bool) bool {
 	if !st.RestartPendingSince.IsZero() && (started.IsZero() || !started.After(st.RestartPendingSince)) {
 		return true
 	}
 	if started.IsZero() {
 		return false
 	}
+	if approx {
+		// The start comes from ps's elapsed time (whole seconds, taken a
+		// second early), so a file written just before the gateway started,
+		// in its second, would look newer than it: setup writes the
+		// configuration and then starts the gateway. A change counts from
+		// psStartSlack after that start.
+		started = started.Add(psStartSlack)
+	}
 	return st.TOMLModTime.Truncate(time.Microsecond).After(started) || st.EnvModTime.Truncate(time.Microsecond).After(started)
 }
+
+// psStartSlack is how much later than a start taken from ps a gateway's
+// configuration may be written and still count as loaded.
+const psStartSlack = 2 * time.Second
 
 // gatewayStartedAt is when the running gateway started, to tell what
 // configuration it loaded: the service's start (systemd), else on a Mac the
@@ -1325,7 +1346,7 @@ func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
 	}
 	// ps counts whole seconds: the start is taken a second early, so a
 	// mark written in the second the gateway started stays pending.
-	r.started = time.Now().Add(-up - time.Second)
+	r.started, r.startedApprox = time.Now().Add(-up-time.Second), true
 	return r.started
 }
 

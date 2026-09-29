@@ -468,7 +468,7 @@ func (r *doctorRun) vmIdentityCheck(ctx context.Context) Check {
 		c.Fix = &Fix{Summary: fmt.Sprintf("set sandbox_uid = %d and sandbox_gid = %d under [openshell.drivers.vm] in %s and restart the gateway "+
 			"(gateway-wide: every MicroVM sandbox on it then runs as you)", want.UID, want.GID, r.config.TOMLPath),
 			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMIdentity: &want})}
-	case restartPending(r.config, r.gatewayStartedAt(ctx)):
+	case r.restartPending(ctx, r.config):
 		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s, but the gateway has not been restarted since it changed", want, r.config.TOMLPath)
 		if r.gatewayStartedAt(ctx).IsZero() {
 			// No start time known: DefenseClaw's mark says only that no
