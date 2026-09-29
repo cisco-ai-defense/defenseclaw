@@ -230,8 +230,10 @@ func (m *Manager) orgPolicy(b *box) (*packs.Effective, error) {
 // checkStart refuses to start a sandbox the current policy would not let
 // the user create: a harness, a live mount or learn mode the organization
 // disallowed since. Skip-permissions mode is not refused; the launch
-// settings follow the re-resolved policy (see launchYolo).
-func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effective, violations []packs.Violation) error {
+// settings follow the re-resolved policy (see launchYolo). A sandbox created
+// on another compute driver than gw runs is refused before it
+// (driverStartRefusal).
+func (m *Manager) checkStart(ctx context.Context, gw *Gateway, rec record, eff *packs.Effective, violations []packs.Violation) error {
 	if v := packs.FirstFatal(violations); v != nil {
 		return m.violationError(ctx, v, rec.Name)
 	}
@@ -250,7 +252,13 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 			return m.violationError(ctx, err, rec.Name)
 		}
 	}
-	if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
+	if gw.Driver.SandboxLimits {
+		if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
+			return m.violationError(ctx, v, rec.Name)
+		}
+	} else if _, v := m.driverResources(gw.Driver, packs.Resources{}); v != nil {
+		// What every sandbox of the driver gets now, not what it got at
+		// create: the gateway-wide values may have changed since.
 		return m.violationError(ctx, v, rec.Name)
 	}
 	// What the --llm and --credential providers open around the egress
@@ -273,6 +281,27 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 		}
 		return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
 			Message: "the sandbox policy now runs this project in copy mode; delete the sandbox and run it again"}
+	}
+	return nil
+}
+
+// driverStartRefusal refuses to start a sandbox on a gateway that runs
+// another compute driver than the one it was created on: one gateway runs
+// one driver, and the sandbox (a container, or a MicroVM and its disk)
+// belongs to the other one. A pull starts the sandbox, so its work is
+// reachable only on a gateway that runs that driver again. A live mount is
+// refused on a driver that mounts no host folders, too.
+func driverStartRefusal(gw *Gateway, rec record) error {
+	if created := recordDriver(rec); created != gw.Driver.Name {
+		return sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"sandbox %[1]s was created on the %[2]s driver; this gateway now runs %[3]s, and one gateway runs one driver. "+
+				"Its work can be pulled only on a %[2]s gateway (switch back with `defenseclaw sandbox setup`), "+
+				"or drop it with `defenseclaw sandbox delete %[1]s`", rec.Name, created, gw.Driver.Name)
+	}
+	if rec.WorkdirMode == config.OpenShellWorkdirMount && !gw.Driver.HostMounts {
+		return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+			Message: "sandbox " + rec.Name + " mounts its project live, which this gateway's compute driver cannot; delete it and run it again",
+			Detail:  gw.Driver.MountRefusal}
 	}
 	return nil
 }

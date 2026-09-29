@@ -26,6 +26,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -337,6 +338,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if orphaned {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s has no DefenseClaw binding; delete it and run a new one", rec.Name)
 	}
+	// Before the gateway is asked about it: a gateway that runs another
+	// driver may not know the sandbox at all.
+	if err := driverStartRefusal(gw, rec); err != nil {
+		return err
+	}
 	// Only a stopped sandbox starts a new session: everything below (the
 	// token rotation, the pre-session snapshot, the tool-call ledger and
 	// the guard baseline) would otherwise be reset under a running agent,
@@ -355,7 +361,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err != nil {
 		return err
 	}
-	if err := m.checkStart(ctx, rec, eff, violations); err != nil {
+	if err := m.checkStart(ctx, gw, rec, eff, violations); err != nil {
 		return err
 	}
 	binding, err := m.opts.Bindings.Get(rec.BindingID)
@@ -606,18 +612,41 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	// A sandbox OpenShell no longer has (deleted outside DefenseClaw), or
 	// whose name another sandbox took, is only released here: the other
-	// sandbox is left alone.
+	// sandbox is left alone. One created on another compute driver than
+	// the gateway runs now is released whatever the gateway answers: this
+	// gateway cannot remove it, and what the other driver made is named.
+	m.mu.Lock()
+	created := recordDriver(b.rec)
+	m.mu.Unlock()
+	otherDriver := created != gw.Driver.Name
 	sb, err := gw.Client.GetSandbox(ctx, name)
 	gone := openshell.IsNotFound(err)
 	switch {
-	case err != nil && !gone:
+	case err != nil && !gone && !otherDriver:
 		m.dropGateway(gw, err)
 		return nil, upstream("look up sandbox "+name, err)
+	case err != nil && !gone:
+		m.dropGateway(gw, err)
+		gone = true
 	case err == nil && !m.sameSandbox(b, sb):
 		gone = true
 	}
 	var warnings []string
-	if gone {
+	switch {
+	case otherDriver:
+		// The gateway's own record of it, if it still has one, is asked to
+		// go; the rest is the other driver's.
+		if !gone {
+			if _, err := gw.Client.DeleteSandbox(ctx, name); err == nil {
+				waitCtx, cancel := context.WithTimeout(ctx, otherDriverDeleteWait)
+				_ = gw.Client.WaitDeleted(waitCtx, name)
+				cancel()
+			} else {
+				m.dropGateway(gw, err)
+			}
+		}
+		warnings = append(warnings, otherDriverLeftovers(name, created, gw.Driver.Name))
+	case gone:
 		m.mu.Lock()
 		where := gatewayMismatch(b.rec, gw)
 		m.mu.Unlock()
@@ -627,7 +656,7 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 		} else {
 			warnings = append(warnings, "OpenShell no longer had sandbox "+name+" (or another sandbox took its name); DefenseClaw released what it held for it")
 		}
-	} else {
+	default:
 		// The watcher keeps running until the sandbox is gone: a delete that
 		// fails leaves it running, still watched and triaged.
 		m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
@@ -658,6 +687,24 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	m.forget(b)
 	return resp, nil
+}
+
+// otherDriverDeleteWait bounds the wait for a gateway to drop its record
+// of a sandbox made on another compute driver, which it may never manage.
+const otherDriverDeleteWait = 30 * time.Second
+
+// otherDriverLeftovers is the warning of a delete of a sandbox created on
+// another compute driver than the gateway runs now: DefenseClaw's side is
+// released, and what that driver made may be left for the user.
+func otherDriverLeftovers(name string, created, now openshell.ComputeDriver) string {
+	msg := "sandbox " + name + " was created on the " + string(created) + " compute driver, and the gateway runs " + string(now) +
+		" now: DefenseClaw released what it held for it (its binding, providers, snapshot and staged copy), but not what the " +
+		string(created) + " driver made"
+	if created == openshell.DriverDocker {
+		return msg + ": its container may be left (still running on a Docker VM such as Colima, or in the Error phase on Docker Desktop); " +
+			"`docker ps -a` lists it and `docker rm -f` removes it"
+	}
+	return msg
 }
 
 // deleteRetained drops what is left of a deleted sandbox whose snapshot was

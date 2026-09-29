@@ -30,7 +30,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -128,17 +127,14 @@ func TestCreateOnVMRefusesRunFilesBeforeAnySideEffect(t *testing.T) {
 
 // A harness without per-run files runs on a MicroVM in copy mode: its
 // template carries no driver_config (the vm driver refuses a docker one),
-// and the record and telemetry name the driver. A live mount is refused
-// before anything is made.
+// and the record and telemetry name the driver. A create that staged no
+// copy is told to (CodeNeedsCopy) before anything is made.
 func TestCreateOnVMHooksOnlyHarness(t *testing.T) {
 	e := newVMEnv(t, nil)
-	res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
-	if res.Status != connector.HookCompatibilityKnown {
-		t.Fatalf("opencode 1.18.31 has no known contract: %+v", res)
-	}
-	e.images.rec.HarnessVersion, e.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+	useOpenCode(t, e)
 	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-mount", Harness: "opencode"})
-	if apiErr := wantCode(t, err, sandboxapi.CodeUnavailable); !strings.Contains(apiErr.Error(), "--copy") {
+	if apiErr := wantCode(t, err, sandboxapi.CodeNeedsCopy); !strings.Contains(apiErr.Error(), "--copy") ||
+		!strings.Contains(apiErr.Detail, "cannot be mounted live: the OpenShell MicroVM (vm) driver mounts no host folders") {
 		t.Fatalf("mount refusal = %+v", apiErr)
 	}
 	if len(e.ws.planned) != 0 || len(e.ws.snapshots) != 0 || e.fake.Calls(openshelltest.MethodCreateSandbox) != 0 {

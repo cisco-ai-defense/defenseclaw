@@ -35,8 +35,8 @@ const (
 	// CodeConflict: the sandbox exists already or is in the wrong phase.
 	CodeConflict = "conflict"
 	// CodeNeedsCopy: the project cannot be mounted live (a linked worktree,
-	// a git directory outside the folder, and the like; Detail says why);
-	// it can run in copy mode.
+	// a git directory outside the folder, a compute driver that mounts no
+	// host folders, and the like; Detail says why); it can run in copy mode.
 	CodeNeedsCopy = "needs_copy"
 	// CodeAdminViolation: openshell.admin refused the request ("blocked by
 	// your organization's DefenseClaw policy").

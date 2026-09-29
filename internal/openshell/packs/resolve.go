@@ -59,6 +59,9 @@ const (
 	SourceFlag Source = "flag"
 	// SourceAdmin is an openshell.admin constraint.
 	SourceAdmin Source = "admin"
+	// SourceGateway is what the OpenShell gateway the sandbox runs on
+	// decides: its compute driver (ConstraintComputeDriver).
+	SourceGateway Source = "gateway"
 )
 
 // Flags are the `sandbox run` inputs that take part in resolution. Zero values
@@ -694,6 +697,22 @@ func (r *resolver) clamp(key, requested, enforced string, from layer, constraint
 	}
 }
 
+// clampByDriver runs the project on a copy because the gateway's compute
+// driver cannot mount it (why): the setting's source is the gateway, not
+// the administrator, and a mount the user chose is reported as refused by
+// the driver.
+func (r *resolver) clampByDriver(requested string, from layer, why string) {
+	r.eff.settings["workdir.mode"] = Setting{Key: "workdir.mode", Value: config.OpenShellWorkdirCopy, Source: SourceGateway,
+		Origin: ConstraintComputeDriver, Requested: requested}
+	if r.attempted(from) {
+		r.violate(Violation{
+			Key: "workdir.mode", Source: from.source, Attempted: requested, Enforced: config.OpenShellWorkdirCopy,
+			Constraint: ConstraintComputeDriver, Message: "the project cannot be mounted live on this gateway; the agent works on a copy",
+			Detail: why,
+		})
+	}
+}
+
 func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, error) {
 	ref, from := "", layer{SourceDefault, "default pack"}
 	switch {
@@ -924,6 +943,11 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	}
 	mount := mode == config.OpenShellWorkdirMount
 	switch {
+	case mount && flags.MountUnsupported != "":
+		// Before the administrator's clamps: whatever they say, the
+		// gateway's compute driver cannot mount the project.
+		r.clampByDriver(mode, from, flags.MountUnsupported)
+		mode = config.OpenShellWorkdirCopy
 	case mount && isFalse(r.admin.AllowMount):
 		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.allow_mount",
 			"live project mounts are disabled; the agent works on a copy")

@@ -138,8 +138,12 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		return nil, err
 	}
 	// Before anything is made, on the host or on the gateway.
-	if err := driverRefusal(gw.Driver, spec, mode); err != nil {
+	if err := driverRefusal(gw.Driver, spec, eff, req.Copy); err != nil {
 		return nil, err
+	}
+	resources, v := m.driverResources(gw.Driver, eff.Resources)
+	if v != nil {
+		return nil, m.violationError(ctx, v, req.Name)
 	}
 
 	name := strings.TrimSpace(req.Name)
@@ -190,6 +194,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	defer rb.run(m, name)
 	view, err := m.create(ctx, gw, b, createInput{
 		name: name, project: project, harness: spec, flags: flags, eff: eff, violations: violations, mode: mode, req: req,
+		resources: resources,
 	}, rb)
 	if err != nil {
 		rb.run(m, name)
@@ -210,6 +215,8 @@ type createInput struct {
 	violations []packs.Violation
 	mode       string
 	req        sandboxapi.CreateRequest
+	// resources is what the sandbox is limited to (driverResources).
+	resources *packs.Resources
 }
 
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
@@ -286,8 +293,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
 	rec.Driver = string(gw.Driver.Name)
-	resources := eff.Resources
-	rec.Resources = &resources
+	rec.Resources = in.resources
+	if note := limitsNote(gw.Driver, eff); note != "" {
+		rec.Warnings = append(rec.Warnings, note)
+	}
 	rec.ProviderEndpoints = providerEndpoints(name, llm, creds)
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
@@ -307,6 +316,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	workdir := sandboxauth.Workdir{Mode: sandboxauth.WorkdirMode(in.mode)}
 	var plan *workspace.MountPlan
 	if in.mode == config.OpenShellWorkdirMount {
+		// The pins and mask files a mount plan writes on the host, and the
+		// snapshot, are for a live mount only.
+		if !gw.Driver.HostMounts {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeInternal,
+				"sandbox %s: a live mount was planned on a gateway whose compute driver mounts no host folders", name)
+		}
 		plan, err = m.ws.PlanMount(ctx, workspace.MountOptions{
 			Project: in.project, Name: name, DataDir: m.opts.DataDir,
 			Masks: eff.Workspace.Masks, Unmask: eff.Workspace.Unmask, Context: in.req.Context,
@@ -474,7 +489,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		tmpl.DriverConfig = plan.DriverConfig()
 	}
 	tmpl.DriverConfig = withRunConfigMounts(tmpl.DriverConfig, runMounts)
-	if res := templateResources(eff.Resources); res != nil {
+	if res := templateResources(eff.Resources); res != nil && gw.Driver.SandboxLimits {
 		tmpl.Resources = res
 	}
 	// driverRefusal keeps host mounts away from a driver without them; this
@@ -546,7 +561,14 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 // managed harness files, which reach a docker sandbox as read-only bind
 // mounts and keep the harness's settings and MCP servers locked down. It
 // runs before anything is made, so a refused create leaves nothing behind.
-func driverRefusal(d openshell.Driver, spec *harness.Spec, mode string) error {
+//
+// A project the policy runs on a copy only because the driver cannot mount
+// it (packs.ConstraintComputeDriver) needs a copy the caller staged: when
+// the request did not ask for one (an older CLI, or one that explained the
+// run before the daemon knew the driver), the create is refused with
+// CodeNeedsCopy, which the CLI answers by staging the copy and asking
+// again. No copy sandbox is made that nobody uploads to.
+func driverRefusal(d openshell.Driver, spec *harness.Spec, eff *packs.Effective, copyAsked bool) error {
 	if d.HostMounts {
 		return nil
 	}
@@ -559,11 +581,85 @@ func driverRefusal(d openshell.Driver, spec *harness.Spec, mode string) error {
 			Message: spec.DisplayName + " sandboxes cannot run on this gateway: DefenseClaw delivers their per-run harness configuration as read-only host mounts",
 			Detail:  why}
 	}
-	if mode == config.OpenShellWorkdirMount {
+	if eff.Workspace.Mode == config.OpenShellWorkdirMount {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
 			Message: "the project cannot be mounted live on this gateway", Detail: why + "; run it with --copy"}
 	}
+	if s, _ := eff.Setting("workdir.mode"); s.Origin == packs.ConstraintComputeDriver && !copyAsked {
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy",
+			Detail: "the project cannot be mounted live: " + why}
+	}
 	return nil
+}
+
+// driverResources is what a sandbox on a gateway running d is limited to,
+// as its record keeps it (record.Resources). A driver that enforces the
+// template's limits gets the resolved request, which the resolver held to
+// openshell.admin.max_resources already. One that does not (the vm driver)
+// gives every sandbox the gateway-wide cpu and memory: those are recorded
+// (nil when they cannot be read), and an administrator's maximum is judged
+// against them, failing closed like every other admin constraint: they
+// must be known and within it.
+func (m *Manager) driverResources(d openshell.Driver, requested packs.Resources) (*packs.Resources, *packs.Violation) {
+	if d.SandboxLimits {
+		return &requested, nil
+	}
+	var shared *packs.Resources
+	if m.opts.GatewayResources != nil {
+		if res, err := m.opts.GatewayResources(); err == nil {
+			shared = &res
+		} else {
+			m.logf("read the cpu and memory the %s driver gives every sandbox: %v", d.Name, err)
+		}
+	}
+	return shared, sharedResourcesViolation(d, shared, m.config().OpenShell.Admin.MaxResources)
+}
+
+// sharedResourcesViolation refuses the gateway-wide cpu and memory every
+// sandbox of d gets when they exceed an administrator's maximum or, with a
+// maximum set, are unknown (nil).
+func sharedResourcesViolation(d openshell.Driver, shared *packs.Resources, max config.OpenShellResourcesConfig) *packs.Violation {
+	if strings.TrimSpace(max.CPU) == "" && strings.TrimSpace(max.Memory) == "" {
+		return nil
+	}
+	table := "[openshell.drivers." + string(d.Name) + "]"
+	fix := "every sandbox on the " + string(d.Name) + " driver gets the gateway-wide vcpus and mem_mib; lower them under " + table +
+		" in the gateway's gateway.toml (`defenseclaw sandbox doctor --fix`)"
+	if shared == nil {
+		return &packs.Violation{Key: "resources", Source: packs.SourceUser, Attempted: "unknown",
+			Constraint: "openshell.admin.max_resources", Fatal: true,
+			Message: "your organization caps sandbox cpu and memory, and the gateway-wide vcpus and mem_mib every sandbox on the " +
+				string(d.Name) + " driver gets cannot be read",
+			Detail: fix}
+	}
+	v := resourceViolation(shared, max)
+	if v == nil {
+		return nil
+	}
+	what, key := strings.TrimPrefix(v.Key, "resources."), "vcpus"
+	if what == "memory" {
+		key = "mem_mib"
+	}
+	v.Message = "your organization caps sandbox " + what + " at " + v.Enforced + ", and every sandbox on the " + string(d.Name) +
+		" driver gets " + v.Attempted + " (" + table + " " + key + ")"
+	v.Detail = fix
+	return v
+}
+
+// limitsNote says that the cpu and memory limits asked for (a flag, or
+// openshell.resources) do nothing on a driver that sets no per-sandbox
+// limits; "" otherwise.
+func limitsNote(d openshell.Driver, eff *packs.Effective) string {
+	if d.SandboxLimits {
+		return ""
+	}
+	for _, key := range []string{"resources.cpu", "resources.memory"} {
+		if s, _ := eff.Setting(key); s.Source == packs.SourceUser || s.Source == packs.SourceFlag {
+			return "cpu/memory limits have no effect on the OpenShell " + string(d.Name) + " driver: every sandbox gets " +
+				"[openshell.drivers." + string(d.Name) + "] vcpus and mem_mib"
+		}
+	}
+	return ""
 }
 
 // deleteCreated is a failed create's rollback of its sandbox: it deletes

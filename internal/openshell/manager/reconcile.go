@@ -85,7 +85,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 
 	// Sandboxes OpenShell has.
 	for _, sb := range sbs {
-		b := m.adopt(sb)
+		b := m.adopt(sb, gw.Driver)
 		if b == nil {
 			continue
 		}
@@ -244,8 +244,9 @@ func (m *Manager) goneNow(ctx context.Context, gw *Gateway, b *box) bool {
 
 // adopt returns the box for a live OpenShell sandbox, creating one from
 // its labels and binding when the daemon holds no record, and marking it
-// orphaned when no binding exists either.
-func (m *Manager) adopt(sb *openshell.Sandbox) *box {
+// orphaned when no binding exists either. A sandbox adopted without a
+// record is taken to run on the gateway's driver: it is live there.
+func (m *Manager) adopt(sb *openshell.Sandbox, driver openshell.Driver) *box {
 	binding, berr := m.opts.Bindings.Lookup(sb.Name)
 	m.mu.Lock()
 	b := m.boxes[sb.Name]
@@ -256,7 +257,7 @@ func (m *Manager) adopt(sb *openshell.Sandbox) *box {
 		b = &box{rec: record{
 			Name: sb.Name, ID: sb.ID, Harness: sb.Labels[LabelHarness], Owner: m.opts.Owner,
 			Profile: sb.Labels[LabelProfile], Pack: sb.Labels[LabelPack], WorkdirMode: sb.Labels[LabelWorkdirMode],
-			CreatedAt: sb.CreatedAt, Image: templateImage(sb),
+			CreatedAt: sb.CreatedAt, Image: templateImage(sb), Driver: string(driver.Name),
 		}, seenChunks: map[string]struct{}{}, unrecorded: true}
 		m.boxes[sb.Name] = b
 	}
@@ -364,15 +365,20 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 // CLI's active gateway to another one, say, or openshell.gateway changed.
 // Not finding it on gw proves nothing then, and releasing it would revoke
 // the binding and drop the snapshot of a sandbox that may still run. It is
-// marked missing and reported (once per place) instead.
+// marked missing and reported (once per place) instead. So is a sandbox
+// created on another compute driver than gw runs now: the gateway was
+// switched (docker to vm, say), and releasing it would also drop its staged
+// copy, while its unpulled work is still in the sandbox the other driver
+// keeps.
 func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) bool {
 	m.mu.Lock()
 	rec := b.rec
 	m.mu.Unlock()
 	where := gatewayMismatch(rec, gw)
+	otherDriver := where != "" && samePlace(rec, gw)
 	m.mu.Lock()
 	changed := b.elsewhere != where
-	b.elsewhere = where
+	b.elsewhere, b.otherDriver = where, otherDriver
 	if where != "" {
 		b.missing = true
 	}
@@ -383,6 +389,10 @@ func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) boo
 	}
 	msg := "sandbox " + rec.Name + " was created on " + where + ", but DefenseClaw is connected to " +
 		gatewayPlace(gw.Name, gw.Endpoint, gw.Client.Workspace()) + "; it is not released while DefenseClaw is connected elsewhere"
+	if otherDriver {
+		msg = "sandbox " + rec.Name + " was created on " + where + "; it runs " + string(gw.Driver.Name) +
+			" now, and one gateway runs one driver: the sandbox is not released while the gateway runs another driver"
+	}
 	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
 	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
@@ -390,14 +400,34 @@ func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) boo
 }
 
 // gatewayMismatch describes where rec's sandbox was created when that is
-// not gw's gateway and workspace ("" when it is, or rec does not say).
+// not gw's gateway and workspace, or not the compute driver gw runs ("" when
+// it is, or rec does not say).
 func gatewayMismatch(rec record, gw *Gateway) string {
-	ws := gw.Client.Workspace()
-	if (rec.Gateway == "" || rec.Gateway == gw.Name) && (rec.GatewayEndpoint == "" || rec.GatewayEndpoint == gw.Endpoint) &&
-		(rec.GatewayWorkspace == "" || rec.GatewayWorkspace == ws) {
-		return ""
+	if !samePlace(rec, gw) {
+		return gatewayPlace(rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace)
 	}
-	return gatewayPlace(rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace)
+	if created := recordDriver(rec); created != gw.Driver.Name {
+		return gatewayPlace(gw.Name, gw.Endpoint, gw.Client.Workspace()) + " when it ran the " + string(created) + " compute driver"
+	}
+	return ""
+}
+
+// samePlace reports whether rec's sandbox was created on gw's gateway
+// registration, endpoint and workspace, as far as rec says.
+func samePlace(rec record, gw *Gateway) bool {
+	ws := gw.Client.Workspace()
+	return (rec.Gateway == "" || rec.Gateway == gw.Name) && (rec.GatewayEndpoint == "" || rec.GatewayEndpoint == gw.Endpoint) &&
+		(rec.GatewayWorkspace == "" || rec.GatewayWorkspace == ws)
+}
+
+// recordDriver is the compute driver rec's sandbox was created on: docker
+// for a record from before the driver was kept, and a name this build does
+// not drive as the record has it.
+func recordDriver(rec record) openshell.ComputeDriver {
+	if d, ok := openshell.LookupDriver(rec.Driver); ok {
+		return d.Name
+	}
+	return openshell.ComputeDriver(rec.Driver)
 }
 
 // gatewayPlace names a gateway registration and workspace for a message.
@@ -407,13 +437,15 @@ func gatewayPlace(name, endpoint, workspace string) string {
 
 // noteGateway records where a sandbox found on gw lives, for a record
 // that does not say yet or that names another place (the registration was
-// renamed, say): it is evidently on gw. It reports whether the record
-// changed.
+// renamed, say): it is evidently on gw. The compute driver it was created
+// on stays: one gw does not run any more is still reported. It reports
+// whether the record changed.
 func (m *Manager) noteGateway(b *box, gw *Gateway) bool {
 	ws := gw.Client.Workspace()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b.elsewhere = ""
+	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
+	b.otherDriver = b.elsewhere != ""
 	if b.rec.Gateway == gw.Name && b.rec.GatewayEndpoint == gw.Endpoint && b.rec.GatewayWorkspace == ws {
 		return false
 	}

@@ -80,9 +80,11 @@ type box struct {
 	retained bool
 	// elsewhere says where a sandbox missing from the connected gateway
 	// was created, while that is another gateway or workspace
-	// (gatewayElsewhere): it is not released then.
-	elsewhere string
-	started   time.Time
+	// (gatewayElsewhere): it is not released then. otherDriver says the
+	// gateway is its own but runs another compute driver now.
+	elsewhere   string
+	otherDriver bool
+	started     time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
@@ -531,7 +533,11 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		v.Warnings = append(slices.Clip(v.Warnings), res.Message+
 			" (it keeps its current limits until it stops, and cannot start again)")
 	}
-	if b.elsewhere != "" {
+	if created := recordDriver(r); b.elsewhere != "" && b.otherDriver {
+		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on the "+string(created)+
+			" compute driver, which the gateway no longer runs; it cannot start, or be pulled, until the gateway runs "+string(created)+
+			" again (`defenseclaw sandbox setup`), and deleting it releases DefenseClaw's side only")
+	} else if b.elsewhere != "" {
 		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on "+b.elsewhere+
 			", not the gateway DefenseClaw is connected to; DefenseClaw keeps it until it connects there again (openshell.gateway), "+
 			"or until you delete it, which releases DefenseClaw's side only")

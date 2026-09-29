@@ -46,6 +46,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
@@ -147,6 +148,14 @@ type Options struct {
 	Resolver egress.Resolver
 	// DefenseClawVersion is part of the image content hash.
 	DefenseClawVersion string
+	// GatewayResources reads the cpu and memory every sandbox gets on a
+	// gateway whose compute driver sets no per-sandbox limits
+	// (openshell.Driver.SandboxLimits false): the vm driver's gateway-wide
+	// [openshell.drivers.vm] vcpus and mem_mib, its defaults included, from
+	// the gateway's configuration, which the daemon's user owns. Nil, or an
+	// error, leaves them unknown: an openshell.admin.max_resources then
+	// refuses every such sandbox, since it cannot be judged.
+	GatewayResources func() (packs.Resources, error)
 	// SettleDelay waits for the first settings poll after a start
 	// (DefaultSettleDelay); negative skips it.
 	SettleDelay       time.Duration

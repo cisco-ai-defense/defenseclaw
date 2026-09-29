@@ -409,6 +409,53 @@ func TestResolveAdminClamps(t *testing.T) {
 	}
 }
 
+// A gateway whose compute driver mounts no host folders runs every project
+// on a copy. Explain names the driver, not the administrator, as the
+// source; a mount the user chose is reported, the default pack's is not,
+// and the driver's clamp is the only one when the administrator's would
+// clamp too.
+func TestResolveComputeDriverClamp(t *testing.T) {
+	const why = "the OpenShell MicroVM (vm) driver mounts no host folders"
+	for _, tc := range []struct {
+		name  string
+		user  func(*config.OpenShellConfig)
+		flags Flags
+		want  []Violation
+	}{
+		{"the default pack's mount", nil, Flags{}, nil},
+		{"a mount the user chose", func(o *config.OpenShellConfig) { o.Workdir.Mode = "mount" }, Flags{},
+			[]Violation{{Key: "workdir.mode", Source: SourceUser, Attempted: "mount", Enforced: "copy", Constraint: ConstraintComputeDriver, Detail: why}}},
+		{"mounts off too", func(o *config.OpenShellConfig) { o.Workdir.Mode, o.Admin.AllowMount = "mount", boolPtr(false) }, Flags{},
+			[]Violation{{Key: "workdir.mode", Constraint: ConstraintComputeDriver}}},
+		{"copy required for the project too", func(o *config.OpenShellConfig) { o.Admin.RequireCopyFor = []string{"/src/*"} },
+			Flags{Project: "/src/app"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := tc.flags
+			flags.MountUnsupported = why
+			eff, violations := mustResolve(t, testConfig(tc.user), flags)
+			wantViolations(t, violations, tc.want...)
+			wantPosture(t, eff, "mode=copy")
+			got, _ := eff.Setting("workdir.mode")
+			if got.Value != "copy" || got.Source != SourceGateway || got.Origin != ConstraintComputeDriver || got.Requested != "mount" {
+				t.Fatalf("setting = %+v, want copy clamped from mount by the compute driver", got)
+			}
+			for _, v := range violations {
+				if v.Admin() || strings.Contains(v.Message, "organization") || v.Fatal {
+					t.Fatalf("the driver's clamp reads as the organization's: %+v", v)
+				}
+			}
+		})
+	}
+	// --copy asks for what the driver can do: nothing is clamped.
+	eff, violations := mustResolve(t, testConfig(nil), Flags{Copy: true, MountUnsupported: why})
+	wantViolations(t, violations)
+	wantSetting(t, eff, "workdir.mode", "copy", SourceFlag, "--copy")
+	// A driver that mounts host folders changes nothing.
+	eff, _ = mustResolve(t, testConfig(nil), Flags{})
+	wantSetting(t, eff, "workdir.mode", "mount", SourcePack, "")
+}
+
 func TestResolvePackHarnessAllowlist(t *testing.T) {
 	root := t.TempDir()
 	writePack(t, root, "claude-only", strings.Replace(customPack("claude-only"),
