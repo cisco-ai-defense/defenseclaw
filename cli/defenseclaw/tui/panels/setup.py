@@ -4693,10 +4693,11 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
 
     OpenShell counts as needed exactly when ``sandbox setup`` would install
     it: the CLI is missing or unsupported, or the gateway service or its
-    version check failed (sandboxcli/setup.go). On a MicroVM (vm) gateway a
-    failed ``vm-driver`` check counts too: setup installs e2fsprogs or has
-    the driver signed with the same consent. A MicroVM mounts no host
-    folders, so the bind-mount check is left out there.
+    version check failed (sandboxcli/setup.go). On a MicroVM (vm) gateway,
+    or a Mac whose docker driver has no Landlock (which setup switches to
+    MicroVMs), a failed ``vm-driver`` check counts too: setup installs
+    e2fsprogs or has the driver signed with the same consent. A MicroVM
+    mounts no host folders, so the bind-mount check is left out there.
     """
 
     if not isinstance(report, Mapping):
@@ -4714,12 +4715,15 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         return str((checks.get(check_id) or {}).get("detail") or "").strip()
 
     # The driver the gateway runs, else the one its files configure
-    # (DoctorReport.Driver, .ConfiguredDriver); a vm-driver check that ran
-    # (not skipped) means the driver is vm or about to be.
+    # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
+    # one). On a Mac whose docker driver has no Landlock (Docker Desktop's
+    # VM) setup switches the gateway to MicroVMs, which is its default
+    # (sandboxcli/setup.go): the MicroVM driver's needs count then, and no
+    # bind mounts do.
     driver = str(report.get("driver") or report.get("configured_driver") or "").strip()
-    if not driver and status("vm-driver") in _DOCTOR_GLYPHS:
-        driver = "vm"
-    microvm = not compute_driver(driver).host_mounts
+    on_microvm = not compute_driver(driver).host_mounts
+    mac = detail("platform").startswith("darwin/")
+    microvm = on_microvm or (mac and status("landlock") != "pass")
     parts: list[str] = []
     docker = status("docker")
     if docker:
@@ -4727,7 +4731,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         text = f"Docker {version}".strip() if docker == "pass" else f"Docker: {detail('docker') or docker}"
         parts.append(f"{_DOCTOR_GLYPHS.get(docker, '·')} {text}")
     landlock = status("landlock")
-    if landlock in _DOCTOR_GLYPHS and microvm:
+    if landlock in _DOCTOR_GLYPHS and on_microvm:
         # The MicroVM's own kernel enforces it (sandboxcli.machineLine).
         parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock (MicroVM)")
     elif landlock in _DOCTOR_GLYPHS:

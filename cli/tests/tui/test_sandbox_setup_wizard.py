@@ -413,24 +413,30 @@ async def test_opening_the_wizard_checks_the_machine_once(monkeypatch) -> None:
     assert probes == [1]
 
 
-# The doctor on a Mac whose Docker Desktop VM kernel has no Landlock, with a
-# bind-mount check that needs a long reason.
+# The doctor on a Mac whose gateway runs the docker driver on Docker
+# Desktop, whose VM kernel has no Landlock, as the Go doctor reports it: it
+# names the driver, and checks what a switch to MicroVMs needs (here
+# e2fsprogs is missing, a reason too long for one line at 80 columns).
 MAC_DOCKER_DESKTOP = {
     "ok": False,
     "docker_version": "29.1.5",
     "cli_version": "0.1.1",
+    "driver": "docker",
+    "configured_driver": "docker",
     "checks": [
-        {"id": "platform", "title": "Platform", "status": "warn", "detail": "darwin/arm64"},
+        {"id": "platform", "title": "Platform", "status": "warn", "detail": "darwin/arm64: macOS sandboxes run in OpenShell MicroVMs"},
         {"id": "docker", "title": "Docker", "status": "pass", "detail": "Docker 29.1.5 (Docker Desktop)"},
         {"id": "landlock", "title": "Landlock", "status": "fail", "detail": "the Docker Desktop VM kernel has no Landlock"},
+        {
+            "id": "vm-driver",
+            "title": "MicroVM driver",
+            "status": "fail",
+            "detail": "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg "
+            "(opt/e2fsprogs under /opt/homebrew or /usr/local): the driver formats every MicroVM's disks with its mke2fs and debugfs",
+        },
         {"id": "openshell-cli", "title": "OpenShell CLI", "status": "pass", "detail": "0.1.1 at /opt/homebrew/bin/openshell"},
         {"id": "gateway-service", "title": "Gateway service", "status": "pass", "detail": "running"},
-        {
-            "id": "bind-mounts",
-            "title": "Project bind mounts",
-            "status": "warn",
-            "detail": "enabled in gateway.toml, but the gateway has not been restarted since it changed",
-        },
+        {"id": "bind-mounts", "title": "Project bind mounts", "status": "fail", "detail": "disabled in gateway.toml"},
     ],
 }
 
@@ -467,7 +473,7 @@ MAC_DOCKER_DESKTOP_LINES = [
     "✓ Docker 29.1.5",
     "✗ Landlock",
     "✓ OpenShell 0.1.1",
-    "✗ bind mounts: enabled in gateway.toml",
+    "✗ MicroVM driver: e2fsprogs is not installed",
 ]
 
 
@@ -489,10 +495,8 @@ def test_a_microvm_gateway_skips_bind_mounts_and_checks_its_driver() -> None:
     install = _install_field(check, "darwin")
     assert install.value == "yes" and "brew install e2fsprogs" in install.hint
 
-    # The driver the files configure counts before the gateway runs it, and a
-    # vm-driver check that ran means vm when the report names no driver.
+    # The driver the files configure counts before the gateway runs it.
     assert _lines({**MAC_MICROVM, "driver": "", "configured_driver": "vm"}) == MAC_MICROVM_LINES
-    assert _lines({key: value for key, value in MAC_MICROVM.items() if key != "driver"}) == MAC_MICROVM_LINES
     ready = {**MAC_MICROVM, "checks": [*MAC_MICROVM["checks"][:5], _check("vm-driver", "pass")]}
     assert _lines(ready)[-1] == "✓ MicroVM driver"
     assert sandbox_machine_check(ready).openshell_needed is False
@@ -500,6 +504,38 @@ def test_a_microvm_gateway_skips_bind_mounts_and_checks_its_driver() -> None:
     # The docker driver skips the vm-driver check and keeps the bind-mount line.
     docker = {**READY, "driver": "docker", "checks": [*READY["checks"], _check("vm-driver", "skip")]}
     assert _lines(docker) == ["✓ Docker 29.4.0", "✓ OpenShell 0.1.1", "✓ bind mounts"]
+
+
+def test_a_docker_desktop_mac_is_checked_for_the_switch_to_microvms() -> None:
+    # Setup switches such a Mac's gateway to MicroVMs by default: the wizard
+    # shows the MicroVM driver's needs, installs them with OpenShell's
+    # consent, and asks about no bind mounts (sandboxcli/setup.go).
+    check = sandbox_machine_check(MAC_DOCKER_DESKTOP)
+    assert check.summary.split("\n") == [
+        "✓ Docker 29.1.5",
+        "✗ Landlock",
+        "✓ OpenShell 0.1.1",
+        "✗ MicroVM driver: " + MAC_DOCKER_DESKTOP["checks"][3]["detail"],
+    ]
+    assert check.openshell_needed is True
+    assert check.openshell_detail.startswith("the MicroVM driver needs attention: e2fsprogs is not installed")
+    assert _install_field(check, "darwin").value == "yes"
+    # A Docker VM with Landlock (Colima) keeps the docker driver and its
+    # bind mounts; so does Linux.
+    colima = {
+        **MAC_DOCKER_DESKTOP,
+        "checks": [
+            _check("platform", "warn", "darwin/arm64"),
+            _check("docker", "pass"),
+            _check("landlock", "pass", "ABI 6"),
+            _check("vm-driver", "skip", "the gateway runs the docker driver"),
+            _check("openshell-cli", "pass"),
+            _check("bind-mounts", "pass"),
+        ],
+    }
+    assert _lines(colima) == ["✓ Docker 29.1.5", "✓ Landlock ABI 6", "✓ OpenShell 0.1.1", "✓ bind mounts"]
+    linux = {**colima, "checks": [_check("platform", "pass", "linux/arm64"), *colima["checks"][1:2], _check("landlock", "fail"), *colima["checks"][3:]]}
+    assert _lines(linux)[-1] == "✓ bind mounts" and sandbox_machine_check(linux).openshell_needed is False
 
 
 def test_only_macos_offers_e2fsprogs_with_the_install() -> None:
