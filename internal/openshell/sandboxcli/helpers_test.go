@@ -71,6 +71,9 @@ type fakeDaemon struct {
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
+	// toolCalls is how many tool calls a harness the fakes ran makes
+	// (hookTraffic): a session with a turn.
+	toolCalls int64
 	// onStatus runs before the status is returned (the daemon notices a
 	// change).
 	onStatus func(st *sandboxapi.Status)
@@ -130,6 +133,7 @@ func (d *fakeDaemon) hookTraffic(argv []string) {
 	defer d.mu.Unlock()
 	if sb, ok := d.sandboxes[name]; ok {
 		sb.Hooks.HookRequests++
+		sb.Hooks.ToolCalls += d.toolCalls
 		sb.Hooks.LastHookAt = time.Now()
 	}
 }
