@@ -400,6 +400,27 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "MicroVM's own kernel")
 	})
 
+	// Every MicroVM gets the gateway-wide values: the switch never writes
+	// more than an organization's maximum allows, or every create after
+	// it would be refused.
+	t.Run("an organization's maximum", func(t *testing.T) {
+		f := docker(t)
+		f.vmErr = openshell.ErrLandlockMissing
+		f.doctor.MaxCPUMillis, f.doctor.MaxMemoryBytes = 2000, 3<<30
+		r := f.run()
+		if r.MicroVM == nil || r.MicroVM.Recommended != (openshell.VMResources{VCPUs: 2, MemMiB: 3072, OverlayDiskMiB: 16384}) {
+			t.Fatalf("microvm = %+v", r.MicroVM)
+		}
+		f.restartedOn = openshell.DriverVM
+		applyFixes(t, r, openshell.CheckIDGatewayDriver)
+		st, err := f.doctor.Gateway.Read()
+		if err != nil || st.ComputeDriver != openshell.DriverVM || st.VM.Resources() != (openshell.VMResources{VCPUs: 2, MemMiB: 3072, OverlayDiskMiB: 16384}) {
+			t.Fatalf("after the switch: %+v (vm %+v), %v", st, st.VM, err)
+		}
+		f.fake = openshelltest.New(openshelltest.WithDriver(openshell.DriverVM))
+		expectCheck(t, f.run(), openshell.CheckIDVMResources, openshell.StatusPass, "every MicroVM gets 2 vCPUs, 3072 MiB of memory")
+	})
+
 	t.Run("Landlock not checked", func(t *testing.T) {
 		f := docker(t)
 		f.vmErr = openshell.ErrNoProbeImage

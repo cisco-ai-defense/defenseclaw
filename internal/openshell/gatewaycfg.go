@@ -430,6 +430,21 @@ func RecommendedVMResources(hostMemory uint64) VMResources {
 	return VMResources{VCPUs: 4, MemMiB: mem, OverlayDiskMiB: 16384}
 }
 
+// Within is v lowered to an organization's openshell.admin.max_resources
+// (maxCPUMillis and maxMemoryBytes; 0 is no maximum). Every MicroVM gets
+// the gateway-wide values, so a value above the maximum refuses every
+// create. A maximum below one vCPU or one MiB leaves that field zero,
+// which a change leaves alone.
+func (v VMResources) Within(maxCPUMillis, maxMemoryBytes int64) VMResources {
+	if maxCPUMillis > 0 {
+		v.VCPUs = min(v.VCPUs, maxCPUMillis/1000)
+	}
+	if maxMemoryBytes > 0 {
+		v.MemMiB = min(v.MemMiB, maxMemoryBytes>>20)
+	}
+	return v
+}
+
 // gatewayServer is the [openshell.gateway] part of gateway.toml that
 // decides who can reach the gateway, and the compute driver it runs.
 type gatewayServer struct {

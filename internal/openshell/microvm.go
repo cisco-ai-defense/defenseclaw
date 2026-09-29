@@ -82,7 +82,8 @@ type MicroVMHost struct {
 	// Identity is the uid and gid DefenseClaw's images are built for,
 	// this user's, which the driver must run sandboxes as.
 	Identity VMIdentity `json:"identity"`
-	// Recommended is what DefenseClaw sets up every MicroVM with.
+	// Recommended is what DefenseClaw sets up every MicroVM with, within
+	// the organization's openshell.admin.max_resources.
 	Recommended VMResources `json:"recommended"`
 }
 
@@ -147,7 +148,7 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 // microVMHost finds what the MicroVM driver needs on this Mac.
 func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 	m := &MicroVMHost{Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
-		Recommended: RecommendedVMResources(r.HostMemory())}
+		Recommended: RecommendedVMResources(r.HostMemory()).Within(r.MaxCPUMillis, r.MaxMemoryBytes)}
 	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
 	if m.E2fsprogs == "" {
 		mke2fs, err1 := r.LookPath("mke2fs")
@@ -380,12 +381,6 @@ func (r *doctorRun) vmResourcesCheck() Check {
 			Automatic: true, Apply: r.applyGateway(GatewayChanges{VMResources: &lower})}
 	default:
 		want := r.micro.Recommended
-		if r.MaxMemoryBytes > 0 {
-			want.MemMiB = min(want.MemMiB, maxMiB)
-		}
-		if r.MaxCPUMillis > 0 {
-			want.VCPUs = min(want.VCPUs, maxCPUs)
-		}
 		raise := VMResources{}
 		if have.MemMiB < want.MemMiB {
 			raise.MemMiB = want.MemMiB
