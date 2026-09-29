@@ -1223,9 +1223,16 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 			}
 		}
 	}
-	llm, err := a.detectLLM(spec, o.LLM, o.BedrockRegion, reserved)
+	choice, from, note := a.runLLM(spec, o.LLM)
+	if note != "" {
+		a.note(note)
+	}
+	llm, err := a.detectLLM(spec, choice, from, o.BedrockRegion, reserved)
 	if err != nil {
 		return req, llmChoice{}, err
+	}
+	if from == llmFromConfig {
+		llm.Configured = choice
 	}
 	req.LLM = llm.Credential
 	return req, llm, nil

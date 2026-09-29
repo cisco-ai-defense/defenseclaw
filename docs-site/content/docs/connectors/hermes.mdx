@@ -350,8 +350,8 @@ only in the image; nothing on your host changes.
 - **Model access.** Use one of these provider profiles. Each key is an
   OpenShell placeholder that resolves only at the provider endpoint, and only
   for the harness's own interpreter. `defenseclaw sandbox run hermes` picks
-  one from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or, with `--llm bedrock`,
-  `AWS_BEARER_TOKEN_BEDROCK`:
+  the first set of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
+  `AWS_BEARER_TOKEN_BEDROCK` (`--llm` picks one):
   - `defenseclaw-openai` or the regional
     `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
     `defenseclaw` provider (`--provider defenseclaw -m <model>`)

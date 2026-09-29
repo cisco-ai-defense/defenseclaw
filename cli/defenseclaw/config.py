@@ -949,6 +949,8 @@ DEFAULT_SANDBOX_HOME = "/home/sandbox"
 # Sandbox profiles, loosest to strictest (mirrors OpenShellProfile* in
 # internal/config/openshell.go).
 OPENSHELL_PROFILES = ("open", "balanced", "strict")
+# openshell.llm and ``sandbox run --llm`` (mirrors OpenShellLLMChoices).
+OPENSHELL_LLM_CHOICES = ("auto", "none", "anthropic", "claude-oauth", "openai", "bedrock", "gemini")
 # openshell keys an administrator can lock against ``sandbox run`` flags
 # (mirrors OpenShellLockableKeys).
 OPENSHELL_LOCKABLE_KEYS = (
@@ -1076,6 +1078,9 @@ class OpenShellConfig:
     pack_dir: str = ""
     profile: str = ""
     yolo: bool | None = None
+    # The model credential a run shares (``sandbox run --llm``'s default,
+    # which the shell wrappers, the TUI and the macOS app take too).
+    llm: str = "auto"
     workdir: OpenShellWorkdirConfig = field(default_factory=OpenShellWorkdirConfig)
     egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
     image: OpenShellImageConfig = field(default_factory=OpenShellImageConfig)
@@ -5094,6 +5099,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         pack_dir=_openshell_str(raw.get("pack_dir"), pack_dir_default),
         profile=_openshell_str(raw.get("profile")),
         yolo=_openshell_optional_bool(raw.get("yolo")),
+        llm=_openshell_str(raw.get("llm")) or "auto",
         workdir=OpenShellWorkdirConfig(
             mode=_openshell_str(workdir.get("mode")),
             masks=_openshell_str_list(workdir.get("masks")),

@@ -671,6 +671,20 @@
             "null"
           ]
         },
+        "llm": {
+          "description": "The model credential a sandbox run shares: the default of `sandbox run --llm`, which the shell wrappers, the TUI and the macOS app take too.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "anthropic",
+            "claude-oauth",
+            "openai",
+            "bedrock",
+            "gemini"
+          ],
+          "default": "auto"
+        },
         "workdir": {
           "$ref": "#/$defs/openShellWorkdir"
         },

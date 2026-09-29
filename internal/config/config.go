@@ -4058,6 +4058,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("openshell.workdir.on_exit", DefaultOpenShellOnExit)
 	viper.SetDefault("openshell.approvals.debounce_ms", DefaultOpenShellApprovalDebounceMs)
 	viper.SetDefault("openshell.token_delivery", DefaultOpenShellTokenDelivery)
+	viper.SetDefault("openshell.llm", DefaultOpenShellLLM)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

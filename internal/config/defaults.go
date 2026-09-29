@@ -163,6 +163,7 @@ func DefaultConfig() *Config {
 			},
 			Approvals:     OpenShellApprovalsConfig{DebounceMs: DefaultOpenShellApprovalDebounceMs},
 			TokenDelivery: DefaultOpenShellTokenDelivery,
+			LLM:           DefaultOpenShellLLM,
 		},
 		Watch: WatchConfig{
 			DebounceMs:          500,

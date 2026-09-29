@@ -269,8 +269,9 @@ replaces that list, so name every harness you want:
   from your shell for OpenCode's built-in `anthropic` provider (pick a model
   with `-- -m anthropic/<model>`), or else `OPENAI_API_KEY` for its `openai`
   provider (`-m openai/<model>`). OpenShell holds the secret, and the sandbox
-  gets a placeholder that works only at that provider's API. `--llm bedrock`
-  shares a short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK`
+  gets a placeholder that works only at that provider's API. `--llm bedrock`,
+  and `auto` when neither is set, shares a short-term Amazon Bedrock API key
+  from `AWS_BEARER_TOKEN_BEDROCK`
   for a custom provider on the Bedrock Mantle Anthropic endpoint (default
   model `anthropic.claude-haiku-4-5`).
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code

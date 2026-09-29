@@ -557,8 +557,7 @@
       },
       {
         "name": "llm",
-        "type": "string",
-        "default": "auto"
+        "type": "string"
       },
       {
         "name": "memory",

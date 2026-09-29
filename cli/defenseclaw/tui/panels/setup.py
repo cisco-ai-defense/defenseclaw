@@ -4656,8 +4656,8 @@ def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str 
     """Which model credential each harness would share (names only, never values).
 
     Mirrors ``sandboxcli.detectLLM`` with the default ``--llm auto``:
-    environment variables, and for Codex the API key in auth.json. A Bedrock
-    key is shared only with ``--llm bedrock``, so it is not counted.
+    environment variables, and for Codex the API key in auth.json, with an
+    Amazon Bedrock key (``AWS_BEARER_TOKEN_BEDROCK``) last.
     """
 
     env = os.environ if env is None else env
@@ -4666,8 +4666,12 @@ def _sandbox_credential_summary(env: Mapping[str, str] | None = None, home: str 
     def first(*names: str) -> str:
         return next((name for name in names if str(env.get(name, "")).strip()), "")
 
-    claude = first("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
-    codex = first("OPENAI_API_KEY", "CODEX_API_KEY") or _codex_auth_key_source(env, home)
+    claude = first("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "AWS_BEARER_TOKEN_BEDROCK")
+    codex = (
+        first("OPENAI_API_KEY", "CODEX_API_KEY")
+        or _codex_auth_key_source(env, home)
+        or first("AWS_BEARER_TOKEN_BEDROCK")
+    )
     parts = [
         f"Claude Code: {claude} found" if claude else "Claude Code: none found (log in inside the sandbox)",
         f"Codex: {codex} found" if codex else "Codex: none found (log in inside the sandbox)",
@@ -7649,6 +7653,13 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             + (f" Your organization requires at least {min_profile}." if min_profile else ""),
         ),
         field("Skip-permissions (yolo)", "openshell.yolo", "choice", inherit_bool, hint="--dangerously-skip-permissions by default."),
+        field(
+            "Model Credential",
+            "openshell.llm",
+            "choice",
+            dc_config.OPENSHELL_LLM_CHOICES,
+            hint="What a run shares (sandbox run --llm; the wrappers, TUI and app too). auto: the first key found, Bedrock last.",
+        ),
         field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder (Docker driver); copy: untrusted repos, and every run on a MicroVM (vm) gateway."),
         field("Secret Masks", "openshell.workdir.masks", hint="Extra secret-file globs, comma-separated."),
         field("Unmask", "openshell.workdir.unmask", hint="Masked paths to share, comma-separated."),

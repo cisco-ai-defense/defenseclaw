@@ -269,8 +269,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "llm",
                 "string",
-                "model credential to share: auto, none, anthropic, claude-oauth, openai or bedrock",
-                default="auto",
+                "model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini "
+                "(default: openshell.llm, which is auto unless set)",
                 metavar="SOURCE",
             ),
             _Flag(

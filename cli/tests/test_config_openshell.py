@@ -64,6 +64,7 @@ _FULL_SECTION = {
     "pack_dir": "/etc/defenseclaw/packs",
     "profile": "strict",
     "yolo": False,
+    "llm": "bedrock",
     "workdir": {
         "mode": "copy",
         "masks": [".env*"],
@@ -121,6 +122,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.approvals.debounce_ms, 3000)
         self.assertTrue(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.token_delivery, "provider")
+        self.assertEqual(oc.llm, "auto")
         self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
         # Pack-governed keys stay unset so the selected pack supplies them.
         self.assertEqual(oc.pack, "")
@@ -151,6 +153,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.pack_dir, "/etc/defenseclaw/packs")
         self.assertEqual(oc.profile, "strict")
         self.assertIs(oc.yolo, False)
+        self.assertEqual(oc.llm, "bedrock")
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")

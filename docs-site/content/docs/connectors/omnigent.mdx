@@ -272,8 +272,9 @@ exist only in the image; nothing on your host changes.
     `--model anthropic/<model>`. This profile is unverified: the sandbox
     agent runs on the `openai-agents` harness.
 
-  `defenseclaw sandbox run omnigent` picks the profile from the same
-  variables (`--llm bedrock` reads `AWS_BEARER_TOKEN_BEDROCK`). It refuses a
+  `defenseclaw sandbox run omnigent` picks the profile from the first set of
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `AWS_BEARER_TOKEN_BEDROCK`
+  (`--llm` picks one). It refuses a
   profile without a default model unless you pass `--model` after the
   harness name, and it does so before a sandbox is created. OmniGent has no
   skip-permissions switch: approval pauses come from its policies.

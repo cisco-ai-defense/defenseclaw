@@ -62,6 +62,9 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	if o.TokenDelivery != "provider" {
 		t.Fatalf("token_delivery = %q", o.TokenDelivery)
 	}
+	if o.LLM != "auto" {
+		t.Fatalf("llm = %q, want auto", o.LLM)
+	}
 	// Pack-governed keys stay unset so the selected pack supplies them.
 	if o.Pack != "" || o.Profile != "" || o.Yolo != nil || o.Workdir.Mode != "" ||
 		o.Workdir.MaxUploadMB != 0 || len(o.Egress.Ports) != 0 || o.Egress.LargeUploadMB != 0 ||
@@ -127,6 +130,7 @@ openshell:
   pack_dir: '`+packDir+`'
   profile: strict
   yolo: false
+  llm: bedrock
   workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep}
   egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, feed: none}
   image: {base: 'registry.example/base@sha256:abc', harness_versions: {codex: 0.146.0}}
@@ -166,6 +170,7 @@ openshell:
 		PackDir:           packDir,
 		Profile:           "strict",
 		Yolo:              &f,
+		LLM:               "bedrock",
 		Workdir:           OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep"},
 		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
 		Image:             OpenShellImageConfig{Base: "registry.example/base@sha256:abc", HarnessVersions: map[string]string{"codex": "0.146.0"}},
@@ -233,6 +238,7 @@ func TestOpenShellValidate(t *testing.T) {
 		{"on exit", func(o *OpenShellConfig) { o.Workdir.OnExit = "delete" }, "workdir.on_exit"},
 		{"feed", func(o *OpenShellConfig) { o.Egress.Feed = "custom" }, "egress.feed"},
 		{"token delivery", func(o *OpenShellConfig) { o.TokenDelivery = "file" }, "token_delivery"},
+		{"llm", func(o *OpenShellConfig) { o.LLM = "vertex" }, "llm"},
 		{"negative upload", func(o *OpenShellConfig) { o.Workdir.MaxUploadMB = -1 }, "max_upload_mb"},
 		{"absolute mask", func(o *OpenShellConfig) { o.Workdir.Masks = []string{".env", "/srv/app/.env"} }, "workdir.masks[1]"},
 		{"escaping unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"../../secrets/app.key"} }, "workdir.unmask[0]"},

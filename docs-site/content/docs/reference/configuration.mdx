@@ -522,6 +522,7 @@ openshell:
   pack_dir: ~/.defenseclaw/policies/sandbox   # default <data_dir>/policies/sandbox
   profile: ""                  # "" follows the pack; open | balanced | strict
   yolo: null                   # null follows the pack; true | false
+  llm: auto                    # model credential a run shares; see below
   workdir:
     mode: ""                   # "" follows the pack; mount | copy
     masks: []                  # secret-file globs added to the pack's masks
@@ -571,6 +572,7 @@ openshell:
 | `pack_dir` | `<data_dir>/policies/sandbox` | Where custom packs live, as `<name>/pack.yaml`. An absolute path, or one starting with `~/`. Empty turns custom pack names off. |
 | `profile` | `""` | `open`, `balanced`, or `strict`. Empty follows the pack's network mode. |
 | `yolo` | `null` | Skip-permissions mode for the harness. `null` follows the pack. |
+| `llm` | `auto` | The model credential a run shares with its sandbox: `auto` (the first key found for the harness, an Amazon Bedrock key last), `none`, `anthropic`, `claude-oauth`, `openai`, `bedrock`, or `gemini`. It is the default of `sandbox run --llm`, so the runs the shell wrappers, the TUI and the macOS app start take it too; `--llm` overrides it for one run. A provider the harness has no profile for falls back to `auto`; one whose key is not set refuses the run. |
 | `workdir.mode` | `""` | `mount` (live bind mount) or `copy`. Empty follows the pack. |
 | `workdir.masks` | `[]` | Project globs of secret files, added to the pack's masks. |
 | `workdir.unmask` | `[]` | Project globs that stay visible even though a mask covers them, added to the pack's own unmask list. |

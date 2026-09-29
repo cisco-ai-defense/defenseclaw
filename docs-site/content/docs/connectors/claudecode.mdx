@@ -255,10 +255,12 @@ sandbox image; your own Claude Code configuration does not change.
 - **Model sign-in.** `--llm auto` (the default) shares `ANTHROPIC_API_KEY`,
   or else `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), from your
   shell. OpenShell holds the secret, and the sandbox gets a placeholder that
-  works only at `api.anthropic.com`. `--llm bedrock` shares a short-term Amazon
-  Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle
-  Anthropic endpoint in `--bedrock-region` (default `$AWS_REGION`, then
-  `$AWS_DEFAULT_REGION`, then `us-east-1`). With
+  works only at `api.anthropic.com`. `--llm bedrock`, and `auto` when neither
+  is set, shares a short-term Amazon Bedrock API key from
+  `AWS_BEARER_TOKEN_BEDROCK` for the Bedrock Mantle Anthropic endpoint in
+  `--bedrock-region` (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then
+  `us-east-1`). `openshell.llm` sets the choice for runs without `--llm`,
+  such as the `claude` shell wrapper's. With
   `--llm none`, or when no key is found, log in inside the sandbox; that login
   stays in the sandbox home, where the agent can read it.
 - **Bedrock models.** Bedrock Mantle serves Claude models only under

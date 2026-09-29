@@ -957,20 +957,34 @@ By default (`--llm auto`) a run shares the first model credential it finds:
 
 | Harness | Looks for |
 | --- | --- |
-| Claude Code | `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) |
-| Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared) |
-| OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY` |
-| GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key |
-| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY` |
+| Claude Code | `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), then `AWS_BEARER_TOKEN_BEDROCK` |
+| Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared), then `AWS_BEARER_TOKEN_BEDROCK` |
+| OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
+| GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key, then `AWS_BEARER_TOKEN_BEDROCK` |
+| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
 | Antigravity | `GEMINI_API_KEY`; without it, you sign in with Google inside the sandbox |
+
+`AWS_BEARER_TOKEN_BEDROCK` is a short-term Amazon Bedrock key, so it comes
+last: a host with only that key set runs its sandboxes on Bedrock.
 
 OmniGent also needs a model name after `--`, for example
 `defenseclaw sandbox run omnigent -- --model <model>`; `run` refuses to
-start without one. With `--llm bedrock` it defaults to `openai.gpt-oss-20b`.
+start without one. On Bedrock it defaults to `openai.gpt-oss-20b`.
 
 `--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai`,
 `bedrock` or `gemini`), and `--llm none` shares nothing, so you log in inside the
-sandbox. `--llm bedrock` uses a short-term Amazon Bedrock key from
+sandbox. `openshell.llm` in `config.yaml` sets the same choice for every run
+that has no `--llm`, which includes the runs the shell wrappers, the TUI and
+the macOS app start:
+
+```yaml
+openshell:
+  llm: bedrock    # auto (the default) | none | anthropic | claude-oauth | openai | bedrock | gemini
+```
+
+`--llm` still overrides it for one run. A provider the harness has no
+profile for (`gemini` for Claude Code) gives way to `auto`, and the run says
+so; a provider whose key is not set refuses the run and names the key. `--llm bedrock` uses a short-term Amazon Bedrock key from
 `AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`,
 then `$AWS_DEFAULT_REGION`, then `us-east-1`). Codex on Bedrock runs
 `openai.gpt-oss-20b` unless `-- -m MODEL` picks another, and Bedrock rejects

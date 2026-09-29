@@ -667,10 +667,15 @@ def test_credential_summary_skips_a_symlinked_auth_json(tmp_path: Path) -> None:
     assert _codex_summary(tmp_path, None) == _NO_CODEX
 
 
-def test_credential_summary_does_not_count_a_bedrock_key(tmp_path: Path) -> None:
-    # `sandbox run` shares a Bedrock key only with --llm bedrock.
+def test_credential_summary_counts_a_bedrock_key_last(tmp_path: Path) -> None:
+    # `sandbox run --llm auto` shares a Bedrock key when no other is set (#955).
     summary = _sandbox_credential_summary({"AWS_BEARER_TOKEN_BEDROCK": "bedrock-secret"}, str(tmp_path))
-    assert summary.count("none found") == 2 and "AWS_BEARER_TOKEN_BEDROCK" not in summary
+    assert summary == "Claude Code: AWS_BEARER_TOKEN_BEDROCK found · Codex: AWS_BEARER_TOKEN_BEDROCK found"
+    assert "bedrock-secret" not in summary
+    both = _sandbox_credential_summary(
+        {"AWS_BEARER_TOKEN_BEDROCK": "b", "ANTHROPIC_API_KEY": "a", "OPENAI_API_KEY": "o"}, str(tmp_path)
+    )
+    assert both == "Claude Code: ANTHROPIC_API_KEY found · Codex: OPENAI_API_KEY found"
 
 
 # --- the config editor ----------------------------------------------------------

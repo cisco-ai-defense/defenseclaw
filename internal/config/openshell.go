@@ -66,6 +66,26 @@ const (
 	OpenShellTokenDeliveryEnv      = "env"
 )
 
+// The model credential a sandbox run shares (openshell.llm, and `sandbox run
+// --llm`, which overrides it for one run): auto takes the first one found for
+// the harness, none shares none, and a provider shares that one only.
+const (
+	OpenShellLLMAuto        = "auto"
+	OpenShellLLMNone        = "none"
+	OpenShellLLMAnthropic   = "anthropic"
+	OpenShellLLMClaudeOAuth = "claude-oauth"
+	OpenShellLLMOpenAI      = "openai"
+	OpenShellLLMBedrock     = "bedrock"
+	OpenShellLLMGemini      = "gemini"
+)
+
+// OpenShellLLMChoices are the values openshell.llm and `sandbox run --llm`
+// take.
+var OpenShellLLMChoices = []string{
+	OpenShellLLMAuto, OpenShellLLMNone, OpenShellLLMAnthropic, OpenShellLLMClaudeOAuth,
+	OpenShellLLMOpenAI, OpenShellLLMBedrock, OpenShellLLMGemini,
+}
+
 // Loader defaults for the openshell section. Keys the sandbox policy pack
 // governs (profile, yolo, workdir mode, upload caps, egress lists, MCP import)
 // have no loader default: an unset key inherits the pack's value.
@@ -75,6 +95,7 @@ const (
 	DefaultOpenShellGitDepth           = 200
 	DefaultOpenShellOnExit             = OpenShellOnExitAsk
 	DefaultOpenShellTokenDelivery      = OpenShellTokenDeliveryProvider
+	DefaultOpenShellLLM                = OpenShellLLMAuto
 	// DefaultOpenShellPackDirName is the directory under <policy_dir> that
 	// holds custom sandbox policy packs (<name>/pack.yaml), mirroring the
 	// repository's policies/sandbox layout.
@@ -137,7 +158,12 @@ type OpenShellConfig struct {
 	// Profile overrides the pack's network profile (open|balanced|strict).
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
 	// Yolo overrides the pack's skip-permissions default for the harness.
-	Yolo              *bool                     `mapstructure:"yolo"               yaml:"yolo,omitempty"`
+	Yolo *bool `mapstructure:"yolo" yaml:"yolo,omitempty"`
+	// LLM is the model credential a run shares with its sandbox
+	// (OpenShellLLMChoices): the default of `sandbox run --llm`, so the runs
+	// the shell wrappers, the TUI and the macOS app start, which pass no
+	// --llm, take it too. Empty means auto.
+	LLM               string                    `mapstructure:"llm"                yaml:"llm,omitempty"`
 	Workdir           OpenShellWorkdirConfig    `mapstructure:"workdir"            yaml:"workdir,omitempty"`
 	Egress            OpenShellEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
 	Image             OpenShellImageConfig      `mapstructure:"image"              yaml:"image,omitempty"`
@@ -817,6 +843,7 @@ func (o *OpenShellConfig) Validate() error {
 		OpenShellFeedBuiltin, OpenShellFeedNone))
 	check(validateOpenShellEnum("token_delivery", o.TokenDelivery, true,
 		OpenShellTokenDeliveryProvider, OpenShellTokenDeliveryEnv))
+	check(validateOpenShellEnum("llm", o.LLM, true, OpenShellLLMChoices...))
 	check(validateOpenShellNonNegative("workdir.max_upload_mb", o.Workdir.MaxUploadMB))
 	check(validateOpenShellNonNegative("workdir.git_depth", o.Workdir.GitDepth))
 	check(validateOpenShellNonNegative("egress.large_upload_mb", o.Egress.LargeUploadMB))

@@ -470,10 +470,16 @@ A few rules the flags follow:
   For Claude Code that is `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`.
   For Codex it is `OPENAI_API_KEY` (or `CODEX_API_KEY`), then the API key
   that `codex login --with-api-key` saved in `~/.codex/auth.json`; a ChatGPT
-  login is not shared. `--llm bedrock` shares `AWS_BEARER_TOKEN_BEDROCK` for
-  Amazon Bedrock in `--bedrock-region`, and `auto` never picks it. OpenShell
+  login is not shared. An Amazon Bedrock key (`AWS_BEARER_TOKEN_BEDROCK`)
+  comes last, for the harnesses that have a Bedrock profile. `--llm bedrock`
+  shares only that key, for Amazon Bedrock in `--bedrock-region`. OpenShell
   gives the harness a placeholder that works only against the provider's
-  hosts. With `--llm none`, or when nothing is found, you log in inside the
+  hosts.
+- Without `--llm`, a run takes `openshell.llm` (`auto` unless set). The shell
+  wrappers, the TUI and the macOS app pass no `--llm`, so that key is how the
+  runs they start share a chosen credential. A provider in `openshell.llm`
+  that the harness has no profile for gives way to `auto`, and the run says
+  so; one whose key is not set refuses the run, naming the key. With `--llm none`, or when nothing is found, you log in inside the
   sandbox, which stores a real token there that the agent can read. A Claude
   subscription can instead run `claude setup-token` on this machine (with
   the shell wrapper on, `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`) and
@@ -540,7 +546,7 @@ A few rules the flags follow:
 | `--env` | text, repeatable |  | KEY=VALUE non-secret variable for the sandbox (repeatable). |
 | `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered. |
 | `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
-| `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini. |
+| `--llm` | text |  | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini (default: openshell.llm, which is auto unless set). |
 | `--memory` | text |  | Memory limit, for example 4Gi. |
 | `--name` | text |  | Sandbox name, at most 19 lowercase letters, digits and '-' (default `<folder>-<random>`). |
 | `--new` | switch |  | Start a new sandbox even when one already holds this folder. |

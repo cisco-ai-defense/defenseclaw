@@ -878,6 +878,15 @@ ahead of time):
 | `defenseclaw-gemini` | `GEMINI_API_KEY` | `x-goog-api-key` | `generativelanguage.googleapis.com:443` (Antigravity) |
 | `dc-cred-<hash>` | the `--credential` variable | bearer | the host and port it is bound to |
 
+Which profile a run takes is `sandbox run --llm`, else `openshell.llm`
+(`auto` unless set; the shell wrappers, the TUI and the macOS app pass no
+`--llm`, so the key decides for the runs they start). `auto` takes the first
+credential set on this machine in `sandboxcli.llmCandidates` order, with
+`AWS_BEARER_TOKEN_BEDROCK` (a Bedrock Mantle profile) last. A configured
+provider the harness has no candidate for falls back to `auto`, and the run
+says so; a configured or flagged provider whose credential is not set refuses
+the run before a sandbox exists.
+
 A Claude subscription (Pro or Max) signs in on this machine: `claude
 setup-token` prints a long-lived token; exported as `CLAUDE_CODE_OAUTH_TOKEN`,
 it reaches the sandbox only as the `defenseclaw-claude-oauth` placeholder.

@@ -465,6 +465,19 @@ deleted.
   with the path quoted for the shell. Both drivers; the OpenCode image
   rebuilds.
 
+### OpenShell sandbox lifecycle and configuration
+
+- `openshell.llm` (default `auto`) chooses the model credential a sandbox
+  run shares, as `sandbox run --llm` does (#955). The shell wrappers, the TUI
+  and the macOS app pass no `--llm`, so the runs they start now share the
+  credential it names; `--llm` still overrides it for one run. A provider the
+  harness has no profile for falls back to `auto` with a note, and one whose
+  key is not set refuses the run, naming the key. `--llm auto` now also picks
+  Amazon Bedrock (`AWS_BEARER_TOKEN_BEDROCK`) when that is the only
+  credential set, after every other one, so a host with only a Bedrock key
+  reaches its model without `--llm bedrock`. The key is in the Python config,
+  the v8 schema, and the TUI and macOS app config editors. Both drivers.
+
 ### Legacy OpenShell standalone sandbox removed
 
 - **Breaking:** removes the legacy standalone sandbox integration for the

@@ -1191,7 +1191,15 @@ func TestDetectLLM(t *testing.T) {
 		{"claude api key", claude, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
 		{"claude oauth", claude, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "", "auto", profiles.ClaudeOAuthID, "CLAUDE_CODE_OAUTH_TOKEN", false},
 		{"claude bedrock", claude, map[string]string{EnvBedrockToken: "b", "AWS_REGION": "us-west-2"}, "", "bedrock", profiles.ClaudeBedrockMantleID, EnvBedrockToken, false},
-		{"bedrock not automatic", claude, map[string]string{EnvBedrockToken: "b"}, "", "auto", "", "", false},
+		// auto takes an Amazon Bedrock key when it is the one set, and
+		// every other credential before it (#955).
+		{"claude bedrock under auto", claude, map[string]string{EnvBedrockToken: "b"}, "", "auto", profiles.ClaudeBedrockMantleID, EnvBedrockToken, false},
+		{"claude api key before bedrock", claude, map[string]string{EnvBedrockToken: "b", "ANTHROPIC_API_KEY": "k"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
+		{"codex bedrock under auto", codex, map[string]string{EnvBedrockToken: "b"}, "", "", profiles.CodexBedrockMantleID, EnvBedrockToken, false},
+		{"codex auth.json before bedrock", codex, map[string]string{EnvBedrockToken: "b"}, `{"OPENAI_API_KEY":"from-file"}`, "", profiles.OpenAIID, "~/.codex/auth.json", false},
+		{"copilot bedrock under auto", get("copilot"), map[string]string{EnvBedrockToken: "b"}, "", "", profiles.CopilotBedrockMantleID, EnvBedrockToken, false},
+		{"hermes bedrock under auto", hermes, map[string]string{EnvBedrockToken: "b"}, "", "", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
+		{"antigravity has no bedrock", get("antigravity"), map[string]string{EnvBedrockToken: "b"}, "", "", "", "", false},
 		{"codex env", codex, map[string]string{"CODEX_API_KEY": "c"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"codex auth.json", codex, nil, `{"OPENAI_API_KEY":"from-file"}`, "", profiles.OpenAIID, "~/.codex/auth.json", false},
 		{"codex chatgpt login", codex, nil, `{"OPENAI_API_KEY":null,"tokens":{"id_token":"x"}}`, "", "", "", false},
@@ -1224,7 +1232,7 @@ func TestDetectLLM(t *testing.T) {
 			if c.auth != "" {
 				writeFile(t, filepath.Join(ta.home, ".codex", "auth.json"), c.auth)
 			}
-			got, err := ta.detectLLM(c.spec, c.choice, "", nil)
+			got, err := ta.detectLLM(c.spec, c.choice, "", "", nil)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("detectLLM err = %v, want error %t", err, c.wantErr)
 			}
@@ -1272,7 +1280,7 @@ func TestDetectLLMNotes(t *testing.T) {
 			if c.setup != nil {
 				c.setup(ta)
 			}
-			got, err := ta.detectLLM(c.spec, c.choice, "", c.bound)
+			got, err := ta.detectLLM(c.spec, c.choice, "", "", c.bound)
 			if err != nil || got.Credential != nil {
 				t.Fatalf("detectLLM = %+v, %v", got, err)
 			}
@@ -1282,7 +1290,7 @@ func TestDetectLLMNotes(t *testing.T) {
 			}
 		})
 	}
-	_, err := newTestApp(t, "").detectLLM(claude, "claude-oauth", "", nil)
+	_, err := newTestApp(t, "").detectLLM(claude, "claude-oauth", "", "", nil)
 	wantErr(t, err, "claude setup-token")
 }
 
