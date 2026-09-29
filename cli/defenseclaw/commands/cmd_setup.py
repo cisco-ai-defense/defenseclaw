@@ -3873,6 +3873,34 @@ def _rotate_token_transaction(
             _restore_rotate_token_environment(environment_before)
 
 
+def _refuse_rotate_token_on_managed_host() -> None:
+    """Refuse per-user rotation where the organization manages DefenseClaw.
+
+    The per-user gateway lifecycle is disabled on a standalone managed host,
+    so the transaction could only fail at its first stop. Secure Client
+    hosts publish no such marker and are unaffected.
+    """
+
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    if not deployment:
+        return
+    if os.name == "nt":
+        remedy = "rotating the credentials of a managed Windows deployment is not available yet"
+    else:
+        gateway = (
+            "/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos"
+            if sys.platform == "darwin"
+            else "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
+        )
+        remedy = f"an administrator rotates its per-user credentials with `sudo {gateway} rotate-credentials`"
+    raise click.ClickException(
+        f"This computer's DefenseClaw is managed by your organization ({deployment}), so per-user "
+        f"token rotation is disabled; {remedy}. Nothing was changed."
+    )
+
+
 @setup.command("rotate-token")
 @click.option(
     "--connector",
@@ -3910,6 +3938,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     """
     import secrets
 
+    _refuse_rotate_token_on_managed_host()
     dotenv_path = _rotate_token_dotenv_path(app)
     if no_restart:
         raise click.ClickException(
