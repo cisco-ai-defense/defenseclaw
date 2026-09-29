@@ -312,6 +312,33 @@ func TestDaemonOutageIsAnnouncedLive(t *testing.T) {
 	has(t, ta.output(), "⚠ the DefenseClaw daemon was not reachable from ", "the hooks failed closed meanwhile")
 }
 
+// agyFailure is how Antigravity CLI 1.2.12 failed in an OpenShell 0.1.1
+// MicroVM.
+const agyFailure = "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"
+
+// failsAtStart makes the session's harness exit 1 before any hook (headless,
+// printing output) and the sandbox answer the localhost check with state.
+func failsAtStart(output, state string) func(*testApp) {
+	return func(ta *testApp) {
+		noChanges(ta)
+		ta.term.hooks, ta.term.code = nil, 1
+		ta.stream.hooks = nil
+		ta.stream.answer = func(argv []string) (int, string) {
+			switch {
+			case runsHarness(argv):
+				ta.IO.TTY = false
+				return 1, output + "\n"
+			case strings.Contains(strings.Join(argv, " "), "::localhost="):
+				return 0, "::localhost=" + state + "\n"
+			}
+			return 0, ""
+		}
+		if output != "" {
+			ta.IO.TTY = false
+		}
+	}
+}
+
 // What the end of a session says, and its exit status (manual R2-2, R2-6,
 // R2-66, R2-78, L3): late denials count, a harness that failed early is not
 // blamed on the hooks, the continue hint follows a conversation only, and
@@ -376,6 +403,32 @@ func TestSessionSummary(t *testing.T) {
 			ta.term.hooks, ta.term.code = nil, 1
 		}, want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"},
 			not: []string{"hooks are not reaching", "continue this conversation"}},
+		// AG-MAC-F3: a harness that failed at start because localhost does
+		// not resolve is told apart, with what to do; the pull of a copy
+		// still runs, without its progress line.
+		{name: "localhost does not resolve in the sandbox", opts: claude, exit: 1, setup: failsAtStart("", "unresolved unlisted"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: localhost does not resolve in " + sbName +
+				": its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves",
+				"→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete " + sbName + "`) and run it again (`defenseclaw sandbox run claudecode`)"},
+			not: []string{"the harness itself failed"}},
+		{name: "a headless harness that looks localhost up itself", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
+			setup: failsAtStart(agyFailure, "resolves unlisted"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: it could not resolve localhost (\"" + agyFailure +
+				"\"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and Claude Code does not use the system resolver, which answers localhost here",
+				"→ Claude Code cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it"}},
+		{name: "a headless harness whose sandbox resolves localhost", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
+			setup: failsAtStart("Error: invalid API key", "resolves listed"),
+			want:  []string{"before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"}, not: []string{"localhost", "a new sandbox"}},
+		{name: "a copy whose harness failed at start", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"}, exit: 1,
+			setup: failsAtStart("", "unresolved unlisted"), want: []string{"localhost does not resolve in copybox", "run it again", "Bring the changes back?"},
+			not: []string{"Pulling copybox's work"}, check: func(t *testing.T, ta *testApp) {
+				// What the harness wrote before it failed still comes back.
+				if !slices.Contains(ta.copy.steps, "pull copybox") {
+					t.Fatalf("copy steps = %v", ta.copy.steps)
+				}
+			}},
+		{name: "a copy whose harness ran", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"},
+			want: []string{"Pulling copybox's work"}, not: []string{"localhost"}},
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},

@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"slices"
 	"strconv"
@@ -79,6 +80,11 @@ type session struct {
 	// its exit status.
 	startedAt   time.Time
 	harnessCode int
+	// harnessOutput is the end of what a headless harness printed; startWhy
+	// and startDo say why a harness that failed at start did, and what to
+	// do (diagnoseStart), when that is known.
+	harnessOutput     string
+	startWhy, startDo string
 	// interrupted is set when the user pressed Ctrl-C at the end of the
 	// session's keep/undo question; undoStopped when that session's undo
 	// stopped a sandbox it had found running.
@@ -155,8 +161,10 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 		// What the agent answers cannot drive the user's terminal.
 		out, flushOut := sandboxOutput(s.app.IO.Out, s.app.IO.OutTTY)
 		errOut, flushErr := sandboxOutput(s.app.IO.Err, s.app.IO.ErrTTY)
-		code, err := s.app.Streamer.Stream(runCtx, inv, out, errOut)
+		tail := &outputTail{}
+		code, err := s.app.Streamer.Stream(runCtx, inv, io.MultiWriter(out, tail), io.MultiWriter(errOut, tail))
 		_, _ = flushOut(), flushErr()
+		s.harnessOutput = tail.String()
 		if interrupted() && ctx.Err() == nil {
 			// The harness was ended; the session ends as usual.
 			s.app.warnErr("interrupted: ending the session")
@@ -564,6 +572,8 @@ func (s *session) end(ctx context.Context) error {
 	if elsewhere != "" {
 		a.warn(elsewhere)
 	}
+	// While the sandbox still runs: the review may stop it.
+	s.diagnoseStart(ctx, after, elsewhere != "")
 	if !s.started && after.Phase == "ready" {
 		// The sandbox was running before the session: a detached run may
 		// still be going in it.
@@ -1055,7 +1065,11 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.keepUnpulled()
 		return s.finish(ctx, true)
 	}
-	pull, err := a.pull(ctx, s.api, s.cli, after)
+	// A harness that failed at start did no work, but it may have written
+	// before it failed and an earlier session may have left work unpulled:
+	// the pull still runs, without its progress line, which would stand
+	// between the harness's output and the summary that points at it.
+	pull, err := a.pull(ctx, s.api, s.cli, after, !s.failedAtStart(after, endedElsewhere))
 	if err != nil {
 		a.println(s.summaryLine(after, nil))
 		s.printHookReach(after, endedElsewhere)
