@@ -77,6 +77,12 @@ rest also reach per-user installs.
   `redacted.secret.id-…`, so the findings dashboards and `rule_id` filters
   could not name it. Every rule id in the default, strict and permissive
   packs is now kept; ids that only a custom pack defines are still keyed.
+- **Finding and scan rows name the user.** `finding.observed` and the
+  `scan.*` records now carry `user.id`, `defenseclaw.user.id_kind` and
+  `defenseclaw.user.name` for the caller whose request was inspected, the
+  same identity the `hook_decision` rows carry, so findings can be filtered
+  by user without joining on `evaluation_id`. On the enterprise standalone
+  profile only the verified caller is recorded.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached

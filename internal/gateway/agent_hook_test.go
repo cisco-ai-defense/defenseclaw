@@ -896,6 +896,17 @@ func TestScanCorrelationFromContextPropagatesConnector(t *testing.T) {
 	if got.RunID != "run-1" || got.SessionID != "session-1" {
 		t.Fatalf("correlation fields not preserved: RunID=%q SessionID=%q", got.RunID, got.SessionID)
 	}
+
+	// Scan rows carry the verified caller on a standalone gateway and
+	// nothing a request only claims.
+	claimed := withServiceAccountGateway(ContextWithAgentIdentity(ctx, AgentIdentity{UserID: "1001", UserName: "claimed"}))
+	if got := ScanCorrelationFromContext(claimed); got.UserID != "" || got.UserName != "" {
+		t.Fatalf("claimed caller reached the scan correlation: %+v", got)
+	}
+	peer := withManagedHookPeer(claimed, managedHookPeer{UID: 1002, Name: "bob"})
+	if got := ScanCorrelationFromContext(peer); got.UserID != "1002" || got.UserIDKind != "posix_uid" || got.UserName != "bob" {
+		t.Fatalf("verified caller missing from the scan correlation: %+v", got)
+	}
 }
 
 // TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity guards the
