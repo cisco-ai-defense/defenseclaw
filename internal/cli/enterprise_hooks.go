@@ -879,30 +879,33 @@ const enterpriseHookManifestCatchUpWindow = 2 * time.Minute
 
 // enterpriseHookManifestActivationIssue words, for standalone status, a
 // guardian activation of other targets.yaml bytes than the installed ones.
-// A manifest the enumerator republished after that activation, less than
-// enterpriseHookManifestCatchUpWindow ago, is the guardian catching up
+// A targets.yaml the enumerator changed less than
+// enterpriseHookManifestCatchUpWindow ago is the guardian catching up
 // (waiting): until it activates the new file the gateway keeps enforcing
-// the targets it last activated.
+// the targets it last activated. The change can predate that activation's
+// stamp: the guardian reads targets.yaml when a reconcile starts and stamps
+// the activation when it ends.
 func enterpriseHookManifestActivationIssue(
 	manifestPath, manifestSHA256 string,
 	activation enterpriseHookGuardianActivation,
 	now time.Time,
 ) (message string, waiting bool) {
 	activatedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(activation.UpdatedAt))
-	info, statErr := os.Stat(manifestPath)
-	if parseErr != nil || statErr != nil || !info.ModTime().After(activatedAt) {
-		return fmt.Sprintf("the hook guardian last activated other targets.yaml bytes than the installed file "+
-			"(activated %.12s, installed %.12s); check that the hook guardian service is running and read its log",
-			activation.ManifestSHA256, manifestSHA256), false
+	if info, statErr := os.Stat(manifestPath); statErr == nil {
+		changedAt := info.ModTime().UTC()
+		if age := now.Sub(changedAt); age >= 0 && age < enterpriseHookManifestCatchUpWindow {
+			return fmt.Sprintf("the hook enumerator updated targets.yaml %s ago and the hook guardian has not activated it yet; "+
+				"it does within about a minute, and until then enforces the targets it last activated", age.Round(time.Second)), true
+		}
+		if parseErr == nil && changedAt.After(activatedAt) {
+			return fmt.Sprintf("the hook guardian has not activated the targets.yaml the enumerator published at %s "+
+				"(its last activation was at %s); check that the hook guardian service is running and read its log",
+				changedAt.Format(time.RFC3339), activatedAt.UTC().Format(time.RFC3339)), false
+		}
 	}
-	changedAt := info.ModTime().UTC()
-	if age := now.Sub(changedAt); age >= 0 && age < enterpriseHookManifestCatchUpWindow {
-		return fmt.Sprintf("the hook enumerator updated targets.yaml %s ago and the hook guardian has not activated it yet; "+
-			"it does within about a minute, and until then enforces the targets it last activated", age.Round(time.Second)), true
-	}
-	return fmt.Sprintf("the hook guardian has not activated the targets.yaml the enumerator published at %s "+
-		"(its last activation was at %s); check that the hook guardian service is running and read its log",
-		changedAt.Format(time.RFC3339), activatedAt.UTC().Format(time.RFC3339)), false
+	return fmt.Sprintf("the hook guardian last activated other targets.yaml bytes than the installed file "+
+		"(activated %.12s, installed %.12s); check that the hook guardian service is running and read its log",
+		activation.ManifestSHA256, manifestSHA256), false
 }
 
 // enterpriseHookRemovedAccountNote follows each failure status and verify
