@@ -65,6 +65,43 @@ defenseclaw setup galileo \
 
 TLS verification is always enabled for Galileo setup and canary requests.
 
+## Standalone enterprise deployments
+
+The enterprise packages do not ship `defenseclaw setup galileo`, and the
+managed gateway service does not get the environment variables of an
+administrator's shell, so `{env: GALILEO_API_KEY}` does not work there.
+Store the key as a protected credential instead and reference it with
+`{credential: NAME}`. On Linux:
+
+```bash
+read -rs GALILEO_API_KEY
+printf '%s' "$GALILEO_API_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin
+unset GALILEO_API_KEY
+```
+
+On macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`; on
+Windows, see [Store the key](/docs/enterprise/ai-defense-key#store-the-key).
+Then add the destination to the administrator's config
+([where it lives](/docs/enterprise/configuration#where-the-config-lives)):
+
+```yaml title="config.yaml (excerpt)"
+observability:
+  destinations:
+    - name: galileo
+      kind: otlp
+      preset: galileo
+      protocol: http/protobuf
+      endpoint: https://api.galileo.ai/otel/traces
+      headers:
+        Galileo-API-Key: {credential: galileo-api-key}
+        project: defenseclaw
+        logstream: production
+```
+
+The lifecycle refuses the config until the credential is stored, and the
+key never appears in the config or in logs. See
+[Observability credentials](/docs/enterprise/configuration#observability-credentials).
+
 ## Keep local observability and Galileo together
 
 ```bash

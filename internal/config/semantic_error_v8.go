@@ -127,6 +127,12 @@ func annotateObservabilityV8SemanticError(document *V8YAMLDocument, err error) e
 		Action:        "inspect the effective-plan validation rule and correct this field",
 		cause:         err,
 	}
+	var secretError *V8SecretReferenceError
+	if errors.As(err, &secretError) && secretError.Credential {
+		result.Summary = "protected credential " + strconv.Quote(secretError.Reference) + " is not stored or not trusted"
+		result.Expected = "a credential stored in a standalone enterprise deployment"
+		result.Action = "store it with `enterprise secret set --name " + secretError.Reference + "`, or remove the reference"
+	}
 	if document != nil {
 		result.Source = document.Source
 	}
