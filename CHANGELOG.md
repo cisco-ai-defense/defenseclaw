@@ -190,6 +190,10 @@ rest also reach per-user installs.
   earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
   only the `hooks` mapping, keeping every byte outside it, and removes all of
   DefenseClaw's approvals.
+- **Disabling Devin no longer puts DefenseClaw's earlier hooks back.** A
+  Devin backup captured while the config already held DefenseClaw's
+  `devin-hook.sh` hooks restored them at teardown. Teardown now removes
+  DefenseClaw's hooks from the restored config.
 
 ### Added
 
