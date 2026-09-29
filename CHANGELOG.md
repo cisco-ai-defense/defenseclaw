@@ -83,6 +83,40 @@ rest also reach per-user installs.
   files, the block/allow list is copied into a new store, and the gateway
   starts and logs a warning instead of failing. It refuses to move a store
   another process still has open.
+- **Findings keep the ids of the shipped rules.** A finding from a bundled
+  rule tagged `credential` (for example `PATH-AWS-CREDS`, `C2-METADATA-AWS`
+  or `exfil.secret_read_and_egress_oneliner`) was stored and exported as
+  `redacted.secret.id-…`, so the findings dashboards and `rule_id` filters
+  could not name it. Every rule id in the default, strict and permissive
+  packs is now kept; ids that only a custom pack defines are still keyed.
+- **Finding and scan rows name the user.** `finding.observed` and the
+  `scan.*` records now carry `user.id`, `defenseclaw.user.id_kind` and
+  `defenseclaw.user.name` for the caller whose request was inspected, the
+  same identity the `hook_decision` rows carry, so findings can be filtered
+  by user without joining on `evaluation_id`. On the enterprise standalone
+  profile only the verified caller is recorded.
+- **Guardrail blocks show on spans.** A tool call a hook blocks now gets a
+  tool span that ends at the decision with status `ERROR`; before, a blocked
+  call left no span. Blocked, confirmed and alerted calls carry a
+  `defenseclaw.guardrail.block`, `.ask` or `.alert` span event (rule,
+  severity, connector, user, redacted reason) and the
+  `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id` and
+  `defenseclaw.guardrail.severity` attributes, on every trace destination
+  including Galileo. Other hook decisions, such as a blocked prompt, and the
+  `/api/v1/inspect/*` routes produce an `apply_guardrail` span with the same
+  status, event and attributes; that span no longer reports `OK` for a block.
+- **Local observability dashboards show the findings and blocks that
+  happened.** The Findings tiles, top rule and per-rule activity panel count
+  `finding.observed` records in Loki, because a Prometheus counter misses a
+  rule's first finding; the per-rule panel no longer fails with
+  `Cannot read properties of undefined (reading 'config')` on an empty
+  range, and the top rule and top target tiles show the name instead of
+  `Value #A`. The Blocked events **Hook surface** filter lists the hook
+  surfaces the panels filter on, the recent guardrail event panels include
+  `hook_decision` records, Agent360 opens on one agent instead of an **All**
+  that matched nothing once two agents existed, and the AI runtime tiles and
+  discovery error rate show data. The local observability guide explains
+  when to set `observability.metric_policy.temporality: cumulative`.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached

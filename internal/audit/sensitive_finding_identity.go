@@ -6,6 +6,9 @@ package audit
 import (
 	"crypto/subtle"
 	"strings"
+	"sync"
+
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // trustedSensitiveFindingRuleIDs is the closed set of built-in identities that
@@ -65,6 +68,23 @@ var trustedSensitiveFindingRuleIDs = map[sensitiveFindingKind]map[string]struct{
 	),
 }
 
+// shippedGuardrailRuleIDs maps the upper-cased form of every rule and judge
+// finding id in the embedded guardrail rule packs to its shipped spelling.
+// Those ids are vendor-authored constants, so they cross the boundary
+// verbatim whatever the finding's sensitive class; an id that only a custom
+// pack defines is still keyed. A pack that cannot be read trusts nothing.
+var shippedGuardrailRuleIDs = sync.OnceValue(func() map[string]string {
+	ids, err := policyassets.GuardrailRuleIDs()
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(ids))
+	for _, id := range ids {
+		out[strings.ToUpper(id)] = id
+	}
+	return out
+})
+
 func makeSensitiveFindingRuleIDSet(ids ...string) map[string]struct{} {
 	out := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
@@ -87,6 +107,9 @@ func trustedSensitiveFindingRuleID(
 		return trimmed, true
 	}
 	canonical := strings.ToUpper(trimmed)
+	if shipped, ok := shippedGuardrailRuleIDs()[canonical]; ok {
+		return shipped, true
+	}
 	_, ok := trustedSensitiveFindingRuleIDs[kind][canonical]
 	return canonical, ok
 }

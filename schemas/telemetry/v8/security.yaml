@@ -647,6 +647,60 @@ attributes:
     id: redacted-content-v1
     notes: NFC; redacted; bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.guardrail.action
+  type: string
+  brief: Guardrail action on a blocked, confirmed or alerted operation
+  examples:
+  - block
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - block
+      - ask
+      - alert
+    notes: block|ask|alert; absent when the guardrail allowed the operation
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.guardrail.rule_id
+  type: string
+  brief: Primary rule ID behind the guardrail action
+  examples:
+  - C2-METADATA-AWS
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    notes: first matched registered rule ID
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.guardrail.severity
+  type: string
+  brief: Severity of the guardrail action
+  examples:
+  - CRITICAL
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - INFO
+      - LOW
+      - MEDIUM
+      - HIGH
+      - CRITICAL
+    notes: INFO|LOW|MEDIUM|HIGH|CRITICAL
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.judge.kind
   type: string
   brief: Judge implementation kind
@@ -2158,7 +2212,13 @@ groups:
   extends:
   - correlation.security
   - security.finding
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.finding.id
     requirement_level: required
@@ -2194,7 +2254,13 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - security.scan
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.scan.id
     requirement_level: required
@@ -2371,6 +2437,86 @@ groups:
   body_fields: []
   x-defenseclaw:
     route_selector: false
+- id: security.guardrail.outcome
+  type: attribute_group
+  brief: Flat guardrail action, primary rule and severity of a blocked, confirmed or alerted operation.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.guardrail.action
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.rule_id
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.severity
+    requirement_level: recommended
+  body_fields: []
+- id: event.defenseclaw.guardrail.block
+  type: span_event
+  brief: Guardrail blocked the operation.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.guardrail.rule_id
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.severity
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.reason
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
+- id: event.defenseclaw.guardrail.ask
+  type: span_event
+  brief: Guardrail asked the user to confirm the operation.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.guardrail.rule_id
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.severity
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.reason
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
+- id: event.defenseclaw.guardrail.alert
+  type: span_event
+  brief: Guardrail alerted on the operation and let it run.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.guardrail.rule_id
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.severity
+    requirement_level: recommended
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.reason
+    requirement_level: recommended
+  body_fields: []
+  x-defenseclaw:
+    route_selector: false
 - id: span.guardrail.apply
   type: span
   brief: Canonical span.guardrail.apply bounded operation.
@@ -2378,11 +2524,12 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - span.core
-  - correlation.request
+  - correlation.interaction
   - correlation.agent
   - correlation.tool.identity
   - correlation.security
   - security.guardrail
+  - security.guardrail.outcome
   - error.core
   attributes:
   - ref: defenseclaw.guardrail.name
@@ -2396,7 +2543,7 @@ groups:
     name_pattern: apply_guardrail {defenseclaw.guardrail.name} {defenseclaw.guardrail.target_type}
     kinds:
     - INTERNAL
-    status_rule: OTel status represents technical outcome; policy decisions remain typed domain fields.
+    status_rule: OTel status is ERROR for a technical failure or a guardrail block; other policy decisions remain typed domain fields.
   x-defenseclaw:
     bucket: guardrail.evaluation
     family_schema_version: 1
@@ -2416,6 +2563,9 @@ groups:
     route_selector: true
     events:
     - guardrail.decision
+    - defenseclaw.guardrail.block
+    - defenseclaw.guardrail.ask
+    - defenseclaw.guardrail.alert
     - security.finding.observed
     - enforcement.requested
     - content.redacted

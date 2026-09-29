@@ -3623,17 +3623,8 @@
         "refresh": 2,
         "sort": 1,
         "multi": false,
-        "includeAll": true,
-        "allValue": "",
-        "current": {
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ],
-          "selected": true
-        }
+        "includeAll": false,
+        "current": {}
       },
       {
         "name": "lifecycle",
