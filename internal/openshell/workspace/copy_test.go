@@ -43,7 +43,7 @@ func launchCopy(t *testing.T, e *env, name string, mutate func(*StageOptions)) (
 	if _, err := Stage(bg, opts); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Upload(bg, e.data, name, fs); err != nil {
+	if _, err := Upload(bg, e.data, name, fs, fs); err != nil {
 		t.Fatal(err)
 	}
 	rec, err := EstablishBaseline(bg, e.data, name, fs)

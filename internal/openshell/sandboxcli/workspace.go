@@ -34,7 +34,9 @@ import (
 // CopyWorkspace is the copy-mode surface of package workspace.
 type CopyWorkspace interface {
 	Stage(ctx context.Context, opts workspace.StageOptions) (*workspace.CopyRecord, error)
-	Upload(ctx context.Context, dataDir, name string, up workspace.Uploader) (*workspace.CopyRecord, error)
+	// Upload sends the staged copy with up and confirms over ex, in the
+	// sandbox by name, that it arrived there.
+	Upload(ctx context.Context, dataDir, name string, up workspace.Uploader, ex workspace.Execer) (*workspace.CopyRecord, error)
 	Baseline(ctx context.Context, dataDir, name string, ex workspace.Execer) (*workspace.CopyRecord, error)
 	Refresh(ctx context.Context, opts workspace.RefreshOptions) (*workspace.CopyRecord, error)
 	Pull(ctx context.Context, opts workspace.PullOptions) (*workspace.PullResult, error)
@@ -53,8 +55,8 @@ type defaultCopyWorkspace struct{}
 func (defaultCopyWorkspace) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
 	return workspace.Stage(ctx, o)
 }
-func (defaultCopyWorkspace) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader) (*workspace.CopyRecord, error) {
-	return workspace.Upload(ctx, dataDir, name, up)
+func (defaultCopyWorkspace) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader, ex workspace.Execer) (*workspace.CopyRecord, error) {
+	return workspace.Upload(ctx, dataDir, name, up, ex)
 }
 func (defaultCopyWorkspace) Baseline(ctx context.Context, dataDir, name string, ex workspace.Execer) (*workspace.CopyRecord, error) {
 	return workspace.EstablishBaseline(ctx, dataDir, name, ex)

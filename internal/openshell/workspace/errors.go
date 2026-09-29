@@ -74,7 +74,32 @@ var (
 	// ErrUnreadableFolders: the session left folders DefenseClaw cannot
 	// list, so undo cannot tell what they hold.
 	ErrUnreadableFolders = errors.New("workspace: the session left folders that cannot be read")
+	// ErrUploadNotArrived: openshell reported an upload done, but the
+	// sandbox it named does not have it.
+	ErrUploadNotArrived = errors.New("workspace: an upload did not arrive in the sandbox")
 )
+
+// UploadNotArrivedError is an upload openshell reported done that the
+// sandbox, asked over the exec API, does not have (ErrUploadNotArrived).
+type UploadNotArrivedError struct {
+	Sandbox string
+	// Dir is where the upload should have landed; Missing is set when Dir
+	// is not there at all, else Marker, the file the upload carried, is
+	// not in it.
+	Dir, Marker string
+	Missing     bool
+}
+
+func (e *UploadNotArrivedError) Error() string {
+	what := e.Dir + " has no " + e.Marker
+	if e.Missing {
+		what = e.Dir + " is not there"
+	}
+	return fmt.Sprintf("workspace: the upload to %s did not arrive: openshell reported it done, but in %s %s; "+
+		"the files went elsewhere, for example into another sandbox through an ssh connection shared between sandboxes", e.Sandbox, e.Sandbox, what)
+}
+
+func (e *UploadNotArrivedError) Unwrap() error { return ErrUploadNotArrived }
 
 // UnreadableError lists the folders a session made unreadable (see
 // ErrUnreadableFolders). Undo refuses until they can be read again: what
