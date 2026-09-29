@@ -19,6 +19,7 @@ package sandboxcli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // ImageService builds, lists and removes the overlay images.
@@ -54,9 +56,11 @@ type ImageService interface {
 	Size(ctx context.Context, spec *harness.Spec, ref string) (uint64, error)
 	// Prune removes superseded images (image.Builder.Prune).
 	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
-	// Remove deletes every image this data dir built or named: its overlay
-	// images and the run images and aliases made from them.
-	Remove(ctx context.Context, dryRun bool) ([]string, error)
+	// Remove deletes the images this data dir built or named: its overlay
+	// images and the run images and aliases made from them, of the
+	// harnesses named (by connector name), or of every harness when none
+	// is. It forgets their records, also of those Docker no longer has.
+	Remove(ctx context.Context, harnesses []string, dryRun bool) ([]string, error)
 }
 
 // builderImages is the real ImageService: it builds exactly the image the
@@ -139,7 +143,7 @@ func (b *builderImages) Prune(ctx context.Context, opts image.PruneOptions) (ima
 	return builder.Prune(ctx, opts)
 }
 
-func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, error) {
+func (b *builderImages) Remove(ctx context.Context, harnesses []string, dryRun bool) ([]string, error) {
 	store := b.store()
 	if _, err := os.Stat(store.Path()); err != nil {
 		// No image was ever recorded here; do not create the store.
@@ -159,12 +163,12 @@ func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, erro
 	}
 	var tags []string
 	for _, r := range recs {
-		if r.Owner == "" || r.Owner == owner {
+		if (r.Owner == "" || r.Owner == owner) && harnessOf(harnesses, r.Connector) {
 			tags = append(tags, r.Tag)
 		}
 	}
 	for _, r := range runs {
-		if r.Owner == owner {
+		if r.Owner == owner && harnessOf(harnesses, r.Connector) {
 			tags = append(tags, r.Tag)
 		}
 	}
@@ -195,11 +199,19 @@ func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, erro
 	return removed, firstErr
 }
 
-// storeImageIDs are the image IDs of the images Remove removes: this data
-// dir's overlay images and the run images made from them (an alias has its
-// overlay image's ID). A data dir without a store has none, and gets none
-// created.
-func (a *App) storeImageIDs() []string {
+// harnessOf reports whether an image of the harness connector is among
+// the images of harnesses (every harness when none is named).
+func harnessOf(harnesses []string, connector string) bool {
+	return len(harnesses) == 0 || slices.Contains(harnesses, connector)
+}
+
+// storeImageIDs are the image IDs of the images Remove removes for
+// harnesses (every harness when none is named): this data dir's overlay
+// images and the run images and aliases made from them (an alias has its
+// overlay image's ID, which Docker keeps while the alias is there, also
+// once the overlay image's record is gone). A data dir without a store has
+// none, and gets none created.
+func (a *App) storeImageIDs(harnesses ...string) []string {
 	store := image.NewStore(a.dataDir())
 	if _, err := os.Stat(store.Path()); err != nil {
 		return nil
@@ -212,12 +224,12 @@ func (a *App) storeImageIDs() []string {
 	runs, _ := store.RunImages()
 	var ids []string
 	for _, r := range recs {
-		if r.Owner == "" || r.Owner == owner {
+		if (r.Owner == "" || r.Owner == owner) && harnessOf(harnesses, r.Connector) {
 			ids = append(ids, r.ImageID)
 		}
 	}
 	for _, r := range runs {
-		if r.Owner == owner && !r.Alias {
+		if r.Owner == owner && harnessOf(harnesses, r.Connector) {
 			ids = append(ids, r.ImageID)
 		}
 	}
@@ -500,6 +512,240 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 			a.note(fmt.Sprintf("left the %s OpenShell prepared from these images (%s in %s): the DefenseClaw daemon did not answer, so which sandboxes boot them is not known",
 				plural(int64(len(set.disks)), "MicroVM disk", "MicroVM disks"), humanBytes(set.size), a.tildePath(set.dir)))
 		}
+	}
+	return nil
+}
+
+// ImageRemoveOptions are the `image rm` flags.
+type ImageRemoveOptions struct {
+	Harnesses []string
+	// DryRun says what would be removed, and removes nothing.
+	DryRun bool
+	// Yes removes without asking.
+	Yes bool
+}
+
+// harnessImages are the images of one harness that `image rm` removes.
+type harnessImages struct {
+	spec *harness.Spec
+	// tags are the recorded images (Remove), gone those of them Docker no
+	// longer has, and ids their image IDs (storeImageIDs).
+	tags []string
+	gone map[string]bool
+	ids  []string
+	// disks are the MicroVM disks OpenShell prepared from them.
+	disks vmDiskSet
+}
+
+// imageRemovePlan is what `image rm` removes.
+type imageRemovePlan struct {
+	harnesses []harnessImages
+}
+
+// bootingSandbox is a sandbox of this data dir with the images it boots,
+// by tag and ID: its overlay image and, on the MicroVM driver, its run
+// image or alias.
+type bootingSandbox struct {
+	name string
+	refs []string
+}
+
+// bootingSandboxes are the sandboxes of this data dir that can boot an
+// image: the ones the daemon lists and the ones it recorded (it need not
+// be running), less the deleted ones whose record keeps only their
+// snapshot. The error says why the daemon did not list its sandboxes.
+func (a *App) bootingSandboxes(ctx context.Context) ([]bootingSandbox, error) {
+	var out []bootingSandbox
+	at := map[string]int{}
+	add := func(name string, refs ...string) {
+		i, ok := at[name]
+		if !ok {
+			i = len(out)
+			at[name] = i
+			out = append(out, bootingSandbox{name: name})
+		}
+		for _, ref := range refs {
+			if ref != "" && !slices.Contains(out[i].refs, ref) {
+				out[i].refs = append(out[i].refs, ref)
+			}
+		}
+	}
+	api, listErr := a.api()
+	if listErr == nil {
+		var list []sandboxapi.Sandbox
+		if list, listErr = api.List(ctx); listErr == nil {
+			for _, sb := range list {
+				if sb.Phase != "deleted" {
+					add(sb.Name, sb.Image, sb.RunImage, sb.ImageID, sb.RunImageID)
+				}
+			}
+		}
+	}
+	for _, r := range manager.RecordedSandboxes(a.dataDir()) {
+		if !r.Retained {
+			add(r.Name, r.Images...)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out, apiError(listErr)
+}
+
+// planImageRemove finds the images of specs that `image rm` removes, and
+// refuses while sandboxes use one of them (naming them), and while the
+// daemon does not list its sandboxes and MicroVM disks were prepared from
+// them.
+func (a *App) planImageRemove(ctx context.Context, specs []*harness.Spec) (imageRemovePlan, error) {
+	sandboxes, listErr := a.bootingSandboxes(ctx)
+	booted := map[string]bool{}
+	for _, sb := range sandboxes {
+		for _, ref := range sb.refs {
+			booted[ref] = true
+		}
+	}
+	var plan imageRemovePlan
+	ours := map[string]bool{}
+	for _, spec := range specs {
+		tags, err := a.Images.Remove(ctx, []string{spec.Name}, true)
+		if err != nil {
+			return plan, err
+		}
+		if len(tags) == 0 {
+			continue
+		}
+		h := harnessImages{spec: spec, tags: tags, ids: a.storeImageIDs(spec.Name)}
+		recs := make([]image.Record, 0, len(tags))
+		for _, t := range tags {
+			ours[t] = true
+			recs = append(recs, image.Record{Tag: t})
+		}
+		for _, id := range h.ids {
+			ours[id] = true
+		}
+		// Which are gone only words the plan: Remove forgets their records
+		// either way.
+		h.gone, _ = a.Images.Gone(ctx, recs)
+		h.disks = a.vmDisksOf(h.ids, booted)
+		plan.harnesses = append(plan.harnesses, h)
+	}
+	var busy, names []string
+	for _, sb := range sandboxes {
+		used := ""
+		for _, ref := range sb.refs {
+			// A tag says more than an image ID.
+			if ours[ref] && (used == "" || strings.HasPrefix(used, "sha256:") && !strings.HasPrefix(ref, "sha256:")) {
+				used = ref
+			}
+		}
+		if used != "" {
+			busy = append(busy, "sandbox "+sb.name+" uses "+used)
+			names = append(names, sb.name)
+		}
+	}
+	if len(names) > 0 {
+		them, list := "it", strings.Join(names, " ")
+		if len(names) > 1 {
+			them = "them"
+		}
+		return plan, fmt.Errorf("%s: delete %s first (`%s delete %s`); nothing was removed", strings.Join(busy, "; "), them, CommandName, list)
+	}
+	if listErr != nil {
+		// Once the records are forgotten, no prune or teardown finds the
+		// IDs of these disks again.
+		var n int
+		var size int64
+		dir := ""
+		for _, h := range plan.harnesses {
+			n, size, dir = n+len(h.disks.disks), size+h.disks.size, h.disks.dir
+		}
+		if n > 0 {
+			return plan, fmt.Errorf("the DefenseClaw daemon did not list its sandboxes, so which of them boot the %s OpenShell prepared from these images (%s in %s) is not known, "+
+				"and nothing was removed: %w", plural(int64(n), "MicroVM disk", "MicroVM disks"), humanBytes(size), a.tildePath(dir), listErr)
+		}
+	}
+	return plan, nil
+}
+
+// ImageRemove removes the images this data dir recorded for the named
+// harnesses, from Docker and from the records: their overlay images, and
+// the MicroVM run images and aliases made from them. On the MicroVM driver
+// it also removes the disks OpenShell prepared from them (about 5 GB each),
+// by removeVMDisks's rules: only while the daemon lists its sandboxes, and
+// only the disks of image IDs Docker no longer has. It refuses, removing
+// nothing, while a sandbox is recorded with one of the images: that
+// sandbox is deleted first. The next run of such a harness builds its image
+// again.
+func (a *App) ImageRemove(ctx context.Context, o ImageRemoveOptions) error {
+	a.defaults()
+	if len(o.Harnesses) == 0 {
+		return fmt.Errorf("name the harnesses whose images to remove, for example `%s image rm claudecode`", CommandName)
+	}
+	specs, err := a.harnesses(o.Harnesses)
+	if err != nil {
+		return err
+	}
+	plan, err := a.planImageRemove(ctx, specs)
+	if err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		if !slices.ContainsFunc(plan.harnesses, func(h harnessImages) bool { return h.spec == spec }) {
+			a.note("no " + spec.DisplayName + " image is recorded here")
+		}
+	}
+	if len(plan.harnesses) == 0 {
+		a.ok("nothing to remove")
+		return nil
+	}
+	for _, h := range plan.harnesses {
+		a.println(a.bold(h.spec.DisplayName + " images"))
+		for _, t := range h.tags {
+			if h.gone[t] {
+				t += " (no longer in Docker: its record is forgotten)"
+			}
+			a.line(t)
+		}
+		if n := len(h.disks.disks); n > 0 {
+			a.line(fmt.Sprintf("and the %s OpenShell prepared from them (%s in %s)",
+				plural(int64(n), "MicroVM disk", "MicroVM disks"), humanBytes(h.disks.size), a.tildePath(h.disks.dir)))
+		}
+	}
+	if o.DryRun {
+		a.println()
+		a.note("dry run: nothing was changed")
+		return nil
+	}
+	yes, err := a.confirm("Remove them? The next run of the harness builds its image again.", o.Yes)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		a.note("nothing changed")
+		return nil
+	}
+	// A sandbox started while the question waited boots them too.
+	if plan, err = a.planImageRemove(ctx, specs); err != nil {
+		return err
+	}
+	var errs []error
+	for _, h := range plan.harnesses {
+		removed, err := a.Images.Remove(ctx, []string{h.spec.Name}, false)
+		for _, t := range removed {
+			if h.gone[t] {
+				a.ok("forgot the record of " + t + " (no longer in Docker)")
+			} else {
+				a.ok("removed image " + t)
+			}
+		}
+		if err != nil {
+			a.bad("remove the " + h.spec.DisplayName + " images: " + err.Error())
+			errs = append(errs, fmt.Errorf("remove the %s images: %w", h.spec.DisplayName, err))
+		}
+		if len(h.disks.disks) > 0 {
+			a.removeVMDisks(ctx, h.disks, false, "the "+h.spec.DisplayName+" images")
+		}
+	}
+	if len(errs) > 0 {
+		return &Silent{Err: errors.Join(errs...)}
 	}
 	return nil
 }

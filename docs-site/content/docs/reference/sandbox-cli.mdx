@@ -54,7 +54,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
   Help and hints name Kiro and Antigravity by their connector names, as
   `image build` and `image list` do. Setup and the image commands default to `openshell.harnesses`, and then to
-  Claude Code and Codex. Amp, Cursor Agent, and Devin CLI are not verified
+  Claude Code and Codex; `image rm` removes only the harnesses you name. Amp, Cursor Agent, and Devin CLI are not verified
   end to end yet: their images build, but they never pass the hook check, so
   no sandbox runs them. The
   [capability matrix](/docs/capability-matrix) says why for each harness.
@@ -85,7 +85,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | --- | --- |
 | [`sandbox setup`](#sandbox-setup) | One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, and images. |
 | [`sandbox doctor`](#sandbox-doctor) | Check that this machine can run sandboxes. |
-| [`sandbox image`](#sandbox-image) | Build, list, and prune the harness images. |
+| [`sandbox image`](#sandbox-image) | Build, list, prune, and remove the harness images. |
 | [`sandbox enable`](#sandbox-enable), [`disable`](#sandbox-disable) | Add or remove the shell wrapper that runs a harness command in a sandbox. |
 | [`sandbox teardown`](#sandbox-teardown) | Remove everything DefenseClaw set up for sandboxes. |
 | [`sandbox run`](#sandbox-run) | Run a harness in a new sandbox on the current folder. |
@@ -191,6 +191,7 @@ defenseclaw sandbox image list
 | [`sandbox image build`](#sandbox-image-build) | Build and hook-verify harness images (default: the configured harnesses). |
 | [`sandbox image list`](#sandbox-image-list) | List the harness images. |
 | [`sandbox image prune`](#sandbox-image-prune) | Remove superseded harness images. |
+| [`sandbox image rm`](#sandbox-image-rm) | Remove the harnesses' images (on a Mac also their MicroVM disks). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox image build`
@@ -256,6 +257,35 @@ defenseclaw sandbox image prune --dry-run
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--dry-run` | switch |  | Only show what would be removed. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox image rm`
+
+Removes the images this data directory recorded for the named harnesses,
+current ones included, and forgets their records: the harness image and, on a
+MicroVM (vm) gateway, the run images and aliases made from it. For an image
+already removed from Docker (with `docker rmi`, say) only the record goes. On
+a Mac it also removes the MicroVM disks OpenShell prepared from these images
+(about 5 GB each), by the rules of `sandbox image prune`: only
+`sandbox-prepared-rootfs-*` directories of image IDs Docker no longer has, and
+only with the daemon's list of sandboxes. When the daemon does not answer and
+such disks exist, it refuses and removes nothing, so that no disk is left
+that no command would remove later. It also refuses, removing nothing, while a
+sandbox uses one of the images (running, stopped, or only recorded), and names
+it: delete that sandbox first. A sandbox deleted with `--keep-snapshot` uses
+none. It shows what it removes and asks first; `--yes` does not ask, and
+`--dry-run` only shows. The next run of the harness builds its image again.
+
+```bash
+defenseclaw sandbox image rm claude --dry-run
+defenseclaw sandbox image rm kiro opencode --yes
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags image rm */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--dry-run` | switch |  | Only show what would be removed. |
+| `-y`, `--yes` | switch |  | Do not ask. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox enable`

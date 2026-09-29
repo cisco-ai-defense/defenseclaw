@@ -499,8 +499,8 @@ const pruneCommand = "defenseclaw sandbox image prune"
 
 // vmDiskCheck measures the free space where the MicroVM driver keeps its
 // prepared images, and what they take: OpenShell's cache, which it keeps
-// after the sandboxes go. `sandbox image prune` and teardown remove the
-// disks of the images they remove, and nothing else of it.
+// after the sandboxes go. `sandbox image prune`, `image rm` and teardown
+// remove the disks of the images they remove, and nothing else of it.
 func (r *doctorRun) vmDiskCheck() Check {
 	c := Check{ID: CheckIDDisk, Title: checkTitles[CheckIDDisk]}
 	dir := r.vmStateDir()

@@ -228,7 +228,7 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 	}
 	p.orphans = manager.OrphanedSandboxData(a.dataDir())
 	if !o.KeepImages {
-		if tags, err := a.Images.Remove(ctx, true); err == nil {
+		if tags, err := a.Images.Remove(ctx, nil, true); err == nil {
 			p.images = tags
 		}
 		if len(p.images) > 0 {
@@ -577,7 +577,7 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		a.ok("removed the leftover data of " + name)
 	}
 	if !o.KeepImages && len(p.images) > 0 {
-		removed, err := a.Images.Remove(ctx, false)
+		removed, err := a.Images.Remove(ctx, nil, false)
 		for _, t := range removed {
 			a.ok("removed image " + t)
 		}

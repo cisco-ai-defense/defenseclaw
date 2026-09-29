@@ -186,7 +186,7 @@ func TestImageRemoveTakesTheRunImages(t *testing.T) {
 	}
 	data, _ := json.Marshal(doc)
 	writeFile(t, store.Path(), string(data))
-	tags, err := (&builderImages{app: ta.App}).Remove(bg, true)
+	tags, err := (&builderImages{app: ta.App}).Remove(bg, nil, true)
 	want := []string{"defenseclaw.invalid/sandbox-run:claudecode-y-u1000", "defenseclaw.invalid/sandbox:claudecode-x-u1000", "defenseclaw/sandbox:claudecode-x-u1000"}
 	if err != nil || !slices.Equal(tags, want) {
 		t.Fatalf("Remove(dry run) = %v, %v; want %v", tags, err, want)

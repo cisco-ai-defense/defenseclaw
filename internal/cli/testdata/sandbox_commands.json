@@ -199,7 +199,7 @@
   {
     "path": "sandbox image",
     "use": "image",
-    "short": "Build, list and prune the harness images"
+    "short": "Build, list, prune and remove the harness images"
   },
   {
     "path": "sandbox image build",
@@ -238,6 +238,24 @@
     "flags": [
       {
         "name": "dry-run",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "path": "sandbox image rm",
+    "use": "rm \u003charness\u003e...",
+    "short": "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+    "flags": [
+      {
+        "name": "dry-run",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "yes",
+        "shorthand": "y",
         "type": "bool",
         "default": "false"
       }
