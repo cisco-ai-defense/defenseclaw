@@ -258,6 +258,38 @@ func TestCreateRefusesRunFilesADriverCannotTake(t *testing.T) {
 	assertNothingLeft(t, e)
 }
 
+// AG-MAC-F2: a MicroVM gateway refuses, before anything is made, a harness
+// whose image did not pass the hook-fire probe's MicroVM scenario, with the
+// probe's reason; a docker gateway, whose sandboxes get Docker's
+// /etc/hosts, runs the same image.
+func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
+	const problem = `Antigravity cannot resolve localhost in an OpenShell MicroVM: it printed "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"`
+	for _, tc := range []struct{ name, problem, detail string }{
+		{"probe failed", problem, problem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs OpenCode."},
+		{"never probed", "", "was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
+			"rebuild it: `defenseclaw sandbox image build opencode --force`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newVMEnv(t, nil)
+			res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
+			e.images.rec.HarnessVersion, e.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+			e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem = false, tc.problem
+			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-no", Harness: "opencode", Copy: true})
+			apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
+			if apiErr.Message != "OpenCode cannot start in an OpenShell MicroVM (the vm driver this gateway runs)" || !strings.Contains(apiErr.Detail, tc.detail) {
+				t.Fatalf("refusal = %+v", apiErr)
+			}
+			if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 0 || len(e.images.runCalls()) != 0 {
+				t.Fatalf("create calls %d, run images %d", n, len(e.images.runCalls()))
+			}
+			assertNothingLeft(t, e)
+		})
+	}
+	e := newEnv(t, nil)
+	e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem = false, problem
+	e.create(sandboxapi.CreateRequest{Name: "dk-ok", Copy: true})
+}
+
 // A hooks-only harness is sent its overlay image's alias under the
 // driver's repository, which no registry serves.
 func TestCreateOnVMSendsTheAlias(t *testing.T) {

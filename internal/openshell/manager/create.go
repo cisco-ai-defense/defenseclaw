@@ -233,6 +233,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err != nil {
 		return nil, err
 	}
+	if !gw.Driver.HostsFile && !img.MicroVMVerified {
+		return nil, microVMRefusal(spec, img)
+	}
 	uid, gid := m.runAs()
 	if img.UID != uid || img.GID != gid {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable,
@@ -878,6 +881,20 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 		return image.Record{}, &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "the " + spec.DisplayName + " sandbox image is not usable", Detail: err.Error()}
 	}
 	return rec, nil
+}
+
+// microVMRefusal refuses a sandbox on a gateway whose driver writes no
+// /etc/hosts (openshell.Driver.HostsFile: a MicroVM) when its image did not
+// pass the hook-fire probe's MicroVM scenario: the harness would exit at
+// once, as Antigravity CLI did when localhost did not resolve.
+func microVMRefusal(spec *harness.Spec, img image.Record) error {
+	detail := img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName + "."
+	if img.MicroVMProblem == "" {
+		detail = "its image " + img.Tag + " was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
+			"rebuild it: `defenseclaw sandbox image build " + spec.Name + " --force`"
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
+		Message: spec.DisplayName + " cannot start in an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}
 }
 
 // runAs is the one source of a sandbox's run-as identity: the numeric host

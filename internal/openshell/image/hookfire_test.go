@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -68,6 +69,10 @@ type containerSim struct {
 	// refusals is what the hostile-settings run reports as the launcher's
 	// refusals.
 	refusals string
+	// microVMOutput, when set, is the harness output of the MicroVM
+	// scenario, which then exits 1 before any hook fires (a harness that
+	// cannot resolve localhost there).
+	microVMOutput string
 }
 
 var (
@@ -76,10 +81,15 @@ var (
 )
 
 // probeArgv is what a hook-fire docker run hands the harness: the run-as
-// user, the ingress host it maps, its environment and the shell script.
+// user, the ingress host it maps, its environment and the shell script. A
+// MicroVM-scenario run mounts its own /etc/hosts and /etc/resolv.conf,
+// whose contents hosts and resolv hold; the ingress host is read from
+// that hosts file.
 type probeArgv struct {
 	user, host, script string
 	env                map[string]string
+	microVM            bool
+	hosts, resolv      string
 }
 
 func parseProbeArgv(args []string) probeArgv {
@@ -95,10 +105,45 @@ func parseProbeArgv(args []string) probeArgv {
 		case "-e":
 			k, v, _ := strings.Cut(args[i+1], "=")
 			p.env[k] = v
+		case "--mount":
+			p.readResolutionMount(args[i+1])
 		}
 	}
 	return p
 }
+
+// readResolutionMount reads a MicroVM-scenario mount of /etc/hosts or
+// /etc/resolv.conf.
+func (p *probeArgv) readResolutionMount(spec string) {
+	var source, target string
+	for _, field := range strings.Split(spec, ",") {
+		k, v, _ := strings.Cut(field, "=")
+		switch k {
+		case "source":
+			source = v
+		case "target":
+			target = v
+		}
+	}
+	if target != "/etc/hosts" && target != "/etc/resolv.conf" {
+		return
+	}
+	raw, _ := os.ReadFile(source)
+	p.microVM = true
+	if target == "/etc/resolv.conf" {
+		p.resolv = string(raw)
+		return
+	}
+	p.hosts = string(raw)
+	for _, line := range strings.Split(p.hosts, "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[1] == connector.SandboxIngressHost {
+			p.host = f[0]
+		}
+	}
+}
+
+// simHostGateway is what the simulated Docker maps host.docker.internal to.
+const simHostGateway = "192.168.65.254"
 
 // postHook posts one hook event with token (and the idempotency key, when
 // set) the way the rendered hooks do and returns the verdict.
@@ -137,18 +182,40 @@ func (s containerSim) handle(args []string) (string, int) {
 		s.t.Errorf("hook-fire argv = %v", args)
 	}
 	target := net.JoinHostPort(host, strconv.Itoa(s.port))
+	gateway := ""
 	if s.relay {
 		m := simRelayPortRE.FindStringSubmatch(script)
-		if containsSeq(args, "--network", "host") || host != "127.0.0.1" || !containsSeq(args, "--add-host", "host.docker.internal:host-gateway") || m == nil ||
+		// A MicroVM-scenario run names host.docker.internal in its own
+		// hosts file, where Docker's --add-host entries would be dropped.
+		mapped := containsSeq(args, "--add-host", "host.docker.internal:host-gateway")
+		if argv.microVM {
+			mapped = !containsSeq(args, "--add-host", connector.SandboxIngressHost+":127.0.0.1") && strings.Contains(argv.hosts, simHostGateway+"\thost.docker.internal\n")
+		}
+		if containsSeq(args, "--network", "host") || host != "127.0.0.1" || !mapped || m == nil ||
 			!strings.Contains(script, "until (exec 3<>/dev/tcp/127.0.0.1/"+strconv.Itoa(s.port)+")") {
-			s.t.Errorf("relay-mode argv = %v\n%s", args, script)
+			s.t.Errorf("relay-mode argv = %v\n%s\nhosts:\n%s", args, script, argv.hosts)
 			return "", 1
 		}
 		// The in-container relay forwards the baked port to the sink.
 		target = "127.0.0.1:" + m[1]
+		if strings.Contains(script, `echo "::host-gateway=${relay_gw%% *}"`) {
+			gateway = "::host-gateway=" + simHostGateway + "\n"
+		}
 	} else if !containsSeq(args, "--network", "host") || strings.Contains(script, "host.docker.internal") {
 		s.t.Errorf("host-mode argv = %v", args)
 		return "", 1
+	}
+	if argv.microVM {
+		resolver := host
+		if s.relay {
+			resolver = "127.0.0.53"
+		}
+		if strings.Contains(argv.hosts, "localhost") || argv.resolv != "nameserver "+resolver+"\noptions timeout:2 attempts:2\n" {
+			s.t.Errorf("MicroVM-scenario hosts file or resolver:\n%s---\n%s", argv.hosts, argv.resolv)
+		}
+		if s.microVMOutput != "" {
+			return gateway + "::rc=1\n" + simSideEffect(false) + "::output-begin\n" + s.microVMOutput + "\n::output-end\n", 0
+		}
 	}
 	if s.badToken {
 		token = "forged"
@@ -188,7 +255,7 @@ func (s containerSim) handle(args []string) (string, int) {
 		}
 		blocked = blocked || (event == "PreToolUse" && strings.Contains(body, `"action":"block"`) && !s.ignoreVerdict)
 	}
-	out := "::rc=0\n"
+	out := gateway + "::rc=0\n"
 	if strings.Contains(script, "::side-effect=") {
 		out += simSideEffect(!blocked && !s.toolNeverRuns)
 	}
@@ -293,10 +360,10 @@ func TestHookFireProbePassesWhenHooksFire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HookFireProbe: %v", err)
 	}
-	if res.Network != HookFireNetworkHost || len(res.Runs) != 3 || len(res.Runs[0].Events) != len(fullClaudeRun) {
+	if res.Network != HookFireNetworkHost || len(res.Runs) != 4 || len(res.Runs[0].Events) != len(fullClaudeRun) || res.MicroVMProblem != "" {
 		t.Fatalf("result = %+v", res)
 	}
-	for i, want := range []string{ScenarioAllow, ScenarioBlock, ScenarioHostileSettings} {
+	for i, want := range []string{ScenarioAllow, ScenarioBlock, ScenarioHostileSettings, ScenarioMicroVM} {
 		if res.Runs[i].Scenario != want {
 			t.Fatalf("run %d is %q, want %q", i, res.Runs[i].Scenario, want)
 		}
@@ -333,8 +400,9 @@ func TestHookFireBuiltinMockDrivesEveryHarness(t *testing.T) {
 				if err != nil {
 					t.Fatalf("HookFireProbe: %v", err)
 				}
-				// Allow, block and hostile settings.
-				if len(res.Runs) != 3 || res.Network != mode {
+				// Allow, block, hostile settings and the MicroVM's name
+				// resolution.
+				if len(res.Runs) != 4 || res.Network != mode || res.MicroVMProblem != "" {
 					t.Fatalf("result = %+v", res)
 				}
 				for _, run := range res.Runs {
@@ -443,7 +511,7 @@ func TestHookFireHostileLaunchEnvAndRefusals(t *testing.T) {
 			if got := res.Runs[2].Refusals; len(got) != 2 || !got[0].Named || got[1].ExitCode != 2 {
 				t.Fatalf("refusals = %+v", got)
 			}
-			if len(scripts) != 3 {
+			if len(scripts) != 4 {
 				t.Fatalf("%d runs", len(scripts))
 			}
 			launch := "/usr/bin/env 'BASH_ENV=" + hostileRoot + "/bash-env' 'PATH=" + hostileRoot + "/bin:/usr/bin:/bin' '" + harness.ClaudeCodeLauncherPath + "'"
@@ -860,23 +928,24 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifyHooks: %v", err)
 	}
-	if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(clock) || rec.ImageID != built.ImageID || len(res.Runs) != 3 {
+	if !rec.HookFireVerified || !rec.HookFireVerifiedAt.Equal(clock) || rec.ImageID != built.ImageID || len(res.Runs) != 4 ||
+		!rec.MicroVMVerified || rec.MicroVMProblem != "" {
 		t.Fatalf("verified record = %+v runs=%d", rec, len(res.Runs))
 	}
-	if len(images) != 3 || images[0] != built.ImageID || images[2] != built.ImageID {
+	if len(images) != 4 || images[0] != built.ImageID || images[3] != built.ImageID {
 		t.Fatalf("hook-fire ran %v, want the recorded image ID %s", images, built.ImageID)
 	}
-	if got, ok := current(); !ok || got.Tag != c.Tag || !got.HookFireVerified {
+	if got, ok := current(); !ok || got.Tag != c.Tag || !got.HookFireVerified || !got.MicroVMVerified {
 		t.Fatalf("Current = %+v %t after a passing probe", got, ok)
 	}
-	if cached, err := b.Build(ctx, c.Spec, BuildOptions{HookFire: opts}); err != nil || !cached.HookFireVerified || docker.count("build") != 1 || len(images) != 3 {
+	if cached, err := b.Build(ctx, c.Spec, BuildOptions{HookFire: opts}); err != nil || !cached.HookFireVerified || docker.count("build") != 1 || len(images) != 4 {
 		t.Fatalf("cached build = %+v %v (docker builds %d, probes %d)", cached, err, docker.count("build"), len(images))
 	}
 
 	// A probe that proves the hooks no longer fire clears the verdict.
 	sim.events = []string{"SessionStart", "UserPromptSubmit", "Stop"}
 	rec, _, err = b.VerifyHooks(ctx, c, opts)
-	if !errors.Is(err, ErrHooksNotFired) || rec.HookFireVerified || !rec.HookFireVerifiedAt.IsZero() {
+	if !errors.Is(err, ErrHooksNotFired) || rec.HookFireVerified || !rec.HookFireVerifiedAt.IsZero() || rec.MicroVMVerified {
 		t.Fatalf("failed probe: record %+v err %v", rec, err)
 	}
 	if _, ok := current(); ok {
@@ -892,7 +961,7 @@ func TestVerifyHooksRecordsVerdictAndGatesCurrent(t *testing.T) {
 	// A rebuild records a fresh image and verifies it before returning.
 	probes := len(images)
 	rebuilt, err := b.Build(ctx, c.Spec, BuildOptions{Force: true, HookFire: opts})
-	if err != nil || !rebuilt.HookFireVerified || docker.count("build") != 2 || len(images) != probes+3 {
+	if err != nil || !rebuilt.HookFireVerified || docker.count("build") != 2 || len(images) != probes+4 {
 		t.Fatalf("forced rebuild = %+v %v", rebuilt, err)
 	}
 	// A rebuild whose hooks do not fire stays recorded, unverified.
@@ -1059,8 +1128,83 @@ func TestHookFireProbeMountsRunFiles(t *testing.T) {
 	if _, err := b.HookFireProbe(context.Background(), c, opts); err != nil {
 		t.Fatalf("HookFireProbe: %v", err)
 	}
-	if runs != 3 {
+	if runs != 4 {
 		t.Fatalf("%d probe containers", runs)
+	}
+}
+
+// TestHookFireMicroVMScenario pins AG-MAC-F2: the probe also runs the
+// harness with a MicroVM's name resolution (no localhost in /etc/hosts, a
+// resolver that answers nothing), on both network modes. A harness that
+// cannot start there (Antigravity CLI before the image answered localhost)
+// leaves the probe passing, since docker sandboxes run it, and records
+// why a MicroVM cannot, naming the lookup that failed; VerifyHooks then
+// keeps the image verified but not for a MicroVM.
+func TestHookFireMicroVMScenario(t *testing.T) {
+	const agy = "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"
+	for _, mode := range []HookFireNetwork{HookFireNetworkHost, HookFireNetworkRelay} {
+		for _, output := range []string{"", agy, "panic: something else"} {
+			t.Run(string(mode)+"/"+output, func(t *testing.T) {
+				c := hookFireContext(t)
+				sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true, relay: mode == HookFireNetworkRelay, microVMOutput: output}
+				docker := verifyDocker(t, c, sim, nil)
+				store := testStore(t)
+				b := &Builder{Docker: docker, Store: store}
+				opts := HookFireOptions{Network: mode, SinkHost: "127.0.0.1"}
+				if _, err := b.Build(context.Background(), c.Spec, BuildOptions{SkipHookFire: true}); err != nil {
+					t.Fatal(err)
+				}
+				rec, res, err := b.VerifyHooks(context.Background(), c, opts)
+				if err != nil || !rec.HookFireVerified {
+					t.Fatalf("VerifyHooks = %+v, %v", rec, err)
+				}
+				vm := res.Runs[len(res.Runs)-1]
+				if vm.Scenario != ScenarioMicroVM {
+					t.Fatalf("last run is %q", vm.Scenario)
+				}
+				switch output {
+				case "":
+					if !rec.MicroVMVerified || rec.MicroVMProblem != "" || res.MicroVMProblem != "" {
+						t.Fatalf("record = %+v", rec)
+					}
+				case agy:
+					want := `Claude Code cannot resolve localhost in an OpenShell MicroVM: it printed "` + agy + `". A MicroVM's /etc/hosts is empty`
+					if rec.MicroVMVerified || !strings.HasPrefix(rec.MicroVMProblem, want) || res.MicroVMProblem != rec.MicroVMProblem {
+						t.Fatalf("MicroVM problem = %q (verified %t), want it to start %q", rec.MicroVMProblem, rec.MicroVMVerified, want)
+					}
+				default:
+					want := "with the name resolution of an OpenShell MicroVM (an empty /etc/hosts, and a DNS relay that does not answer localhost), " +
+						"Claude Code exited 1; hook SessionStart never fired"
+					if rec.MicroVMVerified || !strings.HasPrefix(rec.MicroVMProblem, want) {
+						t.Fatalf("MicroVM problem = %q, want it to start %q", rec.MicroVMProblem, want)
+					}
+				}
+				// The scenario's files are gone with its container.
+				if left, _ := filepath.Glob(filepath.Join(filepath.Dir(store.Path()), "hookfire-microvm-*")); len(left) != 0 {
+					t.Fatalf("MicroVM scenario files left behind: %v", left)
+				}
+			})
+		}
+	}
+}
+
+// A relay-mode probe that cannot learn host.docker.internal's address
+// cannot run its MicroVM scenario: that says nothing about the image.
+func TestHookFireMicroVMScenarioNeedsTheHostGateway(t *testing.T) {
+	netw := hookFireNet{mode: HookFireNetworkRelay, bindHost: "127.0.0.1"}
+	for _, gw := range []string{"", "host.docker.internal", "fdc4::254"} {
+		if _, _, err := netw.microVMFiles(gw); err == nil || errors.Is(err, ErrHooksNotFired) {
+			t.Fatalf("microVMFiles(%q) = %v", gw, err)
+		}
+	}
+	hosts, resolv, err := netw.microVMFiles("192.168.65.254")
+	if err != nil || hosts != "127.0.0.1\thost.openshell.internal\n192.168.65.254\thost.docker.internal\n" ||
+		resolv != "nameserver 127.0.0.53\noptions timeout:2 attempts:2\n" {
+		t.Fatalf("relay files = %q %q %v", hosts, resolv, err)
+	}
+	hosts, resolv, err = hookFireNet{mode: HookFireNetworkHost, bindHost: "127.0.0.2"}.microVMFiles("")
+	if err != nil || hosts != "127.0.0.2\thost.openshell.internal\n" || resolv != "nameserver 127.0.0.2\noptions timeout:2 attempts:2\n" {
+		t.Fatalf("host files = %q %q %v", hosts, resolv, err)
 	}
 }
 

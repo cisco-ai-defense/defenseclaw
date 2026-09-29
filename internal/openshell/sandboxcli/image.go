@@ -247,6 +247,10 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 		how = "built in " + a.Now().Sub(started).Round(time.Second).String()
 	}
 	a.ok(fmt.Sprintf("%s %s: %s, hooks verified (%s)", spec.DisplayName, rec.HarnessVersion, rec.Tag, how))
+	if !rec.MicroVMVerified && rec.MicroVMProblem != "" {
+		// Docker sandboxes run it; a MicroVM gateway refuses it.
+		a.warn(spec.DisplayName + " cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + rec.MicroVMProblem)
+	}
 	return nil
 }
 

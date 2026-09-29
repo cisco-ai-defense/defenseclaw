@@ -94,12 +94,23 @@ type Driver struct {
 	// root disk there on its first boot (about a minute and about 5 GB),
 	// one per image ID, and never removes it.
 	ImageCache string
+	// HostsFile says the workload's /etc/hosts names localhost: Docker
+	// writes one into every container. OpenShell 0.1.1's vm driver makes a
+	// MicroVM's root disk from a `docker export`, whose init layer puts an
+	// empty /etc/hosts over the image's, and its guest init writes none, so
+	// a name resolves only through the image's nsswitch.conf and the guest's
+	// loopback DNS relay, which does not answer localhost. The overlay image
+	// answers it with nss-myhostname, which a program that reads /etc/hosts
+	// itself (Go's own resolver, a static musl binary) never asks. Without
+	// it a sandbox boots only an image that passed the hook-fire probe's
+	// MicroVM scenario (image.Record.MicroVMVerified).
+	HostsFile bool
 }
 
 // drivers is the table: what each compute driver DefenseClaw drives can
 // and cannot do.
 var drivers = map[ComputeDriver]Driver{
-	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true, SkipWorkloadCheck: true},
+	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true, SkipWorkloadCheck: true, HostsFile: true},
 	DriverVM: {
 		Name: DriverVM, RunFilesInImage: true, GatewayIdentity: true,
 		ImageRepository: "defenseclaw.invalid/sandbox",
