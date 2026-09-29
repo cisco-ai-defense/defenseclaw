@@ -643,3 +643,7 @@ func auditDBModeMatches(os.FileInfo, os.FileMode) bool { return true }
 // who can mutate the directory. validateAuditDBPlatformTrust already proves
 // owner, protected DACL, inheritance, and every write-capable ACE.
 func auditDBImmediateDirectoryModeTrusted(os.FileInfo) bool { return true }
+
+// auditDBOpenElsewhere needs no probe on Windows: SQLite opens the database
+// without delete sharing, so renaming a file another process has open fails.
+func auditDBOpenElsewhere(string) error { return nil }

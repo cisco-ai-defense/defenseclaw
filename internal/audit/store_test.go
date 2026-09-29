@@ -17,9 +17,12 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -548,6 +551,64 @@ func TestInitIdempotent(t *testing.T) {
 	}
 	if rowCount != want {
 		t.Errorf("schema_version rows after Init x2 = %d, want %d (not duplicated)", rowCount, want)
+	}
+}
+
+func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.SetActionForConnector("tool", "mcp__probe__one", "claudecode", "", ActionState{Install: "block"}, "probe"); err != nil {
+		t.Fatalf("SetActionForConnector: %v", err)
+	}
+	var rootPage, pageSize int64
+	if err := store.db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = 'audit_events'`).Scan(&rootPage); err != nil {
+		t.Fatalf("audit_events root page: %v", err)
+	}
+	if err := store.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		t.Fatalf("page_size: %v", err)
+	}
+	if err := store.Close(); err != nil { // the last connection checkpoints the WAL into audit.db
+		t.Fatalf("Close: %v", err)
+	}
+	// Damage the event-history table only; the block list stays readable.
+	file, err := os.OpenFile(dbPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open for damage: %v", err)
+	}
+	if _, err := file.WriteAt(bytes.Repeat([]byte{0xff}, int(pageSize)), (rootPage-1)*pageSize); err != nil {
+		t.Fatalf("damage page: %v", err)
+	}
+	_ = file.Close()
+
+	var warn bytes.Buffer
+	recovered, err := OpenDaemonStore(dbPath, &warn)
+	if err != nil {
+		t.Fatalf("OpenDaemonStore on a corrupt store: %v", err)
+	}
+	defer recovered.Close()
+	entry, err := recovered.GetActionForConnector("tool", "mcp__probe__one", "claudecode")
+	if err != nil || entry == nil || entry.Actions.Install != "block" {
+		t.Fatalf("block entry after rebuild = %+v, %v; want the block carried over", entry, err)
+	}
+	var check string
+	if err := recovered.db.QueryRow(`PRAGMA quick_check`).Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("new store quick_check = %q, %v", check, err)
+	}
+	moved, _ := filepath.Glob(dbPath + ".corrupt-*")
+	kept := 0
+	for _, name := range moved {
+		if !strings.HasSuffix(name, "-wal") && !strings.HasSuffix(name, "-shm") {
+			kept++
+		}
+	}
+	if kept != 1 || !strings.Contains(warn.String(), "block/allow entries carried over: 1.") {
+		t.Fatalf("moved stores = %v, warning = %q", moved, warn.String())
 	}
 }
 
