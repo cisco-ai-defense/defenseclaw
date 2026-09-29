@@ -167,23 +167,37 @@ type SandboxArtifactProvider interface {
 
 // ResolveSandboxHookContract resolves a harness version against the Linux
 // hook contracts, which are the ones every overlay image runs. A connector
-// whose host hooks are not version-gated (Kiro) resolves against its
-// sandbox-only contracts instead: an overlay image always pins a reviewed
-// harness build.
+// with sandbox-only contracts resolves against those instead: one whose host
+// hooks are not version-gated (Kiro), as an overlay image always pins a
+// reviewed harness build, and one whose sandbox needs a narrower range than
+// its host (OmniGent). A version the host contract accepts and the sandbox
+// refuses gets the sandbox's reason.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
-		return resolveHookContractAgainst(name, agentVersion, contracts)
+		resolution := resolveHookContractAgainst(name, agentVersion, contracts)
+		if why := sandboxOnlyRefusals[name]; why != "" && resolution.Status == HookCompatibilityUnknown &&
+			resolveHookContractForOS(name, agentVersion, "linux").Status == HookCompatibilityKnown {
+			resolution.Reason = why
+		}
+		return resolution
 	}
 	return resolveHookContractForOS(connectorName, agentVersion, "linux")
 }
 
 // sandboxOnlyHookContractsByConnector are reviewed hook contracts that apply
 // only inside DefenseClaw's OpenShell overlay images, for connectors whose
-// host hooks are not version-gated. Each connector keeps its contracts in its
-// own <connector>_sandbox.go file.
+// host hooks are not version-gated or whose sandbox needs a narrower range.
+// Each connector keeps its contracts in its own <connector>_sandbox.go file.
 var sandboxOnlyHookContractsByConnector = map[string]func() []HookContract{
-	"kiro": kiroSandboxHookContracts,
+	"kiro":     kiroSandboxHookContracts,
+	"omnigent": omnigentSandboxHookContracts,
+}
+
+// sandboxOnlyRefusals say why a sandbox refuses a version its connector's
+// host contract accepts.
+var sandboxOnlyRefusals = map[string]string{
+	"omnigent": omnigentSandboxRefusal,
 }
 
 // sandboxOnlyHookContracts returns fresh copies of connector's sandbox-only

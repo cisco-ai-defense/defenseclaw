@@ -778,6 +778,14 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 			}
 		case openshell.CheckIDCLI:
 			switch {
+			case a.GOOS == "darwin" && rep.OpenShellOutsideFormula():
+				// Setup refuses it on the next line, as the TUI's machine
+				// check marks it (RT-A-1).
+				label, mark = "OpenShell", a.mark(false)
+				if rep.CLIVersion != "" {
+					label += " " + rep.CLIVersion
+				}
+				label += " is not from Homebrew's nvidia/openshell formula"
 			case c.Status == openshell.StatusFail:
 				label = "OpenShell not installed"
 				if rep.CLIVersion != "" {

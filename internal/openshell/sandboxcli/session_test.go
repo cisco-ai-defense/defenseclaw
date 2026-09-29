@@ -472,6 +472,11 @@ func TestSessionSummary(t *testing.T) {
 		// (OG-U2).
 		{name: "continue omnigent", opts: RunOptions{Harness: "omnigent", Args: []string{"--model", "gpt-5-mini"}}, setup: continueHint("sk-mock", false),
 			want: []string{cont + " -- --continue (the `omnigent run …` OmniGent printed above works only inside the sandbox)"}},
+		// agy prints "Resume with -c (or command below): agy
+		// --conversation=<id>" at /quit, and nothing named the sandbox's
+		// continue (AG-RT-1).
+		{name: "continue antigravity", opts: RunOptions{Harness: "antigravity"}, setup: continueHint("", false),
+			want: []string{"→ " + cont + " -- -c (the `agy --conversation …` Antigravity printed above works only inside the sandbox)"}},
 		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
 			ta.IO.TTY = false
 			noChanges(ta)
