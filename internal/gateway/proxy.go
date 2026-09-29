@@ -2200,6 +2200,43 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+
+	// If an upstream base URL is configured and the client sent an
+	// Authorization header, proxy the /models request to the real
+	// upstream so clients (e.g. Codex with ChatGPT auth) get the
+	// provider-native model list instead of a synthetic one.
+	if base := strings.TrimSpace(p.cfg.LLM.BaseURL); base != "" {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			upstreamURL := strings.TrimRight(base, "/") + r.URL.Path
+			if r.URL.RawQuery != "" {
+				upstreamURL += "?" + r.URL.RawQuery
+			}
+			proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+			if err == nil {
+				proxyReq.Header.Set("Authorization", auth)
+				for _, key := range []string{"User-Agent", "Accept", "chatgpt-account-id"} {
+					if v := r.Header.Get(key); v != "" {
+						proxyReq.Header.Set(key, v)
+					}
+				}
+				resp, err := http.DefaultClient.Do(proxyReq)
+				if err == nil {
+					defer resp.Body.Close()
+					for k, vv := range resp.Header {
+						for _, v := range vv {
+							w.Header().Add(k, v)
+						}
+					}
+					w.WriteHeader(resp.StatusCode)
+					io.Copy(w, resp.Body)
+					return
+				}
+				fmt.Fprintf(os.Stderr, "[guardrail] models proxy failed, falling back to synthetic: %v\n", err)
+			}
+		}
+	}
+
+	// Fallback: synthetic OpenAI-compatible model list.
 	p.rtMu.RLock()
 	modelName := p.cfg.ModelName
 	if modelName == "" {
