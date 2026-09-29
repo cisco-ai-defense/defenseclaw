@@ -86,6 +86,13 @@ class _Cmd:
 
 _OUTPUT = _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT")
 _YES = _Flag("yes", "bool", "answer every question with its default", short="y")
+# run and connect: a mount's changes are kept, a copy's stay in the sandbox.
+_SESSION_YES = _Flag(
+    "yes",
+    "bool",
+    "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull)",
+    short="y",
+)
 
 
 def _policy_flags() -> tuple[_Flag, ...]:
@@ -120,10 +127,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ("setup",),
         "One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, images",
         long=(
-            "Checks this machine, installs OpenShell with NVIDIA's installer when you agree, "
-            "enables project-folder bind mounts on your local OpenShell gateway (backed up and "
-            'restored by "sandbox teardown"), turns OpenShell\'s upstream telemetry off unless you '
-            "keep it, records the harnesses, offers shell wrappers and builds the harness images."
+            "Checks this machine, installs OpenShell with NVIDIA's installer when you agree and "
+            'configures your local OpenShell gateway (backed up and restored by "sandbox teardown"): '
+            "on Linux it enables project-folder bind mounts and turns OpenShell's upstream telemetry "
+            "off unless you keep it; on a Mac it switches the gateway to OpenShell's MicroVM driver. "
+            "Then it records the harnesses, offers shell wrappers and builds the harness images."
         ),
         flags=(
             _Flag(
@@ -131,7 +139,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)",
             ),
-            _Flag("no-mounts", "bool", "leave bind mounts off; every run then works on a copy"),
+            _Flag("no-mounts", "bool", "leave bind mounts off (Linux); every run then works on a copy"),
             _Flag("wrappers", "bool", "make the harness commands run sandboxed without asking"),
             _Flag("no-wrappers", "bool", "do not offer the shell wrappers"),
             _Flag(
@@ -161,10 +169,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ("doctor",),
         "Check that this machine can run sandboxes",
         long=(
-            "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration and "
-            "version, bind mounts, telemetry, ports, the DefenseClaw daemon, harness images, shell "
-            "wrappers and the organization policy. Exits 1 when a check fails (with --output json "
-            'the result is printed and the exit status is 0; read "ok").'
+            "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration, "
+            "version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature, "
+            "the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw "
+            "daemon, harness images, shell wrappers and the organization policy. Exits 1 when a "
+            "check fails (with --output json the result is printed and the exit status is 0; read "
+            '"ok").'
         ),
         flags=(
             _OUTPUT,
@@ -177,13 +187,15 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ("run",),
         "Run a harness in a sandbox on this folder",
         long=(
-            "Runs the harness in a new sandbox on the current folder: live-mounted by default "
-            "with a pre-session snapshot, or a copy with --copy. The harness is claude, codex, "
+            "Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver) "
+            "live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS "
+            "(the MicroVM driver) every run works on a copy. The harness is claude, codex, "
             "copilot, opencode, kiro, hermes, openhands, omnigent or agy (amp, cursor-agent and devin "
             "are not verified yet, so they do not run). Skip-permissions mode is on by default; "
             "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
             "you get a summary, a review of changed files that can run code on your machine, and "
-            "the choice to keep or undo the changes. Arguments after -- go to the harness."
+            "the choice to keep or undo the changes (from a copy: to bring them back, or leave them "
+            "in the sandbox for pull). Arguments after -- go to the harness."
         ),
         args=(_Arg("harness"), _Arg("harness_args", required=False, many=True)),
         flags=(
@@ -206,7 +218,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 metavar="PACK",
             ),
             _Flag("profile", "string", "network profile: open, balanced or strict", metavar="PROFILE"),
-            _Flag("context", "stringArray", "extra folder mounted read-only (repeatable)", metavar="PATH"),
+            _Flag(
+                "context",
+                "stringArray",
+                "extra folder mounted read-only (repeatable; mount mode only)",
+                metavar="PATH",
+            ),
             _Flag(
                 "unmask",
                 "stringArray",
@@ -268,7 +285,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("refresh", "bool", "when resuming a copy-mode sandbox, copy the folder again"),
             _Flag("cpu", "string", "CPU limit, for example 2 or 500m", metavar="CPU"),
             _Flag("memory", "string", "memory limit, for example 4Gi", metavar="MEMORY"),
-            _Flag("yes", "bool", "take the defaults at the end of the session (keep the changes)", short="y"),
+            _SESSION_YES,
         ),
         example=(
             "defenseclaw sandbox run claude\n"
@@ -293,7 +310,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("shell", "bool", "open a shell in the sandbox instead of the harness"),
             _Flag("refresh", "bool", "copy-mode: copy the folder into the sandbox again first"),
             _Flag("rm", "bool", "delete the sandbox when the session ends"),
-            _Flag("yes", "bool", "take the defaults at the end of the session (keep the changes)", short="y"),
+            _SESSION_YES,
             _Flag("prompt", "string", "run the harness headless with this prompt", short="p", metavar="TEXT"),
         ),
     ),
@@ -371,6 +388,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("review",),
         "Review the session's changes, flagging files that can run code on this machine",
+        long=(
+            "Reviews what changed in a mounted project since its pre-session snapshot, flagging "
+            "files that can run code on this machine. For a copy-mode sandbox (every sandbox on "
+            'macOS) it previews what "sandbox pull" would bring back and applies nothing; with '
+            "--output json it prints the pull's result."
+        ),
         args=(_Arg("name"),),
         flags=(_OUTPUT, _Flag("diff", "bool", "print the unified diff too")),
     ),
@@ -667,13 +690,14 @@ def sandbox() -> None:
     """Run coding agents in NVIDIA OpenShell sandboxes.
 
     Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA
-    OpenShell sandbox: the agent sees only your project folder (live, with
-    secret files masked, git internals read-only and a snapshot for undo),
-    reaches the web through DefenseClaw's egress proxy, and every tool call
-    still goes through DefenseClaw.
+    OpenShell sandbox: the agent sees only your project folder (on Linux live,
+    with secret files masked, git internals read-only and a snapshot for undo;
+    on macOS, where sandboxes are OpenShell MicroVMs, a copy you pull the
+    changes back from), reaches the web through DefenseClaw's egress proxy,
+    and every tool call still goes through DefenseClaw.
 
     Start with "defenseclaw sandbox setup", then run "defenseclaw sandbox run
-    claude" in a project folder. Linux and macOS only.
+    claude" in a project folder. Linux, and macOS on Apple silicon, only.
     """
 
 

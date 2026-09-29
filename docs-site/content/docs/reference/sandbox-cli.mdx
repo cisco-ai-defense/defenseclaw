@@ -121,7 +121,7 @@ defenseclaw sandbox setup --non-interactive --skip-images
 | --- | --- | --- | --- |
 | `--harness` | text, repeatable or comma-separated |  | Harness to set up, added to openshell.harnesses (repeatable; default: openshell.harnesses, else claude and codex). |
 | `--install-openshell` | switch |  | Install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo). |
-| `--no-mounts` | switch |  | Leave bind mounts off; every run then works on a copy. |
+| `--no-mounts` | switch |  | Leave bind mounts off (Linux); every run then works on a copy. |
 | `--no-wrappers` | switch |  | Do not offer the shell wrappers. |
 | `--non-interactive` | switch |  | Never prompt: take the defaults and skip steps that need consent. |
 | `--restart-gateway` | switch |  | Restart the OpenShell gateway to apply its configuration even while sandboxes run on it. |
@@ -471,7 +471,7 @@ A few rules the flags follow:
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--bedrock-region` | text |  | Amazon Bedrock region for --llm bedrock (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then us-east-1). |
-| `--context` | text, repeatable |  | Extra folder mounted read-only (repeatable). |
+| `--context` | text, repeatable |  | Extra folder mounted read-only (repeatable; mount mode only). |
 | `--copy` | switch |  | Work on a copy of the folder with secrets held back; bring changes back with pull. |
 | `--cpu` | text |  | CPU limit, for example 2 or 500m. |
 | `--credential` | text, repeatable |  | NAME=host[:port]: give the sandbox a placeholder for `$NAME` that works only against that host (repeatable). |
@@ -493,7 +493,7 @@ A few rules the flags follow:
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--safe` | switch |  | Keep the harness's own permission prompts (skip-permissions off). |
 | `--unmask` | text, repeatable |  | Share a masked secret file or glob with the sandbox (repeatable). |
-| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (keep the changes). |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox connect`
@@ -529,7 +529,7 @@ defenseclaw sandbox connect myapp-7f3a --shell
 | `--refresh` | switch |  | Copy-mode: copy the folder into the sandbox again first. |
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--shell` | switch |  | Open a shell in the sandbox instead of the harness. |
-| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (keep the changes). |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox exec`

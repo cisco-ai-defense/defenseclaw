@@ -264,6 +264,24 @@ def test_run_help_names_every_harness(exec_capture) -> None:
     assert exec_capture == []
 
 
+def test_help_says_how_a_mac_differs(exec_capture) -> None:
+    # On macOS (OpenShell's MicroVM driver) every run works on a copy: --yes
+    # leaves its changes in the sandbox, and review previews the pull.
+    def help_text(*args: str) -> str:
+        result = CliRunner().invoke(sandbox, [*args, "--help"], obj=AppContext())
+        assert result.exit_code == 0, result.output
+        return " ".join(result.output.split())
+
+    run = help_text("run")
+    assert "on macOS (the MicroVM driver) every run works on a copy" in run
+    assert "(mount: keep the changes; copy: leave them in the sandbox for pull)" in run
+    assert "(repeatable; mount mode only)" in run
+    assert "copy: leave them in the sandbox for pull" in help_text("connect")
+    assert 'previews what "sandbox pull" would bring back and applies nothing' in help_text("review")
+    assert "on a Mac it switches the gateway to OpenShell's MicroVM driver" in help_text("setup")
+    assert exec_capture == []
+
+
 def test_windows_is_refused_with_a_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "windows")
 
