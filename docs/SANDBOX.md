@@ -41,7 +41,7 @@ Overview and a Sandboxes panel. Still to come:
   (see [Sandboxed connectors](#sandboxed-connectors)).
 - **macOS.** No sandbox can start on Docker Desktop, whose Linux VM kernel
   has no Landlock (see [macOS and Docker Desktop](#macos-and-docker-desktop)).
-  The macOS code paths stay; macOS support is tracked in a follow-up issue.
+  The macOS code paths stay; macOS support (through OpenShell's MicroVM driver) is tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992).
 
 ## Why OpenShell
 
@@ -2110,7 +2110,8 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 
 | Behaviour | Design consequence |
 | --- | --- |
-| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | Landlock stays `hard_requirement`, so no sandbox can start on Docker Desktop: macOS cannot run sandboxes today. The doctor checks the VM kernel for Landlock. The macOS code paths (the Homebrew install, `brew services`, the Docker Desktop host-networking and file-sharing checks) stay in place, and macOS support is tracked in a follow-up issue. |
+| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. The doctor checks the VM kernel for Landlock. The macOS code paths (the Homebrew install, `brew services`, the Docker Desktop host-networking and file-sharing checks) stay in place. |
+| OpenShell's MicroVM driver (opt-in: `OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor; needs `e2fsprogs` from Homebrew for the VM disk) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It pulls its image from a registry. | DefenseClaw drives only the Docker driver: the doctor requires it, each run's files and project mounts go in the Docker driver's config, and harness images are built into the local Docker image store, which the MicroVM driver does not read. Supporting the MicroVM driver is how DefenseClaw will run on macOS ([#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992)). |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
 
 ## Supported platforms and versions
@@ -2130,7 +2131,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 - Linux amd64 and arm64. macOS arm64 cannot run sandboxes today: Docker
   Desktop's Linux VM kernel has no Landlock (see
   [macOS and Docker Desktop](#macos-and-docker-desktop)), and macOS support is
-  tracked in a follow-up issue. Windows, WSL2 and Intel macOS are unsupported.
+  tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992). Windows, WSL2 and Intel macOS are unsupported.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),

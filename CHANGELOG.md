@@ -245,7 +245,7 @@ deleted.
   refuses to start any sandbox there. `defenseclaw sandbox doctor` checks for
   it. The macOS paths (the Homebrew install and `brew services`, the Docker
   Desktop checks, the macOS app's sandbox views) stay in place; macOS support
-  is tracked in a follow-up issue.
+  (through OpenShell's MicroVM driver) is tracked in #992.
 - Harnesses: Claude Code, Codex, OpenCode, GitHub Copilot CLI, Kiro CLI,
   Hermes, OpenHands, Antigravity and OmniGent run end to end. Cursor Agent,
   Amp and Devin CLI images build but are refused until a hook check with a

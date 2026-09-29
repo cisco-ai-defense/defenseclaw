@@ -62,21 +62,31 @@ You don't need OpenShell installed beforehand: setup offers to install it.
 
 ### macOS
 
-OpenShell sandboxes cannot run on a Mac today. On a Mac, OpenShell runs each
-sandbox in a container in Docker Desktop's Linux VM. DefenseClaw's sandbox
-policy requires Landlock, so OpenShell refuses to start a sandbox without it
-rather than run it unconfined, and Docker Desktop's VM kernel does not run
-Landlock. Measured on Apple silicon with Docker Desktop (engine 29.1.5) and
-OpenShell 0.1.1, the VM kernel is 6.12.65-linuxkit and its only active
-security modules are `capability,bpf`, so OpenShell's supervisor fails its
-Landlock check and every sandbox ends in an error state.
+DefenseClaw cannot run OpenShell sandboxes on a Mac yet. OpenShell has two
+ways to run sandboxes on macOS:
 
-`defenseclaw sandbox doctor` checks the VM kernel for Landlock and reports
-that it is missing. The macOS parts of DefenseClaw stay in place for when
-this changes: setup installs OpenShell from NVIDIA's `nvidia/openshell`
-Homebrew formula and runs its gateway with `brew services`, and the doctor
-checks Docker Desktop's host networking and file sharing. macOS support is
-tracked in a follow-up issue. Until then, run sandboxes on a Linux machine.
+- **The Docker driver** runs each sandbox in a container in Docker Desktop's
+  Linux VM. OpenShell's supervisor needs Landlock in the kernel it runs on,
+  and Docker Desktop's VM kernel does not run Landlock. Measured on Apple
+  silicon with Docker Desktop (engine 29.1.5) and OpenShell 0.1.1, the VM
+  kernel is 6.12.65-linuxkit and its only active security modules are
+  `capability,bpf`. Every sandbox fails the supervisor's Landlock check and
+  ends in an error state, whether it runs DefenseClaw's policy or OpenShell's
+  default one.
+- **The MicroVM driver** (opt-in, on Apple's Hypervisor) boots each sandbox
+  in its own small VM with its own kernel, and it does run sandboxes on a Mac
+  (it also needs `e2fsprogs` from Homebrew). DefenseClaw drives only the
+  Docker driver today: its harness images, run files and project mounts all
+  go through Docker.
+
+`defenseclaw sandbox doctor` checks Docker Desktop's VM kernel for Landlock
+and reports that it is missing. The macOS parts of DefenseClaw stay in place:
+setup installs OpenShell from NVIDIA's `nvidia/openshell` Homebrew formula and
+runs its gateway with `brew services`, and the doctor checks Docker Desktop's
+host networking and file sharing. Support for the MicroVM driver on macOS is
+tracked in
+[#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992). Until
+then, run sandboxes on a Linux machine.
 
 ## One-time setup
 
