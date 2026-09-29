@@ -283,13 +283,26 @@ func TestSSHShimRefusesAnSSHThatShares(t *testing.T) {
 	s, err := openshell.NewSSHShim(pathEnv)
 	var sharing *openshell.SSHSharingError
 	if s != nil || !errors.As(err, &sharing) || !strings.Contains(err.Error(), "ssh shim: DefenseClaw could not confirm that "+wrapper+
-		", the first ssh on PATH, keeps connection sharing off when run with "+opts+" first: `ssh -G sandbox` through DefenseClaw's shim: exit status 255: ssh: illegal option -- G; make ") {
+		", the first ssh on PATH, keeps connection sharing off when run with "+opts+" first: `ssh -G sandbox` through DefenseClaw's shim: exit status 255: ssh: illegal option -- G; "+
+		"run `"+wrapper+" -G -o ProxyCommand=true sandbox` to see why ssh cannot read its settings for that host") {
 		t.Fatalf("NewSSHShim with an ssh that cannot answer -G = %+v, %v", s, err)
 	}
 	writeFile(t, wrapper, "#!/bin/sh\necho 'user dev'\n", 0o700)
 	if s, err := openshell.NewSSHShim(pathEnv); s != nil || err == nil ||
-		!strings.Contains(err.Error(), ": `ssh -G sandbox` through DefenseClaw's shim printed no controlmaster setting; make ") {
+		!strings.Contains(err.Error(), ": `ssh -G sandbox` through DefenseClaw's shim printed no controlmaster setting; run `") {
 		t.Fatalf("NewSSHShim with an ssh that prints no settings = %+v, %v", s, err)
+	}
+
+	// An ssh whose configuration canonicalizes host names fails `ssh -G
+	// sandbox` without a ProxyCommand (the bare host does not resolve),
+	// but the OpenShell CLI always passes one, which turns
+	// canonicalization off: the check passes one too, so such an ssh is
+	// used, not refused.
+	writeFile(t, wrapper, "#!/bin/sh\n"+
+		"case \" $* \" in *ProxyCommand=*) ;; *) echo 'ssh: Could not resolve host \"sandbox\"' >&2; exit 255 ;; esac\n"+
+		"exec "+shq(realSSH)+" \"$@\"\n", 0o700)
+	if s, err := openshell.NewSSHShim(pathEnv); err != nil || s == nil || s.Real != wrapper {
+		t.Fatalf("NewSSHShim with an ssh that canonicalizes host names = %+v, %v", s, err)
 	}
 
 	// A wrapper that passes its arguments on is used.

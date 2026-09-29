@@ -214,6 +214,11 @@ func (e *SSHSharingError) Cause() string {
 
 // Fix says what the user can change.
 func (e *SSHSharingError) Fix() string {
+	if e.Err != nil {
+		// ssh reported no settings: nothing says a wrapper is to blame.
+		return fmt.Sprintf("run `%s -G -o ProxyCommand=true %s` to see why ssh cannot read its settings for that host, and fix your ssh configuration or the ssh first on PATH",
+			e.SSH, SSHSandboxHost)
+	}
 	fix := "make " + e.SSH + " pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own, or put "
 	if e.Next == "" {
 		return fix + "OpenSSH's ssh (such as /usr/bin/ssh) first on PATH"
@@ -431,7 +436,12 @@ func (s *SSHShim) checkNoSharing() error {
 func (s *SSHShim) sharing() (sshSharing, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), sshShimProbeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.Path, "-G", SSHSandboxHost)
+	// The OpenShell CLI always passes a ProxyCommand, and with one ssh
+	// skips hostname canonicalization (CanonicalizeHostname), which
+	// would otherwise fail on the bare host "sandbox" or look it up in
+	// every canonical domain. A placeholder keeps -G on the CLI's path;
+	// -G never runs it.
+	cmd := exec.CommandContext(ctx, s.Path, "-G", "-o", "ProxyCommand=true", SSHSandboxHost)
 	env := os.Environ()
 	cmd.Env = s.Environ(append(env[:len(env):len(env)], "PATH="+s.pathEnv))
 	stdout, stderr := &cappedBuffer{limit: sshShimMaxGOutput}, &cappedBuffer{limit: sshShimMaxGOutput}
