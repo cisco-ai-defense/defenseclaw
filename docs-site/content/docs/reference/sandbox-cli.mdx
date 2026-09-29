@@ -411,12 +411,13 @@ continues the same conversation inside the sandbox, for every harness that
 can continue one: `→ continue this conversation: defenseclaw sandbox connect
 myapp-7f3a -- --continue` for Claude Code, OpenCode, GitHub Copilot CLI,
 Hermes Agent and OmniGent, `-- resume --last` for Codex, `-- --resume` for
-Kiro CLI and `-- --resume --last` for OpenHands. A plain `connect` starts a
-new conversation. The resume line the harness itself prints as it exits
-(`claude --resume <id>`, `codex resume <id>`, `copilot --resume=<id>`,
-`kiro-cli --resume-id <id>`, `hermes --resume <id>`, `openhands --resume
-<id>`, `omnigent run … --resume <id>`) works only inside the sandbox, where
-the conversation is: typed on this machine it does not reach it, unless the
+Kiro CLI, `-- --resume --last` for OpenHands and `-- -c` for Antigravity. A
+plain `connect` starts a new conversation. The resume line the harness itself
+prints as it exits (`claude --resume <id>`, `codex resume <id>`,
+`copilot --resume=<id>`, `kiro-cli --resume-id <id>`, `hermes --resume <id>`,
+`openhands --resume <id>`, `omnigent run … --resume <id>`,
+`agy --conversation=<id>`) works only inside the sandbox, where the
+conversation is: typed on this machine it does not reach it, unless the
 shell wrapper is on
 (`sandbox enable`) for that command, which sends it into the folder's
 sandbox. DefenseClaw cannot keep that line off the screen, so its own line
@@ -575,7 +576,7 @@ resume it): neither one's end stops it, undoes the folder or deletes it
 undo commands for later. To continue the harness's last conversation,
 pass its own flag: `-- --continue` for Claude Code, OpenCode, GitHub Copilot
 CLI, Hermes Agent and OmniGent, `-- resume --last` for Codex, `-- --resume`
-for Kiro CLI and `-- --resume --last` for OpenHands.
+for Kiro CLI, `-- --resume --last` for OpenHands and `-- -c` for Antigravity.
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a

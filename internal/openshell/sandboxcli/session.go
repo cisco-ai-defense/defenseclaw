@@ -867,6 +867,9 @@ var continueArgs = map[string]string{
 	// OmniGent's run --continue picks the sandbox agent's latest
 	// conversation.
 	"omnigent": "--continue",
+	// agy's -c (a Go flag) reopens the folder's latest conversation, as
+	// its own "Resume with -c" says.
+	"antigravity": "-c",
 }
 
 // ownResumeHint is how the resume command a harness prints as it exits
@@ -883,6 +886,8 @@ var ownResumeHint = map[string]string{
 	"hermes":     "hermes --resume",
 	"openhands":  "openhands --resume",
 	"omnigent":   "omnigent run",
+	// agy: "Resume with -c (or command below): agy --conversation=<id>".
+	"antigravity": "agy --conversation",
 }
 
 // continueHint names, last and not dimmed, the command that continues this
