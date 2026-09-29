@@ -396,6 +396,31 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	return resp, nil
 }
 
+// EgressUnblock reports whether a sandbox's egress proxy reaches host
+// because of an unblock decision, and that decision's scope: "sandbox" (an
+// unblock for this sandbox) or "always" (one saved to
+// openshell.egress.unblocked). It asks the decider and principal the
+// sandbox's proxy credential carries, so it says what the proxy does now: a
+// host the proxy refuses (the organization's lists, the block list, an
+// unblock ignored under allow_unblock: false, a suspended credential) or
+// allows for another reason (the open web, an allow entry) is not
+// unblocked. The gateway lifts DefenseClaw's destination rules for the
+// hosts it reports (#954). bindingID and name must be the sandbox's.
+func (m *Manager) EgressUnblock(bindingID, name, host string) (string, bool) {
+	p, ok := m.creds.Lookup(bindingID)
+	if !ok || p.Decider == nil || p.SandboxName != name {
+		return "", false
+	}
+	dec := p.Decider.DecideHost(p, host)
+	if !dec.Allowed || dec.Source != egress.SourceUnblock {
+		return "", false
+	}
+	if u, ok := m.unblocks.Unblocked(p, dec.Host); ok && u.SandboxID != "" {
+		return string(audit.SandboxApprovalScopeSandbox), true
+	}
+	return string(audit.SandboxApprovalScopeAlways), true
+}
+
 // recoverCredential restores a sandbox's egress proxy credential from its
 // environment (HTTPS_PROXY userinfo) after a daemon restart.
 func recoverCredential(sb *openshell.Sandbox, username string) (egress.Credential, bool) {

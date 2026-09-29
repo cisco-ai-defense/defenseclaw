@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 // The policy layer, a real egress proxy, REST unblock and triage agree on
@@ -380,6 +381,61 @@ func TestDeciderAndUnblocks(t *testing.T) {
 	sets := proxy.swaps()
 	e.setConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"late.example.com"} })
 	eventually(t, "the deciders rebuilt", func() bool { return !e.decideEgress("egbox", "late.example.com").Allowed && proxy.swaps() > sets })
+}
+
+// #954: EgressUnblock reports a host the sandbox's proxy reaches because of
+// an unblock, with the unblock's scope, and nothing else: not a host the
+// proxy allows anyway, a subdomain of the unblocked host, another
+// sandbox's unblock, another binding, or an unblock the policy no longer
+// honors.
+func TestEgressUnblockFollowsTheProxy(t *testing.T) {
+	e := newEnv(t, nil)
+	proxy := &fakeProxy{counter: egress.NewCounter(egress.CounterOptions{})}
+	e.m.AttachProxy(proxy)
+	e.run()
+	e.create(sandboxapi.CreateRequest{Name: "egbox"})
+	e.create(sandboxapi.CreateRequest{Name: "otherbox", Project: e.otherProject("other")})
+	eg, other := e.binding("egbox"), e.binding("otherbox")
+	unblocked := func(b sandboxauth.Binding, host string) string {
+		t.Helper()
+		scope, ok := e.m.EgressUnblock(b.ID, b.SandboxName, host)
+		if !ok {
+			return "-"
+		}
+		return scope
+	}
+	if got := unblocked(eg, "webhook.site"); got != "-" {
+		t.Fatalf("webhook.site before any unblock = %s", got)
+	}
+	_, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "egbox"})
+	must(t, err)
+	for _, tc := range []struct {
+		b          sandboxauth.Binding
+		host, want string
+	}{
+		{eg, "webhook.site", "sandbox"},
+		{eg, "WebHook.Site.", "sandbox"},
+		{eg, "x.webhook.site", "-"},
+		{eg, "example.org", "-"},
+		{other, "webhook.site", "-"},
+		{sandboxauth.Binding{ID: other.ID, SandboxName: "egbox"}, "webhook.site", "-"},
+		{sandboxauth.Binding{ID: "sb_unknown", SandboxName: "egbox"}, "webhook.site", "-"},
+	} {
+		if got := unblocked(tc.b, tc.host); got != tc.want {
+			t.Errorf("EgressUnblock(%s, %s) = %s, want %s", tc.b.SandboxName, tc.host, got, tc.want)
+		}
+	}
+	_, err = e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "pastebin.com", Always: true})
+	must(t, err)
+	if got, gotOther := unblocked(eg, "pastebin.com"), unblocked(other, "pastebin.com"); got != "always" || gotOther != "always" {
+		t.Fatalf("always unblock = %s and %s, want always for both", got, gotOther)
+	}
+	// An unblock the policy no longer honors lifts nothing.
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
+	e.m.refreshEgress()
+	if got := unblocked(eg, "webhook.site"); got != "-" {
+		t.Fatalf("webhook.site under allow_unblock: false = %s", got)
+	}
 }
 
 // With unblocking off each refusal gives its own reason (the organization's

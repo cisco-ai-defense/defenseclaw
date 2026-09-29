@@ -535,6 +535,12 @@ networks, metadata addresses or this machine, and never overrides your own
 organization sets `openshell.admin.allow_unblock: false`, unblocking is
 refused with "blocked by your organization's DefenseClaw policy".
 
+Once a host is unblocked, DefenseClaw's tool-call rules for known exfil
+destinations (such as `C2-WEBHOOK-SITE`) stop flagging calls to it in the
+sandboxes the unblock covers, so the agent is not told the destination is
+blocked while the proxy lets it through. Calls to its subdomains, and calls
+another rule flags, keep their notice.
+
 ### Answer the rare asks
 
 A client that ignores the proxy settings and connects directly is refused

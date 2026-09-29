@@ -231,6 +231,9 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		OnHookFailure: func(f SandboxHookFailure) {
 			mgr.ObserveHookFailure(manager.HookFailure{BindingID: f.BindingID, SandboxName: f.SandboxName, Status: f.Status})
 		},
+		EgressUnblock: func(b sandboxauth.Binding, host string) (string, bool) {
+			return mgr.EgressUnblock(b.ID, b.SandboxName, host)
+		},
 	}); err != nil {
 		return nil, err
 	}

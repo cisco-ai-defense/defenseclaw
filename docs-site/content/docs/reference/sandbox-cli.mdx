@@ -846,6 +846,14 @@ organization's lists can't be unblocked, and neither can anything under
 [decision order](/docs/setup/sandbox-policy#how-a-destination-is-decided)
 has the details.
 
+An unblock also stops DefenseClaw's destination rules (such as
+`C2-WEBHOOK-SITE` for `webhook.site`, or `C2-NGROK`) from flagging or
+blocking tool calls that name the unblocked host, in the sandboxes the
+unblock covers: the agent is no longer told a destination is blocked that
+the proxy lets it reach, and the activity feed shows no finding for it. A
+call that names a subdomain you did not unblock, or that another rule
+flags too, keeps its verdict.
+
 ```bash
 defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 defenseclaw sandbox unblock docs.example.com --always

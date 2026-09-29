@@ -312,6 +312,21 @@ deleted.
   its subdomains open. `egress_allow_only`, `openshell.egress.block` and pack
   lists still match a host name exactly; IP addresses and CIDR prefixes are
   unchanged.
+- After `sandbox unblock webhook.site`, a sandboxed agent's `curl
+  https://webhook.site/...` no longer gets the `C2-WEBHOOK-SITE` notice
+  ("Allowed but flagged by DefenseClaw rule C2-WEBHOOK-SITE", or a block
+  under a stricter policy) while the egress proxy lets it through (#954).
+  A sandbox verdict decided only by DefenseClaw's destination rules
+  (`C2-WEBHOOK-SITE`, `C2-NGROK`, `C2-PIPEDREAM`, `C2-REQUESTBIN`,
+  `C2-HOOKBIN`, `C2-BURP`, `C2-INTERACTSH`, `C2-OAST`, `C2-CANARY`,
+  `C2-PASTEBIN`) is a plain allow, with no finding on the activity feed,
+  when every host those rules name in the call is one the sandbox's proxy
+  reaches because of an unblock: a sandbox unblock does this in that
+  sandbox, an `--always` unblock in every sandbox. Subdomains nobody
+  unblocked, names next to a shell expansion, calls another rule flags too
+  and hosts the proxy allows for another reason keep their verdict. The
+  audit row's reason names the rule that was not applied, and
+  `extra.sandbox_egress_unblocked` the unblocks. Both drivers.
 
 ### OpenShell sandboxes on macOS (MicroVM driver)
 
