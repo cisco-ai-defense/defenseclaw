@@ -132,6 +132,17 @@ func runFileOf(t *testing.T, files []connector.SandboxFile, path string) connect
 	return connector.SandboxFile{}
 }
 
+// runFileVerifies are the checks of v that are for one of the run files.
+func runFileVerifies(v *verifyRecord, files []connector.SandboxFile) []verifyFile {
+	var out []verifyFile
+	for _, c := range v.Files {
+		if slices.ContainsFunc(files, func(f connector.SandboxFile) bool { return f.Path == c.Path }) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -173,10 +184,14 @@ func TestCreateOnVMBakesRunFilesIntoARunImage(t *testing.T) {
 		rec.RunConfig == nil || rec.RunConfig.Delivery != runDeliveryImage || rec.RunConfig.Digest != digest {
 		t.Fatalf("record: run image %s (%s), run config %+v", rec.RunImage, rec.RunImageID, rec.RunConfig)
 	}
-	if rec.Verify == nil || rec.Verify.UID != 1000 || rec.Verify.GID != 1000 || len(rec.Verify.Files) != len(files) {
+	if rec.Verify == nil || rec.Verify.UID != 1000 || rec.Verify.GID != 1000 {
 		t.Fatalf("verify = %+v", rec.Verify)
 	}
-	for _, v := range rec.Verify.Files {
+	checked := runFileVerifies(rec.Verify, files)
+	if len(checked) != len(files) || len(rec.Verify.Files) == len(files) {
+		t.Fatalf("verify = %+v; want the hooks and each of the %d run files", rec.Verify, len(files))
+	}
+	for _, v := range checked {
 		f := runFileOf(t, files, v.Path)
 		if v.SHA256 != sha256Hex(f.Data) || v.UID != 0 || v.GID != 0 || v.Mode != 0o644 || v.ReadOnlyMount {
 			t.Fatalf("verify file %+v", v)
@@ -192,7 +207,7 @@ func TestCreateOnVMBakesRunFilesIntoARunImage(t *testing.T) {
 	}
 	// The project is still never mounted live.
 	_, err = e.tryCreate(sandboxapi.CreateRequest{Name: "vm-mount", Project: e.otherProject("third")})
-	if apiErr := wantCode(t, err, sandboxapi.CodeUnavailable); !strings.Contains(apiErr.Error(), "--copy") {
+	if apiErr := wantCode(t, err, sandboxapi.CodeNeedsCopy); !strings.Contains(apiErr.Error(), "--copy") {
 		t.Fatalf("mount refusal = %+v", apiErr)
 	}
 }
@@ -210,13 +225,21 @@ func TestCreateOnDockerMountsRunFiles(t *testing.T) {
 	}
 	files := e.runFiles("dk-claude")
 	rec := readRecord(t, e, "dk-claude")
-	if rec.RunImage != "" || rec.RunConfig.Delivery != runDeliveryMount || rec.Verify == nil || len(rec.Verify.Files) != len(files) {
+	if rec.RunImage != "" || rec.RunConfig.Delivery != runDeliveryMount || rec.Verify == nil {
 		t.Fatalf("record: run image %q, run config %+v, verify %+v", rec.RunImage, rec.RunConfig, rec.Verify)
 	}
+	checked := 0
 	for _, v := range rec.Verify.Files {
+		if _, ok := files[v.Path]; !ok {
+			continue
+		}
+		checked++
 		if v.SHA256 != sha256Hex(files[v.Path]) || !v.ReadOnlyMount || v.UID != 1000 || v.Mode != 0o644 {
 			t.Fatalf("verify file %+v", v)
 		}
+	}
+	if checked != len(files) || len(rec.Verify.Files) == len(files) {
+		t.Fatalf("verify = %+v; want the hooks and each of the %d run files", rec.Verify, len(files))
 	}
 }
 
@@ -344,10 +367,18 @@ func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	if after.RunConfig.Digest == before.RunConfig.Digest || after.Verify == nil {
 		t.Fatalf("digest %s -> %s, verify %+v", before.RunConfig.Digest, after.RunConfig.Digest, after.Verify)
 	}
+	checked := 0
 	for _, v := range after.Verify.Files {
+		if _, ok := files[v.Path]; !ok {
+			continue
+		}
+		checked++
 		if v.SHA256 != sha256Hex(files[v.Path]) {
 			t.Fatalf("verify %s = %s, file holds %s", v.Path, v.SHA256, sha256Hex(files[v.Path]))
 		}
+	}
+	if checked != len(files) {
+		t.Fatalf("verify = %+v; want each of the %d run files", after.Verify, len(files))
 	}
 }
 

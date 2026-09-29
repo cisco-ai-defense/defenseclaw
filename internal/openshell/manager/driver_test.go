@@ -102,14 +102,14 @@ func TestStatusNamesTheDriver(t *testing.T) {
 	}
 }
 
-// A MicroVM cannot take a live mount of the project: a Claude Code create in
-// mount mode fails closed before anything is made, on the host or on the
-// gateway. (In copy mode its run files go into a run image, see
-// TestCreateOnVMBakesRunFilesIntoARunImage.)
+// A MicroVM cannot take a live mount of the project: a Claude Code create
+// that staged no copy is told to (CodeNeedsCopy) before anything is made,
+// on the host or on the gateway. (In copy mode its run files go into a run
+// image, see TestCreateOnVMBakesRunFilesIntoARunImage.)
 func TestCreateOnVMRefusesAMountBeforeAnySideEffect(t *testing.T) {
 	e := newVMEnv(t, nil)
 	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-claude", LLM: anthropicLLM, Credentials: stripeCred})
-	apiErr := wantCode(t, err, sandboxapi.CodeUnavailable)
+	apiErr := wantCode(t, err, sandboxapi.CodeNeedsCopy)
 	if !strings.Contains(apiErr.Message, "mounted live") || !strings.Contains(apiErr.Detail, "mounts no host folders") {
 		t.Fatalf("refusal = %+v", apiErr)
 	}
