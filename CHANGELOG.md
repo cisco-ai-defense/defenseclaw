@@ -362,7 +362,8 @@ deleted.
   event OpenHands hands to its already stopped TUI. The same module starts a
   DefenseClaw block's hook line with the block, so the collapsed line reads
   `BLOCKED by DefenseClaw rule <ID>: …` instead of
-  `Status: BLOCKED - Blocked by DefenseCla...`.
+  `Status: BLOCKED - Blocked by DefenseCla...`, and it ignores the
+  `AuthlibDeprecationWarning` an OpenHands dependency printed at every start.
 
 ### Legacy OpenShell standalone sandbox removed
 

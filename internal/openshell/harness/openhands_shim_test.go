@@ -116,6 +116,63 @@ print("session end ok")
 	shParses(t, "OpenHands install step", run)
 }
 
+// TestOpenHandsShimQuietsAuthlib: Authlib's deprecation warning, which
+// Authlib always shows and the OpenHands SDK triggers at every start, is
+// ignored; every other warning still shows.
+func TestOpenHandsShimQuietsAuthlib(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required")
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"authlib/__init__.py": "",
+		"authlib/deprecate.py": `import warnings
+
+
+class AuthlibDeprecationWarning(DeprecationWarning):
+    pass
+
+
+warnings.simplefilter("always", AuthlibDeprecationWarning)
+
+
+def deprecate(message):
+    warnings.warn(AuthlibDeprecationWarning(message), stacklevel=2)
+`,
+		"authlib/jose/__init__.py": `from authlib.deprecate import deprecate
+
+deprecate("authlib.jose module is deprecated, please use joserfc instead.")
+`,
+	} {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), []byte(body))
+	}
+	writeFile(t, filepath.Join(dir, openHandsShimModuleName+".py"), []byte(openHandsShimModule))
+	script := `import sys, warnings
+sys.path.insert(0, sys.argv[1])
+if sys.argv[2] == "shim":
+    import ` + openHandsShimModuleName + `
+import authlib.jose
+warnings.warn("another warning", UserWarning)
+`
+	for _, tc := range []struct {
+		mode      string
+		wantJose  bool
+		wantOther bool
+	}{{"shim", false, true}, {"none", true, true}} {
+		out, err := exec.Command(python, "-I", "-c", script, dir, tc.mode).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", tc.mode, err, out)
+		}
+		if got := strings.Contains(string(out), "authlib.jose module is deprecated"); got != tc.wantJose {
+			t.Errorf("%s: Authlib warning shown = %v, want %v:\n%s", tc.mode, got, tc.wantJose, out)
+		}
+		if got := strings.Contains(string(out), "another warning"); got != tc.wantOther {
+			t.Errorf("%s: other warning shown = %v, want %v:\n%s", tc.mode, got, tc.wantOther, out)
+		}
+	}
+}
+
 // openHandsEventStandIn is the part of OpenHands the block-title patch works
 // with: rich's Text and the SDK's frozen HookExecutionEvent, whose
 // rendering starts "Hook: <event> (<tool>)" and puts the reason after

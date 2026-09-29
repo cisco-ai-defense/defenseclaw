@@ -57,11 +57,19 @@ const openHandsShimModuleName = "defenseclaw_openhands"
 //     reason is DefenseClaw's, the rendering starts with
 //     "BLOCKED by DefenseClaw rule <ID>: <title>. ..." instead, followed by
 //     the rest of OpenHands' own rendering.
+//   - Authlib's deprecation warning stays off the screen. The SDK imports
+//     authlib.jose (openhands/sdk/llm/auth/openai.py), which warns
+//     "authlib.jose module is deprecated, please use joserfc instead" at
+//     every start, with a filter that always shows it; the shim ignores
+//     that one warning category (AuthlibDeprecationWarning) once Authlib
+//     defines it.
 const openHandsShimModule = `"""DefenseClaw: OpenHands in an OpenShell sandbox.
 
 End a session without a traceback: OpenHands hands the SessionEnd hook
-results to its TUI after the TUI stopped. And lead a DefenseClaw block's hook
-line with the block, which the collapsed line otherwise cuts off.
+results to its TUI after the TUI stopped. Lead a DefenseClaw block's hook
+line with the block, which the collapsed line otherwise cuts off. And keep
+Authlib's deprecation warning, which a dependency prints at every start, off
+the screen.
 """
 ` + pyOnImport + `
 
@@ -112,8 +120,15 @@ def _defenseclaw_patch_hook_event(events):
     cls.visualize = property(visualize, doc=cls.visualize.__doc__)
 
 
+def _defenseclaw_quiet_authlib(deprecate):
+    import warnings
+
+    warnings.filterwarnings("ignore", category=deprecate.AuthlibDeprecationWarning)
+
+
 _defenseclaw_on_import("openhands.sdk.hooks.conversation_hooks", _defenseclaw_patch_hooks)
 _defenseclaw_on_import("openhands.sdk.event.hook_execution", _defenseclaw_patch_hook_event)
+_defenseclaw_on_import("authlib.deprecate", _defenseclaw_quiet_authlib)
 `
 
 // OpenHands is the OpenHands CLI harness. OpenHands takes its model only

@@ -174,7 +174,9 @@ exist only in the image; nothing on your host changes.
   `RuntimeError: App is not running` traceback above DefenseClaw's session
   summary at every exit. A root-owned module in the image runs the
   `SessionEnd` hooks as before and drops only that display event, so the
-  session ends cleanly and DefenseClaw still gets the hook.
+  session ends cleanly and DefenseClaw still gets the hook. The module also
+  ignores the `AuthlibDeprecationWarning` (`authlib.jose module is
+  deprecated`) an OpenHands dependency printed at every start.
 - **Blocks on screen.** OpenHands shows a hook result as a collapsed line cut
   at 70 characters, which left `Status: BLOCKED - Blocked by DefenseCla...`.
   The same module starts a DefenseClaw block's rendering with the block, so
