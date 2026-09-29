@@ -59,6 +59,13 @@ import (
 // child's PATH has found it and it has run; when the temporary directory
 // cannot hold one that does, the shim goes under DefenseClaw's data
 // directory, and when that cannot either the command is refused.
+//
+// The options win over ssh_config, not over an ssh wrapper first on PATH
+// that puts its own ControlMaster or ControlPath options before its
+// arguments (ssh keeps the first value it gets) or passes -S or -M (which
+// win wherever they are). So the shim also counts only once `ssh -G
+// sandbox` through it, which prints the configuration without connecting,
+// shows connection sharing off; otherwise the command is refused.
 
 // sshNoSharingOptions turn OpenSSH connection sharing off: no master
 // connection, no control socket to reuse, nothing kept open afterwards.
@@ -169,6 +176,85 @@ type SSHShim struct {
 // in.
 var errSSHShimUnsafe = errors.New("another user could replace the ssh DefenseClaw gives the OpenShell CLI there")
 
+// SSHSharingError is NewSSHShim's refusal of an ssh that does not keep
+// connection sharing off with the shim's options first on its command
+// line, or whose settings `ssh -G` through the shim could not show.
+type SSHSharingError struct {
+	// SSH is the ssh the shim runs, the first on PATH: typically a wrapper
+	// that adds options of its own.
+	SSH string
+	// Next is the ssh after it on PATH, if any: the one to put first.
+	Next string
+	// Master and Path are the ControlMaster and ControlPath that `ssh -G`
+	// reported (Path empty for none).
+	Master, Path string
+	// Err, when set, is why `ssh -G` reported no settings.
+	Err error
+}
+
+func (e *SSHSharingError) Error() string { return "ssh shim: " + e.Cause() + "; " + e.Fix() }
+
+func (e *SSHSharingError) Unwrap() error { return e.Err }
+
+// Cause says what DefenseClaw found.
+func (e *SSHSharingError) Cause() string {
+	opts := strings.Join(sshNoSharingOptions[:], " ")
+	if e.Err != nil {
+		return fmt.Sprintf("DefenseClaw could not confirm that %s, the first ssh on PATH, keeps connection sharing off when run with %s first: %v", e.SSH, opts, e.Err)
+	}
+	path := e.Path
+	if path == "" {
+		path = "none"
+	}
+	return fmt.Sprintf("%s, the first ssh on PATH, does not keep connection sharing off when run with %s first "+
+		"(`ssh -G %s` through DefenseClaw's shim reports ControlMaster %s, ControlPath %s), so one sandbox's session could reach another sandbox: "+
+		"an ssh wrapper that puts its own ControlMaster or ControlPath options before its arguments, or passes -S or -M, wins over DefenseClaw's",
+		e.SSH, opts, SSHSandboxHost, e.Master, path)
+}
+
+// Fix says what the user can change.
+func (e *SSHSharingError) Fix() string {
+	fix := "make " + e.SSH + " pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own, or put "
+	if e.Next == "" {
+		return fix + "OpenSSH's ssh (such as /usr/bin/ssh) first on PATH"
+	}
+	return fix + filepath.Dir(e.Next) + " before " + filepath.Dir(e.SSH) + " on PATH, so the OpenShell CLI runs " + e.Next
+}
+
+// newSSHSharingError is the refusal of realSSH, found on pathEnv, for
+// sharing or err.
+func newSSHSharingError(realSSH, pathEnv string, sharing sshSharing, err error) *SSHSharingError {
+	return &SSHSharingError{SSH: realSSH, Next: sshAfter(realSSH, pathEnv), Master: sharing.master, Path: sharing.path, Err: err}
+}
+
+// sshAfter is the ssh findRealSSH finds on pathEnv after the directory of
+// realSSH, or empty.
+func sshAfter(realSSH, pathEnv string) string {
+	dirs := filepath.SplitList(pathEnv)
+	for i, dir := range dirs {
+		if dir == "" || !filepath.IsAbs(dir) || filepath.Join(dir, "ssh") != realSSH {
+			continue
+		}
+		var rest []string
+		for _, d := range dirs[i+1:] {
+			if d != "" && filepath.Join(d, "ssh") != realSSH {
+				rest = append(rest, d)
+			}
+		}
+		next, _ := findRealSSH(strings.Join(rest, string(os.PathListSeparator)))
+		return next
+	}
+	return ""
+}
+
+// sshShimNoSharingPassed maps the ssh a shim runs and the PATH it runs it
+// with to the files every ssh on that PATH was (sshStamps) when `ssh -G`
+// through a shim last showed sharing off. The check costs a run of ssh
+// (about 0.1 s on a Mac); the commands of one sandbox run then pay for it
+// once, and a change to any ssh on PATH, the wrapper or the ssh it runs,
+// is checked again. One entry per ssh and PATH keeps it bounded.
+var sshShimNoSharingPassed sync.Map // string -> string
+
 // NewSSHShim finds the ssh that pathEnv (a PATH value) resolves and writes
 // a shim for it in a new private directory under the temporary directory,
 // or, when no shim there would run (or the directory is not safe), under
@@ -177,8 +263,9 @@ var errSSHShimUnsafe = errors.New("another user could replace the ssh DefenseCla
 // with either, and on Windows, where OpenShell sandboxes do not run and
 // Win32-OpenSSH has no connection sharing. It refuses when neither
 // directory can hold a shim that runs and that no other user could
-// replace. The caller removes the shim once the command it was made for
-// has exited.
+// replace, and, with an *SSHSharingError, when `ssh -G` through the shim
+// does not show connection sharing off. The caller removes the shim once
+// the command it was made for has exited.
 func NewSSHShim(pathEnv string) (*SSHShim, error) {
 	if runtime.GOOS == "windows" {
 		return nil, nil
@@ -195,20 +282,26 @@ func NewSSHShim(pathEnv string) (*SSHShim, error) {
 		base = os.TempDir()
 	}
 	s, err := newSSHShimIn(base, realSSH, pathEnv, false)
-	if err == nil {
-		return s, nil
-	}
-	reasons := []string{err.Error()}
-	if fallback := sshShimFallback(); fallback != "" && filepath.Clean(fallback) != filepath.Clean(base) {
-		s, ferr := newSSHShimIn(fallback, realSSH, pathEnv, true)
-		if ferr == nil {
-			s.Fallback = err.Error()
-			return s, nil
+	if err != nil {
+		reasons := []string{err.Error()}
+		if fallback := sshShimFallback(); fallback != "" && filepath.Clean(fallback) != filepath.Clean(base) {
+			var ferr error
+			if s, ferr = newSSHShimIn(fallback, realSSH, pathEnv, true); ferr == nil {
+				s.Fallback = err.Error()
+			} else {
+				reasons = append(reasons, ferr.Error())
+			}
 		}
-		reasons = append(reasons, ferr.Error())
+		if s == nil {
+			return nil, fmt.Errorf("ssh shim: DefenseClaw found no directory for an ssh with connection sharing off that the OpenShell CLI would run (%s); "+
+				"set TMPDIR to a directory only you can write, on a filesystem not mounted noexec", strings.Join(reasons, "; "))
+		}
 	}
-	return nil, fmt.Errorf("ssh shim: DefenseClaw found no directory for an ssh with connection sharing off that the OpenShell CLI would run (%s); "+
-		"set TMPDIR to a directory only you can write, on a filesystem not mounted noexec", strings.Join(reasons, "; "))
+	if err := s.checkNoSharing(); err != nil {
+		_ = s.Remove()
+		return nil, err
+	}
+	return s, nil
 }
 
 // newSSHShimIn makes a shim in a new directory under base, which create
@@ -310,6 +403,73 @@ func (s *SSHShim) probe() error {
 		return fmt.Errorf("the shim in %s answered %q when run, not what DefenseClaw wrote in it", s.Dir, bytes.TrimSpace(out))
 	}
 	return nil
+}
+
+// sshShimMaxGOutput bounds what the `ssh -G` check reads of each stream.
+const sshShimMaxGOutput = 64 << 10
+
+// checkNoSharing runs `<shim> -G sandbox`, which prints the configuration
+// the real ssh would connect with and does not connect, and refuses with
+// an *SSHSharingError unless it shows ControlMaster no and ControlPath
+// none. A pass stands while every ssh on the PATH is the same file.
+func (s *SSHShim) checkNoSharing() error {
+	pathEnv := sshPathWithoutShims(s.pathEnv)
+	key, stamps := s.Real+"\x00"+pathEnv, sshStamps(pathEnv)
+	if prev, ok := sshShimNoSharingPassed.Load(key); ok && prev.(string) == stamps {
+		return nil
+	}
+	sharing, err := s.sharing()
+	if err != nil || !sharing.off() {
+		return newSSHSharingError(s.Real, pathEnv, sharing, err)
+	}
+	sshShimNoSharingPassed.Store(key, stamps)
+	return nil
+}
+
+// sharing is what `ssh -G sandbox` through the shim reports, run with the
+// environment the OpenShell CLI gives it.
+func (s *SSHShim) sharing() (sshSharing, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sshShimProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.Path, "-G", SSHSandboxHost)
+	env := os.Environ()
+	cmd.Env = s.Environ(append(env[:len(env):len(env)], "PATH="+s.pathEnv))
+	stdout, stderr := &cappedBuffer{limit: sshShimMaxGOutput}, &cappedBuffer{limit: sshShimMaxGOutput}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = time.Second
+	what := fmt.Sprintf("`ssh -G %s` through DefenseClaw's shim", SSHSandboxHost)
+	if err := cmd.Run(); err != nil {
+		if line := lastLine(stderr.Bytes()); line != "" {
+			err = fmt.Errorf("%w: %s", err, line)
+		}
+		return sshSharing{}, fmt.Errorf("%s: %w", what, err)
+	}
+	sharing, ok := parseSSHSharing(stdout.Bytes())
+	if !ok {
+		return sshSharing{}, fmt.Errorf("%s printed no controlmaster setting", what)
+	}
+	return sharing, nil
+}
+
+// sshStamps identifies the file at each ssh a PATH search of pathEnv
+// could reach (device, inode, size and modification time), or its
+// absence: what a wrapper that runs "the next ssh" on PATH could run.
+func sshStamps(pathEnv string) string {
+	var b strings.Builder
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" || !filepath.IsAbs(dir) {
+			continue
+		}
+		p := filepath.Join(dir, "ssh")
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintf(&b, "%q -\n", p)
+			continue
+		}
+		dev, ino := fileID(info)
+		fmt.Fprintf(&b, "%q %d:%d %d %d\n", p, dev, ino, info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String()
 }
 
 // Verify checks that the shim is still exactly what NewSSHShim wrote, a

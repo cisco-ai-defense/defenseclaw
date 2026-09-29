@@ -19,10 +19,20 @@
 package openshell
 
 import (
+	"io/fs"
 	"os"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+// fileID is the device and inode of the file info describes.
+func fileID(info fs.FileInfo) (dev, ino uint64) {
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		return uint64(st.Dev), uint64(st.Ino)
+	}
+	return 0, 0
+}
 
 // executableFile reports whether p is a regular file the caller may
 // execute, as a PATH search judges it: access(2) with X_OK, which on Linux

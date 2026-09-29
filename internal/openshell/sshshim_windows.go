@@ -18,5 +18,10 @@
 
 package openshell
 
+import "io/fs"
+
 // executableFile is unused on Windows, where NewSSHShim makes no shim.
 func executableFile(string) bool { return false }
+
+// fileID is unused on Windows, where NewSSHShim makes no shim.
+func fileID(fs.FileInfo) (dev, ino uint64) { return 0, 0 }

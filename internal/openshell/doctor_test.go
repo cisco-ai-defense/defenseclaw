@@ -961,7 +961,12 @@ func TestDoctorSSHConnectionSharing(t *testing.T) {
 		}, status: warn, detail: "no ssh on PATH: the OpenShell CLI needs one for sandbox connect, file transfers and port forwards", fix: "install the OpenSSH client"},
 		{name: "the shim's ssh still shares", setup: func(f *doctorFixture) {
 			f.runner.On(fakeShim.Path+" -G sandbox", sshConfigSharing("auto", "/home/dev/.ssh/cm-eed2ca1b"), nil)
-		}, status: warn, detail: "the ssh DefenseClaw runs the OpenShell CLI with still shares connections (ControlMaster auto, ControlPath /home/dev/.ssh/cm-eed2ca1b)"},
+		}, status: fail, detail: "/usr/bin/ssh, the first ssh on PATH, does not keep connection sharing off when run with -o ControlMaster=no -o ControlPath=none -o ControlPersist=no first " +
+			"(`ssh -G sandbox` through DefenseClaw's shim reports ControlMaster auto, ControlPath /home/dev/.ssh/cm-eed2ca1b), so one sandbox's session could reach another sandbox",
+			fix: "make /usr/bin/ssh pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own"},
+		{name: "the shim's ssh opens a master", setup: func(f *doctorFixture) {
+			f.runner.On(fakeShim.Path+" -G sandbox", sshConfigSharing("true", ""), nil)
+		}, status: fail, detail: "reports ControlMaster true, ControlPath none)"},
 		{name: "the shim's ssh cannot be asked", setup: func(f *doctorFixture) {
 			f.runner.On(fakeShim.Path+" -G sandbox", "/home/dev/.ssh/config line 3: Bad configuration option: controlmastr\n", errors.New("exit status 255"))
 		}, status: warn, detail: "could not confirm that the ssh DefenseClaw runs the OpenShell CLI with shares no connections: ssh -G sandbox: exit status 255: /home/dev/.ssh/config line 3: Bad configuration option: controlmastr"},
@@ -981,6 +986,34 @@ func TestDoctorSSHConnectionSharing(t *testing.T) {
 				t.Fatalf("OK = %v with the ssh check %s", r.OK(), tc.status)
 			}
 		})
+	}
+}
+
+// An ssh wrapper first on PATH that turns connection sharing back on fails
+// the check, naming the wrapper and the ssh to put first, since DefenseClaw
+// refuses sandbox sessions through it; it used to only warn.
+func TestDoctorFailsWhenAnSSHWrapperShares(t *testing.T) {
+	skipOnWindows(t)
+	root := t.TempDir()
+	realDir, wrapperDir := filepath.Join(root, "usr-bin"), filepath.Join(root, "home-bin")
+	realSSH := recordingSSH(t, realDir)
+	wrapper := sharingWrapper(t, wrapperDir, realSSH, "-o ControlMaster=auto -o "+shq("ControlPath="+filepath.Join(root, "cm-%C")))
+	openshell.SetSSHShimBase(t, realTempDir(t))
+	f := newDoctorFixture(t)
+	f.doctor.SSHShim = func() (*openshell.SSHShim, error) {
+		return openshell.NewSSHShim(wrapperDir + string(os.PathListSeparator) + realDir)
+	}
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDSSHSharing, openshell.StatusFail,
+		"DefenseClaw refuses to start sandbox sessions: "+wrapper+", the first ssh on PATH, does not keep connection sharing off when run with "+
+			"-o ControlMaster=no -o ControlPath=none -o ControlPersist=no first (`ssh -G sandbox` through DefenseClaw's shim reports ControlMaster auto, ControlPath "+
+			filepath.Join(root, "cm-%C")+")")
+	if want := "make " + wrapper + " pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own, " +
+		"or put " + realDir + " before " + wrapperDir + " on PATH, so the OpenShell CLI runs " + realSSH; c.Fix == nil || c.Fix.Summary != want {
+		t.Fatalf("fix = %+v, want %q", c.Fix, want)
+	}
+	if r.OK() {
+		t.Fatal("the report is OK with an ssh that shares connections")
 	}
 }
 
