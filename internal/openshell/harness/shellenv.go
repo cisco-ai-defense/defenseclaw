@@ -295,20 +295,44 @@ def harness_owns_terminal():
 
 
 # NOTICE is what the terminal shows when a suspend was turned into a resume.
+# It answers the harness's own "suspended, use fg" line, which the harness
+# prints itself.
 NOTICE = (b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
-          b"(the sandbox refuses the signal); it keeps running.\r\n")
+          b"(the sandbox refuses the signal): it keeps running, and there is nothing "
+          b"to bring back with fg.\r\n")
+
+# TITLE says the same at once, while the harness's TUI owns the screen: in
+# the terminal's title and as a desktop notification (OSC 9, where the
+# terminal has them), which leave the screen alone. The title the session
+# had comes back when the harness exits.
+TITLE = b"[defenseclaw] Ctrl-Z cannot suspend a harness in an OpenShell sandbox: it keeps running"
 
 # explain_at_exit: a harness whose own suspend failed took the terminal back
 # after the supervisor's SIGCONT, so it had been waiting to be resumed; the
-# notice follows its exit, when its TUI no longer owns the screen. A TUI
-# that restores the terminal only to shut down never takes it back, and
-# gets no notice.
+# title says so at once and the notice follows its exit, when its TUI no
+# longer owns the screen. A TUI that restores the terminal only to shut
+# down never takes it back, and gets neither.
 explain_at_exit = False
+titled = False
 
 
 def notice():
     try:
         os.write(2, NOTICE)
+    except OSError:
+        pass
+
+
+def notice_now():
+    """Say it in the title (kept to restore at exit) and as a notification,
+    and ring the bell (the harness may take the title back at once), as a
+    DefenseClaw session's own notices do."""
+    global titled
+    seq = b"" if titled else b"\x1b[22;0t"
+    seq += b"\x1b]2;" + TITLE + b"\x07\x1b]9;DefenseClaw: " + TITLE[len(b"[defenseclaw] "):] + b"\x07\x07"
+    try:
+        os.write(2, seq)
+        titled = True
     except OSError:
         pass
 
@@ -324,6 +348,11 @@ def finish(status):
         os.tcsetpgrp(0, os.getpgrp())
     except OSError:
         pass
+    if titled:
+        try:
+            os.write(2, b"\x1b[23;0t")
+        except OSError:
+            pass
     if explain_at_exit:
         notice()
     if os.WIFEXITED(status):
@@ -364,6 +393,7 @@ while True:
     if canonical is False and harness_owns_terminal():
         if woken:
             explain_at_exit, woken = True, False
+            notice_now()
         armed, cooked_since = True, None
     elif canonical and armed and harness_owns_terminal():
         now = time.monotonic()

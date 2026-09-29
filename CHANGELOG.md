@@ -355,7 +355,10 @@ deleted.
   `sandbox delete` of the stopped sandbox does not warn about unpulled work.
   `sandbox pull` asks the same confirmation as a session's end. A new
   sandbox runs in this machine's time zone (`DEFENSECLAW_HOST_TZ`, exported
-  as `TZ` where the image has the zone's file) instead of UTC.
+  as `TZ` where the image has the zone's file) instead of UTC. Ctrl-Z in a
+  harness whose own suspend fails (Copilot CLI) is explained at once in the
+  terminal's title, and the notice after it exits (and Hermes' at once) says
+  there is nothing to bring back with `fg`.
 
 ### Legacy OpenShell standalone sandbox removed
 

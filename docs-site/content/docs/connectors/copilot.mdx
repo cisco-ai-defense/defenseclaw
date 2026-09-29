@@ -288,9 +288,14 @@ replaces that list, so name every harness you want:
   which the OpenShell sandbox refuses, and no shell in the sandbox could
   resume a stopped job either. DefenseClaw resumes Copilot at once, also at a
   `sandbox connect --shell` prompt: Copilot shows its own `✗ Error: kill
-  EPERM` and keeps working, and once it exits the terminal shows its "has
-  been suspended" line followed by `defenseclaw: Ctrl-Z cannot suspend a
-  harness in an OpenShell sandbox`.
+  EPERM` and keeps working, and the terminal's title (and a desktop
+  notification, where the terminal shows them) says at once `[defenseclaw]
+  Ctrl-Z cannot suspend a harness in an OpenShell sandbox: it keeps
+  running`. Once Copilot exits, the terminal shows Copilot's own "has been
+  suspended. Use `fg` to resume." line, which DefenseClaw cannot keep off
+  the screen, followed by `defenseclaw: Ctrl-Z cannot suspend a harness in
+  an OpenShell sandbox (the sandbox refuses the signal): it keeps running,
+  and there is nothing to bring back with fg.`
 - **Interactive hook latency.** In the interactive TUI every hook takes
   Copilot's full hook timeout (30 seconds) although DefenseClaw answers in
   milliseconds, so one tool call can take a minute and a half. This is a

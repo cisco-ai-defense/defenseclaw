@@ -55,7 +55,9 @@ const hermesSuspendModuleName = "defenseclaw_hermes_suspend"
 // the exception reached prompt_toolkit's event loop, which printed a
 // traceback and waited for Enter. The shim answers that one call, and no
 // other, with the notice the launcher's supervisor shows for every harness,
-// so Hermes keeps running.
+// so Hermes keeps running. Hermes prints its own "has been suspended. Run
+// `fg` …" line just before the call, which the shim cannot keep off the
+// screen: the notice that follows it says there is nothing to bring back.
 const hermesSuspendModule = `"""DefenseClaw: Ctrl-Z cannot suspend Hermes in an OpenShell sandbox.
 
 The sandbox refuses a kill() aimed at a process group, which is how Hermes
@@ -71,7 +73,8 @@ def _defenseclaw_kill(pid, sig):
     if pid == 0 and sig == _signal.SIGTSTP:
         try:
             _os.write(2, b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
-                         b"(the sandbox refuses the signal); it keeps running.\r\n")
+                         b"(the sandbox refuses the signal): Hermes Agent keeps running, and there "
+                         b"is nothing to bring back with fg.\r\n")
         except OSError:
             pass
         return None
