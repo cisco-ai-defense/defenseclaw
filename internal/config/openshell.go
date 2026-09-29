@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -277,10 +278,12 @@ type OpenShellAdminConfig struct {
 	// AllowedHarnesses limits which harnesses may run; empty allows all.
 	AllowedHarnesses []string `mapstructure:"allowed_harnesses" yaml:"allowed_harnesses,omitempty"`
 	// EgressBlock is always merged into the blocklist and cannot be
-	// unblocked.
+	// unblocked. A host name on it also blocks every subdomain
+	// (OpenShellAdminBlockPatterns).
 	EgressBlock []string `mapstructure:"egress_block" yaml:"egress_block,omitempty"`
 	// EgressAllowOnly forces allowlist mode: no destination outside these
-	// host globs is reachable.
+	// host globs is reachable. Its entries match exactly: a host name
+	// admits that host only.
 	EgressAllowOnly []string `mapstructure:"egress_allow_only" yaml:"egress_allow_only,omitempty"`
 	// RequireCopyFor lists project path globs that must use copy mode.
 	RequireCopyFor []string                 `mapstructure:"require_copy_for" yaml:"require_copy_for,omitempty"`
@@ -633,6 +636,39 @@ func NormalizeOpenShellEgressPattern(pattern string) string {
 		return parsed.String()
 	}
 	return strings.ToLower(strings.TrimSpace(pattern))
+}
+
+// OpenShellAdminBlockPatterns returns the egress patterns an
+// openshell.admin.egress_block list enforces, canonically spelled and
+// without duplicates. A host name blocks the host and every subdomain:
+// "example.net" also yields "*.example.net", since an administrator who
+// blocks a domain means all of it. Wildcards, IP addresses and CIDR
+// prefixes stay as they are, and an entry that does not parse is kept
+// lowercased and trimmed (validation refuses it).
+//
+// Only the administrator's block list widens so: openshell.egress.block and
+// the packs' block lists, and openshell.admin.egress_allow_only, match
+// exactly (widening an allow-only list would open more than it names).
+func OpenShellAdminBlockPatterns(entries []string) []string {
+	out := []string{}
+	add := func(p string) {
+		if p != "" && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	for _, entry := range entries {
+		p, err := ParseOpenShellEgressPattern(entry)
+		switch {
+		case err != nil:
+			add(strings.ToLower(strings.TrimSpace(entry)))
+		case p.Prefix.IsValid() || p.Wildcard:
+			add(p.String())
+		default:
+			add(p.String())
+			add("*." + p.Host)
+		}
+	}
+	return out
 }
 
 // NormalizeOpenShellHost canonicalizes a destination host the way egress

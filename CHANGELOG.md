@@ -304,6 +304,14 @@ deleted.
     CLI, Antigravity) were only partly parsed, so a matching CRITICAL command
     rule was reported but not enforced. Those calls are now judged in the
     directory they name.
+- A host name on `openshell.admin.egress_block` now blocks the host and every
+  subdomain (#946): `example.net` also blocks `www.example.net` in the egress
+  proxy, `sandbox unblock`, approvals and `sandbox policy allow`, and
+  `sandbox policy explain` lists it as `example.net, *.example.net`. `policy
+  show|explain` and `sandbox doctor` no longer warn that such an entry leaves
+  its subdomains open. `egress_allow_only`, `openshell.egress.block` and pack
+  lists still match a host name exactly; IP addresses and CIDR prefixes are
+  unchanged.
 
 ### OpenShell sandboxes on macOS (MicroVM driver)
 

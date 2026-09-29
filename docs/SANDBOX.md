@@ -719,9 +719,16 @@ that decides wins:
    - The port must be on the port list (80 and 443 by default).
    - Guard blocks can't be unblocked.
 2. **The administrator's lists.** `openshell.admin.egress_block` refuses
-   (`admin_block`). A non-empty `openshell.admin.egress_allow_only` refuses
-   everything outside it (`admin_allow_only`). Nothing but the administrator
-   lifts either. The block message says "blocked by your organization's
+   (`admin_block`). A host name on it covers the host and every subdomain:
+   the resolved list (`egress.admin_block` in `sandbox policy explain`)
+   holds `example.net` and `*.example.net` for an `example.net` entry
+   (`config.OpenShellAdminBlockPatterns`), and that one list feeds the
+   decider, the policy's unblock and approval checks and the posture
+   announcements. Wildcards, IP addresses and CIDR prefixes are unchanged.
+   A non-empty `openshell.admin.egress_allow_only` refuses everything
+   outside it (`admin_allow_only`); its entries, like `openshell.egress.block`
+   and a pack's lists, match a host name exactly. Nothing but the
+   administrator lifts either. The block message says "blocked by your organization's
    DefenseClaw policy".
 3. **The block list**: the pack's `egress.block` plus `openshell.egress.block`
    (`operator_block`). It is checked before unblock decisions, so a host on
@@ -2203,7 +2210,8 @@ the result by `openshell.admin`. Along the way:
 `openshell.admin` holds the administrator's constraints: `required_pack` (its
 posture becomes a floor) and `required_pack_digest`, `min_profile`,
 `allow_yolo`, `allow_mount`, `allow_host_ports`, `allow_unblock`,
-`allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked),
+`allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked;
+a host name also covers its subdomains),
 `egress_allow_only` (forces an allowlist profile), `require_copy_for`,
 `max_resources`, and `locked` (keys run inputs may not loosen). In a
 `managed_enterprise` install the administrator owns `config.yaml`, so the
@@ -2305,7 +2313,8 @@ The manager (`watch.go`) turns the records into the feed and the counts:
   profile, network mode, approvals, skip-permissions, project mode, the
   organization's egress lists) puts one `sandbox.lifecycle` line on its feed
   (reason `policy_changed`), such as "your organization's sandbox policy
-  changed: egress_block now includes example.com; applied to <name>".
+  changed: egress_block now includes example.com, *.example.com; applied to
+  <name>" for an `example.com` entry.
 - A hook verdict that let the tool call run but flagged it (an alert, or a
   block the event cannot enforce) is a `finding` on the feed (reason
   `hook_finding`) with the verdict's severity; the agent reads "Allowed but

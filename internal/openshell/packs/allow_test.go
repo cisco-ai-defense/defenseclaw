@@ -195,6 +195,12 @@ func TestAllowActions(t *testing.T) {
 		{"approve another loopback address with host ports off", hostPortsOff, Flags{}, approve("127.0.0.2", 5432), byHostPorts},
 		{"approve ip6-loopback with host ports off", hostPortsOff, Flags{}, approve("ip6-loopback", 5432), byHostPorts},
 		{"approve an admin-blocked host", adminBlock("api.example.com"), Flags{}, approve("api.example.com", 443), byAdminBlock},
+		// #946: the administrator's domain covers its subdomains.
+		{"approve a subdomain of an admin-blocked domain", adminBlock("example.net"), Flags{}, approve("cdn.www.example.net", 443), byAdminBlock},
+		{"unblock a subdomain of an admin-blocked domain", adminBlock("example.net"), Flags{}, unblock("www.example.net"), byAdminBlock},
+		{"approve always a subdomain of an admin-blocked domain", adminBlock("example.net"), Flags{},
+			Action{Kind: ActionApproveAlways, Host: "api.example.net", Port: 443}, byAdminBlock},
+		{"unblock a subdomain of an allow-only name", allowOnly("corp.example"), Flags{}, unblock("git.corp.example"), byAllowOnly},
 		{"approve always", nil, Flags{}, Action{Kind: ActionApproveAlways, Host: "api.example.com", Port: 443}, allowed},
 		{"approve always off", unblockOff, Flags{}, Action{Kind: ActionApproveAlways, Host: "api.example.com"}, byUnblock},
 		{"approve the host alias", nil, Flags{}, approve(OpenShellHostAlias, 5432), allowed},
@@ -334,6 +340,19 @@ func TestDecideEgress(t *testing.T) {
 		{"admin block", func(o *config.OpenShellConfig) {
 			o.Admin.EgressBlock, o.Egress.Allow = []string{"*.ngrok.io"}, []string{"a.ngrok.io"}
 		}, Flags{}, "a.ngrok.io", 443, false, RuleAdminBlock, "*.ngrok.io", false},
+		// #946: a host name on the administrator's list covers the host and
+		// its subdomains, at any depth; the user's block list and the
+		// allow-only list stay exact.
+		{"admin block of a domain", adminBlock("Example.NET."), Flags{}, "example.net", 443, false, RuleAdminBlock, "example.net", false},
+		{"admin block of a domain covers a subdomain", adminBlock("example.net"), Flags{}, "www.example.net", 443, false, RuleAdminBlock, "*.example.net", false},
+		{"admin block of a domain covers a deep subdomain", adminBlock("example.net"), Flags{}, "a.b.example.net", 0, false, RuleAdminBlock, "*.example.net", false},
+		{"admin block of a domain is not a suffix match", adminBlock("example.net"), Flags{}, "myexample.net", 443, true, RuleNetworkOpen, "", false},
+		{"admin block of a domain beats an allow entry", func(o *config.OpenShellConfig) {
+			o.Admin.EgressBlock, o.Egress.Allow = []string{"ngrok.io"}, []string{"a.ngrok.io"}
+		}, Flags{}, "a.ngrok.io", 443, false, RuleAdminBlock, "*.ngrok.io", false},
+		{"admin block of an address stays exact", adminBlock("93.184.216.34"), Flags{}, "93.184.216.35", 443, false, RuleIPLiteral, "", true},
+		{"user block of a domain stays exact", blockList("example.org"), Flags{}, "www.example.org", 443, true, RuleNetworkOpen, "", false},
+		{"allow-only domain stays exact", allowOnly("corp.example"), Flags{}, "git.corp.example", 443, false, RuleAdminAllowOnly, "", false},
 		{"admin allow-only miss", allowOnly("*.corp.example"), Flags{}, "pypi.org", 443, false, RuleAdminAllowOnly, "", false},
 		{"admin allow-only hit", allowOnly("*.corp.example"), Flags{}, "git.corp.example", 443, true, RuleAdminAllowOnly, "*.corp.example", false},
 		{"feed inside allow-only", allowOnly("*.pastebin.com"), Flags{}, "x.pastebin.com", 443, false, RuleFeed, "Pastebin", true},

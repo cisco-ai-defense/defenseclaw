@@ -351,6 +351,25 @@ func TestResolveAdminClamps(t *testing.T) {
 				}
 				wantSetting(t, eff, "egress.admin_block", "*.ngrok.io", SourceAdmin, "")
 			}},
+		// #946: a host name on the administrator's blocklist resolves to the
+		// host and its "*." wildcard, once; addresses, ranges and wildcards
+		// are kept, and the user's block list and the allow-only list are
+		// not widened.
+		{"admin blocklist domains cover subdomains", func(o *config.OpenShellConfig) {
+			o.Admin.EgressBlock = []string{"Example.NET.", "*.example.net", "ngrok.io", "203.0.113.7", "198.51.100.0/24"}
+			o.Admin.EgressAllowOnly = []string{"example.com", "*.pypi.org"}
+			o.Egress.Block = []string{"paste.example"}
+		}, Flags{}, nil, "", func(t *testing.T, eff *Effective, _ []Violation) {
+			want := []string{"example.net", "*.example.net", "ngrok.io", "*.ngrok.io", "203.0.113.7", "198.51.100.0/24"}
+			if !reflect.DeepEqual(eff.Egress.AdminBlock, want) {
+				t.Fatalf("admin block %v, want %v", eff.Egress.AdminBlock, want)
+			}
+			wantSetting(t, eff, "egress.admin_block", strings.Join(want, ", "), SourceAdmin, "openshell.admin.egress_block")
+			if !reflect.DeepEqual(eff.Egress.AllowOnly, []string{"example.com", "*.pypi.org"}) || !containsString(eff.Egress.Block, "paste.example") ||
+				containsString(eff.Egress.Block, "*.paste.example") {
+				t.Fatalf("allow only %v, block %v", eff.Egress.AllowOnly, eff.Egress.Block)
+			}
+		}},
 		{"host ports off", func(o *config.OpenShellConfig) { o.MCP.HostPorts, o.Admin.AllowHostPorts = []int{5432}, boolPtr(false) },
 			Flags{HostPorts: []int{6379}},
 			[]Violation{{Source: SourceUser, Constraint: "openshell.admin.allow_host_ports"}, {Source: SourceFlag, Constraint: "openshell.admin.allow_host_ports"}},

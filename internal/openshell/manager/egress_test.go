@@ -405,8 +405,15 @@ func TestUnblockRefusals(t *testing.T) {
 		got.Violation.Constraint != "openshell.admin.egress_block" || !strings.Contains(got.Detail, "blocklist") {
 		t.Fatalf("admin-blocked host = %+v", got)
 	}
-	if got := unblock(sandboxapi.UnblockRequest{Host: "www.example.com", Always: true}); got.Code != sandboxapi.CodeInvalid ||
-		!strings.Contains(got.Message, "www.example.com is not blocked") {
+	// #946: the organization's domain covers its subdomains.
+	for _, req := range []sandboxapi.UnblockRequest{{Host: "www.example.com", Sandbox: "openbox"}, {Host: "api.www.example.com", Always: true}} {
+		if got := unblock(req); got.Violation == nil || got.Violation.Constraint != "openshell.admin.egress_block" ||
+			!strings.Contains(got.Detail, "matches *.example.com on your organization's blocklist") {
+			t.Fatalf("subdomain of an admin-blocked domain %+v = %+v", req, got)
+		}
+	}
+	if got := unblock(sandboxapi.UnblockRequest{Host: "www.example.org", Always: true}); got.Code != sandboxapi.CodeInvalid ||
+		!strings.Contains(got.Message, "www.example.org is not blocked") {
 		t.Fatalf("host that is not blocked = %+v", got)
 	}
 	if got := unblock(sandboxapi.UnblockRequest{Host: "www.example.net", Sandbox: "strictbox"}); got.Violation == nil ||
@@ -728,7 +735,7 @@ func TestAdminEgressChangeIsAnnouncedPerSandbox(t *testing.T) {
 	e.m.refreshEgress()
 	for _, name := range []string{"onebox", "twobox"} {
 		if moved := e.events(name, sandboxapi.ActivityLifecycle, sandboxapi.ReasonPolicyChanged); len(moved) != 1 ||
-			!strings.Contains(moved[0].Message, "egress_block now includes example.com, *.example.org") || !strings.HasSuffix(moved[0].Message, "applied to "+name) {
+			!strings.Contains(moved[0].Message, "egress_block now includes example.com, *.example.com, *.example.org") || !strings.HasSuffix(moved[0].Message, "applied to "+name) {
 			t.Fatalf("%s: policy-change feed = %+v", name, moved)
 		}
 	}

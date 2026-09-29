@@ -1066,7 +1066,8 @@ The daemon applies the change to running sandboxes within a few seconds.
 Under your organization's `openshell.admin` limits the command refuses an
 entry, names the limit, and changes nothing: every entry when
 `allow_unblock` is `false` (your own allow entries would be ignored), and a
-host on `egress_block` or outside `egress_allow_only`.
+host on `egress_block` (or a subdomain of a host name there) or outside
+`egress_allow_only`.
 
 ```bash
 defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"

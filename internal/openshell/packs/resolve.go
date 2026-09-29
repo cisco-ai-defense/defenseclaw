@@ -238,8 +238,12 @@ type Workspace struct {
 // (config.ParseOpenShellEgressPattern): names, "*." wildcards, IP addresses
 // and CIDR prefixes.
 type Egress struct {
-	Feeds         []string `json:"feeds"`
-	Block         []string `json:"block"`
+	Feeds []string `json:"feeds"`
+	Block []string `json:"block"`
+	// AdminBlock is openshell.admin.egress_block with each host name
+	// followed by its "*." wildcard (config.OpenShellAdminBlockPatterns):
+	// an administrator's domain covers its subdomains. Block and AllowOnly
+	// match exactly.
 	AdminBlock    []string `json:"admin_block"`
 	Allow         []string `json:"allow"`
 	AllowOnly     []string `json:"allow_only"`
@@ -1044,7 +1048,9 @@ func (r *resolver) resolveEgress(o config.OpenShellConfig) error {
 	userBlock := normalizeGlobs(o.Egress.Block)
 	eg.Block = mergeLists(pack.Egress.Block, userBlock)
 	r.set("egress.block", listValue(eg.Block), mergedLayer(r.packLayer, len(userBlock) > 0, "openshell.egress.block"))
-	eg.AdminBlock = normalizeGlobs(r.admin.EgressBlock)
+	// A host name on the administrator's list blocks its subdomains too;
+	// the user's block list and the allow-only list stay exact.
+	eg.AdminBlock = config.OpenShellAdminBlockPatterns(r.admin.EgressBlock)
 	r.set("egress.admin_block", listValue(eg.AdminBlock), layer{SourceAdmin, "openshell.admin.egress_block"})
 
 	if err := r.resolveAllow(o, unblockForbidden); err != nil {
