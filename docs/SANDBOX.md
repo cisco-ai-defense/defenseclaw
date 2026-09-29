@@ -1254,7 +1254,12 @@ Nothing is applied without a review: a session without a terminal, or with
    plus uncommitted work) and streams it back as a git bundle, capped at 1 GiB
    by bytes received. The bundle is verified against the staged history,
    changes to held-back paths are dropped, and the result gets the same review
-   as mount mode. Nothing in the project changes yet.
+   as mount mode. Nothing in the project changes yet. With
+   `PullOptions.Reuse` naming the last pull's result, the pull is made from
+   that result, which `base.git` holds, without reading the sandbox: the
+   caller knows the sandbox has not run since (below). Its changes, review
+   and `Since` are made anew, so an apply or undo since counts; a last pull
+   that is another one fails with `ErrNoReusablePull`.
 4. **Apply.** `apply` merges the result into the working tree three ways (git
    2.38 or newer; older git, or a conflict, falls back to a `dc/<name>`
    branch for git projects plus a patch file), `branch` creates `dc/<name>`,
@@ -1272,6 +1277,16 @@ Nothing is applied without a review: a session without a terminal, or with
    `patch` only writes the patch file, so the last two gates do not apply to
    it.
 
+   `branch` onto a branch whose tip has the effective result's tree (an
+   earlier pull put the same work there; a new capture of uncommitted work
+   is a new commit of the same tree) lands nothing: it reports `UpToDate`,
+   leaves the branch where it is, and no gate applies. `CheckApply` checks,
+   before a pull, what can be told without the sandbox: the project folder,
+   a branch for a plain folder (`ErrNotGitProject`), the branch name, a
+   branch that exists and does not hold the last pull's tree, and a patch
+   file that exists or whose folder does not. `sandbox pull` runs it before
+   it starts a stopped sandbox.
+
    A 3-way apply that lands (or finds the folder already has the result)
    sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
    result. The next pull starts from it (`PullResult.Since`, kept in
@@ -1288,13 +1303,13 @@ Nothing is applied without a review: a session without a terminal, or with
 The CLI keeps, per copy-mode sandbox, `cli/copy-handover.json`: where the
 work last went (the mode, the folder, branch or patch file, and when), and
 what the copy held as a pull that started the sandbox, a session's end or
-`sandbox stop` stopped it (nothing left to bring back). `sandbox delete`
-words its question from it, and every start of the sandbox drops the second
-part. `sandbox stop` looks at the copy (`PendingWork` with the sandbox's
-transport) only when no detached run and no other session is going, and
-records nothing when a hook request reached the daemon between the look and
-the stop; a pull that started the sandbox records nothing when a session
-attached meanwhile.
+`sandbox stop` stopped it (nothing left to bring back; the last pull, when
+the copy was in its state). `sandbox delete` words its question from it, and
+every start of the sandbox drops the second part. `sandbox stop` looks at the
+copy (`PendingWork` with the sandbox's transport) only when no detached run
+and no other session is going, and records nothing when a hook request
+reached the daemon between the look and the stop; a pull that started the
+sandbox records nothing when a session attached meanwhile.
 
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's

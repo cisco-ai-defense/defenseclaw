@@ -51,6 +51,13 @@ type PullOptions struct {
 	// ReviewOptions.
 	Scanners       []ContentScanner
 	SensitiveGlobs []string
+	// Reuse makes the pull again from the last one, whose Result it names,
+	// without reading the sandbox: the caller knows the sandbox has not run
+	// since that pull read its copy. The review, the changes and where they
+	// start (Since) are made anew, so an apply or an undo since counts. Pull
+	// returns ErrNoReusablePull when the last pull is another one, or of
+	// another copy.
+	Reuse string
 }
 
 // PullResult is the agent's work, verified and reviewed, ready for Apply.
@@ -81,9 +88,14 @@ type PullResult struct {
 	Blocking []string `json:"blocking,omitempty"`
 	// Dropped are held-back (secret) paths the sandbox created, changed or
 	// deleted without ever seeing them; those changes are not applied.
-	Dropped  []string          `json:"dropped,omitempty"`
-	Remotes  map[string]string `json:"remotes,omitempty"`
-	PulledAt time.Time         `json:"pulled_at"`
+	Dropped []string          `json:"dropped,omitempty"`
+	Remotes map[string]string `json:"remotes,omitempty"`
+	// PulledAt is when the sandbox's copy was read: for a Reused pull, when
+	// the pull it was made from read it.
+	PulledAt time.Time `json:"pulled_at"`
+	// Reused is set on a pull made from the last one (PullOptions.Reuse)
+	// without reading the sandbox.
+	Reused bool `json:"reused,omitempty"`
 	// AppliedAt is when Apply last put the result somewhere that outlives
 	// the copy: the working tree, a branch, or a patch file of the
 	// operator's choosing.
@@ -188,24 +200,37 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
 	}
+	var kv, remotes map[string]string
+	pulledAt := time.Now().UTC()
 	last := lastPullOf(opts.DataDir, rec)
-	// Not Idempotent: two captures must never run at once (they share the
-	// scratch index, the result ref and the bundle).
-	res, err := opts.Exec.Exec(ctx, opts.Name, ExecRequest{Argv: []string{"sh", "-c", captureScript(rec, true)}, Timeout: timeout})
-	if err != nil {
-		return nil, err
+	if opts.Reuse != "" {
+		// What the last pull read, whose objects base.git holds, taken as a
+		// capture with nothing to download.
+		if last == nil || last.Result != opts.Reuse || !isOID(last.Result) {
+			return nil, ErrNoReusablePull
+		}
+		kv = map[string]string{"head": last.SandboxHead, "result": last.Result, "tree": last.ResultTree, "bundle": "none"}
+		remotes, pulledAt = last.Remotes, last.PulledAt
+	} else {
+		// Not Idempotent: two captures must never run at once (they share
+		// the scratch index, the result ref and the bundle).
+		res, err := opts.Exec.Exec(ctx, opts.Name, ExecRequest{Argv: []string{"sh", "-c", captureScript(rec, true)}, Timeout: timeout})
+		if err != nil {
+			return nil, err
+		}
+		if res.ExitCode != 0 {
+			return nil, fmt.Errorf("workspace: capture the sandbox copy (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
+		}
+		kv = parseKV(res.Stdout)
+		remotes = parseRemotes(kv["remote"])
 	}
-	if res.ExitCode != 0 {
-		return nil, fmt.Errorf("workspace: capture the sandbox copy (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
-	}
-	kv := parseKV(res.Stdout)
 	result := kv["result"]
 	if !isOID(result) {
 		return nil, fmt.Errorf("workspace: sandbox reported result %q", result)
 	}
 	pr := &PullResult{
 		Name: rec.Name, Project: rec.Project, Kind: rec.Kind, Baseline: rec.Baseline, Head: rec.Head,
-		SandboxHead: kv["head"], Result: result, ResultTree: kv["tree"], PulledAt: time.Now().UTC(),
+		SandboxHead: kv["head"], Result: result, ResultTree: kv["tree"], PulledAt: pulledAt, Reused: opts.Reuse != "",
 	}
 	base := gitCmd{dir: lay.copyDir(rec.Name), gitDir: rec.BaseGit, config: []string{"transfer.fsckObjects=true", "fetch.fsckObjects=true"}}
 	if kv["bundle"] == "none" {
@@ -228,7 +253,7 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 			pr.Blocking = append(pr.Blocking, fmt.Sprintf("history rewrite: the result does not build on the commit the copy started from (%s)", shortOID(rec.Head)))
 		}
 	}
-	pr.Remotes = parseRemotes(kv["remote"])
+	pr.Remotes = remotes
 	for _, name := range sortedKeys(pr.Remotes) {
 		url := pr.Remotes[name]
 		switch before, ok := rec.Remotes[name]; {
@@ -642,8 +667,9 @@ type ApplyResult struct {
 	Conflicts []string `json:"conflicts,omitempty"`
 	Branch    string   `json:"branch,omitempty"`
 	PatchPath string   `json:"patch_path,omitempty"`
-	// UpToDate reports that the working tree already holds the result (an
-	// earlier apply brought it), so the merge changed nothing.
+	// UpToDate reports that the result was there already, so nothing
+	// changed: the working tree holds it (an earlier apply brought it), or
+	// the branch does (an earlier pull put the same work on it).
 	UpToDate bool `json:"up_to_date,omitempty"`
 	// PreApplyRef keeps the working tree as it was before the merge; its
 	// reflog keeps the state before each earlier apply.
@@ -701,6 +727,13 @@ func applyPull(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyO
 	if mode == "" {
 		mode = ApplyMerge
 	}
+	if mode == ApplyBranch && rec.Kind == CopyGit {
+		// A branch that holds the result already (an earlier pull put it
+		// there) lands nothing new: no gate applies, and it stays.
+		if branch := branchName(rec, opts.Branch); branchHolds(ctx, rec, branch, pr.Effective) {
+			return &ApplyResult{Mode: mode, UpToDate: true, Branch: branch}, nil
+		}
+	}
 	if mode != ApplyPatch {
 		if len(pr.Blocking) > 0 && !opts.Force {
 			return nil, &GateError{Sentinel: ErrBlocked, Reasons: pr.Blocking}
@@ -743,13 +776,11 @@ func writePatch(ctx context.Context, base gitCmd, from, to, dest string, force b
 	if err != nil {
 		return err
 	}
-	if info, err := os.Lstat(dest); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return fmt.Errorf("workspace: refusing to write the patch over %s", dest)
-		}
-		if !force {
-			return fmt.Errorf("workspace: %s already exists", dest)
-		}
+	exists, err := checkPatchPath(dest, force)
+	if err != nil {
+		return err
+	}
+	if exists {
 		if err := os.Remove(dest); err != nil {
 			return err
 		}
@@ -779,12 +810,99 @@ func importResult(ctx context.Context, rec *CopyRecord, proj gitCmd, baseRef str
 	return prefix + "/result", prefix + "/base", nil
 }
 
+// checkPatchPath reports whether the patch file dest exists, which only
+// force lets a patch replace, and refuses one that is not a regular file.
+func checkPatchPath(dest string, force bool) (bool, error) {
+	info, err := os.Lstat(dest)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("workspace: %w", err)
+	case info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular():
+		return true, fmt.Errorf("workspace: refusing to write the patch over %s", dest)
+	case !force:
+		return true, fmt.Errorf("workspace: %s already exists", dest)
+	}
+	return true, nil
+}
+
+// branchName is the branch ApplyBranch puts rec's work on: name, or
+// dc/<sandbox>.
+func branchName(rec *CopyRecord, name string) string {
+	if name == "" {
+		return "dc/" + rec.Name
+	}
+	return name
+}
+
+// branchHolds reports whether branch in rec's project holds the tree of
+// effective, a result in the copy's base.git: an earlier pull put the same
+// work there (a result made again has another commit, the same tree).
+func branchHolds(ctx context.Context, rec *CopyRecord, branch, effective string) bool {
+	if effective == "" {
+		return false
+	}
+	tip, err := gitCmd{dir: rec.Project}.line(ctx, "rev-parse", "-q", "--verify", "refs/heads/"+branch+"^{tree}")
+	if err != nil || tip == "" {
+		return false
+	}
+	want, err := gitCmd{gitDir: rec.BaseGit}.line(ctx, "rev-parse", "-q", "--verify", effective+"^{tree}")
+	return err == nil && want == tip
+}
+
+// CheckApply looks, before a pull, at what would stop Apply with opts from
+// landing the pull's result and can be told without the sandbox: the
+// project folder, a branch for a folder that is not a git repository
+// (ErrNotGitProject), an invalid branch name, a branch that exists and does
+// not hold the last pull's result (unless Force), and a patch file that
+// exists (unless Force) or whose folder does not. It reports whether the
+// branch already holds that result, which Apply of a pull that took the same
+// state finds up to date.
+func CheckApply(ctx context.Context, opts ApplyOptions) (bool, error) {
+	rec, err := LoadCopy(opts.DataDir, opts.Name)
+	if err != nil {
+		return false, err
+	}
+	if err := checkProjectPath(rec.Project); err != nil {
+		return false, err
+	}
+	switch opts.Mode {
+	case ApplyBranch:
+		if rec.Kind != CopyGit {
+			return false, ErrNotGitProject
+		}
+		proj := gitCmd{dir: rec.Project}
+		branch := branchName(rec, opts.Branch)
+		if err := proj.run(ctx, "check-ref-format", "--branch", branch); err != nil {
+			return false, fmt.Errorf("workspace: invalid branch name %q", branch)
+		}
+		if _, code, err := proj.outputCode(ctx, "rev-parse", "-q", "--verify", "refs/heads/"+branch); err != nil || code != 0 {
+			return false, err
+		}
+		if last := lastPullOf(opts.DataDir, rec); last != nil && branchHolds(ctx, rec, branch, last.Effective) {
+			return true, nil
+		}
+		if !opts.Force {
+			return false, fmt.Errorf("workspace: branch %s already exists", branch)
+		}
+	case ApplyPatch:
+		if opts.PatchPath == "" {
+			return false, errors.New("workspace: a patch path is required")
+		}
+		if _, err := checkPatchPath(opts.PatchPath, opts.Force); err != nil {
+			return false, err
+		}
+		if info, err := os.Stat(filepath.Dir(opts.PatchPath)); err != nil || !info.IsDir() {
+			return false, fmt.Errorf("workspace: cannot write the patch to %s: its folder does not exist", opts.PatchPath)
+		}
+	}
+	return false, nil
+}
+
 func createBranch(ctx context.Context, rec *CopyRecord, pr *PullResult, opts ApplyOptions, pickFree bool) (string, error) {
 	proj := gitCmd{dir: rec.Project}
-	branch := opts.Branch
-	if branch == "" {
-		branch = "dc/" + rec.Name
-	}
+	branch := branchName(rec, opts.Branch)
 	if err := proj.run(ctx, "check-ref-format", "--branch", branch); err != nil {
 		return "", fmt.Errorf("workspace: invalid branch name %q", branch)
 	}

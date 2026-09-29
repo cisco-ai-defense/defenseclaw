@@ -628,8 +628,17 @@ type fakeCopy struct {
 	// undo is what UndoApply answers (ErrNothingApplied when nil).
 	undo *workspace.UndoApplyResult
 	// pending is what PendingWork answers per sandbox, with an execer
-	// (running) or without one (stopped).
+	// (running) or without one (stopped); pendingPulled the pull it says a
+	// running sandbox's copy is in the state of.
 	pending, pendingStopped map[string]workspace.CopyWork
+	pendingPulled           map[string]string
+	// checks are the CheckApply calls; checkErr and held its answer.
+	checks   []workspace.ApplyOptions
+	checkErr error
+	held     bool
+	// reuseErr is what a Pull with Reuse fails with (it reuses f.pull
+	// otherwise).
+	reuseErr error
 }
 
 func (f *fakeCopy) Discard(_, name string) error {
@@ -637,13 +646,21 @@ func (f *fakeCopy) Discard(_, name string) error {
 	return nil
 }
 
-func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.Execer) (workspace.CopyWork, error) {
+func (f *fakeCopy) PendingWork(_ context.Context, _, name string, ex workspace.Execer) (workspace.CopyStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if ex == nil {
-		return f.pendingStopped[name], nil
+		return workspace.CopyStatus{Work: f.pendingStopped[name]}, nil
 	}
-	return f.pending[name], nil
+	return workspace.CopyStatus{Work: f.pending[name], Pulled: f.pendingPulled[name]}, nil
+}
+
+func (f *fakeCopy) CheckApply(_ context.Context, o workspace.ApplyOptions) (bool, error) {
+	f.step("check " + string(o.Mode))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks = append(f.checks, o)
+	return f.held, f.checkErr
 }
 
 func (f *fakeCopy) UndoApply(_ context.Context, o workspace.UndoApplyOptions) (*workspace.UndoApplyResult, error) {
@@ -684,6 +701,15 @@ func (f *fakeCopy) Refresh(_ context.Context, o workspace.RefreshOptions) (*work
 }
 
 func (f *fakeCopy) Pull(_ context.Context, o workspace.PullOptions) (*workspace.PullResult, error) {
+	if o.Reuse != "" {
+		f.step("reuse " + o.Name + " " + o.Reuse)
+		if f.reuseErr != nil || f.pull == nil || f.pull.Result != o.Reuse {
+			return nil, errors.Join(f.reuseErr, workspace.ErrNoReusablePull)
+		}
+		r := *f.pull
+		r.Reused = true
+		return &r, nil
+	}
 	f.step("pull " + o.Name)
 	if f.pull != nil {
 		return f.pull, nil

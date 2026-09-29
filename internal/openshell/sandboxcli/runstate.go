@@ -130,7 +130,9 @@ func (a *App) runLaunchOf(sb *sandboxapi.Sandbox) *runLaunch {
 // copyHandoverFile is what the CLI knows of a copy-mode sandbox's work
 // between sessions, which stays in the sandbox until a pull brings it back:
 // where it last went, and what the copy held when the sandbox last stopped.
-// `delete` words its question from it.
+// `delete` words its question from it, and a pull of the stopped sandbox
+// takes the last pull again instead of starting the sandbox to read the
+// same state.
 const copyHandoverFile = "copy-handover.json"
 
 type copyHandover struct {
@@ -162,6 +164,9 @@ type stoppedCopy struct {
 	At time.Time `json:"at"`
 	// Clean: nothing in it was left to bring back.
 	Clean bool `json:"clean,omitempty"`
+	// Pulled is the result of the last pull when the copy was in the state
+	// that pull took; the next pull is made from it (PullOptions.Reuse).
+	Pulled string `json:"pulled,omitempty"`
 }
 
 func (a *App) readCopyHandover(name string) (copyHandover, string) {
@@ -178,7 +183,7 @@ func (a *App) readCopyHandover(name string) (copyHandover, string) {
 }
 
 // updateCopyHandover changes sb's record (best effort: without it `delete`
-// warns about work it cannot check).
+// warns about work it cannot check, and a pull starts the sandbox).
 func (a *App) updateCopyHandover(sb *sandboxapi.Sandbox, change func(*copyHandover)) {
 	rec, path := a.readCopyHandover(sb.Name)
 	if path == "" {
@@ -231,12 +236,12 @@ func (a *App) recordHandover(sb *sandboxapi.Sandbox, r *workspace.ApplyResult) {
 }
 
 // markStoppedCopy records what sb's copy held as it stopped: nothing left
-// to bring back (clean), or not known.
-func (a *App) markStoppedCopy(sb *sandboxapi.Sandbox, clean bool) {
+// to bring back (clean), and the last pull when the copy was in its state.
+func (a *App) markStoppedCopy(sb *sandboxapi.Sandbox, clean bool, pulled string) {
 	a.updateCopyHandover(sb, func(rec *copyHandover) {
 		rec.Stopped = nil
-		if clean {
-			rec.Stopped = &stoppedCopy{At: a.Now().UTC(), Clean: true}
+		if clean || pulled != "" {
+			rec.Stopped = &stoppedCopy{At: a.Now().UTC(), Clean: clean, Pulled: pulled}
 		}
 	})
 }

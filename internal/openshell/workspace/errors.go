@@ -67,6 +67,10 @@ var (
 	// ErrNothingApplied: no 3-way apply of a copy-mode sandbox's work is
 	// recorded that UndoApply could revert.
 	ErrNothingApplied = errors.New("workspace: no apply to undo")
+	// ErrNoReusablePull: the pull PullOptions.Reuse names is not the last
+	// pull of the copy (another pull replaced it, or an undo dropped it),
+	// so the sandbox has to be read again.
+	ErrNoReusablePull = errors.New("workspace: the last pull cannot be reused")
 	// ErrScanIncomplete: the secret scan could not look at the whole
 	// folder, so a live mount is refused rather than showing files nobody
 	// checked.

@@ -515,7 +515,8 @@ type StopOptions struct {
 // on a terminal (said otherwise), and its log is kept for `sandbox logs`.
 // The copy of a copy-mode sandbox nothing runs in any more is looked at
 // first: what it holds as it stops is remembered (markStoppedCopy), so
-// `delete` need not warn about work that came back already.
+// `delete` need not warn about work that came back already, and the next
+// pull need not start it.
 func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	a.defaults()
 	api, err := a.api()
@@ -526,7 +527,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	var copyAt *workspace.CopyWork
+	var copyAt *workspace.CopyStatus
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
 			cli := a.cli(gateway)
@@ -551,7 +552,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	}
 	// A hook request since the look is something that ran in it after all.
 	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
-		a.markStoppedCopy(sb, *copyAt == workspace.CopyWorkNone)
+		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
 	}
 	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
@@ -559,14 +560,14 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 
 // copyAtStop looks at the copy of sb, which is about to stop, within a
 // minute: nil when it could not be looked at.
-func (a *App) copyAtStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox) *workspace.CopyWork {
+func (a *App) copyAtStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox) *workspace.CopyStatus {
 	look, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	work, err := a.Workspace.PendingWork(look, a.dataDir(), sb.Name, a.transport(cli))
+	st, err := a.Workspace.PendingWork(look, a.dataDir(), sb.Name, a.transport(cli))
 	if err != nil {
 		return nil
 	}
-	return &work
+	return &st
 }
 
 // StartOptions are the `sandbox start` flags.
@@ -668,7 +669,8 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 			ex = a.transport(a.cli(gateway))
 		}
 	}
-	work, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	st, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	work := st.Work
 	if ex == nil && (err != nil || work == workspace.CopyWorkUnknown) && a.cleanCopy(sb) {
 		// What stopped it found nothing left to bring back, and it has not
 		// run since.

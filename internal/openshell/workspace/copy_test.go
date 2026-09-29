@@ -507,8 +507,10 @@ func TestCopyGatesSensitiveAndBlocking(t *testing.T) {
 	if res, err := apply(e, "c1", ApplyBranch, func(o *ApplyOptions) { o.AcceptSensitive, o.Force = true, true }); err != nil || res.Branch != "dc/c1" {
 		t.Fatalf("forced branch: %+v %v", res, err)
 	}
-	if _, err := apply(e, "c1", ApplyBranch, func(o *ApplyOptions) { o.AcceptSensitive = true }); err == nil {
-		t.Fatal("existing branch reused without Force")
+	// The branch holds this result now: bringing it back there again lands
+	// nothing, so no gate stops it (TestCopyBranchThatHoldsThePull).
+	if res, err := apply(e, "c1", ApplyBranch, nil); err != nil || !res.UpToDate || res.Applied || res.Branch != "dc/c1" {
+		t.Fatalf("the same result on its branch again: %+v %v", res, err)
 	}
 }
 
@@ -529,12 +531,140 @@ func TestCopyPullOfAStateAlreadyBroughtBack(t *testing.T) {
 	if same := pull(t, e, fs, "c1"); !same.HandedOver() || same.Empty() {
 		t.Fatalf("a pull of the state the patch took: %+v", same)
 	}
-	if work, err := PendingWork(bg, e.data, "c1", nil); err != nil || work == CopyWorkUnapplied {
-		t.Fatalf("stopped after it: %v, %v", work, err)
+	if st, err := PendingWork(bg, e.data, "c1", nil); err != nil || st.Work == CopyWorkUnapplied {
+		t.Fatalf("stopped after it: %+v, %v", st, err)
 	}
 	fs.write(remoteRepo+"/agent.txt", "more agent work\n")
 	if next := pull(t, e, fs, "c1"); next.HandedOver() {
 		t.Fatalf("a pull of new work counts as brought back: %+v", next)
+	}
+}
+
+// TestCopyBranchThatHoldsThePull: `pull --branch` of work its branch
+// already holds (the same pull, or a new one of the same state, whose
+// commit differs) is done, and checked before the sandbox is read; a branch
+// that holds something else is refused before the pull, as is a patch file
+// that exists or has no folder (#965).
+func TestCopyBranchThatHoldsThePull(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	check := func(mutate func(*ApplyOptions)) (bool, error) {
+		opts := ApplyOptions{DataDir: e.data, Name: "c1", Mode: ApplyBranch}
+		if mutate != nil {
+			mutate(&opts)
+		}
+		return CheckApply(bg, opts)
+	}
+	if held, err := check(nil); err != nil || held {
+		t.Fatalf("check before any branch: %v, %v", held, err)
+	}
+	if _, err := check(func(o *ApplyOptions) { o.Branch = "bad..name" }); err == nil || !strings.Contains(err.Error(), "invalid branch name") {
+		t.Fatalf("check of an invalid name: %v", err)
+	}
+	fs.write(remoteRepo+"/agent.txt", "agent work\n")
+	first := pull(t, e, fs, "c1")
+	if res, err := apply(e, "c1", ApplyBranch, nil); err != nil || !res.Applied || res.Branch != "dc/c1" {
+		t.Fatalf("branch: %+v, %v", res, err)
+	}
+	tip := e.git(e.project, "rev-parse", "dc/c1")
+	if held, err := check(nil); err != nil || !held {
+		t.Fatalf("check of the branch that holds the last pull: %v, %v", held, err)
+	}
+	// The same work, committed in the sandbox: another commit, the same
+	// tree.
+	fs.agent(remoteRepo, "add", "-A")
+	fs.agent(remoteRepo, "commit", "-q", "-m", "agent work")
+	if again := pull(t, e, fs, "c1"); again.Result == first.Result || again.ResultTree != first.ResultTree {
+		t.Fatalf("the committed work: result %s tree %s; first %s tree %s", again.Result, again.ResultTree, first.Result, first.ResultTree)
+	}
+	if res, err := apply(e, "c1", ApplyBranch, nil); err != nil || !res.UpToDate || res.Applied || res.Branch != "dc/c1" {
+		t.Fatalf("the same work again: %+v, %v", res, err)
+	}
+	if now := e.git(e.project, "rev-parse", "dc/c1"); now != tip {
+		t.Fatalf("an up-to-date branch moved from %s to %s", tip, now)
+	}
+	if pr, err := LoadPull(e.data, "c1"); err != nil || pr.AppliedAt == nil {
+		t.Fatalf("the pull is not marked handed over: %+v, %v", pr, err)
+	}
+	// Other work: the branch holds something else.
+	fs.write(remoteRepo+"/agent.txt", "more agent work\n")
+	pull(t, e, fs, "c1")
+	e.git(e.project, "branch", "-f", "dc/c1", "main")
+	if held, err := check(nil); held || err == nil || !strings.Contains(err.Error(), "branch dc/c1 already exists") {
+		t.Fatalf("check of a branch that holds other work: %v, %v", held, err)
+	}
+	if held, err := check(func(o *ApplyOptions) { o.Force = true }); err != nil || held {
+		t.Fatalf("forced check: %v, %v", held, err)
+	}
+	if _, err := apply(e, "c1", ApplyBranch, nil); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("branch over other work: %v", err)
+	}
+	// Patch files: one that exists, one without a folder, a link.
+	patch := func(p string, force bool) error {
+		_, err := CheckApply(bg, ApplyOptions{DataDir: e.data, Name: "c1", Mode: ApplyPatch, PatchPath: p, Force: force})
+		return err
+	}
+	writeFile(t, e.root, "old.patch", "x")
+	mustSymlink(t, filepath.Join(e.root, "old.patch"), filepath.Join(e.root, "link.patch"))
+	for p, want := range map[string]string{
+		filepath.Join(e.root, "old.patch"):          "already exists",
+		filepath.Join(e.root, "nowhere", "a.patch"): "its folder does not exist",
+		filepath.Join(e.root, "link.patch"):         "refusing to write the patch over",
+		filepath.Join(e.root, "new.patch"):          "",
+	} {
+		if err := patch(p, false); (want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), want)) {
+			t.Fatalf("check of patch %s: %v; want %q", p, err, want)
+		}
+	}
+	if err := patch(filepath.Join(e.root, "old.patch"), true); err != nil {
+		t.Fatalf("forced check of an existing patch: %v", err)
+	}
+	// A folder that is not a git repository has no branch.
+	p := newSerialEnv(t)
+	writeFile(t, p.project, "notes.md", "n\n")
+	launchCopy(t, p, "c2", nil)
+	if _, err := CheckApply(bg, ApplyOptions{DataDir: p.data, Name: "c2", Mode: ApplyBranch}); !errors.Is(err, ErrNotGitProject) {
+		t.Fatalf("check of a plain folder's branch: %v", err)
+	}
+}
+
+// TestCopyPullReusesTheLastPull: a pull made from the last one (the
+// sandbox has not run since) reads nothing from the sandbox, and still
+// starts from the last apply; a pull the named one is not, or one an undo
+// dropped, is not reused (#965).
+func TestCopyPullReusesTheLastPull(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	first := pull(t, e, fs, "c1")
+	reuse := func(result string) (*PullResult, error) {
+		// A stopped sandbox: any exec fails.
+		fs.failExec = errors.New("the sandbox is not running")
+		defer func() { fs.failExec = nil }()
+		return Pull(bg, PullOptions{DataDir: e.data, Name: "c1", Exec: fs, Reuse: result})
+	}
+	pr, err := reuse(first.Result)
+	if err != nil || !pr.Reused || pr.Result != first.Result || !pr.PulledAt.Equal(first.PulledAt) || changePaths(pr.Changes) != changePaths(first.Changes) {
+		t.Fatalf("reused pull: %+v, %v; first %+v", pr, err, first)
+	}
+	if saved, err := LoadPull(e.data, "c1"); err != nil || !saved.Reused {
+		t.Fatalf("the reused pull is not the last one: %+v, %v", saved, err)
+	}
+	mustApply(t, e, "c1")
+	if pr, err := reuse(first.Result); err != nil || !pr.Empty() || pr.Since == "" {
+		t.Fatalf("reused pull after the apply: %+v, %v; want nothing new since it", pr, err)
+	}
+	if _, err := reuse(strings.Repeat("0", 40)); !errors.Is(err, ErrNoReusablePull) {
+		t.Fatalf("reuse of another pull: %v", err)
+	}
+	// The undo drops the pull that started from the apply.
+	if _, err := UndoApply(bg, UndoApplyOptions{DataDir: e.data, Name: "c1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reuse(first.Result); !errors.Is(err, ErrNoReusablePull) {
+		t.Fatalf("reuse after the undo: %v", err)
 	}
 }
 
@@ -886,37 +1016,39 @@ func TestRefreshAfterPull(t *testing.T) {
 	writeFile(t, e.project, "config/server.key", "marker-key\n")
 	e.git(e.project, "add", "-f", "config/server.key")
 	e.git(e.project, "commit", "-q", "-m", "key")
-	if work, err := PendingWork(bg, e.data, "c1", nil); err != nil || work != CopyWorkNone {
-		t.Fatalf("no copy record: %v, %v", work, err)
+	if st, err := PendingWork(bg, e.data, "c1", nil); err != nil || st != (CopyStatus{}) {
+		t.Fatalf("no copy record: %+v, %v", st, err)
 	}
 	_, fs := launchCopy(t, e, "c1", nil)
 	opts := e.refreshOpts("c1", fs)
-	pending := func(step string, ex Execer, want CopyWork) {
+	// pending wants PendingWork's answer and, for a copy it looked at, the
+	// pull it says the copy is still in the state of ("" for none).
+	pending := func(step string, ex Execer, want CopyWork, pulled string) {
 		t.Helper()
-		if work, err := PendingWork(bg, e.data, "c1", ex); err != nil || work != want {
-			t.Fatalf("%s: PendingWork = %v, %v; want %v", step, work, err, want)
+		if st, err := PendingWork(bg, e.data, "c1", ex); err != nil || st.Work != want || st.Pulled != pulled {
+			t.Fatalf("%s: PendingWork = %+v, %v; want %v, pulled %q", step, st, err, want, pulled)
 		}
 	}
-	pending("as uploaded", fs, CopyWorkNone)
-	pending("stopped, never pulled", nil, CopyWorkUnknown)
+	pending("as uploaded", fs, CopyWorkNone, "")
+	pending("stopped, never pulled", nil, CopyWorkUnknown, "")
 
 	fs.write(remoteRepo+"/agent.txt", "agent work\n")
-	pending("agent work", fs, CopyWorkUnpulled)
-	pull(t, e, fs, "c1")
-	pending("pulled, not applied", fs, CopyWorkUnapplied)
-	pending("pulled, not applied, stopped", nil, CopyWorkUnapplied)
+	pending("agent work", fs, CopyWorkUnpulled, "")
+	first := pull(t, e, fs, "c1")
+	pending("pulled, not applied", fs, CopyWorkUnapplied, first.Result)
+	pending("pulled, not applied, stopped", nil, CopyWorkUnapplied, "")
 	if _, err := Refresh(bg, opts); !errors.Is(err, ErrUnappliedPull) {
 		t.Fatalf("refresh over an unapplied pull: %v", err)
 	}
 	// More work after the pull is unpulled work again.
 	fs.write(remoteRepo+"/later.txt", "later\n")
-	pending("work after the pull", fs, CopyWorkUnpulled)
+	pending("work after the pull", fs, CopyWorkUnpulled, "")
 	if _, err := Refresh(bg, opts); !errors.Is(err, ErrUnpulledChanges) {
 		t.Fatalf("refresh over work after the pull: %v", err)
 	}
-	pull(t, e, fs, "c1")
+	second := pull(t, e, fs, "c1")
 	mustApply(t, e, "c1")
-	pending("applied", fs, CopyWorkNone)
+	pending("applied", fs, CopyWorkNone, second.Result)
 	if pr, err := LoadPull(e.data, "c1"); err != nil || pr.AppliedAt == nil {
 		t.Fatalf("the pull is not marked applied: %+v %v", pr, err)
 	}

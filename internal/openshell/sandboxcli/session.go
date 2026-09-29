@@ -90,9 +90,10 @@ type session struct {
 	// stopped a sandbox it had found running.
 	interrupted bool
 	undoStopped bool
-	// handedOver is set once nothing of the work the pull at a copy-mode
-	// session's end found is left to bring back: finish records it for a
-	// sandbox it stops (markStoppedCopy).
+	// pulled is the result of the pull a copy-mode session's end took, and
+	// handedOver is set once nothing of it is left to bring back: finish
+	// records both for a sandbox it stops (markStoppedCopy).
+	pulled     string
 	handedOver bool
 
 	// hooksWarned is set once the live warning that the session's hooks do
@@ -1127,7 +1128,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
-	s.handedOver = pull.HandedOver()
+	s.pulled, s.handedOver = pull.Result, pull.HandedOver()
 	rev := &sandboxapi.ReviewResponse{Summary: pullSummary(pull), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after, endedElsewhere)
@@ -1185,7 +1186,9 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 	case "patch":
 		opts.PatchOut = after.Name + ".patch"
 	}
-	if sensitive {
+	// A branch that holds this work already takes nothing new: nothing to
+	// confirm.
+	if sensitive && !a.branchHolds(ctx, after, opts) {
 		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {
 			return errors.Join(err, s.keepInSandbox(ctx, after, pull))
@@ -1195,6 +1198,8 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}
+	} else if sensitive {
+		opts.AcceptSensitive = true
 	}
 	if _, err := a.applyPull(ctx, s.api, after, pull, opts); err != nil {
 		a.warn(err.Error())
@@ -1206,14 +1211,14 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 }
 
 // markStopped records, for a copy-mode sandbox this session's end stopped
-// after its pull, that nothing in its copy is left to bring back
-// (markStoppedCopy) when the pull found nothing new or went to the folder,
-// a branch or a patch, so `delete` of it stopped need not warn about work
-// it cannot check. A sandbox that keeps running can still change, so it is
-// not marked.
+// after its pull, what its copy held (markStoppedCopy): nothing left to
+// bring back when the pull found nothing new or went to the folder, a
+// branch or a patch, so `delete` of it stopped need not warn about work it
+// cannot check; and that pull, which the next pull is made from. A sandbox
+// that keeps running can still change, so it is not marked.
 func (s *session) markStopped() {
-	if s.handedOver {
-		s.app.markStoppedCopy(s.sb, true)
+	if s.pulled != "" || s.handedOver {
+		s.app.markStoppedCopy(s.sb, s.handedOver, s.pulled)
 	}
 }
 

@@ -1336,7 +1336,7 @@ func TestDeleteKnowsTheSessionChangedNothing(t *testing.T) {
 	sb := copySandbox("copybox")
 	ta.daemon.add(sb)
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
-	ta.markStoppedCopy(&sb, true)
+	ta.markStoppedCopy(&sb, true, "")
 	sb.StartedAt = ta.Now().Add(time.Minute)
 	ta.daemon.add(sb)
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"copybox"}}))
@@ -1372,9 +1372,9 @@ func TestDeleteSaysWhereTheWorkWent(t *testing.T) {
 	ta = newTestApp(t, "")
 	running(ta)
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "fix-tests", Apply: true}))
-	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}
+	ta.copy.pending, ta.copy.pendingPulled = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkNone}, map[string]string{"fix-tests": "r1"}
 	ta.ok(t, ta.Stop(bg, StopOptions{Name: "fix-tests"}))
-	if st := ta.stoppedCopyOf(ta.daemon.sandboxes["fix-tests"]); st == nil || !st.Clean {
+	if st := ta.stoppedCopyOf(ta.daemon.sandboxes["fix-tests"]); st == nil || !st.Clean || st.Pulled != "r1" {
 		t.Fatalf("stop marked %+v", st)
 	}
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"fix-tests"}, Yes: true}))
