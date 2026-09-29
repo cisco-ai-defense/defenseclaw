@@ -165,7 +165,9 @@ not the driver's name or `runtime.GOOS`.
   a writable HOME, an empty `CapEff`, and the digests, owners and modes of
   the hook entrypoints and run files against what create recorded. A
   mismatch rolls the create back or stops the started sandbox. It runs on
-  both drivers.
+  the vm driver, where the workload's identity is the gateway's
+  configuration. On docker it is off (`SkipWorkloadCheck` in the driver
+  table) until a Linux live run has passed it.
 - **Resources.** vm has no per-sandbox limits: every MicroVM gets the
   gateway-wide `vcpus`, `mem_mib` and `overlay_disk_mib`. `--cpu` and
   `--memory` are warned about and dropped, the record keeps the gateway-wide
