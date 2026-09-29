@@ -107,6 +107,17 @@ func RemoveClaudeCodePerUserHookRegistrations(data []byte, install ClaudeCodePer
 	)))
 }
 
+// legacyNativeHookBinaries shares the finite, exact executable locations
+// accepted by main's Cursor teardown with the Claude per-user cleanup.
+func legacyNativeHookBinaries() []string {
+	return uniqueNonEmptyStrings(append(
+		nativeHookBinaryOwnershipCandidates(),
+		defenseclawGatewayBinary(),
+		canonicalNativeWindowsInstalledGatewayBinary(),
+		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
+	))
+}
+
 // claudeCodePerUserHookMatcher holds the executables whose per-user Claude
 // Code registrations are DefenseClaw's own and the command strings earlier
 // releases wrote for them.
