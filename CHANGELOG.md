@@ -387,6 +387,36 @@ deleted.
   harness whose own suspend fails (Copilot CLI) is explained at once in the
   terminal's title, and the notice after it exits (and Hermes' at once) says
   there is nothing to bring back with `fg`.
+- Harness start-up fixes from the macOS certification, on both drivers: the
+  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
+  the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no
+  longer prints above the TUI at every start.
+- The Kiro image unpacks the embedding model Kiro CLI downloads at its first
+  start (`all-MiniLM-L6-v2`, 79 MiB, each file checked against the SHA-256
+  the pinned `kiro-cli-chat` carries) into the image HOME, so a new Kiro
+  sandbox's first session no longer downloads it. The Kiro launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so an interactive session runs the root-owned
+  `kiro-cli-chat` rather than the copy Kiro makes in
+  `~/.local/share/kiro-cli/run`.
+- A DefenseClaw block now shows in the Hermes TUI: a root-owned module in the
+  Hermes image prints the block reason under the tool's line
+  (`┊ ✗ terminal blocked by DefenseClaw rule <ID>: …`), where Hermes 0.19
+  printed nothing. The reason the model gets is unchanged.
+- The Hermes image stamps its install the way Hermes' own image does
+  (`.install_method` = `docker`), so Hermes no longer prints "pip installs are
+  no longer an officially supported platform" or asks `pypi.org` for updates
+  at every start, and its managed layer pins `model_catalog.enabled: false`,
+  which stops the start-up fetch from `hermes-agent.nousresearch.com` and
+  `nousresearch.github.io`.
+- An OpenHands sandbox session no longer ends with an
+  `Exception ignored in atexit callback` / `RuntimeError: App is not running`
+  traceback above the session summary: a root-owned module in the OpenHands
+  image runs the `SessionEnd` hooks as before and drops only the display
+  event OpenHands hands to its already stopped TUI. The same module starts a
+  DefenseClaw block's hook line with the block, so the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: …` instead of
+  `Status: BLOCKED - Blocked by DefenseCla...`, and it ignores the
+  `AuthlibDeprecationWarning` an OpenHands dependency printed at every start.
 
 ### Legacy OpenShell standalone sandbox removed
 

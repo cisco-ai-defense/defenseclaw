@@ -35,15 +35,88 @@ var hermesTool = uvTool{
 	commands:     []string{"hermes"},
 	versionCheck: `/usr/local/bin/hermes --version | awk 'NR==1{sub(/^v/,"",$3); print $3}'`,
 	// The Ctrl-Z shim (hermesSuspendModule, base64 so the Dockerfile RUN
-	// stays one line) goes into the tool environment's site-packages with a
-	// .pth file that imports it at every interpreter start.
+	// stays one line) and the block-notice shim (hermesBlockNoticeModule) go
+	// into the tool environment's site-packages, each with a .pth file that
+	// imports it at every interpreter start.
 	extra: `site="$(` + shellQuote(InstallRootBase+"/hermes/tools/hermes-agent/bin/python") + ` -I -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; ` +
 		`case "$site" in ` + InstallRootBase + `/hermes/*) ;; *) echo "Hermes site-packages $site is outside the install root" >&2; exit 1 ;; esac; ` +
 		`printf '%s' ` + shellQuote(base64.StdEncoding.EncodeToString([]byte(hermesSuspendModule))) + ` | base64 -d >"$site/` + hermesSuspendModuleName + `.py"; ` +
 		`printf 'import ` + hermesSuspendModuleName + `\n' >"$site/` + hermesSuspendModuleName + `.pth"; ` +
 		`chown root:root "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
-		`chmod 0644 "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"`,
+		`chmod 0644 "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
+		// The block-notice shim, and the install-method stamp
+		// (hermesInstallMethod) next to the code, root-owned like it.
+		pyShimInstall(InstallRootBase+"/hermes/tools/hermes-agent/bin/python", InstallRootBase+"/hermes", "Hermes",
+			pyShim{name: hermesBlockNoticeModuleName, source: hermesBlockNoticeModule}) + `; ` +
+		`printf '` + hermesInstallMethod + `\n' >"$site/.install_method"; chown root:root "$site/.install_method"; chmod 0644 "$site/.install_method"`,
 }
+
+// hermesInstallMethod is the install-method stamp the image writes next to
+// Hermes' code, which Hermes 0.19.0 reads before anything else to tell how
+// it was installed (hermes_cli/config.py detect_install_method). Without it
+// a PyPI install is "pip": the banner then says "pip installs are no longer
+// an officially supported platform and will not receive further updates"
+// at every start, and every start asks pypi.org for a newer release
+// (banner.py check_for_updates). "docker" is how Hermes' own published image
+// marks an install that is updated by replacing the image, which is what a
+// DefenseClaw image is: Hermes then skips the update check and the notice,
+// and `hermes update` explains that it does not apply in a container.
+const hermesInstallMethod = "docker"
+
+// hermesBlockNoticeModuleName is the root-owned module that shows a tool
+// call DefenseClaw blocked.
+const hermesBlockNoticeModuleName = "defenseclaw_hermes_blocks"
+
+// hermesBlockNoticeModule shows a blocked tool call in the Hermes TUI.
+// Hermes 0.19.0 skips every display callback for a tool call a
+// pre_tool_call hook blocks (agent/tool_executor.py): the block message goes
+// to the model as the tool's error, and the terminal shows only "preparing
+// terminal..." before the model's reply. The shim wraps
+// hermes_cli.plugins.resolve_pre_tool_block, through which every dispatch
+// path gets the block message, and prints the message with the CLI's own
+// printer (cli._cprint, which prints above the prompt) when stdout is a
+// terminal. The message, and so what the model gets, is unchanged.
+const hermesBlockNoticeModule = `"""DefenseClaw: show a Hermes tool call a hook blocked.
+
+Hermes shows nothing for a tool call a pre_tool_call hook blocked; print the
+block message under the tool's line, as Hermes prints its own tool lines.
+"""
+import os as _os
+` + pyOnImport + `
+
+def _defenseclaw_block_notice(tool_name, message):
+    cprint = getattr(sys.modules.get("cli"), "_cprint", None)
+    if cprint is None or not _os.isatty(1):
+        return
+    text = " ".join(str(message).split())
+    if text.startswith("Blocked by "):
+        line = "%s blocked by %s" % (tool_name, text[len("Blocked by "):])
+    else:
+        line = "%s blocked: %s" % (tool_name, text)
+    if len(line) > 300:
+        line = line[:297] + "..."
+    cprint("  ┊ ✗ " + line)
+
+
+def _defenseclaw_patch_plugins(plugins):
+    resolve = plugins.resolve_pre_tool_block
+
+    def resolve_pre_tool_block(tool_name, *args, **kwargs):
+        message = resolve(tool_name, *args, **kwargs)
+        if message is not None:
+            try:
+                _defenseclaw_block_notice(tool_name, message)
+            except Exception:
+                pass
+        return message
+
+    resolve_pre_tool_block.__wrapped__ = resolve
+    resolve_pre_tool_block.__doc__ = resolve.__doc__
+    plugins.resolve_pre_tool_block = resolve_pre_tool_block
+
+
+_defenseclaw_on_import("hermes_cli.plugins", _defenseclaw_patch_plugins)
+`
 
 // hermesSuspendModuleName is the root-owned module the Hermes tool
 // environment imports at start.

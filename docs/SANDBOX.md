@@ -1890,7 +1890,12 @@ These were measured on the pinned releases inside the community base image
   GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
   GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
   the per-plan Copilot API hosts) come from the CLI, not from a live run: no
-  Copilot-entitled account was available.
+  Copilot-entitled account was available. With the proxy settings, Copilot's
+  Node printed its `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
+  above the TUI at every start, so the launcher passes
+  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
+  Copilot's tool commands inherit it (a Node older than 20.11 would refuse
+  the flag).
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
@@ -1984,7 +1989,38 @@ These were measured on the pinned releases inside the community base image
   `/agent` in an interactive session (it can switch to Kiro's built-in
   agent), project MCP servers, and a nested `kiro-cli-chat` started from a
   tool call, which skips the launcher. A real model through a Kiro Pro `KIRO_API_KEY` or
-  a device-flow login is unverified.
+  a device-flow login is unverified. At its first start Kiro downloads its
+  semantic-search embedding model, `all-MiniLM-L6-v2.zip` (79 MiB, from
+  `desktop-release.q.us-east-1.amazonaws.com/models`), into
+  `~/.semantic_search/models/all-MiniLM-L6-v2`; that was most of a new
+  sandbox's first-session download. `kiro-cli-chat` carries the SHA-256 of
+  both files and checks the ones it finds at every start, downloading again
+  when they differ. The image unpacks those files there at build, each
+  checked against the digests the pinned binary accepts (the URL names no
+  release, so the archive's own bytes are not pinned); a base image without
+  `/usr/bin/python3` leaves the download to Kiro. Kiro's TUI runtime (`bun`
+  and `tui.js`, about 92 MB) is embedded in `kiro-cli-chat` and extracted into
+  `~/.local/share/kiro-cli` at the first interactive start, without a
+  download. Kiro extracts it again when the `.sha256` file next to it does
+  not match the embedded digest, and offers no supported way to run it from
+  elsewhere (`KIRO_TEST_TUI_JS_PATH` is a test hook), so it stays in the
+  workload-writable HOME. An interactive session also "pins" `kiro-cli-chat`
+  into `~/.local/share/kiro-cli/run` (a hard link, or a copy where the link
+  fails; with `fs.protected_hardlinks`, the usual default, the sandbox user
+  cannot hard-link a root-owned file it cannot write) and runs that path; the
+  launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so Kiro runs the root-owned binary. At every
+  start Kiro also asks `management.<region>.kiro.dev` in four regions
+  (`us-east-1`, `eu-central-1`, `us-gov-east-1`, `us-gov-west-1`) for its
+  governance settings. The Kiro profile's placeholder resolves only on the
+  `us-east-1` host; without a working key Kiro prints `failed to retrieve
+  governance settings — MCP and web tools disabled` (its log:
+  `Failed to get governance config from API`), which is Kiro's account
+  check, not a DefenseClaw policy, and leaves MCP servers and web tools off
+  for that session. With `telemetry.enabled` false Kiro still sends its
+  CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`
+  (`Failed to send cw telemetry event` in its log without a working key); no
+  Kiro setting stops them.
 - **Devin CLI 3000.4.25.** Devin's versioned release manifest publishes
   SHA-256 digests. Hooks come from `~/.config/devin/config.json` (`hooks`) or
   a project `.devin/hooks.v1.json`; there is no system hook tier, so the tier
@@ -2236,6 +2272,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
 | Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session with no job-control shell above it, the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. When such a harness takes the terminal back, the supervisor says at once, in the terminal's title (OSC 2, the previous title kept and restored when the harness exits) and as an OSC 9 notification with a bell, that Ctrl-Z cannot suspend it, and after the harness exits prints the same on the screen, answering the harness's own "suspended, use `fg`" line. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started from a `sandbox connect --shell` prompt (where Ctrl-Z suspends it to that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
+| The same filter refuses a harness that ends a cancelled tool command through the command's process group. Measured with Kiro CLI 2.24.1 (on the vm driver): Ctrl-C during a shell tool call shows `● Cancelled …`, but the command runs to its end and Kiro's `postToolUse` still arrives when it finishes. Kiro's binary puts commands in process groups of their own and signals groups (it calls `setpgid` and `killpg`); a host run of the same release was not compared. | No launcher setting changes how the harness signals, and the supervisor never learns of the cancel. DefenseClaw judged the command before it started; to stop one that keeps running, end it by pid from another terminal (`defenseclaw sandbox connect <name> --shell`, then `pkill -f '<command>'`, which signals each process on its own). |
 
 ### Not measured
 
@@ -2255,6 +2292,7 @@ These were not measured, so the design does not rely on a result for them:
 | `sandbox exec` and `sandbox upload` hang while stdin is an open non-TTY pipe. | Non-interactive invocations read stdin from `/dev/null`. |
 | The first `sandbox exec` after create occasionally returns nothing. | `WaitReady` waits for `Ready` and the `ConfigurationReady` condition. |
 | Ending an exec stream does not stop the command in 0.1.1. | `Exec` wraps commands in `timeout(1)` inside the sandbox and retries only attempts whose stream never opened (plus unanswered attempts of idempotent commands). |
+| `openshell sandbox exec` and `sandbox connect` start `openshell ssh-proxy --gateway <url> --sandbox <name> --workspace <ws> --token <token>` as ssh's `ProxyCommand` (token mode), so while a session is attached every local user of the host can read its SSH session token in `ps`. `ssh-proxy`'s name mode (`--gateway-name <gw> --name <sandbox>`, meant for `~/.ssh/config`) fetches its own session instead. | DefenseClaw starts every session through `sandbox exec` and `sandbox connect` and does not pass the token itself. Running ssh through the name mode would keep it out of the process list but means replacing both commands' session set-up; until then the exposure is OpenShell's (a token passed on stdin or in the environment would close it). |
 | `WatchSandbox` OCSF lines arrive at level `OCSF` with structured fields empty. The cursor looks like `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log buffer. | The shorthand text is parsed; an `OUT_OF_RANGE` cursor becomes a gap and a fresh subscription. |
 
 ### macOS and Docker Desktop

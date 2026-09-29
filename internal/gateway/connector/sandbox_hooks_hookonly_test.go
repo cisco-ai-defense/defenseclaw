@@ -86,7 +86,9 @@ func TestVerifyHermesSandboxManagedConfigRejectsTampering(t *testing.T) {
 		"tirith-on": mutate(func(d map[string]interface{}) {
 			d["security"] = map[string]interface{}{"tirith_enabled": true, "allow_lazy_installs": false}
 		}),
-		"lazy-installs-on": mutate(func(d map[string]interface{}) { d["security"] = map[string]interface{}{"tirith_enabled": false} }),
+		"lazy-installs-on":       mutate(func(d map[string]interface{}) { d["security"] = map[string]interface{}{"tirith_enabled": false} }),
+		"model-catalog-on":       mutate(func(d map[string]interface{}) { d["model_catalog"] = map[string]interface{}{"enabled": true} }),
+		"model-catalog-unpinned": mutate(func(d map[string]interface{}) { delete(d, "model_catalog") }),
 		"provider-pinned-url": mutate(func(d map[string]interface{}) {
 			d["providers"].(map[string]interface{})[HermesSandboxProviderName].(map[string]interface{})["base_url"] = "http://example.invalid/v1"
 		}),

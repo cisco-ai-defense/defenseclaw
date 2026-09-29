@@ -293,8 +293,9 @@ only in the image; nothing on your host changes.
   root-owned file. It also pins `hooks_auto_accept: true` (the hooks register
   without the first-use prompt), `plugins.enabled: []`, `terminal.backend:
   local` (approved commands run inside the sandbox), `agent.disabled_toolsets:
-  [code_execution]`, `security.tirith_enabled: false` and
-  `security.allow_lazy_installs: false`. A user setting can add hooks for
+  [code_execution]`, `security.tirith_enabled: false`,
+  `security.allow_lazy_installs: false` and `model_catalog.enabled: false`.
+  A user setting can add hooks for
   other events but cannot drop or replace DefenseClaw's.
 
   Hermes still reads settings and imports code from its home directory,
@@ -327,6 +328,12 @@ only in the image; nothing on your host changes.
   no opinion, so the sandbox hook prints a Hermes block directive on every
   failure: missing token, ingress down, or a bad reply. It does so well inside
   the 30-second hook timeout.
+- **Blocks on screen.** Hermes 0.19 shows nothing for a tool call a hook
+  blocked: the reason goes to the model as the tool's error, and the terminal
+  shows only `preparing terminal…`. A root-owned module in the image prints
+  the reason under that line, the way Hermes prints its own tool lines, for
+  example `┊ ✗ terminal blocked by DefenseClaw rule <ID>: <title>. …`. It
+  prints only to a terminal, and what the model gets is unchanged.
 - **Known gaps.** An agent can still start a second Hermes from a tool call,
   for example by running the pinned binary directly. That start skips the
   launcher's checks. DefenseClaw judges that tool call first, and
@@ -360,12 +367,26 @@ only in the image; nothing on your host changes.
   Ctrl-Z cannot suspend a harness in an OpenShell sandbox (the sandbox
   refuses the signal): Hermes Agent keeps running, and there is nothing to
   bring back with fg.`, and Hermes keeps running.
-- **Other traffic.** Apart from the model, a daemon run on a mock model
-  reached only `pypi.org` (Hermes' update check). The image turns off the
-  Tirith scanner download and runtime installs, which reached `github.com`
-  and fetched about 20 MB from `release-assets.githubusercontent.com` and
-  `files.pythonhosted.org` before. Remaining traffic goes through the
-  DefenseClaw egress proxy, which logs it and applies the blocklist.
+- **Ctrl-C.** One Ctrl-C at an empty Hermes prompt ends Hermes at once
+  (`Shutting down… (finalizing session)`), and DefenseClaw goes on to the end
+  of the session. That is Hermes' own binding: with a draft, Ctrl-C clears
+  it, and while the agent runs it interrupts the agent. The sandbox is
+  kept; `defenseclaw sandbox connect <name>` starts Hermes in it again.
+- **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
+  at start (its model metadata, which has no setting to turn off). The
+  image marks the install the way Hermes' own image does (an
+  `.install_method` of `docker` next to the code), so Hermes neither checks
+  `pypi.org` for updates nor prints its "pip installs are no longer an
+  officially supported platform" notice; `hermes update` then says it does
+  not apply in a container (rebuild the image instead). The managed layer
+  pins `model_catalog.enabled: false`, which stops the fetch of Hermes'
+  curated OpenRouter and Nous Portal model lists
+  (`hermes-agent.nousresearch.com`, redirected to `nousresearch.github.io`).
+  It also turns off the Tirith scanner download and runtime installs, which
+  reached `github.com` and fetched about 20 MB from
+  `release-assets.githubusercontent.com` and `files.pythonhosted.org`
+  before. Remaining traffic goes through the DefenseClaw egress proxy, which
+  logs it and applies the blocklist.
 - **Status.** Verified end to end. A run through the DefenseClaw daemon in an
   OpenShell sandbox, on a mock model behind a credential binding, showed:
   - hooks reaching the sandbox ingress, with OpenShell substituting the model

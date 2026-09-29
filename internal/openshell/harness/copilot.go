@@ -147,6 +147,7 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 	},
 	preseedRefresh: []string{
 		"pin COPILOT_PKG_CACHE_HOME to the root-owned pre-extracted package and COPILOT_AUTO_UPDATE=false, and drop COPILOT_CLI_DIST_DIR and COPILOT_CLI_VERSION, so only the pinned CLI runs",
+		"set NODE_OPTIONS to --disable-warning=UNDICI-EHPA alone, so Node's experimental-EnvHttpProxyAgent warning does not print above the TUI at every start",
 		"trust the exact working directory under /work or /sandbox in ~/.copilot/config.json (folder trust skips the interactive prompt)",
 	},
 	env: map[string]string{
@@ -189,4 +190,9 @@ case "$dir" in
     fi
     ;;
 esac
-` + launcherExec(`/usr/local/bin/copilot "$@"`)
+
+# Copilot builds on Node's EnvHttpProxyAgent, which warns at every start
+# that it is experimental, above the TUI. This fixed NODE_OPTIONS silences
+# only that warning (Copilot's tool commands inherit it); the caller's
+# NODE_OPTIONS is dropped with the other start-up variables.
+` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/copilot "$@"`)

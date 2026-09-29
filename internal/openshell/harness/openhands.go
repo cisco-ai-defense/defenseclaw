@@ -30,7 +30,106 @@ var openHandsTool = uvTool{
 	dist:         "openhands",
 	commands:     []string{"openhands"},
 	versionCheck: `OPENHANDS_SUPPRESS_BANNER=1 /usr/local/bin/openhands --version | awk '/^OpenHands CLI /{print $3; exit}'`,
+	extra: pyShimInstall(InstallRootBase+"/openhands/tools/openhands/bin/python", InstallRootBase+"/openhands", "OpenHands",
+		pyShim{name: openHandsShimModuleName, source: openHandsShimModule}),
 }
+
+// openHandsShimModuleName is the root-owned module the OpenHands tool
+// environment imports at start.
+const openHandsShimModuleName = "defenseclaw_openhands"
+
+// openHandsShimModule adjusts what OpenHands 1.16.0 shows in a sandbox
+// session; no hook's verdict or result changes.
+//
+//   - The end of a session stays free of a traceback. OpenHands closes the
+//     conversation from an atexit callback (LocalConversation.close), after
+//     its Textual app has stopped; close runs the SessionEnd hooks
+//     (DefenseClaw's among them) and then hands each result to the app as a
+//     HookExecutionEvent, which raises "App is not running". Python printed
+//     "Exception ignored in atexit callback" and the traceback just above
+//     DefenseClaw's session summary, and the rest of close (the agent and
+//     tool executors) never ran. HookEventProcessor.run_session_end runs as
+//     it is and drops only a display event the stopped app cannot take.
+//   - A DefenseClaw block leads its hook line. The TUI titles a collapsed
+//     HookExecutionEvent with the first 70 characters of its rendering,
+//     "Hook: PreToolUse (terminal) Status: BLOCKED - Blocked by DefenseCla...",
+//     so the rule and reason showed only after Ctrl+O. For a block whose
+//     reason is DefenseClaw's, the rendering starts with
+//     "BLOCKED by DefenseClaw rule <ID>: <title>. ..." instead, followed by
+//     the rest of OpenHands' own rendering.
+//   - Authlib's deprecation warning stays off the screen. The SDK imports
+//     authlib.jose (openhands/sdk/llm/auth/openai.py), which warns
+//     "authlib.jose module is deprecated, please use joserfc instead" at
+//     every start, with a filter that always shows it; the shim ignores
+//     that one warning category (AuthlibDeprecationWarning) once Authlib
+//     defines it.
+const openHandsShimModule = `"""DefenseClaw: OpenHands in an OpenShell sandbox.
+
+End a session without a traceback: OpenHands hands the SessionEnd hook
+results to its TUI after the TUI stopped. Lead a DefenseClaw block's hook
+line with the block, which the collapsed line otherwise cuts off. And keep
+Authlib's deprecation warning, which a dependency prints at every start, off
+the screen.
+"""
+` + pyOnImport + `
+
+def _defenseclaw_patch_hooks(hooks):
+    cls = hooks.HookEventProcessor
+    run = cls.run_session_end
+
+    def run_session_end(self):
+        emit = self._emit_hook_execution_event
+
+        def _emit(*args, **kwargs):
+            try:
+                emit(*args, **kwargs)
+            except Exception:
+                pass
+
+        self._emit_hook_execution_event = _emit
+        try:
+            return run(self)
+        finally:
+            self.__dict__.pop("_emit_hook_execution_event", None)
+
+    run_session_end.__wrapped__ = run
+    run_session_end.__doc__ = run.__doc__
+    cls.run_session_end = run_session_end
+
+
+def _defenseclaw_patch_hook_event(events):
+    cls = events.HookExecutionEvent
+    render = cls.visualize.fget
+
+    def visualize(self):
+        reason = " ".join(str(self.reason or "").split())
+        if not self.blocked or not reason.startswith(("Blocked by DefenseClaw", "DefenseClaw")):
+            return render(self)
+        from rich.text import Text
+
+        text = Text()
+        text.append("BLOCKED", style="bold red")
+        if reason.startswith("Blocked by "):
+            text.append(" " + reason[len("Blocked "):])
+        else:
+            text.append(": " + reason)
+        text.append("\n")
+        text.append_text(render(self.model_copy(update={"reason": None})))
+        return text
+
+    cls.visualize = property(visualize, doc=cls.visualize.__doc__)
+
+
+def _defenseclaw_quiet_authlib(deprecate):
+    import warnings
+
+    warnings.filterwarnings("ignore", category=deprecate.AuthlibDeprecationWarning)
+
+
+_defenseclaw_on_import("openhands.sdk.hooks.conversation_hooks", _defenseclaw_patch_hooks)
+_defenseclaw_on_import("openhands.sdk.event.hook_execution", _defenseclaw_patch_hook_event)
+_defenseclaw_on_import("authlib.deprecate", _defenseclaw_quiet_authlib)
+`
 
 // OpenHands is the OpenHands CLI harness. OpenHands takes its model only
 // from saved settings or, with --override-with-envs, from LLM_MODEL,
