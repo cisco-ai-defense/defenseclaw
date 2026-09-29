@@ -364,6 +364,11 @@ only in the image; nothing on your host changes.
   the OpenShell sandbox refuses. The image answers that call with
   `defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox`, and
   Hermes keeps running, after its own "has been suspended" line.
+- **Ctrl-C.** One Ctrl-C at an empty Hermes prompt ends Hermes at once
+  (`Shutting down… (finalizing session)`), and DefenseClaw goes on to the end
+  of the session. That is Hermes' own binding: with a draft, Ctrl-C clears
+  it, and while the agent runs it interrupts the agent. The sandbox is
+  kept; `defenseclaw sandbox connect <name>` starts Hermes in it again.
 - **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
   at start (its model metadata, which has no setting to turn off). The
   image marks the install the way Hermes' own image does (an

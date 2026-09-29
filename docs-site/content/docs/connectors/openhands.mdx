@@ -184,6 +184,10 @@ exist only in the image; nothing on your host changes.
   `BLOCKED by DefenseClaw rule <ID>: <title>...`; Ctrl+O still expands it to
   the full reason and OpenHands' own details. The reason the model gets is
   unchanged.
+- **Screen updates.** OpenHands 1.16 sometimes does not scroll to a new
+  turn: the token counter moves but the view stays on the previous turn, and
+  PageDown does nothing. Pressing Ctrl+O twice redraws it. This is OpenHands'
+  own TUI, not DefenseClaw.
 - **Known gaps.** The agent can edit `~/.openhands/hooks.json`, or start a
   second OpenHands with another `HOME`, from a tool call. DefenseClaw sees that
   tool call first, and hook-silence detection is the backstop. Command rules

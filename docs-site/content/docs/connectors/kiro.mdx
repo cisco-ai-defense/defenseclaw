@@ -218,6 +218,23 @@ replaces that list, so name every harness you want:
   sign-in was tested live: no Kiro account was available.
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
   and Codex sandboxes only.
+- **Kiro's own behaviour in a sandbox.**
+  - Ctrl-C during a shell tool call shows `● Cancelled …`, but the command
+    keeps running to its end: Kiro stops a cancelled command by signalling
+    its process group, which the OpenShell sandbox refuses, as it refuses
+    every harness's Ctrl-Z. DefenseClaw judged the command before it
+    started. To stop one that keeps running, open a shell with
+    `defenseclaw sandbox connect <name> --shell` and end it by name, for
+    example `pkill -f 'sleep 40'`.
+  - `● failed to retrieve governance settings — MCP and web tools disabled`
+    at the start is Kiro's account check, not a DefenseClaw policy: without
+    a working Kiro key or login Kiro cannot fetch its governance settings
+    and turns MCP servers and web tools off for the session. Kiro asks its
+    management service in four regions, including the us-gov ones, at every
+    start.
+  - With telemetry off (the image's settings), Kiro still sends its
+    CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`; no Kiro
+    setting stops them.
 - **Image and verification.** The image installs Kiro CLI 2.24.1 from its
   release archive, checked against the SHA-256 in Kiro's release manifest.
   It also unpacks the embedding model Kiro would otherwise download at a new
