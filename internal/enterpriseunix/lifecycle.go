@@ -1552,6 +1552,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		// exists, with nothing left to remove them: the binaries, the
 		// deployment record and the state stay, so a rerun of this uninstall
 		// removes the rest and ensure restores the deployment.
+		if err := errors.Join(errs...); err != nil {
+			r.AddError(codeUninstall, err.Error())
+		}
 		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
