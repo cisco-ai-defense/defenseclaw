@@ -285,6 +285,34 @@ func NewContext(spec BuildSpec) (*Context, error) {
 	return c, nil
 }
 
+// localhostStep makes the image resolve localhost without /etc/hosts. An
+// OpenShell MicroVM boots it with an empty /etc/hosts (the vm driver makes
+// the root disk from a `docker export`, whose init layer masks the image's
+// file, and its guest init writes none) and a loopback DNS relay that
+// answers localhost with SERVFAIL, so every program that resolved
+// localhost failed there: Antigravity CLI would not start. nss-myhostname
+// (Ubuntu's libnss-myhostname) answers localhost, localhost.localdomain,
+// *.localhost and the hostname with loopback addresses, and _gateway and
+// _outbound with the default route's, which a MicroVM has none of (only
+// its loopback is configured); it does no network I/O. It is asked after
+// /etc/hosts (Docker's, on the docker driver, still answers first) and
+// before DNS, so a localhost query never leaves the sandbox. Go programs
+// linked with cgo hand these names to libc when nsswitch.conf names
+// myhostname; Go's own resolver and static musl programs read /etc/hosts
+// and DNS themselves and still cannot resolve localhost in a MicroVM,
+// which the hook-fire probe's MicroVM scenario catches. The package's
+// postinst appends myhostname after dns, so the hosts line is rewritten
+// with it right after files, and the build checks that the module answers
+// localhost with 127.0.0.1.
+const localhostStep = "# A MicroVM's /etc/hosts is empty and its DNS relay does not answer localhost: nss-myhostname answers it (and\n" +
+	"# *.localhost and the hostname) with loopback addresses, after /etc/hosts and before DNS.\n" +
+	`RUN set -eu; if ! getent -s hosts:myhostname hosts localhost >/dev/null 2>&1; then ` +
+	`apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libnss-myhostname && rm -rf /var/lib/apt/lists/*; fi; ` +
+	`sed -i -E '/^hosts:/{s/[[:space:]]+myhostname([[:space:]]|$)/\1/g;s/^hosts:([[:space:]]+)files([[:space:]]|$)/hosts:\1files myhostname\2/}' /etc/nsswitch.conf; ` +
+	`grep -Eq '^hosts:[[:space:]]+files myhostname([[:space:]]|$)' /etc/nsswitch.conf || ` +
+	`{ echo "the base image's /etc/nsswitch.conf has no hosts line that starts with files, so myhostname cannot follow it" >&2; exit 1; }; ` +
+	`getent -s hosts:myhostname ahosts localhost | grep -q '^127\.0\.0\.1[[:space:]]' || { echo "nss-myhostname does not answer localhost with 127.0.0.1" >&2; exit 1; }` + "\n"
+
 // contextName maps an in-image path to its build-context entry.
 func contextName(imagePath string) string {
 	return "files" + imagePath
@@ -305,6 +333,7 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 	b.WriteString("# The hooks need jq and curl on the baked hook PATH, not just the image PATH.\n")
 	b.WriteString(`RUN set -eu; PATH=` + connector.SandboxHookPATH + `; missing=""; for tool in jq curl; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done; ` +
 		`if [ -n "$missing" ]; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing && rm -rf /var/lib/apt/lists/*; fi` + "\n")
+	b.WriteString(localhostStep)
 	for _, step := range steps {
 		fmt.Fprintf(&b, "# %s\n", step.Comment)
 		fmt.Fprintf(&b, "RUN %s\n", step.Run)
