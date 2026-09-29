@@ -693,6 +693,17 @@ and `violations`. Before a create on a MicroVM gateway, `vm_first_boot` says
 the image the sandbox would boot has no prepared MicroVM disk yet, so its
 first start takes about a minute.
 
+For a harness whose run files depend on the create request (Claude Code,
+Codex), `run=true` describes that request with the following parameters:
+- `run_env=KEY=VALUE` (repeatable): the `env` variables the run files read.
+- `run_env_withheld=KEY` (repeatable): such a variable whose value is not
+  sent because it may be a secret. The answer then counts as a first boot.
+- `run_credential=NAME` (repeatable): the credential names, never their
+  values.
+- `run_llm_profile` and `run_bedrock_region`: the model profile and region.
+
+Without `run`, the daemon uses the newest sandbox of the harness.
+
 Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `admin`,
 `gateway`, or `default`), `origin` (such as `openshell.admin.min_profile`),
 and, for a clamped setting, the value `requested`. `gateway` is the compute

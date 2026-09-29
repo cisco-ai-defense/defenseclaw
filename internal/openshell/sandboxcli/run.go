@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
@@ -257,6 +258,19 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	if _, err := spec.LaunchArgv(pre); err != nil {
 		return err
+	}
+	// On MicroVMs a harness's run files are baked into a run image, whose
+	// first start prepares a disk: which run image this run boots depends
+	// on its --env and credentials, which the preflight took from the
+	// newest sandbox of the harness. The daemon is asked again with this
+	// run's (an older daemon, or none, leaves the preflight's answer).
+	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles && drv.ImageCache != "" {
+		if again, err := api.Explain(ctx, sandboxapi.ExplainRequest{
+			Harness: spec.Name, Pack: o.Pack, Profile: o.Profile, Project: project, Copy: req.Copy, Safe: o.Safe, Unmask: o.Unmask,
+			Run: explainRun(spec, req),
+		}); err == nil {
+			ex.VMFirstBoot = again.VMFirstBoot
+		}
 	}
 	// A first start on MicroVMs prepares a disk of about the image's size:
 	// on a volume without the room it is refused before anything is
@@ -1229,6 +1243,42 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 	}
 	req.LLM = llm.Credential
 	return req, llm, nil
+}
+
+// explainRun is what of the create request req the run files of its
+// sandbox depend on (sandboxapi.ExplainRun), without a secret: the values of
+// the --env variables spec's run files read (a variable whose name looks
+// like a secret's, or that holds HTTP headers, which carry credentials,
+// only by name), and the names of its credentials, never their values.
+func explainRun(spec *harness.Spec, req sandboxapi.CreateRequest) *sandboxapi.ExplainRun {
+	run := &sandboxapi.ExplainRun{}
+	if reader, ok := spec.Provider.(connector.SandboxRunEnvReader); ok {
+		for _, k := range reader.SandboxRunEnv() {
+			v, set := req.Env[k]
+			switch {
+			case !set:
+			case secretLooking(k) || strings.Contains(strings.ToUpper(k), "HEADERS"):
+				run.EnvWithheld = append(run.EnvWithheld, k)
+			default:
+				if run.Env == nil {
+					run.Env = map[string]string{}
+				}
+				run.Env[k] = v
+			}
+		}
+	}
+	for _, c := range req.Credentials {
+		run.Credentials = append(run.Credentials, c.Name)
+	}
+	if req.LLM != nil {
+		run.LLMProfile, run.BedrockRegion = req.LLM.Profile, req.LLM.BedrockRegion
+		for name := range req.LLM.Credentials {
+			run.Credentials = append(run.Credentials, name)
+		}
+	}
+	sort.Strings(run.Credentials)
+	sort.Strings(run.EnvWithheld)
+	return run
 }
 
 // stageCopy stages the copy-mode project with the effective workspace

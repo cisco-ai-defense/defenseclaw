@@ -314,10 +314,11 @@ func runWorkdir(d openshell.Driver, workdir string) string {
 // the daemon, which runs as the gateway's user) holds no disk prepared
 // from its image ID for the workload identity. A run image also depends
 // on what only the create request carries, the model provider's settings,
-// --env and --credential; the render takes them from the newest sandbox of
-// the harness and image, whose runs usually share them, and assumes none
-// without one. Always false on a driver that prepares nothing.
-func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshell.Driver, flags packs.Flags, eff *packs.Effective) bool {
+// --env and --credential: run, when the client sent it, says what of them
+// this run has (explainRunInputs); without it the render takes them from
+// the newest sandbox of the harness and image, and assumes none without
+// one. Always false on a driver that prepares nothing.
+func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshell.Driver, flags packs.Flags, eff *packs.Effective, run *sandboxapi.ExplainRun) bool {
 	spec, ok := harness.Get(flags.Harness)
 	if d.ImageCache == "" || m.opts.Images == nil || !ok {
 		return false
@@ -333,8 +334,14 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 	}
 	id := img.ImageID
 	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles {
-		env, creds, provider := m.newestRunInputs(spec.Name, img.ImageID)
 		target := connector.SandboxRenderTarget{IngressPort: m.opts.IngressPort, AgentVersion: img.HarnessVersion, HookContractID: img.HookContract}
+		env, creds, provider := m.newestRunInputs(spec.Name, img.ImageID)
+		if run != nil {
+			if env, creds, provider, err = explainRunInputs(spec, target, run); err != nil {
+				// Files this run's inputs render cannot be told apart.
+				return true
+			}
+		}
 		rc, err := m.planRunConfig(ctx, runConfigInput{
 			spec: spec, target: target, eff: eff, yolo: eff.Yolo, env: env, credentials: creds,
 			provider: provider, workdir: runWorkdir(d, ""), project: flags.Project, baked: d.RunFilesInImage,
@@ -394,6 +401,38 @@ func (m *Manager) newestRunInputs(harnessName, imageID string) (map[string]strin
 		return nil, nil, nil
 	}
 	return maps.Clone(newest.sb.Spec.Environment), slices.Clone(newest.rec.RunConfig.Credentials), newest.rec.RunConfig.ModelProvider
+}
+
+// explainRunInputs are the creation environment, credential names and model
+// provider that a create of the run a client describes (run) renders its
+// run files with, as create computes them: the harness's environment with
+// its provider profile's, then the run's --env. It leaves out only what
+// differs per sandbox and no run file reads (its ID and name, its proxy and
+// token). A run whose client withheld a value the files read cannot be
+// rendered.
+func explainRunInputs(spec *harness.Spec, target connector.SandboxRenderTarget, run *sandboxapi.ExplainRun) (map[string]string, []string, *connector.SandboxModelProvider, error) {
+	if len(run.EnvWithheld) > 0 {
+		return nil, nil, nil, fmt.Errorf("the value of %s was not sent", strings.Join(run.EnvWithheld, ", "))
+	}
+	arts, err := spec.Provider.SandboxArtifacts(target)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	profile := strings.TrimSpace(run.LLMProfile)
+	env, err := spec.Env(harness.EnvOptions{Artifacts: arts, CredentialProfile: profile, BedrockRegion: run.BedrockRegion})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var provider *connector.SandboxModelProvider
+	if profile != "" {
+		cp, err := spec.CredentialProfile(profile, run.BedrockRegion)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		provider = cp.ModelProvider
+	}
+	maps.Copy(env, run.Env)
+	return env, slices.Compact(slices.Sorted(slices.Values(run.Credentials))), provider, nil
 }
 
 // planRunConfig renders the per-run files, or returns nil for a harness

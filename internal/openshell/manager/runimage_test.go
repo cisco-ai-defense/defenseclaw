@@ -694,6 +694,37 @@ func TestExplainReportsAVMFirstBoot(t *testing.T) {
 	if !explain(e, sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Safe: true}) {
 		t.Fatal("another posture (safe mode) reported no first boot")
 	}
+	// FIN-A-2: the run's own --env and credentials, when the client sends
+	// them, decide its run image, not the newest sandbox's: another model
+	// endpoint, a credential the files then leave out, or a value the
+	// client withheld is another run image, so a first boot.
+	const endpoint = "http://host.openshell.internal:39942"
+	withRun := func(run sandboxapi.ExplainRun) sandboxapi.ExplainRequest {
+		return sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Run: &run}
+	}
+	if explain(e, withRun(sandboxapi.ExplainRun{})) {
+		t.Fatal("a run with the prepared sandbox's inputs (none) reported a first boot")
+	}
+	for name, run := range map[string]sandboxapi.ExplainRun{
+		"another --env":        {Env: map[string]string{"ANTHROPIC_BASE_URL": endpoint}},
+		"a --credential":       {Credentials: []string{"ANTHROPIC_AUTH_TOKEN"}},
+		"a withheld --env":     {EnvWithheld: []string{"ANTHROPIC_AUTH_TOKEN"}},
+		"an unknown --llm":     {LLMProfile: "defenseclaw-nonesuch"},
+		"another model --env":  {Env: map[string]string{"ANTHROPIC_MODEL": "claude-sonnet-4-5"}},
+		"a provider selection": {Env: map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"}},
+	} {
+		if !explain(e, withRun(run)) {
+			t.Fatalf("%s reported no first boot", name)
+		}
+	}
+	env := e.create(sandboxapi.CreateRequest{Name: "vm-env", Copy: true, Project: e.otherProject("env"), Env: map[string]string{"ANTHROPIC_BASE_URL": endpoint}})
+	prepare(env.RunImageID)
+	if explain(e, withRun(sandboxapi.ExplainRun{Env: map[string]string{"ANTHROPIC_BASE_URL": endpoint, "UNRELATED": "x"}})) {
+		t.Fatal("the --env of a prepared sandbox reported a first boot")
+	}
+	if explain(e, withRun(sandboxapi.ExplainRun{})) {
+		t.Fatal("once another sandbox is newer, the first one's inputs reported a first boot")
+	}
 	// An existing sandbox's Explain describes no create.
 	if explain(e, sandboxapi.ExplainRequest{Sandbox: "vm-first"}) {
 		t.Fatal("an existing sandbox's Explain reported a first boot")

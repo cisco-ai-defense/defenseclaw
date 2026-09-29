@@ -77,6 +77,8 @@ type fakeDaemon struct {
 	// onStatus runs before the status is returned (the daemon notices a
 	// change).
 	onStatus func(st *sandboxapi.Status)
+	// onExplain, when set, edits the explain answer to a request.
+	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
 	createMCP        *sandboxapi.MCPSummary
 	createWarnings   []string
@@ -223,7 +225,11 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(d.status)
 	case path == sandboxapi.PathPolicyExplain:
-		reply(d.explain)
+		ex := d.explain
+		if d.onExplain != nil {
+			d.onExplain(sandboxapi.ParseExplainQuery(r.URL.Query()), &ex)
+		}
+		reply(ex)
 	case path == sandboxapi.PathApprovals && r.Method == http.MethodGet:
 		var out []sandboxapi.Approval
 		for _, a := range d.approvals {

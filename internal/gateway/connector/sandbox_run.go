@@ -125,6 +125,14 @@ type SandboxRunConfigProvider interface {
 	SandboxRunFiles(target SandboxRenderTarget, run SandboxRunConfig) ([]SandboxFile, error)
 }
 
+// SandboxRunEnvReader is implemented by a SandboxRunConfigProvider whose
+// run files take values from the creation environment (SandboxRunConfig.Env).
+// SandboxRunEnv names the variables they read: the only ones of a run's
+// environment a client needs to send to learn which run files the run gets.
+type SandboxRunEnvReader interface {
+	SandboxRunEnv() []string
+}
+
 // Limits on imported MCP servers.
 const (
 	maxSandboxMCPServers = 64

@@ -191,8 +191,16 @@ not the driver's name or `runtime.GOOS`.
 - **Cost.** The first start of an image prepares a rootfs from it (about a
   minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
   keyed by image ID and kept by OpenShell); a cached one starts in seconds.
-  The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
-  its "about a minute" note and a disk check before it stages the copy
+  The pre-create `Explain` reports `vm_first_boot`. For a harness with run
+  files (Claude Code, Codex) that depends on the run image of this run's
+  `--env`, credentials and model provider. The preflight renders it from
+  the newest sandbox's, so the CLI asks again once it has built the create
+  request, sending `sandboxapi.ExplainRun`. That holds the values of the
+  variables the run files read (`connector.SandboxRunEnvReader`), a
+  secret-looking or header variable by name only (`env_withheld`, which the
+  daemon counts as a first boot), and credential names, never their values.
+  The CLI turns the answer into its "about a minute" note and a disk check
+  before it stages the copy
   (`openshell.VMDiskShortage`: refused below the image's size plus 1 GiB,
   never below the doctor's 6 GiB `VMDiskFailBytes`, warned below twice that,
   never below 12 GiB; `image build` warns the same after a build). The

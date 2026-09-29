@@ -599,6 +599,34 @@ type ExplainRequest struct {
 	Safe    bool     `json:"safe,omitempty"`
 	Yolo    bool     `json:"yolo,omitempty"`
 	Unmask  []string `json:"unmask,omitempty"`
+	// Run, for a new sandbox, is what of its create request its run files
+	// depend on, which a MicroVM gateway bakes into a run image, so
+	// Explain.VMFirstBoot does too. Without it the daemon takes the newest
+	// sandbox of the harness's.
+	Run *ExplainRun `json:"run,omitempty"`
+}
+
+// ExplainRun is what of a create request the run files of the sandbox
+// depend on. It carries no secret: the names of the credentials, never
+// their values.
+type ExplainRun struct {
+	// Env holds the variables of CreateRequest.Env that the harness's run
+	// files read (connector.SandboxRunEnvReader), except those whose name
+	// looks like a secret's.
+	Env map[string]string `json:"env,omitempty"`
+	// EnvWithheld names the variables of CreateRequest.Env that the run
+	// files read but whose values Env leaves out, because the name looks
+	// like a secret's. The daemon cannot render the files without them, so
+	// it takes the sandbox to boot a new run image.
+	EnvWithheld []string `json:"env_withheld,omitempty"`
+	// Credentials names the variables the sandbox gets as credential
+	// placeholders: those of CreateRequest.LLM.Credentials and of
+	// CreateRequest.Credentials.
+	Credentials []string `json:"credentials,omitempty"`
+	// LLMProfile and BedrockRegion are CreateRequest.LLM's Profile and
+	// BedrockRegion.
+	LLMProfile    string `json:"llm_profile,omitempty"`
+	BedrockRegion string `json:"bedrock_region,omitempty"`
 }
 
 // Explain is the resolved sandbox posture with provenance.
