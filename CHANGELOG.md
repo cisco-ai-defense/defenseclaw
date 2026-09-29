@@ -202,7 +202,7 @@ rest also reach per-user installs.
   restarting and stopping the gateway ran `defenseclaw-gateway` by path after
   checking who can write it, so the path could name another file by the time
   it ran. Linux now runs the checked file itself, Windows keeps it locked
-  against replacement until the process exists, and macOS stops the launch if
+  against replacement until the command finishes, and macOS stops the launch if
   the file or a directory above it changed. The Windows Cursor runtime probe
   does the same for PowerShell, and the Windows watchdog repair uses the
   verified gateway executable instead of the first one on `PATH`.

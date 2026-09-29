@@ -24,8 +24,10 @@ window with the primitive it has:
 * Linux executes the open descriptor (``/proc/<pid>/fd/N``), so the kernel
   runs the verified inode whatever the path names by then.
 * Windows holds the file open without write or delete sharing until the
-  process exists. NTFS then refuses to rewrite, rename or replace the file or
-  any directory above it.
+  process exists (``run_pinned_executable``: until it exits, since the gateway
+  controller starts its own long-running process from the same path). NTFS
+  then refuses to rewrite, rename or replace the file or any directory above
+  it.
 * macOS has no descriptor exec. Just before the launch the path must still
   name the held file, and the identity and change times of the file and of
   every directory above it are recorded; once the process exists they must be
@@ -176,9 +178,10 @@ def run_pinned_executable(
     if capture_output:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
-    with pinned_executable(argv[0]) as pinned:
-        process = pinned.popen(argv, **kwargs)
-    with process:
+    # Hold the file until the command exits: the controller starts the
+    # long-running gateway from this same path, and on Windows the held file
+    # cannot be renamed or replaced before that launch either.
+    with pinned_executable(argv[0]) as pinned, pinned.popen(argv, **kwargs) as process:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:

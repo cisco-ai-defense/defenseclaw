@@ -15,7 +15,7 @@ from defenseclaw import config as config_module
 from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_version
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
-from defenseclaw.pinned_exec import pinned_executable
+from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 
 
 def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
@@ -714,7 +714,7 @@ def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(
     controller = tmp_path / ("defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway")
     replacement = tmp_path / "replacement"
     if os.name == "nt":
-        controller.write_bytes(b"verified controller")
+        shutil.copyfile(os.path.join(os.environ["SystemRoot"], "System32", "cmd.exe"), controller)
         replacement.write_bytes(b"replacement controller")
     else:
         shutil.copyfile("/bin/echo", controller)
@@ -722,12 +722,24 @@ def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(
         for path in (controller, replacement):
             path.chmod(0o755)
 
-    with pinned_executable(os.fspath(controller)) as pinned:
-        if os.name == "nt":
+    if os.name == "nt":
+        with pinned_executable(os.fspath(controller)):
             # NTFS refuses to replace a file held without delete sharing.
             with pytest.raises(PermissionError):
                 os.replace(replacement, controller)
-            return
+        # The hold lasts until the command exits, so the controller cannot be
+        # renamed away before it starts its own long-running process either.
+        renamed = run_pinned_executable(
+            [os.fspath(controller), "/d", "/c", "ren", os.fspath(controller), "moved.exe"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+        assert renamed.returncode != 0
+        assert controller.exists()
+        return
+
+    with pinned_executable(os.fspath(controller)) as pinned:
         os.replace(replacement, controller)
         argv = [os.fspath(controller), "verified"]
         if sys.platform.startswith("linux"):
