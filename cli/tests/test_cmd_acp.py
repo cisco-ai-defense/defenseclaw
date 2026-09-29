@@ -72,7 +72,7 @@ def test_catalog_exposes_native_only_connector_coverage():
             assert "agent_id" not in row, row
         else:
             assert row["agent_id"] in agent_ids, row
-    retired = {"codex", "claudecode", "amp", "antigravity", "openclaw", "openhands", "geminicli"}
+    retired = {"codex", "claudecode", "amp", "antigravity", "openclaw", "openhands"}
     reporting_none = {row["connector_id"] for row in catalog["connector_coverage"] if row["acp_support"] == "none"}
     assert retired <= reporting_none
 

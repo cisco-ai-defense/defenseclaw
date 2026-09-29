@@ -56,7 +56,7 @@ evidence has not been recorded.
 | [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | Regular connector: workspace-scoped native hooks in `.kiro/hooks` for Kiro IDE and `kiro-cli --v3`, a CLI 2.x agent config for bare `kiro-cli`, plus optional ACP via the shipped stdio guard. |
 | [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
 | [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
-| [Devin](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` hook admission; its separate native `devin acp` entry point is cataloged for the shared guard, while cloud Devin, proxy, and native OTLP remain excluded. |
+| [Devin CLI and Devin Desktop](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` hook admission. Devin Desktop's default Devin Local agent shares the CLI hooks; its legacy Cascade agent is not covered. The separate native `devin acp` entry point is cataloged for the shared guard, while cloud Devin, proxy, and native OTLP remain excluded. |
 | [GitHub Copilot CLI](/docs/connectors/copilot) | **Supported** | **Supported** | Uses Copilot's PowerShell hook field; upstream Windows sandboxing cannot enforce per-path denials. |
 | [Antigravity](/docs/connectors/antigravity) | **Supported** | **Supported** | Native PowerShell launcher; only `PreToolUse` can block or ask. |
 | [Hermes](/docs/connectors/hermes) | **Supported** | **Supported** | Direct executable hook is shell-free, but Hermes' own terminal tool depends on its bundled Git Bash. |
@@ -66,10 +66,9 @@ evidence has not been recorded.
 | [OpenClaw](/docs/connectors/openclaw) | **Supported** | **Unsupported** | Its DefenseClaw integration requires the guardrail proxy, which native Windows does not host. |
 | [ZeptoClaw](/docs/connectors/zeptoclaw) | **Supported** | **Unsupported** | Its DefenseClaw integration requires the guardrail proxy and upstream publishes macOS/Linux builds. |
 
-Gemini CLI is deprecated and unavailable for new setup on every platform. Use
-[Antigravity](/docs/connectors/antigravity) for new Google agent integration;
-the [legacy Gemini CLI page](/docs/connectors/geminicli) exists only for safe,
-receipt-bound teardown.
+Connectors that earlier releases shipped under other names, or that were
+removed, are listed with migration steps in
+[Upgrade → Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors).
 
 ## Capability summary
 

@@ -85,12 +85,12 @@ func installedCursorConnector(t *testing.T) (connector.Connector, connector.Setu
 	return conn, opts, cfgPath
 }
 
-func installedWindsurfConnector(t *testing.T) (connector.Connector, connector.SetupOpts, string) {
+func installedDevinConnector(t *testing.T) (connector.Connector, connector.SetupOpts, string) {
 	t.Helper()
-	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
-	prev := connector.WindsurfHooksPathOverride
-	connector.WindsurfHooksPathOverride = cfgPath
-	t.Cleanup(func() { connector.WindsurfHooksPathOverride = prev })
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	prev := connector.DevinHooksPathOverride
+	connector.DevinHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.DevinHooksPathOverride = prev })
 
 	opts := connector.SetupOpts{
 		DataDir:      t.TempDir(),
@@ -98,9 +98,9 @@ func installedWindsurfConnector(t *testing.T) (connector.Connector, connector.Se
 		APIToken:     "tok-test",
 		WorkspaceDir: t.TempDir(),
 	}
-	conn := connector.NewWindsurfConnector()
+	conn := connector.NewDevinConnector()
 	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("windsurf Setup: %v", err)
+		t.Fatalf("devin Setup: %v", err)
 	}
 	return conn, opts, cfgPath
 }
@@ -845,7 +845,7 @@ func TestHookConfigGuard_SuppressHealingPausesThenResumes(t *testing.T) {
 
 func TestHookConfigGuard_RepointFollowsConnectorSwitch(t *testing.T) {
 	cursorConn, cursorOpts, cursorPath := installedCursorConnector(t)
-	windsurfConn, windsurfOpts, windsurfPath := installedWindsurfConnector(t)
+	devinConn, devinOpts, devinPath := installedDevinConnector(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -854,14 +854,14 @@ func TestHookConfigGuard_RepointFollowsConnectorSwitch(t *testing.T) {
 	defer guard.Stop()
 	waitForPresence(t, cursorConn, cursorOpts, true, time.Second)
 
-	// Switch the guard to the windsurf connector.
-	guard.Repoint(windsurfConn, windsurfOpts)
+	// Switch the guard to the devin connector.
+	guard.Repoint(devinConn, devinOpts)
 
-	// Deleting windsurf's hook block is now healed.
-	if err := os.WriteFile(windsurfPath, []byte("{}\n"), 0o600); err != nil {
-		t.Fatalf("strip windsurf hook block: %v", err)
+	// Deleting devin's hook block is now healed.
+	if err := os.WriteFile(devinPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("strip devin hook block: %v", err)
 	}
-	waitForPresence(t, windsurfConn, windsurfOpts, true, 3*time.Second)
+	waitForPresence(t, devinConn, devinOpts, true, 3*time.Second)
 
 	// Deleting the previous connector's hook block is NOT healed: the guard
 	// repointed away from it.
@@ -874,6 +874,6 @@ func TestHookConfigGuard_RepointFollowsConnectorSwitch(t *testing.T) {
 		t.Fatalf("OwnedHooksPresent cursor: %v", err)
 	}
 	if present {
-		t.Fatal("cursor hook block restored after the guard repointed to windsurf")
+		t.Fatal("cursor hook block restored after the guard repointed to devin")
 	}
 }

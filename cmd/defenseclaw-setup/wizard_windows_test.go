@@ -468,22 +468,6 @@ func TestPlainInteractiveRerunRoutesExistingInstallToRepair(t *testing.T) {
 	}
 }
 
-func TestInteractiveInstallDefaultsRetireGeminiSelection(t *testing.T) {
-	state := &installState{Connector: "geminicli", Mode: "action"}
-	opts := applyInteractiveInstallDefaults(options{
-		Action:          "install",
-		Connector:       "none",
-		Mode:            "observe",
-		StartGatewaySet: true,
-	}, state, false, true)
-	if opts.Connector != "none" || opts.Mode != "action" || opts.StartGateway {
-		t.Fatalf("retired Gemini defaults = %+v, want connector-free install", opts)
-	}
-	if opts.ConnectorSet || opts.ModeSet || !opts.StartGatewaySet {
-		t.Fatalf("retired Gemini defaults changed explicit property markers: %+v", opts)
-	}
-}
-
 func TestInteractiveInstallDefaultsRespectExplicitSelections(t *testing.T) {
 	state := &installState{Connector: "claudecode", Mode: "action"}
 	opts := applyInteractiveInstallDefaults(options{

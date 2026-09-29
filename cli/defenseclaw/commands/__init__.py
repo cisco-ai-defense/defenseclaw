@@ -75,8 +75,6 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
         raise click.UsageError(
             f"connector {requested!r} is not configured. Configured connectors: {allowed}."
         )
-    if connector_paths.is_cleanup_only(match):
-        raise click.UsageError(connector_paths.cleanup_only_guidance(match))
     return match
 
 
@@ -88,8 +86,7 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
 
     * An explicit ``--connector X`` narrows to exactly that one validated
       peer.
-    * With no flag the listing covers every non-retired active connector;
-      cleanup-only connectors are excluded from catalog fan-out.
+    * With no flag the listing covers every active connector.
       ``Config.active_connectors()`` returns a single name on a
       single-connector install and N names on a fan-out install, so the
       caller renders the same way regardless of count — the operator never
@@ -122,16 +119,7 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
         if cfg is not None and hasattr(cfg, "active_connectors"):
             names = [n for n in cfg.active_connectors() if n]
             if names:
-                from defenseclaw import connector_paths
-
-                active_names = [
-                    name for name in names if not connector_paths.is_cleanup_only(name)
-                ]
-                if active_names:
-                    return active_names
-                raise click.UsageError(
-                    connector_paths.cleanup_only_guidance(names[0])
-                )
+                return names
     except click.UsageError:
         raise
     except Exception:  # noqa: BLE001 — fall back to the singular active connector.

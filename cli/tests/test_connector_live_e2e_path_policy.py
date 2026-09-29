@@ -200,7 +200,6 @@ def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
     assert "omnigent" not in json.loads(full_match.group(1))["connector"]
     assert "          - openclaw" not in dispatch
     assert "          - zeptoclaw" not in dispatch
-    assert "          - geminicli" not in dispatch
 
 
 def test_copilot_contract_normalizes_fixture_event_to_native_registration() -> None:

@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // agentProcessPattern matches executables that *are* an AI agent, as opposed
@@ -41,7 +43,7 @@ import (
 // discarded for having no agent above it, because the agent was "claude.exe".
 var agentProcessPattern = regexp.MustCompile(
 	`(?i)^(claude|codex|cursor|cursor-agent|aider|goose|crush|opencode|continue|` +
-		`cline|windsurf|copilot|copilot-language-server|gh-copilot|` +
+		`cline|` + legacyconnector.ProcessName + `|copilot|copilot-language-server|gh-copilot|` +
 		`amp|devin|openhands|swe-agent|autogpt|agentgpt|babyagi|` +
 		`gptme|interpreter|open-interpreter|smol.*|langgraph.*|crewai.*)` +
 		`(\.(exe|cmd|bat|com|ps1))?$`)

@@ -1425,120 +1425,9 @@
           },
           "notes": [
             "The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
+            "Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
             "Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
             "Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded."
-          ]
-        }
-      ]
-    },
-    "geminicli": {
-      "kind": "hook",
-      "compatibility_gate": "hook-contract",
-      "version_probe": "gemini --version",
-      "contracts": [
-        {
-          "contract_id": "geminicli-hooks-v1",
-          "agent_version": {
-            "min_inclusive": "0.26.0",
-            "max_exclusive": ""
-          },
-          "default_for_unversioned": true,
-          "hook_script_version": "v6",
-          "hook_script": "geminicli-hook.sh",
-          "hook_config_path_templates": [
-            "~/.gemini/settings.json"
-          ],
-          "response_field": "hook_output",
-          "events": [
-            "SessionStart",
-            "BeforeAgent",
-            "BeforeModel",
-            "BeforeToolSelection",
-            "BeforeTool",
-            "AfterTool",
-            "AfterModel",
-            "AfterAgent",
-            "PreCompress",
-            "Notification",
-            "SessionEnd"
-          ],
-          "aid_surfaces": [
-            "prompt",
-            "tool_call",
-            "tool_result"
-          ],
-          "supports_traceparent": true,
-          "native_otlp": true,
-          "tool_call_lifecycle": {
-            "version": 1,
-            "pre_proposal_events": [
-              "BeforeTool"
-            ],
-            "authoritative_success_events": [
-              "AfterTool"
-            ],
-            "authoritative_failure_events": [
-              "AfterTool"
-            ],
-            "authoritative_denial_events": [],
-            "authoritative_pending_discard_events": [
-              "AfterAgent"
-            ],
-            "authoritative_terminal_events": [
-              "SessionEnd"
-            ],
-            "invocation_id_authority": "none",
-            "outcome_authority": "result-payload",
-            "stateful_enforcement_level": "detection-only",
-            "routing": {
-              "structured_action_events": [
-                "BeforeTool"
-              ],
-              "result_content_events": [
-                "AfterTool"
-              ],
-              "state_transition_events": [],
-              "audit_only_events": [
-                "SessionStart",
-                "AfterAgent",
-                "SessionEnd"
-              ]
-            },
-            "covered_tool_surfaces": [
-              "generic",
-              "shell",
-              "file-read",
-              "file-write",
-              "file-edit",
-              "mcp",
-              "skills"
-            ],
-            "official_source_urls": [
-              "https://geminicli.com/docs/hooks/reference/",
-              "https://geminicli.com/docs/reference/tools/"
-            ],
-            "limitations": [
-              "Hook payloads provide a session identifier but no stable tool invocation identifier, so AfterTool cannot authorize a paired state transition.",
-              "AfterTool is shared by success and failure; consumers must inspect tool_response.error instead of treating the event name as success."
-            ]
-          },
-          "capabilities": {
-            "can_block": true,
-            "can_ask_native": false,
-            "ask_events": [],
-            "block_events": [
-              "BeforeAgent",
-              "BeforeModel",
-              "BeforeTool",
-              "AfterTool",
-              "AfterModel",
-              "AfterAgent"
-            ],
-            "supports_fail_closed": true,
-            "scope": "user"
-          },
-          "notes": [
-            "Gemini CLI 0.26.0 enabled hooks by default."
           ]
         }
       ]
@@ -1879,7 +1768,7 @@
             "Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
             "Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
             "PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
-            "Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json. Gemini CLI shares the global config namespace, but its connector registration, lifecycle schema, gateway route, token, and teardown ownership remain separate."
+            "Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json."
           ]
         }
       ]

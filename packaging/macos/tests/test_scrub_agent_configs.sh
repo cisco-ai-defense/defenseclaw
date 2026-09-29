@@ -472,7 +472,7 @@ t_missing_file_returns_2() {
 t_unsupported_connector_returns_3() {
   local d; d="$(mktest_tmp)"
   printf '{}\n' > "${d}/x.json"
-  ${PY} "${SCRUB}" geminicli "${d}/x.json" 2>/dev/null
+  ${PY} "${SCRUB}" retired-example "${d}/x.json" 2>/dev/null
   local rc=$?; assert_status "${rc}" 3 "unsupported connector returns 3"
 }
 

@@ -3299,10 +3299,11 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	conn, ok := reg.Get(trimmed)
 	if !ok {
 		return nil, fmt.Errorf(
-			"[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (%s) or remove the field to default to openclaw",
+			"[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (%s) or remove the field to default to openclaw; %s",
 			surface,
 			trimmed,
 			strings.Join(reg.Names(), ", "),
+			removedConnectorDocHint,
 		)
 	}
 	return conn, nil
@@ -3344,6 +3345,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
 		}
 	}
+	s.migrateRetiredConnectorState(ctx, registry)
 	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
@@ -3818,7 +3820,10 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 		APIAddr:      fmt.Sprintf("%s:%d", apiBind, s.currentConfig().Gateway.APIPort),
 		WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
 	}
-	failed := teardownRemovedConnectors(registry, previous, nil, opts, ctx)
+	failed, dropped := teardownRemovedConnectorsReport(registry, previous, nil, opts, ctx)
+	for _, name := range dropped {
+		s.auditDroppedConnectorState(name, "removed")
+	}
 	if len(failed) == 0 {
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
 		return nil
@@ -3880,6 +3885,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
 		}
 	}
+	s.migrateRetiredConnectorState(ctx, registry)
 
 	// configured is every connector in guardrail.connectors. names is the
 	// ENABLED subset: a connector explicitly disabled via
@@ -3971,6 +3977,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 				return s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 			},
 			clearLock: connector.ClearHookContractLockEntry,
+			audit: func(name string) {
+				s.auditDroppedConnectorState(name, "lock-only")
+			},
 		},
 	); err != nil {
 		reconcileErr := fmt.Errorf("reconcile orphaned connector registration: %w", err)
@@ -4003,7 +4012,11 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		setupSeed.removed = removed
 		failedRemoved = append(unavailable, teardownFailed...)
 	} else {
-		failedRemoved = teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
+		var dropped []string
+		failedRemoved, dropped = teardownRemovedConnectorsReport(registry, previous, names, baseOpts, ctx)
+		for _, name := range dropped {
+			s.auditDroppedConnectorState(name, "removed")
+		}
 	}
 
 	// Disabled short-circuit: tear every configured connector down, clear
@@ -4693,6 +4706,20 @@ func (s *Sidecar) teardownPreviousConnectorTransaction(
 	if strings.TrimSpace(previousName) == "" ||
 		strings.EqualFold(strings.TrimSpace(previousName), strings.TrimSpace(requested.Name())) {
 		return nil
+	}
+	if registry != nil {
+		if _, known := registry.Get(strings.TrimSpace(previousName)); !known && connectorDroppable(registry, previousName) {
+			// The previous connector is not shipped by this build, so there is
+			// no prior registration this switch could restore. Drop its lock
+			// state; requested Setup then publishes the new active roster.
+			// A name a plugin may still provide falls through to the strict
+			// rollback-authority check below.
+			if err := retireOrDropUnregisteredConnector(ctx, registry, s.currentConfig().DataDir, strings.TrimSpace(previousName), "previous", nil); err != nil {
+				return err
+			}
+			s.auditDroppedConnectorState(strings.TrimSpace(previousName), "previous")
+			return nil
+		}
 	}
 	candidates, unavailable := s.removedConnectorRollbackCandidates(
 		registry,
@@ -5403,7 +5430,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
-//	hermes / cursor / windsurf / geminicli / copilot / openhands
+//	hermes / cursor / copilot / openhands
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw
@@ -5588,8 +5615,12 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	}
 	old, ok := registry.Get(prev)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "[guardrail] previous connector %q not in registry — skipping teardown\n", prev)
-		return nil
+		if retired, isRetired := connector.RetiredConnector(prev); isRetired {
+			old = retired
+		} else {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: previous connector %q is not shipped by this build — skipping teardown; agent config files were not changed; %s\n", prev, removedConnectorDocHint)
+			return nil
+		}
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector changed %s → %s — tearing down %s\n", prev, newName, prev)
 	if err := old.Teardown(ctx, opts); err != nil {
@@ -5619,11 +5650,23 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 // are still active (DN1), while the returned names remain persisted for a
 // later cleanup retry. Membership is compared case-insensitively so a case
 // mismatch can never tear down a connector that is in fact still active.
+//
+// A previous name the registry cannot resolve is a connector this build no
+// longer ships. It has no teardown owner, so its agent config files are left
+// untouched; only its DefenseClaw lock entry is dropped (see
+// dropUnregisteredConnectorState) and it is not retried.
 func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) []string {
+	failed, _ := teardownRemovedConnectorsReport(registry, previous, current, opts, ctx)
+	return failed
+}
+
+// teardownRemovedConnectorsReport is teardownRemovedConnectors that also
+// returns the unregistered names whose state was dropped, so Sidecar callers
+// can audit them.
+func teardownRemovedConnectorsReport(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) (failed, dropped []string) {
 	if registry == nil || len(previous) == 0 {
-		return nil
+		return nil, nil
 	}
-	var failed []string
 	keep := make(map[string]struct{}, len(current))
 	for _, n := range current {
 		if trimmed := strings.TrimSpace(n); trimmed != "" {
@@ -5640,8 +5683,17 @@ func teardownRemovedConnectors(registry *connector.Registry, previous, current [
 		}
 		old, ok := registry.Get(prevName)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry — skipping teardown\n", prevName)
-			failed = append(failed, prevName)
+			if !connectorDroppable(registry, prevName) {
+				fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry and a plugin may still provide it — skipping teardown, retaining for retry\n", prevName)
+				failed = append(failed, prevName)
+				continue
+			}
+			if err := retireOrDropUnregisteredConnector(ctx, registry, opts.DataDir, prevName, "removed", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v\n", err)
+				failed = append(failed, prevName)
+				continue
+			}
+			dropped = append(dropped, prevName)
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down\n", prevName)
@@ -5661,7 +5713,102 @@ func teardownRemovedConnectors(registry *connector.Registry, previous, current [
 		RemoveConnectorRulePackOverrides(prevName)
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s teardown verified clean\n", prevName)
 	}
-	return failed
+	return failed, dropped
+}
+
+// removedConnectorDocHint points operators at the upgrade notes that list the
+// connectors a build no longer ships and how to clean up after them by hand.
+const removedConnectorDocHint = "see Upgrade → Renamed and removed connectors " +
+	"(https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/#renamed-and-removed-connectors)"
+
+// dropUnregisteredConnectorState forgets DefenseClaw's own bookkeeping for a
+// connector name that this build does not ship (an older release registered it,
+// the operator upgraded, and the registry can no longer resolve it).
+//
+// There is no teardown owner for such a name, so nothing here may edit the
+// agent's host files: guessing at another product's config format is riskier
+// than leaving a stale entry the upgrade notes tell the operator how to remove.
+// The hook contract lock entry and the in-process rule-pack override are
+// cleared, so the full-lock readiness gate stops waiting on a connector that
+// can never become ready again, and the hook scripts and OTLP token
+// DefenseClaw wrote for that name under dataDir/hooks are removed
+// (connector.Registry.RemoveUnshippedConnectorFiles): an agent still pointing
+// at a removed script then fails to start the hook instead of running a
+// fail-closed script against a route that no longer exists. Names the
+// registry does resolve keep the strict teardown-then-verify gate unchanged;
+// callers check connectorDroppable first.
+func dropUnregisteredConnectorState(registry *connector.Registry, dataDir, name, surface string, clearLock func(dataDir, connectorName string) error) error {
+	if clearLock == nil {
+		clearLock = connector.ClearHookContractLockEntry
+	}
+	fmt.Fprintf(os.Stderr,
+		"[guardrail] WARNING: %s connector %q is not shipped by this build — dropping its DefenseClaw state; agent config files were not changed; %s\n",
+		surface, name, removedConnectorDocHint)
+	if err := clearLock(dataDir, name); err != nil {
+		return fmt.Errorf("clear hook contract lock for unregistered connector %s: %w", name, err)
+	}
+	RemoveConnectorRulePackOverrides(name)
+	if registry != nil {
+		removed, err := registry.RemoveUnshippedConnectorFiles(dataDir, name)
+		for _, path := range removed {
+			fmt.Fprintf(os.Stderr, "[guardrail] removed DefenseClaw file %s left by connector %q\n", path, name)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: remove DefenseClaw files left by connector %q: %v\n", name, err)
+		}
+	}
+	return nil
+}
+
+// connectorDroppable reports whether the state of a name the registry cannot
+// resolve may be dropped: a retired connector ID (it has a teardown-only
+// owner) or a name no built-in connector or plugin could provide. A plugin
+// that failed to load, or a plugin directory that could not be scanned, keeps
+// the strict retain-and-retry behaviour.
+func connectorDroppable(registry *connector.Registry, name string) bool {
+	if _, retired := connector.RetiredConnector(strings.TrimSpace(name)); retired {
+		return true
+	}
+	return registry != nil && registry.NotShipped(name)
+}
+
+// retireOrDropUnregisteredConnector handles a name the registry cannot
+// resolve. A retired connector ID has a teardown-only owner
+// (connector.RetiredConnector) that removes exactly what an older release
+// wrote; its cleanup problems are logged and never block boot. Any other name
+// only loses DefenseClaw's lock state (dropUnregisteredConnectorState).
+func retireOrDropUnregisteredConnector(ctx context.Context, registry *connector.Registry, dataDir, name, surface string, clearLock func(dataDir, connectorName string) error) error {
+	retired, ok := connector.RetiredConnector(name)
+	if !ok {
+		return dropUnregisteredConnectorState(registry, dataDir, name, surface, clearLock)
+	}
+	if clearLock == nil {
+		clearLock = connector.ClearHookContractLockEntry
+	}
+	opts := connector.SetupOpts{DataDir: dataDir}
+	if err := retired.Teardown(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: cleanup of retired connector %s: %v; %s\n", retired.Name(), err, removedConnectorDocHint)
+	} else if err := retired.VerifyClean(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: retired connector %s left state: %v; %s\n", retired.Name(), err, removedConnectorDocHint)
+	}
+	if err := clearLock(dataDir, retired.Name()); err != nil {
+		return fmt.Errorf("clear hook contract lock for retired connector %s: %w", retired.Name(), err)
+	}
+	RemoveConnectorRulePackOverrides(retired.Name())
+	return nil
+}
+
+// auditDroppedConnectorState records that boot dropped the state of a
+// connector this build does not ship.
+func (s *Sidecar) auditDroppedConnectorState(name, surface string) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	_ = s.logger.LogAction(
+		string(audit.ActionSetupHookConnector),
+		name,
+		fmt.Sprintf("connector=%s action=drop-unregistered surface=%s host_files=untouched", name, surface),
+	)
 }
 
 type orphanConnectorOptsResolver func(connector.Connector) (connector.SetupOpts, error)
@@ -5669,6 +5816,9 @@ type orphanConnectorOptsResolver func(connector.Connector) (connector.SetupOpts,
 type orphanConnectorReconcileOps struct {
 	resolveOpts orphanConnectorOptsResolver
 	clearLock   func(dataDir, connectorName string) error
+	// audit, when set, records each unregistered connector whose lock entry
+	// was dropped.
+	audit func(connectorName string)
 }
 
 // reconcileOrphanedConnectorRegistrations removes protected lock evidence and
@@ -5678,6 +5828,11 @@ type orphanConnectorReconcileOps struct {
 // full-lock gate, while restoring them into the active roster would invent
 // configuration. Cleanup therefore runs as a bounded recovery transaction
 // before the requested setup snapshot is captured.
+//
+// A lock-only name the registry cannot resolve belongs to a connector this
+// build no longer ships. Its lock entry is dropped without touching host files
+// (dropUnregisteredConnectorState); this relaxes the full-lock gate only for
+// names that no registered connector could ever satisfy.
 func reconcileOrphanedConnectorRegistrations(
 	ctx context.Context,
 	registry *connector.Registry,
@@ -5730,16 +5885,17 @@ func reconcileOrphanedConnectorRegistrations(
 	for _, name := range orphans {
 		entry := entries[name]
 		conn, ok := registry.Get(name)
-		if !ok && name == "windsurf" {
-			// Windsurf is retired from the active registry, but authenticated
-			// lock evidence from an older installation must remain removable.
-			// Resolve its connector only inside this cleanup transaction so it
-			// cannot reappear in discovery, setup, routing, or public APIs.
-			conn = connector.NewWindsurfConnector()
-			ok = true
-		}
 		if !ok {
-			return fmt.Errorf("protected lock-only connector %q is not registered", name)
+			if !connectorDroppable(registry, name) {
+				return fmt.Errorf("protected lock-only connector %q is not registered and a plugin may still provide it (check plugin discovery); %s", name, removedConnectorDocHint)
+			}
+			if err := retireOrDropUnregisteredConnector(ctx, registry, dataDir, name, "lock-only", ops.clearLock); err != nil {
+				return err
+			}
+			if ops.audit != nil {
+				ops.audit(name)
+			}
+			continue
 		}
 		opts, err := ops.resolveOpts(conn)
 		if err != nil {
@@ -5877,8 +6033,19 @@ func (s *Sidecar) removedConnectorRollbackCandidates(
 		}
 		conn, ok := registry.Get(name)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry — retaining for teardown retry\n", name)
-			failed = append(failed, name)
+			if !connectorDroppable(registry, name) {
+				fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry and a plugin may still provide it — retaining for teardown retry\n", name)
+				failed = append(failed, name)
+				continue
+			}
+			// No build-shipped owner can tear this name down, so retrying would
+			// fail forever. Drop DefenseClaw's lock state and leave host files.
+			if err := retireOrDropUnregisteredConnector(context.Background(), registry, s.currentConfig().DataDir, name, "removed", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: %v — retaining for teardown retry\n", err)
+				failed = append(failed, name)
+				continue
+			}
+			s.auditDroppedConnectorState(name, "removed")
 			continue
 		}
 		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
@@ -5979,22 +6146,6 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 	conn connector.Connector,
 	rollbackAuthority ...multiConnectorSetupTransaction,
 ) error {
-	if conn.Name() == "windsurf" {
-		// Publish the verified Cascade contract before making the connector
-		// active. Doctor must never observe active Windsurf state without the
-		// matching lock/runtime metadata. A failed publication is rolled back
-		// to an explicit inactive tombstone so stale or partially published
-		// readiness cannot survive the DCWIN-012 recovery path.
-		if err := publishWindsurfReadyEvidence(opts, conn); err != nil {
-			lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
-			return s.failWindsurfReadyStatePublication(ctx, opts, conn, lockErr)
-		}
-		if err := saveWindsurfReadyActiveState(opts.DataDir, conn.Name()); err != nil {
-			stateErr := fmt.Errorf("connector %s active state save failed after hook contract publication: %w", conn.Name(), err)
-			return s.failWindsurfReadyStatePublication(ctx, opts, conn, stateErr)
-		}
-		return nil
-	}
 	transaction := multiConnectorSetupTransaction{}
 	hasTransaction := false
 	if len(rollbackAuthority) > 0 {
@@ -6033,12 +6184,6 @@ func (s *Sidecar) saveSingleConnectorReadyState(
 	}
 	return nil
 }
-
-var (
-	publishWindsurfReadyEvidence = publishFreshHookRegistrationEvidence
-	saveWindsurfReadyActiveState = connector.SaveActiveConnector
-	markWindsurfReadyInactive    = connector.MarkConnectorInactive
-)
 
 // ErrHookContractAdmission is returned when action-mode setup refuses a
 // connector before writing hook files. Callers must not tear down an already
@@ -6093,30 +6238,6 @@ func hookContractDriftAdmission(name string, previous, current connector.HookCon
 		return nil
 	}
 	return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, name, previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
-}
-
-func (s *Sidecar) failWindsurfReadyStatePublication(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, cause error) error {
-	fmt.Fprintf(os.Stderr, "[guardrail] connector windsurf atomic readiness publication failed: %v\n", cause)
-	var cleanupErrors []string
-	if _, err := markWindsurfReadyInactive(opts.DataDir, "windsurf"); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("clear active connector readiness: %v", err))
-	}
-	if err := connector.ClearHookContractLockEntry(opts.DataDir, "windsurf"); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("clear hook contract metadata: %v", err))
-	}
-	if err := conn.Teardown(ctx, opts); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("rollback teardown: %v", err))
-	}
-	if err := conn.VerifyClean(opts); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Sprintf("verify rollback: %v", err))
-	}
-	if len(cleanupErrors) > 0 {
-		cause = fmt.Errorf("%w; cleanup: %s", cause, strings.Join(cleanupErrors, "; "))
-	}
-	if s != nil && s.health != nil {
-		s.health.SetGuardrail(StateError, cause.Error(), nil)
-	}
-	return cause
 }
 
 func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connector.Connector) error {

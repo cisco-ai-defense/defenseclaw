@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func TestHookLauncherPayloadInterfaceIsCanonicalAndRequired(t *testing.T) {
@@ -264,21 +265,6 @@ func TestParseArgsNormalizesCursorAgentAliases(t *testing.T) {
 	}
 }
 
-func TestGeminiAliasesRemainRecognizableButCannotBeSelected(t *testing.T) {
-	if !isNativeLifecycleConnector("geminicli") || !validConnector("geminicli") {
-		t.Fatal("Gemini CLI cleanup compatibility is missing from the native lifecycle roster")
-	}
-	for _, alias := range []string{"gemini", "geminicli", "gemini-cli"} {
-		opts, err := parseArgs([]string{"/quiet", "CONNECTOR=" + alias})
-		if err == nil || !strings.Contains(err.Error(), "deprecated") {
-			t.Fatalf("parseArgs(%q) error = %v, want deprecation refusal", alias, err)
-		}
-		if opts.Connector != "geminicli" || !opts.ConnectorSet {
-			t.Fatalf("parseArgs(%q) connector = %q, set=%t", alias, opts.Connector, opts.ConnectorSet)
-		}
-	}
-}
-
 func TestParseArgsVerifyAction(t *testing.T) {
 	opts, err := parseArgs([]string{"/verify"})
 	if err != nil {
@@ -347,18 +333,13 @@ func TestParseArgsQuietPropertyMatrix(t *testing.T) {
 	}
 }
 
-func TestRetiredWindsurfIdentityIsMigrationOnly(t *testing.T) {
-	if validConnector("windsurf") || isNativeLifecycleConnector("windsurf") {
-		t.Fatal("retired Windsurf identity remained publicly installable")
+func TestRetiredDesktopIdentityIsRejected(t *testing.T) {
+	retired := legacyconnector.RetiredDesktopID
+	if validConnector(retired) || isNativeLifecycleConnector(retired) {
+		t.Fatal("the retired Desktop connector identity remained installable")
 	}
-	if !validCleanupConnector("windsurf") {
-		t.Fatal("retired Windsurf identity lost teardown compatibility")
-	}
-	if got := normalizeConnector("windsurf"); got != "windsurf" {
-		t.Fatalf("retired public choice unexpectedly normalized to %q", got)
-	}
-	if _, err := parseArgs([]string{"/quiet", "CONNECTOR=windsurf"}); err == nil {
-		t.Fatal("retired Windsurf identity remained an accepted setup argument")
+	if _, err := parseArgs([]string{"/quiet", "CONNECTOR=" + retired}); err == nil {
+		t.Fatal("the retired Desktop connector identity remained an accepted setup argument")
 	}
 }
 
@@ -411,7 +392,7 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 }
 
 func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
-	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "geminicli", "hermes", "omnigent", "opencode"} {
+	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
 		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
 		if !wanted.Gateway {
 			t.Fatalf("connector %s did not require gateway startup", connectorName)
@@ -929,8 +910,6 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 		filepath.Join("connector_backups", "copilot", "config.json"),
 		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
 		filepath.Join("connector_backups", "devin", "config.json"),
-		filepath.Join("connector_backups", "windsurf", "config.json"),
-		filepath.Join("connector_backups", "geminicli", "config.json"),
 		filepath.Join("connector_backups", "opencode", "config.json"),
 		filepath.Join("connector_backups", "omnigent", "config.json"),
 		filepath.Join("connector_backups", "hermes", "config.yaml.json"),
@@ -949,7 +928,7 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "claudecode", "amp", "copilot", "cursor", "windsurf", "devin", "antigravity", "geminicli", "opencode", "omnigent", "hermes"}
+	want := []string{"codex", "claudecode", "amp", "copilot", "cursor", "devin", "antigravity", "opencode", "omnigent", "hermes"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
@@ -991,8 +970,6 @@ guardrail:
     copilot:
       mode: observe
     cursor:
-    geminicli:
-      mode: observe
     opencode:
       mode: observe
 gateway:
@@ -1008,7 +985,7 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "geminicli", "opencode"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "opencode"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}

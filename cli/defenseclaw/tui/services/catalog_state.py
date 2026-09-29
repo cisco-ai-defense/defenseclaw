@@ -21,11 +21,9 @@ from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
 from defenseclaw.connector_paths import (
-    cleanup_only_guidance,
     connector_config_files,
     connector_home,
     hermes_config_path,
-    is_cleanup_only,
 )
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
@@ -659,14 +657,10 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         return sum(1 for row in self.items if row.status == "blocked")
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
-        if is_cleanup_only(self.connector):
-            return ()
         row = self.selected()
         return skill_actions(row.status if row else "", bundled=bool(row and row.bundled))
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
-        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
-            return None
         row = self.selected()
         if row is None:
             return None
@@ -701,8 +695,6 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
             return CatalogPanelAction(True, registry_focus=self.registry_focus())
@@ -763,14 +755,10 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         return sum(1 for row in self.items if row.status == "blocked")
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
-        if is_cleanup_only(self.connector):
-            return ()
         row = self.selected()
         return mcp_actions(row.status if row else "", self.connector)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
-        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
-            return None
         row = self.selected()
         if row is None:
             return None
@@ -805,12 +793,8 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
             )
             return CatalogPanelAction(True, intent)
         if key in {"n", "+"}:
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, open_mcp_set_form=True)
         if key == "r":
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
             return CatalogPanelAction(True, registry_focus=self.registry_focus())
@@ -868,16 +852,12 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         )
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
-        if is_cleanup_only(self.connector):
-            return ()
         row = self.selected()
         if row is None:
             return plugin_actions("", "", False)
         return plugin_actions(row.verdict, row.status, row.enabled)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
-        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
-            return None
         row = self.selected()
         if row is None:
             return None
@@ -904,7 +884,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             return CatalogPanelAction(True, detail_opened=True)
         if key == "s":
             row = self.selected()
-            if row is None or is_cleanup_only(self.action_connector(row) or self.connector):
+            if row is None:
                 return CatalogPanelAction(True)
             return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.action_connector(row)))
         if key == "o":
@@ -917,8 +897,6 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
-            if is_cleanup_only(self.connector):
-                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         return CatalogPanelAction(False)
 
@@ -1438,8 +1416,6 @@ def skill_actions(status: str, *, bundled: bool = False) -> tuple[CatalogMenuAct
 
 
 def mcp_actions(status: str, connector: str) -> tuple[CatalogMenuAction, ...]:
-    if is_cleanup_only(connector):
-        return ()
     actions = [
         CatalogMenuAction("s", "Scan", "Run security scan"),
         CatalogMenuAction("i", "Info", "Show full details"),
@@ -1540,8 +1516,6 @@ _PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r"
 
 
 def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     verbs = {
         "s": ("scan", "scan skill"),
         "i": ("info", "info skill"),
@@ -1570,8 +1544,6 @@ def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str 
 
 
 def mcp_action_intent(key: str, row: MCPRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     verbs = {
         "s": ("scan", "scan mcp"),
         "i": ("list", "list mcp"),
@@ -1591,8 +1563,6 @@ def mcp_action_intent(key: str, row: MCPRow, *, origin: str, connector: str = ""
 
 
 def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     target = row.id
     args = ["plugin", "scan", target]
     if connector:
@@ -1605,8 +1575,6 @@ def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCom
 
 
 def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
-    if is_cleanup_only(connector or row.connector):
-        return None
     verbs = {
         "s": ("scan", "scan plugin"),
         "i": ("info", "info plugin"),
@@ -1658,8 +1626,6 @@ def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = 
 
 
 def mcp_unset_target_for_connector(connector: str) -> str:
-    if is_cleanup_only(connector):
-        return cleanup_only_guidance(connector)
     match normalized_connector(connector):
         case "claudecode":
             return connector_config_files("claudecode")[0]
@@ -1724,8 +1690,6 @@ def friendly_connector_name(connector: str) -> str:
             return "Cursor"
         case "devin":
             return "Devin"
-        case "geminicli":
-            return "Gemini CLI (deprecated; use Antigravity)"
         case "copilot":
             return "GitHub Copilot CLI"
         case "openhands":
@@ -1746,8 +1710,6 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = normalized_connector(connector)
-    if is_cleanup_only(connector):
-        return cleanup_only_guidance(connector)
     claude_root = connector_home("claudecode")
     codex_root = connector_home("codex")
     claude_config = connector_config_files("claudecode")[0]

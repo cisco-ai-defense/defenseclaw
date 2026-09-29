@@ -37,13 +37,13 @@ const (
 	styleCodex
 	// styleHookEcho: echo hook_output and exit 0 — the gateway already
 	// encoded the decision in the agent-native hook_output. (cursor / copilot
-	// / geminicli / hermes)
+	// / hermes)
 	styleHookEcho
 	// styleHookEchoDecision: echo hook_output, then exit 2 if its
 	// `decision` is deny/block. (openhands-hook.sh)
 	styleHookEchoDecision
 	// styleActionStderr: no stdout echo; on action=block write reason to
-	// stderr + exit 2. (windsurf-hook.sh)
+	// stderr + exit 2. (amp-plugin)
 	styleActionStderr
 )
 
@@ -131,14 +131,6 @@ var specs = map[string]spec{
 		subject: "copilot tool", endpoint: "/api/v1/copilot/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
-	"geminicli": {
-		connector: "geminicli", hookName: "geminicli-hook", errLabel: "geminicli",
-		subject: "geminicli tool", endpoint: "/api/v1/geminicli/hook",
-		outputField: "hook_output", style: styleHookEcho,
-		oversizedClosed:   failResult{exit: blockExit},
-		unreachableStrict: failResult{exit: blockExit},
-		responseClosed:    failResult{exit: blockExit},
-	},
 	// Antigravity consumes per-event JSON on stdout. PreToolUse decision=deny is
 	// the only documented hard block; hookexec converts generic failure results
 	// into exact event-native bodies and does not rely on process exit status.
@@ -154,15 +146,6 @@ var specs = map[string]spec{
 		connector: "hermes", hookName: "hermes-hook", errLabel: "hermes",
 		subject: "hermes tool", endpoint: "/api/v1/hermes/hook",
 		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
-	},
-	"windsurf": {
-		connector: "windsurf", hookName: "windsurf-hook", errLabel: "windsurf",
-		subject: "windsurf tool", endpoint: "/api/v1/windsurf/hook",
-		outputField: "", style: styleActionStderr,
-		defaultBlockReason: "DefenseClaw blocked this Cascade action.",
-		oversizedClosed:    failResult{exit: blockExit},
-		unreachableStrict:  failResult{exit: blockExit},
-		responseClosed:     failResult{exit: blockExit},
 	},
 	"devin": {
 		connector: "devin", hookName: "devin-hook", errLabel: "devin",
@@ -242,11 +225,6 @@ func specFor(connector string) (spec, bool) {
 func SupportedConnectors() []string {
 	names := make([]string, 0, len(specs))
 	for name := range specs {
-		if name == "windsurf" {
-			// Retained solely so already-installed Cascade hooks can fail safely
-			// while the upgrade transaction restores their legacy backup.
-			continue
-		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

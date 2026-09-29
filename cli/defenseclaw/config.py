@@ -38,7 +38,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths, credential_provenance
+from defenseclaw import connector_paths, credential_provenance, legacy_connector
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -2478,8 +2478,6 @@ def _normalize_connector_key(name: str | None) -> str:
         return "openhands"
     if n in {"claude-code", "claude_code"}:
         return "claudecode"
-    if n in {"gemini-cli", "gemini_cli", "gemini"}:
-        return "geminicli"
     return n
 
 
@@ -2937,6 +2935,9 @@ class Config:
             raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
         dataclass_data = _config_to_dict(self)
         existing = _load_existing_config_yaml(path)
+        # Load already moved a retired connector ID in memory; apply the same
+        # rename to the on-disk document so any save persists it.
+        legacy_connector.migrate_raw_config(existing, path)
         merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
         merged["config_version"] = 8
         merged.setdefault("observability", {})
@@ -4959,6 +4960,10 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     except OSError:
         pass
     _warn_untrusted_managed_config(cfg_file, raw)
+    # Move the retired Desktop connector ID to devin before any connector key
+    # is normalized or checked for duplicates. The Go loader applies the same
+    # rule; `defenseclaw migrate` persists it (see migrations.py).
+    legacy_connector.migrate_raw_config(raw, cfg_file)
 
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})

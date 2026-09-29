@@ -82,8 +82,6 @@ _CONNECTOR_LABELS = {
     "hermes": "Hermes",
     "cursor": "Cursor",
     "devin": "Devin",
-    "windsurf": "Retired Cascade (cleanup only)",
-    "geminicli": "Gemini CLI (deprecated; use Antigravity)",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",

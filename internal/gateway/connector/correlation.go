@@ -43,8 +43,6 @@ const (
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
 	CorrelationProfileDevinV1       CorrelationProfileVersion = "devin-correlation-v1"
-	CorrelationProfileWindsurfV1    CorrelationProfileVersion = "windsurf-correlation-v1"
-	CorrelationProfileGeminiCLIV1   CorrelationProfileVersion = "geminicli-correlation-v1"
 	CorrelationProfileCopilotV1     CorrelationProfileVersion = "copilot-correlation-v1"
 	CorrelationProfileOpenHandsV1   CorrelationProfileVersion = "openhands-correlation-v1"
 	CorrelationProfileAntigravityV1 CorrelationProfileVersion = "antigravity-correlation-v1"
@@ -424,11 +422,6 @@ func declaredCorrelationAliases(name string) []CorrelationPathAlias {
 		}
 	case "hermes":
 		return []CorrelationPathAlias{{Path: "extra.child_role", Targets: []CorrelationTarget{CorrelationTargetAgentName, CorrelationTargetAgentType}}}
-	case "windsurf":
-		return []CorrelationPathAlias{
-			{Path: "execution_id", Targets: []CorrelationTarget{CorrelationTargetTurn, CorrelationTargetExecution}},
-			{Path: "executionId", Targets: []CorrelationTarget{CorrelationTargetTurn, CorrelationTargetExecution}},
-		}
 	default:
 		return nil
 	}
@@ -451,23 +444,21 @@ func correlationLifecycleForContract(contract HookContract) []CorrelationLifecyc
 		}},
 		{Lifecycle: CorrelationLifecycleTurnStart, Events: []string{
 			"UserPromptSubmit", "userPromptSubmitted", "user_prompt_submit", "beforeSubmitPrompt",
-			"BeforeAgent", "PreInvocation", "pre_user_prompt", "pre_llm_call", "agent.start",
+			"BeforeAgent", "PreInvocation", "pre_llm_call", "agent.start",
 		}},
 		{Lifecycle: CorrelationLifecycleTurnEnd, Events: []string{
 			"Stop", "stop", "agentStop", "AfterAgent", "AfterAgentResponse", "PostInvocation",
-			"afterAgentResponse", "post_cascade_response", "post_cascade_response_with_transcript", "post_llm_call", "agent.end",
+			"afterAgentResponse", "post_llm_call", "agent.end",
 		}},
 		{Lifecycle: CorrelationLifecycleToolStart, Events: []string{
 			"PreToolUse", "preToolUse", "pre_tool_use", "BeforeTool", "pre_tool_call",
-			"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use",
 			"beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
 			"tool.execute.before", "tool.call",
 		}},
 		{Lifecycle: CorrelationLifecycleToolEnd, Events: []string{
 			"PostToolUse", "postToolUse", "post_tool_use", "PostToolUseFailure", "postToolUseFailure",
 			"PermissionDenied",
-			"AfterTool", "post_tool_call", "post_read_code", "post_write_code", "post_run_command",
-			"post_mcp_tool_use", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
+			"AfterTool", "post_tool_call", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
 			"afterTabFileEdit", "tool.execute.after", "tool.result",
 		}},
 		{Lifecycle: CorrelationLifecycleModelStart, Events: []string{
@@ -523,8 +514,6 @@ func nativeTelemetryForConnector(name string) NativeTelemetrySpec {
 		// Official monitoring documentation states that native tool_use_id and
 		// gen_ai.tool.call.id carry the same value passed to hooks.
 		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryMetrics, NativeTelemetryTraces}, Stability: NativeTelemetryBeta, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true, AuthoritativeFields: []CorrelationTarget{CorrelationTargetTool}}
-	case "geminicli":
-		return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryLogs, NativeTelemetryTraces, NativeTelemetryMetrics}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsReviewed, AcceptsW3C: true, PropagatesW3C: true}
 	case "openhands":
 		if runtime.GOOS == "darwin" {
 			return NativeTelemetrySpec{InputSurface: CorrelationSurfaceNativeOTLP, Signals: []NativeTelemetrySignal{NativeTelemetryTraces}, Stability: NativeTelemetryStable, BindingMode: NativeTelemetryBindingsExporterOnly, AcceptsW3C: true, PropagatesW3C: true}
@@ -732,37 +721,12 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetChildAgent, ns, "subagent", "subagent_id", "subagentId"),
 		)
 		return makeSpec(CorrelationProfileCursorV1, "cursor-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "no documented native OTLP surface"))
-	case "windsurf":
-		bindings := appendBindings(base,
-			reported(CorrelationTargetSession, ns, "trajectory", "trajectory_id", "trajectoryId"),
-			reported(CorrelationTargetTurn, ns, "execution", "execution_id", "executionId"),
-			reported(CorrelationTargetExecution, ns, "execution", "execution_id", "executionId"),
-			reported(CorrelationTargetTool, ns, "tool_invocation", "tool_call_id", "toolCallId"),
-			reported(CorrelationTargetSourceSeq, ns, "trajectory_step", "step_index", "stepIndex"),
-		)
-		return makeSpec(CorrelationProfileWindsurfV1, "windsurf-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "delegation and per-tool IDs are not consistently reported"))
 	case "devin":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "session_id", "sessionId"),
 			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id", "promptId"),
 		)
 		return makeSpec(CorrelationProfileDevinV1, "devin-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "Devin publishes session and per-prompt IDs but no stable per-tool invocation or native OTLP identity"))
-	case "geminicli":
-		bindings := appendBindings(base,
-			reported(CorrelationTargetSession, ns, "session", "sessionId", "conversation_id", "conversationId"),
-			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id", "promptId"),
-			reported(CorrelationTargetAgent, ns, "agent", "agentId"),
-			reported(CorrelationTargetModelRequest, ns, "model_request", "request_id", "requestId"),
-			reported(CorrelationTargetModelResponse, ns, "model_response", "response_id", "responseId"),
-		)
-		native := appendBindings(nativeStandard(ns),
-			reported(CorrelationTargetTurn, ns, "prompt", "prompt_id"),
-			// Gemini CLI uses the underscore spelling in its native telemetry
-			// contract. Keep the standard dotted spelling as separate accepted
-			// evidence through nativeStandard for compatible SDK emitters.
-			reported(CorrelationTargetTool, ns, "tool_invocation", "gen_ai.tool.call_id"),
-		)
-		return makeSpec(CorrelationProfileGeminiCLIV1, "geminicli-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceModelBoundary, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "hook tool payloads may omit prompt and tool-call IDs; native tool IDs require trace or pending-operation correlation"))
 	case "copilot":
 		correlationContractID := hookContractID
 		switch correlationContractID {

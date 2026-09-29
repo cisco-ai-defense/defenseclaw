@@ -1015,11 +1015,7 @@ func applyInteractiveInstallDefaults(opts options, state *installState, autoStar
 		opts.Action = "repair"
 		return opts
 	}
-	if !opts.ConnectorSet && state.Connector == "geminicli" {
-		// Retired Gemini CLI installs default to Configure later. The install
-		// transaction retains the previous state for exact teardown.
-		opts.Connector = "none"
-	} else if !opts.ConnectorSet && validConnector(state.Connector) {
+	if !opts.ConnectorSet && validConnector(state.Connector) {
 		opts.Connector = state.Connector
 	}
 	if !opts.ModeSet && validMode(state.Mode) {

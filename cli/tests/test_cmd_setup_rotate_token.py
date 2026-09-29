@@ -1687,8 +1687,6 @@ with locked_file_update(lock_base):
             "CLAUDE_CONFIG_DIR": "D:\\authoritative-claude-home",
             "COPILOT_HOME": "D:\\authoritative-copilot-home",
             "DEFENSECLAW_CURSOR_CONFIG_HOME": "D:\\authoritative-cursor-home",
-            "WINDSURF_USER_HOME": "D:\\authoritative-windsurf-profile",
-            "WINDSURF_HOOK_CONFIG_PATH": "D:\\authoritative-windsurf-hooks.json",
             "OPENCODE_CONFIG_DIR": "D:\\authoritative-opencode-home",
             "OMNIGENT_CONFIG": "D:\\authoritative-omnigent-config.yaml",
             "OMNIGENT_CONFIG_HOME": "D:\\authoritative-omnigent-home",
@@ -1728,11 +1726,6 @@ with locked_file_update(lock_base):
             child_env["DEFENSECLAW_CURSOR_CONFIG_HOME"],
             ambient["DEFENSECLAW_CURSOR_CONFIG_HOME"],
         )
-        self.assertEqual(child_env["WINDSURF_USER_HOME"], ambient["WINDSURF_USER_HOME"])
-        self.assertEqual(
-            child_env["WINDSURF_HOOK_CONFIG_PATH"],
-            ambient["WINDSURF_HOOK_CONFIG_PATH"],
-        )
         self.assertEqual(child_env["OPENCODE_CONFIG_DIR"], ambient["OPENCODE_CONFIG_DIR"])
         self.assertEqual(child_env["OMNIGENT_CONFIG"], ambient["OMNIGENT_CONFIG"])
         self.assertEqual(child_env["OMNIGENT_CONFIG_HOME"], ambient["OMNIGENT_CONFIG_HOME"])
@@ -1759,8 +1752,6 @@ with locked_file_update(lock_base):
                 "CLAUDE_CONFIG_DIR",
                 "COPILOT_HOME",
                 "DEFENSECLAW_CURSOR_CONFIG_HOME",
-                "WINDSURF_USER_HOME",
-                "WINDSURF_HOOK_CONFIG_PATH",
                 "OPENCODE_CONFIG_DIR",
                 "OMNIGENT_CONFIG",
                 "OMNIGENT_CONFIG_HOME",
@@ -1823,8 +1814,6 @@ with locked_file_update(lock_base):
         for name in (
             "COPILOT_HOME",
             "DEFENSECLAW_CURSOR_CONFIG_HOME",
-            "WINDSURF_USER_HOME",
-            "WINDSURF_HOOK_CONFIG_PATH",
             "OMNIGENT_CONFIG",
             "OMNIGENT_CONFIG_HOME",
         ):

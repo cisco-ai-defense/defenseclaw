@@ -7282,39 +7282,6 @@ def test_overview_config_no_connectors_yields_empty_claw_mode() -> None:
     assert OverviewPanelModel(overview, version="test").active_connector_name() == ""
 
 
-def test_overview_config_routes_cleanup_only_gemini_to_migration_notice() -> None:
-    guardrail = _RosterGuardrail(modes={"geminicli": "action"})
-    guardrail.connector = "geminicli"
-    cfg = _roster_config(lambda: ["geminicli"], guardrail)
-    cfg.claw = SimpleNamespace(mode="geminicli")
-
-    overview = _overview_config(cfg)
-
-    assert overview.connector_modes == ()
-    assert overview.claw_mode == ""
-    assert overview.guardrail_connector == ""
-    assert "Antigravity" in overview.roster_error
-    assert "setup remove geminicli --yes" in overview.roster_error
-
-
-def test_overview_config_excludes_gemini_from_mixed_active_roster() -> None:
-    guardrail = _RosterGuardrail(
-        modes={"geminicli": "action", "codex": "observe", "cursor": "action"}
-    )
-    guardrail.connector = "geminicli"
-    cfg = _roster_config(
-        lambda: ["geminicli", "codex", "cursor"],
-        guardrail,
-    )
-    cfg.claw = SimpleNamespace(mode="geminicli")
-
-    overview = _overview_config(cfg)
-
-    assert dict(overview.connector_modes) == {"codex": "observe", "cursor": "action"}
-    assert overview.claw_mode == "codex"
-    assert overview.guardrail_connector == "codex"
-
-
 def test_overview_config_sets_roster_error_when_enumeration_raises() -> None:
     """A2: a throwing active_connectors() stashes a visible diagnostic in
     roster_error (surfaced by the Overview notices) instead of degrading

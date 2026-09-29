@@ -50,6 +50,7 @@ def capture_click_output():
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import legacy_connector
 from defenseclaw.commands import cmd_uninstall  # noqa: E402  (sys.path tweak above)
 
 
@@ -934,11 +935,10 @@ class RenderPlanConnectorTests(unittest.TestCase):
             "codex",
             "copilot",
             "cursor",
-            "geminicli",
             "hermes",
             "omnigent",
             "opencode",
-            "windsurf",
+            legacy_connector.RETIRED_DESKTOP_ID,
         }
         self.assertLessEqual(native_connectors, set(cmd_uninstall._CONNECTOR_BACKUP_MARKERS))
         self.assertIn(

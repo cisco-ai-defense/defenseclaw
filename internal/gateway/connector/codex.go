@@ -915,7 +915,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// connectors) applies to env-block-style connectors like
 	// claudecode where the agent's natural service.name would
 	// otherwise be useless to operators. For native TOML exporters
-	// native exporters that already self-identify (codex, geminicli),
+	// native exporters that already self-identify (codex),
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
 	profile := HookProfile{

@@ -22,7 +22,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1016,131 +1015,6 @@ func TestSaveSingleConnectorReadyState_LockFailureRollsBack(t *testing.T) {
 	}
 	if got := s.health.Snapshot().Guardrail.State; got != StateError {
 		t.Fatalf("guardrail state = %q, want %q", got, StateError)
-	}
-}
-
-func TestWindsurfReadyState_LockFailureNeverPublishesActiveConnector(t *testing.T) {
-	dir := t.TempDir()
-	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
-	s := &Sidecar{health: NewSidecarHealth()}
-	previousPublish := publishWindsurfReadyEvidence
-	previousSave := saveWindsurfReadyActiveState
-	previousInactive := markWindsurfReadyInactive
-	activeSaveCalled := false
-	activeClearCalled := false
-	publishWindsurfReadyEvidence = func(connector.SetupOpts, connector.Connector) error {
-		return errors.New("forced Windsurf lock failure")
-	}
-	saveWindsurfReadyActiveState = func(string, string) error {
-		activeSaveCalled = true
-		return nil
-	}
-	markWindsurfReadyInactive = func(_ string, name string) (func() error, error) {
-		if name != "windsurf" {
-			t.Fatalf("cleared peer connector %q", name)
-		}
-		activeClearCalled = true
-		return func() error { return nil }, nil
-	}
-	t.Cleanup(func() {
-		publishWindsurfReadyEvidence = previousPublish
-		saveWindsurfReadyActiveState = previousSave
-		markWindsurfReadyInactive = previousInactive
-	})
-
-	err := s.saveSingleConnectorReadyState(
-		context.Background(), connector.SetupOpts{DataDir: dir}, conn,
-	)
-	if err == nil || !strings.Contains(err.Error(), "hook contract lock save failed") {
-		t.Fatalf("saveSingleConnectorReadyState error = %v, want lock-save failure", err)
-	}
-	if !conn.teardownCalled || !conn.verifyCalled {
-		t.Fatal("Windsurf lock-save failure did not roll setup back")
-	}
-	if activeSaveCalled {
-		t.Fatal("Windsurf active state was attempted before the hook lock succeeded")
-	}
-	if !activeClearCalled {
-		t.Fatal("Windsurf failure did not clear any pre-existing active readiness")
-	}
-	if got := connector.LoadActiveConnector(dir); got != "" {
-		t.Fatalf("active connector = %q, want no published Windsurf readiness", got)
-	}
-	if got := s.health.Snapshot().Guardrail.State; got != StateError {
-		t.Fatalf("guardrail state = %q, want %q", got, StateError)
-	}
-}
-
-func TestWindsurfReadyState_PublishesLockBeforeActiveWithoutPeerConnector(t *testing.T) {
-	dataDir := t.TempDir()
-	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
-	opts := connector.SetupOpts{DataDir: dataDir}
-	previousPublish := publishWindsurfReadyEvidence
-	previousSave := saveWindsurfReadyActiveState
-	var order []string
-	publishWindsurfReadyEvidence = func(_ connector.SetupOpts, got connector.Connector) error {
-		if got.Name() != "windsurf" {
-			t.Fatalf("published peer connector %q", got.Name())
-		}
-		order = append(order, "lock")
-		return nil
-	}
-	saveWindsurfReadyActiveState = func(_ string, name string) error {
-		if name != "windsurf" {
-			t.Fatalf("saved peer connector %q", name)
-		}
-		order = append(order, "active")
-		return nil
-	}
-	t.Cleanup(func() {
-		publishWindsurfReadyEvidence = previousPublish
-		saveWindsurfReadyActiveState = previousSave
-	})
-	s := &Sidecar{health: NewSidecarHealth()}
-	if err := s.saveSingleConnectorReadyState(context.Background(), opts, conn); err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Join(order, ","); got != "lock,active" {
-		t.Fatalf("Windsurf readiness publication order = %q, want lock,active", got)
-	}
-}
-
-func TestWindsurfReadyState_ActiveFailureClearsPublishedEvidence(t *testing.T) {
-	dataDir := t.TempDir()
-	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
-	opts := connector.SetupOpts{DataDir: dataDir}
-	previousPublish := publishWindsurfReadyEvidence
-	previousSave := saveWindsurfReadyActiveState
-	previousInactive := markWindsurfReadyInactive
-	publishWindsurfReadyEvidence = func(_ connector.SetupOpts, _ connector.Connector) error {
-		return connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
-			Connector:  "windsurf",
-			ContractID: "windsurf-hooks-v1",
-		})
-	}
-	saveWindsurfReadyActiveState = func(string, string) error {
-		return errors.New("forced active-state failure")
-	}
-	markWindsurfReadyInactive = connector.MarkConnectorInactive
-	t.Cleanup(func() {
-		publishWindsurfReadyEvidence = previousPublish
-		saveWindsurfReadyActiveState = previousSave
-		markWindsurfReadyInactive = previousInactive
-	})
-
-	s := &Sidecar{health: NewSidecarHealth()}
-	err := s.saveSingleConnectorReadyState(context.Background(), opts, conn)
-	if err == nil || !strings.Contains(err.Error(), "active state save failed") {
-		t.Fatalf("saveSingleConnectorReadyState error = %v, want active-state failure", err)
-	}
-	if got := connector.LoadHookContractLockEntry(dataDir, "windsurf"); got.Connector != "" {
-		t.Fatalf("Windsurf lock survived failed active publication: %+v", got)
-	}
-	if got := connector.LoadActiveConnector(dataDir); got != "" {
-		t.Fatalf("active connector = %q, want explicit inactive state", got)
-	}
-	if !conn.teardownCalled || !conn.verifyCalled {
-		t.Fatal("Windsurf active-state failure did not roll setup back")
 	}
 }
 
@@ -6275,7 +6149,7 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -6291,14 +6165,14 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 	api, called := tokenAuthTestServer(t, "secret-token-123")
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeGeminiCLI: "scoped-token-abc",
+		connector.OTLPScopeOmnigent: "scoped-token-abc",
 	})
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -6309,7 +6183,7 @@ func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 		t.Fatal("next handler called for master token despite scoped token existing")
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req = httptest.NewRequest(http.MethodPost, "/otlp/omnigent/scoped-token-abc/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Authorization", "Bearer secret-token-123")
 	rr = httptest.NewRecorder()
@@ -6321,7 +6195,7 @@ func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
 		t.Fatal("next handler called for master bearer despite scoped token existing")
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req = httptest.NewRequest(http.MethodPost, "/otlp/omnigent/scoped-token-abc/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
@@ -6512,7 +6386,7 @@ func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) 
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+			req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 			req.RemoteAddr = "127.0.0.1:54321"
 			if tc.ct != "" {
 				req.Header.Set("Content-Type", tc.ct)
@@ -6537,7 +6411,7 @@ func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
 	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://evil.example.com")

@@ -299,8 +299,6 @@ struct ConnectorOnboardingTests {
     private static func commandRegistryIncludesCanonicalDevinSetup() {
         let command = CommandRegistry.all.first { $0.title == "setup devin" }
         expect(command?.arguments == ["setup", "devin", "--yes"], "Devin setup command is available")
-        expect(CommandRegistry.all.allSatisfy { !$0.arguments.contains("windsurf") },
-               "legacy Windsurf setup is absent from the native command registry")
     }
 
     private static func parsesCommandArguments() {

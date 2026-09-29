@@ -110,8 +110,8 @@ func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
 //     (`"C:\...\defenseclaw-hook.exe" hook --connector <name>`). The absolute
 //     exe path's backslashes and surrounding quotes are escaped during config
 //     serialization, so their stable marker is `hook --connector <name>`.
-//     Cursor and Windsurf are matched exactly because their native transports
-//     require generated PowerShell adapters. Antigravity is also matched
+//     Cursor is matched exactly because its native transport requires a
+//     generated PowerShell adapter. Antigravity is also matched
 //     exactly because its direct-exec tokenizer requires a PowerShell
 //     encoded-command wrapper rather than a visibly quoted absolute executable
 //     path.
@@ -144,7 +144,7 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 		}
 	}
 	if goos == "windows" {
-		if conn.Name() == "cursor" || conn.Name() == "windsurf" {
+		if conn.Name() == "cursor" {
 			unixCommand := filepath.Join(opts.DataDir, "hooks", conn.Name()+"-hook.sh")
 			return []string{hookInvocationCommandFor("windows", conn.Name(), unixCommand)}
 		}
@@ -188,13 +188,6 @@ func OwnedHooksPresentContext(ctx context.Context, conn Connector, opts SetupOpt
 	if cursor, ok := conn.(*hookOnlyConnector); ok && cursor.name == "cursor" {
 		return cursor.ownedCursorHookContractPresent(opts)
 	}
-	if conn != nil && conn.Name() == "windsurf" {
-		windsurf, ok := conn.(*hookOnlyConnector)
-		if !ok {
-			return false, errors.New("windsurf hook contract requires the native Cascade connector")
-		}
-		return windsurfOwnedHooksPresentForOS(windsurf, opts, runtime.GOOS)
-	}
 	if conn != nil && conn.Name() == "devin" {
 		devin, ok := conn.(*hookOnlyConnector)
 		if !ok {
@@ -234,72 +227,6 @@ func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 		}
 	}
 	return true, nil
-}
-
-// windsurfOwnedHooksPresentForOS validates the effective legacy Cascade
-// contract, not merely the presence of one DefenseClaw path. Readiness requires
-// exactly one managed handler on every documented event. Foreign handlers and
-// future event keys remain untouched and do not make the managed contract
-// unhealthy.
-func windsurfOwnedHooksPresentForOS(conn *hookOnlyConnector, opts SetupOpts, goos string) (bool, error) {
-	paths := HookConfigPathsForConnector(conn, opts)
-	if len(paths) != 1 {
-		return false, fmt.Errorf("windsurf Cascade hook config path count is %d; want 1", len(paths))
-	}
-	cfg, err := readJSONObject(paths[0])
-	if err != nil {
-		return false, err
-	}
-	hooks, ok := cfg["hooks"].(map[string]interface{})
-	if !ok {
-		return false, nil
-	}
-	expected := conn.hookCommandForOS(goos, opts)
-	for _, event := range windsurfCascadeHookEvents {
-		entries, ok := hooks[event].([]interface{})
-		if !ok {
-			return false, nil
-		}
-		managed := 0
-		for _, raw := range entries {
-			owned := managedHookCommandEntry(raw, expected) ||
-				managedHookCommandEntry(raw, filepath.Join(opts.DataDir, "hooks", conn.scriptName)) ||
-				managedHookCommandEntry(raw, legacyWindsurfWindowsHookCommand())
-			if !owned {
-				continue
-			}
-			if !windsurfManagedHookEntryMatches(raw, expected, goos) {
-				return false, nil
-			}
-			managed++
-		}
-		if managed != 1 {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func windsurfManagedHookEntryMatches(raw interface{}, expected, goos string) bool {
-	entry, ok := raw.(map[string]interface{})
-	if !ok || entry["show_output"] != true {
-		return false
-	}
-	if goos == "windows" {
-		command, ok := entry["powershell"].(string)
-		if !ok || command != expected {
-			return false
-		}
-		_, hasFallback := entry["command"]
-		_, hasBash := entry["bash"]
-		return !hasFallback && !hasBash
-	}
-	command, ok := entry["command"].(string)
-	if !ok || command != shellWord(expected) {
-		return false
-	}
-	_, hasPowerShell := entry["powershell"]
-	return !hasPowerShell
 }
 
 // openCodeManagedPluginPresent validates the standalone JavaScript artifact

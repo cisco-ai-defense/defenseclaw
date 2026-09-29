@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -406,8 +407,25 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// The runtime loader moves a retired connector key to its replacement
+	// (legacyconnector), so compare against the roster it is expected to
+	// produce rather than the raw source keys.
+	_, rename, dropped := legacyconnector.MigrateConnectorKeys("", names)
+	droppedKeys := make(map[string]struct{}, len(dropped))
+	for _, name := range dropped {
+		droppedKeys[name] = struct{}{}
+	}
+	expected := 0
 	for _, name := range names {
-		if _, retained := candidate.Guardrail.Connectors[name]; retained {
+		if _, gone := droppedKeys[name]; gone {
+			continue
+		}
+		expected++
+		runtimeName := name
+		if replacement, renamed := rename[name]; renamed {
+			runtimeName = replacement
+		}
+		if _, retained := candidate.Guardrail.Connectors[runtimeName]; retained {
 			continue
 		}
 		return &config.V8SemanticError{
@@ -418,7 +436,7 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 			Action:   "refuse activation and keep the live configuration unchanged",
 		}
 	}
-	if len(candidate.Guardrail.Connectors) != len(configured) {
+	if len(candidate.Guardrail.Connectors) != expected {
 		return &config.V8SemanticError{
 			Source:   document.Source,
 			Path:     "$.guardrail.connectors",

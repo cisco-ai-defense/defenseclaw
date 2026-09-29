@@ -1126,40 +1126,6 @@ func TestConnectorReconcileCopilotSupportsOrdinaryPath(t *testing.T) {
 	}
 }
 
-func TestConnectorReconcileRejectsDeprecatedGeminiWithoutWritingSettings(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("native Windows Setup maintenance contract")
-	}
-	dataDir := testenv.PrivateTempDir(t)
-	home := filepath.Join(testenv.PrivateTempDir(t), ".gemini")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	ambientHome := filepath.Join(testenv.PrivateTempDir(t), "ambient-gemini")
-	t.Setenv("GEMINI_CONFIG_DIR", ambientHome)
-	defer withConnectorState(t, dataDir, "geminicli")()
-	connectorFlagConfigHome = home
-	cfg.Guardrail.Enabled = true
-	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"geminicli": {HookFailMode: "closed"},
-	}
-
-	stdout, stderr, exitCode := runConnectorCmd(t, "reconcile", "--connector", "geminicli", "--json")
-	if exitCode != 0 || stdout != "" {
-		t.Fatalf("deprecated Gemini reconcile produced output: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
-	}
-	if !strings.Contains(stderr, "Gemini CLI integration is deprecated") ||
-		!strings.Contains(stderr, "use the Antigravity connector") {
-		t.Fatalf("deprecated Gemini reconcile stderr = %q", stderr)
-	}
-	if _, err := os.Stat(filepath.Join(home, "settings.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("deprecated Gemini reconcile wrote bound settings.json: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(ambientHome, "settings.json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Gemini reconcile trusted ambient GEMINI_CONFIG_DIR: %v", err)
-	}
-}
-
 func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
@@ -1377,10 +1343,8 @@ func TestConnectorListBackups_FindsManagedBackups(t *testing.T) {
 
 	for rel, body := range map[string]string{
 		filepath.Join("codex", "config.toml.json"):     `{"version":1}`,
-		filepath.Join("geminicli", "settings.json"):    `{"connector":"geminicli"}`,
 		filepath.Join("copilot", "defenseclaw.json"):   `{"connector":"copilot"}`,
 		filepath.Join("cursor", "hooks.json.backup"):   `{"connector":"cursor"}`,
-		filepath.Join("windsurf", "hooks.json.backup"): `{"connector":"windsurf"}`,
 		filepath.Join("hermes", "config.yaml.managed"): `{"connector":"hermes"}`,
 	} {
 		path := filepath.Join(dir, "connector_backups", rel)
@@ -1396,7 +1360,7 @@ func TestConnectorListBackups_FindsManagedBackups(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d", exitCode)
 	}
-	for _, want := range []string{"codex", "geminicli", "copilot", "cursor", "windsurf", "hermes", "connector_backups"} {
+	for _, want := range []string{"codex", "copilot", "cursor", "hermes", "connector_backups"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("expected %s in managed backup output, got: %s", want, stdout)
 		}
@@ -1560,6 +1524,26 @@ func TestConnectorVerify_UnknownConnector_Exit2(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "ghostclaw") {
 		t.Fatalf("expected ghostclaw in stderr; got %q", stderr)
+	}
+}
+
+func TestConnectorVerify_PluginDeclaredConnectorIsNotUnknown(t *testing.T) {
+	// A plugin directory that declares the name means an installed plugin
+	// may simply have failed to load. Exit 2 would let uninstall skip its
+	// teardown, so verify must report it as not verifiable (exit 1).
+	dir := t.TempDir()
+	defer withConnectorState(t, dir, "")()
+	pluginDir := filepath.Join(dir, "plugins")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "ghostclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.PluginDir = pluginDir
+	_, stderr, exitCode := runConnectorCmd(t, "verify", "--connector", "ghostclaw")
+	if exitCode != 1 {
+		t.Fatalf("expected exit 1 for a plugin-declared connector, got %d (stderr=%q)", exitCode, stderr)
+	}
+	if !strings.Contains(stderr, "a plugin may provide it") || strings.Contains(stderr, "unknown connector") {
+		t.Fatalf("stderr = %q, want the not-loaded plugin message", stderr)
 	}
 }
 

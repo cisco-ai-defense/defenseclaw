@@ -734,11 +734,6 @@ func TestHandleAgentHook_FullChain_PanicFailsOpen(t *testing.T) {
 // a registered hook handler. The test below documents it.
 func TestConnectorRegistry_ScopeAndHookHandlerInSync(t *testing.T) {
 	for _, scope := range connector.OTLPPathTokenScopes() {
-		if scope == connector.OTLPScopeGeminiCLI {
-			// This scope remains readable only so teardown can revoke
-			// credentials from older Gemini CLI installs.
-			continue
-		}
 		if _, ok := connectorHookHandlerByName[string(scope)]; !ok {
 			t.Errorf("OTLP scope %q has no registered hook handler; misconfigured connector estate", scope)
 		}

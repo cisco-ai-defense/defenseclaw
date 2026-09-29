@@ -21,7 +21,6 @@ struct ConnectorInventoryCompatibilityTests {
     static func main() {
         skillDirectoriesMatchCurrentConnectors()
         mcpSourcesMatchCurrentConnectors()
-        retiredConnectorsHaveNoInventorySources()
         print("ConnectorInventoryCompatibilityTests passed")
     }
 
@@ -90,13 +89,6 @@ struct ConnectorInventoryCompatibilityTests {
             MCPScanner.sources(connector: "codex").first?.path.hasSuffix("/.codex/config.toml") == true,
             "Codex MCP source uses config.toml"
         )
-    }
-
-    private static func retiredConnectorsHaveNoInventorySources() {
-        expect(SkillScanner.skillDirs(connector: "windsurf").isEmpty, "Windsurf skills are retired")
-        expect(SkillScanner.skillDirs(connector: "geminicli").isEmpty, "Gemini CLI skills are retired")
-        expect(MCPScanner.sources(connector: "windsurf").isEmpty, "Windsurf MCP sources are retired")
-        expect(MCPScanner.sources(connector: "geminicli").isEmpty, "Gemini CLI MCP sources are retired")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {

@@ -18,12 +18,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from defenseclaw.connector_paths import (
-    cleanup_only_guidance,
     connector_config_files,
     connector_home,
     hermes_config_path,
     hermes_home,
-    is_cleanup_only,
 )
 from defenseclaw.observability.custody_status import (
     NativeDeliveryStatus,
@@ -1449,7 +1447,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 policy events after {formatted} - "
                 "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
             )
-        case "hermes" | "cursor" | "devin" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
+        case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -1477,8 +1475,6 @@ def friendly_connector_name(connector: str) -> str:
             return "Cursor"
         case "devin":
             return "Devin"
-        case "geminicli":
-            return "Gemini CLI (deprecated; use Antigravity)"
         case "copilot":
             return "GitHub Copilot CLI"
         case "openhands":
@@ -1499,8 +1495,6 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = (connector or "").strip().lower()
-    if is_cleanup_only(connector):
-        return cleanup_only_guidance(connector)
     hermes_root = hermes_home()
     hermes_config = hermes_config_path()
     claude_root = connector_home("claudecode")

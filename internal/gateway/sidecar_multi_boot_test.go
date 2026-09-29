@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -1177,45 +1178,42 @@ func TestMultiConnectorActivePublicationReportsIncompleteRollback(t *testing.T) 
 	}
 }
 
-func TestReconcileOrphanedConnectorRegistrationCleansLegacyWindsurfBeforeRequestedSetup(t *testing.T) {
+func TestReconcileOrphanedConnectorRegistrationCleansRetiredDesktopBeforeRequestedSetup(t *testing.T) {
 	for _, requestedConnector := range []string{"copilot", "antigravity", "opencode"} {
 		t.Run(requestedConnector, func(t *testing.T) {
+			home := testenv.PrivateTempDir(t)
 			dataDir := testenv.PrivateTempDir(t)
-			configDir := testenv.PrivateTempDir(t)
-			configPath := filepath.Join(configDir, "hooks.json")
-			priorConfig := []byte("{\n  \"hooks\": {\"operator-owned\": []}\n}\n")
-			if err := os.WriteFile(configPath, priorConfig, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			previousOverride := connector.WindsurfHooksPathOverride
-			connector.WindsurfHooksPathOverride = configPath
-			t.Cleanup(func() { connector.WindsurfHooksPathOverride = previousOverride })
-
-			windsurf := connector.NewWindsurfConnector()
-			opts := connector.SetupOpts{
-				DataDir:       dataDir,
-				APIAddr:       "127.0.0.1:18970",
-				APIToken:      "synthetic connector token",
-				HookAPIToken:  "synthetic hook token",
-				HookFailMode:  "closed",
-				GuardrailMode: "action",
-			}
-			if err := windsurf.Setup(context.Background(), opts); err != nil {
-				t.Fatalf("stage legacy Windsurf registration: %v", err)
-			}
-			registeredConfig, err := os.ReadFile(configPath)
+			restoreHome, err := connector.BindUserHomeDir(home)
 			if err != nil {
 				t.Fatal(err)
 			}
-			hookScripts := windsurf.HookScripts(opts)
-			registeredHook := filepath.Base(hookScripts[len(hookScripts)-1])
-			if reflect.DeepEqual(registeredConfig, priorConfig) || !strings.Contains(string(registeredConfig), registeredHook) {
-				t.Fatalf("fixture did not stage a Windsurf registration: %q", registeredConfig)
+			defer restoreHome()
+			script := legacyconnector.OwnedHookScripts(dataDir)[0]
+			if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
+				t.Fatal(err)
 			}
-			entry := connector.NewHookContractLockEntry(opts, windsurf, "0.8.10")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			configPath := legacyconnector.CascadeUserHooksPath(home)
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			registered := map[string]interface{}{"hooks": map[string]interface{}{
+				"operator-owned":  []interface{}{},
+				"pre_run_command": []interface{}{map[string]interface{}{"command": script, "show_output": true}},
+				"pre_read_code":   []interface{}{map[string]interface{}{"command": script, "show_output": true}},
+			}}
+			body, _ := json.Marshal(registered)
+			if err := os.WriteFile(configPath, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			retired, _ := connector.RetiredConnector(legacyconnector.RetiredDesktopID)
+			opts := connector.SetupOpts{DataDir: dataDir, HookFailMode: "closed", GuardrailMode: "action"}
+			entry := connector.NewHookContractLockEntry(opts, retired, "0.8.10")
 			entry.RegistrationPosture = nil // Models the pre-transaction lock found on the affected installation.
 			if err := connector.SaveFreshHookContractLockEntry(dataDir, entry); err != nil {
-				t.Fatalf("stage legacy Windsurf lock: %v", err)
+				t.Fatalf("stage retired lock: %v", err)
 			}
 			priorRoster := []string{"claudecode", "codex", "cursor", "omnigent"}
 			if err := connector.SaveActiveConnectors(dataDir, priorRoster); err != nil {
@@ -1230,32 +1228,29 @@ func TestReconcileOrphanedConnectorRegistrationCleansLegacyWindsurfBeforeRequest
 				requested,
 				orphanConnectorReconcileOps{
 					resolveOpts: func(conn connector.Connector) (connector.SetupOpts, error) {
-						if conn.Name() != "windsurf" {
-							return connector.SetupOpts{}, fmt.Errorf("unexpected connector %s", conn.Name())
-						}
-						return opts, nil
+						return connector.SetupOpts{}, fmt.Errorf("unexpected owner lookup for %s", conn.Name())
 					},
 					clearLock: connector.ClearHookContractLockEntry,
 				},
 			)
 			if err != nil {
-				t.Fatalf("reconcile legacy lock-only registration: %v", err)
+				t.Fatalf("reconcile retired lock-only registration: %v", err)
 			}
 			afterConfig, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(afterConfig, priorConfig) {
-				t.Fatalf("Windsurf config = %q, want exact prior bytes %q", afterConfig, priorConfig)
+			if strings.Contains(string(afterConfig), script) || !strings.Contains(string(afterConfig), "operator-owned") {
+				t.Fatalf("legacy hooks after cleanup = %s", afterConfig)
 			}
-			if got := connector.LoadHookContractLockEntry(dataDir, "windsurf"); got.Connector != "" {
-				t.Fatalf("orphaned Windsurf lock survived cleanup: %+v", got)
+			if _, statErr := os.Stat(script); !os.IsNotExist(statErr) {
+				t.Fatalf("owned script survived: %v", statErr)
+			}
+			if got := connector.LoadHookContractLockEntry(dataDir, legacyconnector.RetiredDesktopID); got.Connector != "" {
+				t.Fatalf("orphaned retired lock survived cleanup: %+v", got)
 			}
 			if got := connector.LoadActiveConnectors(dataDir); !reflect.DeepEqual(got, priorRoster) {
 				t.Fatalf("active roster = %v, want exact prior %v", got, priorRoster)
-			}
-			if !connector.ConnectorExplicitlyInactive(dataDir, "windsurf") {
-				t.Fatal("orphaned Windsurf cleanup did not retain its inactive tombstone")
 			}
 		})
 	}
@@ -1277,14 +1272,14 @@ func TestReconcileOrphanedConnectorRegistrationFailureRestoresExactActiveState(t
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
-			hookPath := filepath.Join(testenv.PrivateTempDir(t), "windsurf-hook")
+			hookPath := filepath.Join(testenv.PrivateTempDir(t), "orphan-example-hook")
 			const hookBody = "truthful pre-reconciliation hook bytes\n"
 			if err := os.WriteFile(hookPath, []byte(hookBody), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			conn := &orphanReconcileFailureConnector{
 				bootStubConnector: bootStubConnector{
-					stubConnector: stubConnector{name: "windsurf"},
+					stubConnector: stubConnector{name: "orphan-example"},
 					artifactPath:  hookPath,
 				},
 				hookPath:             hookPath,
@@ -1342,7 +1337,7 @@ func TestReconcileOrphanedConnectorRegistrationFailureRestoresExactActiveState(t
 			if body, readErr := os.ReadFile(activePath); readErr != nil || !reflect.DeepEqual(body, priorActive) {
 				t.Fatalf("active state = %q, %v; want exact prior bytes %q", body, readErr, priorActive)
 			}
-			if connector.ConnectorExplicitlyInactive(dataDir, "windsurf") {
+			if connector.ConnectorExplicitlyInactive(dataDir, "orphan-example") {
 				t.Fatal("failed reconciliation committed a new inactive tombstone")
 			}
 			if body, readErr := os.ReadFile(lockPath); readErr != nil || !reflect.DeepEqual(body, priorLock) {
@@ -1373,14 +1368,14 @@ func TestReconcileOrphanedConnectorRegistrationRequiresProtectedActiveAuthority(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
-			hookPath := filepath.Join(testenv.PrivateTempDir(t), "windsurf-hook")
+			hookPath := filepath.Join(testenv.PrivateTempDir(t), "orphan-example-hook")
 			const hookBody = "protected orphan hook bytes\n"
 			if err := os.WriteFile(hookPath, []byte(hookBody), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			conn := &orphanReconcileFailureConnector{
 				bootStubConnector: bootStubConnector{
-					stubConnector: stubConnector{name: "windsurf"},
+					stubConnector: stubConnector{name: "orphan-example"},
 					artifactPath:  hookPath,
 				},
 				hookPath: hookPath,
@@ -1911,8 +1906,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	s.cfg.Guardrail.Mode = "action"
 	s.cfg.Guardrail.HookFailMode = "open"
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"cursor":   {Mode: "action", HookFailMode: "closed"},
-		"windsurf": {Mode: "observe", HookFailMode: "closed"},
+		"cursor": {Mode: "action", HookFailMode: "closed"},
+		"devin":  {Mode: "observe", HookFailMode: "closed"},
 	}
 
 	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
@@ -1926,12 +1921,12 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	if cursorOpts.GuardrailMode != "action" {
 		t.Errorf("cursor GuardrailMode=%q, want action", cursorOpts.GuardrailMode)
 	}
-	windsurfOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}, "tok", "a", "b")
-	if windsurfOpts.HookFailMode != "closed" {
-		t.Errorf("windsurf HookFailMode=%q, want connector override independent of observe mode", windsurfOpts.HookFailMode)
+	devinOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "devin"}}, "tok", "a", "b")
+	if devinOpts.HookFailMode != "closed" {
+		t.Errorf("devin HookFailMode=%q, want connector override independent of observe mode", devinOpts.HookFailMode)
 	}
-	if windsurfOpts.GuardrailMode != "observe" {
-		t.Errorf("windsurf GuardrailMode=%q, want observe", windsurfOpts.GuardrailMode)
+	if devinOpts.GuardrailMode != "observe" {
+		t.Errorf("devin GuardrailMode=%q, want observe", devinOpts.GuardrailMode)
 	}
 }
 

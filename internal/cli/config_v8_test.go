@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
@@ -54,6 +55,55 @@ observability: {}
 	want := []string{"claudecode", "codex"}
 	if got := loaded.runtime.ActiveConnectors(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("staged target runtime connectors = %v, want %v", got, want)
+	}
+}
+
+// The gateway loads config through this v8 loader. A roster that still names
+// the retired Desktop connector must load as the replacement connector instead
+// of failing the roster check, or every gateway command refuses to start
+// until `defenseclaw migrate` rewrites the file.
+func TestLoadConfigV8FileAcceptsRetiredConnectorKey(t *testing.T) {
+	retired := legacyconnector.RetiredDesktopID
+	replacement := legacyconnector.Replacement
+	cases := []struct {
+		name       string
+		connectors string
+		want       []string
+		wantMode   string
+	}{
+		{
+			name:       "retired key renamed",
+			connectors: "    codex: {}\n    " + retired + ":\n      mode: action\n",
+			want:       []string{"codex", replacement},
+			wantMode:   "action",
+		},
+		{
+			name:       "explicit replacement wins",
+			connectors: "    " + replacement + ":\n      mode: observe\n    " + retired + ":\n      mode: action\n",
+			want:       []string{replacement},
+			wantMode:   "observe",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "config.yaml")
+			raw := []byte("config_version: 8\ndata_dir: " + directory + "\nguardrail:\n  enabled: true\n  mode: observe\n  connectors:\n" +
+				tc.connectors + "observability: {}\n")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := loadConfigV8File(path, directory)
+			if err != nil {
+				t.Fatalf("loadConfigV8File: %v", err)
+			}
+			if got := loaded.runtime.ActiveConnectors(); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("staged target runtime connectors = %v, want %v", got, tc.want)
+			}
+			if got := loaded.runtime.Guardrail.Connectors[replacement].Mode; got != tc.wantMode {
+				t.Fatalf("%s mode = %q, want %q", replacement, got, tc.wantMode)
+			}
+		})
 	}
 }
 

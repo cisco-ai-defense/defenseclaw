@@ -77,7 +77,6 @@ struct AIDiscoveryModelTests {
 
     private static func rendersCanonicalDevinConnectorName() {
         expect(friendlyConnectorName("devin") == "Devin", "Devin connector name is canonical")
-        expect(friendlyConnectorName("windsurf") == "Windsurf", "legacy name has no special public label")
     }
 
     private static func preservesUnknownLineageBooleansAndRejectsInvalidCountries() {

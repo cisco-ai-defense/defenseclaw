@@ -266,12 +266,10 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
     claude_config = tmp_path / "claude-home" / "settings.json"
     codex_config = tmp_path / "codex-home" / "config.toml"
     devin_config = tmp_path / "devin-config"
-    gemini_home = tmp_path / "gemini-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config.parent))
     monkeypatch.setenv("CODEX_HOME", str(codex_config.parent))
     monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
     cases = {
         "openclaw": "OpenClaw config",
         "claudecode": str(claude_config),
@@ -280,15 +278,11 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
         "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
         "devin": str(devin_config / "mcp_config.json"),
-        "geminicli": connector_paths.cleanup_only_guidance("geminicli"),
         "copilot": "./.github/mcp.json",
         "antigravity": "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json",
     }
     for connector, want in cases.items():
         assert mcp_unset_target_for_connector(connector) == want
-        if connector == "geminicli":
-            assert mcp_actions("blocked", connector) == ()
-            continue
         unset = next(action for action in mcp_actions("blocked", connector) if action.key == "x")
         assert want in unset.description
 
@@ -338,38 +332,6 @@ def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contrac
     assert "tools permission map is not an asset" in connector_source_label(
         "opencode", "tools"
     )
-
-
-def test_catalog_gemini_labels_are_cleanup_only_and_route_to_antigravity(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    gemini_home = tmp_path / "authenticated" / ".gemini"
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
-
-    guidance = connector_paths.cleanup_only_guidance("geminicli")
-    for category in ("skills", "plugins", "mcps", "config"):
-        assert connector_source_label("geminicli", category) == guidance
-    assert "Antigravity" in guidance
-    assert "setup remove geminicli --yes" in guidance
-
-
-def test_catalog_gemini_panels_expose_no_active_actions() -> None:
-    skills = SkillsPanelModel(connector="geminicli")
-    skills.apply_json(json.dumps([{"name": "legacy-skill"}]))
-    mcps = MCPsPanelModel(connector="geminicli")
-    mcps.apply_json(json.dumps([{"name": "legacy-mcp"}]))
-    plugins = PluginsPanelModel(connector="geminicli")
-    plugins.apply_json(json.dumps([{"id": "legacy-plugin", "name": "legacy-plugin"}]))
-
-    for panel in (skills, mcps, plugins):
-        assert panel.menu_actions() == ()
-        assert panel.action_intent("b") is None
-        refresh = panel.handle_key("r")
-        assert refresh.intent is None
-        assert "Antigravity" in refresh.hint
-
-    assert mcps.handle_key("+").open_mcp_set_form is False
 
 
 def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:

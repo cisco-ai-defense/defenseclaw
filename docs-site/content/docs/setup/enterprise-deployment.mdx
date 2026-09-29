@@ -160,7 +160,7 @@ The important qualifier is **permanently**. A standard user—or an AI agent exe
 | Logs | `/var/log/defenseclaw` | `defenseclaw:defenseclaw` | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` |
 | Service definition | `/etc/systemd/system/defenseclaw-gateway.service` | `root:root` | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` | `root:wheel` |
 
-User-owned agent configuration remains in user space. Examples include `~/.codex/config.toml`, `~/.claude/settings.json`, and `~/.gemini/settings.json`. DefenseClaw can only harden those files by installing and repairing hooks through a privileged enterprise controller; users still own the agent's native configuration file.
+User-owned agent configuration remains in user space. Examples include `~/.codex/config.toml`, `~/.claude/settings.json`, and `~/.config/devin/config.json`. DefenseClaw can only harden those files by installing and repairing hooks through a privileged enterprise controller; users still own the agent's native configuration file.
 
 ## Recommended rollout sequence
 

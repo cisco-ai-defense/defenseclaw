@@ -70,7 +70,7 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
-	// "windsurf", "geminicli", "copilot", "openhands". Constants for those modes
+	// "devin", "copilot", "openhands", "antigravity". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -232,6 +232,10 @@ const CurrentConfigVersion = 7
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
 	ConfigFilePath string `mapstructure:"-" yaml:"-"`
+	// LegacyConnectorNotices records connector IDs this load moved to their
+	// replacement (see internal/legacyconnector). The gateway logs them once
+	// per boot and finishes the host-side cleanup. Never serialized.
+	LegacyConnectorNotices []string `mapstructure:"-" yaml:"-"`
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin
@@ -1428,12 +1432,6 @@ func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
 		return c.ClaudeCode
 	case "codex":
 		return c.Codex
-	case "gemini-cli", "gemini_cli", "gemini":
-		if c.ConnectorHooks != nil {
-			if h, ok := c.ConnectorHooks["geminicli"]; ok {
-				return h
-			}
-		}
 	}
 	return AgentHookConfig{}
 }
@@ -1612,8 +1610,8 @@ type CiscoAIDefenseConfig struct {
 
 	// ScanHookSurface controls whether the hook lane (PreToolUse +
 	// PostToolUse + UserPromptSubmit on hook-only connectors like
-	// Codex / Claude Code / Cursor / Windsurf / Hermes / Gemini /
-	// Copilot) forwards payloads to Cisco AI Defense.
+	// Codex / Claude Code / Cursor / Devin / Hermes / Copilot)
+	// forwards payloads to Cisco AI Defense.
 	//
 	// Pre-existing AID integration only fires on the proxy lane
 	// (chat prompts + completions) for OpenClaw / ZeptoClaw, so
@@ -1874,8 +1872,6 @@ func normalizeConnectorKey(name string) string {
 		return "openhands"
 	case "claude-code", "claude_code":
 		return "claudecode"
-	case "gemini-cli", "gemini_cli", "gemini":
-		return "geminicli"
 	default:
 		return n
 	}
@@ -2834,6 +2830,9 @@ func loadConfigSource(
 		}
 	}
 	cfg.ConfigFilePath = configFile
+	// Move retired connector IDs to their replacement before any connector
+	// key is normalized or checked for duplicates.
+	migrateLegacyConnectorIDs(&cfg)
 
 	// Reinstate the dot-preserving OTel resource attributes that we
 	// stripped before handing bytes to Viper.

@@ -238,8 +238,7 @@ a random operation identity; every destructive application/cache path is
 derived from Windows Known Folders. It also records the explicitly selected
 connector configuration homes needed for Codex, Claude Code, GitHub Copilot
 CLI, Cursor, Devin, Hermes, Antigravity, OpenCode, and OmniGent, plus the
-observed user PATH. Legacy Windsurf and Gemini CLI fields are consumed only for
-authenticated upgrade or uninstall cleanup. Recovery
+observed user PATH. Recovery
 rejects an altered destructive path, an unrelated install-state identity, an
 untrusted journal ACL, or a reparse point in a transaction-owned root. Agent
 configuration symlinks remain supported by the connector's target-aware writer.

@@ -783,9 +783,8 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
 	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
 	tokens := map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeCodex:     strings.Repeat("c", 64),
-		connector.OTLPScopeClaude:    strings.Repeat("d", 64),
-		connector.OTLPScopeGeminiCLI: strings.Repeat("e", 64),
+		connector.OTLPScopeCodex:  strings.Repeat("c", 64),
+		connector.OTLPScopeClaude: strings.Repeat("d", 64),
 	}
 	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
 		return tokens[scope], nil
@@ -808,11 +807,6 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 				t.Errorf("%s authorization did not use its scoped credential", source)
 			}
 			seen[source]++
-		case r.URL.Path == "/otlp/geminicli/"+tokens[connector.OTLPScopeGeminiCLI]+"/v1/logs":
-			if got := r.Header.Get("Authorization"); got != "" {
-				t.Errorf("geminicli path-token probe sent an Authorization header")
-			}
-			seen["geminicli"]++
 		default:
 			t.Errorf("unexpected convergence probe path %q source %q", r.URL.Path, source)
 		}
@@ -821,12 +815,12 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	defer srv.Close()
 
 	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex", "geminicli"},
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex"},
 	)
 	if err != nil {
 		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v", err)
 	}
-	for name, want := range map[string]int{"claudecode": 2, "codex": 1, "geminicli": 1} {
+	for name, want := range map[string]int{"claudecode": 2, "codex": 1} {
 		if seen[name] != want {
 			t.Fatalf("%s auth probes = %d, want %d", name, seen[name], want)
 		}

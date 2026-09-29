@@ -23,8 +23,6 @@ from defenseclaw.connector_paths import (
     codex_home,
     connector_config_files,
     normalize,
-    windsurf_hook_config_path,
-    windsurf_user_home,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
@@ -554,14 +552,6 @@ def _windows_registration_freshness(
         if len(locked_paths) != 1:
             return "registration-config-binding-stale"
         config_path = locked_paths[0]
-    elif connector == "windsurf":
-        try:
-            config_path = windsurf_hook_config_path()
-        except ValueError:
-            return "registration-profile-binding-missing"
-        locked_paths = _registration_hook_config_paths(cfg, connector)
-        if len(locked_paths) != 1 or not _same_config_path(locked_paths[0], config_path):
-            return "registration-profile-binding-stale"
     elif connector == "codex":
         # Native Setup registers Codex hooks in the supported managed layer so
         # they are source-trusted without a manual /hooks approval. Keep the
@@ -577,8 +567,6 @@ def _windows_registration_freshness(
         )
     install_root = _packaged_windows_install_root(str(cfg.data_dir))
     if install_root is None:
-        if connector == "windsurf":
-            return "registration-install-root-unverified"
         install_root = str(Path.home() / ".local" / "bin")
     check = validate_windows_hook_registration(
         connector=connector,
@@ -609,28 +597,6 @@ def _registration_hook_config_paths(cfg: Any, connector: str) -> tuple[str, ...]
     if not isinstance(raw_paths, list):
         return ()
     return tuple(str(path) for path in raw_paths if isinstance(path, str) and path)
-
-
-def _same_config_path(left: str, right: str) -> bool:
-    def key(value: str) -> str | None:
-        if (
-            not value
-            or value.strip() != value
-            or "\x00" in value
-            or "\r" in value
-            or "\n" in value
-            or not os.path.isabs(value)
-            or os.path.normpath(value) != value
-        ):
-            return None
-        return os.path.normcase(value)
-
-    try:
-        left_key = key(left)
-        right_key = key(right)
-        return left_key is not None and left_key == right_key
-    except ValueError:
-        return False
 
 
 def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
@@ -776,13 +742,10 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
         paths.add(hook_dir / f".hookcfg.{name}")
         try:
             config_paths = connector_config_files(name, workspace_dir=workspace)
-            windsurf_hooks = windsurf_hook_config_path() if name == "windsurf" else ""
         except ValueError as exc:
             raise OSError(f"{name} profile binding is invalid: {exc}") from exc
         for config_path in config_paths:
             paths.add(Path(config_path))
-        if windsurf_hooks:
-            paths.add(Path(windsurf_hooks))
         paths.add(hook_dir / f"{name}-hook.sh")
         paths.add(Path(cfg.data_dir) / f"{name}_backup.json")
         backup_dir = Path(cfg.data_dir) / "connector_backups" / name
@@ -877,10 +840,6 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
 
 def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailModeState:
     name = normalize(connector)
-    try:
-        config_home = windsurf_user_home() if name == "windsurf" else ""
-    except ValueError as exc:
-        raise OSError(f"Windsurf profile binding is invalid: {exc}") from exc
     executable = shutil.which("defenseclaw-gateway")
     if not executable or (_is_windows() and Path(executable).suffix.lower() != ".exe"):
         raise OSError("native defenseclaw-gateway executable not found")
@@ -896,8 +855,6 @@ def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailM
             "--data-dir",
             str(cfg.data_dir),
         ]
-        if name == "windsurf":
-            args.extend(("--config-home", config_home))
         args.append("--json")
         result = subprocess.run(
             args,
