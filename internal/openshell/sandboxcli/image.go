@@ -23,11 +23,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -42,8 +44,10 @@ type ImageService interface {
 	// daemon uses it without building).
 	Current(spec *harness.Spec) (bool, error)
 	List() ([]image.Record, error)
-	Prune(ctx context.Context, dryRun bool) (image.PruneReport, error)
-	// Remove deletes every image this data dir built.
+	// Prune removes superseded images (image.Builder.Prune).
+	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
+	// Remove deletes every image this data dir built or named: its overlay
+	// images and the run images and aliases made from them.
 	Remove(ctx context.Context, dryRun bool) ([]string, error)
 }
 
@@ -97,9 +101,9 @@ func (b *builderImages) Current(h *harness.Spec) (bool, error) {
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }
 
-func (b *builderImages) Prune(ctx context.Context, dryRun bool) (image.PruneReport, error) {
+func (b *builderImages) Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
-	return builder.Prune(ctx, image.PruneOptions{DryRun: dryRun})
+	return builder.Prune(ctx, opts)
 }
 
 func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, error) {
@@ -116,12 +120,23 @@ func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
+	runs, err := store.RunImages()
+	if err != nil {
+		return nil, err
+	}
 	var tags []string
 	for _, r := range recs {
 		if r.Owner == "" || r.Owner == owner {
 			tags = append(tags, r.Tag)
 		}
 	}
+	for _, r := range runs {
+		if r.Owner == owner {
+			tags = append(tags, r.Tag)
+		}
+	}
+	// Sorted, the run images (defenseclaw.invalid/sandbox-run:) come before
+	// the aliases, and both before the overlay images they come from.
 	sort.Strings(tags)
 	if dryRun || len(tags) == 0 {
 		return tags, nil
@@ -145,6 +160,36 @@ func (b *builderImages) Remove(ctx context.Context, dryRun bool) ([]string, erro
 		}
 	}
 	return removed, firstErr
+}
+
+// storeImageIDs are the image IDs of the images Remove removes: this data
+// dir's overlay images and the run images made from them (an alias has its
+// overlay image's ID). A data dir without a store has none, and gets none
+// created.
+func (a *App) storeImageIDs() []string {
+	store := image.NewStore(a.dataDir())
+	if _, err := os.Stat(store.Path()); err != nil {
+		return nil
+	}
+	owner, err := store.Owner()
+	if err != nil {
+		return nil
+	}
+	recs, _ := store.List()
+	runs, _ := store.RunImages()
+	var ids []string
+	for _, r := range recs {
+		if r.Owner == "" || r.Owner == owner {
+			ids = append(ids, r.ImageID)
+		}
+	}
+	for _, r := range runs {
+		if r.Owner == owner && !r.Alias {
+			ids = append(ids, r.ImageID)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 // ImageBuildOptions are the `image build` flags.
@@ -266,10 +311,27 @@ func (a *App) ImageList(format OutputFormat) error {
 	return nil
 }
 
-// ImagePrune removes superseded overlay images.
+// ImagePrune removes superseded overlay images. The images the daemon's
+// sandboxes run are kept. The MicroVM driver's run images and aliases,
+// which no container holds, are pruned only with that list: without the
+// daemon they are left alone.
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
-	rep, err := a.Images.Prune(ctx, dryRun)
+	opts := image.PruneOptions{DryRun: dryRun}
+	vm, _ := openshell.LookupDriver(string(openshell.DriverVM))
+	if api, err := a.api(); err == nil {
+		if list, err := api.List(ctx); err == nil {
+			for _, sb := range list {
+				for _, ref := range []string{sb.Image, sb.ImageID, sb.RunImage, sb.RunImageID} {
+					if ref != "" {
+						opts.Keep = append(opts.Keep, ref)
+					}
+				}
+			}
+			opts.AliasRepository = vm.ImageRepository
+		}
+	}
+	rep, err := a.Images.Prune(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -284,7 +346,11 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 		a.ok(verb + " " + t)
 	}
 	for _, t := range rep.Kept {
-		a.note("kept " + t + " (current)")
+		if slices.Contains(rep.InUse, t) {
+			a.note("kept " + t + " (a sandbox runs it)")
+		} else {
+			a.note("kept " + t + " (current)")
+		}
 	}
 	for _, t := range rep.Foreign {
 		a.note("left " + t + " (another DefenseClaw data directory's)")
@@ -292,5 +358,37 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	for _, t := range rep.Unrecorded {
 		a.note("left " + t + " (not recorded here)")
 	}
+	if n := len(rep.RunImagesLeft); n > 0 {
+		a.note(fmt.Sprintf("left %d MicroVM run image(s) and alias(es) (%s...) alone: the DefenseClaw daemon did not answer, so which sandboxes run them is not known",
+			n, vm.ImageRepository))
+	}
+	if note := a.vmDiskNote(vm, rep.RemovedRunImageIDs); note != "" {
+		a.note(note)
+	}
 	return nil
+}
+
+// vmDiskNote says how much of the MicroVM driver's image cache the disks it
+// prepared from the images ids take, which OpenShell keeps after the images
+// are gone and DefenseClaw never removes; "" when there are none. The cache
+// is under the user's home, where the gateway runs as the user.
+func (a *App) vmDiskNote(vm openshell.Driver, ids []string) string {
+	home, err := a.Home()
+	if err != nil || vm.ImageCache == "" {
+		return ""
+	}
+	dir := filepath.Join(home, vm.ImageCache)
+	var count int
+	var size int64
+	for _, id := range ids {
+		for _, d := range image.VMDisks(dir, id) {
+			count++
+			size += d.Bytes
+		}
+	}
+	if count == 0 {
+		return ""
+	}
+	return fmt.Sprintf("OpenShell keeps the %d MicroVM disk(s) it prepared from these images (%s in %s); DefenseClaw does not remove them",
+		count, humanBytes(size), a.tildePath(dir))
 }

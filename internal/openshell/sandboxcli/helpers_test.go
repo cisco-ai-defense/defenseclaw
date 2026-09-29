@@ -510,6 +510,10 @@ type fakeImages struct {
 	removed []string
 	// missing are harnesses whose image is not built yet (Current).
 	missing map[string]bool
+	// pruned are the options of each Prune; pruneReport, when set, is its
+	// answer.
+	pruned      []image.PruneOptions
+	pruneReport *image.PruneReport
 }
 
 func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
@@ -533,7 +537,13 @@ func (f *fakeImages) List() ([]image.Record, error) {
 	return append([]image.Record(nil), f.recs...), nil
 }
 
-func (f *fakeImages) Prune(context.Context, bool) (image.PruneReport, error) {
+func (f *fakeImages) Prune(_ context.Context, opts image.PruneOptions) (image.PruneReport, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruned = append(f.pruned, opts)
+	if f.pruneReport != nil {
+		return *f.pruneReport, nil
+	}
 	return image.PruneReport{Removed: []string{"defenseclaw/sandbox:old"}}, nil
 }
 

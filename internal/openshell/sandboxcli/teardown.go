@@ -52,6 +52,9 @@ type teardownPlan struct {
 	// providers are deleted.
 	ownIngress map[string]bool
 	images     []string
+	// vmDisks says what the MicroVM driver keeps of those images, which
+	// teardown cannot remove ("" when nothing).
+	vmDisks string
 	// orphans are sandboxes whose data under <data_dir>/sandboxes the
 	// daemon has no record of.
 	orphans []string
@@ -224,6 +227,10 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 		if tags, err := a.Images.Remove(ctx, true); err == nil {
 			p.images = tags
 		}
+		if len(p.images) > 0 {
+			vm, _ := openshell.LookupDriver(string(openshell.DriverVM))
+			p.vmDisks = a.vmDiskNote(vm, a.storeImageIDs())
+		}
 	}
 	if r, err := a.loadReceipt(); err == nil {
 		for _, f := range r.GatewayFiles {
@@ -322,6 +329,9 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		row("images", "kept (--keep-images)")
 	} else {
 		list("images", p.images)
+		if p.vmDisks != "" {
+			row("", p.vmDisks)
+		}
 	}
 	if len(p.orphans) > 0 {
 		list("leftover data", p.orphans)

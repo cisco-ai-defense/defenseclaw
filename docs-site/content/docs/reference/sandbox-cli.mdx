@@ -214,9 +214,13 @@ defenseclaw sandbox image list --output json
 
 ### `sandbox image prune`
 
-Removes superseded harness images. It keeps the current images and leaves
-images that another DefenseClaw data directory recorded, or that nothing
-recorded.
+Removes superseded harness images. It keeps the current images and the images
+the daemon's sandboxes run, and leaves images that another DefenseClaw data
+directory recorded, or that nothing recorded. On a MicroVM (vm) gateway it
+also removes the run images and aliases of superseded harness images, and only
+while the daemon answers: without its list of sandboxes it leaves them alone.
+OpenShell keeps the MicroVM disk it prepared from a removed image; prune says
+how much space those disks take.
 
 ```bash
 defenseclaw sandbox image prune --dry-run
