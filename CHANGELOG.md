@@ -417,6 +417,13 @@ deleted.
   `BLOCKED by DefenseClaw rule <ID>: …` instead of
   `Status: BLOCKED - Blocked by DefenseCla...`, and it ignores the
   `AuthlibDeprecationWarning` an OpenHands dependency printed at every start.
+- Interactive GitHub Copilot CLI sessions wait out Copilot's 30-second hook
+  timeout on every hook in a MicroVM too (#966): OpenShell's seccomp filter
+  refuses `pidfd_open` there as well. The launch banner of an interactive
+  Copilot session now says so, on Linux as well; `--prompt` runs are not
+  slowed. Copilot's HTTP hooks, which would avoid the wait, let a tool call
+  run when the request fails, so the sandbox keeps its fail-closed command
+  hooks.
 
 ### Legacy OpenShell standalone sandbox removed
 

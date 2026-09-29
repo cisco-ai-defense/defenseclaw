@@ -395,7 +395,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `MCP` | Your MCP servers that came along. |
 | `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings and MCP servers are the agent's to edit (Kiro has no system settings tier) (hook silence is detected)`. It reads the same on every compute driver. The connector pages have the details. |
-| `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
+| `⚠ …` | Anything worth knowing before you start: a limit of the harness or its model provider in an interactive session (every Copilot CLI hook waits out Copilot's 30-second timeout, see [Copilot CLI](/docs/connectors/copilot#in-an-openshell-sandbox); Codex on Bedrock Mantle needs `/new` for each request), MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
 
 ### Harness arguments and headless runs
 

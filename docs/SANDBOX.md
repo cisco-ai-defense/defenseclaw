@@ -1896,6 +1896,46 @@ These were measured on the pinned releases inside the community base image
   `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
   Copilot's tool commands inherit it (a Node older than 20.11 would refuse
   the flag).
+  In the interactive TUI every hook waits out Copilot's 30-second hook
+  timeout ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)),
+  on the Docker driver and in the macOS MicroVM alike: the sandbox's seccomp
+  filter makes `pidfd_open` fail with ENOSYS (in the MicroVM too, although
+  its 6.12 kernel has the call), so the CLI's native runtime (tokio, in a
+  Node.js addon inside Copilot's process) falls back to a `SIGCHLD` handler
+  to learn that a hook exited, and in the TUI Copilot's Node.js side
+  (libuv) resets `SIGCHLD` to its default after its own child processes.
+  The exited hook stays a zombie until the timeout; its verdict is still
+  applied. Headless runs keep the handler and are not slowed. The launch
+  banner of an interactive Copilot session says so
+  (`harness.Spec.InteractiveCaveat`). The fix is upstream: OpenShell
+  allowing `pidfd_open` in the workload's seccomp filter, or Copilot not
+  relying on `SIGCHLD` alone for its hook processes. What DefenseClaw cannot
+  do about it:
+  - Copilot's HTTP hooks (`"type": "http"`, which start no process) fail
+    open: GitHub's hook reference says a network error, a timeout or a
+    non-2xx status of an HTTP `preToolUse` or `permissionRequest` hook falls
+    through to the normal permission flow (with `--yolo`, an allow). A command
+    hook bounds its own requests and exits 2 on every failure. HTTP hooks
+    also refuse plain `http://` for those two events unless
+    `COPILOT_HOOK_ALLOW_HTTP_AUTH_HOOKS=1`, a variable the workload can drop
+    for a Copilot it starts itself, and expand a header variable
+    (`allowedEnvVars`) only over `https://` or to `localhost` with
+    `COPILOT_HOOK_ALLOW_LOCALHOST=1`; the ingress is plain HTTP at
+    `host.openshell.internal`, and the token's placeholder is scoped to a
+    policy revision, so it cannot be written into the image's policy
+    document either. The ingress route (`/api/v1/copilot/hook`) would also
+    have to answer with Copilot's bare hook output instead of its
+    `action`/`hook_output` envelope.
+  - A shorter `timeoutSec` lets the tool call run: a timed-out command hook
+    fails open, even a policy hook.
+  - The launcher cannot keep a handler in place: a caught signal's handler
+    does not survive `exec`, an inherited `SIG_IGN` lasts only until tokio
+    or libuv installs its own handler (and libuv's reset restores the
+    default, not `SIG_IGN`), and the single-executable CLI ignores
+    `NODE_OPTIONS` (measured with 1.0.86 on macOS: neither an unknown
+    option nor a `--require` preload took effect), so no preload can hold
+    the `SIGCHLD` listener that would keep libuv from resetting it.
+  - The hook cannot reap itself: only Copilot, its parent, can.
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
@@ -2305,6 +2345,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver, and a run that fails the probe there names the switch. |
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
+| Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, and setup offers to install the formula. While such a gateway answers, the doctor does not fail it: `vm-driver` passes on the driver the gateway reports (found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`), and `gateway-service` says how it runs (the launchd label from `launchctl list`, or a warning for one started by hand) and that DefenseClaw cannot restart it. With no gateway answering both fail as not installed. |
 

@@ -390,7 +390,16 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
+	// interactiveCaveat is a limit of the pinned harness in an OpenShell
+	// sandbox that an interactive session should know before it starts,
+	// whatever the credential profile; the launch banner prints it.
+	interactiveCaveat string
 }
+
+// InteractiveCaveat is the harness limit an interactive session should know
+// about before it starts ("" when there is none). A one-prompt run is not
+// shown it.
+func (s *Spec) InteractiveCaveat() string { return s.interactiveCaveat }
 
 // DirectFetch is a request the pinned harness binary makes on its own
 // around the egress proxy (its HTTP client ignores the proxy variables)
