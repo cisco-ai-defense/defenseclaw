@@ -809,6 +809,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	originalBody := body // preserve original (possibly compressed) for passthrough
+	bodyModified := false
 	if isZstdBody(body) {
 		if decompressed, err := decompressZstd(body); err == nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] zstd: decompressed %d → %d bytes\n", len(body), len(decompressed))
@@ -884,6 +886,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 				} else {
 					body = patchModelInBody(body, decision.Model)
+				bodyModified = true
 				}
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: semantic-router hydration model=%q base=%s\n",
@@ -916,6 +919,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					if !strings.Contains(r.URL.Path, "/invoke") {
 						body = patchModelInBody(body, cfgModel)
 					}
+					bodyModified = true
 					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: direct-provider hydration model=%q base=%s\n",
 						cfgModel, scrubURLSecrets(base))
 				} else if clientAuth := r.Header.Get("Authorization"); clientAuth != "" {
@@ -1006,6 +1010,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				r.URL.RawPath = ""
 				bedrockTranslateNeeded = true
 				bedrockTranslateToOpenAI = true
+					bodyModified = true
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→openai translation model=%q\n", decision.Model)
 			} else if shouldTranslateBedrockToAnthropic(r.URL.Path, decision) {
 				body, r.URL.Path = bedrockToAnthropicRequest(body, r.URL.Path, decision.Model)
@@ -1013,11 +1018,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				bedrockTranslateNeeded = true
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→anthropic translation model=%q\n", decision.Model)
 			} else if decision.Model != "" && !strings.Contains(r.URL.Path, "/invoke") && decision.APIKeyOverride {
+					bodyModified = true
 				// Only patch the model when credentials are being overridden.
 				// Passthrough auth (APIKeyOverride=false) preserves the
 				// client's original model choice alongside their credentials.
 				body = patchModelInBody(body, decision.Model)
 			}
+				bodyModified = true
 			// Strip Codex-specific input items (additional_tools, etc.)
 			// when routing to non-ChatGPT backends that don't understand them.
 			if decision.TargetURLOverride && decision.TargetURL != "" &&
@@ -1025,6 +1032,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				if cleaned := stripUnsupportedInputItems(body); cleaned != nil {
 					body = cleaned
 				}
+					bodyModified = true
 			}
 		}
 	}
@@ -1429,7 +1437,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	upstreamCtx, upstreamCancel := context.WithTimeout(r.Context(), passthroughTimeout)
 	defer upstreamCancel()
 
-	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
+	// When the body was not modified by routing (no model patch, no input
+	// stripping, no format translation), forward the original bytes to
+	// preserve zstd compression and encrypted content signatures.
+	forwardBody := body
+	if !bodyModified && isZstdBody(originalBody) {
+		forwardBody = originalBody
+		r.Header.Set("Content-Encoding", "zstd")
+	}
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
 		return
