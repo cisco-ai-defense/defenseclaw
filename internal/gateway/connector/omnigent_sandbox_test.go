@@ -56,6 +56,11 @@ func TestOmnigentSandboxArtifacts(t *testing.T) {
 	if tui, _ := cfg["tui"].(map[string]interface{}); tui["theme"] != "dark" {
 		t.Fatalf("tui = %v, want a pinned theme", cfg["tui"])
 	}
+	// /theme fails with a raw errno naming this file (OG-U6); the file says
+	// why.
+	if !strings.Contains(string(config), "# OmniGent's /theme cannot change the TUI theme in a sandbox") {
+		t.Fatalf("the configuration does not explain /theme:\n%s", config)
+	}
 	if cfg["telemetry"] != false {
 		t.Fatalf("telemetry = %v, want false", cfg["telemetry"])
 	}

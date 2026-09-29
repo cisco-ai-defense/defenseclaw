@@ -10,8 +10,8 @@
     "/etc/omnigent/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 454,
-      "sha256": "c1baa64af3c378c043de0d35462859c80dbac2158a7785a36aa13a375db433a0"
+      "size": 626,
+      "sha256": "5cb30197a159606a7b92bd85e59a82a0727f8e66599d3aeb5839da0fb7fff418"
     },
     "/usr/local/lib/defenseclaw/omnigent/agent/config.yaml": {
       "mode": "-rw-r--r--",

@@ -175,13 +175,22 @@ func omnigentSandboxConfig() map[string]interface{} {
 	}
 }
 
+// omnigentThemeNote explains, in the file OmniGent's /theme error names
+// ("Failed to write TUI user config at /etc/omnigent/config.yaml: [Errno
+// 13] Permission denied"), why the theme cannot change. The file cannot be
+// made writable, nor its directory (the TUI writes a temporary file there
+// and renames it over this one): it carries DefenseClaw's policy.
+const omnigentThemeNote = "# OmniGent's /theme cannot change the TUI theme in a sandbox: it writes this file,\n" +
+	"# which holds DefenseClaw's policy and stays root-owned, so the theme is pinned to dark.\n"
+
 func renderOmnigentSandboxConfig(rt resolvedSandboxTarget) ([]byte, error) {
 	body, err := yaml.Marshal(omnigentSandboxConfig())
 	if err != nil {
 		return nil, fmt.Errorf("marshal OmniGent sandbox config: %w", err)
 	}
 	header := "# DefenseClaw managed OmniGent server configuration (OpenShell sandbox image, root-owned).\n" +
-		"# Read through OMNIGENT_CONFIG_HOME=" + OmnigentSandboxConfigHome + "; policy contract " + rt.contract.ContractID + ".\n"
+		"# Read through OMNIGENT_CONFIG_HOME=" + OmnigentSandboxConfigHome + "; policy contract " + rt.contract.ContractID + ".\n" +
+		omnigentThemeNote
 	return append([]byte(header), body...), nil
 }
 

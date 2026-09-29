@@ -202,7 +202,10 @@ exist only in the image; nothing on your host changes.
 - **TUI theme.** OmniGent's TUI keeps its theme in the same file, so the image
   sets the dark theme there: the first-launch theme picker would otherwise
   fail writing the root-owned file. `/theme` cannot change the theme inside a
-  sandbox.
+  sandbox. It fails with OmniGent's own message, `Failed to write TUI user
+  config at /etc/omnigent/config.yaml: [Errno 13] Permission denied`, and the
+  top of that file says why. The file and its directory stay root-owned
+  because the file carries DefenseClaw's policy.
 - **Fail closed.** The sandbox bridge presents only the per-sandbox binding
   token and retries a dropped request once. Every failure becomes a DENY:
   missing token, ingress down, a bad status or a bad reply.
