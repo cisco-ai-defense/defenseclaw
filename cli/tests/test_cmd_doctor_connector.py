@@ -96,6 +96,14 @@ from defenseclaw.file_permissions import (
 
 
 class TestCodexOtelAlignment(unittest.TestCase):
+    def setUp(self) -> None:
+        trusted = patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     def _cfg(self, environment: str = "windows") -> MagicMock:
         cfg = MagicMock()
         cfg.environment = environment

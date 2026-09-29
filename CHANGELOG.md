@@ -190,6 +190,14 @@ rest also reach per-user installs.
   earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
   only the `hooks` mapping, keeping every byte outside it, and removes all of
   DefenseClaw's approvals.
+- **`defenseclaw doctor` sends the gateway token only to the gateway it
+  checked.** Doctor verified which process owned the API port, then opened a
+  new connection for its authenticated requests, so a process that took the
+  port over in between could receive the token. Doctor now requires the
+  verified gateway process to have accepted that same connection before it
+  writes the request, and otherwise reports `the connected gateway endpoint is
+  not served by the verified gateway process`. The Codex telemetry runtime
+  check, which sent the token without checking the listener, does the same.
 
 ### Added
 

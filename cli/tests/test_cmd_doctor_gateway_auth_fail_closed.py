@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import subprocess
+import sys
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,11 +17,12 @@ from defenseclaw.commands.cmd_doctor import (
     _check_gateway_auth,
     _check_sidecar,
     _DoctorResult,
+    _gateway_peer_bound_request,
     _GatewayTrust,
     _strict_authenticated_runtime_pid,
 )
 from defenseclaw.config import GatewayConfig
-from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
+from defenseclaw.doctor_gateway import GatewayEvidence, PIDRecord, ProcessEvidence
 
 
 def _cfg(data_dir: str) -> SimpleNamespace:
@@ -276,3 +281,51 @@ def test_gateway_auth_fails_closed_when_runtime_attestation_is_invalid(
     assert auth_row["status"] == "fail"
     assert expected_detail in auth_row["detail"]
     assert token not in repr(result.to_dict())
+
+
+def test_gateway_token_is_written_only_to_the_verified_gateway_peer() -> None:
+    """An endpoint served by anyone but the verified gateway gets no request bytes."""
+    evidence = GatewayEvidence()
+    received: list[bytes] = []
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def serve() -> None:
+        for _ in range(2):
+            try:
+                connection, _address = listener.accept()
+            except OSError:
+                return
+            with connection:
+                connection.settimeout(5)
+                try:
+                    data = connection.recv(65536)
+                except OSError:
+                    data = b""
+                received.append(data)
+                if data:
+                    connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+
+    def verified(pid: int) -> _GatewayTrust:
+        process = evidence.process(pid)
+        assert process.status == "ok", process
+        return _GatewayTrust("trusted", "verified", pid, process=process)
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}/status"
+    headers = {"Authorization": "Bearer peer-bound-token"}
+    # This test process serves the endpoint; the verified "gateway" is another process.
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        code, detail = _gateway_peer_bound_request(url, verified(other.pid), headers=headers, timeout=1.0)
+        assert code == 0
+        assert "not served by the verified gateway process" in detail
+        assert _gateway_peer_bound_request(url, verified(os.getpid()), headers=headers, timeout=5.0) == (200, "ok")
+    finally:
+        other.kill()
+        other.wait()
+        server.join(timeout=10)
+        listener.close()
+
+    assert received[0] == b""
+    assert b"peer-bound-token" in received[1]
