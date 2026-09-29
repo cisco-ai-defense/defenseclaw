@@ -67,17 +67,24 @@ def test_scanner_path_probe_is_cached_between_repaints(monkeypatch) -> None:
     assert calls == ["skill-scanner", "skill-scanner"]
 
 
-async def test_service_details_read_as_words_at_80_columns(tmp_path) -> None:
+async def test_service_details_read_as_words_at_80_columns(tmp_path, monkeypatch) -> None:
     import sys
     from pathlib import Path
+
+    from defenseclaw.tui.services.overview_state import OverviewPanelModel
 
     sys.path.insert(0, str(Path(__file__).parent))
     from fixtures import screen_text, settle_panel, snapshot_app
 
+    # The same long detail on every platform (the live one depends on how far
+    # the observability status has loaded).
+    monkeypatch.setattr(OverviewPanelModel, "telemetry_detail", lambda _self: "canonical destination plan loading")
     app = snapshot_app(tmp_path)
-    # Tall enough that the Services card is on screen without scrolling.
-    async with app.run_test(size=(80, 70)) as pilot:
+    # Tall enough that the Services card is on screen without scrolling, even
+    # with the extra notices some platforms show above it.
+    async with app.run_test(size=(80, 120)) as pilot:
         await settle_panel(app, pilot)  # the Overview body renders after the first frame
         text = screen_text(app)
-    # The Telemetry detail used to fold four letters a line ("cano", "nica").
-    assert "plan loading" in text
+    # The Telemetry detail used to fold four letters a line ("cano", "nica");
+    # now each word stays whole, wherever the lines wrap.
+    assert all(word in text for word in ("canonical", "destination", "loading"))
