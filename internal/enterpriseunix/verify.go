@@ -37,6 +37,19 @@ const codeUnitFailed = "unit_failed"
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
 	env, r := l.env, l.result
+	if l.opts.Action == ActionVerify {
+		// The daily verify can start while another run changes the
+		// deployment: ensure restarts the timer, and a Persistent timer past
+		// its daily time fires at once. verify waits for that run like any
+		// lifecycle action, then releases the lock so it never holds up a
+		// change; a run that outlasts the wait is busy, not a failed check.
+		lock, err := env.acquireLock(ctx)
+		if errors.Is(err, errLockBusy) {
+			r.AddError(codeBusy, err.Error())
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		lock.release()
+	}
 	record, err := env.loadDeployment()
 	if err != nil {
 		r.AddError(codeState, err.Error())
