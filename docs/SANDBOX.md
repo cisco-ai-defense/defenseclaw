@@ -2037,8 +2037,10 @@ These were measured on the pinned releases inside the community base image
   both files and checks the ones it finds at every start, downloading again
   when they differ. The image unpacks those files there at build, each
   checked against the digests the pinned binary accepts (the URL names no
-  release, so the archive's own bytes are not pinned); a base image without
-  `/usr/bin/python3` leaves the download to Kiro. Kiro's TUI runtime (`bun`
+  release, so the archive's own bytes are not pinned). The model is only a
+  cache, so a base image without `/usr/bin/python3`, a failed download or an
+  archive that does not hold exactly those files leaves the download to
+  Kiro: the build says so, writes none of it and goes on. Kiro's TUI runtime (`bun`
   and `tui.js`, about 92 MB) is embedded in `kiro-cli-chat` and extracted into
   `~/.local/share/kiro-cli` at the first interactive start, without a
   download. Kiro extracts it again when the `.sha256` file next to it does

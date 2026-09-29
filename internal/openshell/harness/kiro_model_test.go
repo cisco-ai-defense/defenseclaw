@@ -69,9 +69,10 @@ func TestKiroInstallPreSeedsItsEmbeddingModel(t *testing.T) {
 
 // TestZipModelInstallChecksEveryFile runs a model step against a fake curl
 // serving archives the test builds: only the pinned files, with the pinned
-// sizes and digests, are written; any other archive fails the build and
-// writes nothing; without the interpreter the step leaves the model to the
-// harness and downloads nothing.
+// sizes and digests, are written. The model is only a cache the harness
+// fetches itself, so a failed download, any other archive or a missing
+// interpreter leaves it to the harness: the step says so, writes nothing
+// (not the model directory either) and the build goes on.
 func TestZipModelInstallChecksEveryFile(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -91,16 +92,17 @@ func TestZipModelInstallChecksEveryFile(t *testing.T) {
 	for name, tc := range map[string]struct {
 		members map[string][]byte
 		python  string
-		failure string
-		skipped bool
+		// skipped is why the step leaves the model to the harness.
+		skipped string
 	}{
 		"pinned files":     {members: pinned},
-		"extra member":     {members: map[string][]byte{"model.safetensors": weights, "tokenizer.json": vocab, "../evil": vocab}, failure: "model archive holds"},
-		"missing member":   {members: map[string][]byte{"model.safetensors": weights}, failure: "model archive holds"},
-		"other bytes":      {members: map[string][]byte{"model.safetensors": bytes.Repeat([]byte("x"), 4096), "tokenizer.json": vocab}, failure: "is not the pinned"},
-		"other size":       {members: map[string][]byte{"model.safetensors": weights[:100], "tokenizer.json": vocab}, failure: "bytes, not the pinned"},
-		"no interpreter":   {members: pinned, python: "/nonexistent/python3", skipped: true},
-		"download failure": {failure: "curl: download failed"},
+		"extra member":     {members: map[string][]byte{"model.safetensors": weights, "tokenizer.json": vocab, "../evil": vocab}, skipped: "model archive holds"},
+		"missing member":   {members: map[string][]byte{"model.safetensors": weights}, skipped: "model archive holds"},
+		"other bytes":      {members: map[string][]byte{"model.safetensors": bytes.Repeat([]byte("x"), 4096), "tokenizer.json": vocab}, skipped: "is not the pinned"},
+		"other tokenizer":  {members: map[string][]byte{"model.safetensors": weights, "tokenizer.json": []byte(`{"vocab":[]}`)}, skipped: "is not the pinned"},
+		"other size":       {members: map[string][]byte{"model.safetensors": weights[:100], "tokenizer.json": vocab}, skipped: "bytes, not the pinned"},
+		"no interpreter":   {members: pinned, python: "/nonexistent/python3", skipped: "no /nonexistent/python3"},
+		"download failure": {skipped: "curl: download failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -140,26 +142,23 @@ func TestZipModelInstallChecksEveryFile(t *testing.T) {
 			cmd := exec.Command("/bin/sh", "-c", pin.installRun(target, interp))
 			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "TMPDIR=" + dir}
 			out, err := cmd.CombinedOutput()
-			if tc.failure != "" {
-				if err == nil || !strings.Contains(string(out), tc.failure) {
-					t.Fatalf("the step passed or failed for another reason: %v\n%s", err, out)
+			if err != nil {
+				t.Fatalf("model step failed the build: %v\n%s", err, out)
+			}
+			if tc.skipped != "" {
+				if !strings.Contains(string(out), "is not pre-seeded") || !strings.Contains(string(out), tc.skipped) {
+					t.Errorf("the skipped step did not say so and why (%q):\n%s", tc.skipped, out)
 				}
-				for _, f := range pin.Files {
-					if _, err := os.Stat(filepath.Join(target, f.Name)); err == nil {
-						t.Errorf("%s was written from a refused archive", f.Name)
+				if _, err := os.Stat(target); err == nil {
+					t.Errorf("the skipped step created the model directory or wrote into it:\n%s", out)
+				}
+				if tc.python != "" {
+					if _, err := os.Stat(filepath.Join(dir, "curl-called")); err == nil {
+						t.Error("the step downloaded a model it cannot unpack")
 					}
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("model step: %v\n%s", err, out)
-			}
-			if tc.skipped {
-				if !strings.Contains(string(out), "is not pre-seeded") {
-					t.Errorf("the skipped step did not say so:\n%s", out)
-				}
-				if _, err := os.Stat(filepath.Join(dir, "curl-called")); err == nil {
-					t.Error("the step downloaded a model it cannot unpack")
+				if leftover, _ := filepath.Glob(filepath.Join(dir, "tmp.*")); len(leftover) != 0 {
+					t.Errorf("the skipped step left %v", leftover)
 				}
 				return
 			}

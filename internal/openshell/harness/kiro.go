@@ -78,14 +78,16 @@ type zipModelFile struct {
 
 // zipModelUnpack is the Python the model step runs (unzip is not in every
 // base image): it reads only the pinned members, checks the member list, each
-// size before reading and each sha256, and writes them into the target
-// directory. argv: archive, directory, then name=size=sha256 per file.
+// size before reading and each sha256, and only when every file matches
+// creates the target directory and writes them there. argv: archive,
+// directory, then name=size=sha256 per file.
 const zipModelUnpack = `import hashlib, os, sys, zipfile
 archive, dest = sys.argv[1], sys.argv[2]
 want = {}
 for arg in sys.argv[3:]:
     name, size, digest = arg.split("=")
     want[name] = (int(size), digest)
+files = {}
 with zipfile.ZipFile(archive) as z:
     members = {i.filename: i for i in z.infolist() if not i.is_dir()}
     if sorted(members) != sorted(want):
@@ -97,29 +99,35 @@ with zipfile.ZipFile(archive) as z:
         got = hashlib.sha256(data).hexdigest()
         if got != digest:
             sys.exit("%s sha256 %s is not the pinned %s" % (name, got, digest))
-        path = os.path.join(dest, name)
-        with open(path + ".part", "wb") as f:
-            f.write(data)
-        os.chmod(path + ".part", 0o644)
-        os.replace(path + ".part", path)
+        files[name] = data
+os.makedirs(dest, exist_ok=True)
+os.chmod(dest, 0o755)
+for name, data in sorted(files.items()):
+    path = os.path.join(dest, name)
+    with open(path + ".part", "wb") as f:
+        f.write(data)
+    os.chmod(path + ".part", 0o644)
+    os.replace(path + ".part", path)
 `
 
 // installRun returns the RUN body that downloads the archive and writes its
-// pinned files into dir with python (the interpreter's path). Without that
-// interpreter the step leaves the model to the harness's own first start.
+// pinned files into dir with python (the interpreter's path). The model is
+// only a cache the harness downloads at its first start, so without that
+// interpreter, when the download fails or when the archive does not hold
+// exactly the pinned files, the step says so, writes nothing and the build
+// goes on.
 func (m zipModelPin) installRun(dir, python string) string {
 	var pins []string
 	for _, f := range m.Files {
 		pins = append(pins, shellQuote(f.Name+"="+strconv.FormatInt(f.Size, 10)+"="+f.SHA256))
 	}
 	return `set -eu; dir=` + shellQuote(dir) + `; url=` + shellQuote(m.URL) + `; ` +
-		`if [ ! -x ` + shellQuote(python) + ` ]; then echo "$url is not pre-seeded: the base image has no ` + python + ` to unpack it (the harness downloads it at its first start)" >&2; exit 0; fi; ` +
-		`tmp="$(mktemp -d)"; ` +
-		`curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/model.zip" "$url"; ` +
+		`skip() { echo "$url is not pre-seeded: $1 (the harness downloads it at its first start)" >&2; exit 0; }; ` +
+		`if [ ! -x ` + shellQuote(python) + ` ]; then skip ` + shellQuote("the base image has no "+python+" to unpack it") + `; fi; ` +
+		`tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; ` +
+		`curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/model.zip" "$url" || skip "the download failed"; ` +
 		`printf '%s' ` + shellQuote(base64.StdEncoding.EncodeToString([]byte(zipModelUnpack))) + ` | base64 -d >"$tmp/unpack.py"; ` +
-		`install -d -m 0755 "$dir"; ` +
-		shellQuote(python) + ` -I -S "$tmp/unpack.py" "$tmp/model.zip" "$dir" ` + strings.Join(pins, " ") + `; ` +
-		`rm -rf "$tmp"`
+		shellQuote(python) + ` -I -S "$tmp/unpack.py" "$tmp/model.zip" "$dir" ` + strings.Join(pins, " ") + ` || skip "the archive does not hold the pinned files"`
 }
 
 // Kiro is the Kiro CLI harness. Its hooks live in the DefenseClaw agent,

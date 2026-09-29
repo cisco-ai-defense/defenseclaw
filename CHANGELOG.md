@@ -394,7 +394,9 @@ deleted.
 - The Kiro image unpacks the embedding model Kiro CLI downloads at its first
   start (`all-MiniLM-L6-v2`, 79 MiB, each file checked against the SHA-256
   the pinned `kiro-cli-chat` carries) into the image HOME, so a new Kiro
-  sandbox's first session no longer downloads it. The Kiro launcher sets
+  sandbox's first session no longer downloads it. When that download fails
+  or its files do not match, the image builds without the model and Kiro
+  downloads it as before. The Kiro launcher sets
   `KIRO_SKIP_BINARY_PINNING=1`, so an interactive session runs the root-owned
   `kiro-cli-chat` rather than the copy Kiro makes in
   `~/.local/share/kiro-cli/run`.
