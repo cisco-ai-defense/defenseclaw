@@ -5,7 +5,9 @@
 package managed
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,5 +149,92 @@ func TestRelaxAncestorTrustJudgementOnlyDowngradesTaggedVerdicts(t *testing.T) {
 	}
 	if len(*advisories) != 1 {
 		t.Fatalf("exec failure emitted an advisory: %v", *advisories)
+	}
+}
+
+// TestReportTrustAdvisoryDedupesRepeatedTuplesOnDefaultLog pins the
+// dedupe-per-(path, label, reason) contract on the default log path. The
+// hook-guardian reconciles every 5 s; without dedupe the same
+// managed_trust_ancestor_advisory line would appear 12 times per minute for
+// every host whose /opt/cisco is 0775. Emit each unique tuple once, swallow
+// the rest, until either the tuple changes (reason differs) or the process
+// restarts (dedupe state is process-scoped).
+func TestReportTrustAdvisoryDedupesRepeatedTuplesOnDefaultLog(t *testing.T) {
+	// Force the default log path (no embedder hook).
+	prevHook := ReportTrustAdvisory
+	ReportTrustAdvisory = nil
+	t.Cleanup(func() { ReportTrustAdvisory = prevHook })
+
+	advisoryLogDedupe.reset()
+	t.Cleanup(func() { advisoryLogDedupe.reset() })
+
+	var buf bytes.Buffer
+	prevWriter := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0) // strip timestamp for stable line counts
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+
+	same := func() { reportTrustAdvisory("/opt/cisco", "managed config", "group/other writable 0775") }
+
+	// First call emits.
+	same()
+	firstCount := strings.Count(buf.String(), TrustAdvisoryMarker)
+	if firstCount != 1 {
+		t.Fatalf("first emission count = %d, want 1", firstCount)
+	}
+
+	// Repeated calls with the SAME tuple are swallowed.
+	for i := 0; i < 10; i++ {
+		same()
+	}
+	if got := strings.Count(buf.String(), TrustAdvisoryMarker); got != 1 {
+		t.Fatalf("after 10 repeated tuples: emission count = %d, want 1 (dedupe leaked %d extras)", got, got-1)
+	}
+
+	// A DIFFERENT path is a distinct tuple — emits.
+	reportTrustAdvisory("/opt/cisco/secureclient", "managed config", "group/other writable 0775")
+	if got := strings.Count(buf.String(), TrustAdvisoryMarker); got != 2 {
+		t.Fatalf("distinct-path emission count = %d, want 2", got)
+	}
+
+	// A DIFFERENT label is a distinct tuple — emits.
+	reportTrustAdvisory("/opt/cisco", "audit store database directory", "group/other writable 0775")
+	if got := strings.Count(buf.String(), TrustAdvisoryMarker); got != 3 {
+		t.Fatalf("distinct-label emission count = %d, want 3", got)
+	}
+
+	// A DIFFERENT reason (mode drifted 0775 -> 0777) is a distinct tuple — emits.
+	reportTrustAdvisory("/opt/cisco", "managed config", "group/other writable 0777")
+	if got := strings.Count(buf.String(), TrustAdvisoryMarker); got != 4 {
+		t.Fatalf("distinct-reason emission count = %d, want 4 (state-change advisories MUST re-emit)", got)
+	}
+
+	// Reset simulates a process restart — the first fire after reset emits again.
+	advisoryLogDedupe.reset()
+	same()
+	if got := strings.Count(buf.String(), TrustAdvisoryMarker); got != 5 {
+		t.Fatalf("post-reset emission count = %d, want 5 (process restart MUST re-emit)", got)
+	}
+}
+
+// TestReportTrustAdvisoryEmbedderHookBypassesDedupe pins that a custom
+// ReportTrustAdvisory hook sees EVERY occurrence — the default-log dedupe is
+// only for the process's own line-oriented output. Embedders (structured log,
+// telemetry) have richer context and are expected to dedupe themselves if
+// they want to.
+func TestReportTrustAdvisoryEmbedderHookBypassesDedupe(t *testing.T) {
+	advisoryLogDedupe.reset()
+	t.Cleanup(func() { advisoryLogDedupe.reset() })
+
+	advisories := captureTrustAdvisories(t)
+	for i := 0; i < 5; i++ {
+		reportTrustAdvisory("/opt/cisco", "managed config", "group/other writable 0775")
+	}
+	if len(*advisories) != 5 {
+		t.Fatalf("embedder hook saw %d advisories, want 5 (hook path must NOT be deduped)", len(*advisories))
 	}
 }

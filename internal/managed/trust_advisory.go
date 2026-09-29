@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // TrustStrictAncestorsEnv restores the pre-AIFW-34262 behaviour: ancestor
@@ -189,13 +190,62 @@ func relaxAncestorTrustVerdict(advisory bool, path, label string, verdict error)
 
 func reportTrustAdvisory(path, label, reason string) {
 	if hook := ReportTrustAdvisory; hook != nil {
+		// Embedders (structured log, telemetry) get every occurrence and
+		// dedupe themselves with their richer context. The default-log
+		// dedupe below is only for the process's own line-oriented output.
 		hook(path, label, reason)
+		return
+	}
+	// Dedupe the default log emission per (path, label, reason) tuple: an
+	// ancestor's advisory doesn't change between hook-guardian ticks
+	// (5 s) or between gateway reconciles, so re-logging every fire adds
+	// noise without new signal. If the tuple changes — for example a
+	// third-party writer flips the mode to something more permissive —
+	// the reason string changes, the dedupe key changes, and the log
+	// fires again. Process restarts also re-emit each unique advisory
+	// once, which is what an operator wants after a bounce.
+	if !advisoryLogDedupe.shouldEmit(path, label, reason) {
 		return
 	}
 	log.Printf(
 		"%s: %s ancestor %s is not provably trusted, continuing (permissions are owned by the platform installer): %s",
 		TrustAdvisoryMarker, label, path, reason,
 	)
+}
+
+// advisoryLogDedupe tracks which (path, label, reason) advisories have already
+// been emitted on the default log path. The set is small and bounded by the
+// number of distinct managed-path ancestors on a host (a handful), so no LRU
+// or size cap is needed.
+var advisoryLogDedupe = &trustAdvisoryLogDedupe{}
+
+type trustAdvisoryLogDedupe struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// shouldEmit returns true the first time it sees a tuple, false on every
+// subsequent call for the same tuple. The key uses a NUL separator so no
+// two distinct tuples can collide by string concatenation.
+func (d *trustAdvisoryLogDedupe) shouldEmit(path, label, reason string) bool {
+	key := path + "\x00" + label + "\x00" + reason
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen == nil {
+		d.seen = make(map[string]struct{})
+	}
+	if _, ok := d.seen[key]; ok {
+		return false
+	}
+	d.seen[key] = struct{}{}
+	return true
+}
+
+// reset clears the dedupe state. Test-only.
+func (d *trustAdvisoryLogDedupe) reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seen = nil
 }
 
 // trustVerdict marks a permission judgement — an owner, mode, or ACL that

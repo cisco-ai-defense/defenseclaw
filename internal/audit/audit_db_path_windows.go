@@ -220,7 +220,21 @@ func validateAuditDBWindowsSecurityDescriptor(
 		return fmt.Errorf("audit: inspect Windows owner: %w", err)
 	}
 	if !auditDBWindowsTrustedPrincipal(owner, gatewayServiceSID) {
-		return fmt.Errorf("audit: Windows owner %s is not trusted", auditDBWindowsSID(owner))
+		// AIFW-34262 ancestor-advisory: an untrusted OWNER on a path under
+		// managed.PlatformInstallerOwnedPath is a permission-shaped verdict,
+		// not a structural failure. Under `protectChildren=false` (an
+		// ancestor of the audit DB) the shared managed-trust helper
+		// downgrades it to a managed_trust_ancestor_advisory warning; the
+		// leaf and every non-installer-owned path keep it fatal.
+		verdict := managed.NewTrustVerdict(
+			"audit: Windows owner %s is not trusted", auditDBWindowsSID(owner),
+		)
+		advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+		if err := managed.RelaxAncestorTrustVerdict(
+			advisory, path, "audit store owner", verdict,
+		); err != nil {
+			return err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -567,10 +581,27 @@ func rejectUntrustedAuditDBWindowsACEs(
 			continue
 		}
 		if !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
-			return fmt.Errorf(
+			// AIFW-34262 ancestor-advisory: a foreign-principal ACE on a path
+			// under managed.PlatformInstallerOwnedPath is permission-shaped —
+			// AVC's setup places well-known BUILTIN\Users read ACEs on
+			// %ProgramData%\Cisco that DefenseClaw's stricter DACL policy
+			// otherwise rejects hard-fatal, taking the gateway down on
+			// startup the way the analogous /opt/cisco 0775 rejection did
+			// on macOS. When `protectChildren=false` (ancestor of the audit
+			// DB) the verdict is downgraded to an advisory warning. Leaves
+			// and non-installer-owned paths keep it fatal, as do structural
+			// failures (unsupported ACE type, API errors) via the earlier
+			// returns above. TrustStrictAncestorsEnv=1 restores fatality.
+			verdict := managed.NewTrustVerdict(
 				"audit: untrusted Windows principal %s has access mask 0x%x that can expose or modify audit storage on %s",
 				auditDBWindowsSID(sid), uint32(ace.Mask), path,
 			)
+			advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+			if err := managed.RelaxAncestorTrustVerdict(
+				advisory, path, "audit store DACL", verdict,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
