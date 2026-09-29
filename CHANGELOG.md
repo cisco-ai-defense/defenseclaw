@@ -77,12 +77,12 @@ rest also reach per-user installs.
   gateway was stopped then deleted the WAL under the TUI or another open
   command, and their later writes failed with "database disk image is
   malformed" or corrupted the file. The permission fix now runs before
-  SQLite opens the file, and only once per process. The gateway also checks
-  audit.db when it starts: a corrupt store is moved to
-  `audit.db.corrupt-<time>` with its WAL and SHM files, the block/allow list
-  is copied into a new store, and the gateway starts and logs a warning
-  instead of failing. It refuses to move a store another process still has
-  open.
+  SQLite opens the file, and only while no other audit store in the same
+  process has it open. The gateway also checks audit.db when it starts: a
+  corrupt store is moved to `audit.db.corrupt-<time>` with its WAL and SHM
+  files, the block/allow list is copied into a new store, and the gateway
+  starts and logs a warning instead of failing. It refuses to move a store
+  another process still has open.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
