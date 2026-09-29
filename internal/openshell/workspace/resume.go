@@ -127,7 +127,7 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 	live := old.inSandbox()
 	last := lastPullOf(opts.Stage.DataDir, old)
 	if !opts.Force {
-		work, err := pendingWork(ctx, opts.Exec, live, last)
+		work, _, err := pendingWork(ctx, opts.Exec, live, last)
 		if err != nil {
 			return nil, err
 		}
@@ -167,7 +167,7 @@ func Refresh(ctx context.Context, opts RefreshOptions) (*CopyRecord, error) {
 	if err == nil {
 		err = establishBaseline(ctx, rec, opts.Exec)
 	}
-	if err == nil && last != nil && !last.handedOver() {
+	if err == nil && last != nil && !last.HandedOver() {
 		rec.Warnings = append(rec.Warnings, fmt.Sprintf("the last pull of sandbox %s (%s) was never applied and is discarded", name, last.PulledAt.Format(time.RFC3339)))
 	}
 	if err == nil {
@@ -205,30 +205,45 @@ const (
 	CopyWorkUnapplied
 )
 
+// CopyStatus is what PendingWork found.
+type CopyStatus struct {
+	Work CopyWork
+	// Pulled is the Result of the last pull when the copy it looked at is
+	// still in the state that pull took (same HEAD, same working tree): a
+	// pull of the sandbox stopped now can be made from that one
+	// (PullOptions.Reuse). "" when not, or when it did not look.
+	Pulled string
+}
+
 // PendingWork reports the work the copy-mode sandbox name holds that was
 // never handed back. ex looks at the copy inside the sandbox; a nil ex (the
 // sandbox is not running) judges by the last pull alone. A sandbox without
 // a copy record holds none.
-func PendingWork(ctx context.Context, dataDir, name string, ex Execer) (CopyWork, error) {
+func PendingWork(ctx context.Context, dataDir, name string, ex Execer) (CopyStatus, error) {
 	rec, err := LoadCopy(dataDir, name)
 	if errors.Is(err, ErrCopyNotFound) {
-		return CopyWorkNone, nil
+		return CopyStatus{Work: CopyWorkNone}, nil
 	}
 	if err != nil {
-		return CopyWorkUnknown, err
+		return CopyStatus{Work: CopyWorkUnknown}, err
 	}
 	live := rec.inSandbox()
 	last := lastPullOf(dataDir, rec)
 	if ex == nil {
 		switch {
-		case last != nil && !last.handedOver():
-			return CopyWorkUnapplied, nil
+		case last != nil && !last.HandedOver():
+			return CopyStatus{Work: CopyWorkUnapplied}, nil
 		case len(live) == 0:
-			return CopyWorkNone, nil
+			return CopyStatus{Work: CopyWorkNone}, nil
 		}
-		return CopyWorkUnknown, nil
+		return CopyStatus{Work: CopyWorkUnknown}, nil
 	}
-	return pendingWork(ctx, ex, live, last)
+	work, pulled, err := pendingWork(ctx, ex, live, last)
+	st := CopyStatus{Work: work}
+	if pulled {
+		st.Pulled = last.Result
+	}
+	return st, err
 }
 
 // lastPullOf is the last pull of rec's copy, nil when there is none (or it
@@ -242,21 +257,26 @@ func lastPullOf(dataDir string, rec *CopyRecord) *PullResult {
 }
 
 // pendingWork looks at each copy the sandbox may hold (live) and then at
-// the last pull of the record's copy.
-func pendingWork(ctx context.Context, ex Execer, live []*CopyRecord, last *PullResult) (CopyWork, error) {
+// the last pull of the record's copy. It also reports whether the sandbox
+// holds just the record's own copy, in the state last took.
+func pendingWork(ctx context.Context, ex Execer, live []*CopyRecord, last *PullResult) (CopyWork, bool, error) {
+	pulled := false
 	for _, c := range live {
-		state, err := inspectSandboxCopy(ctx, ex, c, last)
+		state, matched, err := inspectSandboxCopy(ctx, ex, c, last)
 		if err != nil {
-			return CopyWorkUnknown, err
+			return CopyWorkUnknown, false, err
 		}
 		if state == copyChanged {
-			return CopyWorkUnpulled, nil
+			return CopyWorkUnpulled, false, nil
 		}
+		// The record's own copy (a copy a refresh replaced has no upload
+		// time), in last's state.
+		pulled = len(live) == 1 && c.UploadedAt != nil && matched && last.Result != ""
 	}
-	if last != nil && !last.handedOver() {
-		return CopyWorkUnapplied, nil
+	if last != nil && !last.HandedOver() {
+		return CopyWorkUnapplied, pulled, nil
 	}
-	return CopyWorkNone, nil
+	return CopyWorkNone, pulled, nil
 }
 
 // copyState is what a refresh found in the sandbox copy.
@@ -276,8 +296,9 @@ const (
 
 // inspectSandboxCopy compares the sandbox copy with what was uploaded (new
 // commits, or a working tree other than the baseline's) and with last,
-// the last pull of rec (nil if none).
-func inspectSandboxCopy(ctx context.Context, ex Execer, rec *CopyRecord, last *PullResult) (copyState, error) {
+// the last pull of rec (nil if none). It also reports whether the copy is
+// in the state last took, unchanged since the upload or not.
+func inspectSandboxCopy(ctx context.Context, ex Execer, rec *CopyRecord, last *PullResult) (copyState, bool, error) {
 	script := remoteGitPrelude(rec) + "\n" +
 		`if [ ! -e "$W" ] && [ ! -L "$W" ] && [ ! -e "$G" ] && [ ! -L "$G" ]; then echo copy=missing; exit 0; fi` + "\n" +
 		captureScript(rec, false) + "\nprintf 'basetree=%s\\n' \"$(g rev-parse \"$B^{tree}\")\""
@@ -285,28 +306,30 @@ func inspectSandboxCopy(ctx context.Context, ex Execer, rec *CopyRecord, last *P
 	// scratch index a second run would use.
 	res, err := ex.Exec(ctx, rec.Name, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 5 * time.Minute})
 	if err != nil {
-		return copyChanged, err
+		return copyChanged, false, err
 	}
 	if res.ExitCode != 0 {
-		return copyChanged, fmt.Errorf("workspace: inspect the sandbox copy (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
+		return copyChanged, false, fmt.Errorf("workspace: inspect the sandbox copy (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
 	}
 	kv := parseKV(res.Stdout)
 	if kv["copy"] == "missing" {
-		return copyUnchanged, nil
+		return copyUnchanged, false, nil
 	}
 	head := rec.Head
 	if rec.Kind == CopyPlain {
 		head = rec.Baseline
 	}
-	switch tree := kv["tree"]; {
+	tree := kv["tree"]
+	matched := tree != "" && last != nil && last.ResultTree != "" && kv["head"] == last.SandboxHead && tree == last.ResultTree
+	switch {
 	case tree == "":
-		return copyChanged, nil
+		return copyChanged, false, nil
 	case kv["head"] == head && tree == kv["basetree"]:
-		return copyUnchanged, nil
-	case last != nil && last.ResultTree != "" && kv["head"] == last.SandboxHead && tree == last.ResultTree:
-		return copyPulled, nil
+		return copyUnchanged, matched, nil
+	case matched:
+		return copyPulled, true, nil
 	}
-	return copyChanged, nil
+	return copyChanged, false, nil
 }
 
 // removeRemoteCopy deletes previous copies (and hidden git dirs) inside

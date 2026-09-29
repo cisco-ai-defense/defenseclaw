@@ -99,11 +99,14 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 	if !req.NoSnapshot && !req.NewSnapshot && a.accepted(sb) {
 		req.NewSnapshot = true
 	}
+	// The session can change the copy: what it held as the sandbox stopped
+	// is not known after this (a start that fails may still have started
+	// it).
+	a.forgetStoppedCopy(sb.Name)
 	started, err := api.Start(ctx, sb.Name, req)
 	if err != nil {
 		return nil, false, a.startError(ctx, api, sb, err)
 	}
-	a.forgetCleanCopy(sb.Name)
 	kept := keptUndoPoint(sb, started)
 	if kept && !o.NoSnapshot {
 		accept := "keeping the changes at the end of this session accepts them"

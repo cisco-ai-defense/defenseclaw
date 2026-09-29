@@ -716,7 +716,8 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	if n := ta.calls("POST", "copybox/stop"); n != 1 || !strings.Contains(ta.output(), "stopped copybox again") {
 		t.Fatalf("the sandbox the pull started was not stopped again (%d):\n%s", n, ta.output())
 	}
-	if !slices.Equal(ta.copy.steps, []string{"pull copybox", "apply branch"}) {
+	// Where the work goes is checked before the sandbox starts.
+	if !slices.Equal(ta.copy.steps, []string{"check branch", "pull copybox", "apply branch"}) {
 		t.Fatalf("steps = %v", ta.copy.steps)
 	}
 	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 1 || !strings.Contains(r[0], `"pull_mode":"branch"`) || !strings.Contains(r[0], `"lines_added":4`) {
@@ -742,6 +743,94 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
 	has(t, ta.output(), "nothing to apply: ", "already has these changes")
 	lacks(t, ta.output(), "applied 0 changes")
+}
+
+// `sandbox pull --branch` and `--patch-out FILE` are checked against the
+// project before the sandbox is started: a branch that holds other work, a
+// patch file that exists and a folder without git are refused before
+// "starting …". A branch that holds the work already takes nothing new, so
+// nothing is asked about its sensitive changes (#965).
+func TestPullChecksWhereTheWorkGoesFirst(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	for _, c := range []struct {
+		o    PullOptions
+		err  error
+		want string
+	}{
+		{PullOptions{Name: "copybox", Branch: true}, errors.New("workspace: branch dc/copybox already exists"),
+			"bring back copybox's changes: branch dc/copybox already exists; pass --branch-name NAME for another branch, or --force to move this one"},
+		{PullOptions{Name: "copybox", PatchOut: "copybox.patch"}, errors.New("workspace: /tmp/copybox.patch already exists"),
+			"pass another --patch-out FILE, or --force to overwrite this one"},
+		{PullOptions{Name: "copybox", BranchAs: "fix"}, workspace.ErrNotGitProject, "not a git repository, so there is no branch to put its changes on"},
+		{PullOptions{Name: "copybox", Apply: true}, workspace.ErrCopyNotFound, "pull copybox: copy-mode record not found"},
+	} {
+		ta.copy.checkErr = c.err
+		wantErr(t, ta.Pull(bg, c.o), c.want)
+	}
+	ta.wantCalls(t, 0, "POST", "copybox/start")
+	lacks(t, ta.output(), "starting copybox")
+	if len(ta.copy.checks) != 4 || !filepath.IsAbs(ta.copy.checks[1].PatchPath) || ta.copy.checks[2].Branch != "fix" {
+		t.Fatalf("checks = %+v", ta.copy.checks)
+	}
+	// A preview has nowhere to go.
+	ta.copy.checkErr = nil
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	if len(ta.copy.checks) != 4 {
+		t.Fatalf("a preview checked %+v", ta.copy.checks[4:])
+	}
+
+	ta = newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.IO.TTY = false
+	ta.copy.held = true
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Effective: "e1", Changes: []workspace.TreeChange{{Path: ".envrc", Status: "A"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: ".envrc", Label: ".envrc", Severity: workspace.SeverityHigh}}}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, UpToDate: true, Branch: "dc/copybox"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	has(t, ta.output(), "nothing to do: branch dc/copybox already has these changes (your checkout is unchanged)")
+	lacks(t, ta.output(), "--accept-sensitive", "Bring them back anyway?")
+}
+
+// A pull of a stopped copy-mode sandbox that has not run since its last
+// pull read its copy is made from that pull: the second `pull --branch`
+// starts nothing and finds the branch done. A pull the workspace cannot
+// reuse, or a sandbox started since, is read again (#965).
+func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),
+		Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 4}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, Applied: true, Branch: "dc/copybox"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+
+	ta.fresh()
+	ta.copy.steps = nil
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyBranch, UpToDate: true, Branch: "dc/copybox"}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+	has(t, ta.output(), "copybox has not run since its last pull at "+ta.clock(ta.Now())+"; using that pull instead of starting it",
+		"copybox: 1 file changed (+4 −0)", "nothing to do: branch dc/copybox already has these changes")
+	lacks(t, ta.output(), "starting copybox", "stopped copybox again")
+	if !slices.Equal(ta.copy.steps, []string{"check branch", "reuse copybox r1", "apply branch"}) {
+		t.Fatalf("steps = %v", ta.copy.steps)
+	}
+	// The review of it reads nothing either.
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox"}))
+	ta.wantCalls(t, 1, "POST", "copybox/start")
+
+	// A pull the workspace cannot reuse starts it.
+	ta.copy.reuseErr = errors.New("another pull since")
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	ta.wantCalls(t, 2, "POST", "copybox/start")
+	// So does a sandbox that started since (and was stopped outside the
+	// CLI: nothing marked it again).
+	ta.copy.reuseErr = nil
+	ta.ok(t, ta.Start(bg, "copybox", StartOptions{}))
+	ta.daemon.add(copySandbox("copybox"))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	ta.wantCalls(t, 4, "POST", "copybox/start")
 }
 
 // A conflicted `pull --apply` exits 4 and says how to merge (manual test

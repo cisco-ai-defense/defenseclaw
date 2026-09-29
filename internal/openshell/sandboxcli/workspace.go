@@ -47,7 +47,10 @@ type CopyWorkspace interface {
 	Discard(dataDir, name string) error
 	// PendingWork reports the work a sandbox's copy holds that was never
 	// brought back (workspace.PendingWork; a nil ex for a stopped one).
-	PendingWork(ctx context.Context, dataDir, name string, ex workspace.Execer) (workspace.CopyWork, error)
+	PendingWork(ctx context.Context, dataDir, name string, ex workspace.Execer) (workspace.CopyStatus, error)
+	// CheckApply looks, before a pull, at what would stop its apply
+	// (workspace.CheckApply).
+	CheckApply(ctx context.Context, opts workspace.ApplyOptions) (bool, error)
 }
 
 type defaultCopyWorkspace struct{}
@@ -79,8 +82,11 @@ func (defaultCopyWorkspace) Discard(dataDir, name string) error {
 	}
 	return nil
 }
-func (defaultCopyWorkspace) PendingWork(ctx context.Context, dataDir, name string, ex workspace.Execer) (workspace.CopyWork, error) {
+func (defaultCopyWorkspace) PendingWork(ctx context.Context, dataDir, name string, ex workspace.Execer) (workspace.CopyStatus, error) {
 	return workspace.PendingWork(ctx, dataDir, name, ex)
+}
+func (defaultCopyWorkspace) CheckApply(ctx context.Context, o workspace.ApplyOptions) (bool, error) {
+	return workspace.CheckApply(ctx, o)
 }
 
 // UndoOptions are the `sandbox undo` flags.
@@ -310,7 +316,7 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 	}
 	if res.Undone {
 		// The undone work is in the sandbox alone again.
-		a.forgetCleanCopy(sb.Name)
+		a.forgetApply(sb)
 	}
 	if stdout != nil {
 		return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: res})
@@ -544,45 +550,64 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if sb.WorkdirMode != config.OpenShellWorkdirCopy {
 		return fmt.Errorf("%s works on your folder directly; use `%s review %s` or `%s undo %s`", o.Name, CommandName, o.Name, CommandName, o.Name)
 	}
-	gateway, err := a.gatewayName(ctx)
-	if err != nil {
-		return err
+	// Where the work is to go is checked before the sandbox is started and
+	// read: a branch it cannot go on, a patch file that is there already.
+	if modes > 0 {
+		if _, err := a.checkPull(ctx, sb, o); err != nil {
+			return err
+		}
 	}
-	cli := a.cli(gateway)
 	// handedOver is set once nothing of the sandbox's work is left to bring
-	// back; a sandbox this pull started, and stops again, is then marked so
-	// (markCleanCopy), and `delete` of it stopped need not warn.
+	// back. A sandbox this pull found stopped is left stopped, with what its
+	// copy held (markStoppedCopy): `delete` of it then need not warn, and
+	// the next pull need not start it.
 	handedOver := false
+	var res *workspace.PullResult
 	if sb.Phase != "ready" {
+		if res, err = a.reusePull(ctx, sb); err != nil {
+			return err
+		}
+	}
+	switch {
+	case res != nil:
+		defer func() { a.markStoppedCopy(sb, handedOver, res.Result) }()
+	case sb.Phase != "ready":
 		a.note("starting " + o.Name + " to read its work…")
+		a.forgetStoppedCopy(o.Name)
+		hooked := sb.Hooks.LastHookAt
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
-		defer func() {
-			if handedOver {
-				a.markCleanCopy(sb)
-			}
-		}()
 		// Leave it as it was found.
 		defer func() {
-			if _, err := api.Stop(context.WithoutCancel(ctx), o.Name); err != nil {
+			// A session that attached meanwhile (its hooks tell one that
+			// has ended already) may have changed the copy since the pull.
+			quiet := a.attachedSessions(o.Name) == 0
+			stopped, err := api.Stop(context.WithoutCancel(ctx), o.Name)
+			if err != nil {
 				a.warn("could not stop " + o.Name + " again: " + apiError(err).Error())
 				return
 			}
 			a.note("stopped " + o.Name + " again")
+			if res != nil && quiet && (stopped == nil || !stopped.Hooks.LastHookAt.After(hooked)) {
+				a.markStoppedCopy(sb, handedOver, res.Result)
+			}
 		}()
 	}
-	res, err := a.pull(ctx, api, cli, sb, true)
-	if err != nil {
-		return err
+	if res == nil {
+		gateway, err := a.gatewayName(ctx)
+		if err != nil {
+			return err
+		}
+		if res, err = a.pull(ctx, api, a.cli(gateway), sb, true); err != nil {
+			return err
+		}
 	}
 	if res.Kind == workspace.CopyPlain && o.applyMode() == workspace.ApplyBranch {
 		return fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
 			"bring them back with --apply or --patch-out FILE", o.Name)
 	}
-	if res.Empty() && res.Effective != "" && len(res.Blocking) == 0 {
-		handedOver = true
-	}
+	handedOver = res.HandedOver()
 	if stdout != nil && modes == 0 {
 		return writeJSON(stdout, res)
 	}
@@ -626,7 +651,9 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		}
 		return nothing()
 	}
-	if res.Review.Sensitive() && !o.AcceptSensitive {
+	// A branch that holds this work already takes nothing new, so there is
+	// nothing to confirm.
+	if res.Review.Sensitive() && !o.AcceptSensitive && !a.branchHolds(ctx, sb, o) {
 		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
 		if err != nil {
 			if errors.Is(err, ErrNoTerminal) {
@@ -676,16 +703,89 @@ func (o PullOptions) applyMode() workspace.ApplyMode {
 	return workspace.ApplyPatch
 }
 
+// applyOptions is where o brings sb's work back.
+func (a *App) applyOptions(sb *sandboxapi.Sandbox, o PullOptions) (workspace.ApplyOptions, error) {
+	opts := workspace.ApplyOptions{DataDir: a.dataDir(), Name: sb.Name, Mode: o.applyMode(), AcceptSensitive: o.AcceptSensitive, Force: o.Force}
+	switch opts.Mode {
+	case workspace.ApplyBranch:
+		opts.Branch = o.BranchAs
+	case workspace.ApplyPatch:
+		p, err := filepath.Abs(o.PatchOut)
+		if err != nil {
+			return opts, err
+		}
+		opts.PatchPath = p
+	}
+	return opts, nil
+}
+
+// checkPull refuses, before the sandbox is started and read, a pull whose
+// work cannot go where o says: a branch for a folder that is not a git
+// repository, a branch that exists and does not hold the last pull's work,
+// a patch file that exists (without --force) or has no folder. It reports
+// whether the branch holds that work already.
+func (a *App) checkPull(ctx context.Context, sb *sandboxapi.Sandbox, o PullOptions) (bool, error) {
+	opts, err := a.applyOptions(sb, o)
+	if err != nil {
+		return false, err
+	}
+	held, err := a.Workspace.CheckApply(ctx, opts)
+	switch {
+	case err == nil:
+		return held, nil
+	case errors.Is(err, workspace.ErrNotGitProject):
+		return false, fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
+			"bring them back with --apply or --patch-out FILE", sb.Name)
+	case errors.Is(err, workspace.ErrCopyNotFound):
+		return false, workspaceFailure("pull "+sb.Name, err, "")
+	}
+	return false, workspaceFailure("bring back "+sb.Name+"'s changes", err, applyHint(opts.Mode, err))
+}
+
+// branchHolds reports whether the branch `pull --branch` puts sb's work on
+// holds the work of its last pull already.
+func (a *App) branchHolds(ctx context.Context, sb *sandboxapi.Sandbox, o PullOptions) bool {
+	if o.applyMode() != workspace.ApplyBranch {
+		return false
+	}
+	held, err := a.checkPull(ctx, sb, o)
+	return err == nil && held
+}
+
+// reviewGlobs are the paths the review of sb's work flags besides the
+// built-in ones (the pack's workspace.review).
+func (a *App) reviewGlobs(sb *sandboxapi.Sandbox) []string {
+	if eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: sb.Pack, Harness: sb.Harness, Project: sb.Project, Profile: sb.Profile, Copy: true}); err == nil {
+		return eff.Workspace.Review
+	}
+	return nil
+}
+
+// reusePull is the pull of stopped sandbox sb made from its last one, when
+// sb has not run since that pull read its copy (stoppedCopyOf), so starting
+// it would read the same state again: nil when that is not known.
+func (a *App) reusePull(ctx context.Context, sb *sandboxapi.Sandbox) (*workspace.PullResult, error) {
+	st := a.stoppedCopyOf(sb)
+	if st == nil || st.Pulled == "" {
+		return nil, nil
+	}
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Reuse: st.Pulled, SensitiveGlobs: a.reviewGlobs(sb)})
+	if errors.Is(err, workspace.ErrNoReusablePull) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, workspaceFailure("pull "+sb.Name, err, a.diskFullHint(err))
+	}
+	a.note(sb.Name + " has not run since its last pull at " + a.clock(res.PulledAt) + "; using that pull instead of starting it")
+	return res, nil
+}
+
 // pull captures the sandbox's work, saying so when announce is set.
 func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxapi.Sandbox, announce bool) (*workspace.PullResult, error) {
-	var review []string
-	if eff, _, err := packs.Resolve(a.Cfg, packs.Flags{Pack: sb.Pack, Harness: sb.Harness, Project: sb.Project, Profile: sb.Profile, Copy: true}); err == nil {
-		review = eff.Workspace.Review
-	}
 	if announce {
 		a.note("Pulling " + sb.Name + "'s work…")
 	}
-	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: review})
+	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: a.reviewGlobs(sb)})
 	if err != nil {
 		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))
 	}
@@ -735,18 +835,15 @@ func (a *App) diskFullHint(err error) string {
 
 // applyPull lands a pull and records it with the daemon.
 func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, res *workspace.PullResult, o PullOptions) (*workspace.ApplyResult, error) {
-	opts := workspace.ApplyOptions{DataDir: a.dataDir(), Name: sb.Name, Mode: o.applyMode(), AcceptSensitive: o.AcceptSensitive, Force: o.Force}
-	switch opts.Mode {
-	case workspace.ApplyBranch:
-		opts.Branch = o.BranchAs
-	case workspace.ApplyPatch:
-		p, err := filepath.Abs(o.PatchOut)
-		if err != nil {
-			return nil, err
-		}
-		opts.PatchPath = p
+	opts, err := a.applyOptions(sb, o)
+	if err != nil {
+		return nil, err
 	}
 	applied, err := a.Workspace.Apply(ctx, opts)
+	if err == nil {
+		// What `delete` says came back.
+		a.recordHandover(sb, applied)
+	}
 	report := sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspacePull, PullMode: string(opts.Mode)}
 	files := int64(len(res.Changes))
 	var added, removed int64
@@ -802,6 +899,8 @@ func (a *App) applyPull(ctx context.Context, api API, sb *sandboxapi.Sandbox, re
 		} else {
 			a.note(undo)
 		}
+	case applied.Mode == workspace.ApplyBranch && applied.UpToDate:
+		a.ok("nothing to do: branch " + applied.Branch + " already has these changes (your checkout is unchanged)")
 	case applied.Mode == workspace.ApplyBranch:
 		a.ok("the changes are on branch " + applied.Branch + " (your checkout is unchanged)")
 	default:

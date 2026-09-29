@@ -850,7 +850,11 @@ does. A folder without git has no branches, so use `--apply` or
 `--patch-out` there.
 The patch file of a conflicting `--apply` is `<name>.patch` in your folder,
 so deleting the sandbox does not take it along. A pull from a stopped
-sandbox starts it to read its work and stops it again.
+sandbox starts it to read its work and stops it again, unless the sandbox
+has not run since its last pull read it: that pull is used then, without
+starting anything. A branch that holds other work or a patch file that
+exists is refused before the sandbox starts, and a branch that already holds
+the work is reported as done.
 
 A copy-mode sandbox changes your folder only through `pull --apply`, so for
 such a sandbox `undo` reverts its last apply, after a preview. Edits you

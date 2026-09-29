@@ -477,6 +477,9 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	if err != nil {
 		return err
 	}
+	// The command can change a copy: what it held as the sandbox last
+	// stopped is no longer known.
+	a.forgetStoppedCopy(sb.Name)
 	// The command outlives a client that is ended (execreap.go): one told
 	// to end stops what the command left running before it exits.
 	runCtx, stop := untilTerminated(ctx, tty)
@@ -514,6 +517,10 @@ type StopOptions struct {
 
 // Stop is `sandbox stop`. A detached run the stop would end is confirmed
 // on a terminal (said otherwise), and its log is kept for `sandbox logs`.
+// The copy of a copy-mode sandbox nothing runs in any more is looked at
+// first: what it holds as it stops is remembered (markStoppedCopy), so
+// `delete` need not warn about work that came back already, and the next
+// pull need not start it.
 func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	a.defaults()
 	api, err := a.api()
@@ -524,9 +531,11 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
+	var copyAt *workspace.CopyStatus
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
-			ok, err := a.beforeStop(ctx, a.cli(gateway), sb, o.Yes)
+			cli := a.cli(gateway)
+			ok, idle, err := a.beforeStop(ctx, cli, sb, o.Yes)
 			if err != nil {
 				return err
 			}
@@ -534,14 +543,35 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 				a.note(sb.Name + " keeps running")
 				return nil
 			}
+			// A detached run or a session still going can change the copy
+			// between the look and the stop.
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy && idle && a.attachedSessions(sb.Name) == 0 {
+				copyAt = a.copyAtStop(ctx, cli, sb)
+			}
 		}
 	}
-	sb, err = api.Stop(ctx, o.Name)
+	stopped, err := api.Stop(ctx, o.Name)
 	if err != nil {
 		return apiError(err)
 	}
-	a.ok(sb.Name + " is " + sb.Phase)
+	// A hook request since the look is something that ran in it after all.
+	if copyAt != nil && !stopped.Hooks.LastHookAt.After(sb.Hooks.LastHookAt) {
+		a.markStoppedCopy(sb, copyAt.Work == workspace.CopyWorkNone, copyAt.Pulled)
+	}
+	a.ok(stopped.Name + " is " + stopped.Phase)
 	return nil
+}
+
+// copyAtStop looks at the copy of sb, which is about to stop, within a
+// minute: nil when it could not be looked at.
+func (a *App) copyAtStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox) *workspace.CopyStatus {
+	look, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	st, err := a.Workspace.PendingWork(look, a.dataDir(), sb.Name, a.transport(cli))
+	if err != nil {
+		return nil
+	}
+	return &st
 }
 
 // StartOptions are the `sandbox start` flags.
@@ -603,6 +633,8 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				if o.Yes {
 					a.warn("sandbox " + name + " " + lost + "; deleting it discards that work (--yes)")
 				}
+			} else if h := a.lastHandover(sb); h != nil {
+				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
 		yes, err := a.confirm(question, o.Yes)
@@ -627,9 +659,10 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 }
 
 // unhandedWork says what work a copy-mode sandbox holds that never came
-// back to the folder, which deleting the sandbox discards: "" when there
-// is none. A running sandbox's copy is looked at; a stopped one is judged
-// by its last pull.
+// back to the folder, which deleting the sandbox discards, and where its
+// work last went: "" when there is none. A running sandbox's copy is looked
+// at; a stopped one is judged by its last pull, and by what its copy held
+// as it stopped.
 func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	if sb == nil || sb.WorkdirMode != config.OpenShellWorkdirCopy {
 		return ""
@@ -640,24 +673,52 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 			ex = a.transport(a.cli(gateway))
 		}
 	}
-	work, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	st, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)
+	work := st.Work
 	if ex == nil && (err != nil || work == workspace.CopyWorkUnknown) && a.cleanCopy(sb) {
-		// The session that stopped it found it changed nothing, and it has
-		// not run since.
+		// What stopped it found nothing left to bring back, and it has not
+		// run since.
 		return ""
 	}
 	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
+	last := ""
+	if h := a.lastHandover(sb); h != nil {
+		last = "its work was last " + a.handoverText(h)
+	}
+	why := func(reasons ...string) string {
+		var out []string
+		for _, r := range append(reasons, last) {
+			if r != "" {
+				out = append(out, r)
+			}
+		}
+		if len(out) == 0 {
+			return ""
+		}
+		return " (" + strings.Join(out, "; ") + ")"
+	}
 	switch {
 	case err != nil:
-		return "may hold work that was never pulled back (it could not be checked: " + truncate(err.Error(), 120) + "); " + pull + " brings it back"
+		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(err.Error(), 120)) + "; " + pull + " brings it back"
 	case work == workspace.CopyWorkUnpulled:
-		return "holds work that was never pulled back; " + pull + " brings it back"
+		return "holds work that was never pulled back" + why() + "; " + pull + " brings it back"
 	case work == workspace.CopyWorkUnapplied:
-		return "holds a pull that was never applied; " + pull + " applies it"
+		return "holds a pull that was never applied" + why() + "; " + pull + " applies it"
 	case work == workspace.CopyWorkUnknown:
-		return "may hold work that was never pulled back (it is not running, so it was not checked); " + pull + " looks"
+		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; " + pull + " looks"
 	}
 	return ""
+}
+
+// lastHandover is where a copy-mode sandbox's work last went, or nil.
+func (a *App) lastHandover(sb *sandboxapi.Sandbox) *handover {
+	if sb == nil || sb.WorkdirMode != config.OpenShellWorkdirCopy {
+		return nil
+	}
+	if rec := a.copyHandoverOf(sb); rec != nil {
+		return rec.Last
+	}
+	return nil
 }
 
 // LogsOptions are the `sandbox logs` flags.
