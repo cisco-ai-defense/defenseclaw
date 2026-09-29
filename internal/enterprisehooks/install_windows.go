@@ -1172,16 +1172,8 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	if !present {
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
 	}
-	// A standalone per-user plugin (Amp, OpenCode) is code the agent runs.
-	// After a package upgrade it still carries its ownership markers and the
-	// digest recorded at its last write, so it is also compared with this
-	// release's render and reinstalled when it differs.
-	if windowsEnterpriseStandaloneProcess() && windowsStandaloneInAgentPluginConnector(target.conn.Name()) {
-		if path, err := connector.ManagedPluginArtifactDrift(target.conn, target.setup); err != nil {
-			return fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", target.conn.Name(), path, err)
-		} else if path != "" {
-			return fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", target.conn.Name(), path)
-		}
+	if err := verifyWindowsStandalonePluginRender(target); err != nil {
+		return err
 	}
 	if err := connector.ValidateManagedHookRuntimeState(target.dataDir, target.conn.Name(), target.setup.HookFailMode); err != nil {
 		return fmt.Errorf("enterprise hooks: connector %s runtime sidecars are invalid: %w", target.conn.Name(), err)
@@ -1233,6 +1225,36 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s fail mode %q does not match configured mode %q", target.conn.Name(), lock.HookFailMode, current.HookFailMode)
 	}
 	return nil
+}
+
+// windowsEnterpriseTargetRepairable reports whether this process can repair
+// target in its user's session now: it runs as LocalSystem, as the guardian
+// does, and the user is signed in. Replaced in tests.
+var windowsEnterpriseTargetRepairable = func(target windowsGenericManagedTarget) bool {
+	return target.sid != nil && RequireWindowsEnterpriseTargetSession(target.sid.String(), target.home) == nil
+}
+
+// verifyWindowsStandalonePluginRender compares a standalone per-user plugin
+// (Amp, OpenCode), code the agent runs, with this release's render: after a
+// package upgrade the plugin still carries its ownership markers and the
+// digest recorded at its last write. The plugin can be reinstalled only in
+// the user's session, so a difference is reported only while the guardian
+// can do that (windowsEnterpriseTargetRepairable). Reported for a signed-out
+// user, it failed every reconcile, which withholds enrollment publication for
+// every other user, and the readiness check of the upgrade itself. The
+// reconcile the user's sign-in starts re-renders the plugin.
+func verifyWindowsStandalonePluginRender(target windowsGenericManagedTarget) error {
+	if !windowsEnterpriseStandaloneProcess() || !windowsStandaloneInAgentPluginConnector(target.conn.Name()) {
+		return nil
+	}
+	path, err := connector.ManagedPluginArtifactDrift(target.conn, target.setup)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", target.conn.Name(), path, err)
+	}
+	if path == "" || !windowsEnterpriseTargetRepairable(target) {
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", target.conn.Name(), path)
 }
 
 func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
