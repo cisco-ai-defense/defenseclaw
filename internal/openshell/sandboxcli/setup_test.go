@@ -705,7 +705,7 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 	if ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("applied %d, restarts %d", ta.gateway.applied, ta.gateway.restarts)
 	}
-	has(t, ta.output(), "the gateway still runs the docker driver, where no sandbox can start (Docker Desktop's Linux VM has no Landlock); "+
+	has(t, ta.output(), "the gateway still runs the docker driver, where no sandbox can start (the Linux VM Docker runs in has no Landlock); "+
 		"it runs sandboxes in MicroVMs once it restarts on them",
 		"skipped: the OpenShell gateway change above",
 		"not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`defenseclaw sandbox setup --restart-gateway`)")

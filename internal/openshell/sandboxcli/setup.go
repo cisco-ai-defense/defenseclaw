@@ -370,14 +370,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 	}
 	onMicroVMs := microVM && (!switching || switched)
-	// On a Docker VM without Landlock (Docker Desktop) no sandbox starts
+	// On a Docker VM without Landlock (Docker Desktop's) no sandbox starts
 	// until the gateway runs MicroVMs.
 	stuck := microVM && !onMicroVMs && failed(rep, openshell.CheckIDLandlock)
 	switch {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
 	case stuck:
-		a.warn("the gateway still runs the docker driver, where no sandbox can start (Docker Desktop's Linux VM has no Landlock); " +
+		a.warn("the gateway still runs the docker driver, where no sandbox can start (the Linux VM Docker runs in has no Landlock); " +
 			"it runs sandboxes in MicroVMs once it restarts on them")
 	case microVM:
 		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs once it restarts on them")
