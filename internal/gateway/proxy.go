@@ -1018,6 +1018,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				// client's original model choice alongside their credentials.
 				body = patchModelInBody(body, decision.Model)
 			}
+			// Strip Codex-specific input items (additional_tools, etc.)
+			// when routing to non-ChatGPT backends that don't understand them.
+			if decision.TargetURLOverride && decision.TargetURL != "" &&
+				!strings.Contains(strings.ToLower(decision.TargetURL), "chatgpt.com") {
+				if cleaned := stripUnsupportedInputItems(body); cleaned != nil {
+					body = cleaned
+				}
+			}
 		}
 	}
 	_ = routerDecision
@@ -2222,13 +2230,25 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 				resp, err := http.DefaultClient.Do(proxyReq)
 				if err == nil {
 					defer resp.Body.Close()
+					// Read the response so we can patch prefer_websockets
+					// to false when routing is enabled — this forces Codex
+					// to use HTTP POST instead of WebSocket, enabling
+					// model routing on the request path.
+					body, readErr := io.ReadAll(resp.Body)
+					if readErr == nil && p.modelRouter != nil && resp.StatusCode == http.StatusOK {
+						body = patchPreferWebsockets(body, false)
+					}
 					for k, vv := range resp.Header {
+						if strings.EqualFold(k, "Content-Length") {
+							continue // body may have changed size
+						}
 						for _, v := range vv {
 							w.Header().Add(k, v)
 						}
 					}
+					w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 					w.WriteHeader(resp.StatusCode)
-					io.Copy(w, resp.Body)
+					w.Write(body)
 					return
 				}
 				fmt.Fprintf(os.Stderr, "[guardrail] models proxy failed, falling back to synthetic: %v\n", err)
@@ -5671,6 +5691,37 @@ func extractExtraParams(body []byte) map[string]any {
 		return nil
 	}
 	return extra
+}
+
+// patchPreferWebsockets rewrites the ChatGPT /models response to set
+// prefer_websockets on every model. When false, Codex uses HTTP POST
+// instead of WebSocket, which enables model routing in the proxy.
+func patchPreferWebsockets(body []byte, prefer bool) []byte {
+	var resp map[string]json.RawMessage
+	if json.Unmarshal(body, &resp) != nil {
+		return body
+	}
+	modelsRaw, ok := resp["models"]
+	if !ok {
+		return body
+	}
+	var models []map[string]interface{}
+	if json.Unmarshal(modelsRaw, &models) != nil {
+		return body
+	}
+	for i := range models {
+		models[i]["prefer_websockets"] = prefer
+	}
+	patched, err := json.Marshal(models)
+	if err != nil {
+		return body
+	}
+	resp["models"] = patched
+	result, err := json.Marshal(resp)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {

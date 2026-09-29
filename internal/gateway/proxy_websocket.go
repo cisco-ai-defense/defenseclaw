@@ -31,6 +31,12 @@ func isWebSocketUpgrade(r *http.Request) bool {
 func (p *GuardrailProxy) webSocketBypass(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isWebSocketUpgrade(r) {
+			// When model routing is enabled, reject WebSocket upgrades
+			// so clients fall back to HTTP POST where routing works.
+			if p.modelRouter != nil {
+				w.WriteHeader(http.StatusNotImplemented)
+				return
+			}
 			path := r.URL.Path
 			if idx := strings.Index(path, "/c/"); idx >= 0 {
 				parts := strings.SplitN(path[idx+3:], "/", 2)
