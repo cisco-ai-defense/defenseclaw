@@ -491,6 +491,11 @@ A few rules the flags follow:
   in plain text, which the agent can read. A name that looks like a secret
   (`KIRO_API_KEY`, `*_TOKEN`, `*_PASSWORD`) gets a warning; bind a key with
   `--credential NAME=HOST` instead, so the sandbox sees only a placeholder.
+- A sandbox with the egress proxy sets `NODE_NO_WARNINGS=1`, so Node's
+  `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning, which the proxy
+  settings trigger, does not print above the harness or in the agent's
+  `node` and `npm` output. It hides Node's other warnings too; pass
+  `--env NODE_NO_WARNINGS=0` to a new sandbox to keep them.
 - Hermes Agent's managed `defenseclaw` provider reads an OpenAI-compatible
   endpoint from `HERMES_DEFENSECLAW_BASE_URL` and its key from
   `HERMES_DEFENSECLAW_API_KEY`: for your own endpoint, run
