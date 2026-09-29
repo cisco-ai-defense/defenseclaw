@@ -75,6 +75,13 @@ rest also reach per-user installs.
   setup refused 1.18.20 and later with `detected-but-unsupported-version`, so
   enterprise deployments reported it unprotected. The reviewed range is now
   `>=1.18.10,<1.19.0`, checked against OpenCode 1.18.33.
+- **The gateway reports the OpenClaw fleet client off when OpenClaw is not
+  installed.** OpenClaw is `defenseclaw init`'s default connector, so an
+  install without OpenClaw dialed `127.0.0.1:18789` without end and showed the
+  gateway as reconnecting. When agent discovery found no OpenClaw and
+  `gateway.host` is on this machine, the gateway reports it disabled with
+  "OpenClaw is not installed", and doctor expects that. A `gateway.host` on
+  another machine or `gateway.fleet_mode: enabled` still dials.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached

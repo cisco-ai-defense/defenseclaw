@@ -1721,21 +1721,44 @@ def _gateway_fleet_expected_enabled(cfg) -> bool:
     if not _doctor_active_connectors(cfg):
         return False
     connector = _active_connector(cfg)
-    if connector in {"openclaw", "zeptoclaw"}:
+    if connector == "zeptoclaw":
         return True
-    if connector not in {"codex", "claudecode"}:
+    if connector not in {"openclaw", "codex", "claudecode"}:
         return False
     host = str(getattr(gateway, "host", "") or "").strip()
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
     if not host or host.casefold() == "localhost":
-        return False
+        loopback = True
+    else:
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            # The Go runtime intentionally does not resolve DNS here; a
+            # non-empty hostname expresses an external fleet endpoint.
+            loopback = False
+    if connector == "openclaw":
+        return not (loopback and _discovery_found_no_openclaw(cfg))
+    return not loopback
+
+
+def _discovery_found_no_openclaw(cfg) -> bool:
+    """Mirror the gateway's ``connector.CachedAgentNotFound("openclaw")``.
+
+    True only when ``agent_discovery.json`` records a scan that found no
+    OpenClaw binary; a missing or unreadable cache keeps the dial expected.
+    """
+    path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "agent_discovery.json")
     try:
-        return not ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        # The Go runtime intentionally does not resolve DNS here; a non-empty
-        # hostname expresses an external fleet endpoint.
-        return True
+        with open(path, encoding="utf-8") as fh:
+            entry = (json.load(fh).get("agents") or {}).get("openclaw")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return (
+        isinstance(entry, dict)
+        and entry.get("installed") is False
+        and not str(entry.get("binary_path") or "").strip()
+    )
 
 
 def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
