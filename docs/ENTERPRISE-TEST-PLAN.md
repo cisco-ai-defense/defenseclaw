@@ -493,7 +493,8 @@ can smoke-test the same artifacts on a disposable host (they install and
 remove services):
 
 ```bash
-sudo bash scripts/test-enterprise-unix-install.sh --package dist/defenseclaw-enterprise-<v>-linux-<arch>.deb --version <v>
+# v is the Linux version from BLD-L1; ARCH is amd64 or arm64
+sudo bash scripts/test-enterprise-unix-install.sh --package "dist/defenseclaw-enterprise-${v}-linux-${ARCH}.deb" --version "$v"
 sudo bash scripts/test-enterprise-unix-install.sh --package dist/defenseclaw-enterprise-9.9.9-darwin-arm64.pkg --version 9.9.9
 ```
 
@@ -672,7 +673,7 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 
 ```bash
 # INS-L-01: package channel
-v=<version read from BLD-L1 dist/metadata.json>
+v="<version read from BLD-L1 dist/metadata.json>"
 ARCH=amd64  # or arm64; Go architecture names also apply to RHEL package filenames
 sudo install -d -o root -g root -m 0755 /etc/defenseclaw
 sudo install -o root -g root -m 0640 config.yaml /etc/defenseclaw/config.yaml
@@ -708,7 +709,7 @@ sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 pkgutil --pkg-info com.cisco.defenseclaw.enterprise
 
 # INS-M-04: payload channel
-v=<version read from BLD-L1 dist/metadata.json>
+v="<version read from BLD-L1 dist/metadata.json>"
 PAYLOAD="/var/root/defenseclaw-enterprise-${v}"
 sudo install -d -o root -g wheel -m 0700 "$PAYLOAD"
 sudo tar -xzf "defenseclaw-enterprise-${v}-darwin-arm64.tar.gz" \
