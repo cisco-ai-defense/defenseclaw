@@ -1100,7 +1100,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
-	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: riskLine(&pull.Review)}
+	rev := &sandboxapi.ReviewResponse{Summary: pullSummary(pull), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after, endedElsewhere)
 	s.printNotices()
@@ -1112,8 +1112,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.warn(b)
 	}
 	if pull.Empty() {
-		a.note("the sandbox changed nothing")
-		a.markCleanCopy(after)
+		if pull.Since != "" {
+			a.note("nothing new since the last apply: " + a.tildePath(after.Project) + " has the sandbox's changes")
+		} else {
+			a.note("the sandbox changed nothing")
+		}
+		s.markHandedOver(after)
 		return s.finish(ctx, false)
 	}
 	mode := ""
@@ -1154,14 +1158,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		opts.PatchOut = after.Name + ".patch"
 	}
 	if sensitive {
-		question := "Some changes can run code on this machine. Bring them back anyway?"
-		if secrets := pull.Review.SecretPaths(); len(secrets) > 0 {
-			a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
-			if rev.RiskLine == "" {
-				question = "Some changes hold what looks like a secret. Bring them back anyway?"
-			}
-		}
-		yes, err := a.ask(question, false, false)
+		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {
 			return errors.Join(err, s.keepInSandbox(ctx, after, pull))
 		}
@@ -1174,8 +1171,30 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 	if _, err := a.applyPull(ctx, s.api, after, pull, opts); err != nil {
 		a.warn(err.Error())
 		s.keepUnpulled()
+	} else {
+		s.markHandedOver(after)
 	}
 	return s.finish(ctx, false)
+}
+
+// markHandedOver records, for a sandbox this session's end stops, that
+// nothing in its copy is left to bring back (the pull found nothing new,
+// or it was applied or handed over as a branch or a patch), so `delete`
+// of it stopped need not warn about work it cannot check. A sandbox that
+// keeps running can still change, so it is not marked.
+func (s *session) markHandedOver(after *sandboxapi.Sandbox) {
+	if s.started && !s.liveRun && s.others == 0 {
+		s.app.markCleanCopy(after)
+	}
+}
+
+// pullSummary is a pull's "N files changed (+a −d)", said to start from
+// the last apply when an earlier apply brought the rest back already.
+func pullSummary(pull *workspace.PullResult) string {
+	if pull.Since != "" {
+		return pull.Review.SummaryLine() + " since the last apply"
+	}
+	return pull.Review.SummaryLine()
 }
 
 // keepInSandbox ends a copy-mode session whose changes stay in the sandbox

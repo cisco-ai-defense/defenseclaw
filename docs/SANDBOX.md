@@ -1230,6 +1230,16 @@ Nothing is applied without a review: a session without a terminal, or with
    `patch` only writes the patch file, so the last two gates do not apply to
    it.
 
+   A 3-way apply that lands (or finds the folder already has the result)
+   sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
+   result. The next pull starts from it (`PullResult.Since`, kept in
+   `refs/defenseclaw/since`): its changes and review cover what changed in
+   the sandbox since, and its 3-way merge base and patch start there, so
+   work brought back once is not offered again and what the operator took
+   back of it stays taken back. `UndoApply` removes the mark (the next pull
+   starts from the baseline) and drops a kept pull that started from it. A
+   branch or patch does not set it.
+
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
 real path, in hex) and `io.defenseclaw/workdir-mode`, so a later run can find

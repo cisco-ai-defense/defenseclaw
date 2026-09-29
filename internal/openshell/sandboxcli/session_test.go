@@ -1151,6 +1151,49 @@ func TestRunLaunchIsTiedToTheSandbox(t *testing.T) {
 	}
 }
 
+// A session after an apply compares with what the apply brought: with
+// nothing new it asks nothing and says so, and `delete` of the sandbox it
+// stopped does not warn about unpulled work; the same after an apply at
+// the session's end (cert hermes:HERMES-5, hermes:HERMES-6,
+// openhands:MAC-OSH-OH-2).
+func TestCopySessionAfterAnApply(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40), Since: strings.Repeat("d", 40)}
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	has(t, ta.output(), "0 files changed (+0 −0) since the last apply", "nothing new since the last apply: ~/proj has the sandbox's changes")
+	lacks(t, ta.output(), "Bring the changes back?", "Bring them back anyway?", "the sandbox changed nothing")
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	lacks(t, ta.output(), "may hold work")
+
+	// Applied at the session's end: nothing is left to bring back either.
+	ta = newTestApp(t, "a\n")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	has(t, ta.output(), "applied 1 change to ~/proj")
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	lacks(t, ta.output(), "may hold work")
+}
+
+// `sandbox pull` and a session's end ask the same question before bringing
+// back changes that can run code on this machine (cert
+// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret").
+func TestPullAsksLikeTheSessionEnd(t *testing.T) {
+	ta := newTestApp(t, "n\n")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40),
+		Changes: []workspace.TreeChange{{Path: "Makefile", Status: "M"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "Makefile", Label: "Makefile", Kind: workspace.RiskExecutable,
+			Severity: workspace.SeverityHigh, Detail: "build file"}}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?")
+	lacks(t, ta.output(), "or hold a secret")
+}
+
 // Manual R2-43: a copy-mode session that found nothing to bring back lets
 // `delete` of the stopped sandbox go without the "may hold work" warning,
 // until the sandbox runs again.

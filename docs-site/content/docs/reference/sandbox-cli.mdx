@@ -909,6 +909,17 @@ exits `4`: the changes go to `<name>.patch` in your folder and, in a git
 project, to branch `dc/<name>`. Changes that can run code on your machine
 need your confirmation, or `--accept-sensitive` without a terminal.
 
+Once an `--apply` (or the apply at a session's end) has put the work in your
+folder, the next pull, a session's end included, shows only what changed in
+the sandbox since (`2 files changed (+3 −0) since the last apply`), flags and
+asks about only that, and its apply, patch or 3-way merge starts from that
+point, so a change you took back from your folder since stays taken back.
+With nothing new it says so and asks nothing, and `sandbox delete` of the
+stopped sandbox does not warn about work it holds. `sandbox undo` of the
+apply starts the next pull from the uploaded copy again, so the undone work
+is offered anew. A branch or a patch file does not move that point: your
+folder does not have those changes.
+
 ```bash
 defenseclaw sandbox pull fix-tests
 defenseclaw sandbox pull fix-tests --branch

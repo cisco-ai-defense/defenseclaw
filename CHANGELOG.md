@@ -349,7 +349,11 @@ deleted.
   not dimmed, for Kiro CLI, Hermes Agent and OpenHands too, and says that the
   resume line the harness printed (`copilot --resume=…`, `kiro-cli
   --resume-id …`, `hermes --resume …`, `openhands --resume …`) works only
-  inside the sandbox.
+  inside the sandbox. After an apply, the next pull or session end of a
+  copy-mode sandbox shows, reviews and merges only what changed since that
+  apply (`… since the last apply`); with nothing new it asks nothing, and
+  `sandbox delete` of the stopped sandbox does not warn about unpulled work.
+  `sandbox pull` asks the same confirmation as a session's end.
 
 ### Legacy OpenShell standalone sandbox removed
 

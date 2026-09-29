@@ -57,6 +57,12 @@ const (
 	baselineRef = "refs/defenseclaw/baseline"
 	resultRef   = "refs/defenseclaw/result"
 	effectRef   = "refs/defenseclaw/effective"
+	// appliedRef is the effective result a 3-way apply last put in the
+	// folder (or found there), and not undone since; sinceRef is where the
+	// last pull measured its changes from (PullResult.Since). Both live in
+	// base.git, which a refresh replaces with the baseline.
+	appliedRef = "refs/defenseclaw/applied"
+	sinceRef   = "refs/defenseclaw/since"
 )
 
 // StageOptions configures Stage. Mask and size settings normally come from
