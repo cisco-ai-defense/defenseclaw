@@ -733,11 +733,19 @@ type fakeGateway struct {
 	rollbacks []*openshell.GatewayApplyResult
 	applyRes  *openshell.GatewayApplyResult
 	restarts  int
+	// stateErr, when set, fails State (a configuration that cannot be read).
+	stateErr error
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
 
-func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) { s := f.state; return &s, nil }
+func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) {
+	if f.stateErr != nil {
+		return nil, f.stateErr
+	}
+	s := f.state
+	return &s, nil
+}
 
 func (f *fakeGateway) Plan(_ context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error) {
 	f.planned = append(f.planned, ch)

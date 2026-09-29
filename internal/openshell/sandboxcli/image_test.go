@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -385,6 +386,53 @@ func TestImageListNamesImagesGoneFromDocker(t *testing.T) {
 	if out := ta.output(); !strings.Contains(out, "would forget the record of defenseclaw/sandbox:kiro-3f7c-u1000 (no longer in Docker)") ||
 		strings.Contains(out, "nothing to prune") {
 		t.Fatalf("image prune --dry-run:\n%s", out)
+	}
+}
+
+// FIN-A-3: the list says which compute driver each image is for, and on a
+// gateway whose driver is known names the images it does not boot, as the
+// doctor does not count them: a MicroVM gateway's docker images (those
+// recorded before MicroVM images existed too), which prune removes, or a
+// docker gateway's MicroVM ones. A driver not known says nothing of it.
+func TestImageListSaysWhichImagesTheGatewayBoots(t *testing.T) {
+	for _, tc := range []struct {
+		name, daemon, want string
+		noGateway          bool
+	}{
+		{name: "vm gateway", daemon: "vm", want: "this gateway runs sandboxes in MicroVMs (the vm driver) and boots only the MicroVM images: " +
+			"it does not use the 2 images for the docker driver, which `defenseclaw sandbox image prune` removes unless a sandbox runs one"},
+		{name: "docker gateway", daemon: "docker", want: "this gateway runs sandboxes on the docker driver and boots only the docker images: " +
+			"it does not use the 1 image for MicroVMs"},
+		{name: "driver not known", noGateway: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.daemon
+			if tc.noGateway {
+				ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+				ta.gateway.stateErr = errors.New("no gateway configuration")
+			}
+			built := ta.Now()
+			ta.images.recs = []image.Record{
+				{Tag: "defenseclaw/sandbox:claudecode-vm-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, MicroVM: true, UID: 1000, BuiltAt: built},
+				{Tag: "defenseclaw/sandbox:claudecode-old-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, UID: 1000, BuiltAt: built.Add(-1)},
+				{Tag: "defenseclaw/sandbox:codex-old-u1000", Connector: "codex", HarnessVersion: "0.146.0", HookFireVerified: true, UID: 1000, BuiltAt: built.Add(-2)},
+			}
+			ta.ok(t, ta.ImageList(bg, OutputText))
+			out := ta.output()
+			header, rows, _ := strings.Cut(out, "\n")
+			if !strings.Contains(header, "FOR") || !regexp.MustCompile(`claudecode-vm-u1000\s+claudecode\s+2\.1\.156\s+MicroVM\s+yes`).MatchString(rows) ||
+				!regexp.MustCompile(`codex-old-u1000\s+codex\s+0\.146\.0\s+docker\s+yes`).MatchString(rows) {
+				t.Fatalf("image list:\n%s", out)
+			}
+			if tc.want == "" {
+				if strings.Contains(out, "this gateway") {
+					t.Fatalf("a driver not known named the images the gateway boots:\n%s", out)
+				}
+			} else if !strings.Contains(out, tc.want) {
+				t.Fatalf("image list lacks %q:\n%s", tc.want, out)
+			}
+		})
 	}
 }
 

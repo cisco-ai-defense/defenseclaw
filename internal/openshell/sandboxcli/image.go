@@ -417,7 +417,9 @@ type listedImage struct {
 
 // ImageList prints the recorded overlay images Docker still has, and names
 // the recorded ones it no longer has: the next run of their harness builds
-// them again, and `image prune` forgets their records.
+// them again, and `image prune` forgets their records. Each row says which
+// compute driver the image is for, and a note names those the gateway, when
+// its driver is known, does not boot.
 func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 	a.defaults()
 	recs, err := a.Images.List()
@@ -441,8 +443,13 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		a.note("no images yet; `" + CommandName + " image build` builds them")
 		return nil
 	}
+	// The gateway boots only the images built for its compute driver: a
+	// MicroVM one only the MicroVM images, a docker one only the others.
+	driver, driverKnown := a.gatewayDriverKnown(ctx)
+	microVMGateway := image.MicroVMTarget(driver)
 	rows := make([][]string, 0, len(recs))
 	var missing []string
+	unused := 0
 	for _, r := range recs {
 		if gone[r.Tag] {
 			missing = append(missing, fmt.Sprintf("%s (%s %s)", r.Tag, r.Connector, r.HarnessVersion))
@@ -452,10 +459,26 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		if r.HookFireVerified {
 			verified = "yes"
 		}
-		rows = append(rows, []string{r.Tag, r.Connector, r.HarnessVersion, verified, fmt.Sprint(r.UID), r.BuiltAt.Local().Format("2006-01-02 15:04")})
+		target := "docker"
+		if r.MicroVM {
+			target = "MicroVM"
+		}
+		if driverKnown && r.MicroVM != microVMGateway {
+			unused++
+		}
+		rows = append(rows, []string{r.Tag, r.Connector, r.HarnessVersion, target, verified, fmt.Sprint(r.UID), r.BuiltAt.Local().Format("2006-01-02 15:04")})
 	}
 	if len(rows) > 0 {
-		a.table([]string{"TAG", "HARNESS", "VERSION", "HOOKS VERIFIED", "UID", "BUILT"}, rows)
+		a.table([]string{"TAG", "HARNESS", "VERSION", "FOR", "HOOKS VERIFIED", "UID", "BUILT"}, rows)
+	}
+	switch {
+	case unused == 0:
+	case microVMGateway:
+		a.note(fmt.Sprintf("this gateway runs sandboxes in MicroVMs (the vm driver) and boots only the MicroVM images: it does not use the %s for the docker driver, "+
+			"which `%s image prune` removes unless a sandbox runs one", plural(int64(unused), "image", "images"), CommandName))
+	default:
+		a.note(fmt.Sprintf("this gateway runs sandboxes on the docker driver and boots only the docker images: it does not use the %s for MicroVMs",
+			plural(int64(unused), "image", "images")))
 	}
 	if len(missing) > 0 {
 		a.note(fmt.Sprintf("recorded but no longer in Docker: %s; the next run of the harness builds its image again, and `%s image prune` forgets the record",

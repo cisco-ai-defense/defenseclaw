@@ -219,8 +219,15 @@ defenseclaw sandbox image build codex --force --verbose
 Lists the recorded harness images, newest first. An image removed from Docker
 (with `docker rmi`, say) is not in the table: a note names it, the next run of
 its harness builds the image again, and `sandbox image prune` forgets its
-record. With `--output json` every recorded image is listed, and one Docker no
-longer has carries `"missing": true`.
+record. The FOR column says which compute driver an image is for: `MicroVM`
+for the vm driver (a Mac's gateway), `docker` for the docker driver. Images
+recorded before DefenseClaw built MicroVM images are `docker`. A gateway boots
+only the images for its driver, and when the list can tell which driver that
+is, a note names the images the gateway does not use. The doctor does not
+count those as built, and on a MicroVM gateway `sandbox image prune` removes
+them. With `--output json` every recorded image is listed, with
+`"microvm": true` for a MicroVM image, and one Docker no longer has carries
+`"missing": true`.
 
 ```bash
 defenseclaw sandbox image list --output json
