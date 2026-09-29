@@ -237,6 +237,11 @@ exist only in the image; nothing on your host changes.
   shell wrapper is on (`defenseclaw sandbox enable omnigent`). The wrapper
   sends it into the folder's sandbox; the sandbox drops the `run` it
   forwards, since the launcher runs `omnigent run` already.
+- **Ctrl-Z.** OmniGent's TUI has no suspend, on a host as in a sandbox. It
+  keeps prompt_toolkit's default binding, which types Ctrl-Z into the prompt
+  as a `^Z` character (Backspace removes it). OmniGent never tries to stop
+  itself, so DefenseClaw's notice that a sandbox cannot suspend a harness
+  does not appear.
 - **One server.** OmniGent reuses a running local server or host daemon that
   it finds in its records under `~/.omnigent`. It does not check which
   configuration that process started with. Before every start the launcher
