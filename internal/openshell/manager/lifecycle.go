@@ -382,6 +382,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	m.mu.Lock()
 	b.rec.MCP, b.rec.RunConfig, b.rec.Verify = mcp, runConfig, verify
 	m.mu.Unlock()
+	// The workload check after the start compares with what was just
+	// written, not with the files the last session had.
+	rec.Verify = verify
 	// With token_delivery: provider the token is rotated, so a credential
 	// from an earlier session is useless, and the provider carries the new
 	// one into the sandbox. With token_delivery: env the token is a plain

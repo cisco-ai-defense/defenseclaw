@@ -352,9 +352,14 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 }
 
 // On docker a start that rewrites the run files records their new digests,
-// so the session's workload check compares with what was just written.
+// so the session's workload check compares with what was just written
+// (here with the check turned on, as it will be for docker).
 func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	e := newEnv(t, nil)
+	checked, _ := openshell.LookupDriver("docker")
+	checked.SkipWorkloadCheck = false
+	e.gw.Driver = checked
+	e.fake.HandleExec(e.workloadChecks(nil, nil))
 	e.create(sandboxapi.CreateRequest{Name: "dk-yolo", Yolo: true})
 	before := readRecord(t, e, "dk-yolo")
 	e.stopBox("dk-yolo")
@@ -367,18 +372,21 @@ func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	if after.RunConfig.Digest == before.RunConfig.Digest || after.Verify == nil {
 		t.Fatalf("digest %s -> %s, verify %+v", before.RunConfig.Digest, after.RunConfig.Digest, after.Verify)
 	}
-	checked := 0
+	runChecks := 0
 	for _, v := range after.Verify.Files {
 		if _, ok := files[v.Path]; !ok {
 			continue
 		}
-		checked++
+		runChecks++
 		if v.SHA256 != sha256Hex(files[v.Path]) {
 			t.Fatalf("verify %s = %s, file holds %s", v.Path, v.SHA256, sha256Hex(files[v.Path]))
 		}
 	}
-	if checked != len(files) {
+	if runChecks != len(files) {
 		t.Fatalf("verify = %+v; want each of the %d run files", after.Verify, len(files))
+	}
+	if calls := e.workloadCheckCalls("dk-yolo"); len(calls) != 2 {
+		t.Fatalf("workload checks = %d", len(calls))
 	}
 }
 
