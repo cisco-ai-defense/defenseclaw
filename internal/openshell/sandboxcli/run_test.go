@@ -1168,3 +1168,34 @@ func TestCopyLimitsOnTheMicroVMDriver(t *testing.T) {
 	ta.daemon.status.Gateway.Driver = "docker"
 	has(t, ta.sandboxDiskHint(bg, ta.API, full), "the disk holding")
 }
+
+// Cert opencode:OC-2: OpenCode quits on Ctrl-C, also in the middle of a
+// turn, which ends the session; an interactive OpenCode session's banner
+// names Esc as the key that interrupts a turn. A one-prompt run, a session
+// without a terminal and another harness get no such line.
+func TestBannerNamesOpenCodesInterruptKey(t *testing.T) {
+	const keys = "Keys      Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session"
+	for _, c := range []struct {
+		name    string
+		harness string
+		tty     bool
+		prompt  string
+		want    bool
+	}{
+		{"interactive OpenCode", "opencode", true, "", true},
+		{"one prompt", "opencode", true, "fix the tests", false},
+		{"no terminal", "opencode", false, "", false},
+		{"Claude Code", "claudecode", true, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.IO.TTY = c.tty
+			sb := sampleSandbox("box")
+			sb.Harness = c.harness
+			ta.banner(&sb, bannerInfo{o: RunOptions{Prompt: c.prompt}})
+			if got := strings.Contains(ta.output(), keys); got != c.want {
+				t.Fatalf("Keys line shown = %v, want %v:\n%s", got, c.want, ta.output())
+			}
+		})
+	}
+}

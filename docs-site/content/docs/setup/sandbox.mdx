@@ -393,6 +393,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
+| `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
 | `Hooks` | Shown for user-tier harnesses: the agent could edit its own hook settings, and hook silence is detected. |
 | `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |

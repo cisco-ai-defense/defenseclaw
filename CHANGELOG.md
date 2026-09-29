@@ -341,6 +341,9 @@ deleted.
   the session's end (two seconds' grace, then `SIGTERM` and `SIGKILL`) and
   names it. OmniGent's server and `sandbox exec` commands are kept. Both
   drivers; the images rebuild.
+- An interactive OpenCode session's banner has a `Keys` line: Esc
+  interrupts a turn, and Ctrl-C (OpenCode's quit key, also mid-turn) ends
+  the session.
 
 ### Legacy OpenShell standalone sandbox removed
 
