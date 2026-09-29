@@ -1229,10 +1229,11 @@ defenseclaw sandbox doctor
 
 It checks the platform, your user, Landlock, Docker (version, host
 networking and file sharing on Docker Desktop, disk space), systemd linger,
-the OpenShell service, CLI, registration, mTLS files, version and driver,
-gateway-global policy, bind mounts, telemetry, the sandbox ports, the
-DefenseClaw daemon, the sandbox hooks, the harness images, the shell
-wrappers and your organization's policy. Every failed check names its fix.
+the OpenShell service, CLI, ssh connection sharing, registration, mTLS
+files, version and driver, gateway-global policy, bind mounts, telemetry,
+the sandbox ports, the DefenseClaw daemon, the sandbox hooks, the harness
+images, the shell wrappers and your organization's policy. Every failed
+check names its fix.
 `--fix` applies the fixes that need only your user (such as starting or
 restarting the gateway, or turning bind mounts on), after asking.
 
@@ -1279,6 +1280,8 @@ section, and skips them while `openshell.enabled` is off.
 | An image build fails | The error from `setup` or `image build` names the build log, `~/.defenseclaw/logs/sandbox-image-<harness>.log`. `defenseclaw sandbox image build <harness> --verbose` streams the build instead. |
 | A tool cannot reach a site | Look for the block in `defenseclaw sandbox activity`, then unblock it. Git over SSH and databases don't go through the web proxy: use HTTPS remotes, or `--host-port` for a service on your machine. |
 | Project folder mounts show as disabled | Run `defenseclaw sandbox doctor --fix`, or setup again. On a Mac on the MicroVM driver the doctor skips this check: every run works on a copy. |
+| The doctor's **SSH connection sharing** check warns that `your ssh configuration shares connections for host "sandbox"` | Your `~/.ssh/config` turns on ssh connection sharing (`ControlMaster` with a `ControlPath`, often under `Host *`). OpenShell's CLI gives every sandbox the same ssh host name, `sandbox`, so a shared connection left open by one sandbox's session would carry the next session into that sandbox, whichever sandbox it names. DefenseClaw turns sharing off for every OpenShell command it runs, so `defenseclaw sandbox` sessions, copies and pulls are not affected, and it does not change your ssh configuration. An `openshell sandbox connect`, `upload`, `download` or `forward` that you run yourself is affected: add a `Host sandbox` block with `ControlMaster no` and `ControlPath none` above any `Host *` in `~/.ssh/config`. |
+| `ssh shim: … is writable by other users …; set TMPDIR to a directory only you can write` | DefenseClaw runs each OpenShell command with a small `ssh` wrapper (your ssh, with connection sharing off) in a private folder in your temporary directory, and refuses a temporary directory that other users could change. Point `TMPDIR` at a folder only you can write, for example `mkdir -p -m 700 ~/.cache/tmp` and `export TMPDIR=~/.cache/tmp`. |
 | Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. On a Mac, the MicroVM driver's prepared disks (about 5 GB for each image it started, in `~/.local/state/openshell/vm-driver/images`) belong to OpenShell: the doctor shows their size, and DefenseClaw does not remove them. |
 
 Exit statuses: 3 means the platform or deployment is unsupported (Windows,
