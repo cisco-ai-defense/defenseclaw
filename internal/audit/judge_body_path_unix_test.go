@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type judgeBodyOwnerOverrideInfo struct {
@@ -261,4 +263,73 @@ func TestJudgeBodyUnixTrustRejectsSyntheticUntrustedOwner(t *testing.T) {
 	if err := validateJudgeBodyPlatformTrust(path, override, false, true); err == nil || !strings.Contains(err.Error(), "untrusted owner") {
 		t.Fatalf("synthetic owner error = %v", err)
 	}
+}
+
+// TestJudgeBodyAdvisoryRelaxesInstallerOwnedAncestorPerms mirrors the
+// audit_db test — same AIFW-34262 downgrade for the judge-body path walker.
+// A permission verdict on an ancestor under managed.PlatformInstallerOwnedPath
+// with the ancestor strict flag off is downgraded to a
+// managed_trust_ancestor_advisory warning and swallowed; leaf verdicts,
+// non-installer-owned ancestor verdicts, TrustStrictAncestorsEnv=1, and
+// structural failures (untrusted owner) all stay fatal.
+func TestJudgeBodyAdvisoryRelaxesInstallerOwnedAncestorPerms(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Fatalf("chmod 0o775 %s: %v", dir, err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("file ownership metadata is unavailable")
+	}
+	override := judgeBodyOwnerOverrideInfo{FileInfo: info, stat: *stat}
+	override.stat.Uid = 0
+
+	roots := managed.PlatformInstallerOwnedRoots()
+	if len(roots) == 0 {
+		t.Skip("no PlatformInstallerOwnedRoots on this platform")
+	}
+	installerOwned := filepath.Join(roots[0], "secureclient")
+	outsideRoot := filepath.Join(t.TempDir(), "other-non-cisco-tree")
+
+	t.Run("ancestor under installer-owned root is advisory", func(t *testing.T) {
+		if err := validateJudgeBodyPlatformTrust(installerOwned, override, true, false); err != nil {
+			t.Errorf("advisory downgrade did not fire: %v", err)
+		}
+	})
+
+	t.Run("same path at the leaf stays fatal", func(t *testing.T) {
+		err := validateJudgeBodyPlatformTrust(installerOwned, override, true, true)
+		if err == nil || !strings.Contains(err.Error(), "group- or other-writable") {
+			t.Errorf("leaf verdict = %v, want group- or other-writable", err)
+		}
+	})
+
+	t.Run("ancestor outside installer-owned root stays fatal", func(t *testing.T) {
+		err := validateJudgeBodyPlatformTrust(outsideRoot, override, true, false)
+		if err == nil || !strings.Contains(err.Error(), "group- or other-writable") {
+			t.Errorf("non-installer-owned ancestor verdict = %v, want group- or other-writable", err)
+		}
+	})
+
+	t.Run("TrustStrictAncestorsEnv forces installer-owned ancestor fatal", func(t *testing.T) {
+		t.Setenv(managed.TrustStrictAncestorsEnv, "1")
+		err := validateJudgeBodyPlatformTrust(installerOwned, override, true, false)
+		if err == nil || !strings.Contains(err.Error(), "group- or other-writable") {
+			t.Errorf("strict-env installer-owned ancestor verdict = %v, want group- or other-writable", err)
+		}
+	})
+
+	t.Run("structural failures (untrusted owner) stay fatal even on installer-owned ancestor", func(t *testing.T) {
+		untrusted := override
+		untrusted.stat.Uid = uint32(os.Geteuid() + 1)
+		err := validateJudgeBodyPlatformTrust(installerOwned, untrusted, false, false)
+		if err == nil || !strings.Contains(err.Error(), "untrusted owner") {
+			t.Errorf("untrusted-owner verdict = %v, want untrusted owner (advisory MUST NOT swallow structural failures)", err)
+		}
+	})
+
 }
