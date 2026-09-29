@@ -200,6 +200,14 @@ rest also reach per-user installs.
   config backup records), and rollback removes exactly those; any other
   file, such as the backups of displaced user hooks, still keeps the folder.
   Stale OpenCode runtime generations are now also cleaned up (#927).
+- **Windows standalone status names the process holding the gateway API
+  port.** While another process listened on `127.0.0.1:18970` (or another
+  account's wildcard listener made Windows refuse the gateway's bind),
+  `enterprise windows status` and `verify` reported only `not_ready`. They
+  now report `api_port_held` with each holder's PID, image and account (or
+  that this account cannot identify it), list them in `api_port_holders`
+  in `--json`, and say that the gateway takes the port back by itself once
+  it is free, as on Linux and macOS (#929).
 
 ### Added
 

@@ -135,6 +135,7 @@ The MDM wrapper scripts print the same document.
 | `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table) |
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
+| `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
 
 The two summary fields are computed differently on each OS:
 

@@ -83,6 +83,16 @@ type Enrollment struct {
 	Exempt  int `json:"exempt"`
 }
 
+// PortHolder is a process, other than the DefenseClaw gateway, listening
+// where the gateway API must bind. Image and Account are empty when the
+// reporting account cannot identify the process.
+type PortHolder struct {
+	Address string `json:"address"`
+	PID     int    `json:"pid"`
+	Image   string `json:"image,omitempty"`
+	Account string `json:"account,omitempty"`
+}
+
 // Message is a stable machine code plus a human sentence.
 type Message struct {
 	Code    string `json:"code"`
@@ -111,6 +121,7 @@ type Result struct {
 	SecurityComplete   bool                          `json:"security_complete"`
 	Errors             []Message                     `json:"errors"`
 	Warnings           []Message                     `json:"warnings,omitempty"`
+	APIPortHolders     []PortHolder                  `json:"api_port_holders,omitempty"`
 	LogPath            string                        `json:"log_path,omitempty"`
 	ExitCode           int                           `json:"exit_code"`
 }

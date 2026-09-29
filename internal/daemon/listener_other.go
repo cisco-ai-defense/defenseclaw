@@ -21,3 +21,7 @@ package daemon
 func listenerOwnerPID(_ string, _ int) (int, error) {
 	return 0, ErrListenerInspectionUnavailable
 }
+
+func listeners(_ string, _ int) ([]Listener, error) {
+	return nil, ErrListenerInspectionUnavailable
+}
