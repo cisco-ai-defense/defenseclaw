@@ -35,6 +35,12 @@ type Builder struct {
 	Log io.Writer
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// TempDir is where the hook-fire probe writes the files it mounts into
+	// a probe container (default os.TempDir()). On a Mac, Docker Desktop
+	// shares /private, /tmp and /var/folders (the user's $TMPDIR) by
+	// default, where a data dir such as /opt/cisco/defenseclaw/runtime is
+	// not shared.
+	TempDir string
 }
 
 // BuildOptions tune one build.

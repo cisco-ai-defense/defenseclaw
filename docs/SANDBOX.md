@@ -1372,18 +1372,27 @@ container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
 `test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
 configuration below against the real harnesses.
 
-The probe ends with the allowed run once more, with an OpenShell MicroVM's
-name resolution: an `/etc/hosts` that names neither `localhost` nor the
-hostname (only the stand-in ingress and, in relay mode,
-`host.docker.internal`), the guest's `resolv.conf` pointed at a resolver no
-server answers at (the container's own `127.0.0.53` in relay mode; the
-stand-in's address on the host network, where `127.0.0.53` is
-systemd-resolved), and the image's own `nsswitch.conf`. Its verdict is kept
-apart (`MicroVMVerified` and `MicroVMProblem` in `images.json`): a harness
-that needs a real `/etc/hosts` still verifies for the docker driver, and
-`sandbox image build` says that a MicroVM gateway refuses it, and why. A
-harness that could not resolve localhost there is named with the line it
-printed.
+The probe of an image for the vm driver (`BuildSpec.MicroVM`) ends with the
+allowed run once more, with an OpenShell MicroVM's name resolution: an
+`/etc/hosts` that names neither `localhost` nor the hostname (only the
+stand-in ingress and, in relay mode, `host.docker.internal`), the guest's
+`resolv.conf` pointed at a resolver no server answers at (the container's
+own `127.0.0.53` in relay mode; the stand-in's address on the host network,
+where `127.0.0.53` is systemd-resolved), and the image's own
+`nsswitch.conf`. The two files are written to a new directory under the
+system temp directory (`Builder.TempDir`, `os.TempDir()`: the user's
+`$TMPDIR` under `/var/folders` on a Mac), which Docker Desktop shares by
+default wherever the data dir is (a managed install's
+`/opt/cisco/defenseclaw/runtime` is not shared), and removed with the
+container; the doctor's file sharing check on a vm gateway is of that
+directory. An image for the docker driver never runs this scenario. Its
+verdict is kept apart (`MicroVMVerified` and `MicroVMProblem` in
+`images.json`) and never fails the probe: a MicroVM run that could not run
+at all (a mount Docker refused, a timeout, an address relay mode could not
+learn) is recorded as its problem, and only an interrupted probe fails.
+`sandbox image build` says that a MicroVM gateway refuses such an image,
+and why. A harness that could not resolve localhost there is named with the
+line it printed.
 
 Kiro CLI has no model endpoint a mock can stand in for; its own
 scripted-response mode (`KIRO_MOCK_CHAT_RESPONSE`, with a placeholder

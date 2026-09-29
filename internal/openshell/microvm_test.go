@@ -76,6 +76,7 @@ func (f *doctorFixture) onMicroVMs() {
 	f.writeTOML(microVMTOML, f.started.Add(-time.Minute))
 	f.runner.On("docker info", dockerInfoJSON("29.1.5", "Docker Desktop", nil), nil)
 	f.doctor.DockerDesktop = func() (*openshell.DockerDesktop, error) { return &openshell.DockerDesktop{}, nil }
+	f.doctor.TempDir = func() string { return macTempDir }
 	f.doctor.Geteuid, f.doctor.Getegid = func() int { return 501 }, func() int { return 20 }
 	for _, tool := range []string{"mke2fs", "debugfs"} {
 		touchExecutable(f.t, filepath.Join(f.e2fsprogs, tool))
@@ -86,11 +87,15 @@ func (f *doctorFixture) onMicroVMs() {
 	f.runner.On("brew postinstall nvidia/openshell/openshell", "", nil)
 }
 
+// macTempDir is a Mac user's $TMPDIR.
+const macTempDir = "/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T/"
+
 // TestDoctorOnAMacRunningMicroVMs: on a Mac whose gateway runs the
 // MicroVM driver, Landlock is the MicroVM kernel's (no Docker VM probe),
-// Docker Desktop's network and file sharing do not matter, bind mounts
-// are not offered, and the driver's own needs are checked, in the order
-// of the check list.
+// Docker Desktop's network does not matter and its file sharing only for
+// the temp directory the image builds' hook-fire probe mounts from, bind
+// mounts are not offered, and the driver's own needs are checked, in the
+// order of the check list.
 func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.onMicroVMs()
@@ -109,7 +114,8 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	expectCheck(t, r, openshell.CheckIDPlatform, warn, "darwin/arm64: macOS sandboxes run in OpenShell MicroVMs (the vm driver, experimental upstream)")
 	expectCheck(t, r, openshell.CheckIDLandlock, pass, "enforced by the MicroVM's own kernel; OpenShell refuses to start a sandbox without it (hard requirement)")
 	expectCheck(t, r, openshell.CheckIDDockerHostNetwork, skip, "the MicroVM driver does not use Docker's network")
-	expectCheck(t, r, openshell.CheckIDDockerFileSharing, skip, "the MicroVM driver does not use Docker's file sharing")
+	expectCheck(t, r, openshell.CheckIDDockerFileSharing, pass, "/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T is shared with Docker Desktop "+
+		"(the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)")
 	expectCheck(t, r, openshell.CheckIDVMDriver, pass, "e2fsprogs in "+f.e2fsprogs+"; "+f.vmDriverPath()+" signed for Apple's Hypervisor")
 	expectCheck(t, r, openshell.CheckIDVMIdentity, pass, "sandboxes run as 501:20, your user")
 	expectCheck(t, r, openshell.CheckIDVMResources, pass, "every MicroVM gets 4 vCPUs, 4096 MiB of memory and a 16384 MiB disk for its changes")
@@ -472,5 +478,36 @@ func TestDoctorOnLinuxWithTheVMDriver(t *testing.T) {
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
 	if r.Get(openshell.CheckIDVMDriver) != nil || r.MicroVM != nil {
 		t.Fatalf("Linux got the macOS MicroVM checks:\n%s", r)
+	}
+}
+
+// On the MicroVM driver the file sharing check is of the temp directory
+// the hook-fire probe of an image build mounts a MicroVM's /etc/hosts and
+// /etc/resolv.conf from: Docker Desktop shares /var/folders and /tmp by
+// default (a settings store that names no directories keeps the
+// defaults), and a list without it fails with where to add it.
+func TestDoctorChecksTheProbesFileSharingOnMicroVMs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tmp    string
+		shared []string
+		status openshell.CheckStatus
+		detail string
+	}{
+		{"defaults", macTempDir, nil, openshell.StatusPass, "/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T is shared with Docker Desktop"},
+		{"tmp", "/tmp", []string{"/Users", "/tmp"}, openshell.StatusPass, "/tmp is shared with Docker Desktop"},
+		{"home only", macTempDir, []string{"/Users"}, openshell.StatusFail,
+			"/var/folders/1r/kq1tw76n1rv8s9wxygbgtglm0000gn/T is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoctorFixture(t)
+			f.onMicroVMs()
+			f.doctor.TempDir = func() string { return tc.tmp }
+			f.doctor.DockerDesktop = func() (*openshell.DockerDesktop, error) { return &openshell.DockerDesktop{FileSharing: tc.shared}, nil }
+			c := expectCheck(t, f.run(), openshell.CheckIDDockerFileSharing, tc.status, tc.detail)
+			if (tc.status == openshell.StatusFail) != (c.Fix != nil && strings.Contains(c.Fix.Summary, "Docker Desktop → Settings → Resources → File sharing")) {
+				t.Fatalf("fix = %+v", c.Fix)
+			}
+		})
 	}
 }

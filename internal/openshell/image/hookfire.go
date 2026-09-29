@@ -463,9 +463,11 @@ const (
 	// allow prompt and quits (interactiveLaunches).
 	ScenarioInteractive = "interactive"
 	// ScenarioMicroVM runs the allow prompt again with the name resolution
-	// of an OpenShell MicroVM (below). Its verdict is kept apart
+	// of an OpenShell MicroVM (below), for an image built for the MicroVM
+	// driver (BuildSpec.MicroVM) only. Its verdict is kept apart
 	// (HookFireResult.MicroVMProblem, Record.MicroVMVerified): only a
-	// driver without a hosts file (openshell.Driver.HostsFile) needs it.
+	// driver without a hosts file (openshell.Driver.HostsFile) needs it,
+	// and it never fails the probe.
 	ScenarioMicroVM = "microvm"
 )
 
@@ -633,8 +635,10 @@ type HookFireResult struct {
 	Network HookFireNetwork `json:"network"`
 	Runs    []HookFireRun   `json:"runs"`
 	// MicroVMProblem says why the harness does not work with a MicroVM's
-	// name resolution (ScenarioMicroVM); empty when it does. It does not
-	// fail the probe: only a MicroVM gateway refuses such an image.
+	// name resolution (ScenarioMicroVM), or why that run could not run at
+	// all; empty when it passed or was not run (an image for the docker
+	// driver). It does not fail the probe: only a MicroVM gateway refuses
+	// such an image.
 	MicroVMProblem string `json:"microvm_problem,omitempty"`
 }
 
@@ -961,13 +965,23 @@ func (b *Builder) hookFireProbe(ctx context.Context, c *Context, ref string, opt
 		}
 		sideEffect(tty, ttySc, prefix)
 	}
-	vmSc := hookFireScenario{name: ScenarioMicroVM, prompt: opts.Prompt, sideEffect: opts.AllowSideEffect, wantSideEffect: true,
-		microVM: true, hostGateway: allow.hostGateway}
-	vm, err := run(vmSc)
-	if err != nil {
-		return result, err
+	if c.Spec.MicroVM {
+		// A run that could not run at all (a mount Docker refused, a
+		// timeout, an address it could not learn) says nothing about the
+		// hooks the runs above proved: it is recorded as the MicroVM
+		// problem, and only an interrupted probe fails.
+		vmSc := hookFireScenario{name: ScenarioMicroVM, prompt: opts.Prompt, sideEffect: opts.AllowSideEffect, wantSideEffect: true,
+			microVM: true, hostGateway: allow.hostGateway}
+		vm, err := run(vmSc)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			return result, err
+		case err != nil:
+			result.MicroVMProblem = "the hook-fire probe could not run " + c.Spec.Harness.DisplayName + " with an OpenShell MicroVM's name resolution: " + err.Error()
+		default:
+			result.MicroVMProblem = microVMProblem(c.Spec.Harness.DisplayName, vm, vmSc, required)
+		}
 	}
-	result.MicroVMProblem = microVMProblem(c.Spec.Harness.DisplayName, vm, vmSc, required)
 	if len(problems) > 0 {
 		return result, fmt.Errorf("openshell image %s hook-fire probe failed: %w: %s", c.Tag, ErrHooksNotFired, strings.Join(problems, "; "))
 	}
@@ -1282,20 +1296,20 @@ func (b *Builder) hookFireRun(
 }
 
 // microVMMounts writes the MicroVM scenario's /etc/hosts and
-// /etc/resolv.conf (hookFireNet.microVMFiles) to a new directory next to
-// the image store (the system temp directory without one), where Docker
-// Desktop's file sharing reaches them, and returns their read-only mounts
-// and what removes them.
+// /etc/resolv.conf (hookFireNet.microVMFiles) to a new directory under
+// Builder.TempDir (the system temp directory), which Docker Desktop's file
+// sharing reaches by default wherever the data dir is, and returns their
+// read-only mounts and what removes them.
 func (b *Builder) microVMMounts(netw hookFireNet, hostGateway string) ([]RunFile, func(), error) {
 	hosts, resolv, err := netw.microVMFiles(hostGateway)
 	if err != nil {
 		return nil, nil, err
 	}
-	parent := ""
-	if b.Store != nil {
-		parent = filepath.Dir(b.Store.Path())
+	parent := b.TempDir
+	if parent == "" {
+		parent = os.TempDir()
 	}
-	dir, err := os.MkdirTemp(parent, "hookfire-microvm-")
+	dir, err := os.MkdirTemp(parent, "defenseclaw-hookfire-microvm-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("openshell image: hook-fire MicroVM scenario: %w", err)
 	}

@@ -301,6 +301,10 @@ type Doctor struct {
 	Username      func() (string, error)
 	HomeDir       func() (string, error)
 	DockerDesktop func() (*DockerDesktop, error)
+	// TempDir is the system temp directory (default os.TempDir), where
+	// the hook-fire probe of an image build writes what it mounts into its
+	// containers (image.Builder.TempDir).
+	TempDir func() string
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
 	DockerGroup func() (member, inSession bool, err error)
@@ -368,6 +372,9 @@ func (d *Doctor) defaults() {
 	}
 	if d.DockerDesktop == nil {
 		d.DockerDesktop = func() (*DockerDesktop, error) { return readDockerDesktop(d.GOOS, d.HomeDir) }
+	}
+	if d.TempDir == nil {
+		d.TempDir = os.TempDir
 	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership

@@ -1242,9 +1242,12 @@ driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway
 runs sandboxes as your uid and gid (**vm-identity**), the gateway-wide
 `vcpus`, `mem_mib` and `overlay_disk_mib` against what builds need and your
 organization's `max_resources` (**vm-resources**), and the free space and
-size of the MicroVM driver's prepared disks. It skips the checks that only
-matter for Docker Desktop's VM (host networking, file sharing) and the bind
-mounts, with the reason. A gateway configured for the MicroVM driver that
+size of the MicroVM driver's prepared disks. It skips the host networking
+check, which only Docker Desktop's VM needs, and the bind mounts, with the
+reason. Its file sharing check is of your temp directory (`$TMPDIR`, under
+`/var/folders`), from which an image build mounts a MicroVM's `/etc/hosts`
+into the container that checks the image; Docker Desktop shares it by
+default. A gateway configured for the MicroVM driver that
 still runs the Docker driver is reported as a restart pending.
 The command exits 1 when a check fails. With `--json` it prints the report
 as JSON and always exits 0; the report's `ok` field says whether every check
