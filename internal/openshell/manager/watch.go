@@ -314,7 +314,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
 			if !quiet {
 				m.mu.Lock()
-				b.blocked++
+				b.noteBlocked(host)
 				m.mu.Unlock()
 			}
 			// OpenShell drafts a proposal for the denied destination a few

@@ -303,6 +303,15 @@ The harness spec builds the environment passed to `openshell sandbox create
   address. `--env` overrides them. OpenShell's refusal of a lookup of the
   container's own host name (Docker's 12-hex-digit default) is audited but is
   neither a blocked site nor a feed line.
+- `DEFENSECLAW_HOST_TZ` is the IANA time zone of the machine `sandbox run`
+  ran on (`CreateRequest.TimeZone`: `TZ`, else the zone `/etc/localtime`
+  links to, else `/etc/timezone`; `openshell.HostTimeZone`). A second
+  fragment next to the proxy one (`timeZoneScript`) exports `TZ` from it
+  in the launchers, the login-shell profile and the `sandbox exec` wrapper,
+  when `TZ` is not set already and the image has
+  `/usr/share/zoneinfo/<zone>`; without the file libc would show UTC under
+  the zone's name, so the sandbox stays on UTC. Both compute drivers. A
+  sandbox keeps the zone it was created with.
 
 One shell fragment (`egressEnvScript` in
 `internal/openshell/harness/shellenv.go`) exports `HTTPS_PROXY`,
@@ -1243,6 +1252,16 @@ Nothing is applied without a review: a session without a terminal, or with
 
    `patch` only writes the patch file, so the last two gates do not apply to
    it.
+
+   A 3-way apply that lands (or finds the folder already has the result)
+   sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
+   result. The next pull starts from it (`PullResult.Since`, kept in
+   `refs/defenseclaw/since`): its changes and review cover what changed in
+   the sandbox since, and its 3-way merge base and patch start there, so
+   work brought back once is not offered again and what the operator took
+   back of it stays taken back. `UndoApply` removes the mark (the next pull
+   starts from the baseline) and drops a kept pull that started from it. A
+   branch or patch does not set it.
 
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
@@ -2216,7 +2235,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Claude Code drops a whole managed-settings drop-in with one invalid field, silently. | The hook-fire probe gates every image. |
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
-| Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session with no job-control shell above it, the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started from a `sandbox connect --shell` prompt (where Ctrl-Z suspends it to that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
+| Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session with no job-control shell above it, the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. When such a harness takes the terminal back, the supervisor says at once, in the terminal's title (OSC 2, the previous title kept and restored when the harness exits) and as an OSC 9 notification with a bell, that Ctrl-Z cannot suspend it, and after the harness exits prints the same on the screen, answering the harness's own "suspended, use `fg`" line. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started from a `sandbox connect --shell` prompt (where Ctrl-Z suspends it to that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
 
 ### Not measured
 

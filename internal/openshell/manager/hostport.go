@@ -82,7 +82,7 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 	}
 	name, id, eff := b.rec.Name, b.identity(), b.eff
 	declared := slices.Contains(b.rec.Flags.HostPorts, port)
-	b.blocked++
+	b.blockedRequests++
 	explained := b.closedPorts[port]
 	m.mu.Unlock()
 	replayed := at.Before(m.startedAt)
@@ -96,9 +96,14 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 		refusal = eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: port})
 	}
 	if declared && refusal == nil && !replayed {
+		// An ask, not a blocked destination (until it is answered).
 		m.hostPortAsk(ctx, b, port, r.Binary)
 		return
 	}
+	m.mu.Lock()
+	// The feed names it blocked (now, or when the port was first denied).
+	b.noteBlockedHost(openshellHostAlias)
+	m.mu.Unlock()
 	if explained {
 		return
 	}

@@ -1320,8 +1320,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 5777,
-      "sha256": "24fbe24d1915d0cd3ae3704a5c72c9afd3358cffe9bcd30bf92b8be4f68a4ffe"
+      "size": 6184,
+      "sha256": "24e8ba0bc0ff25f5c1994645e081bc77671df60fa28ffcd48b35ca0fc4e5a10f"
     }
   },
   "kiro/managed=1/scoped=1/fail=open": {
@@ -1367,8 +1367,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 5755,
-      "sha256": "0dd5db287252c5a2b313ea00632274125c0b91a88f26c2fa385c49b8c5d2436d"
+      "size": 6162,
+      "sha256": "e1a4d011a2aaa19db79c6629e33291df77aa504214398ff65bf86d39815263a5"
     }
   },
   "legacy/all-scripts": {
@@ -1449,8 +1449,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 5727,
-      "sha256": "4890ab8ed1c9b4e46b4c6cecc325f80838495655a10a6ce53f8cc42cc4b6499b"
+      "size": 6134,
+      "sha256": "a99f424ab5b4adcde60308d736bda064a4721f63da90cbfc45dea3901ce7fcb2"
     },
     "openhands-hook.sh": {
       "mode": "-rwx------",
@@ -1536,8 +1536,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 5727,
-      "sha256": "c182ac2ba3e5e09f8d6f3f7cc264c6730d11fb1f213f05d02ae20a7d1b091d67"
+      "size": 6134,
+      "sha256": "9fc56ab438105d900e79bbe71f2e4ba58cb66b623bf58de742d9b646c8adb516"
     },
     "openhands-hook.sh": {
       "mode": "-rwx------",

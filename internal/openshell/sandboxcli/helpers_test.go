@@ -666,7 +666,7 @@ func (f *fakeCopy) Stage(_ context.Context, o workspace.StageOptions) (*workspac
 
 func (f *fakeCopy) Upload(_ context.Context, _, name string, _ workspace.Uploader) (*workspace.CopyRecord, error) {
 	f.step("upload " + name)
-	return &workspace.CopyRecord{Name: name, Files: 3, Bytes: 1024}, nil
+	return &workspace.CopyRecord{Name: name, Files: 3, Bytes: 1024, HeldBack: []string{".env"}, Warnings: []string{"nested repository vendor/lib is not copied"}}, nil
 }
 
 func (f *fakeCopy) Baseline(_ context.Context, _, name string, _ workspace.Execer) (*workspace.CopyRecord, error) {

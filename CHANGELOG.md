@@ -362,6 +362,31 @@ deleted.
   forgets its record, and the doctor's image check does not count it. That
   check also lists every harness image built for you, not only the
   configured harnesses'.
+- Fixes from the macOS connector certification (every driver unless noted):
+  a copy names the secret files it holds back once; a Kiro tool block names
+  DefenseClaw once (host hooks too); the egress counts are destinations
+  everywhere: the session summary reads `N new sites contacted · M sites
+  blocked` with M matching its `✗` lines, `sandbox status` reads
+  `N destinations contacted, M blocked`, and an invalid destination (a host
+  without a dot) counts as blocked like the feed shows it (the status JSON
+  keeps the request count as `egress.blocked_requests`). The banner's
+  `Hooks` line says, per user-tier harness, what the image keeps root-owned
+  and what the agent can still change (it said "the agent could edit its own
+  hook settings" also for Kiro and Hermes, whose hooks are root-owned). The
+  end of a session names `sandbox connect NAME -- <continue args>` last, and
+  not dimmed, for Kiro CLI, Hermes Agent and OpenHands too, and says that the
+  resume line the harness printed (`copilot --resume=…`, `kiro-cli
+  --resume-id …`, `hermes --resume …`, `openhands --resume …`) works only
+  inside the sandbox. After an apply, the next pull or session end of a
+  copy-mode sandbox shows, reviews and merges only what changed since that
+  apply (`… since the last apply`); with nothing new it asks nothing, and
+  `sandbox delete` of the stopped sandbox does not warn about unpulled work.
+  `sandbox pull` asks the same confirmation as a session's end. A new
+  sandbox runs in this machine's time zone (`DEFENSECLAW_HOST_TZ`, exported
+  as `TZ` where the image has the zone's file) instead of UTC. Ctrl-Z in a
+  harness whose own suspend fails (Copilot CLI) is explained at once in the
+  terminal's title, and the notice after it exits (and Hermes' at once) says
+  there is nothing to bring back with `fg`.
 
 ### Legacy OpenShell standalone sandbox removed
 

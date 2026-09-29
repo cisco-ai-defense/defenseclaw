@@ -45,6 +45,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	ta.env["TZ"] = ":America/New_York"
 	notice := "MCP: blocked the repository's servers repo-tool (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)"
 	ta.daemon.createMCP = &sandboxapi.MCPSummary{Imported: []string{"github", "linear"}, ProjectServers: "block", Project: []string{"repo-tool"}}
 	ta.daemon.createWarnings = []string{notice}
@@ -61,7 +62,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	if req.Harness != "claudecode" || req.Project != ta.project || req.Copy || req.LLM == nil ||
 		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-test-not-a-secret" ||
 		len(req.Credentials) != 1 || req.Credentials[0].Host != "api.stripe.com" || req.Credentials[0].Value != "stripe-test-value" ||
-		req.Env["FOO"] != "bar" {
+		req.Env["FOO"] != "bar" || req.TimeZone != "America/New_York" {
 		t.Fatalf("create request = %+v", req)
 	}
 	has(t, ta.output(),
@@ -73,7 +74,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
-		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted (1 request blocked) · 2 files changed (+10 −3)",
+		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted · 1 site blocked · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b")
 	if strings.Contains(ta.output(), "sk-test-not-a-secret") || strings.Contains(ta.output(), "stripe-test-value") {
@@ -615,7 +616,12 @@ func TestRunCopySession(t *testing.T) {
 			if r := ta.bodies("POST", "copybox/workspace"); len(r) != 2 || !strings.Contains(r[0], `"operation":"upload"`) || !strings.Contains(r[1], `"pull_mode":"apply"`) {
 				t.Fatalf("workspace reports = %q", r)
 			}
-			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)")
+			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)",
+				"⚠ nested repository vendor/lib is not copied")
+			// The held-back secrets are named once (cert copilot:F5).
+			if out := ta.output(); strings.Count(out, ".env") != 1 || !strings.Contains(out, "⚠ 1 secret file held back from the copy: .env") {
+				t.Fatalf("held-back lines:\n%s", out)
+			}
 		})
 	}
 }
@@ -749,18 +755,35 @@ func TestSummaryLine(t *testing.T) {
 		want          string
 	}{
 		{egress(1), egress(1), "Session ended · 0 tool calls · 0 new sites contacted"},
-		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted (1 request blocked)"},
-		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted (2 requests blocked)"},
+		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted · 1 site blocked"},
+		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted · 2 sites blocked"},
 		// Hook calls DefenseClaw answered with an error were blocked (the
 		// hooks fail closed).
 		{&sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}, &failed,
-			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted (1 request blocked)"},
+			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted · 1 site blocked"},
 		{&failed, &failed, "Session ended · 0 tool calls · 0 new sites contacted"},
 	} {
 		s := &session{app: newTestApp(t, "").App, before: c.before}
 		if got := s.summaryLine(c.after, nil); got != c.want {
 			t.Errorf("summaryLine(%+v) = %q, want %q", c.after.Egress, got, c.want)
 		}
+	}
+	// The blocked sites are the ✗ lines the session announced, one per
+	// destination however often it was tried, also when the daemon had
+	// blocked one of them before the session (cert copilot:F8, kiro:KR-F7,
+	// hermes:HERMES-8, openhands:MAC-OSH-OH-5: an invalid destination and
+	// webhook.site read "1 request blocked" over two ✗ lines).
+	box := sampleSandbox("f-box")
+	s := &session{app: newTestApp(t, "").App, sb: &box, before: egress(1)}
+	for _, ev := range []sandboxapi.ActivityEvent{
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site", Port: 443, Category: "webhook_catcher"},
+	} {
+		s.blockNotice(ev)
+	}
+	if got, want := s.summaryLine(egress(2), nil), "Session ended · 0 tool calls · 1 new site contacted · 2 sites blocked"; got != want {
+		t.Errorf("summaryLine after two blocked destinations = %q, want %q", got, want)
 	}
 	// Manual R2-17: a blocked call is named by its rule's title and ID, not
 	// the cut-off start of the reason.
@@ -807,6 +830,20 @@ func TestBanner(t *testing.T) {
 			[]string{"skip-permissions OFF (harness prompts kept)"}, nil},
 		{"omnigent", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.Harness, sb.HarnessName = "omnigent", "OmniGent" }, nil,
 			[]string{"OmniGent · approvals from OmniGent's policies, DefenseClaw's included"}, []string{"skip-permissions"}},
+		// A user tier says what the image protects for that harness: Kiro's
+		// and Hermes' hooks are root-owned (cert kiro:KR-F3,
+		// hermes:HERMES-3).
+		{"kiro's tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings and MCP servers are the agent's to edit"},
+			[]string{"could edit its own hook settings"}},
+		{"hermes' tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "hermes", "Hermes Agent", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
+			nil},
+		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")

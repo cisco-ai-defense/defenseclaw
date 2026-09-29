@@ -1194,6 +1194,8 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
+		// The sandbox's clock reads like this machine's.
+		TimeZone: openshell.HostTimeZone(a.Getenv),
 	}
 	reserved := map[string]bool{}
 	for _, c := range o.Credentials {
@@ -1398,8 +1400,8 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		// warnings below, one line each.
 		row("MCP", strings.Join(sb.MCP.Imported, " ✓ · ")+" ✓")
 	}
-	if sb.TamperTier != "" && sb.TamperTier != "managed" {
-		row("Hooks", sb.TamperTier+" tier: the agent could edit its own hook settings (hook silence is detected)")
+	if text := hooksTierText(sb); text != "" {
+		row("Hooks", text)
 	}
 	for _, v := range sb.Violations {
 		if !b.shown[violationKey(v)] {
@@ -1412,6 +1414,21 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		}
 	}
 	a.println()
+}
+
+// hooksTierText is the banner's Hooks line for a sandbox whose hooks are
+// not in the managed tier: what of them the image protects and what the
+// agent can still change, for its harness (harness.Spec.TamperNote), or
+// the tier's general meaning for a harness DefenseClaw does not know.
+func hooksTierText(sb *sandboxapi.Sandbox) string {
+	if sb.TamperTier == "" || sb.TamperTier == "managed" {
+		return ""
+	}
+	note := "the agent or a project can change what runs the hooks"
+	if spec, ok := harness.Get(sb.Harness); ok && spec.TamperNote != "" {
+		note = spec.TamperNote
+	}
+	return sb.TamperTier + " tier: " + note + " (hook silence is detected)"
 }
 
 // bannerHostPorts are the host ports the sandbox may ask to reach, as the

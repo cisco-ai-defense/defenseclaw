@@ -199,6 +199,9 @@ type DestinationStats struct {
 	Active  int64
 	// Blocked counts refused attempts.
 	Blocked int64
+	// Contacted reports that a tunnel or request reached the destination;
+	// false for one that was only ever refused.
+	Contacted bool
 	// FirstSeen is when the destination was first tracked: its first
 	// refusal or its first contact, whichever came first.
 	FirstSeen time.Time
@@ -625,6 +628,7 @@ func (d *destination) stats() DestinationStats {
 		Tunnels:     d.tunnels.Load(),
 		Active:      d.active.Load(),
 		Blocked:     d.blocked.Load(),
+		Contacted:   true,
 		FirstSeen:   d.firstSeen,
 		LastSeen:    time.Unix(0, d.lastSeen.Load()),
 		Novel:       d.novel,

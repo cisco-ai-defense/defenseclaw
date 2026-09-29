@@ -101,6 +101,9 @@ type session struct {
 	notices    []sessionNotice
 	noticeKeys map[string]bool
 	titleSet   bool
+	// blockedHosts are the destinations the session announced blocked
+	// (blockNotice), which the summary counts.
+	blockedHosts map[string]bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -395,6 +398,14 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	if ev.Unblockable {
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
 	}
+	s.noticeMu.Lock()
+	if s.blockedHosts == nil {
+		s.blockedHosts = map[string]bool{}
+	}
+	if len(s.blockedHosts) < maxSeenEvents {
+		s.blockedHosts[strings.ToLower(ev.Host)] = true
+	}
+	s.noticeMu.Unlock()
 	s.notice("block "+ev.Host, text, text)
 }
 
@@ -530,13 +541,20 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 		return workspaceFailure("record the copy's baseline", err, "")
 	}
 	report("completed", up, "")
-	for _, w := range up.Warnings {
+	a.copyWarnings(up)
+	return nil
+}
+
+// copyWarnings prints what an upload or a refresh of a copy left out: the
+// secret files it held back (one line, however many) and the record's
+// other warnings.
+func (a *App) copyWarnings(rec *workspace.CopyRecord) {
+	if n := len(rec.HeldBack); n > 0 {
+		a.warn(plural(int64(n), "secret file", "secret files") + " held back from the copy: " + strings.Join(firstN(rec.HeldBack, 8), ", "))
+	}
+	for _, w := range rec.Warnings {
 		a.warn(w)
 	}
-	if len(up.HeldBack) > 0 {
-		a.note("held back: " + strings.Join(firstN(up.HeldBack, 8), "  "))
-	}
-	return nil
 }
 
 func firstN(list []string, n int) []string {
@@ -816,25 +834,36 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 }
 
 // continueArgs are the harness arguments that continue its latest
-// conversation.
+// conversation in the project folder (all of them take the folder's most
+// recent one, which a sandbox's own folder makes this session's).
 var continueArgs = map[string]string{
 	"claudecode": "--continue",
 	"codex":      "resume --last",
 	"opencode":   "--continue",
 	"copilot":    "--continue",
+	"kiro":       "--resume",
+	"hermes":     "--continue",
+	"openhands":  "--resume --last",
 }
 
-// ownResumeHint is the resume command a harness prints as it exits. Typed
-// on this machine it runs the harness here, outside the sandbox, unless
-// the shell wrapper sends it into the sandbox.
+// ownResumeHint is how the resume command a harness prints as it exits
+// starts ("copilot --resume=<id>", "kiro-cli --resume-id <id>"). Its
+// conversation is in the sandbox, so typed on this machine it does not
+// reach it (the harness starts here, outside the sandbox, if it is
+// installed at all), unless the shell wrapper sends that command into the
+// sandbox. It cannot be kept off the screen: the harness prints it.
 var ownResumeHint = map[string]string{
 	"claudecode": "claude --resume",
 	"codex":      "codex resume",
+	"copilot":    "copilot --resume",
+	"kiro":       "kiro-cli --resume-id",
+	"hermes":     "hermes --resume",
+	"openhands":  "openhands --resume",
 }
 
-// continueHint names the command that continues this conversation inside
-// the sandbox (a plain connect starts a new one), and what the harness's
-// own resume hint does.
+// continueHint names, last and not dimmed, the command that continues this
+// conversation inside the sandbox (a plain connect starts a new one), and
+// what the harness's own resume hint does.
 func (s *session) continueHint() {
 	if s.headless || s.shell || s.spec == nil || !s.sawHooks.Load() {
 		// No conversation to continue: no hook of the session reached
@@ -849,13 +878,14 @@ func (s *session) continueHint() {
 	a := s.app
 	line := "continue this conversation: " + CommandName + " connect " + s.sb.Name + " -- " + args
 	if own, ok := ownResumeHint[s.spec.Name]; ok {
-		if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name) {
+		wrapped := strings.Fields(own)[0] == s.spec.Command && a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name)
+		if wrapped {
 			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed resumes it in this sandbox too: the shell wrapper is on)"
 		} else {
-			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed would run it on this machine, outside the sandbox)"
+			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed above works only inside the sandbox)"
 		}
 	}
-	a.note(line)
+	a.line(a.style("→", ansiCyan, ansiBold) + " " + line)
 }
 
 // settled reads the sandbox for the session summary once its counts stop
@@ -878,6 +908,7 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 			break
 		}
 		same := next.Egress.Destinations == after.Egress.Destinations && next.Egress.Blocked == after.Egress.Blocked &&
+			next.Egress.BlockedRequests == after.Egress.BlockedRequests &&
 			next.Hooks.ToolCalls == after.Hooks.ToolCalls && next.Hooks.ToolBlocked == after.Hooks.ToolBlocked &&
 			next.Hooks.HookFailed == after.Hooks.HookFailed
 		after = next
@@ -895,10 +926,12 @@ const (
 )
 
 // summaryLine is "Session ended · 57 tool calls (1 blocked: <rule title>
-// (RULE-ID)) · 23 new sites contacted (1 request blocked) · 8 files changed
-// (+212 −37)". Sites count destinations the sandbox had not contacted
-// before the session and blocks count refused requests, so the blocked
-// number is labelled as requests. A daemon restart during the session
+// (RULE-ID)) · 23 new sites contacted · 2 sites blocked · 8 files changed
+// (+212 −37)". Both counts are destinations: the sites contacted are those
+// the sandbox reached for the first time, and the sites blocked those the
+// session announced blocked (its ✗ lines, which the summary repeats), or
+// the daemon's count of newly blocked ones when that is higher (a late
+// denial, or a flood the feed paced). A daemon restart during the session
 // starts its counters from zero: the session's then count from zero too.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
@@ -910,7 +943,8 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
 		hooksBefore, restarted = sandboxapi.HookCoverage{}, true
 	}
-	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked {
+	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
 		egressBefore = sandboxapi.EgressStats{}
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
@@ -934,12 +968,13 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		parts = append(parts, plural(failed, "hook call", "hook calls")+" failed (blocked)")
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
-	requestsBlocked := after.Egress.Blocked - egressBefore.Blocked
-	siteText := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
-	if requestsBlocked > 0 {
-		siteText += " (" + plural(int64(requestsBlocked), "request blocked", "requests blocked") + ")"
+	parts = append(parts, plural(int64(max(sites, 0)), "new site contacted", "new sites contacted"))
+	s.noticeMu.Lock()
+	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
+	s.noticeMu.Unlock()
+	if sitesBlocked > 0 {
+		parts = append(parts, plural(int64(sitesBlocked), "site blocked", "sites blocked"))
 	}
-	parts = append(parts, siteText)
 	switch {
 	case rev != nil && rev.Summary != "":
 		parts = append(parts, rev.Summary)
@@ -1065,7 +1100,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
-	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: riskLine(&pull.Review)}
+	rev := &sandboxapi.ReviewResponse{Summary: pullSummary(pull), RiskLine: riskLine(&pull.Review)}
 	a.println(s.summaryLine(after, rev))
 	s.printHookReach(after, endedElsewhere)
 	s.printNotices()
@@ -1077,8 +1112,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.warn(b)
 	}
 	if pull.Empty() {
-		a.note("the sandbox changed nothing")
-		a.markCleanCopy(after)
+		if pull.Since != "" {
+			a.note("nothing new since the last apply: " + a.tildePath(after.Project) + " has the sandbox's changes")
+		} else {
+			a.note("the sandbox changed nothing")
+		}
+		s.markHandedOver(after)
 		return s.finish(ctx, false)
 	}
 	mode := ""
@@ -1119,14 +1158,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		opts.PatchOut = after.Name + ".patch"
 	}
 	if sensitive {
-		question := "Some changes can run code on this machine. Bring them back anyway?"
-		if secrets := pull.Review.SecretPaths(); len(secrets) > 0 {
-			a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
-			if rev.RiskLine == "" {
-				question = "Some changes hold what looks like a secret. Bring them back anyway?"
-			}
-		}
-		yes, err := a.ask(question, false, false)
+		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {
 			return errors.Join(err, s.keepInSandbox(ctx, after, pull))
 		}
@@ -1139,8 +1171,30 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 	if _, err := a.applyPull(ctx, s.api, after, pull, opts); err != nil {
 		a.warn(err.Error())
 		s.keepUnpulled()
+	} else {
+		s.markHandedOver(after)
 	}
 	return s.finish(ctx, false)
+}
+
+// markHandedOver records, for a sandbox this session's end stops, that
+// nothing in its copy is left to bring back (the pull found nothing new,
+// or it was applied or handed over as a branch or a patch), so `delete`
+// of it stopped need not warn about work it cannot check. A sandbox that
+// keeps running can still change, so it is not marked.
+func (s *session) markHandedOver(after *sandboxapi.Sandbox) {
+	if s.started && !s.liveRun && s.others == 0 {
+		s.app.markCleanCopy(after)
+	}
+}
+
+// pullSummary is a pull's "N files changed (+a −d)", said to start from
+// the last apply when an earlier apply brought the rest back already.
+func pullSummary(pull *workspace.PullResult) string {
+	if pull.Since != "" {
+		return pull.Review.SummaryLine() + " since the last apply"
+	}
+	return pull.Review.SummaryLine()
 }
 
 // keepInSandbox ends a copy-mode session whose changes stay in the sandbox

@@ -606,6 +606,30 @@ func TestSandboxHooksRenderVerdicts(t *testing.T) {
 	}
 }
 
+// TestSandboxKiroHookNamesDefenseClawOnce: Kiro shows the veto's stderr as
+// "PreToolHook blocked the tool execution: <stderr>". DefenseClaw's own
+// reason is printed as is ("defenseclaw: Blocked by DefenseClaw rule ..."
+// named it twice, cert kiro:KR-F10); any other reason keeps the prefix.
+func TestSandboxKiroHookNamesDefenseClawOnce(t *testing.T) {
+	var tc sandboxHookCase
+	for _, c := range sandboxHookCases() {
+		if c.connector == "kiro" && c.lifecycle {
+			tc = c
+		}
+	}
+	for reason, want := range map[string]string{
+		"Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command": "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command\n",
+		"marker rule matched": "defenseclaw: marker rule matched\n",
+	} {
+		reply := `{"action":"block","reason":"` + reason + `","hook_output":{"decision":"block","reason":"` + reason + `"}}`
+		run := newSandboxHookHarness(t, tc.provider, tc.version).run(t, SandboxHookDir+"/"+tc.script, tc.args, tc.stdin,
+			map[string]string{SandboxTokenEnv: "tok", "DEFENSECLAW_FAIL_MODE": "open"}, []string{"200|" + reply})
+		if !tc.blocked(run) || run.stdout != "" || run.stderr != want {
+			t.Errorf("reason %q: exit %d stdout %q stderr %q, want stderr %q", reason, run.exitCode, run.stdout, run.stderr, want)
+		}
+	}
+}
+
 // TestSandboxHooksBindTheRegisteredEvent: a hook posts only the event its
 // registration names (argv, never an exported variable), fails closed on any
 // other registration, and a Codex SessionEnd gets its short time budget.

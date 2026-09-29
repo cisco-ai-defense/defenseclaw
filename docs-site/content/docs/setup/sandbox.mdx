@@ -394,7 +394,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `MCP` | Your MCP servers that came along. |
-| `Hooks` | Shown for user-tier harnesses: the agent could edit its own hook settings, and hook silence is detected. |
+| `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings and MCP servers are the agent's to edit (Kiro has no system settings tier) (hook silence is detected)`. It reads the same on every compute driver. The connector pages have the details. |
 | `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
 
 ### Harness arguments and headless runs
@@ -649,11 +649,21 @@ folder; a run on a copy, such as every run on a Mac, asks where the changes
 go instead (see [work on a copy](#work-on-a-copy)).
 
 ```text
-Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 sites contacted (1 request blocked) · 8 files changed (+212 −37)
+Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
+✗ DefenseClaw blocked webhook.site:443 (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
 ```
+
+The network counts are sites (destinations): the new ones the sandbox
+reached, and the ones blocked during the session, each counted once however
+often it was tried and listed below with `✗`. An invalid destination (a
+host name without a dot, such as a mistyped `curl echo`) counts as blocked
+too. The counts cover everything in the sandbox while the session ran,
+`sandbox exec` commands from another terminal included. `sandbox status NAME`
+shows the same two counts for the sandbox's life (since the daemon started):
+`Egress 9 destinations contacted, 2 blocked, …`.
 
 - **Enter** or `y` keeps the changes.
 - `u` restores the folder to its pre-session snapshot.

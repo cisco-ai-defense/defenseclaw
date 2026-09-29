@@ -144,17 +144,19 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	out := make([]sandboxapi.Sandbox, 0, len(m.boxes))
 	bindings := make([]string, 0, len(m.boxes))
 	shared := make([]openshell.ComputeDriver, 0, len(m.boxes))
+	blocked := make([][]string, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
 			out = append(out, m.view(b))
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
+			blocked = append(blocked, b.blockedHostList())
 		}
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
 	for i := range out {
-		m.decorate(&out[i], proxy, bindings[i])
+		m.decorate(&out[i], proxy, bindings[i], blocked[i])
 	}
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })

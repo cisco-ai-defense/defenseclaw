@@ -55,7 +55,9 @@ const hermesSuspendModuleName = "defenseclaw_hermes_suspend"
 // the exception reached prompt_toolkit's event loop, which printed a
 // traceback and waited for Enter. The shim answers that one call, and no
 // other, with the notice the launcher's supervisor shows for every harness,
-// so Hermes keeps running.
+// so Hermes keeps running. Hermes prints its own "has been suspended. Run
+// `fg` …" line just before the call, which the shim cannot keep off the
+// screen: the notice that follows it says there is nothing to bring back.
 const hermesSuspendModule = `"""DefenseClaw: Ctrl-Z cannot suspend Hermes in an OpenShell sandbox.
 
 The sandbox refuses a kill() aimed at a process group, which is how Hermes
@@ -71,7 +73,8 @@ def _defenseclaw_kill(pid, sig):
     if pid == 0 and sig == _signal.SIGTSTP:
         try:
             _os.write(2, b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
-                         b"(the sandbox refuses the signal); it keeps running.\r\n")
+                         b"(the sandbox refuses the signal): Hermes Agent keeps running, and there "
+                         b"is nothing to bring back with fg.\r\n")
         except OSError:
             pass
         return None
@@ -92,6 +95,7 @@ var Hermes = register(&Spec{
 	// files, profiles and plugins from its workload-writable home at every
 	// start; the launcher's checks keep them from switching the hooks off.
 	TamperTier: connector.SandboxTamperTierUser,
+	TamperNote: "the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start",
 	verification: Verification{Status: VerifiedLive,
 		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=hermes): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a hostile user config.yaml and a planted sitecustomize in the launch environment, and launcher refusals of a planted .env (safe mode, managed dir), model-provider plugin and profile secrets section. Verified with the E2E mock model behind a --credential binding only: no curated provider profile has carried a real model inside a sandbox. The Mantle endpoint set (managed defenseclaw provider, bearer, Chat Completions) answered the pinned Hermes host-direct with openai.gpt-oss-20b; the OpenAI and Anthropic profiles are unverified"},
 	probe: ProbeSpec{
