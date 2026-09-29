@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -94,6 +95,31 @@ func transparent(name string) bool {
 	// macOS truncates command names to 16 bytes (defenseclaw-hook-launcher
 	// reads as defenseclaw-hoo).
 	return transparentNames[name] || strings.HasPrefix(name, "defenseclaw")
+}
+
+// Now returns the current instant in the units of an identity's start time,
+// "<goos>:<boot>:<clock>", or "" when it cannot be read (on Linux, also when
+// the boot ID is unknown). StartedBefore compares an identity with it.
+func Now() string {
+	boot, clock, ok := currentClock()
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s:%d", runtime.GOOS, boot, clock)
+}
+
+// StartedBefore reports whether the process an identity names started no
+// later than mark, a Now value from the same host. A process of another boot
+// started after every mark of an earlier one, and an identity or mark that
+// does not parse is not known to have started before anything.
+func StartedBefore(identity, mark string) bool {
+	id, at := strings.Split(identity, ":"), strings.Split(mark, ":")
+	if len(id) != 4 || len(at) != 3 || id[0] != at[0] || id[1] != at[1] {
+		return false
+	}
+	start, startErr := strconv.ParseInt(id[3], 10, 64)
+	clock, clockErr := strconv.ParseInt(at[2], 10, 64)
+	return startErr == nil && clockErr == nil && start <= clock
 }
 
 // Identity returns the identity of the agent process that runs this

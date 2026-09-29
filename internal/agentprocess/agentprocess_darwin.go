@@ -12,6 +12,7 @@ package agentprocess
 
 import (
 	"errors"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,6 +21,9 @@ import (
 const darwinZombie = 5
 
 func newLookup() (func(int) (Process, error), func()) { return lookupSysctl, func() {} }
+
+// currentClock reads the wall clock start times count, in microseconds.
+func currentClock() (string, int64, bool) { return "", time.Now().UnixMicro(), true }
 
 // lookupSysctl reads kern.proc.pid.<pid>. A process that does not exist
 // returns no record, which x/sys reports as EIO.
