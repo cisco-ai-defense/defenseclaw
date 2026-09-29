@@ -1035,7 +1035,8 @@ openshell:
 
 `--llm` still overrides it for one run. A provider the harness has no
 profile for (`gemini` for Claude Code) gives way to `auto`, and the run says
-so; a provider whose key is not set refuses the run and names the key. `--llm bedrock` uses a short-term Amazon Bedrock key from
+so, unless the harness shares no model credential at all (Kiro CLI, Cursor
+Agent, Amp, Devin CLI); a provider whose key is not set refuses the run and names the key. `--llm bedrock` uses a short-term Amazon Bedrock key from
 `AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`,
 then `$AWS_DEFAULT_REGION`, then `us-east-1`). Codex on Bedrock runs
 `openai.gpt-oss-20b` unless `-- -m MODEL` picks another, and Bedrock rejects

@@ -566,6 +566,28 @@ func TestRunLLMFromConfig(t *testing.T) {
 	}
 }
 
+// openshell.llm is one key for every harness: a harness that shares no
+// model credential (Kiro, Cursor Agent, Amp, Devin) takes auto without a
+// note on every run; one that shares others but not this one is told.
+func TestRunLLMNotesOnlyAHarnessWithOtherCredentials(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.LLM = LLMBedrock
+	for _, h := range []string{"kiro", "cursor", "amp", "devin"} {
+		spec := harnessSpec(t, h)
+		if choice, from, note := ta.runLLM(spec, ""); choice != LLMAuto || from != llmFromFlag || note != "" {
+			t.Fatalf("runLLM(%s) = %q, %q, %q; want auto without a note", h, choice, from, note)
+		}
+	}
+	claude := harnessSpec(t, "claudecode")
+	if _, _, note := ta.runLLM(claude, ""); note != "" {
+		t.Fatalf("runLLM(claude) notes %q for a provider it can use", note)
+	}
+	ta.Cfg.OpenShell.LLM = LLMGemini
+	if _, _, note := ta.runLLM(claude, ""); !strings.Contains(note, "which Claude Code cannot use") {
+		t.Fatalf("runLLM(claude) with gemini: note = %q", note)
+	}
+}
+
 // A --credential binding of the model's key wins over the detected
 // credential, and the banner says where the key comes from; --github-write
 // binds the token, by both names, to the API host alone and says what that

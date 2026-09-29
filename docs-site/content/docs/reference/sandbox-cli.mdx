@@ -520,7 +520,8 @@ A few rules the flags follow:
   wrappers, the TUI and the macOS app pass no `--llm`, so that key is how the
   runs they start share a chosen credential. A provider in `openshell.llm`
   that the harness has no profile for gives way to `auto`, and the run says
-  so; one whose key is not set refuses the run, naming the key. With `--llm none`, or when nothing is found, you log in inside the
+  so (a harness that shares no model credential at all, such as Kiro CLI,
+  takes `auto` without a note); one whose key is not set refuses the run, naming the key. With `--llm none`, or when nothing is found, you log in inside the
   sandbox, which stores a real token there that the agent can read. A Claude
   subscription can instead run `claude setup-token` on this machine (with
   the shell wrapper on, `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`) and

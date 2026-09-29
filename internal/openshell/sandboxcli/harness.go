@@ -85,7 +85,9 @@ const (
 // runLLM is the model credential choice of a run: --llm, else
 // openshell.llm, else auto; where it came from; and, when a configured
 // provider is one the harness has no credential for (openshell.llm is one
-// key for every harness), the note that the run takes auto instead. The flag
+// key for every harness), the note that the run takes auto instead. A
+// harness that shares no model credential at all (it logs in inside) takes
+// auto without the note, which every one of its runs would repeat. The flag
 // names this harness's own choice, so an unknown one there is an error
 // (detectLLM).
 func (a *App) runLLM(spec *harness.Spec, flag string) (choice, from, note string) {
@@ -99,7 +101,10 @@ func (a *App) runLLM(spec *harness.Spec, flag string) (choice, from, note string
 	if c == "" || c == LLMAuto {
 		return LLMAuto, llmFromFlag, ""
 	}
-	if c != LLMNone && !slices.ContainsFunc(a.llmCandidates(spec), func(cand llmCandidate) bool { return cand.llm == c }) {
+	if cands := a.llmCandidates(spec); c != LLMNone && !slices.ContainsFunc(cands, func(cand llmCandidate) bool { return cand.llm == c }) {
+		if len(cands) == 0 {
+			return LLMAuto, llmFromFlag, ""
+		}
 		return LLMAuto, llmFromFlag, llmFromConfig + " is " + c + ", which " + spec.DisplayName +
 			" cannot use, so this run shares the credential --llm auto finds"
 	}
