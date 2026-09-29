@@ -682,7 +682,13 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		input.Signals.Complexity = defaultComplexitySignals()
 	}
 
-	// Decisions
+	// Decisions — augment keyword-only decisions with embedding fallback
+	// when default embedding signals were auto-generated.
+	hasDefaultEmbeddings := len(input.Signals.Embeddings) > 0 && (mmBertPath != "" || qwen3Path != "")
+	embeddingSignalForKeyword := map[string]string{
+		"planning_intent": "_default_planning",
+		"coding_intent":   "_default_coding",
+	}
 	for _, d := range rcfg.Decisions {
 		dec := routing.TranslateDecision{
 			Name:      d.Name,
@@ -698,10 +704,39 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 				Value:         c.Name,
 			})
 		}
+		// If the decision only has keyword conditions and we have default
+		// embedding signals, add an embedding condition as OR fallback.
+		// This lets the SR match semantic intent even when keywords miss.
+		if hasDefaultEmbeddings && allConditionsAreKeyword(d.Conditions) {
+			for _, c := range d.Conditions {
+				if embSig, ok := embeddingSignalForKeyword[c.Name]; ok {
+					dec.Conditions = append(dec.Conditions, routing.TranslateCondition{
+						Signal:        "embedding",
+						MinConfidence: 0.7,
+						Value:         embSig,
+					})
+					if dec.Operator == "" {
+						dec.Operator = "OR"
+					}
+				}
+			}
+		}
 		input.Decisions = append(input.Decisions, dec)
 	}
 
 	return input
+}
+
+func allConditionsAreKeyword(conditions []config.RoutingCondition) bool {
+	if len(conditions) == 0 {
+		return false
+	}
+	for _, c := range conditions {
+		if strings.ToLower(strings.TrimSpace(c.Type)) != "keyword" {
+			return false
+		}
+	}
+	return true
 }
 
 func defaultEmbeddingSignals() []routing.TranslateEmbedding {

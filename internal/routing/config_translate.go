@@ -69,9 +69,8 @@ type SRSignalsConfig struct {
 }
 
 type SREmbeddingSignal struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description,omitempty"`
-	Examples    []string `yaml:"examples"`
+	Name       string   `yaml:"name"`
+	Candidates []string `yaml:"candidates"`
 }
 
 type SRDomainSignal struct {
@@ -346,9 +345,8 @@ func Translate(input TranslateInput) *SRConfig {
 	}
 	for _, e := range input.Signals.Embeddings {
 		cfg.Routing.Signals.Embeddings = append(cfg.Routing.Signals.Embeddings, SREmbeddingSignal{
-			Name:        e.Name,
-			Description: e.Description,
-			Examples:    e.Examples,
+			Name:       e.Name,
+			Candidates: e.Examples,
 		})
 	}
 	for _, d := range input.Signals.Domains {
