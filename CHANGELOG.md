@@ -432,6 +432,30 @@ deleted.
   slowed. Copilot's HTTP hooks, which would avoid the wait, let a tool call
   run when the request fails, so the sandbox keeps its fail-closed command
   hooks.
+- A harness that exits while a command it started still runs (OpenCode quit
+  in the middle of a tool call) no longer leaves that command changing the
+  sandbox while DefenseClaw pulls or reviews the work: the launcher's
+  terminal-session supervisor adopts what the harness leaves, ends it before
+  the session's end (two seconds' grace, then `SIGTERM` and `SIGKILL`) and
+  names it. OmniGent's server and `sandbox exec` commands are kept. Both
+  drivers; the images rebuild.
+- An interactive OpenCode session's banner has a `Keys` line: Esc
+  interrupts a turn, and Ctrl-C (OpenCode's quit key, also mid-turn) ends
+  the session.
+- A new OpenCode sandbox no longer downloads `@opencode-ai/plugin` and its
+  dependencies (about 20 MiB from registry.npmjs.org) at start: the image
+  records the pinned version as installed in `~/.config/opencode`, which
+  OpenCode's install check accepts. Both drivers; the OpenCode image
+  rebuilds.
+- The toast for a tool call DefenseClaw blocked in an OpenCode sandbox says
+  to click the tool's red line to see the reason again: OpenCode shows a
+  refused call's reason only there, and its plugins cannot set the tool's
+  output.
+- The OpenCode launcher's refusal of a plugin, custom tool or config file
+  inside the sandbox gives the commands that remove it from your machine
+  (`sandbox start`, `sandbox exec <name> -- rm <file>`, `sandbox connect`),
+  with the path quoted for the shell. Both drivers; the OpenCode image
+  rebuilds.
 
 ### Legacy OpenShell standalone sandbox removed
 

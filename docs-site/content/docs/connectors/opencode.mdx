@@ -226,9 +226,10 @@ asset declarations.
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run opencode` runs OpenCode in an NVIDIA OpenShell
-sandbox, on Linux or, on an Apple-silicon Mac, in a MicroVM that works on a
-copy of your folder: the agent sees only your project folder,
-and the DefenseClaw plugin gates every tool call. The [sandbox guide](/docs/setup/sandbox)
+sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its own that
+works on a copy of your folder ([macOS](/docs/setup/sandbox#macos)): the
+agent sees only your project folder, and the DefenseClaw plugin gates every
+tool call. The [sandbox guide](/docs/setup/sandbox)
 covers setup, the session and every flag. The first run builds the OpenCode
 image; `defenseclaw sandbox image build opencode` builds it ahead of time.
 `defenseclaw sandbox setup` builds the images of the harnesses in
@@ -242,11 +243,24 @@ replaces that list, so name every harness you want:
   other plugin and custom tool into the same process, where one could answer
   for the bridge. So the launcher refuses to start, naming the file, while
   any other plugin or custom tool would load, and refuses `--pure`, which
-  loads none. DefenseClaw also reports a sandbox whose hooks go silent while
-  the harness is active.
+  loads none. The refusal also gives the commands that remove the file from
+  your machine (`defenseclaw sandbox start <name> && defenseclaw sandbox exec
+  <name> -- rm <file>`, then `defenseclaw sandbox connect <name>`); the
+  refused start does not appear in `sandbox activity`, as the launcher has no
+  way to report there. DefenseClaw also reports a sandbox whose hooks go
+  silent while the harness is active.
 - **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
-  command line only, so the plugin also shows DefenseClaw's reason in a toast
-  (the model gets the same reason as the tool's error).
+  command line only, in red, and shows the reason only when you click that
+  line; a plugin cannot put it in the tool's output. So the plugin also
+  shows DefenseClaw's reason in a toast for 15 seconds, which says to click
+  the red line to see it again (the model gets the same reason as the
+  tool's error). The session summary counts the block too.
+- **Esc, not Ctrl-C, interrupts a turn.** Ctrl-C with an empty prompt quits
+  OpenCode, also while a tool runs, and that ends the session; the banner's
+  `Keys` line says so.
+- **Quitting in the middle of a tool call.** OpenCode does not end a shell
+  tool's command when it quits. DefenseClaw ends it when OpenCode exits,
+  before the pull or the review, and names it in the terminal.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs):
   OpenCode starts with `--auto`, which approves every permission OpenCode's
   config does not deny. `--safe`, or the `strict` pack, keeps OpenCode's
@@ -262,7 +276,11 @@ replaces that list, so name every harness you want:
 - **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
   and Codex sandboxes only.
 - **Image and verification.** The image installs OpenCode 1.18.31, replacing
-  the base image's OpenCode 1.2.18, which no hook contract covers. Verified
+  the base image's OpenCode 1.2.18, which no hook contract covers. It also
+  records OpenCode's plugin package, `@opencode-ai/plugin`, as installed in
+  `~/.config/opencode`, so a new sandbox does not download it (about 20 MiB
+  from registry.npmjs.org) at every start; nothing in the sandbox imports
+  it, since the launcher refuses every plugin but DefenseClaw's. Verified
   end to end: against a mock model the plugin's hooks reached DefenseClaw and
   a blocked tool call had no effect, also with `plugin: []` in user and
   project config, and the launcher refused planted plugins. In a live sandbox

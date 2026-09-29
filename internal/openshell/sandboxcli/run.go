@@ -1408,6 +1408,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		where = "announced in this terminal's title as they come"
 	}
 	row("Asks", where+"; answer them in another terminal: "+CommandName+" approvals --sandbox "+sb.Name+" (or `defenseclaw tui`: 7, then t)")
+	if keys := sessionKeys[sb.Harness]; keys != "" && a.IO.TTY && b.o.Prompt == "" && !printMode(specOf(sb), b.o.Args) {
+		row("Keys", keys)
+	}
 	if sb.MCP != nil && len(sb.MCP.Imported) > 0 {
 		// Servers left behind and a repository's blocked servers arrive as
 		// warnings below, one line each.
@@ -1476,6 +1479,14 @@ func specOf(sb *sandboxapi.Sandbox) *harness.Spec {
 	}
 	spec, _ := harness.Get("claudecode")
 	return spec
+}
+
+// sessionKeys is the banner's Keys line of an interactive session whose
+// harness quits on the Ctrl-C a user presses to stop a turn, which ends
+// the whole session: OpenCode 1.18 binds Ctrl-C to app_exit (with an empty
+// prompt, also while a tool runs) and Esc to session_interrupt.
+var sessionKeys = map[string]string{
+	"opencode": "Esc interrupts OpenCode's turn; Ctrl-C (with an empty prompt) quits OpenCode, which ends the session",
 }
 
 // ownApprovals are the harnesses without a skip-permissions switch: their

@@ -248,9 +248,10 @@ GitHub's Copilot CLI 1.0.76 release notes state that per-path sandbox denials ca
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run copilot` runs GitHub Copilot CLI in an NVIDIA
-OpenShell sandbox, on Linux or, on an Apple-silicon Mac, in a MicroVM that
-works on a copy of your folder: the agent sees only your project, and
-DefenseClaw hooks gate every tool call. The
+OpenShell sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its
+own that works on a copy of your folder ([macOS](/docs/setup/sandbox#macos)):
+the agent sees only your project folder, and DefenseClaw hooks gate every tool
+call. The
 [sandbox guide](/docs/setup/sandbox) covers setup, the session and every flag.
 The first run builds the Copilot CLI image;
 `defenseclaw sandbox image build copilot` builds it ahead of time.
