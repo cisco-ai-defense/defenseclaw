@@ -177,15 +177,17 @@ func (s *Store) carryOverActions(movedPath string) (int, error) {
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	kept := 0
+	kept, unreadable := 0, 0
 	for rows.Next() {
 		var targetType, targetName, actionsJSON, connectorName string
 		var sourcePath, reason, storedAt sql.NullString
 		if err := rows.Scan(&targetType, &targetName, &sourcePath, &actionsJSON, &reason, &storedAt, &connectorName); err != nil {
+			unreadable++
 			continue
 		}
 		var state ActionState
 		if targetType == "" || targetName == "" || json.Unmarshal([]byte(actionsJSON), &state) != nil {
+			unreadable++
 			continue
 		}
 		var updatedAt any = time.Now().UTC()
@@ -204,6 +206,11 @@ func (s *Store) carryOverActions(movedPath string) (int, error) {
 		}
 	}
 	readErr := rows.Err()
+	if unreadable > 0 && readErr == nil {
+		readErr = fmt.Errorf("damaged entries skipped: %d", unreadable)
+	} else if unreadable > 0 {
+		readErr = fmt.Errorf("%w; damaged entries skipped: %d", readErr, unreadable)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}

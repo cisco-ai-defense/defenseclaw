@@ -566,6 +566,11 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 	if err := store.SetActionForConnector("tool", "mcp__probe__one", "claudecode", "", ActionState{Install: "block"}, "probe"); err != nil {
 		t.Fatalf("SetActionForConnector: %v", err)
 	}
+	// A block entry that no longer decodes must be reported, not dropped silently.
+	if _, err := store.db.Exec(`INSERT INTO actions (id, target_type, target_name, actions_json, updated_at, connector)
+		VALUES ('damaged', 'tool', 'mcp__probe__two', '{"install":', CURRENT_TIMESTAMP, 'claudecode')`); err != nil {
+		t.Fatalf("insert damaged entry: %v", err)
+	}
 	var rootPage, pageSize int64
 	if err := store.db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = 'audit_events'`).Scan(&rootPage); err != nil {
 		t.Fatalf("audit_events root page: %v", err)
@@ -607,7 +612,8 @@ func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
 			kept++
 		}
 	}
-	if kept != 1 || !strings.Contains(warn.String(), "block/allow entries carried over: 1.") {
+	if kept != 1 || !strings.Contains(warn.String(), "block/allow entries carried over: 1.") ||
+		!strings.Contains(warn.String(), "damaged entries skipped: 1") {
 		t.Fatalf("moved stores = %v, warning = %q", moved, warn.String())
 	}
 }
