@@ -101,7 +101,9 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, for
 func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
 	rec, ok, err := builder.Current(b.spec(h, microVM))
-	return ok && rec.HookFireVerified, err
+	// A MicroVM image whose MicroVM check settled nothing is checked
+	// again before its next sandbox, so it is not current yet.
+	return ok && rec.HookFireVerified && !rec.MicroVMUnchecked(), err
 }
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }

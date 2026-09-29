@@ -218,14 +218,23 @@ func (a *App) imagesCheck(microVM bool) openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, err.Error()
 		return c
 	}
-	var ready, missing []string
+	var ready, missing, unchecked, refused []string
 	for _, spec := range specs {
 		found := false
 		for _, r := range recs {
 			if r.Connector == spec.Name && r.HookFireVerified && r.MicroVM == microVM && r.UID == os.Getuid() &&
 				r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
 				found = true
-				ready = append(ready, spec.Name+" "+r.HarnessVersion)
+				switch {
+				case r.MicroVMProblem != "":
+					// Every run of it on the MicroVM driver is refused.
+					refused = append(refused, spec.Name)
+				case r.MicroVMUnchecked():
+					// Its next run checks it again first, which takes a while.
+					unchecked = append(unchecked, spec.Name)
+				default:
+					ready = append(ready, spec.Name+" "+r.HarnessVersion)
+				}
 				break
 			}
 		}
@@ -233,13 +242,28 @@ func (a *App) imagesCheck(microVM bool) openshell.Check {
 			missing = append(missing, spec.Name)
 		}
 	}
+	var notes []string
+	if len(missing) > 0 {
+		notes = append(notes, "not built yet: "+strings.Join(missing, ", ")+" (the first run builds it, which takes a while)")
+	}
+	if len(refused) > 0 {
+		notes = append(notes, "cannot start in an OpenShell MicroVM: "+strings.Join(refused, ", ")+
+			" (the image build's MicroVM check says why; a gateway on the docker driver runs it)")
+	}
+	if len(unchecked) > 0 {
+		notes = append(notes, "not checked for an OpenShell MicroVM yet: "+strings.Join(unchecked, ", ")+
+			" (the next run checks it first, which takes a while)")
+	}
 	switch {
-	case len(missing) == 0:
+	case len(notes) == 0:
 		c.Status, c.Detail = openshell.StatusPass, "hook-verified: "+strings.Join(ready, ", ")
-	default:
-		c.Status = openshell.StatusWarn
-		c.Detail = "not built yet: " + strings.Join(missing, ", ") + " (the first run builds it, which takes a while)"
+	case len(missing) > 0:
+		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
 		c.Fix = &openshell.Fix{Summary: "build the images now", Command: CommandName + " image build " + strings.Join(missing, " ")}
+	default:
+		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
+		recheck := append(append([]string{}, refused...), unchecked...)
+		c.Fix = &openshell.Fix{Summary: "check them again", Command: CommandName + " image build " + strings.Join(recheck, " ") + " --force"}
 	}
 	if forbidden != "" {
 		c.Detail += "; " + forbidden
