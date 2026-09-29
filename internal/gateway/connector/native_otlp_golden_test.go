@@ -365,8 +365,17 @@ func TestBuildClaudeCodeOtelEnv_HybridProxyMode(t *testing.T) {
 		o.HybridProxyMode = true
 		env := buildClaudeCodeOtelEnv(o)
 		want := "http://127.0.0.1:4000/c/claudecode"
-		if got := env["ANTHROPIC_BASE_URL"]; got != want {
-			t.Errorf("ANTHROPIC_BASE_URL = %q, want %q", got, want)
+		if got := env["ANTHROPIC_BEDROCK_BASE_URL"]; got != want {
+			t.Errorf("ANTHROPIC_BEDROCK_BASE_URL = %q, want %q", got, want)
+		}
+		if _, present := env["ANTHROPIC_BASE_URL"]; present {
+			t.Errorf("ANTHROPIC_BASE_URL must not be set in Bedrock hybrid mode, got %q", env["ANTHROPIC_BASE_URL"])
+		}
+		if got := env["CLAUDE_CODE_USE_BEDROCK"]; got != "1" {
+			t.Errorf("CLAUDE_CODE_USE_BEDROCK = %q, want 1 so Claude Code uses Bedrock Converse via the proxy", got)
+		}
+		if got := env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"]; got != "1" {
+			t.Errorf("CLAUDE_CODE_SKIP_BEDROCK_AUTH = %q, want 1 so the proxy injects the Bedrock token", got)
 		}
 	})
 

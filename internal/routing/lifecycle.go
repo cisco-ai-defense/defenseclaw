@@ -92,7 +92,7 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 	}
 	configDir := filepath.Dir(l.configPath)
 	configFile := filepath.Base(l.configPath)
-	return []string{
+	args := []string{
 		"run", "-d", "--pull=missing",
 		"--name", l.containerName,
 		"--label", srContainerNameLabel,
@@ -101,12 +101,17 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 		"--read-only",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 		"-v", fmt.Sprintf("%s:/app/config:ro", configDir),
-		// The stock v0.3.0 entrypoint binds the classification API to
-		// container port 8080. Port is the operator-selected host port.
+	}
+	modelsDir := filepath.Join(filepath.Dir(configDir), "models")
+	if info, err := os.Stat(modelsDir); err == nil && info.IsDir() {
+		args = append(args, "-v", fmt.Sprintf("%s:/app/models:ro", modelsDir))
+	}
+	args = append(args,
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", l.port, DefaultAPIPort),
 		image,
 		fmt.Sprintf("/app/config/%s", configFile),
-	}, nil
+	)
+	return args, nil
 }
 
 // Start launches only the router container via Docker.

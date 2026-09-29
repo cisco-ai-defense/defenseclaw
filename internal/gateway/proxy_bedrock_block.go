@@ -111,6 +111,35 @@ func bedrockModelFromPath(path string) string {
 	return rest
 }
 
+func isBedrockNativeModelPath(path string) bool {
+	if !strings.Contains(path, "/model/") {
+		return false
+	}
+	switch bedrockActionFromPath(path) {
+	case bedrockActionConverse, bedrockActionConverseStream, bedrockActionInvoke, bedrockActionInvokeResponseStream:
+		return true
+	default:
+		return false
+	}
+}
+
+// rewriteBedrockModelPath swaps the modelId segment of a Bedrock
+// /model/{modelId}/{action} path. The Converse and Invoke APIs take the
+// model from the URL, not the JSON body; injecting a body "model" field
+// makes Bedrock reject the request with "model: Extra inputs are not permitted".
+func rewriteBedrockModelPath(path, model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" || strings.ContainsAny(model, "/\\") || strings.Contains(model, "..") || !isBedrockNativeModelPath(path) {
+		return path
+	}
+	action := bedrockActionFromPath(path)
+	idx := strings.Index(path, "/model/")
+	if idx < 0 || action == "" {
+		return path
+	}
+	return path[:idx] + "/model/" + url.PathEscape(model) + "/" + action
+}
+
 // bedrockBlockedConverseBody returns the JSON body of a Bedrock
 // Converse (non-streaming) block response. It is shared with the
 // streaming writer as the payload of the (single) contentBlockDelta.

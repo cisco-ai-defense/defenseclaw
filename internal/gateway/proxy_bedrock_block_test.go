@@ -48,6 +48,54 @@ func TestBedrockActionFromPath(t *testing.T) {
 	}
 }
 
+func TestRewriteBedrockModelPath(t *testing.T) {
+	cases := []struct {
+		name  string
+		path  string
+		model string
+		want  string
+	}{
+		{
+			name:  "same model invoke-stream",
+			path:  "/model/global.anthropic.claude-opus-4-6-v1/invoke-with-response-stream",
+			model: "global.anthropic.claude-opus-4-6-v1",
+			want:  "/model/global.anthropic.claude-opus-4-6-v1/invoke-with-response-stream",
+		},
+		{
+			name:  "swap model converse",
+			path:  "/model/old.model/converse",
+			model: "global.anthropic.claude-opus-4-6-v1",
+			want:  "/model/global.anthropic.claude-opus-4-6-v1/converse",
+		},
+		{
+			name:  "keeps colon (RFC 3986 pchar)",
+			path:  "/model/old/invoke",
+			model: "anthropic.claude-3-5-sonnet-20240620-v1:0",
+			want:  "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/invoke",
+		},
+		{
+			name:  "rejects slash injection",
+			path:  "/model/safe/invoke",
+			model: "../admin",
+			want:  "/model/safe/invoke",
+		},
+		{
+			name:  "ignores non-bedrock path",
+			path:  "/v1/messages",
+			model: "claude",
+			want:  "/v1/messages",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rewriteBedrockModelPath(tc.path, tc.model)
+			if got != tc.want {
+				t.Errorf("rewriteBedrockModelPath(%q, %q) = %q; want %q", tc.path, tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBedrockModelFromPath(t *testing.T) {
 	cases := []struct {
 		name string
