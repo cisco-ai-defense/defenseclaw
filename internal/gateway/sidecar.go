@@ -666,6 +666,22 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 		})
 	}
 
+	// Auto-generate default signals when embedding models are available
+	// and the user hasn't explicitly configured that signal type. This
+	// enables full SR classification (not just keywords) out of the box.
+	if mmBertPath != "" || qwen3Path != "" {
+		if len(input.Signals.Embeddings) == 0 {
+			input.Signals.Embeddings = defaultEmbeddingSignals()
+			fmt.Fprintf(os.Stderr, "[routing] auto-generated %d default embedding signals (embedding model available)\n", len(input.Signals.Embeddings))
+		}
+	}
+	if len(input.Signals.Domains) == 0 {
+		input.Signals.Domains = defaultDomainSignals()
+	}
+	if len(input.Signals.Complexity) == 0 {
+		input.Signals.Complexity = defaultComplexitySignals()
+	}
+
 	// Decisions
 	for _, d := range rcfg.Decisions {
 		dec := routing.TranslateDecision{
@@ -686,6 +702,68 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	}
 
 	return input
+}
+
+func defaultEmbeddingSignals() []routing.TranslateEmbedding {
+	return []routing.TranslateEmbedding{
+		{
+			Name:        "_default_planning",
+			Description: "Architecture, design, planning, and review tasks",
+			Examples: []string{
+				"help me think through the system architecture",
+				"what are the tradeoffs between these approaches",
+				"design a scalable solution for this problem",
+				"review this code for potential issues",
+				"plan the implementation strategy",
+				"evaluate the pros and cons",
+				"write a technical spec for this feature",
+				"how should we approach this migration",
+			},
+		},
+		{
+			Name:        "_default_coding",
+			Description: "Code implementation, debugging, and modification tasks",
+			Examples: []string{
+				"write a function that parses this JSON",
+				"fix the null pointer error on line 42",
+				"add error handling to the HTTP client",
+				"refactor this class to use dependency injection",
+				"implement the login endpoint",
+				"this test is failing with a timeout",
+				"create a unit test for the parser",
+				"optimize this database query",
+			},
+		},
+	}
+}
+
+func defaultDomainSignals() []routing.TranslateDomain {
+	return []routing.TranslateDomain{
+		{
+			Name:       "_default_devops",
+			Categories: []string{"kubernetes", "docker", "terraform", "ci-cd", "infrastructure", "deployment", "helm", "ansible"},
+		},
+		{
+			Name:       "_default_data",
+			Categories: []string{"sql", "database", "analytics", "pipeline", "etl", "data-science", "visualization", "pandas"},
+		},
+	}
+}
+
+func defaultComplexitySignals() []routing.TranslateComplexity {
+	return []routing.TranslateComplexity{
+		{
+			Name:             "_default_simple",
+			MaxMessageLength: 200,
+			Indicators:       []string{"simple", "quick", "short", "one-liner", "hello", "hi", "thanks"},
+		},
+		{
+			Name:             "_default_complex",
+			MinMessageLength: 500,
+			MinToolCount:     3,
+			Indicators:       []string{"multi-step", "cross-file", "architectural", "migration", "refactor entire"},
+		},
+	}
 }
 
 func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
