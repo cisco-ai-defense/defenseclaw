@@ -606,7 +606,10 @@ func maskedRels(binding sandboxauth.Binding, workdir string) []string {
 // Delete deletes a sandbox and everything DefenseClaw created for it: the
 // providers, the binding (its token stops working at once), the egress
 // credential and unblocks, the mount pins and mask files, and by default
-// the snapshot.
+// the snapshot. A run image (vm) stays, even one no other sandbox uses:
+// the next sandbox of its posture boots it, where a rebuilt one would get
+// a new image ID and a new prepared disk from the driver (image prune
+// removes it with its overlay image; see image.Builder.pruneRunImages).
 func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {

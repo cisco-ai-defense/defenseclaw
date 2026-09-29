@@ -192,7 +192,14 @@ not the driver's name or `runtime.GOOS`.
   minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
   keyed by image ID and kept by OpenShell); a cached one starts in seconds.
   The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
-  its "about a minute" note.
+  its "about a minute" note. `delete` keeps a sandbox's run image even when
+  no other sandbox uses it, and `image prune` keeps every run image of an
+  overlay image it keeps: the run image adds only its files' few layers to
+  Docker, while a rebuilt one gets a new image ID, which the driver
+  prepares another rootfs for (another minute and about 5 GB). So each
+  posture's run image, and its prepared rootfs of about 5 GB, stays until
+  its overlay image is superseded and pruned; the rootfs stays after that
+  too, in OpenShell's cache, which the doctor's disk check reports.
 - **Stops.** A MicroVM stopped without a flush brings back empty what its
   workload wrote since the last one (OpenShell 0.1.1; `StopFlushes` is off
   for vm). The daemon's stop runs `sync` in the sandbox first. Every gateway
