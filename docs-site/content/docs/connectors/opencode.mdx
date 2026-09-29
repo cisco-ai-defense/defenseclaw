@@ -261,6 +261,11 @@ replaces that list, so name every harness you want:
 - **Quitting in the middle of a tool call.** OpenCode does not end a shell
   tool's command when it quits. DefenseClaw ends it when OpenCode exits,
   before the pull or the review, and names it in the terminal.
+- **"(no output)" for a command that printed.** OpenCode 1.18.31 can stop
+  reading a shell command's output as soon as the command exits, and then
+  reports "(no output)" to you and the model although the command ran. This
+  is OpenCode's behaviour, seen rarely (once, on a new sandbox's first tool
+  call); the next call is not affected.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs):
   OpenCode starts with `--auto`, which approves every permission OpenCode's
   config does not deny. `--safe`, or the `strict` pack, keeps OpenCode's

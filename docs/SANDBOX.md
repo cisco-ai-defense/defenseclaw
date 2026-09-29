@@ -1911,6 +1911,16 @@ These were measured on the pinned releases inside the community base image
   but not the nested session's tools. `opencode run --auto` is the headless
   skip-permissions mode. The base image ships OpenCode 1.2.18, which is
   outside every hook contract. The image removes it.
+- **OpenCode 1.18.31 can lose a shell command's output.** Its bash tool
+  reads the command's output in a fiber forked into a scope that closes as
+  soon as the exit code arrives, which interrupts the reader: output it had
+  not read yet is dropped, and the tool reports "(no output)" to the TUI and
+  the model although the command ran. Seen once, on the first tool call of a
+  new MicroVM sandbox (`echo dce2e-allowed > /tmp/dce2e-allowed.txt && cat
+  /tmp/dce2e-allowed.txt`, whose file was written); the next call, and the
+  same first call in an earlier round, returned the output. It is OpenCode's
+  race, not the supervisor's or the plugin's (which only reads the result in
+  `tool.execute.after`).
 - **OpenCode plugins share the process, so the tier is user.** OpenCode
   imports every plugin into the process the DefenseClaw plugin runs in: the
   `{plugin,plugins}/*.{js,ts}` files and `{tool,tools}` custom tools of every
