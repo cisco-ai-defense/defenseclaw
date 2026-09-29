@@ -468,6 +468,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return err
 	}
+	if !gw.Driver.SkipWorkloadCheck {
+		if err := m.verifyStarted(ctx, gw, b, rec); err != nil {
+			return err
+		}
+	}
 	m.mu.Lock()
 	b.sb = sb
 	// A new session: its rule budget and approval rate start over.

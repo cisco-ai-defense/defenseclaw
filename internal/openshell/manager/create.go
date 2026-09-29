@@ -297,6 +297,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if note := limitsNote(gw.Driver, eff); note != "" {
 		rec.Warnings = append(rec.Warnings, note)
 	}
+	rec.Verify = verifyExpectation(img, spec, arts)
 	rec.ProviderEndpoints = providerEndpoints(name, llm, creds)
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv
@@ -538,9 +539,20 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return nil, err
 	}
+	// Before the sandbox is saved and watched: one that does not run as
+	// prepared is rolled back like one OpenShell rejected.
+	var hostname string
+	if !gw.Driver.SkipWorkloadCheck {
+		facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify)
+		if err != nil {
+			return nil, err
+		}
+		hostname = facts.Hostname
+	}
 
 	m.mu.Lock()
 	b.rec.ID = sb.ID
+	b.rec.Hostname = hostname
 	b.sb = sb
 	b.creating = false
 	m.mu.Unlock()

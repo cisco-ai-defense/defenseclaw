@@ -264,7 +264,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 	}
 	m.mu.Lock()
 	id := b.identity()
-	name, harnessName := b.rec.Name, b.rec.Harness
+	name, harnessName, hostname := b.rec.Name, b.rec.Harness, b.rec.Hostname
 	m.mu.Unlock()
 	// A record from before this daemon started is OpenShell's stream
 	// replaying what it recorded while DefenseClaw was down: it lands on
@@ -295,7 +295,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		// because the policy changed under it (policyReloadCut), which the
 		// policy still allows: the client connects again. They are
 		// audited, but neither counted nor shown on the feed.
-		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host) || policyReloadCut(r)))
+		quiet := fetch || (r.Denied() && (dnsRefusal(r) || ownHostName(host, hostname) || policyReloadCut(r)))
 		ofHarness := harnessActivity(harnessName, r.Binary)
 		if !fetch {
 			m.markWork(b, at, ofHarness, harnessModelCall(r, ofHarness))
@@ -478,13 +478,19 @@ func (m *Manager) hostAliasPortLocked(b *box, port int) bool {
 
 const openshellHostAlias = "host.openshell.internal"
 
-// ownHostName reports the host name Docker gives a sandbox's container,
-// the first 12 hex digits of its ID, which is the workload's own name.
-// Tools look it up to find their own address: git does when it has no
-// identity, to make up an e-mail address. OpenShell's DNS refuses it like
-// every single-label name, and nothing is reached by it, so its refusal is
-// no blocked site.
-func ownHostName(host string) bool {
+// ownHostName reports the workload's own host name: the one the workload
+// check read in the sandbox (recorded), or the one Docker gives a
+// sandbox's container, the first 12 hex digits of its ID (a MicroVM's is
+// the sandbox's name). Tools look it up to find their own address: git
+// does when it has no identity, to make up an e-mail address. OpenShell's
+// DNS refuses it like every single-label name, and nothing is reached by
+// it, so its refusal is no blocked site.
+func ownHostName(host, recorded string) bool {
+	// A single label only: a name with a dot is a site, whatever the
+	// sandbox calls itself.
+	if recorded != "" && !strings.Contains(recorded, ".") && strings.EqualFold(host, recorded) {
+		return true
+	}
 	if len(host) != 12 {
 		return false
 	}

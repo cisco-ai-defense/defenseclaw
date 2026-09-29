@@ -75,12 +75,12 @@ func TestGatewayDriver(t *testing.T) {
 // identity from the gateway and names images no registry serves.
 func TestDriverTable(t *testing.T) {
 	docker, ok := openshell.LookupDriver("docker")
-	if !ok || docker != (openshell.Driver{Name: openshell.DriverDocker, HostMounts: true, SandboxLimits: true}) {
+	if !ok || docker != (openshell.Driver{Name: openshell.DriverDocker, HostMounts: true, SandboxLimits: true, SkipWorkloadCheck: true}) {
 		t.Fatalf("docker = %+v, %v", docker, ok)
 	}
 	vm, ok := openshell.LookupDriver("vm")
 	if !ok || vm.Name != openshell.DriverVM || vm.HostMounts || vm.SandboxLimits || !vm.RunFilesInImage || !vm.GatewayIdentity ||
-		vm.MountRefusal == "" || !strings.HasPrefix(vm.ImageRepository, "defenseclaw.invalid/") {
+		vm.MountRefusal == "" || !strings.HasPrefix(vm.ImageRepository, "defenseclaw.invalid/") || vm.SkipWorkloadCheck {
 		t.Fatalf("vm = %+v, %v", vm, ok)
 	}
 	// A record from before drivers were kept was made on docker.
@@ -91,7 +91,7 @@ func TestDriverTable(t *testing.T) {
 		t.Fatalf(`LookupDriver("podman") = %+v, %v`, unknown, ok)
 	}
 	// The zero Driver fails closed.
-	if zero := (openshell.Driver{}); zero.HostMounts || zero.SandboxLimits || zero.RunFilesInImage {
+	if zero := (openshell.Driver{}); zero.HostMounts || zero.SandboxLimits || zero.RunFilesInImage || zero.SkipWorkloadCheck {
 		t.Fatalf("zero Driver = %+v", zero)
 	}
 }

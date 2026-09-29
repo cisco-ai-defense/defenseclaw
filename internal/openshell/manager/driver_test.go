@@ -36,9 +36,12 @@ import (
 )
 
 // newVMEnv is newEnv on a gateway that runs OpenShell's MicroVM driver.
+// Its sandboxes answer the workload check as their records expect.
 func newVMEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	t.Helper()
-	return newDaemonEnv(t, daemonOptions{driver: openshell.DriverVM}, edit)
+	e := newDaemonEnv(t, daemonOptions{driver: openshell.DriverVM}, edit)
+	e.fake.HandleExec(e.workloadChecks(nil, nil))
+	return e
 }
 
 // The connector reads the driver off the gateway, and a gateway that runs

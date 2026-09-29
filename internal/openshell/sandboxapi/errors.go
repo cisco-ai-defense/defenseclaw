@@ -48,7 +48,9 @@ const (
 	// CodeImageUnavailable: no hook-verified overlay image exists (and
 	// building one was refused or failed).
 	CodeImageUnavailable = "image_unavailable"
-	// CodePolicyRejected: OpenShell rejected the sandbox configuration.
+	// CodePolicyRejected: OpenShell rejected the sandbox configuration, or
+	// the sandbox it made does not run as DefenseClaw prepared it (the
+	// workload check after ready).
 	CodePolicyRejected = "policy_rejected"
 	// CodeUpstream: an OpenShell call failed.
 	CodeUpstream = "upstream_error"
