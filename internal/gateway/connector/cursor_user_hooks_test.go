@@ -484,7 +484,7 @@ func TestPerUserCursorSetupAndTeardownWorkOnACleanedFile(t *testing.T) {
 	c := NewCursorConnector()
 	opts := SetupOpts{DataDir: f.dataDir}
 	if err := WithUserHomeDir(f.home, func() error {
-		return c.removeConfigEntries(f.hooksPath, c.hookCommand(opts))
+		return c.removeConfigEntries(f.hooksPath, c.hookCommand(opts), opts)
 	}); err != nil {
 		t.Fatalf("per-user teardown of the cleaned file: %v", err)
 	}
