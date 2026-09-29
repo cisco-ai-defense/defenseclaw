@@ -253,7 +253,7 @@ func newSSHShimIn(base, realSSH, pathEnv string, create bool) (*SSHShim, error) 
 // write puts the shim in place atomically (a temporary file renamed over
 // Path) and reads it back.
 func (s *SSHShim) write() error {
-	if err := checkSSHShimDir(s.Dir); err != nil {
+	if _, err := checkSSHShimDir(s.Dir); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(s.Dir, ".ssh-*")
@@ -315,7 +315,8 @@ func (s *SSHShim) probe() error {
 }
 
 // Verify checks that the shim is still exactly what NewSSHShim wrote, a
-// regular file of the user's, in a directory only the user can write.
+// regular file of the user's, in a directory only the user can write, and
+// that no macOS ACL on either lets another user write them.
 func (s *SSHShim) Verify() error {
 	if err := s.verify(); err != nil {
 		return fmt.Errorf("ssh shim: %w", err)
@@ -324,7 +325,8 @@ func (s *SSHShim) Verify() error {
 }
 
 func (s *SSHShim) verify() error {
-	if err := checkSSHShimDir(s.Dir); err != nil {
+	dirInfo, err := checkSSHShimDir(s.Dir)
+	if err != nil {
 		return err
 	}
 	info, err := os.Lstat(s.Path)
@@ -333,6 +335,14 @@ func (s *SSHShim) verify() error {
 	}
 	if !info.Mode().IsRegular() || !sshShimOwned(info) || info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s is not a private file of yours (mode %v)", s.Path, info.Mode())
+	}
+	// What the mode bits do not show: an ACL entry, inherited from the
+	// directory or added since, that lets another user rewrite the shim.
+	if err := checkSSHShimACL(s.Dir, dirInfo, false); err != nil {
+		return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
+	}
+	if err := checkSSHShimACL(s.Path, info, false); err != nil {
+		return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
 	}
 	data, err := safefile.ReadRegularFileBounded(s.Path, maxSSHShimBytes)
 	if err != nil {
@@ -431,27 +441,29 @@ func isSSHShim(p string) bool {
 }
 
 // checkSSHShimDir refuses a shim directory that is not a directory of the
-// user's, or that other users can write.
-func checkSSHShimDir(dir string) error {
+// user's, or that other users can write by its mode bits, and returns
+// what it found.
+func checkSSHShimDir(dir string) (fs.FileInfo, error) {
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch {
 	case !info.IsDir():
-		return fmt.Errorf("%s is not a directory", dir)
+		return nil, fmt.Errorf("%s is not a directory", dir)
 	case !sshShimOwned(info):
-		return fmt.Errorf("%s is not owned by you", dir)
+		return nil, fmt.Errorf("%s is not owned by you", dir)
 	case info.Mode().Perm()&0o022 != 0:
-		return fmt.Errorf("%s is writable by other users (mode %04o)", dir, info.Mode().Perm())
+		return nil, fmt.Errorf("%s is writable by other users (mode %04o)", dir, info.Mode().Perm())
 	}
-	return nil
+	return info, nil
 }
 
 // checkSSHShimAncestors refuses a directory (already free of symbolic
 // links) that, or any directory above it, belongs to another user than
-// the caller or root, or that other users can write without the sticky
-// bit that stops them renaming what is inside (as in /tmp).
+// the caller or root, that other users can write without the sticky bit
+// that stops them renaming what is inside (as in /tmp), or whose macOS
+// ACL grants a write-capable right, inheritable or not.
 func checkSSHShimAncestors(dir string) error {
 	for p := dir; ; {
 		info, err := os.Lstat(p)
@@ -465,6 +477,9 @@ func checkSSHShimAncestors(dir string) error {
 			return fmt.Errorf("%s belongs to another user: %w", p, errSSHShimUnsafe)
 		case info.Mode().Perm()&0o022 != 0 && info.Mode()&fs.ModeSticky == 0:
 			return fmt.Errorf("%s is writable by other users (mode %04o): %w", p, info.Mode().Perm(), errSSHShimUnsafe)
+		}
+		if err := checkSSHShimACL(p, info, true); err != nil {
+			return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
 		}
 		parent := filepath.Dir(p)
 		if parent == p {
