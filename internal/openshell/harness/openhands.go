@@ -30,7 +30,59 @@ var openHandsTool = uvTool{
 	dist:         "openhands",
 	commands:     []string{"openhands"},
 	versionCheck: `OPENHANDS_SUPPRESS_BANNER=1 /usr/local/bin/openhands --version | awk '/^OpenHands CLI /{print $3; exit}'`,
+	extra: pyShimInstall(InstallRootBase+"/openhands/tools/openhands/bin/python", InstallRootBase+"/openhands", "OpenHands",
+		pyShim{name: openHandsSessionEndModuleName, source: openHandsSessionEndModule}),
 }
+
+// openHandsSessionEndModuleName is the root-owned module the OpenHands tool
+// environment imports at start.
+const openHandsSessionEndModuleName = "defenseclaw_openhands_session_end"
+
+// openHandsSessionEndModule keeps the end of an OpenHands session free of a
+// traceback. OpenHands 1.16.0 closes the conversation from an atexit
+// callback (LocalConversation.close), after its Textual app has stopped;
+// close runs the SessionEnd hooks (DefenseClaw's among them) and then hands
+// each result to the app as a HookExecutionEvent, which raises "App is not
+// running". Python printed "Exception ignored in atexit callback" and the
+// traceback just above DefenseClaw's session summary, and the rest of close
+// (the agent and tool executors) never ran. The shim runs
+// HookEventProcessor.run_session_end as it is and drops only a display event
+// the stopped app cannot take; the hooks' own results and every other
+// event are unchanged.
+const openHandsSessionEndModule = `"""DefenseClaw: end an OpenHands session without a traceback.
+
+OpenHands closes a conversation at interpreter exit, after its TUI stopped,
+and hands the SessionEnd hook results to that TUI, which raises. Run the
+SessionEnd hooks and drop only the display event the stopped TUI refuses.
+"""
+` + pyOnImport + `
+
+def _defenseclaw_patch_hooks(hooks):
+    cls = hooks.HookEventProcessor
+    run = cls.run_session_end
+
+    def run_session_end(self):
+        emit = self._emit_hook_execution_event
+
+        def _emit(*args, **kwargs):
+            try:
+                emit(*args, **kwargs)
+            except Exception:
+                pass
+
+        self._emit_hook_execution_event = _emit
+        try:
+            return run(self)
+        finally:
+            self.__dict__.pop("_emit_hook_execution_event", None)
+
+    run_session_end.__wrapped__ = run
+    run_session_end.__doc__ = run.__doc__
+    cls.run_session_end = run_session_end
+
+
+_defenseclaw_on_import("openhands.sdk.hooks.conversation_hooks", _defenseclaw_patch_hooks)
+`
 
 // OpenHands is the OpenHands CLI harness. OpenHands takes its model only
 // from saved settings or, with --override-with-envs, from LLM_MODEL,

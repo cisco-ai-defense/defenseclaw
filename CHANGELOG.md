@@ -355,6 +355,11 @@ deleted.
   at every start, and its managed layer pins `model_catalog.enabled: false`,
   which stops the start-up fetch from `hermes-agent.nousresearch.com` and
   `nousresearch.github.io`.
+- An OpenHands sandbox session no longer ends with an
+  `Exception ignored in atexit callback` / `RuntimeError: App is not running`
+  traceback above the session summary: a root-owned module in the OpenHands
+  image runs the `SessionEnd` hooks as before and drops only the display
+  event OpenHands hands to its already stopped TUI.
 
 ### Legacy OpenShell standalone sandbox removed
 
