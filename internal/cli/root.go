@@ -154,12 +154,21 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to prepare audit store directory: %w", err)
 		}
 	}
-	auditStore, err = audit.NewStore(cfg.AuditDB)
-	if err != nil {
-		return fmt.Errorf("failed to open audit store: %w", err)
-	}
-	if err := auditStore.Init(); err != nil {
-		return fmt.Errorf("failed to init audit store: %w", err)
+	if cmd != nil && !cmd.HasParent() {
+		// The daemon owns the store: it moves a corrupt one aside and starts
+		// on a new one instead of failing.
+		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr)
+		if err != nil {
+			return fmt.Errorf("failed to open audit store: %w", err)
+		}
+	} else {
+		auditStore, err = audit.NewStore(cfg.AuditDB)
+		if err != nil {
+			return fmt.Errorf("failed to open audit store: %w", err)
+		}
+		if err := auditStore.Init(); err != nil {
+			return fmt.Errorf("failed to init audit store: %w", err)
+		}
 	}
 	auditLog = audit.NewLogger(auditStore)
 	installCorrelator(auditStore, os.Stderr)
