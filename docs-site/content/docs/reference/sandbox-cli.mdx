@@ -34,9 +34,11 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   status 1. `setup`, `run`, `image build`, and `enable` also stop with status
   3 under WSL2, in a `managed_enterprise` install, and when run as root:
   sandboxes run as your own user. `teardown` also stops with status 3 in a
-  `managed_enterprise` install. On macOS the commands run, but no sandbox can
-  start yet: OpenShell needs Landlock, and Docker Desktop's Linux VM kernel
-  has none (see [macOS](/docs/setup/sandbox#macos)).
+  `managed_enterprise` install. On a Mac sandboxes run in OpenShell
+  MicroVMs, on Apple silicon only: on an Intel Mac every command except
+  `teardown` and `legacy-cleanup` stops with exit status 3. A MicroVM mounts
+  no host folders, so every run on a Mac works on a copy (see
+  [macOS](/docs/setup/sandbox#macos)).
 - **The daemon does the work.** Commands that create, change, or read
   sandboxes call the DefenseClaw daemon's
   [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
@@ -74,7 +76,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   tree alone: the changes went to a patch file and, in a git project, to a
   `dc/<name>` branch instead. An interrupted command returns `130` (Ctrl-C at
   the end-of-session question too), and an unsupported platform or setup
-  returns `3`.
+  (an Intel Mac included) returns `3`.
 
 | Command | What it does |
 | --- | --- |
@@ -103,12 +105,17 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 ### `sandbox setup`
 
 One-time setup. It checks this machine and installs OpenShell with NVIDIA's
-installer when you agree (`sudo`, sha256-verified). It enables project-folder
-bind mounts on your local OpenShell gateway, backing up the gateway config so
-that `teardown` can restore it. It turns OpenShell's anonymous usage telemetry
-off unless you keep it, records the harnesses in `openshell.harnesses`, and
-sets `openshell.enabled: true`. It then offers the shell wrappers and builds
-the harness images (the first build downloads about 3 GB).
+installer when you agree (`sudo`, sha256-verified). On Linux it enables
+project-folder bind mounts on your local OpenShell gateway, backing up the
+gateway config so that `teardown` can restore it, and turns OpenShell's
+anonymous usage telemetry off unless you keep it. On a Mac it installs
+OpenShell's Homebrew formula (and `e2fsprogs`, with the same consent) and
+asks instead whether to run sandboxes in OpenShell MicroVMs: yes switches the
+gateway to the MicroVM driver and sets its sandbox identity to your uid and
+gid, in one backed-up change with one restart. It then records the harnesses
+in `openshell.harnesses`, sets `openshell.enabled: true`, offers the shell
+wrappers and builds the harness images (the first build downloads about
+3 GB).
 
 ```bash
 defenseclaw sandbox setup
@@ -134,8 +141,12 @@ defenseclaw sandbox setup --non-interactive --skip-images
 ### `sandbox doctor`
 
 Checks the platform, Landlock, Docker, the OpenShell service, CLI,
-registration and version, bind mounts, telemetry, ports, the DefenseClaw
-daemon, harness images, shell wrappers, and the organization policy. While the
+registration, version and compute driver, bind mounts, telemetry, ports, the
+DefenseClaw daemon, harness images, shell wrappers, and the organization
+policy. On a Mac it checks the MicroVM driver too (`e2fsprogs` and the
+driver's Hypervisor signature, the sandbox identity, the gateway-wide
+resources and the disk of its prepared images) and skips the checks that
+only matter for the Docker driver, with the reason. While the
 daemon serves sandboxes, it also checks that the hooks of running sandboxes
 reach DefenseClaw, and fails when a sandbox's hooks don't. Each failed check
 names its fix. `--fix` applies the fixes it can make as your user, after
@@ -313,13 +324,16 @@ defenseclaw sandbox teardown --yes --keep-images
 
 ### `sandbox run`
 
-Runs a harness in a new sandbox on the current folder. By default the folder
-is mounted live, secret files are masked, `.git/hooks` and `.git/config` are
-read-only, and a snapshot is taken first so that `undo` can restore the
-folder. `--copy` works on a copy with secrets held back instead, and you bring
-its work back with `pull`. Skip-permissions mode is on by default, and
-`--safe` keeps the harness's own prompts. The harness gets your terminal.
-Arguments after `--` go to the harness.
+Runs a harness in a new sandbox on the current folder. On Linux (OpenShell's
+Docker driver) the folder is mounted live by default, secret files are
+masked, `.git/hooks` and `.git/config` are read-only, and a snapshot is taken
+first so that `undo` can restore the folder. `--copy` works on a copy with
+secrets held back instead, and you bring its work back with `pull`. On a Mac
+(OpenShell's MicroVM driver, which mounts no host folders) every run works
+on a copy, and `run` says so in one line before it copies anything.
+Skip-permissions mode is on by default, and `--safe` keeps the harness's own
+prompts. The harness gets your terminal. Arguments after `--` go to the
+harness.
 
 While the harness runs, the session announces what can't wait: each ask (a
 port on your machine, a private address, a destination the profile does not
@@ -364,12 +378,14 @@ When the review fails, you are still asked, and `--rm` keeps the undo point.
 `--yes`), so `sandbox undo` still reverts them; `sandbox delete` drops it.
 In copy mode you apply them (3-way), put them on branch `dc/<name>`, write a
 patch, or skip, which leaves them in the sandbox for `pull`. Without a
-terminal, or with `--yes`, copy mode skips: nothing is applied. The sandbox is
-then stopped and kept for `connect`, unless you passed `--rm`. In copy mode
-`--rm` is not honored while changes are left in the sandbox (you skipped,
-declined changes that can run code on your machine, or the pull or apply
-failed), so they aren't lost. A pull that fails because the disk is full
-says so.
+terminal, or with `--yes`, copy mode skips: nothing is applied, and the end
+says how many files changed and names the `sandbox pull` that brings them
+back. The sandbox is then stopped and kept for `connect`, unless you passed
+`--rm`. In copy mode `--rm` is not honored while changes are left in the
+sandbox (you skipped, declined changes that can run code on your machine, or
+the pull or apply failed), so they aren't lost, and the end says so. A pull
+that fails because the disk is full says whose disk: this machine's, or on a
+Mac the MicroVM's own (`overlay_disk_mib`).
 
 A kept sandbox's resume line is followed, for Claude Code, Codex, OpenCode
 and GitHub Copilot CLI, by the command that continues the same conversation
@@ -466,6 +482,15 @@ A few rules the flags follow:
   own policies, DefenseClaw's included.
 - A folder that can't be mounted live (a linked git worktree, a git
   directory outside it) runs on a copy, with one line saying why.
+- A copy larger than `openshell.workdir.max_upload_mb` (500 MB by default)
+  is refused before a sandbox exists, and the refusal names the setting; on
+  a Mac it also says that a copy is the only way the project runs there.
+- On a gateway whose compute driver mounts no host folders (a Mac's MicroVM
+  driver), `--context` is refused before anything is copied, `--no-snapshot`
+  is said not to apply, and `--cpu` and `--memory` are said to have no
+  effect: every MicroVM gets the gateway's `vcpus` and `mem_mib`, so an
+  organization's limit on the flags is not applied to them. The first start
+  of an image the driver has not prepared yet says it takes about a minute.
 
 {/* AUTOGEN-BEGIN: sandbox-flags run */}
 | Flag | Takes | Default | Description |
@@ -808,6 +833,12 @@ changes to the git config, hooks or `.git` pointer of those that were there
 before. It also flags secret-like files, and lists the review's findings and
 the nested repositories the session's guard found. `--diff` prints the
 unified diff too.
+
+For a copy-mode sandbox (every sandbox on a Mac) `review` previews what
+`sandbox pull` would bring back, the same review and the changed files, and
+applies nothing; a stopped sandbox is started to read its work and stopped
+again. `-o json` then prints the pull's result, as `pull -o json` does, and
+`sandbox pull NAME --patch-out FILE` writes the diff.
 
 ```bash
 defenseclaw sandbox review myapp-7f3a

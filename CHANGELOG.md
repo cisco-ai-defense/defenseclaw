@@ -239,13 +239,11 @@ deleted.
   namespace, Landlock, seccomp, non-root, credential placeholders); DefenseClaw
   keeps judging every tool call through its hooks, which fail closed in a
   sandbox.
-- macOS cannot run sandboxes yet. OpenShell needs Landlock, and Docker
-  Desktop's Linux VM kernel has none (measured with engine 29.1.5: kernel
-  6.12.65-linuxkit, active security modules `capability,bpf`), so OpenShell
-  refuses to start any sandbox there. `defenseclaw sandbox doctor` checks for
-  it. The macOS paths (the Homebrew install and `brew services`, the Docker
-  Desktop checks, the macOS app's sandbox views) stay in place; macOS support
-  (through OpenShell's MicroVM driver) is tracked in #992.
+- On the Docker driver macOS cannot run sandboxes: OpenShell needs Landlock,
+  and Docker Desktop's Linux VM kernel has none (measured with engine 29.1.5:
+  kernel 6.12.65-linuxkit, active security modules `capability,bpf`), so
+  OpenShell refuses to start any sandbox there. A Mac runs sandboxes on
+  OpenShell's MicroVM driver instead (see the next section).
 - Harnesses: Claude Code, Codex, OpenCode, GitHub Copilot CLI, Kiro CLI,
   Hermes, OpenHands, Antigravity and OmniGent run end to end. Cursor Agent,
   Amp and Devin CLI images build but are refused until a hook check with a
@@ -298,6 +296,44 @@ deleted.
     CLI, Antigravity) were only partly parsed, so a matching CRITICAL command
     rule was reported but not enforced. Those calls are now judged in the
     directory they name.
+
+### OpenShell sandboxes on macOS (MicroVM driver)
+
+- Apple-silicon Macs run sandboxes on OpenShell's MicroVM (`vm`) compute
+  driver, which boots each sandbox in its own VM with a kernel that runs
+  Landlock. OpenShell calls the driver experimental. Intel Macs are refused
+  before any sandbox command runs (`teardown` still runs). Linux, and any
+  gateway on the Docker driver, behave as before.
+- The daemon reads the gateway's compute driver when it connects, refuses
+  one it does not drive, keeps the driver with each sandbox, and reports it
+  as `gateway.driver` in the sandbox status API. What differs per driver
+  lives in one table (`internal/openshell/driver.go`).
+- A MicroVM mounts no host folders, so every run on a Mac works on a copy:
+  `sandbox run` says so in one line before it copies, refuses `--context`,
+  says `--no-snapshot` does not apply and that `--cpu`/`--memory` have no
+  effect (every MicroVM gets the gateway's `vcpus` and `mem_mib`), and notes
+  that the first start of an image prepares its MicroVM disk (about a
+  minute). `policy explain` shows `workdir.mode = copy` from
+  `openshell.gateway.compute_driver`.
+- Copy-mode sessions (on every driver) that bring nothing back, without a
+  terminal, with `--yes` or after a skip, end with `N files changed; nothing
+  was applied` and the `sandbox pull` command, and say when they keep a
+  sandbox despite `--rm`. `sandbox review` of a copy-mode sandbox previews
+  its pull instead of failing. A copy above the upload cap names
+  `openshell.workdir.max_upload_mb`; on a Mac a full sandbox disk names the
+  MicroVM's overlay (`overlay_disk_mib`).
+- Claude Code and Codex per-run managed settings are baked, root-owned and
+  read-only, into a content-addressed run image instead of bind-mounted, and
+  every image name sent to the MicroVM driver is under `defenseclaw.invalid/`,
+  so its registry fallback cannot fetch a stand-in. After each create and
+  start a check inside the sandbox proves its uid and gid, that it has no
+  capabilities, and the digests of its hooks and run files.
+- `sandbox setup` on a Mac asks to switch the gateway to the MicroVM driver,
+  offers `brew install e2fsprogs`, and writes `compute_driver = "vm"` and the
+  sandbox identity (your uid and gid) in one plan with one restart;
+  `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
+  checks. On a Mac still on the Docker driver, a run that fails OpenShell's
+  Landlock check names the switch.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -39,9 +39,11 @@ Overview and a Sandboxes panel. Still to come:
   `devin` have harness specs and sandbox artifacts. The `amp`, `cursor` and
   `devin` images stay unverified until a probe runs with a vendor account
   (see [Sandboxed connectors](#sandboxed-connectors)).
-- **macOS.** No sandbox can start on Docker Desktop, whose Linux VM kernel
-  has no Landlock (see [macOS and Docker Desktop](#macos-and-docker-desktop)).
-  The macOS code paths stay; macOS support (through OpenShell's MicroVM driver) is tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992).
+- **macOS.** A Mac runs sandboxes on OpenShell's MicroVM (`vm`) compute
+  driver, since no sandbox can start on Docker Desktop, whose Linux VM kernel
+  has no Landlock (see [compute drivers](#compute-drivers) and
+  [macOS and Docker Desktop](#macos-and-docker-desktop)). Every run there
+  works on a copy. OpenShell calls the driver experimental.
 
 ## Why OpenShell
 
@@ -76,7 +78,7 @@ parts of the boundary that depend on the project.
 | --- | --- | --- |
 | Network | The workload has no network; the supervisor is the only path out and applies per-endpoint, per-binary rules | The egress proxy for web traffic: blocklist feed, SSRF guard, per-destination decisions, byte counts |
 | Files | Landlock; only bind-mounted host paths are visible | Which host paths are mounted, secret masks, read-only git state, snapshot and undo, change review |
-| Identity | The process identity the policy names | Runs as your uid in mount and copy mode and builds a per-uid image |
+| Identity | The process identity the policy names (docker driver), or the gateway-wide `sandbox_uid`/`sandbox_gid` (vm driver) | Runs as your uid in mount and copy mode and builds a per-uid image; on the vm driver setup sets the gateway's identity to your uid and gid, and a check after each create and start refuses any other |
 | Credentials | Placeholders resolve only on bound endpoints, for bound binaries | Per-sandbox binding tokens, provider profiles pinned to the harness binary; LLM traffic never passes through DefenseClaw |
 | Agent actions | None | Hooks feed the existing guardrail pipeline: rule packs, CEL, the judge, HITL |
 | Hook integrity | Root-owned, read-only system paths | Managed hook config in the image, fail-closed hooks, a build-time hook-fire probe, hook tamper and hook silence detection |
@@ -107,6 +109,75 @@ The OpenShell client (`openshell.Dial`) talks to the gateway over gRPC with
 mTLS through the OpenShell Go SDK. The upstream `openshell` CLI is used only
 where the SDK has no transport: terminal attach, file upload and download,
 port forwarding, gateway registration and install.
+
+On a Mac the gateway is the `nvidia/openshell` Homebrew service (launchd),
+and each sandbox is a MicroVM (libkrun on Apple's Hypervisor) instead of a
+container; the rest of the picture is the same.
+
+## Compute drivers
+
+One OpenShell gateway runs one compute driver. DefenseClaw drives two:
+`docker` (Linux, and any Docker host) and `vm`, OpenShell's MicroVM driver,
+which a Mac runs sandboxes with. `internal/openshell/driver.go` holds the
+one table of what differs, and code asks its fields (`HostMounts`,
+`RunFilesInImage`, `SandboxLimits`, `GatewayIdentity`, `ImageRepository`),
+not the driver's name or `runtime.GOOS`.
+
+- **Which driver.** When the daemon connects it reads the driver from
+  `GetGatewayInfo` (`openshell.GatewayDriver`) and refuses a gateway that
+  reports none, several, or one DefenseClaw does not drive (podman,
+  kubernetes). The status API reports it as `gateway.driver`, each sandbox
+  record keeps the driver it was created on (empty in older records: docker),
+  and a record is re-resolved with its own driver, never the connected
+  gateway's. Setup and the doctor, before any gateway answers, read the
+  configured driver from the effective `gateway.env` and `gateway.toml`.
+- **No host mounts on vm.** libkrun attaches no shared folders, and the vm
+  `driver_config` takes only `gpu_device_ids`. So every vm sandbox is in copy
+  mode: the packs resolver clamps `workdir.mode` to copy with the constraint
+  `openshell.gateway.compute_driver`, a create without a staged copy is
+  answered with `CodeNeedsCopy`, and a template on a driver without host
+  mounts never carries a `driver_config` (checked before anything is made,
+  and again just before `CreateSandbox`). The CLI reads the driver from the
+  status and stages a copy up front, refuses `--context`, and says that
+  `--no-snapshot` does not apply.
+- **Run files in a run image.** The per-run managed files of Claude Code and
+  Codex cannot be bind-mounted, so on vm they are baked, root:root 0644, into
+  a content-addressed run image (`defenseclaw.invalid/sandbox-run:<harness>-<base>-<digest>-u<uid>`)
+  built on the verified overlay image. Hooks-only harnesses boot an alias of
+  the overlay image (`defenseclaw.invalid/sandbox:…`), which shares its image
+  ID. The files cannot change after create: a start whose render is stricter
+  is refused (delete and run again), a looser one keeps the image. A value
+  of a secret-bearing variable that came from `--env` is refused on vm,
+  since it would sit in an image layer and in OpenShell's prepared-rootfs
+  cache.
+- **Image names.** The vm driver reads images from the local Docker image
+  store and falls back to a registry pull of the same name when it does not
+  find one. Its references use a registry host under the reserved `.invalid`
+  TLD (RFC 2606), which never resolves, so that fallback fails instead of
+  fetching someone else's image. An image ID is not accepted as a reference.
+- **Identity.** The vm driver runs every workload as the gateway's
+  `[openshell.drivers.vm] sandbox_uid` and `sandbox_gid` (default 1000:1000)
+  and ignores `process.run_as_user`; it rewrites the image's `sandbox`
+  account to that identity. Setup writes the host uid and gid there, so the
+  per-uid images, the hook-fire probe and the policy stay as they are.
+- **Workload check.** After ready, at create and at every start, one exec
+  (`/usr/bin/env -i`, every tool by absolute path) proves the uid and gid,
+  a writable HOME, an empty `CapEff`, and the digests, owners and modes of
+  the hook entrypoints and run files against what create recorded. A
+  mismatch rolls the create back or stops the started sandbox. It runs on
+  both drivers.
+- **Resources.** vm has no per-sandbox limits: every MicroVM gets the
+  gateway-wide `vcpus`, `mem_mib` and `overlay_disk_mib`. `--cpu` and
+  `--memory` are warned about and dropped, the record keeps the gateway-wide
+  values, and an admin `max_resources` below them refuses the create.
+- **Cost.** The first start of an image prepares a rootfs from it (about a
+  minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
+  keyed by image ID and kept by OpenShell); a cached one starts in seconds.
+  The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
+  its "about a minute" note.
+- **Switching.** A record made on the other driver is never started, gc'd or
+  released as if it were this gateway's: `start` refuses it before any other
+  check, and `delete` releases DefenseClaw's host state for it.
 
 ## Networking
 
@@ -807,14 +878,18 @@ because every policy reload closes connections.
 
 - **Landlock** is `hard_requirement`: a kernel without the needed ABI refuses
   to start the sandbox instead of running it unconfined. This is why no
-  sandbox starts on Docker Desktop (see
-  [macOS and Docker Desktop](#macos-and-docker-desktop)).
+  Docker-driver sandbox starts on Docker Desktop (see
+  [macOS and Docker Desktop](#macos-and-docker-desktop)); a MicroVM's own
+  kernel has it.
 - **Read-only:** `/usr`, `/lib`, `/etc`, `/proc`, `/dev/urandom`, `/var/log`,
   `/opt`, the harness install roots and read-only context mounts.
 - **Read-write:** `/tmp`, `/dev/null`, `/dev/ptmx`, `/dev/pts`, `/dev/tty`,
   `/sandbox` and the workdir (`/work/<repo>` in mount mode).
-- **Process:** the numeric host uid and gid in mount mode (required), the
-  image's `sandbox` user in copy mode. Root is refused.
+- **Process:** on the docker driver, the numeric host uid and gid in mount
+  mode (required), the image's `sandbox` user in copy mode. The vm driver
+  ignores `run_as_user` and runs every workload as the gateway's
+  `sandbox_uid`/`sandbox_gid`, which setup sets to the host uid and gid (see
+  [compute drivers](#compute-drivers)). Root is refused.
 - **Network:** `defenseclaw_egress` for the `open` and `balanced` profiles,
   nothing for `strict`. Credentialed endpoints are left to OpenShell's
   provider rules, except the ingress of a `token_delivery: env` sandbox,
@@ -833,8 +908,9 @@ nothing else, and lets the operator take back what the agent did.
 
 ### Mount mode
 
-Mount mode is the default. `PlanMount` validates the launch folder and turns
-it into docker-driver bind mounts:
+Mount mode is the default on the docker driver; the vm driver has no host
+mounts, so nothing in this section runs against it. `PlanMount` validates
+the launch folder and turns it into docker-driver bind mounts:
 
 | Mount | Target | Access |
 | --- | --- | --- |
@@ -1076,8 +1152,12 @@ operator applies it.
 
 ### Copy mode
 
-Copy mode is the choice for untrusted repositories or tasks. The agent works
-on a copy, and changes come back only through a verified pull.
+Copy mode is the choice for untrusted repositories or tasks, and the only
+mode on the vm driver. The agent works on a copy, and changes come back only
+through a verified pull, applied by git on the host as the host user: only
+the executable bit crosses, and the in-sandbox uid never reaches the host.
+Nothing is applied without a review: a session without a terminal, or with
+`--yes`, leaves the work in the sandbox and names the pull.
 
 1. **Stage.** A git project becomes a sanitized shallow clone (depth
    `openshell.workdir.git_depth`, 200 by default; no hooks, config written by
@@ -1445,10 +1525,14 @@ shows:
 ### Per-sandbox managed configuration
 
 What differs per run cannot live in the image. For every sandbox the manager
-renders `connector.SandboxRunFiles` for the image's render target, writes the
-files under `<data_dir>/sandboxes/<name>/run-config/` (owner-only directory,
-files 0644) and bind-mounts each read-only at its in-sandbox path, in mount
-and copy mode alike. Stop and start keep the files; delete removes them.
+renders `connector.SandboxRunFiles` for the image's render target. On the
+docker driver it writes the files under
+`<data_dir>/sandboxes/<name>/run-config/` (owner-only directory, files 0644)
+and bind-mounts each read-only at its in-sandbox path, in mount and copy mode
+alike. Stop and start keep the files; delete removes them. On the vm driver,
+which has no mounts, the same bytes are baked root:root 0644 into the
+sandbox's run image instead (see [compute drivers](#compute-drivers)), and a
+start compares the render with the image's digest instead of rewriting.
 
 - **Claude Code:** `managed-settings.d/60-defenseclaw-run.json` sorts after
   the image's drop-in and wins over it. It pins every model-provider
@@ -2075,8 +2159,10 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Sandbox names are capped at 19 characters (`name exceeds maximum length`). | Test and probe names stay short. |
 | Bind mounts need `allow_driver_config` and `enable_bind_mounts` for the docker driver and resource admission off in `gateway.toml`, then a gateway restart. | `GatewayConfigurator` plans the TOML-preserving edit, runs the gateway's preflight, backs up, restarts and rolls back if the gateway does not come up. |
 | A read-only over-mount refuses writes, a bind-mounted file is effectively read-only, and an empty-file mask reads as empty. | Git internals and secrets are protected by the mounts themselves (Landlock cannot narrow a subtree of a read-write grant). |
-| `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
-| Content under `/sandbox` in the base image belongs to uid 998. | The overlay chowns `/sandbox` to the run-as uid; without it writes to `~/.claude` fail and `SessionStart` silently does not run. |
+| Docker driver: `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
+| Docker driver: content under `/sandbox` in the base image belongs to uid 998, the image's `sandbox` user. | The overlay chowns `/sandbox` to the run-as uid; without it writes to `~/.claude` fail and `SessionStart` silently does not run. |
+| vm driver: `run_as_user` is ignored. The driver rewrites the image's `sandbox` account to the gateway's `[openshell.drivers.vm] sandbox_uid`/`sandbox_gid` (default 1000:1000) and runs every workload as it, for every sandbox on the gateway. | Setup writes the host uid and gid there, so the per-uid overlay images (`/sandbox` chowned to that uid) work unchanged; the workload check refuses any other identity, and the doctor's vm-identity check catches a gateway without the keys before a boot is spent. |
+| vm driver: no shared folders and no `driver_config` but `gpu_device_ids`. | Per-run managed files are baked into a run image, root:root 0644, whose tag carries a digest of the files; a posture change on start is compared by digest and a stricter one refuses the start. |
 | Landlock hides `/dev` entries that are not listed. | `/dev/ptmx`, `/dev/pts` and `/dev/tty` are read-write for PTY tools. |
 | Claude Code drops a whole managed-settings drop-in with one invalid field, silently. | The hook-fire probe gates every image. |
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
@@ -2110,8 +2196,10 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 
 | Behaviour | Design consequence |
 | --- | --- |
-| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. The doctor checks the VM kernel for Landlock. The macOS code paths (the Homebrew install, `brew services`, the Docker Desktop host-networking and file-sharing checks) stay in place. |
-| OpenShell's MicroVM driver (opt-in: `OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor; needs `e2fsprogs` from Homebrew for the VM disk) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It pulls its image from a registry. | DefenseClaw drives only the Docker driver: the doctor requires it, each run's files and project mounts go in the Docker driver's config, and harness images are built into the local Docker image store, which the MicroVM driver does not read. Supporting the MicroVM driver is how DefenseClaw will run on macOS ([#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992)). |
+| Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver, and a run that fails the probe there names the switch. |
+| OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
+| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor and teardown name the cache and its size, and DefenseClaw never deletes it. |
+| With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
 
 ## Supported platforms and versions
@@ -2128,16 +2216,19 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
   OpenShell config directory that are symbolic links. The CA and client
   certificate may be readable by others, and group-writable files and entries
   only produce a warning.
-- Linux amd64 and arm64. macOS arm64 cannot run sandboxes today: Docker
-  Desktop's Linux VM kernel has no Landlock (see
-  [macOS and Docker Desktop](#macos-and-docker-desktop)), and macOS support is
-  tracked in [#992](https://github.com/cisco-ai-defense/defenseclaw/issues/992). Windows, WSL2 and Intel macOS are unsupported.
+- Linux amd64 and arm64 on the docker driver, and macOS on Apple silicon on
+  the vm driver (see [compute drivers](#compute-drivers)). Windows, WSL2 and
+  Intel Macs are unsupported: `openshell.CheckHost` refuses them before any
+  sandbox command runs, except `teardown`. The vm driver on Linux and a
+  Docker VM with Landlock on a Mac (Colima, OrbStack) may work, untested.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
   systemd linger, the gateway service, CLI, registration, mTLS files, gateway
   version and driver, global policy, bind mounts, OpenShell telemetry and the
-  sandbox ports.
+  sandbox ports; on a vm gateway also `vm-driver` (e2fsprogs, the
+  Hypervisor signature, image architecture), `vm-identity` and
+  `vm-resources`, and the disk of the prepared-rootfs cache.
 
 ## Code map
 
