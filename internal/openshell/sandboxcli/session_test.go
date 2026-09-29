@@ -131,6 +131,54 @@ func TestSessionEnd(t *testing.T) {
 	})
 }
 
+// A copy-mode session whose changes nobody brings back (no terminal to ask
+// on, --yes, a skip, a declined secret) ends saying how many files changed
+// and that nothing was applied, with the pull that brings them back; its
+// sandbox is stopped and kept, and a --rm dropped for that is said. On the
+// MicroVM driver, where every run works on a copy, this is how an
+// unattended run ends: nothing is applied without a review.
+func TestCopySessionLeavesUnpulledWorkInTheSandbox(t *testing.T) {
+	const name = "copybox"
+	left := "1 file changed; nothing was applied: the changes are kept in the sandbox for `defenseclaw sandbox pull " + name +
+		" --apply` (or --branch or --patch-out FILE)"
+	kept := name + " is not deleted (--rm): its work was not brought back; delete it once it is: `defenseclaw sandbox delete " + name + "`"
+	keptStopped := func(t *testing.T, ta *testApp) {
+		t.Helper()
+		if stops, deletes, applies := ta.calls("POST", name+"/stop"), ta.calls("DELETE", name), len(ta.copy.apply); stops != 1 || deletes != 0 || applies != 0 {
+			t.Fatalf("stop %d, delete %d, apply %d calls; want the sandbox stopped and kept with its work", stops, deletes, applies)
+		}
+	}
+	headless := func(ta *testApp) { ta.IO.TTY = false }
+	vm := func(ta *testApp) {
+		ta.IO.TTY = false
+		ta.daemon.status.Gateway.Driver = "vm"
+	}
+	secret := func(ta *testApp) {
+		ta.copy.pull = &workspace.PullResult{Name: name, Kind: workspace.CopyGit,
+			Changes: []workspace.TreeChange{{Path: "config/keys.txt", Status: "A", Added: 1}},
+			Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 1, Findings: []workspace.ScanFinding{
+				{Path: "config/keys.txt", Scanner: "clawshield-secrets", RuleID: "CS-SEC-MARKER", Severity: "CRITICAL", Title: "marker secret"}}}}
+	}
+	copyRun := RunOptions{Harness: "claude", Copy: true, Name: name}
+	with := func(f func(*RunOptions)) RunOptions {
+		o := copyRun
+		f(&o)
+		return o
+	}
+	runCases(t, []runCase{
+		{name: "no terminal, --rm", setup: headless, opts: with(func(o *RunOptions) { o.Prompt, o.Rm = "fix it", true }),
+			want: []string{left, kept}, check: keptStopped},
+		{name: "--yes on a terminal", opts: with(func(o *RunOptions) { o.Yes = true }), want: []string{left},
+			not: []string{kept, "Bring the changes back?"}, check: keptStopped},
+		{name: "a skip, --rm", input: "s\n", opts: with(func(o *RunOptions) { o.Rm = true }), want: []string{"Bring the changes back?", left, kept},
+			check: keptStopped},
+		{name: "a declined secret, --rm", input: "a\n\n", setup: secret, opts: with(func(o *RunOptions) { o.Rm = true }), want: []string{kept},
+			check: keptStopped},
+		{name: "the MicroVM driver without a terminal", setup: vm, opts: RunOptions{Harness: "claude", Name: name, Prompt: "fix it"},
+			want: []string{left}, not: []string{kept}, check: keptStopped},
+	})
+}
+
 // A headless session (--prompt) on a terminal still asks "Keep changes?"
 // at its end, and keeping them makes them the next session's base; only a
 // session with no terminal to ask on leaves its changes unaccepted, so the

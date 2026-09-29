@@ -141,6 +141,10 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
+	// The gateway's compute driver decides what a new sandbox can have: on
+	// one that mounts no host folders (OpenShell's MicroVM driver, which a
+	// Mac runs sandboxes with) every run works on a copy.
+	drv := gatewayDriver(st)
 	gateway := ""
 	if st.Gateway != nil {
 		gateway = st.Gateway.Name
@@ -164,13 +168,20 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		}
 	}
 	// The flags replace the configured limits a clamp of which the
-	// preflight reported.
-	for _, c := range resourceClamps(o, ex) {
-		ex.Violations = slices.DeleteFunc(ex.Violations, func(v sandboxapi.Violation) bool { return v.Key == c.Key })
-		ex.Violations = append(ex.Violations, c)
+	// preflight reported. A driver without per-sandbox limits takes neither
+	// (driverFlagNotes says so).
+	if drv.SandboxLimits {
+		for _, c := range resourceClamps(o, ex) {
+			ex.Violations = slices.DeleteFunc(ex.Violations, func(v sandboxapi.Violation) bool { return v.Key == c.Key })
+			ex.Violations = append(ex.Violations, c)
+		}
 	}
-	// The organization's refusals come first; then what the run needs from
-	// this terminal.
+	// The organization's refusals come first; then what this gateway
+	// cannot do, and what the run needs from this terminal.
+	if len(o.Context) > 0 && !drv.HostMounts {
+		return fmt.Errorf("--context mounts a folder into the sandbox read-only, and %s; run without --context (the agent works on a copy of this folder only)",
+			mountRefusal(drv))
+	}
 	if !o.Detach && !headless && !a.IO.TTY {
 		return fmt.Errorf("`sandbox run` attaches %s to your terminal, and there is none; pass --prompt TEXT (with --detach to run in the background)", spec.DisplayName)
 	}
@@ -183,8 +194,11 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	if err != nil {
 		return err
 	}
-	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy
-	if note := copyPolicyNote(ex, o); note != "" {
+	// The daemon decides the mode, the driver's clamp included; a driver
+	// without host mounts is known here already, which spares a create it
+	// would refuse.
+	copyMode := o.Copy || settingValue(ex.Settings, "workdir.mode") == config.OpenShellWorkdirCopy || !drv.HostMounts
+	if note := copyPolicyNote(ex, o, drv); note != "" {
 		a.note(note)
 	}
 
@@ -225,6 +239,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		}
 	}
 
+	a.driverFlagNotes(o, drv, shown)
 	a.warnSecretEnv(env)
 	env = a.withGitIdentity(ctx, project, env)
 	req, llm, err := a.createRequest(spec, project, o, copyMode, env)
@@ -252,13 +267,13 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 				return err
 			}
 		}
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
 			return err
 		}
 	}
 
 	a.println()
-	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o))
+	a.note("Starting " + withArticle(spec.DisplayName) + " sandbox…" + a.buildNote(spec, o, ex.VMFirstBoot))
 	sb, err := api.Create(ctx, req)
 	if err != nil && !copyMode && sandboxapi.IsCode(err, sandboxapi.CodeNeedsCopy) {
 		// A linked worktree, a git directory outside the folder and the
@@ -272,7 +287,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			}
 		}
 		a.warn(a.needsCopyText(project, refusal, req.Name))
-		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o); err != nil {
+		if copyRec, err = a.stageCopy(ctx, spec, project, req.Name, o, drv); err != nil {
 			return err
 		}
 		sb, err = api.Create(ctx, req)
@@ -286,7 +301,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		if taken {
 			return nameTakenError(req.Name, headless)
 		}
-		return a.landlockHint(apiError(err))
+		return a.landlockHint(apiError(err), func() openshell.Driver { return drv })
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
@@ -575,17 +590,96 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 
 // landlockHint completes, on macOS, a sandbox that ended in the error
 // phase for a reason naming Landlock (OpenShell's supervisor probes it
-// before the harness runs): there sandboxes run on the kernel of Docker
-// Desktop's Linux VM, which has none today.
-func (a *App) landlockHint(err error) error {
+// before the harness runs) on a gateway that runs the docker driver: there
+// sandboxes run on the kernel of Docker Desktop's Linux VM, which has none
+// today, and OpenShell's MicroVM driver, which boots each sandbox with a
+// kernel of its own, is the way on. driver is the gateway's compute
+// driver, asked for only when the failure is one of those.
+func (a *App) landlockHint(err error, driver func() openshell.Driver) error {
 	if err == nil || a.GOOS != "darwin" {
 		return err
 	}
 	if msg := strings.ToLower(err.Error()); !strings.Contains(msg, "error state") || !strings.Contains(msg, "landlock") {
 		return err
 	}
-	return fmt.Errorf("%w; macOS sandboxes cannot run on Docker Desktop today: its Linux VM has no Landlock, which OpenShell sandboxes need "+
-		"(`%s doctor` checks it; see %s)", err, CommandName, setupTroubleshootingURL)
+	if driver().Name != openshell.DriverDocker {
+		return err
+	}
+	return fmt.Errorf("%w; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: "+
+		"switch the gateway to MicroVMs with `%s setup` (or `%s doctor --fix`; see %s)", err, CommandName, CommandName, setupTroubleshootingURL)
+}
+
+// gatewayDriver is the compute driver of the daemon's gateway, from its
+// status: docker from a daemon too old to say (it drove no other), and the
+// zero Driver, which mounts nothing, for one DefenseClaw does not know.
+func gatewayDriver(st *sandboxapi.Status) openshell.Driver {
+	name := ""
+	if st != nil && st.Gateway != nil {
+		name = st.Gateway.Driver
+	}
+	d, _ := openshell.LookupDriver(name)
+	return d
+}
+
+// statusDriver is the compute driver of the daemon's gateway, read now:
+// docker when the daemon does not answer (what it drove before it could
+// say).
+func statusDriver(ctx context.Context, api API) openshell.Driver {
+	st, err := api.Status(ctx)
+	if err != nil {
+		st = nil
+	}
+	return gatewayDriver(st)
+}
+
+// mountRefusal says why the driver mounts no host folders.
+func mountRefusal(d openshell.Driver) string {
+	return firstNonEmpty(d.MountRefusal, "this gateway's compute driver mounts no host folders")
+}
+
+// sandboxDisk names the gateway setting that sizes a sandbox's own disk,
+// where the driver gives it one: a MicroVM writes to an overlay disk of
+// [openshell.drivers.vm] overlay_disk_mib (4096 by default); a docker
+// sandbox writes to the Docker host's storage (""). Like landlockHint's
+// Docker Desktop wording, it names a setting of one driver, which the
+// driver table does not hold.
+func sandboxDisk(d openshell.Driver) string {
+	if d.Name == openshell.DriverVM {
+		return "overlay_disk_mib under [openshell.drivers.vm] in the OpenShell gateway's gateway.toml"
+	}
+	return ""
+}
+
+// limitsIgnoredText is the warning of a --cpu or --memory the gateway's
+// compute driver does not enforce per sandbox (the daemon warns the same
+// at create; the banner does not repeat it).
+const limitsIgnoredText = "cpu/memory limits have no effect on the OpenShell vm driver: every MicroVM gets [openshell.drivers.vm] vcpus and mem_mib"
+
+// driverFlagNotes says, before anything is copied or created, which of a
+// new sandbox's flags the gateway's compute driver does not honour: without
+// host mounts the run works on a copy, which takes no snapshot, and
+// without per-sandbox limits every sandbox gets the gateway's own. What it
+// warns about is recorded in shown.
+func (a *App) driverFlagNotes(o RunOptions, d openshell.Driver, shown map[string]bool) {
+	if o.NoSnapshot && !d.HostMounts {
+		a.note("--no-snapshot does not apply: " + mountRefusal(d) + ", so the run works on a copy, which takes no snapshot")
+	}
+	if !d.SandboxLimits && (strings.TrimSpace(o.CPU) != "" || strings.TrimSpace(o.Memory) != "") {
+		a.warn(limitsIgnoredText)
+		shown[warningKey(limitsIgnoredText)] = true
+	}
+}
+
+// driverClamp reports the daemon's clamp of a mount to copy mode because
+// the gateway's compute driver mounts no host folders: the copy note says
+// it (copyPolicyNote), not an organization's refusal.
+func driverClamp(v sandboxapi.Violation) bool {
+	return v.Key == "workdir.mode" && v.Constraint == packs.ConstraintComputeDriver
+}
+
+// driverCopyNote is the copy note of a run on a driver without host mounts.
+func driverCopyNote(d openshell.Driver) string {
+	return "copy mode: " + mountRefusal(d) + "; the agent works on a copy, and your folder gets its changes only through `" + CommandName + " pull`"
 }
 
 func nameTakenError(name string, headless bool) error {
@@ -624,17 +718,25 @@ func (a *App) freeName(ctx context.Context, api API, project string) (string, er
 }
 
 // buildNote says, when the harness image is missing, that the run builds
-// it first.
-func (a *App) buildNote(spec *harness.Spec, o RunOptions) string {
-	if o.NoBuild {
+// it first, and when the gateway's MicroVM driver has not prepared the
+// image the sandbox boots (firstBoot, the daemon's
+// Explain.VMFirstBoot), that its first start prepares it.
+func (a *App) buildNote(spec *harness.Spec, o RunOptions, firstBoot bool) string {
+	var parts []string
+	if !o.NoBuild {
+		if ok, err := a.Images.Current(spec); err == nil && !ok {
+			// Sizes and times differ by harness and by what the build cache
+			// already holds.
+			parts = append(parts, "building its image first, which can take a few minutes")
+		}
+	}
+	if firstBoot {
+		parts = append(parts, "the first start prepares its MicroVM disk: about a minute")
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	if ok, err := a.Images.Current(spec); err != nil || ok {
-		return ""
-	}
-	// Sizes and times differ by harness and by what the build cache
-	// already holds.
-	return " (building its image first, which can take a few minutes)"
+	return " (" + strings.Join(parts, "; then ") + ")"
 }
 
 // checkHostPorts refuses a --host-port DefenseClaw does not open, the way
@@ -710,6 +812,11 @@ func (a *App) preflightViolations(list []sandboxapi.Violation) (map[string]bool,
 		if v.Fatal {
 			continue
 		}
+		if driverClamp(v) {
+			// The gateway's, not the organization's: the copy note says it.
+			shown[violationKey(v)] = true
+			continue
+		}
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 		shown[violationKey(v)] = true
 		overridden = overridden || (v.Admin && v.Source == string(packs.SourceFlag))
@@ -773,20 +880,24 @@ func resourceClamps(o RunOptions, ex *sandboxapi.Explain) []sandboxapi.Violation
 }
 
 // copyPolicyNote says why a run the user did not ask to copy works on a
-// copy: the organization requires it for this folder, or its required pack
-// works on copies. A clamp of a flag was said already (preflight).
-func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions) string {
+// copy: the gateway's compute driver mounts no host folders, the
+// organization requires it for this folder, or its required pack works on
+// copies. An organization's clamp of a flag was said already (preflight).
+func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) string {
 	if o.Copy {
 		return ""
 	}
 	for _, v := range ex.Violations {
-		if v.Key == "workdir.mode" {
+		if v.Key == "workdir.mode" && !driverClamp(v) {
 			return ""
 		}
 	}
 	for _, s := range ex.Settings {
 		if s.Key != "workdir.mode" || s.Value != config.OpenShellWorkdirCopy || s.Source != string(packs.SourceAdmin) {
 			continue
+		}
+		if s.Origin == packs.ConstraintComputeDriver {
+			return driverCopyNote(d)
 		}
 		why := "your organization's policy runs it on a copy"
 		switch s.Origin {
@@ -800,11 +911,21 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions) string {
 		return "copy mode: " + why + " (" + s.Origin + "); the agent works on a copy, and your folder gets its changes only through `" +
 			CommandName + " pull`"
 	}
+	if !d.HostMounts && settingValue(ex.Settings, "workdir.mode") != config.OpenShellWorkdirCopy {
+		// A daemon whose policy does not clamp for the driver itself.
+		return driverCopyNote(d)
+	}
 	return ""
 }
 
 func violationKey(v sandboxapi.Violation) string {
 	return v.Key + "\x00" + v.Constraint + "\x00" + v.Attempted
+}
+
+// warningKey is the key of a warning the run printed before the create, so
+// the banner does not repeat the daemon's own copy of it.
+func warningKey(text string) string {
+	return "warning\x00" + text
 }
 
 // liveMountHolder returns the sandbox that mounts project (or a folder
@@ -1088,7 +1209,7 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 
 // stageCopy stages the copy-mode project with the effective workspace
 // policy.
-func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions) (*workspace.CopyRecord, error) {
+func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name string, o RunOptions, d openshell.Driver) (*workspace.CopyRecord, error) {
 	opts, err := a.copyStageOptions(packs.Flags{Pack: o.Pack, Harness: spec.Name, Project: project, Profile: o.Profile, Safe: o.Safe, Unmask: o.Unmask}, name)
 	if err != nil {
 		return nil, err
@@ -1096,9 +1217,29 @@ func (a *App) stageCopy(ctx context.Context, spec *harness.Spec, project, name s
 	a.note("Copying " + a.tildePath(project) + " (secrets are held back)…")
 	rec, err := a.Workspace.Stage(ctx, opts)
 	if err != nil {
-		return nil, workspaceFailure("stage the project copy", err, a.diskFullHint(err))
+		return nil, workspaceFailure("stage the project copy", err, a.stageHint(err, d))
 	}
 	return rec, nil
+}
+
+// stageHint is the way on after a copy could not be staged. A copy above
+// the size cap names the setting that raises it; on a gateway that mounts
+// no host folders it also says that a copy is the only way the project runs
+// there (on Linux it could be mounted live instead), and that the
+// sandbox's own disk must then hold the copy with its git history.
+func (a *App) stageHint(err error, d openshell.Driver) string {
+	var large *workspace.TooLargeError
+	if !errors.As(err, &large) || large.Entries {
+		return a.diskFullHint(err)
+	}
+	hint := "raise openshell.workdir.max_upload_mb (in MB, 500 by default) in " + a.tildePath(a.ConfigPath) + " to copy a larger project"
+	if !d.HostMounts {
+		hint += "; " + mountRefusal(d) + ", so a copy is the only way this project runs on this gateway, and the sandbox's own disk must hold it with its git history"
+		if disk := sandboxDisk(d); disk != "" {
+			hint += " (" + disk + ")"
+		}
+	}
+	return hint
 }
 
 // discardStagedCopy removes the copy staged for a sandbox the daemon did
@@ -1137,7 +1278,8 @@ type bannerInfo struct {
 	// keptSnapshot marks an undo point an earlier session left (a resume
 	// that did not take a new one).
 	keptSnapshot bool
-	// shown are the violations the preflight printed already.
+	// shown are the violations the preflight printed already (violationKey),
+	// and the warnings (warningKey).
 	shown map[string]bool
 }
 
@@ -1248,7 +1390,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 		}
 	}
 	for _, w := range sb.Warnings {
-		a.warn(w)
+		if !b.shown[warningKey(w)] {
+			a.warn(w)
+		}
 	}
 	a.println()
 }

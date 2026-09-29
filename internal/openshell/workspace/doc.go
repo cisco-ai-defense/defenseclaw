@@ -19,18 +19,23 @@
 //
 // Two modes exist:
 //
-//   - Mount (default). PlanMount validates the launch folder and turns it into
-//     OpenShell docker-driver bind mounts: the project read-write at
-//     /work/<repo>, secret files masked by read-only empty files, and every
-//     piece of git state that would run code on the host (hooks, config,
-//     include files, the git directory itself, commondir, submodule git
-//     directories) pinned read-only or against replacement. Snapshot records
-//     the working tree before the session; Review lists what changed and which
-//     of those changes can execute on the host; Undo puts the folder back.
-//   - Copy (--copy). Stage builds a sanitized shallow clone plus the working
-//     tree with secrets held back; Upload and EstablishBaseline put it in the
-//     sandbox; Pull brings the agent's result back as a verified git bundle and
-//     Apply lands it as a 3-way merge, a dc/<name> branch, or a patch file.
+//   - Mount (the default on OpenShell's docker driver). PlanMount validates
+//     the launch folder and turns it into OpenShell docker-driver bind
+//     mounts: the project read-write at /work/<repo>, secret files masked by
+//     read-only empty files, and every piece of git state that would run code
+//     on the host (hooks, config, include files, the git directory itself,
+//     commondir, submodule git directories) pinned read-only or against
+//     replacement. Snapshot records the working tree before the session;
+//     Review lists what changed and which of those changes can execute on the
+//     host; Undo puts the folder back.
+//   - Copy (--copy, and every sandbox on a driver that mounts no host
+//     folders, such as the MicroVM driver a Mac runs sandboxes with). Stage
+//     builds a sanitized shallow clone plus the working tree with secrets
+//     held back; Upload and EstablishBaseline put it in the sandbox; Pull
+//     brings the agent's result back as a verified git bundle and Apply lands
+//     it as a 3-way merge, a dc/<name> branch, or a patch file. Nothing of the
+//     sandbox reaches the host but that bundle, applied by the host's git as
+//     the host user.
 //
 // # Threat model
 //

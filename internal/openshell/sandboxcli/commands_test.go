@@ -320,6 +320,41 @@ func TestReviewAndDelete(t *testing.T) {
 	}
 }
 
+// `review` of a copy-mode sandbox (every sandbox on the MicroVM driver)
+// previews what `pull` would bring back and applies nothing, naming the
+// pull that does; the daemon's review, of mounted projects only, is not
+// asked. With -o json stdout holds the pull's result.
+func TestReviewPreviewsACopysPull(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true}))
+	has(t, ta.output(), "starting copybox to read its work", "copybox: 1 file changed (+4 −1)", "  M main.go",
+		"--diff: the changes of a copy come back as a patch; `defenseclaw sandbox pull copybox --patch-out FILE` writes one",
+		"nothing was applied; bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch or --patch-out FILE)", "stopped copybox again")
+	if !slices.Equal(ta.copy.steps, []string{"pull copybox"}) || ta.calls("POST", "copybox/review") != 0 {
+		t.Fatalf("copy steps %v, daemon reviews %d; want a pull and nothing applied", ta.copy.steps, ta.calls("POST", "copybox/review"))
+	}
+	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 0 {
+		t.Fatalf("a preview reported %q", r)
+	}
+	// A plain folder has no branch.
+	ta = newTestApp(t, "", copySandbox("plainbox"))
+	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain,
+		Changes: []workspace.TreeChange{{Path: "notes.md", Status: "M", Added: 1}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 1}}
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
+	has(t, ta.output(), "bring it back with `defenseclaw sandbox pull plainbox --apply` (or --patch-out FILE)")
+	lacks(t, ta.output(), "--branch", "--diff")
+	// -o json: one document, the pull's.
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true, Output: OutputJSON}))
+	var res workspace.PullResult
+	if err := json.Unmarshal(ta.out.Bytes(), &res); err != nil || res.Name != "copybox" || len(res.Changes) != 1 {
+		t.Fatalf("stdout is not the pull's result (%v):\n%s", err, ta.out.String())
+	}
+	if len(ta.copy.apply) != 0 {
+		t.Fatalf("a review applied %+v", ta.copy.apply)
+	}
+}
+
 // The review merges each file's reasons into one line (manual test L10).
 func TestReviewMergesAFilesReasons(t *testing.T) {
 	flags := []workspace.Flag{

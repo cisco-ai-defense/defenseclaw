@@ -523,7 +523,7 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t)
 	if err != nil {
 		report("failed", rec, "upload_failed")
-		return workspaceFailure("upload the project copy", err, a.diskFullHint(err))
+		return workspaceFailure("upload the project copy", err, a.sandboxDiskHint(ctx, s.api, err))
 	}
 	if _, err := a.Workspace.Baseline(ctx, a.dataDir(), s.sb.Name, t); err != nil {
 		report("failed", up, "baseline_failed")
@@ -1052,7 +1052,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.printHookReach(after, endedElsewhere)
 		s.printNotices()
 		a.note("its work stays in the sandbox: `" + CommandName + " pull " + after.Name + "` reads it")
-		s.rm = false
+		s.keepUnpulled()
 		return s.finish(ctx, true)
 	}
 	pull, err := a.pull(ctx, s.api, s.cli, after)
@@ -1062,7 +1062,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		s.printNotices()
 		a.warn("could not pull the sandbox's changes: " + err.Error())
 		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
-		s.rm = false
+		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
 	rev := &sandboxapi.ReviewResponse{Summary: pull.Review.SummaryLine(), RiskLine: riskLine(&pull.Review)}
@@ -1098,12 +1098,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		case err != nil:
 			// No answer (an interrupt, the end of input): the changes stay
 			// in the sandbox, which ends as a skip does.
-			return errors.Join(err, s.keepInSandbox(ctx, after))
+			return errors.Join(err, s.keepInSandbox(ctx, after, pull))
 		}
 		mode = map[string]string{"a": "apply", "b": "branch", "p": "patch"}[ans]
 	}
 	if mode == "" {
-		return s.keepInSandbox(ctx, after)
+		return s.keepInSandbox(ctx, after, pull)
 	}
 	// The same gate as `pull --apply`: changes that can run code on this
 	// machine, or a critical secret the agent wrote (which no risk line
@@ -1128,28 +1128,44 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		}
 		yes, err := a.ask(question, false, false)
 		if err != nil {
-			return errors.Join(err, s.keepInSandbox(ctx, after))
+			return errors.Join(err, s.keepInSandbox(ctx, after, pull))
 		}
 		opts.AcceptSensitive = yes
 		if !yes {
-			s.rm = false
+			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}
 	}
 	if _, err := a.applyPull(ctx, s.api, after, pull, opts); err != nil {
 		a.warn(err.Error())
-		s.rm = false
+		s.keepUnpulled()
 	}
 	return s.finish(ctx, false)
 }
 
 // keepInSandbox ends a copy-mode session whose changes stay in the sandbox
-// for `pull`: the sandbox is stopped (a session that started it) and kept,
-// --rm or not.
-func (s *session) keepInSandbox(ctx context.Context, after *sandboxapi.Sandbox) error {
-	s.app.note("changes are kept in the sandbox: `" + CommandName + " pull " + after.Name + " --apply|--branch|--patch-out FILE`")
-	s.rm = false
+// for `pull` (a skip, no terminal to ask on, --yes, no answer): it says how
+// many files changed and that nothing was applied, and the sandbox is
+// stopped (a session that started it) and kept, --rm or not.
+func (s *session) keepInSandbox(ctx context.Context, after *sandboxapi.Sandbox, pull *workspace.PullResult) error {
+	n := 0
+	if pull != nil {
+		n = len(pull.Changes)
+	}
+	s.app.note(plural(int64(n), "file", "files") + " changed; nothing was applied: the changes are kept in the sandbox for `" +
+		CommandName + " pull " + after.Name + " --apply` (or --branch or --patch-out FILE)")
+	s.keepUnpulled()
 	return s.finish(ctx, false)
+}
+
+// keepUnpulled keeps a copy-mode sandbox whose work was not brought back:
+// with --rm, deleting it would delete that work too, so --rm is dropped,
+// and said.
+func (s *session) keepUnpulled() {
+	if s.rm {
+		s.app.warn(s.sb.Name + " is not deleted (--rm): its work was not brought back; delete it once it is: `" + CommandName + " delete " + s.sb.Name + "`")
+	}
+	s.rm = false
 }
 
 // transport is copy mode's openshell CLI transport.

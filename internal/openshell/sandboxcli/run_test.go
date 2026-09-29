@@ -32,8 +32,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -307,7 +309,12 @@ func TestRunRefusals(t *testing.T) {
 			want: []string{"daemon is not running"}},
 		{name: "windows", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS = "windows" }, want: []string{"Windows and WSL2 are not supported"}},
 		{name: "wsl2", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.WSL = func() bool { return true } }, want: []string{"Windows and WSL2 are not supported"}},
-		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } }, want: []string{"not root"}},
+		{name: "root", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.Geteuid = func() int { return 0 } },
+			want: []string{"not root: the OpenShell gateway is a per-user service"}},
+		// OpenShell's MicroVM driver, which a Mac runs sandboxes with, needs
+		// Apple silicon.
+		{name: "an Intel Mac", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) { ta.GOOS, ta.GOARCH = "darwin", "amd64" },
+			want: []string{"OpenShell sandboxes are not supported here", "Apple silicon"}},
 		{name: "bad credential", opts: RunOptions{Harness: "claude", Credentials: []string{"NOPE=api.x.com"}}, want: []string{"is not set in this shell"}},
 		{name: "--github-write without a token", opts: RunOptions{Harness: "claude", GitHubWrite: true}, want: []string{"GH_TOKEN"}},
 		// The OmniGent sandbox agent names no model, and a profile without a
@@ -375,26 +382,38 @@ func TestRunRefusals(t *testing.T) {
 // "wait for sandbox … failed: … is in error state", OpenShell's reason (its
 // supervisor's Landlock probe) only in the gateway log (manual test M13).
 // The daemon now passes the reason on, and on macOS a run or a start that
-// failed on Landlock says what that means there.
+// failed on Landlock on the docker driver (Docker Desktop's VM kernel) says
+// what that means there and how to switch to MicroVMs; on the MicroVM
+// driver, whose sandboxes boot kernels of their own, it says nothing more.
 func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 	const detail = `openshell: wait for sandbox "myapp-d395": Internal: sandbox "myapp-d395" is in error state; ` +
 		`OpenShell says: SupervisorFailed: Landlock allow/deny probe failed`
 	failure := &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "OpenShell: wait for sandbox myapp-d395 failed", Detail: detail}
-	hint := "; macOS sandboxes cannot run on Docker Desktop today: its Linux VM has no Landlock, which OpenShell sandboxes need " +
-		"(`defenseclaw sandbox doctor` checks it; see " + setupTroubleshootingURL + ")"
-	for goos, want := range map[string]string{"linux": failure.Error(), "darwin": failure.Error() + hint} {
+	hint := "; this gateway runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, which OpenShell sandboxes need: " +
+		"switch the gateway to MicroVMs with `defenseclaw sandbox setup` (or `defenseclaw sandbox doctor --fix`; see " + setupTroubleshootingURL + ")"
+	for _, c := range []struct{ goos, driver, want string }{
+		{"linux", "", failure.Error()},
+		{"linux", "docker", failure.Error()},
+		{"darwin", "", failure.Error() + hint},
+		{"darwin", "docker", failure.Error() + hint},
+		{"darwin", "vm", failure.Error()},
+	} {
 		ta := newTestApp(t, "")
-		ta.GOOS = goos
+		ta.GOOS = c.goos
+		ta.daemon.status.Gateway.Driver = c.driver
 		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = failure
-		if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != want {
-			t.Fatalf("%s: Run = %v\nwant %s", goos, err, want)
+		if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != c.want {
+			t.Fatalf("%s/%s: Run = %v\nwant %s", c.goos, c.driver, err, c.want)
 		}
 		old := sampleSandbox("myapp-d395")
 		old.Phase, old.Project = "stopped", ta.project
+		if c.driver == "vm" {
+			old.WorkdirMode = "copy"
+		}
 		ta.daemon.add(old)
 		ta.daemon.errors["POST /api/v1/sandbox/sandboxes/myapp-d395/start"] = failure
-		if err := ta.Connect(bg, ConnectOptions{Name: "myapp-d395"}); err == nil || err.Error() != want {
-			t.Fatalf("%s: Connect = %v\nwant %s", goos, err, want)
+		if err := ta.Connect(bg, ConnectOptions{Name: "myapp-d395"}); err == nil || err.Error() != c.want {
+			t.Fatalf("%s/%s: Connect = %v\nwant %s", c.goos, c.driver, err, c.want)
 		}
 	}
 	// A configuration OpenShell refused for a Landlock path is not that.
@@ -701,6 +720,22 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 	has(t, ta.output(), "⚠ ~/proj can't be mounted live (its git directory lives at ~/main/.git/worktrees/proj, outside the folder "+
 		"(a git worktree or submodule checkout)), so it runs on a copy: `defenseclaw sandbox pull wt` brings the changes back")
 	lacks(t, ta.output(), "with --copy")
+
+	// The daemon's needs-copy answer on a driver without host mounts, to a
+	// run whose status did not name the driver (a daemon that reconnected
+	// to a MicroVM gateway since): the same one sentence, with the driver's
+	// reason.
+	ta = newTestApp(t, "a\n")
+	ta.daemon.refuseCreate = func(req sandboxapi.CreateRequest) *sandboxapi.Error {
+		if req.Copy {
+			return nil
+		}
+		return &sandboxapi.Error{Code: sandboxapi.CodeNeedsCopy, Message: "this project cannot be mounted live; run it with --copy",
+			Detail: ta.project + " cannot be mounted live: the OpenShell MicroVM (vm) driver mounts no host folders"}
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "vmbox"}))
+	has(t, ta.output(), "⚠ ~/proj can't be mounted live (the OpenShell MicroVM (vm) driver mounts no host folders), so it runs on a copy: "+
+		"`defenseclaw sandbox pull vmbox` brings the changes back")
 }
 
 func TestSummaryLine(t *testing.T) {
@@ -961,4 +996,174 @@ func TestDiskFullIsNamed(t *testing.T) {
 	if hint := ta.diskFullHint(errors.New("connection reset")); hint != "" {
 		t.Errorf("an unrelated failure got %q", hint)
 	}
+}
+
+// TestRunOnTheMicroVMDriver: on a gateway whose compute driver mounts no
+// host folders (OpenShell's MicroVM driver, which a Mac runs sandboxes
+// with) every run works on a copy, said in one line before the copy is
+// made, whether the daemon clamped the mode itself or not. A flag the
+// driver cannot honour is refused (--context) or named (--no-snapshot,
+// --cpu, --memory) before anything is copied or created, and the first
+// boot of an image says it takes a while. The docker driver's runs are
+// unchanged.
+func TestRunOnTheMicroVMDriver(t *testing.T) {
+	const note = "copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, " +
+		"and your folder gets its changes only through `defenseclaw sandbox pull`"
+	driver := func(name string, more ...func(*testApp)) func(*testApp) {
+		return func(ta *testApp) {
+			ta.daemon.status.Gateway.Driver = name
+			for _, f := range more {
+				f(ta)
+			}
+		}
+	}
+	// copied checks the run asked for a copy and said so once, before the
+	// copy was made.
+	copied := func(said string) func(*testing.T, *testApp) {
+		return func(t *testing.T, ta *testApp) {
+			t.Helper()
+			req := createRequest(t, ta.daemon)
+			if !req.Copy {
+				t.Fatalf("create request = %+v, want a copy", req)
+			}
+			out := ta.output()
+			if strings.Count(out, said) != 1 || strings.Index(out, said) > strings.Index(out, "Copying") {
+				t.Fatalf("%q is not said once, before the copy:\n%s", said, out)
+			}
+			if got := ta.copy.steps; len(got) < 2 || got[0] != "stage "+req.Name || got[1] != "upload "+req.Name {
+				t.Fatalf("copy steps = %v", got)
+			}
+		}
+	}
+	// The daemon's own clamp of a mount the user configured.
+	clamped := func(ta *testApp) {
+		ta.daemon.explain.Settings[0] = sandboxapi.Setting{Key: "workdir.mode", Value: "copy", Source: "admin",
+			Origin: packs.ConstraintComputeDriver, Requested: "mount"}
+		clamp := sandboxapi.Violation{Key: "workdir.mode", Source: "user", Attempted: "mount", Enforced: "copy", Constraint: packs.ConstraintComputeDriver,
+			Message: sandboxapi.AdminMessage + ": workdir.mode", Detail: "the OpenShell MicroVM (vm) driver mounts no host folders"}
+		ta.daemon.explain.Violations = []sandboxapi.Violation{clamp}
+		ta.daemon.createViolations = []sandboxapi.Violation{clamp}
+	}
+	// An organization's cap on --cpu, which a MicroVM does not take.
+	capped := func(ta *testApp) {
+		ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
+			sandboxapi.Setting{Key: "resources.cpu", Value: "1", Source: "admin", Origin: "openshell.admin.max_resources"})
+		ta.daemon.createWarnings = []string{limitsIgnoredText}
+	}
+	firstBoot := func(ta *testApp) { ta.daemon.explain.VMFirstBoot = true }
+	missing := func(ta *testApp) { ta.images.missing = map[string]bool{"claudecode": true} }
+	refused := func(o RunOptions, want string) func(*testApp) error {
+		return func(ta *testApp) error {
+			err := ta.Run(bg, o)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				return fmt.Errorf("Run = %v, want %q", err, want)
+			}
+			if ta.creates() != 0 || len(ta.copy.steps) != 0 {
+				return fmt.Errorf("a refused run created %d sandboxes and staged %v", ta.creates(), ta.copy.steps)
+			}
+			return nil
+		}
+	}
+	run := RunOptions{Harness: "claude"}
+	runCases(t, []runCase{
+		{name: "every run works on a copy", input: "a\n", setup: driver("vm"), opts: run, check: copied(note),
+			want: []string{"Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj"}},
+		{name: "--copy needs no note", input: "a\n", setup: driver("vm"), opts: RunOptions{Harness: "claude", Copy: true}, not: []string{note}},
+		// The clamp is the gateway's, not the organization's.
+		{name: "the daemon's own clamp", input: "a\n", setup: driver("vm", clamped), opts: run, check: copied(note),
+			not: []string{"organization", "Run with its setting?"}},
+		{name: "a driver DefenseClaw does not know mounts nothing", input: "a\n", setup: driver("podman"), opts: run,
+			check: copied("copy mode: this gateway's compute driver mounts no host folders")},
+		{name: "--context is refused before anything is copied", setup: driver("vm"),
+			do: refused(RunOptions{Harness: "claude", Context: []string{"/srv/lib"}}, "--context mounts a folder into the sandbox read-only, and "+
+				"the OpenShell MicroVM (vm) driver mounts no host folders; run without --context")},
+		{name: "--no-snapshot, --cpu and --memory are named", input: "a\n", setup: driver("vm", capped),
+			opts: RunOptions{Harness: "claude", CPU: "4", Memory: "8Gi", NoSnapshot: true}, check: copied(limitsIgnoredText),
+			want: []string{"--no-snapshot does not apply: the OpenShell MicroVM (vm) driver mounts no host folders, so the run works on a copy, which takes no snapshot"},
+			not:  []string{"limited by your organization", "Run with its setting?"}},
+		{name: "the first boot of an image", input: "a\n", setup: driver("vm", firstBoot), opts: run,
+			want: []string{"Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)"}},
+		{name: "a new image and its first boot", input: "a\n", setup: driver("vm", firstBoot, missing), opts: run,
+			want: []string{"(building its image first, which can take a few minutes; then the first start prepares its MicroVM disk: about a minute)"}},
+		// On docker the mount, --context and the limits go to the daemon.
+		{name: "the docker driver mounts", input: "y\n", setup: driver("docker"),
+			opts: RunOptions{Harness: "claude", Context: []string{"/srv/lib"}, CPU: "2", NoSnapshot: true}, check: func(t *testing.T, ta *testApp) {
+				if req := createRequest(t, ta.daemon); req.Copy || !slices.Equal(req.Context, []string{"/srv/lib"}) || req.CPU != "2" || !req.NoSnapshot {
+					t.Fatalf("create request = %+v", req)
+				}
+			}, not: []string{"copy mode:", limitsIgnoredText, "does not apply", "Copying"}},
+	})
+}
+
+// failingCopy is a fakeCopy whose stage or upload fails with the error set.
+type failingCopy struct {
+	*fakeCopy
+	stageErr, uploadErr error
+}
+
+func (f *failingCopy) Stage(ctx context.Context, o workspace.StageOptions) (*workspace.CopyRecord, error) {
+	if f.stageErr != nil {
+		f.step("stage " + o.Name)
+		return nil, f.stageErr
+	}
+	return f.fakeCopy.Stage(ctx, o)
+}
+
+func (f *failingCopy) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader) (*workspace.CopyRecord, error) {
+	if f.uploadErr != nil {
+		return nil, f.uploadErr
+	}
+	return f.fakeCopy.Upload(ctx, dataDir, name, up)
+}
+
+// A copy too large to stage names the setting that raises the cap; on the
+// MicroVM driver the refusal also says that a copy is the only way the
+// project runs there, and what must hold it (a folder too large to copy
+// could be mounted live on Linux). A disk full inside a MicroVM is its
+// overlay disk, not this machine's.
+func TestCopyLimitsOnTheMicroVMDriver(t *testing.T) {
+	large := &workspace.TooLargeError{What: "the copy (files and history)", Size: 612 << 20, Limit: 500 << 20}
+	onlyWay := "the OpenShell MicroVM (vm) driver mounts no host folders, so a copy is the only way this project runs on this gateway, " +
+		"and the sandbox's own disk must hold it with its git history (overlay_disk_mib under [openshell.drivers.vm]"
+	for _, driver := range []string{"docker", "vm"} {
+		ta := newTestApp(t, "")
+		ta.daemon.status.Gateway.Driver = driver
+		ta.Workspace = &failingCopy{fakeCopy: ta.copy, stageErr: large}
+		err := ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "bigbox"})
+		wantErr(t, err, "stage the project copy: the copy (files and history) is", "above the",
+			"; raise openshell.workdir.max_upload_mb (in MB, 500 by default) in "+ta.tildePath(ta.ConfigPath)+" to copy a larger project")
+		if strings.Contains(err.Error(), onlyWay) != (driver == "vm") {
+			t.Errorf("%s: %v", driver, err)
+		}
+		if ta.creates() != 0 {
+			t.Fatalf("%s: a copy that could not be staged created a sandbox", driver)
+		}
+	}
+	// Too many files is not the size cap.
+	ta := newTestApp(t, "")
+	if hint := ta.stageHint(&workspace.TooLargeError{What: "the folder", Size: 200001, Limit: 200000, Entries: true}, openshell.Driver{}); hint != "" {
+		t.Errorf("an entry limit got %q", hint)
+	}
+
+	full := errors.New("openshell sandbox upload failed: tar: ./node_modules/x: Cannot write: No space left on device")
+	overlay := "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by overlay_disk_mib under " +
+		"[openshell.drivers.vm] in the OpenShell gateway's gateway.toml; free some space in the sandbox, or raise that size for new sandboxes " +
+		"(`defenseclaw sandbox doctor` shows it)"
+	ta = newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
+	if hint := ta.sandboxDiskHint(bg, ta.API, full); hint != overlay {
+		t.Errorf("a full MicroVM: %q", hint)
+	}
+	// This machine's own full disk is still its own.
+	has(t, ta.sandboxDiskHint(bg, ta.API, fmt.Errorf("write: %w", syscall.ENOSPC)), "the disk holding")
+	if hint := ta.sandboxDiskHint(bg, ta.API, errors.New("connection reset")); hint != "" {
+		t.Errorf("an unrelated failure got %q", hint)
+	}
+	// The upload says it.
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, uploadErr: full}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Name: "fullbox"}), "upload the project copy: ", overlay)
+	// On docker a full disk is named as before.
+	ta = newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "docker"
+	has(t, ta.sandboxDiskHint(bg, ta.API, full), "the disk holding")
 }

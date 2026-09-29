@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -100,7 +101,7 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 	}
 	started, err := api.Start(ctx, sb.Name, req)
 	if err != nil {
-		return nil, false, a.startError(sb, err)
+		return nil, false, a.startError(ctx, api, sb, err)
 	}
 	a.forgetCleanCopy(sb.Name)
 	kept := keptUndoPoint(sb, started)
@@ -120,7 +121,7 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 // lets start as it was created (a live mount the organization now runs on
 // a copy, a harness it no longer allows) can only be deleted and run
 // again.
-func (a *App) startError(sb *sandboxapi.Sandbox, err error) error {
+func (a *App) startError(ctx context.Context, api API, sb *sandboxapi.Sandbox, err error) error {
 	msg := apiError(err).Error()
 	var e *sandboxapi.Error
 	if errors.As(err, &e) && e.Violation != nil {
@@ -129,7 +130,7 @@ func (a *App) startError(sb *sandboxapi.Sandbox, err error) error {
 			return fmt.Errorf("%s; delete it (`%s delete %s`) and run it again", msg, CommandName, sb.Name)
 		}
 	}
-	return a.landlockHint(errors.New(msg))
+	return a.landlockHint(errors.New(msg), func() openshell.Driver { return statusDriver(ctx, api) })
 }
 
 // keptUndoPoint reports whether a start kept the undo point it found: the

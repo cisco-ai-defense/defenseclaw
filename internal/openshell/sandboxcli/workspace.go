@@ -429,11 +429,19 @@ type ReviewOptions struct {
 	Output OutputFormat
 }
 
-// Review prints the end-of-session review of a mounted project.
+// Review prints the end-of-session review of a mounted project. For a
+// copy-mode sandbox (every sandbox on a gateway that mounts no host
+// folders) it previews what `pull` would bring back, applying nothing.
 func (a *App) Review(ctx context.Context, o ReviewOptions) error {
 	api, err := a.api()
 	if err != nil {
 		return err
+	}
+	if sb, err := api.Get(ctx, o.Name); err == nil && sb.WorkdirMode == config.OpenShellWorkdirCopy {
+		if o.Diff && o.Output != OutputJSON {
+			a.note("--diff: the changes of a copy come back as a patch; `" + CommandName + " pull " + o.Name + " --patch-out FILE` writes one")
+		}
+		return a.Pull(ctx, PullOptions{Name: o.Name, Output: o.Output, preview: true})
 	}
 	rev, err := api.Review(ctx, o.Name, sandboxapi.ReviewRequest{Diff: o.Diff})
 	if err != nil {
@@ -498,6 +506,9 @@ type PullOptions struct {
 	AcceptSensitive bool
 	Yes             bool
 	Output          OutputFormat
+	// preview is `review` of a copy-mode sandbox: a pull without a mode,
+	// whose way on names `pull`.
+	preview bool
 }
 
 // Pull brings a copy-mode sandbox's work back: review, then apply (3-way),
@@ -571,9 +582,14 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		a.warn(b)
 	}
 	if modes == 0 {
-		if res.Kind == workspace.CopyPlain {
+		switch {
+		case o.preview && res.Kind == workspace.CopyPlain:
+			a.note("nothing was applied; bring it back with `" + CommandName + " pull " + o.Name + " --apply` (or --patch-out FILE)")
+		case o.preview:
+			a.note("nothing was applied; bring it back with `" + CommandName + " pull " + o.Name + " --apply` (or --branch or --patch-out FILE)")
+		case res.Kind == workspace.CopyPlain:
 			a.note("bring it back with --apply or --patch-out FILE")
-		} else {
+		default:
 			a.note("bring it back with --apply, --branch or --patch-out FILE")
 		}
 		return nil
@@ -649,7 +665,7 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 	a.note("Pulling " + sb.Name + "'s work…")
 	res, err := a.Workspace.Pull(ctx, workspace.PullOptions{DataDir: a.dataDir(), Name: sb.Name, Exec: a.transport(cli), SensitiveGlobs: review})
 	if err != nil {
-		return nil, workspaceFailure("pull "+sb.Name, err, a.diskFullHint(err))
+		return nil, workspaceFailure("pull "+sb.Name, err, a.sandboxDiskHint(ctx, api, err))
 	}
 	return res, nil
 }
@@ -657,6 +673,27 @@ func (a *App) pull(ctx context.Context, api API, cli openshell.CLI, sb *sandboxa
 // lowDiskBytes is the free space under which a failed write is taken for
 // a full disk: git names only the file it could not write.
 const lowDiskBytes = 64 << 20
+
+// sandboxDiskHint is diskFullHint for a step that also writes inside the
+// sandbox (the upload, the pull's bundle). A disk full while this machine's
+// is not, and not full from a write of this process, is the sandbox's own:
+// on a driver that gives each sandbox a disk of its own (a MicroVM's
+// overlay) the hint names that disk and its size setting instead.
+func (a *App) sandboxDiskHint(ctx context.Context, api API, err error) string {
+	hint := a.diskFullHint(err)
+	if hint == "" || isNoSpace(err) {
+		return hint
+	}
+	if free, known := freeBytes(a.dataDir()); !known || free < lowDiskBytes {
+		return hint
+	}
+	disk := sandboxDisk(statusDriver(context.WithoutCancel(ctx), api))
+	if disk == "" {
+		return hint
+	}
+	return "the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk sized by " + disk +
+		"; free some space in the sandbox, or raise that size for new sandboxes (`" + CommandName + " doctor` shows it)"
+}
 
 // diskFullHint names a full disk as the cause of a workspace failure (no
 // space left on device), which git's own message does not say.

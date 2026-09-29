@@ -752,6 +752,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		Executable: func() (string, error) { return "/usr/local/bin/defenseclaw-gateway", nil },
 		Now:        func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) },
 		GOOS:       "linux",
+		GOARCH:     "arm64", // a test that makes this a Mac makes it an Apple-silicon one
 		WSL:        func() bool { return false },
 		Geteuid:    func() int { return 1000 },
 		Sleep:      func(context.Context, time.Duration) error { return nil },
