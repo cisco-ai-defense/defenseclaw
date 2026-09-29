@@ -83,8 +83,6 @@ const (
 	sshShimFallbackName = "openshell-ssh"
 	// sshShimProbeTimeout bounds the probe run.
 	sshShimProbeTimeout = 10 * time.Second
-	// maxSSHShimBytes bounds what Verify reads back.
-	maxSSHShimBytes = 4096
 )
 
 // sshShimBase is where shim directories are made first; empty means
@@ -262,7 +260,7 @@ func (s *SSHShim) write() error {
 	}
 	tmp := f.Name()
 	defer func() { _ = os.Remove(tmp) }()
-	_, werr := f.Write(sshShimScript(s.Real))
+	_, werr := f.Write(s.script())
 	if werr == nil {
 		werr = f.Chmod(sshShimMode)
 	}
@@ -344,11 +342,12 @@ func (s *SSHShim) verify() error {
 	if err := checkSSHShimACL(s.Path, info, false); err != nil {
 		return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
 	}
-	data, err := safefile.ReadRegularFileBounded(s.Path, maxSSHShimBytes)
+	want := s.script()
+	data, err := safefile.ReadRegularFileBounded(s.Path, int64(len(want))+1)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(data, sshShimScript(s.Real)) {
+	if !bytes.Equal(data, want) {
 		return fmt.Errorf("%s is not the shim DefenseClaw wrote", s.Path)
 	}
 	return nil
@@ -386,11 +385,31 @@ func (s *SSHShim) Remove() error {
 	return err
 }
 
-// sshShimScript is the shim that runs realSSH.
-func sshShimScript(realSSH string) []byte {
+// script is the shim s runs as.
+func (s *SSHShim) script() []byte { return sshShimScript(s.Real, sshPathWithoutShims(s.pathEnv)) }
+
+// sshShimScript is the shim that runs realSSH with PATH set to pathEnv:
+// the PATH the shim was made for, without the shim's own directory, so a
+// real ssh that is itself a wrapper looking for "the next ssh" on PATH
+// (ssh-ident as ~/bin/ssh) finds the one after it, not the shim again.
+func sshShimScript(realSSH, pathEnv string) []byte {
 	return []byte("#!/bin/sh\n" + sshShimMarker + "\n" +
 		"if [ -n \"${" + sshShimProbeEnv + "+x}\" ]; then printf '%s\\n' \"$" + sshShimProbeEnv + "\"; exit 0; fi\n" +
+		"PATH=" + shellQuote(pathEnv) + "\nexport PATH\n" +
 		"exec " + shellQuote(realSSH) + " " + strings.Join(sshNoSharingOptions[:], " ") + " \"$@\"\n")
+}
+
+// sshPathWithoutShims is pathEnv without DefenseClaw's shim directories,
+// its own and any another DefenseClaw process left on it.
+func sshPathWithoutShims(pathEnv string) string {
+	dirs := filepath.SplitList(pathEnv)
+	kept := dirs[:0]
+	for _, dir := range dirs {
+		if !strings.HasPrefix(filepath.Base(dir), sshShimPrefix) {
+			kept = append(kept, dir)
+		}
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
 }
 
 // findRealSSH is the ssh a command-name lookup of pathEnv finds, skipping

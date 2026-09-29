@@ -153,6 +153,56 @@ func TestSSHShimFindsTheRealSSH(t *testing.T) {
 	}
 }
 
+// The shim runs the real ssh with the PATH it was made for, without the
+// shim's directory. A first ssh that is itself a wrapper running "the next
+// ssh" on PATH (ssh-ident installed as ~/bin/ssh) used to find the shim
+// again, which ran the wrapper again with six more arguments each round,
+// until the argument list was too long.
+func TestSSHShimRunsSSHWithoutItselfOnPATH(t *testing.T) {
+	skipOnWindows(t)
+	openshell.SetSSHShimBase(t, realTempDir(t))
+	root := t.TempDir()
+	wrapperDir, realDir := filepath.Join(root, "home bin"), filepath.Join(root, "usr-bin")
+	recordingSSH(t, realDir)
+	if err := os.Mkdir(wrapperDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rounds := filepath.Join(root, "rounds")
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	// Like ssh-ident: skip its own directory, run the first other ssh.
+	writeFile(t, filepath.Join(wrapperDir, "ssh"), "#!/bin/sh\n"+
+		"echo x >> "+q(rounds)+"\n"+
+		"n=0; while read -r _; do n=$((n+1)); done < "+q(rounds)+"\n"+
+		"[ \"$n\" -le 3 ] || { echo 'the wrapper looped' >&2; exit 99; }\n"+
+		"IFS=:\nfor d in $PATH; do\n"+
+		"  [ \"$d\" = "+q(wrapperDir)+" ] && continue\n"+
+		"  [ -x \"$d/ssh\" ] && exec \"$d/ssh\" \"$@\"\n"+
+		"done\nexit 127\n", 0o700)
+	// A shim directory another DefenseClaw process left on PATH is no
+	// ssh to run either.
+	stale := filepath.Join(root, "defenseclaw-ssh-stale")
+	recordingSSH(t, stale)
+	pathEnv := strings.Join([]string{stale, wrapperDir, realDir}, string(os.PathListSeparator))
+
+	s, err := openshell.NewSSHShim(pathEnv)
+	if err != nil || s == nil || s.Real != filepath.Join(wrapperDir, "ssh") {
+		t.Fatalf("NewSSHShim = %+v, %v; want one running the wrapper", s, err)
+	}
+	defer s.Remove()
+	// The CLI finds ssh on the PATH the shim gives it.
+	cmd := exec.Command("/bin/sh", "-c", `exec ssh "$@"`, "sh", "-tt", "sandbox")
+	cmd.Env = s.Environ([]string{"PATH=" + pathEnv})
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if want := "[-o][ControlMaster=no][-o][ControlPath=none][-o][ControlPersist=no][-tt][sandbox]"; err != nil || string(out) != want {
+		t.Fatalf("ssh ran with %q, %v (%s); want %q", out, err, stderr.String(), want)
+	}
+	if data, err := os.ReadFile(rounds); err != nil || string(data) != "x\n" {
+		t.Fatalf("the wrapper ran %q times, %v; want once", data, err)
+	}
+}
+
 // A temporary directory that another user could swap the shim out of is
 // refused, and so is a shim that changed after it was written.
 func TestSSHShimRefusesUnsafeDirectories(t *testing.T) {
