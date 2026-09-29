@@ -140,20 +140,31 @@ func dispatchTrustedAction(
 	// argv. Semantic rules run on the complete analysis of a static-target
 	// twin without those redirects, but only a match counts there, and only
 	// for a rule that match cannot depend on the dropped redirect and path
-	// facts (redirectReductionCandidate). A non-match or a skipped rule never
-	// suppresses its legacy fallback, which, like every recovery lane below,
-	// still sees the whole action. A partial action with && or || lists gets
-	// the same treatment on the complete analysis of its commands that are
-	// certain to run: every statement of the top-level sequence, and of each
-	// list only its first command (listReductionCandidate). A command after
-	// && or || might not run, so a match on it alone stays detection-only.
+	// facts (redirectReductionCandidate). A code-owned prerequisite is a Go
+	// check written for complete facts, so it must also hold on the twin
+	// with its static targets (staticTargetTwin). A non-match or a skipped
+	// rule never suppresses its legacy fallback, which, like every recovery
+	// lane below, still sees the whole action.
+	//
+	// A partial action with && or || lists is judged as if every command of
+	// each list runs: a block stops the whole call before any of it runs, so
+	// a rule that blocks `a; b` also blocks `a && b` and `a || b`. Semantic
+	// rules that do not read how complete the analysis is
+	// (listReductionCandidate) and the context checks run on the complete
+	// analysis of the list read as a sequence, which has every fact of the
+	// action, so there a non-match counts as it does for `a; b`. A list with
+	// a runtime-expanded redirect target is read as a sequence inside the
+	// redirect-target view.
 	semanticFacts := facts
-	// viewCandidate is set when semanticFacts is a reduced view, and reports
-	// whether a rule's match on that view may stand for the whole action.
+	// viewCandidate is set when semanticFacts is a view, and reports whether
+	// a rule's result on that view may stand for the whole action.
 	var viewCandidate func(compiledSemanticRule) bool
+	// staticTargetTwin is the complete analysis a redirect-target view was
+	// cut from, with the placeholder targets' redirect and path facts.
+	var staticTargetTwin *actionfacts.Facts
 	if !facts.Authoritative() {
-		if view, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
-			semanticFacts, viewCandidate = view, redirectReductionCandidate
+		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
 		} else {
@@ -168,7 +179,8 @@ func dispatchTrustedAction(
 			return findings
 		}
 	}
-	reduced := viewCandidate != nil
+	// matchOnly is set when only a match on the view counts.
+	matchOnly := staticTargetTwin != nil
 	fullProjection, projectionCode := semantic.Project(semanticFacts)
 	if projectionCode != semantic.ProjectionOK {
 		var fallbackTelemetry trustedActionTelemetry
@@ -199,14 +211,17 @@ func dispatchTrustedAction(
 		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 			continue
 		}
-		if reduced && !viewCandidate(candidate) {
+		if viewCandidate != nil && !viewCandidate(candidate) {
 			continue
 		}
 		if !candidate.owner.eligible(semanticFacts) {
-			if !reduced && candidate.owner.suppressFallback != nil &&
+			if !matchOnly && candidate.owner.suppressFallback != nil &&
 				candidate.owner.suppressFallback(semanticFacts) {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
+			continue
+		}
+		if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 			continue
 		}
 		result, evalCode := candidate.program.EvalBool(ctx, fullProjection)
@@ -221,7 +236,7 @@ func dispatchTrustedAction(
 			continue
 		}
 		if !result.Matched {
-			if !reduced {
+			if !matchOnly {
 				excludeSemanticOwner(excluded, candidate.owner, false)
 			}
 			continue
@@ -371,28 +386,32 @@ func dispatchTrustedAction(
 		request.EnforcementCapable,
 	)
 	findings = append(semanticFindings, legacyFindings...)
-	return finalizeTrustedActionFindings(generation, request, facts, findings)
+	// A list read as a sequence has every fact of the action, so the context
+	// checks that decide whether a content or path finding may block judge it
+	// as that sequence too. A redirect-target view lacks the target's facts.
+	contextFacts := facts
+	if viewCandidate != nil && !matchOnly {
+		contextFacts = semanticFacts
+	}
+	return finalizeTrustedActionFindings(generation, request, contextFacts, findings)
 }
 
 // redirectReductionCandidate reports whether a match of candidate on the view
 // from actionfacts.DynamicRedirectTargetReduction may stand for the
-// whole action. The expression must be one that more redirects cannot turn
-// off (semantic.Program.RedirectReductionSafe), and the owner must have no
-// code-owned prerequisite: those are Go checks written for complete facts
-// that may read a command's redirects. Other owners keep their legacy
+// whole action: the expression must be one that more redirects cannot turn
+// off (semantic.Program.RedirectReductionSafe). Other rules keep their legacy
 // fallback, as for any other partial action.
 func redirectReductionCandidate(candidate compiledSemanticRule) bool {
-	return candidate.owner.prerequisite == nil &&
-		candidate.program.RedirectReductionSafe()
+	return candidate.program.RedirectReductionSafe()
 }
 
-// listReductionCandidate is redirectReductionCandidate for the view from
-// actionfacts.ShortCircuitListReduction: the expression must be one that
-// more commands, and the facts they own, cannot turn off
-// (semantic.Program.ListReductionSafe).
+// listReductionCandidate reports whether a result of candidate on the view
+// from actionfacts.ShortCircuitListReduction may stand for the whole action:
+// the expression must not read how complete the analysis is
+// (semantic.Program.ListReductionSafe). Other rules keep their legacy
+// fallback.
 func listReductionCandidate(candidate compiledSemanticRule) bool {
-	return candidate.owner.prerequisite == nil &&
-		candidate.program.ListReductionSafe()
+	return candidate.program.ListReductionSafe()
 }
 
 func excludeSemanticOwner(

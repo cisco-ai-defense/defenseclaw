@@ -51,22 +51,16 @@ func (p *Program) RedirectReductionSafe() bool {
 	return p != nil && p.redirectReductionSafe
 }
 
-// ListReductionSafe reports whether a match of this expression on the view
-// returned by actionfacts.ShortCircuitListReduction also holds for the whole
-// action, whose commands after && or || the view left out.
+// ListReductionSafe reports whether the result of this expression on the
+// view returned by actionfacts.ShortCircuitListReduction also holds for the
+// whole action, read as if every command of its && and || lists runs.
 //
-// The view is the complete analysis of a twin of the action with only the
-// commands certain to run. Compared with the action it lacks commands and
-// every fact they own (paths, network, data flows, artifacts and archive
-// lineages), and it is complete where the action is not. An expression is
-// safe when it reads neither parse nor authoritative, reads argv_complete
-// only on a command, and reads commands, paths, network, data_flows,
-// artifacts and archive_lineages only as the range of an exists() reached
-// from the root through &&, || and exists() or all() predicates alone: more
-// of them can then only keep a match. A kept command's own facts, such as
-// its argv, argv_complete, operations and wrappers, are those of a complete
-// analysis, so negation over them is unaffected, except for facts only a
-// left-out command could add to it.
+// The view is the complete analysis of a twin of the action in which each
+// list is the sequence of its commands. It has every command of the action
+// and every fact they own, so negation over them decides as it does for the
+// same commands joined by ";". It differs from the action only in being
+// complete, so an expression is safe when it reads neither parse nor
+// authoritative, and reads argv_complete only on a command.
 func (p *Program) ListReductionSafe() bool {
 	return p != nil && p.listReductionSafe
 }
@@ -78,10 +72,7 @@ func redirectReductionSafe(ast *cel.Ast) bool {
 }
 
 func listReductionSafe(ast *cel.Ast) bool {
-	return reductionSafe(ast, map[string]bool{
-		"commands": true, "paths": true, "network": true, "data_flows": true,
-		"artifacts": true, "archive_lineages": true,
-	})
+	return reductionSafe(ast, nil)
 }
 
 // commandFactType is the CEL type name of a command fact.
