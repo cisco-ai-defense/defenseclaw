@@ -270,6 +270,12 @@ func (a *APIServer) applySandboxVerdictReason(
 	if !sandboxHookForConnector(ctx, connectorName) {
 		return resp
 	}
+	// A verdict of destination rules alone, for destinations the user
+	// unblocked for this sandbox, is an allow: the proxy lets the sandbox
+	// reach them (#954).
+	if lifted, ok := a.liftUnblockedDestinations(ctx, req, resp); ok {
+		return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, lifted, "")
+	}
 	// Finding labels quote titles the catalogs do not vouch for; the rule
 	// IDs travel on rule_ids.
 	findings := resp.Findings

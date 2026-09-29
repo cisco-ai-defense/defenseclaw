@@ -608,6 +608,9 @@ match the same entry. A bare `*` is refused: choose the profile instead
 paths, and wildcards inside a name are refused, and so are host names whose
 last label does not start with a letter (`127.1`, `0x7f000001`), because
 resolvers read them as addresses. Matching ignores case and a trailing dot.
+One list widens a host name: on `admin.egress_block`, `example.net` blocks
+the host and all its subdomains, the way an administrator blocking a domain
+means it. Every other list matches a host name exactly.
 Lists hold at most 4096 entries.
 
 **Project globs** (`workdir.masks`, `workdir.unmask`, and
@@ -698,8 +701,8 @@ openshell:
 | `allow_unblock` | `true`, `false`, `null` | `false` refuses unblocks and approve-always, ignores saved unblocks and the allow entries of users and of custom packs they chose, and keeps the blocklist feed on. A one-time approval then can't reach a feed-listed or private-network destination. |
 | `allow_learn_mode` | `true`, `false`, `null` | `false` refuses learn mode. |
 | `allowed_harnesses` | Harness names | Only these harnesses may run. |
-| `egress_block` | Host patterns | Always blocked, for every sandbox. Nothing unblocks or approves them. |
-| `egress_allow_only` | Host patterns | The only hosts any sandbox may reach. Raises the profile to at least `balanced`. |
+| `egress_block` | Host patterns | Always blocked, for every sandbox. Nothing unblocks or approves them. A host name also blocks its subdomains (`example.net` covers `www.example.net`). |
+| `egress_allow_only` | Host patterns | The only hosts any sandbox may reach. Raises the profile to at least `balanced`. Entries match exactly: list `*.<host>` for subdomains. |
 | `require_copy_for` | Path globs, at most 1024 | Projects that must run in copy mode. |
 | `max_resources.cpu`, `max_resources.memory` | Same formats as `resources` | Ceilings for every sandbox. |
 | `locked` | Up to 16 of `pack`, `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import`, `mcp.host_ports`, `resources` | Keys whose configured value run options may not loosen. |

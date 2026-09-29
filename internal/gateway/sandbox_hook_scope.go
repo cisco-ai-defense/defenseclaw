@@ -255,6 +255,9 @@ const (
 type sandboxCoverage struct {
 	mu   sync.Mutex
 	gaps map[string]struct{}
+	// unblocked names the egress unblocks ("host:scope") that lifted the
+	// request's destination rules (liftUnblockedDestinations).
+	unblocked []string
 }
 
 type sandboxCoverageContextKey struct{}
@@ -323,6 +326,9 @@ func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 	}
 	if gaps := sandboxCoverageGaps(ctx); len(gaps) > 0 {
 		extra["sandbox_coverage_gaps"] = strings.Join(gaps, ",")
+	}
+	if lifted := sandboxEgressUnblocks(ctx); len(lifted) > 0 {
+		extra[sandboxEgressUnblockExtra] = strings.Join(lifted, ",")
 	}
 	return extra
 }

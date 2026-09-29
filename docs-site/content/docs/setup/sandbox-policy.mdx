@@ -555,7 +555,7 @@ unblocks never apply to it. The first match decides:
    `openshell.admin.egress_allow_only`. An unblock never opens them.
 3. The port must be on the proxy port list.
 4. `openshell.admin.egress_block`: blocked by your organization's policy.
-   Nothing unblocks it.
+   Nothing unblocks it. A host name there covers its subdomains too.
 5. `openshell.admin.egress_allow_only`: when set, any host not on it is
    blocked by your organization's policy.
 6. The block list (the pack's entries plus `openshell.egress.block`): blocked.
@@ -627,7 +627,7 @@ openshell:
     allow_unblock: null        # false: no unblocking, no approve-always, no user allow entries
     allow_learn_mode: null     # false: learn mode is refused
     allowed_harnesses: []      # only these harnesses may run; empty allows all
-    egress_block: []           # host globs that are always blocked
+    egress_block: []           # host globs that are always blocked (a name covers its subdomains)
     egress_allow_only: []      # the only host globs any sandbox may reach
     require_copy_for: []       # project path globs that must run in copy mode
     max_resources:             # ceilings for every sandbox
@@ -758,11 +758,19 @@ openshell:
 ### `egress_block` and `egress_allow_only`
 
 `egress_block` host globs are blocked for every sandbox. They are checked
-first, and neither an unblock nor an approval can open them.
+first, and neither an unblock nor an approval can open them. A host name on
+it blocks that host and every subdomain: `example.net` also blocks
+`www.example.net` and `a.b.example.net`, as if `*.example.net` were listed
+too (`sandbox policy explain` shows both). `*.example.net` still blocks only
+the subdomains. IP addresses and CIDR prefixes match the addresses they
+name. Only this list widens: `egress_allow_only`, `openshell.egress.block`
+and a pack's lists match a host name exactly.
 
 `egress_allow_only` is the complete list of hosts any sandbox may reach.
 Hosts on it are reachable (unless a block list or the feed blocks them), and
-nothing else is, including entries on the pack's own allow list. An entry
+nothing else is, including entries on the pack's own allow list. Its entries
+match exactly: `github.com` admits `github.com` only, so list
+`*.github.com` too for its subdomains. An entry
 that names a private host, such as `jira.corp` or `10.20.0.5`, opens it the
 way an allow entry does. It also raises the profile to at least `balanced`.
 With the `strict` profile the proxy is off, so it limits only what an

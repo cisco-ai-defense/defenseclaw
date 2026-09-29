@@ -566,6 +566,32 @@ Hook handlers then treat a sandbox request differently from a host request
   the sandbox's `last_blocked` and its `tool.blocked` activity entry; the
   audit sinks keep the source reason and redact it as before. Finding labels
   are left out of the response body; the rule IDs travel in `rule_ids`.
+- An unblock also lifts DefenseClaw's destination rules for that host
+  (`internal/gateway/sandbox_egress_unblock.go`, #954). The egress proxy and
+  these rules are two controls over one destination: the feed refuses
+  `webhook.site`, and `C2-WEBHOOK-SITE` flags (or, under a policy that
+  answers it with block, blocks) a tool call that names it. After
+  `sandbox unblock webhook.site --sandbox NAME` the proxy lets that sandbox
+  through, so its verdicts no longer tell the agent the destination is
+  flagged or blocked. A sandbox verdict is a plain allow, with no notice for
+  the agent and no finding on the feed, when every rule that decided it is a
+  destination rule (`C2-WEBHOOK-SITE`, `C2-NGROK`, `C2-PIPEDREAM`,
+  `C2-REQUESTBIN`, `C2-HOOKBIN`, `C2-BURP`, `C2-INTERACTSH`, `C2-OAST`,
+  `C2-CANARY`, `C2-PASTEBIN`) and every destination those rules name in the
+  hook request is a host the sandbox's proxy reaches because of an unblock
+  (`Manager.EgressUnblock`, asked of the decider its proxy credential
+  carries). A sandbox unblock does this for that sandbox, an `--always` one
+  for every sandbox. The rest keep their verdict: a subdomain nobody
+  unblocked (an unblock names one host), a name next to a shell expansion
+  (`$SUB.webhook.site`) or joined from parts the scan cannot read, a call
+  another rule decides too (a secret read piped to the upload), a host the
+  proxy allows for another reason (the feed off, an allow entry), and an
+  unblock the policy no longer honors (`allow_unblock: false`, a new
+  organization block). The audit row's reason names the rules that were not
+  applied and the hosts (`allowed: C2-WEBHOOK-SITE not applied to
+  webhook.site, which the user unblocked …`), `rule_ids` stay as the
+  verdict had them, and `extra.sandbox_egress_unblocked` lists the unblocks
+  (`webhook.site:sandbox` or `webhook.site:always`).
 
 ## Sandbox bindings and tokens
 
@@ -728,9 +754,16 @@ that decides wins:
    - The port must be on the port list (80 and 443 by default).
    - Guard blocks can't be unblocked.
 2. **The administrator's lists.** `openshell.admin.egress_block` refuses
-   (`admin_block`). A non-empty `openshell.admin.egress_allow_only` refuses
-   everything outside it (`admin_allow_only`). Nothing but the administrator
-   lifts either. The block message says "blocked by your organization's
+   (`admin_block`). A host name on it covers the host and every subdomain:
+   the resolved list (`egress.admin_block` in `sandbox policy explain`)
+   holds `example.net` and `*.example.net` for an `example.net` entry
+   (`config.OpenShellAdminBlockPatterns`), and that one list feeds the
+   decider, the policy's unblock and approval checks and the posture
+   announcements. Wildcards, IP addresses and CIDR prefixes are unchanged.
+   A non-empty `openshell.admin.egress_allow_only` refuses everything
+   outside it (`admin_allow_only`); its entries, like `openshell.egress.block`
+   and a pack's lists, match a host name exactly. Nothing but the
+   administrator lifts either. The block message says "blocked by your organization's
    DefenseClaw policy".
 3. **The block list**: the pack's `egress.block` plus `openshell.egress.block`
    (`operator_block`). It is checked before unblock decisions, so a host on
@@ -2258,7 +2291,8 @@ the result by `openshell.admin`. Along the way:
 `openshell.admin` holds the administrator's constraints: `required_pack` (its
 posture becomes a floor) and `required_pack_digest`, `min_profile`,
 `allow_yolo`, `allow_mount`, `allow_host_ports`, `allow_unblock`,
-`allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked),
+`allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked;
+a host name also covers its subdomains),
 `egress_allow_only` (forces an allowlist profile), `require_copy_for`,
 `max_resources`, and `locked` (keys run inputs may not loosen). In a
 `managed_enterprise` install the administrator owns `config.yaml`, so the
@@ -2360,7 +2394,8 @@ The manager (`watch.go`) turns the records into the feed and the counts:
   profile, network mode, approvals, skip-permissions, project mode, the
   organization's egress lists) puts one `sandbox.lifecycle` line on its feed
   (reason `policy_changed`), such as "your organization's sandbox policy
-  changed: egress_block now includes example.com; applied to <name>".
+  changed: egress_block now includes example.com, *.example.com; applied to
+  <name>" for an `example.com` entry.
 - A hook verdict that let the tool call run but flagged it (an alert, or a
   block the event cannot enforce) is a `finding` on the feed (reason
   `hook_finding`) with the verdict's severity; the agent reads "Allowed but

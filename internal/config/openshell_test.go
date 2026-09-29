@@ -381,6 +381,27 @@ func TestValidateOpenShellProjectGlob(t *testing.T) {
 	}
 }
 
+// #946: a host name on openshell.admin.egress_block covers its subdomains.
+func TestOpenShellAdminBlockPatterns(t *testing.T) {
+	for _, tc := range []struct {
+		in, want []string
+	}{
+		{nil, []string{}},
+		{[]string{"example.net"}, []string{"example.net", "*.example.net"}},
+		{[]string{" Example.NET. ", "*.example.net", "example.net"}, []string{"example.net", "*.example.net"}},
+		{[]string{"*.ngrok.io"}, []string{"*.ngrok.io"}},
+		{[]string{"www.example.org"}, []string{"www.example.org", "*.www.example.org"}},
+		{[]string{"203.0.113.7", "[2001:db8::1]", "198.51.100.0/24"}, []string{"203.0.113.7", "2001:db8::1", "198.51.100.0/24"}},
+		// Validation refuses these; they are kept as written, not widened.
+		{[]string{"x.example/path", ""}, []string{"x.example/path"}},
+	} {
+		got := OpenShellAdminBlockPatterns(tc.in)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") || got == nil {
+			t.Errorf("OpenShellAdminBlockPatterns(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestParseOpenShellEgressPattern(t *testing.T) {
 	for in, want := range map[string]string{
 		"Paste.Example.":       "paste.example",

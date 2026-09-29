@@ -877,8 +877,9 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 // `policy allow|block` edits config.yaml. A refused entry writes nothing: a
 // catch-all, any edit of a managed install, and a host the organization's
 // policy keeps closed, whatever the entry says (manual test M10: "✓ added"
-// for a host the organization blocks). The bare-domain blocklist entries
-// that leave subdomains open are named.
+// for a host the organization blocks). A host name on the organization's
+// blocklist covers its subdomains (#946), so the doctor no longer warns
+// that it leaves them open.
 func TestPolicyEdit(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")
@@ -900,6 +901,10 @@ func TestPolicyEdit(t *testing.T) {
 		{"egress_block", config.OpenShellAdminConfig{EgressBlock: []string{"example.net"}}, "example.net",
 			"blocked by your organization's DefenseClaw policy: egress.allow — example.net is on your organization's blocklist (example.net) (openshell.admin.egress_block)"},
 		{"egress_block wildcard", config.OpenShellAdminConfig{EgressBlock: []string{"*.example.net"}}, "*.api.example.net", "openshell.admin.egress_block"},
+		{"egress_block subdomain", config.OpenShellAdminConfig{EgressBlock: []string{"example.net"}}, "www.example.net",
+			"www.example.net is on your organization's blocklist (example.net) (openshell.admin.egress_block)"},
+		{"egress_block subdomain wildcard", config.OpenShellAdminConfig{EgressBlock: []string{"Example.NET."}}, "*.cdn.example.net",
+			"*.cdn.example.net is on your organization's blocklist (Example.NET.) (openshell.admin.egress_block)"},
 		{"egress_allow_only", config.OpenShellAdminConfig{EgressAllowOnly: []string{"*.github.com"}}, "example.com",
 			"example.com is not on your organization's list of allowed destinations (openshell.admin.egress_allow_only)"},
 		{"allow_unblock", config.OpenShellAdminConfig{AllowUnblock: &off}, "example.com",
@@ -923,12 +928,11 @@ func TestPolicyEdit(t *testing.T) {
 	writeConfig(t, ta, "")
 	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{EgressAllowOnly: []string{"*.github.com"}, EgressBlock: []string{"example.net", "*.example.org", "example.org"}}
 	ta.ok(t, ta.PolicyEdit(bg, "allow", []string{"api.github.com"}))
-	warnings := ta.adminWarnings()
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "openshell.admin.egress_block example.net blocks example.net itself, not its subdomains") ||
-		!strings.Contains(warnings[0], "add *.example.net") {
-		t.Fatalf("warnings = %q", warnings)
-	}
-	if c := ta.adminCheck(); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "add *.example.net") {
+	// Only the organization's blocklist widens: an allow entry for a
+	// subdomain of a bare allow-only name is still refused.
+	ta.Cfg.OpenShell.Admin.EgressAllowOnly = []string{"github.com"}
+	wantErr(t, ta.PolicyEdit(bg, "allow", []string{"api.github.com"}), "api.github.com is not on your organization's list of allowed destinations")
+	if c := ta.adminCheck(); c.Status != openshell.StatusPass || strings.Contains(c.Detail, "subdomains") {
 		t.Fatalf("doctor check = %+v", c)
 	}
 }

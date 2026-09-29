@@ -910,9 +910,10 @@ ask the same decider, so they never disagree with the proxy. In short:
   `openshell.admin.allow_unblock: false`, your own entries and those of a
   custom pack you picked are ignored, so only `egress_allow_only` or a
   required pack's list can open one; the `how_to_unblock` hint says so.
-- `openshell.admin.egress_block`, a host outside
-  `openshell.admin.egress_allow_only`, and the block list (the pack's and
-  `openshell.egress.block`) are refused, and can't be unblocked.
+- `openshell.admin.egress_block` (a host name there covers its subdomains),
+  a host outside `openshell.admin.egress_allow_only`, and the block list
+  (the pack's and `openshell.egress.block`) are refused, and can't be
+  unblocked.
 - Under `open`, host names are allowed unless the built-in feed of
   exfiltration and abuse destinations lists them (paste sites, file drops,
   webhook catchers, tunnels, anonymizers). A destination given as an IP
