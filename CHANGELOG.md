@@ -185,6 +185,12 @@ rest also reach per-user installs.
   earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
   only the `hooks` mapping, keeping every byte outside it, and removes all of
   DefenseClaw's approvals.
+- **`defenseclaw version` lists the OpenClaw plugin only for OpenClaw.** A
+  Hermes-only or other hook-only install showed `plugin (not installed)
+  missing`. The plugin row, and its drift check, now appear only when
+  OpenClaw is an enabled active connector, the rule doctor already used; a
+  config that cannot be read keeps the row
+  ([#881](https://github.com/cisco-ai-defense/defenseclaw/issues/881)).
 
 ### Added
 

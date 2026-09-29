@@ -40,6 +40,7 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
 | `defenseclaw doctor` | Health and repair check. Run this first whenever something feels off; see [Doctor](#doctor) below. |
 | `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
+| `defenseclaw version [--json] [--no-drift-exit]` | Versions of the CLI, the gateway binary and, when OpenClaw is an active connector, the OpenClaw plugin. Exits `1` when their versions differ (not with `--json` or `--no-drift-exit`) or a component fails to report. |
 
 ## Doctor
 
