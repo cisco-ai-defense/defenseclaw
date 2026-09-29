@@ -128,6 +128,10 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.openclaw_presence import (
+    OPENCLAW_NOT_INSTALLED_DETAIL,
+    openclaw_implied_but_not_installed,
+)
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -1900,7 +1904,11 @@ def _gateway_fleet_expected_enabled(cfg) -> bool:
     if not _doctor_active_connectors(cfg):
         return False
     connector = _active_connector(cfg)
-    if connector in {"openclaw", "zeptoclaw"}:
+    if connector == "openclaw":
+        # claw.mode alone names OpenClaw and OpenClaw is not installed: the
+        # gateway reports the fleet uplink off instead of dialing (#958).
+        return not openclaw_implied_but_not_installed(cfg)
+    if connector == "zeptoclaw":
         return True
     if connector not in {"codex", "claudecode"}:
         return False
@@ -2208,6 +2216,11 @@ def _authenticated_runtime_matches(cfg, trusted_pid: int, body: str) -> tuple[bo
 
 
 def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
+    if openclaw_implied_but_not_installed(cfg):
+        # Only claw.mode's default names OpenClaw and nothing on this machine
+        # is OpenClaw, so there is no OpenClaw gateway to reach (#958).
+        _emit("skip", "OpenClaw gateway", OPENCLAW_NOT_INSTALLED_DETAIL, r=r)
+        return
     url = f"http://{cfg.gateway.host}:{cfg.gateway.port}/health"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:

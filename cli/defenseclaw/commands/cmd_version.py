@@ -12,8 +12,8 @@
 
 Where ``defenseclaw --version`` only speaks for the Python CLI, this
 command surfaces the version of *every* DefenseClaw component the
-operator has on their machine (CLI, gateway binary, OpenClaw plugin)
-and warns when they drift.
+operator has on their machine (CLI, gateway binary, and the OpenClaw
+plugin when OpenClaw is an active connector) and warns when they drift.
 
 Drift matters because the three components ship together: the gateway
 speaks a sidecar REST API the CLI depends on, and the plugin's IPC
@@ -179,6 +179,41 @@ def _parse_gateway_version(line: str) -> tuple[str, str]:
     return tail, ""
 
 
+def _openclaw_connector_active() -> bool:
+    """Whether OpenClaw is an enabled, active connector in this install.
+
+    The plugin only matters to OpenClaw, so a Hermes-only or hook-only
+    install must not see "plugin (not installed) missing" (#881).
+    ``version`` runs before the CLI loads config (it has to work on a broken
+    or legacy install), so it reads the config itself, read-only. When the
+    config cannot be read, the plugin is listed as before.
+    """
+    try:
+        from defenseclaw import config as cfg_mod
+
+        cfg = cfg_mod.load()
+    except Exception:  # noqa: BLE001 - a broken config keeps the old table.
+        return True
+    return _openclaw_active_in(cfg)
+
+
+def _openclaw_active_in(cfg) -> bool:
+    """Apply doctor's rule: OpenClaw is in ``active_connectors()`` and enabled."""
+    try:
+        names = {str(name).strip().lower() for name in cfg.active_connectors()}
+    except Exception:  # noqa: BLE001 - unknown shape keeps the old table.
+        return True
+    if "openclaw" not in names:
+        return False
+    effective_enabled = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
+    if not callable(effective_enabled):
+        return True
+    try:
+        return bool(effective_enabled("openclaw"))
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _plugin_component() -> Component:
     """Read the OpenClaw plugin's ``package.json`` if it's installed."""
     candidates: list[Path] = []
@@ -335,6 +370,9 @@ def _render_table(components: list[Component]) -> None:
 def version_cmd(as_json: bool, no_drift_exit: bool) -> None:
     """Show DefenseClaw CLI / gateway / plugin versions and flag drift.
 
+    The OpenClaw plugin is listed, and checked for drift, only when
+    OpenClaw is an active connector.
+
     This is the command to run first when a bug report says "the
     guardrail isn't blocking" — nine times out of ten the problem is a
     freshly rebuilt CLI talking to a stale gateway binary still living
@@ -345,8 +383,9 @@ def version_cmd(as_json: bool, no_drift_exit: bool) -> None:
     components = [
         _cli_component(),
         _gateway_component(),
-        _plugin_component(),
     ]
+    if _openclaw_connector_active():
+        components.append(_plugin_component())
     drift = _compute_drift(components)
 
     if as_json:
