@@ -57,6 +57,9 @@ const (
 	maxUserScanRecordBytes = 16 << 20
 	maxUserScanField       = 256
 	userScanProcessNote    = "provided by per-user scans"
+	// localModelArtifactSignatureID is the model_file detector's own
+	// signature, which no catalog lists.
+	localModelArtifactSignatureID = "local-model-artifact"
 )
 
 // UserScanOptions are the discovery settings a per-user scan runs with. The
@@ -129,6 +132,11 @@ type UserScanRecord struct {
 func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserScanOptions, catalog []AISignature) AIDiscoveryReport {
 	start := time.Now()
 	home = filepath.Clean(home)
+	// The model file detector reports paths with symlinks resolved.
+	homeRoots := []string{home}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil && filepath.Clean(resolved) != home {
+		homeRoots = append(homeRoots, filepath.Clean(resolved))
+	}
 	svc := &ContinuousDiscoveryService{
 		opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
 			Enabled:                 true,
@@ -153,7 +161,7 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	signals, stats := svc.scanSignals(ctx, scanID, &aiDiscoveryScanObservation{}, true, nil)
 	out := make([]AISignal, 0, len(signals))
 	for _, sig := range signals {
-		if sig.Detector == "application" || !evidenceInsideHome(sig.Evidence, home) {
+		if sig.Detector == "application" || !evidenceInsideHome(sig.Evidence, homeRoots) {
 			continue
 		}
 		if !opts.StoreRawLocalPaths {
@@ -209,13 +217,20 @@ func boundedUserScanList(values []string) []string {
 	return values
 }
 
-func evidenceInsideHome(evidence []AIEvidence, home string) bool {
+func evidenceInsideHome(evidence []AIEvidence, homes []string) bool {
 	for _, ev := range evidence {
 		if ev.RawPath == "" {
 			continue
 		}
-		rel, err := filepath.Rel(home, filepath.Clean(ev.RawPath))
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		inside := false
+		for _, home := range homes {
+			rel, err := filepath.Rel(home, filepath.Clean(ev.RawPath))
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
 			return false
 		}
 	}
@@ -276,13 +291,13 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 		known[sig.ID] = true
 	}
 	for _, sig := range report.Signals {
-		if !known[sig.SignatureID] {
+		if !known[sig.SignatureID] && (sig.SignatureID != localModelArtifactSignatureID || sig.Detector != "model_file") {
 			return errors.New("signal names a signature outside the scan catalog")
 		}
 		if !isSHA256Hash(sig.Fingerprint) {
 			return errors.New("signal fingerprint must be a sha256 digest")
 		}
-		fields := []string{sig.Name, sig.Vendor, sig.Product, sig.Detector, sig.Version, sig.SupportedConnector, sig.State}
+		fields := []string{sig.Name, sig.Vendor, sig.Product, sig.Detector, sig.Version, sig.SupportedConnector, sig.State, sig.CoverageReason}
 		if sig.Runtime != nil {
 			if sig.Runtime.PID < 0 || sig.Runtime.PPID < 0 {
 				return errors.New("process ids must be non-negative")
@@ -298,7 +313,7 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 		fields = append(fields, sig.Basenames...)
 		fields = append(fields, sig.EvidenceTypes...)
 		for _, ev := range sig.Evidence {
-			fields = append(fields, ev.Type, ev.Basename, ev.MatchKind, ev.Origin)
+			fields = append(fields, ev.Type, ev.Basename, ev.MatchKind, ev.Origin, ev.ValueHash)
 			if !userScanText(ev.RawPath, 4096) {
 				return errors.New("evidence paths must be printable")
 			}

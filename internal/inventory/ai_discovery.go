@@ -2265,7 +2265,15 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	if len(s.processOwners) > 0 {
 		owned := procs[:0]
 		for _, proc := range procs {
-			if s.processOwners[proc.User] {
+			// Linux ps shows a user name longer than eight characters
+			// truncated ("longname+"); there the owner of /proc/<pid>
+			// decides.
+			owner := s.processOwners[proc.User]
+			if !owner {
+				uid := processOwnerUID(proc.PID)
+				owner = uid != "" && s.processOwners[uid]
+			}
+			if owner {
 				owned = append(owned, proc)
 			}
 		}

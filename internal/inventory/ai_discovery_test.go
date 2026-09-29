@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1054,6 +1055,7 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "alice")
 	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
+	mustWrite(t, filepath.Join(home, ".lmstudio", "models", "example", "tiny", "tiny.gguf"), "GGUF\x03\x00\x00\x00"+strings.Repeat("\x00", 4096))
 	signature := testAISignature()
 	signature.ProcessNames = []string{"shadowai"}
 	catalog := []AISignature{signature}
@@ -1111,12 +1113,32 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		}
 		fingerprints[sig.Fingerprint] = sig.UserName
 	}
-	if processes != 2 || len(got.Signals) != 4 {
-		t.Fatalf("signals = %+v, want a config and a process signal per user", got.Signals)
+	if processes != 2 || len(got.Signals) != 6 {
+		t.Fatalf("signals = %+v, want a config, a process and a model file signal per user", got.Signals)
 	}
 	if raw, _ := json.Marshal(got); strings.Contains(string(raw), tmp) {
 		t.Fatalf("report leaked a raw path: %s", raw)
 	}
+}
+
+// Linux ps prints a user name longer than eight characters truncated
+// ("longname+"). A per-user scan still keeps its account's own processes.
+func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux ps truncates user names")
+	}
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "firstna+", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "firstname.lastname", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want the account's own process", report.Signals)
 }
 
 func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
