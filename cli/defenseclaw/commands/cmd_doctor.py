@@ -1285,7 +1285,7 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Human approval",
-            "OpenCode v1.18.10-v1.18.19 publishes permission.ask, but the DefenseClaw bridge "
+            "OpenCode v1.18.10-v1.18.33 publishes permission.ask, but the DefenseClaw bridge "
             "intentionally does not implement or claim that surface",
             r=r,
         )

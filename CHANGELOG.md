@@ -71,6 +71,10 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **OpenCode newer than 1.18.19 is supported.** OpenCode updates itself, and
+  setup refused 1.18.20 and later with `detected-but-unsupported-version`, so
+  enterprise deployments reported it unprotected. The reviewed range is now
+  `>=1.18.10,<1.19.0`, checked against OpenCode 1.18.33.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
