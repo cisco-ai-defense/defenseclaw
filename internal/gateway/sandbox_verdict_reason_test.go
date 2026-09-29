@@ -306,8 +306,9 @@ func TestSandboxEvaluatorFailureIsNotAPolicyBlock(t *testing.T) {
 // tamper detection for the hook-only harnesses: each one's pre-tool and
 // post-tool events reach the manager under the harness's own event names,
 // with what names the call. Cursor, OpenCode and Amp send a per-call ID;
-// Kiro CLI sends none (measured on 2.24.1), so the call's session and tool
-// input must reach the manager byte for byte the same from both events.
+// Kiro CLI and Copilot CLI send none (measured on 2.24.1 and 1.0.88), so the
+// call's session and tool input must reach the manager byte for byte the
+// same from both events.
 func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 	var obs sandboxObserver
 	f := newSandboxIngressFixture(t, obs.observe)
@@ -318,8 +319,14 @@ func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 		// preBody and postBody are the harness's payloads (the plugins'
 		// for OpenCode and Amp).
 		preBody, postBody string
-		id, session       string
-		status            string
+		// preHeaders and postHeaders carry the event of a harness whose
+		// payload names none (Copilot: the hook command's --event).
+		preHeaders, postHeaders []string
+		id, session             string
+		status                  string
+		// inputKeys is the number of keys in the call's tool input (1 when
+		// unset).
+		inputKeys int
 	}{
 		{
 			spec: harness.Kiro, path: "/api/v1/kiro/hook", pre: "preToolUse", post: "postToolUse",
@@ -350,6 +357,18 @@ func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 			id: "call_opencode_pair",
 		},
 		{
+			spec: harness.Copilot, path: "/api/v1/copilot/hook", pre: "preToolUse", post: "postToolUse",
+			// Copilot CLI 1.0.88's own payloads; the event arrives out of band.
+			preHeaders:  []string{"X-DefenseClaw-Copilot-Event", "preToolUse"},
+			postHeaders: []string{"X-DefenseClaw-Copilot-Event", "postToolUse"},
+			preBody: `{"sessionId":"506e99d3-3a4f-4a7c-9d0e-0f2c6d1e8b11","timestamp":1790483549431,"cwd":"/work/app",` +
+				`"toolName":"bash","toolArgs":{"command":"echo dce2e-pair","description":"write the pair marker"}}`,
+			postBody: `{"sessionId":"506e99d3-3a4f-4a7c-9d0e-0f2c6d1e8b11","timestamp":1790483551012,"cwd":"/work/app",` +
+				`"toolName":"bash","toolArgs":{"command":"echo dce2e-pair","description":"write the pair marker"},` +
+				`"toolResult":{"resultType":"success","textResultForLlm":"dce2e-pair\n"}}`,
+			session: "506e99d3-3a4f-4a7c-9d0e-0f2c6d1e8b11", inputKeys: 2,
+		},
+		{
 			spec: harness.Amp, path: "/api/v1/amp/hook", pre: "tool.call", post: "tool.result",
 			preBody: `{"hook_event_name":"tool.call","thread_id":"T-pair","session_id":"T-pair","tool_call_id":"toolu_amp_pair",` +
 				`"tool_name":"Bash","tool_input":{"cmd":"echo dce2e-pair"},"cwd":"/work/app"}`,
@@ -367,8 +386,8 @@ func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 			}
 			_, token := f.mint(t, "dc-pair-"+tc.spec.Name, tc.spec.Name, version, contract.Contract.ContractID, "")
 			obs.take()
-			f.hook(t, tc.path, token, tc.preBody)
-			f.hook(t, tc.path, token, tc.postBody)
+			f.hook(t, tc.path, token, tc.preBody, tc.preHeaders...)
+			f.hook(t, tc.path, token, tc.postBody, tc.postHeaders...)
 			decisions, _ := obs.take()
 			if len(decisions) != 2 {
 				t.Fatalf("decisions = %+v", decisions)
@@ -390,7 +409,7 @@ func TestSandboxHookDecisionsNameEachHarnessCall(t *testing.T) {
 				t.Fatalf("the call's tool and input differ: pre %q %s, post %q %s", pre.Tool, pre.ToolInput, post.Tool, post.ToolInput)
 			}
 			var input map[string]interface{}
-			if err := json.Unmarshal(pre.ToolInput, &input); err != nil || len(input) != 1 {
+			if err := json.Unmarshal(pre.ToolInput, &input); err != nil || len(input) != max(tc.inputKeys, 1) {
 				t.Fatalf("tool input %s is not the call's input: %v", pre.ToolInput, err)
 			}
 		})

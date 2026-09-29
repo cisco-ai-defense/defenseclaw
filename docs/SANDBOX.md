@@ -1472,7 +1472,8 @@ compromised hook shows:
   | OpenCode | `tool.execute.before` | `tool.execute.after` | | the plugin's `callID` |
   | Amp | `tool.call` | `tool.result` with status `done` | `tool.result` with another status | the plugin's `toolUseID` |
   | Kiro CLI | `preToolUse` | `postToolUse` | | session, tool name and tool input |
-  | Copilot CLI, Devin CLI, Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
+  | Copilot CLI | `preToolUse` | `postToolUse` | `postToolUseFailure` | session, tool name and tool input |
+  | Devin CLI, Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
 
   A failure event closes a call but never proves tamper: Claude Code can
   report a failure before `PreToolUse` ran. Kiro CLI 2.24.1 sends no
@@ -1484,9 +1485,16 @@ compromised hook shows:
   share a key, so the ledger counts open ones, and each call's own verdict
   decides: a retried call that DefenseClaw now allows is not tamper, and a
   repeat of a call DefenseClaw allowed with the same input is not reported.
-  Copilot CLI and Devin CLI hooks carry no per-call ID either, and whether
-  their post-tool events fire for a call a hook denied is not measured, so
-  for them hook silence is the backstop. The same holds for Hermes,
+  Copilot CLI 1.0.88 sends no per-call ID either and is keyed the same way
+  (`sessionId`, `toolName` and `toolArgs`). Measured on the pinned release
+  through its bring-your-own-provider mode: `toolArgs` is the same object in
+  both events, `postToolUse` fires only for a tool that ran (not for one a
+  `preToolUse` deny blocked, nor for one the user refused at Copilot's
+  permission prompt, and neither sends `postToolUseFailure`), and parallel
+  or identical calls each get their own pair. Devin CLI hooks carry no
+  per-call ID either, and whether its `PostToolUse` fires for a call a hook
+  denied is not measured (no Devin account), so for it hook silence is the
+  backstop. The same holds for Hermes,
   OpenHands, Antigravity and OmniGent until their hook payloads are
   measured. Every harness's pre-tool events
   count in the session summary's tool calls and blocks.

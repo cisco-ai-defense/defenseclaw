@@ -153,12 +153,19 @@ var toolCallHooksByConnector = map[string]toolCallHooks{
 	// never for one a preToolUse exit 2 blocked or Kiro's own permission
 	// check denied, and preToolUse fires before that check.
 	"kiro": {keying: keyByContent, pre: "preToolUse", ran: "postToolUse"},
-	// Copilot CLI and Devin CLI hooks carry no per-call ID either, and
-	// whether their post-tool events fire for a call a hook denied is not
-	// measured, so their calls are not paired: hook silence is their
-	// backstop.
-	"copilot": {pre: "preToolUse", ran: "postToolUse", failed: "postToolUseFailure"},
-	"devin":   {pre: "PreToolUse", ran: "PostToolUse"},
+	// Copilot CLI 1.0.88 sends no per-call ID either: preToolUse carries
+	// sessionId, toolName and toolArgs, and postToolUse the same three plus
+	// toolResult. Measured (the pinned release's macOS arm64 build through
+	// its bring-your-own-provider mode): toolArgs is the same object in
+	// both events, postToolUse fires only for a tool that ran, never for
+	// one a preToolUse deny blocked or the user refused at Copilot's
+	// permission prompt (neither sends postToolUseFailure), and parallel or
+	// identical calls each get their own pair.
+	"copilot": {keying: keyByContent, pre: "preToolUse", ran: "postToolUse", failed: "postToolUseFailure"},
+	// Devin CLI hooks carry no per-call ID either, and whether PostToolUse
+	// fires for a call a hook denied is not measured (no Devin account), so
+	// its calls are not paired: hook silence is its backstop.
+	"devin": {pre: "PreToolUse", ran: "PostToolUse"},
 	// Hermes, OpenHands, Antigravity and OmniGent: whether their hooks carry
 	// a per-call ID the gateway sees, and whether a post-tool event fires for
 	// a denied call, is not measured, so they are not paired either.

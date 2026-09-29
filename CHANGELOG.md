@@ -464,6 +464,14 @@ deleted.
   (`sandbox start`, `sandbox exec <name> -- rm <file>`, `sandbox connect`),
   with the path quoted for the shell. Both drivers; the OpenCode image
   rebuilds.
+- Copilot CLI sandboxes get hook tamper detection: a tool call that ran
+  although DefenseClaw denied it, or whose `preToolUse` hook never reached
+  DefenseClaw, now raises the `hook_tamper` finding and `hooks.on_tamper`
+  applies (`stop` in `balanced` and `strict`). Until now only a silent hook
+  was noticed. Copilot's hooks carry no per-call ID, so its calls are paired
+  like Kiro CLI's, by session, tool name and tool arguments; measured on the
+  pinned 1.0.88, a call a hook denied or the user refused sends no
+  `postToolUse`. Devin CLI is still not paired (not measured). Both drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 

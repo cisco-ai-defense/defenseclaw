@@ -166,7 +166,7 @@ type SandboxHookDecision struct {
 	ToolUseID string
 	// SessionID and ToolInput are the call's session and tool input (empty
 	// when the event carries none). They name a call whose harness sends no
-	// per-call ID (Kiro CLI).
+	// per-call ID (Kiro CLI, Copilot CLI).
 	SessionID string
 	ToolInput json.RawMessage
 	// ResultStatus is the status field a post-tool event reports (Amp's
