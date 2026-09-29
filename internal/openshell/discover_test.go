@@ -288,6 +288,25 @@ func TestCheckPlatform(t *testing.T) {
 	}
 }
 
+// A Mac runs sandboxes in OpenShell MicroVMs, which need Apple silicon.
+func TestCheckHost(t *testing.T) {
+	for _, tc := range []struct {
+		goos, goarch string
+		ok           bool
+	}{
+		{"linux", "amd64", true}, {"linux", "arm64", true}, {"darwin", "arm64", true},
+		{"darwin", "amd64", false}, {"windows", "amd64", false}, {"windows", "arm64", false},
+	} {
+		err := openshell.CheckHost(tc.goos, tc.goarch)
+		if (err == nil) != tc.ok || (!tc.ok && !errors.Is(err, openshell.ErrUnsupportedPlatform)) {
+			t.Fatalf("CheckHost(%s, %s) = %v", tc.goos, tc.goarch, err)
+		}
+		if tc.goos == "darwin" && !tc.ok && !strings.Contains(err.Error(), "Apple silicon") {
+			t.Fatalf("CheckHost(%s, %s) = %v, which does not say why", tc.goos, tc.goarch, err)
+		}
+	}
+}
+
 // testPKI is a gateway CA with a loopback server certificate and a client
 // certificate, as openshell-gateway generate-certs produces.
 type testPKI struct {

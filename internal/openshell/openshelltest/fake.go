@@ -156,6 +156,22 @@ func WithGatewayInfo(info types.GatewayInfo) Option {
 	return func(f *Fake) { f.gatewayInfo = info }
 }
 
+// WithDriver makes the gateway run one compute driver, reported as a live
+// 0.1.1 gateway reports it: docker (the default), or vm, OpenShell's
+// MicroVM driver, as {Name: "vm", DriverName: "openshell-driver-vm"}. A
+// gateway running vm also refuses what that driver refuses at create: a
+// template driver_config other than {"vm": {"gpu_device_ids": [...]}}
+// fails with InvalidArgument.
+func WithDriver(d openshell.ComputeDriver) Option {
+	return func(f *Fake) {
+		info := types.ComputeDriverInfo{Name: string(d), DriverName: string(d), DriverVersion: openshell.SupportedMin}
+		if d == openshell.DriverVM {
+			info.DriverName = "openshell-driver-vm"
+		}
+		f.gatewayInfo.ComputeDrivers = []types.ComputeDriverInfo{info}
+	}
+}
+
 // New returns an empty, healthy fake gateway with the docker driver.
 func New(opts ...Option) *Fake {
 	f := &Fake{

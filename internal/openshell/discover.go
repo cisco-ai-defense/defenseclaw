@@ -214,6 +214,19 @@ func CheckPlatform(goos string) error {
 	}
 }
 
+// CheckHost is CheckPlatform for a machine: it also refuses a Mac that is
+// not Apple silicon, where OpenShell's MicroVM driver, which a Mac runs
+// sandboxes with, does not run.
+func CheckHost(goos, goarch string) error {
+	if err := CheckPlatform(goos); err != nil {
+		return err
+	}
+	if goos == "darwin" && goarch != "arm64" {
+		return fmt.Errorf("%w (on a Mac, Apple silicon only: OpenShell's MicroVM driver does not run on %s/%s)", ErrUnsupportedPlatform, goos, goarch)
+	}
+	return nil
+}
+
 // Discover resolves a gateway registration and validates it for use by
 // DefenseClaw: its files must be the caller's (CheckRegistrationFiles),
 // the gateway must be local and use mtls, and its private key must be
