@@ -71,12 +71,19 @@ type detachedRun struct {
 // runAlive is a POSIX sh function: the latest run's runner is alive. A pid
 // counts only while its command line is the runner's (it names
 // latest.exit), so a pid reused after the sandbox restarted is not taken for
-// the run; a process table that hides command lines trusts the pid.
+// the run; a process table that hides command lines trusts the pid. A zombie
+// is not alive. An empty command line is a runner caught mid-exec (setsid,
+// nohup and sh exec one another as it starts), so it counts as alive rather
+// than as a run that ended without recording its status.
 const runAlive = `alive() {
   pid=$(cat "$d/latest.pid" 2>/dev/null)
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  [ ! -r "/proc/$pid/cmdline" ] || tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q latest.exit
+  [ -r "/proc/$pid/cmdline" ] || return 0
+  [ "$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | cut -c1)" != Z ] || return 1
+  cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)
+  [ -n "$cmd" ] || return 0
+  printf '%s\n' "$cmd" | grep -q latest.exit
 }
 `
 
