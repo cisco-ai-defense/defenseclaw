@@ -1162,8 +1162,8 @@ func TestCopySessionAfterAnApply(t *testing.T) {
 	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40), Since: strings.Repeat("d", 40)}
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
-	has(t, ta.output(), "0 files changed (+0 −0) since the last apply", "nothing new since the last apply: ~/proj has the sandbox's changes")
-	lacks(t, ta.output(), "Bring the changes back?", "Bring them back anyway?", "the sandbox changed nothing")
+	has(t, ta.output(), "0 files changed (+0 −0) since the last apply", "nothing new since the last apply to ~/proj")
+	lacks(t, ta.output(), "Bring the changes back?", "Bring them back anyway?", "the sandbox changed nothing", "has the sandbox's changes")
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
 	lacks(t, ta.output(), "may hold work")
 

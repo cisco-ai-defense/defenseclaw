@@ -833,16 +833,25 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 		mode    workspace.ApplyMode
 		applied bool
 		stderr  []string
+		// since is a pull that starts from an earlier apply.
+		since bool
 	}{
-		{"review", PullOptions{}, false, true, "", false, []string{"starting copybox", "Pulling copybox's work"}},
+		{"review", PullOptions{}, false, true, "", false, []string{"starting copybox", "Pulling copybox's work"}, false},
 		{"branch", PullOptions{Branch: true}, false, false, workspace.ApplyBranch, true,
-			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}},
-		{"nothing to bring back", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}},
+			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}, false},
+		{"nothing to bring back", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}, false},
+		// What the operator took back of that apply is not in the folder:
+		// only what is known is said.
+		{"nothing new since the last apply", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false,
+			[]string{"nothing new since the last apply to "}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "", copySandbox("copybox"))
 			if c.empty {
 				ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+				if c.since {
+					ta.copy.pull.Since = strings.Repeat("d", 40)
+				}
 			}
 			o := c.opts
 			o.Name, o.Output = "copybox", OutputJSON
@@ -857,6 +866,7 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 				t.Fatalf("stdout is not one result (%v):\n%s", err, ta.output())
 			}
 			has(t, ta.err.String(), c.stderr...)
+			lacks(t, ta.err.String(), "has the sandbox's changes")
 			if ta.IO.Out != io.Writer(ta.out) {
 				t.Fatal("stdout was not restored after the command")
 			}

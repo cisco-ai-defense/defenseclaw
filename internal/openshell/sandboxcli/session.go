@@ -1113,7 +1113,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 	}
 	if pull.Empty() {
 		if pull.Since != "" {
-			a.note("nothing new since the last apply: " + a.tildePath(after.Project) + " has the sandbox's changes")
+			a.note("nothing new since the last apply to " + a.tildePath(after.Project))
 		} else {
 			a.note("the sandbox changed nothing")
 		}

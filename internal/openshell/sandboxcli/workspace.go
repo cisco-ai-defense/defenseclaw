@@ -618,7 +618,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	}
 	if res.Empty() {
 		if res.Since != "" {
-			a.ok("nothing new to bring back: " + a.tildePath(sb.Project) + " has the sandbox's changes since the last apply")
+			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
 		} else {
 			a.ok("nothing to bring back")
 		}
