@@ -13,11 +13,15 @@
 package enterprisepolicy
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 
@@ -106,6 +110,53 @@ func TestPublishWindowsGoOwnedInstallsTheOpenCodePlugin(t *testing.T) {
 	}
 	if body, err := os.ReadFile(config); err == nil && strings.Contains(string(body), "defenseclaw.js") {
 		t.Fatalf("teardown must remove DefenseClaw's OpenCode entry:\n%s", body)
+	}
+}
+
+// A standard account's FILE_WRITE_ATTRIBUTES change (a reparse point and
+// the read-only attribute) leaves the plugin readable by no one. The
+// guardian's watch restores it within seconds, without waiting for a pass.
+func TestWatchOpenCodeManagedPluginRestoresAChangedPlugin(t *testing.T) {
+	opts := windowsOpenCodeTestOptions(t)
+	if _, err := PublishWindowsGoOwned(opts, []string{ConnectorOpenCode}); err != nil {
+		t.Fatal(err)
+	}
+	previousDebounce, previousArmed := openCodeWatchDebounce, openCodeWatchArmed
+	t.Cleanup(func() { openCodeWatchDebounce, openCodeWatchArmed = previousDebounce, previousArmed })
+	openCodeWatchDebounce = 50 * time.Millisecond
+	armed := make(chan struct{}, 8)
+	openCodeWatchArmed = func() {
+		select {
+		case armed <- struct{}{}:
+		default:
+		}
+	}
+	logs := make(chan string, 8)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var lock sync.Mutex
+	go WatchOpenCodeManagedPlugin(ctx, opts, &lock, func(format string, args ...any) {
+		logs <- fmt.Sprintf(format, args...)
+	})
+	select {
+	case <-armed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the plugin watch did not arm")
+	}
+	markWindowsFileWithWriteAttributesOnly(t, opts.OpenCodePluginPath)
+	select {
+	case message := <-logs:
+		if !strings.Contains(message, "restored it") {
+			t.Fatalf("watch log %q, want the restored tamper", message)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the changed plugin was not restored without a pass")
+	}
+	if data, err := os.ReadFile(opts.OpenCodePluginPath); err != nil || string(data) != string(OpenCodeManagedPlugin()) {
+		t.Fatalf("the restored plugin must be the shipped one: %v", err)
+	}
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
+		t.Fatalf("the restored plugin must be loadable by Users: %v %v", loadable, err)
 	}
 }
 

@@ -2222,6 +2222,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		debounceReason = ""
 	}
 	scheduleRepairRetry()
+	// Windows standalone: restore the managed OpenCode plugin as soon as its
+	// attributes change, without waiting for the interval pass.
+	enterpriseHookStandalonePlatformWatch(cmd.Context(), cmd.ErrOrStderr())
 
 	for {
 		select {

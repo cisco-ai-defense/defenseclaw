@@ -143,6 +143,15 @@ it. OpenCode itself can still start without it: see
 - `verify` and `policy show` report a plugin whose content differs from the
   installed release. `ensure` (Linux and macOS) or the next guardian pass
   (Windows) restores it.
+- On Windows, OpenCode's runtime opens every module with the
+  write-attributes right, so the plugin grants that right to Users. With it a
+  standard account can mark the plugin read-only or set a reparse point on
+  it, which stops every account's OpenCode from loading it. The guardian
+  watches the plugin's folder and restores the plugin within about a second
+  of such a change, and logs it as a tamper in `hook-guardian.log`. It
+  restores at most 12 changes a minute that way; beyond that the next pass
+  restores it. The right is removed once OpenCode no longer needs it to load
+  a plugin.
 - A per-user DefenseClaw plugin left from the per-user route counts as a
   foreign plugin once the managed plugin is in place; the guardian removes it
   with `foreign_hooks: remove` (the default).

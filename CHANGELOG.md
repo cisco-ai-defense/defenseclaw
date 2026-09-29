@@ -217,6 +217,14 @@ rest also reach per-user installs.
   `checksums.txt`. It fails only for a changed payload, a stripped signature
   or an unexpected one. The Windows install page says how to authenticate a
   0.8.x Setup whose `/verify` still reports the missing signature (#919).
+- **The Windows guardian restores the managed OpenCode plugin right after a
+  change to its attributes.** OpenCode's runtime needs the write-attributes
+  right to load a plugin, and with it a standard account could make the
+  plugin unreadable (read-only or a reparse point), so every account's
+  OpenCode ran without DefenseClaw until the next pass, about a minute. The
+  guardian now watches the plugin's folder and runs the same heal within
+  about a second, logs a tamper line, and limits itself to 12 restores a
+  minute; the pass stays the backstop (#930).
 
 ### Added
 
