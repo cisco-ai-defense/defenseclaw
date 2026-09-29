@@ -122,8 +122,14 @@ func TestWatchOpenCodeManagedPluginRestoresAChangedPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousDebounce, previousArmed := openCodeWatchDebounce, openCodeWatchArmed
-	t.Cleanup(func() { openCodeWatchDebounce, openCodeWatchArmed = previousDebounce, previousArmed })
+	previousBudget, previousThrottle := openCodeHealBudget, openCodeHealThrottle
+	t.Cleanup(func() {
+		openCodeWatchDebounce, openCodeWatchArmed = previousDebounce, previousArmed
+		openCodeHealBudget, openCodeHealThrottle = previousBudget, previousThrottle
+	})
 	openCodeWatchDebounce = 50 * time.Millisecond
+	// One restore spends the budget, so the second change below is past it.
+	openCodeHealBudget, openCodeHealThrottle = 1, 200*time.Millisecond
 	armed := make(chan struct{}, 8)
 	openCodeWatchArmed = func() {
 		select {
@@ -157,6 +163,22 @@ func TestWatchOpenCodeManagedPluginRestoresAChangedPlugin(t *testing.T) {
 	}
 	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
 		t.Fatalf("the restored plugin must be loadable by Users: %v %v", loadable, err)
+	}
+
+	// Past the budget the watch still restores the plugin, only slower: an
+	// account that spends the budget cannot keep it unreadable until a pass.
+	markWindowsFileWithWriteAttributesOnly(t, opts.OpenCodePluginPath)
+	deadline := time.After(10 * time.Second)
+	for restored := false; !restored; {
+		select {
+		case message := <-logs:
+			restored = strings.Contains(message, "restored it")
+		case <-deadline:
+			t.Fatal("a change past the restore budget was left to the pass")
+		}
+	}
+	if loadable, err := openCodePluginLoadable(opts, opts.OpenCodePluginPath); err != nil || !loadable {
+		t.Fatalf("the plugin restored past the budget must be loadable by Users: %v %v", loadable, err)
 	}
 }
 

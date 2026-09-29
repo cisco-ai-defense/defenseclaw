@@ -39,6 +39,7 @@ var (
 	openCodeWatchRearm    = 30 * time.Second
 	openCodeHealWindow    = time.Minute
 	openCodeHealBudget    = 12
+	openCodeHealThrottle  = 5 * time.Second
 	openCodeWatchArmed    = func() {}
 )
 
@@ -51,9 +52,11 @@ const openCodeWatchFilter = windows.FILE_NOTIFY_CHANGE_FILE_NAME |
 
 // WatchOpenCodeManagedPlugin restores the managed OpenCode plugin after
 // every burst of attribute, name, security or content changes in its
-// folder until ctx ends. Bursts are debounced, and at most openCodeHealBudget
-// rewrites run per openCodeHealWindow so a loop of changes cannot keep the
-// guardian busy; the pass stays the backstop. A failed watch is re-armed.
+// folder until ctx ends. Bursts are debounced, and past openCodeHealBudget
+// rewrites per openCodeHealWindow at most one runs per openCodeHealThrottle,
+// so a loop of changes can neither keep the guardian busy nor keep the
+// plugin unreadable until the pass, which stays the backstop. A failed
+// watch is re-armed.
 // lock serializes the heal with the guardian's other writers of the plugin;
 // logf records each restored change and each failure.
 func WatchOpenCodeManagedPlugin(ctx context.Context, opts Options, lock sync.Locker, logf func(string, ...any)) {
@@ -84,31 +87,38 @@ func WatchOpenCodeManagedPlugin(ctx context.Context, opts Options, lock sync.Loc
 	windowStart := time.Now()
 	heals := 0
 	limited := false
+	var lastHeal time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-changes:
 		}
-		// Let a burst settle; the heal's own rewrite also lands here.
+		if time.Since(windowStart) >= openCodeHealWindow {
+			windowStart, heals, limited = time.Now(), 0, false
+		}
+		// Let a burst settle; the heal's own rewrite also lands here. Past the
+		// budget the heal slows down instead of stopping: dropping changes
+		// would let an account spend the budget and then keep the plugin
+		// unreadable until the next pass.
+		wait := openCodeWatchDebounce
+		if heals >= openCodeHealBudget {
+			if !limited {
+				logf("the managed OpenCode plugin keeps changing; restoring it at most every %s", openCodeHealThrottle)
+				limited = true
+			}
+			if throttle := time.Until(lastHeal.Add(openCodeHealThrottle)); throttle > wait {
+				wait = throttle
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(openCodeWatchDebounce):
+		case <-time.After(wait):
 		}
 		select {
 		case <-changes:
 		default:
-		}
-		if time.Since(windowStart) >= openCodeHealWindow {
-			windowStart, heals, limited = time.Now(), 0, false
-		}
-		if heals >= openCodeHealBudget {
-			if !limited {
-				logf("the managed OpenCode plugin keeps changing; the next pass restores it")
-				limited = true
-			}
-			continue
 		}
 		// A missing plugin is left to the pass: no account can delete it,
 		// and only teardown removes it.
@@ -124,6 +134,7 @@ func WatchOpenCodeManagedPlugin(ctx context.Context, opts Options, lock sync.Loc
 		lock.Unlock()
 		if changed || err != nil {
 			heals++
+			lastHeal = time.Now()
 		}
 		switch {
 		case err != nil:

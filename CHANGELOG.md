@@ -223,8 +223,9 @@ rest also reach per-user installs.
   plugin unreadable (read-only or a reparse point), so every account's
   OpenCode ran without DefenseClaw until the next pass, about a minute. The
   guardian now watches the plugin's folder and runs the same heal within
-  about a second, logs a tamper line, and limits itself to 12 restores a
-  minute; the pass stays the backstop (#930).
+  about a second and logs a tamper line. After 12 restores in a minute it
+  slows to one restore every 5 seconds, so repeated changes cannot keep the
+  plugin unreadable until the next pass, which stays the backstop (#930).
 
 ### Added
 
