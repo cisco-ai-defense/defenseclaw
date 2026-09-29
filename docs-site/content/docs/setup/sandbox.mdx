@@ -60,7 +60,7 @@ the last `pull --apply`.
 | Requirement | Details |
 | --- | --- |
 | DefenseClaw | Installed and initialized (`defenseclaw init`, see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user. |
-| Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On a Mac, Docker Desktop running: DefenseClaw builds the harness images in Docker, and OpenShell's MicroVM driver reads them from it. |
+| Docker | On Linux, a rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. On a Mac, Docker Desktop running: DefenseClaw builds the harness images in Docker, and OpenShell's MicroVM driver reads them from it. Either way docker needs its buildx plugin, which builds the images with BuildKit: Docker Desktop provides it, and on Linux it is the `docker-buildx-plugin` package from Docker's repository. |
 | Linux kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. Without it OpenShell refuses to start a sandbox. On a Mac each MicroVM boots OpenShell's own Linux kernel, which has Landlock (Docker Desktop's VM kernel has none, see [macOS](#macos)). |
 | Mac | Apple silicon, [Homebrew](https://brew.sh), and Homebrew's `e2fsprogs`, which the MicroVM driver formats its disks with. Setup offers to install it. |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. On a Mac, the MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started, in `~/.local/state/openshell/vm-driver`. |
@@ -1212,6 +1212,7 @@ defenseclaw sandbox doctor
   ✓ User                       alice (uid 1000)
   ✓ Landlock                   ABI 6
   ✓ Docker                     Docker 29.4.0 (Ubuntu 24.04 LTS)
+  ✓ Docker BuildKit            docker build uses BuildKit (buildx v0.30.1)
   …
   ✓ Project bind mounts        enabled for the docker driver
   ✓ OpenShell telemetry        OpenShell usage telemetry is off
@@ -1227,7 +1228,7 @@ defenseclaw sandbox doctor
   ✓ ready for sandboxes
 ```
 
-It checks the platform, your user, Landlock, Docker (version, host
+It checks the platform, your user, Landlock, Docker (version, BuildKit, host
 networking and file sharing on Docker Desktop, disk space), systemd linger,
 the OpenShell service, CLI, registration, mTLS files, version and driver,
 gateway-global policy, bind mounts, telemetry, the sandbox ports, the
@@ -1276,7 +1277,9 @@ section, and skips them while `openshell.enabled` is off.
 | `the folder (for its undo snapshot) is …, above the 1.0 GiB limit` | A folder without git has a 1 GiB snapshot cap. Make it a git repository, or run with `--copy`, or with `--no-snapshot` (no undo). |
 | `blocked by your organization's DefenseClaw policy: <key>` | An `openshell.admin` limit refused the setting. `defenseclaw sandbox policy explain` shows which one. |
 | `` `sandbox run` attaches Claude Code to your terminal, and there is none `` | Run it from a terminal, or pass `--prompt`. |
-| An image build fails | The error from `setup` or `image build` names the build log, `~/.defenseclaw/logs/sandbox-image-<harness>.log`. `defenseclaw sandbox image build <harness> --verbose` streams the build instead. |
+| An image build fails | The error ends with the last lines docker printed (up to 40, with anything that looks like a token redacted), whether `setup` or `image build` ran the build or the daemon did for `sandbox run` or `create`; the daemon log (`~/.defenseclaw/gateway.log`, under `OPENSHELL_IMAGE_BUILD_FAILED`) has them too. The error from `setup` or `image build` then names the whole build log, `~/.defenseclaw/logs/sandbox-image-<harness>.log`. `defenseclaw sandbox image build <harness> --verbose` streams the build instead. |
+| ``docker's buildx plugin is not available (`docker buildx version`: …)``, or the doctor's **Docker BuildKit** check fails | The harness images need BuildKit, which docker builds with only through its buildx plugin; without it docker would fall back to its legacy builder, which cannot build them (`the --chmod option requires BuildKit`). Install the plugin: Docker Desktop provides it, and on Linux it is the `docker-buildx-plugin` package from Docker's repository. docker looks for it in the `cli-plugins` directory of its config, `DOCKER_CONFIG` or `~/.docker` when that is unset, so a `DOCKER_CONFIG` or `HOME` that points elsewhere hides it: point `DOCKER_CONFIG` at the config that has `cli-plugins/docker-buildx`. The daemon builds in the environment it started with, so restart it (`defenseclaw-gateway restart`) after changing that. |
+| ``DOCKER_BUILDKIT=0 turns BuildKit off`` | Unset `DOCKER_BUILDKIT`, or set it to `1`, where you run DefenseClaw and where the daemon starts, then restart the daemon. |
 | A tool cannot reach a site | Look for the block in `defenseclaw sandbox activity`, then unblock it. Git over SSH and databases don't go through the web proxy: use HTTPS remotes, or `--host-port` for a service on your machine. |
 | Project folder mounts show as disabled | Run `defenseclaw sandbox doctor --fix`, or setup again. On a Mac on the MicroVM driver the doctor skips this check: every run works on a copy. |
 | Low disk space | `defenseclaw sandbox image prune` removes DefenseClaw's superseded harness images. Avoid `docker system prune` on a machine you share: it also removes every stopped container, unused network and build cache, other users' too. On a Mac, the MicroVM driver's prepared disks (about 5 GB for each image it started, in `~/.local/state/openshell/vm-driver/images`) belong to OpenShell: the doctor shows their size, and DefenseClaw does not remove them. |

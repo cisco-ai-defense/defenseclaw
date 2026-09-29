@@ -1293,6 +1293,16 @@ modes and owners are set in the tar headers) and streams it to
 4. Creates `/work` root-owned, chowns `/sandbox` to the run-as uid and gid,
    and switches to the `sandbox` user.
 
+The Dockerfile, like a run image's, uses BuildKit-only syntax (`COPY
+--chmod`). Every build first runs `docker buildx version` and reads
+`DOCKER_BUILDKIT`, and refuses (`image.ErrNoBuildKit`, with the fix) a docker
+that would use the legacy builder, before `docker build` runs. A failed build
+returns an `image.BuildError` whose message ends with the last 40 lines (at
+most 8 KiB) docker printed, terminal escapes and control characters removed
+and anything shaped like a credential redacted. It reaches the CLI's error,
+the daemon's create error and its `OPENSHELL_IMAGE_BUILD_FAILED` log line,
+because the daemon builds without a build log.
+
 The tag is `defenseclaw/sandbox:<harness>-<hash>-u<uid>`, where `<hash>` is
 the first 16 hex digits of a content hash over every input: the base digest,
 harness and version, hook contract, uid and gid, ingress port, fail mode,
@@ -2197,8 +2207,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Docker driver: `process.run_as_user` sets the uid, and files written to a bind mount are owned by it on the host. | Mount mode runs as the host uid. |
 | Docker driver: content under `/sandbox` in the base image belongs to uid 998, the image's `sandbox` user. | The overlay chowns `/sandbox` to the run-as uid; without it writes to `~/.claude` fail and `SessionStart` silently does not run. |
 | vm driver: `run_as_user` is ignored. The driver rewrites the image's `sandbox` account to the gateway's `[openshell.drivers.vm] sandbox_uid`/`sandbox_gid` (default 1000:1000) and runs every workload as it, for every sandbox on the gateway. | Setup writes the host uid and gid there, so the per-uid overlay images (`/sandbox` chowned to that uid) work unchanged; the workload check refuses any other identity, and the doctor's vm-identity check catches a gateway without the keys before a boot is spent. |
-| vm driver: no shared folders and no `driver_config` but `gpu_device_ids`. | Per-run managed files are baked into a run image, root:root 0644, whose tag carries a digest of the files; a posture change on start is compared by digest and a stricter one refuses the start. |
-| Landlock hides `/dev` entries that are not listed. | `/dev/ptmx`, `/dev/pts` and `/dev/tty` are read-write for PTY tools. |
+| vm driver: no shared folders and no `driver_config` but `gpu_device_ids`. | Per-run managed files are baked into a run image, root:root 0644, whose tag carries a digest of the files; a posture change on start is compared by digest and a stricter one refuses the start. || Landlock hides `/dev` entries that are not listed. | `/dev/ptmx`, `/dev/pts` and `/dev/tty` are read-write for PTY tools. |
 | Claude Code drops a whole managed-settings drop-in with one invalid field, silently. | The hook-fire probe gates every image. |
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
@@ -2236,6 +2245,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor and teardown name the cache and its size, and DefenseClaw never deletes it. |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
+| `docker build` uses BuildKit only through the buildx CLI plugin, which docker looks for in the `cli-plugins` directory of its config (`DOCKER_CONFIG`, else `~/.docker`), where Docker Desktop links it: a `HOME` or `DOCKER_CONFIG` without that directory hides it. Without it, or with `DOCKER_BUILDKIT=0`, docker falls back to the legacy builder with only a deprecation notice; it runs every step before the first `COPY --chmod` and then fails with `the --chmod option requires BuildKit`, and a caller that discards docker's output sees `docker build exited 1` and nothing else. The same holds for Docker Engine on Linux without the `docker-buildx-plugin` package. | Every image build checks `docker buildx version` and `DOCKER_BUILDKIT` first and refuses with the fix, before `docker build` runs; the doctor's `docker-buildkit` check reports the same, and a failed build's error carries the last lines docker printed. The daemon builds in the environment it started with. |
 
 ## Supported platforms and versions
 
@@ -2258,12 +2268,13 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
   Docker VM with Landlock on a Mac (Colima, OrbStack) may work, untested.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
-  or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
-  systemd linger, the gateway service, CLI, registration, mTLS files, gateway
-  version and driver, global policy, bind mounts, OpenShell telemetry and the
-  sandbox ports; on a vm gateway also `vm-driver` (e2fsprogs, the
-  Hypervisor signature, image architecture), `vm-identity` and
-  `vm-resources`, and the disk of the prepared-rootfs cache.
+  or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
+  host networking, file sharing, disk), systemd linger, the gateway service,
+  CLI, registration, mTLS files, gateway version and driver, global policy,
+  bind mounts, OpenShell telemetry and the sandbox ports; on a vm gateway
+  also `vm-driver` (e2fsprogs, the Hypervisor signature, image
+  architecture), `vm-identity` and `vm-resources`, and the disk of the
+  prepared-rootfs cache.
 
 ## Code map
 
