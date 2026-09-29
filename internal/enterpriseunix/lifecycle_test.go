@@ -499,6 +499,20 @@ func TestLifecycleLockIsExclusive(t *testing.T) {
 	if r.ExitCode != enterprisestatus.UnixExitBusy {
 		t.Fatalf("busy exit %d, want %d", r.ExitCode, enterprisestatus.UnixExitBusy)
 	}
+	// A daily verify started during another run reports busy, which its
+	// unit accepts, instead of failing on the half-changed deployment.
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeBusy)
+	if verify.ExitCode != enterprisestatus.UnixExitBusy {
+		t.Fatalf("verify busy exit %d, want %d", verify.ExitCode, enterprisestatus.UnixExitBusy)
+	}
+	unit, err := systemdunits.ReadFile(unitVerifyService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "\nSuccessExitStatus=75\n") {
+		t.Fatalf("a busy verify leaves its unit failed:\n%s", unit)
+	}
 }
 
 func TestSecretsAndCredentialDropins(t *testing.T) {

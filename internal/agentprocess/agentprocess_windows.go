@@ -12,6 +12,7 @@ package agentprocess
 
 import (
 	"errors"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -19,6 +20,13 @@ import (
 
 // stillActive is STILL_ACTIVE, the exit code of a running process.
 const stillActive = 259
+
+// currentClock reads the wall clock as a FILETIME, the unit of process
+// creation times.
+func currentClock() (string, int64, bool) {
+	now := windows.NsecToFiletime(time.Now().UnixNano())
+	return "", int64(now.HighDateTime)<<32 | int64(now.LowDateTime), true
+}
 
 // newLookup takes one process snapshot for the parent links and names, and
 // reads each start time from the process itself. A process that is not in

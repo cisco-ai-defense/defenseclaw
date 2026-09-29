@@ -165,10 +165,14 @@ const standaloneHookRuntimeRecordMaxBytes = 4 << 20
 // and guardrail mode the configuration selects now (an
 // observe-to-action change never reached ~/.defenseclaw/hooks); and the
 // runtime records the hook scripts read (.hookcfg and .hookcfg.<connector>)
-// carry that fail mode. A managed in-agent plugin (Amp, OpenCode) also
-// matches the freshly rendered template byte for byte, because the user can
-// edit its recorded digests as well. The worker runs as the user and reads
-// only the user's own files. Standalone per-user worker only.
+// carry that fail mode. Every hook runtime file DefenseClaw renders for the
+// user (a managed in-agent plugin for Amp and OpenCode, OmniGent's policy
+// module, the hook scripts and _hardening.sh for the rest) also matches this
+// release's render byte for byte: after a package upgrade the files still
+// match the digests recorded at their last write but carry the previous
+// release's render, and the user can edit those digests as well. The worker
+// runs as the user and reads only the user's own files. Standalone per-user
+// worker only.
 func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.SetupOpts, guardrailMode string, lock connector.HookContractLockEntry, uid int) error {
 	if !standalonePerUserRepair(uid) || conn == nil {
 		return nil
@@ -219,6 +223,11 @@ func verifyStandaloneHookRuntime(conn connector.Connector, setupOpts connector.S
 		return fmt.Errorf("enterprise hooks: inspect connector %s managed plugin %s: %w", name, path, err)
 	} else if path != "" {
 		return fmt.Errorf("enterprise hooks: connector %s managed plugin differs from the rendered template: %s", name, path)
+	}
+	if path, err := connector.HookScriptRenderDrift(conn, opts); err != nil {
+		return fmt.Errorf("enterprise hooks: inspect connector %s hook runtime file %s: %w", name, path, err)
+	} else if path != "" {
+		return fmt.Errorf("enterprise hooks: connector %s hook runtime file differs from the rendered template: %s", name, path)
 	}
 	if !rendersScript {
 		return nil // plugin-only connectors keep no per-connector runtime record

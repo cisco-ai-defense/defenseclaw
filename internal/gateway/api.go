@@ -71,6 +71,9 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
+	// foreignHookRemovals caches the hook guardian foreign-hook removal
+	// ledger the session exchanges check.
+	foreignHookRemovals foreignHookRemovalCache
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter

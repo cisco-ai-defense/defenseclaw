@@ -753,6 +753,13 @@ var enterpriseHookWorkerRunner = runEnterpriseHookWorker
 // runEnterpriseHookWorkerPool runs one worker per job with bounded
 // parallelism and returns outcomes in job order.
 func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int) []enterpriseHookWorkerOutcome {
+	return runEnterpriseHookWorkerPoolReporting(ctx, jobs, parallelism, nil)
+}
+
+// runEnterpriseHookWorkerPoolReporting is runEnterpriseHookWorkerPool that
+// also hands each outcome to done, when set, as soon as its worker ends
+// (concurrently with the other workers).
+func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterpriseHookWorkerJob, parallelism int, done func(enterpriseHookWorkerOutcome)) []enterpriseHookWorkerOutcome {
 	if parallelism <= 0 {
 		parallelism = enterpriseHookWorkerParallelism
 	}
@@ -767,6 +774,9 @@ func runEnterpriseHookWorkerPool(ctx context.Context, jobs []enterpriseHookWorke
 			defer func() { <-semaphore }()
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
+			if done != nil {
+				done(outcomes[i])
+			}
 		}(i)
 	}
 	wg.Wait()

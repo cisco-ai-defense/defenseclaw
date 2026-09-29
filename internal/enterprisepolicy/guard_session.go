@@ -152,7 +152,13 @@ type SessionUpdate struct {
 	SessionStart bool
 	// Decision is this invocation's scan result.
 	Decision GuardDecision
-	Now      time.Time
+	// Removals are the hooks the guardian removed for this account
+	// (gateway only). An agent process of the connector that started before
+	// one of them is denied. RemovalsErr reports a removal ledger that could
+	// not be read, which denies the call.
+	Removals    []ForeignHookRemoval
+	RemovalsErr error
+	Now         time.Time
 }
 
 // SessionPath is the record for one key kind and ID under accountHome.
@@ -180,6 +186,9 @@ const (
 //   - a call of a session or process blocked earlier is denied, even when
 //     the files are clean now (the agent may still run the hook), until
 //     sessionRecordTTL after the block;
+//   - a call the scan allows, of an agent process that started before the
+//     guardian removed a hook of the connector for this account
+//     (SessionUpdate.Removals), is denied: the process may still run it;
 //   - otherwise the snapshot is recorded (replaced at a session start) and
 //     the scan's own decision stands: a hook found after the session start,
 //     or a file the scan cannot verify, denies this call only.
@@ -206,6 +215,14 @@ func ApplyForeignHookSession(update SessionUpdate) GuardDecision {
 	now := update.Now
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if update.RemovalsErr != nil {
+		return sessionUnavailableDecision(decision)
+	}
+	if !decision.Deny {
+		if removal, ok := removalAfterProcessStart(update.Removals, key, now); ok {
+			return removedHookDecision(decision, key.Connector, removal)
+		}
 	}
 	type loaded struct {
 		path   string
