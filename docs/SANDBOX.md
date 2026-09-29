@@ -1369,7 +1369,10 @@ modes and owners are set in the tar headers) and streams it to
    other version fails before the build starts. Claude Code 2.1.156 is
    relocated from the digest-pinned base image, and no other Claude Code
    version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
-   outside every reviewed contract. An npm-installed harness (Codex,
+   outside every reviewed contract. OmniGent's sandbox range starts at 0.13.0,
+   above its host contract's 0.7.0: before 0.13.0 its server never evaluates
+   the response phase (`AfterAgentResponse`) for the sandbox agent, whose
+   runner it relays, so a 0.12.0 image failed the hook-fire probe. An npm-installed harness (Codex,
    OpenCode, Copilot CLI, Amp) is downloaded once with `npm pack`, installed
    from that tarball only after its SHA-512 matches the pinned registry
    integrity, and its native executable must match a pinned sha256 per

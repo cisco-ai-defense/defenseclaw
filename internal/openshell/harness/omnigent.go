@@ -26,7 +26,8 @@ import (
 )
 
 // omnigentTool is Databricks' OmniGent from PyPI. 0.13.0 is the newest
-// release inside omnigent-custom-policy-v1 (>=0.7.0,<0.14.0). The install
+// release inside omnigent-custom-policy-v1 (>=0.7.0,<0.14.0) and the oldest
+// a sandbox accepts (connector.OmnigentSandboxMinVersion). The install
 // adds the root-owned DefenseClaw policy directory to the tool environment's
 // import path with a .pth file, so the server imports the bridge by name.
 var omnigentTool = uvTool{
