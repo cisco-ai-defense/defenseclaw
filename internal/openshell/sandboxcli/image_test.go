@@ -406,3 +406,35 @@ func TestDoctorImagesCoverEveryBuiltHarness(t *testing.T) {
 		t.Fatalf("images check = %+v", c)
 	}
 }
+
+// On a MicroVM gateway the doctor's image check covers every built
+// harness too, counting only its images for the MicroVM driver, and names
+// one whose MicroVM check settled nothing with the command that checks it
+// again.
+func TestDoctorImagesCoverEveryMicroVMHarness(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) { r.Driver = openshell.DriverVM })
+	built := func(connector, version string, microVM, verified bool) image.Record {
+		r := readyImages(ta)[0]
+		r.Tag, r.Connector, r.HarnessVersion = "defenseclaw/sandbox:"+connector, connector, version
+		r.MicroVM, r.MicroVMVerified = microVM, microVM && verified
+		if microVM {
+			r.Tag += "-microvm"
+		}
+		return r
+	}
+	// Codex has only a docker image; Kiro, not configured, is unchecked.
+	ta.images.recs = []image.Record{built("claudecode", "2.1.156", true, true), built("codex", "0.146.0", false, false), built("kiro", "2.24.1", true, false)}
+	c := ta.runDoctor(bg).Get(CheckIDImages)
+	if c == nil || c.Status != "warn" || c.Fix == nil || c.Fix.Command != CommandName+" image build codex" ||
+		c.Detail != "not built yet: codex (the first run builds it, which takes a while); not checked for an OpenShell MicroVM yet: kiro "+
+			"(the next run checks it first, which takes a while); hook-verified: claudecode 2.1.156" {
+		t.Fatalf("images check = %+v", c)
+	}
+	ta.images.recs = append(ta.images.recs, built("codex", "0.146.0", true, true))
+	c = ta.runDoctor(bg).Get(CheckIDImages)
+	if c.Status != "warn" || c.Fix == nil || c.Fix.Command != CommandName+" image build kiro --force" ||
+		c.Detail != "not checked for an OpenShell MicroVM yet: kiro (the next run checks it first, which takes a while); hook-verified: claudecode 2.1.156, codex 0.146.0" {
+		t.Fatalf("images check = %+v", c)
+	}
+}
