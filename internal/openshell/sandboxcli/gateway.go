@@ -33,12 +33,14 @@ import (
 )
 
 // GatewayService reads and changes the local OpenShell gateway's
-// configuration (bind mounts, upstream telemetry) and restores it.
+// configuration (the compute driver, bind mounts, upstream telemetry),
+// restores it, and restarts the gateway on what its files already say.
 type GatewayService interface {
 	State() (*openshell.GatewayConfigState, error)
 	Plan(ctx context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error)
 	Apply(ctx context.Context, plan *openshell.GatewayPlan) (*openshell.GatewayApplyResult, error)
 	Rollback(ctx context.Context, res *openshell.GatewayApplyResult) error
+	Restart(ctx context.Context) error
 }
 
 type gatewayService struct {
@@ -71,6 +73,10 @@ func (g *gatewayService) Apply(ctx context.Context, plan *openshell.GatewayPlan)
 
 func (g *gatewayService) Rollback(ctx context.Context, res *openshell.GatewayApplyResult) error {
 	return g.configurator().Rollback(ctx, res)
+}
+
+func (g *gatewayService) Restart(ctx context.Context) error {
+	return g.configurator().Restart(ctx)
 }
 
 // setupReceipt records what setup changed outside DefenseClaw, so

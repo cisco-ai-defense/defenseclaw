@@ -652,7 +652,10 @@ type fakeGateway struct {
 	applied   int
 	rollbacks []*openshell.GatewayApplyResult
 	applyRes  *openshell.GatewayApplyResult
+	restarts  int
 }
+
+func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
 
 func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) { s := f.state; return &s, nil }
 

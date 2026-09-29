@@ -57,6 +57,15 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 		want := o.UpstreamTelemetry
 		d.WantTelemetry = &want
 		d.BindMountsOptional = o.Workdir.Mode == config.OpenShellWorkdirCopy
+		// Every MicroVM gets the gateway-wide resources, which an
+		// organization's maximum must allow. The resolver refuses a
+		// malformed one on its own.
+		if n, err := config.ParseOpenShellCPU(o.Admin.MaxResources.CPU); err == nil {
+			d.MaxCPUMillis = n
+		}
+		if n, err := config.ParseOpenShellMemory(o.Admin.MaxResources.Memory); err == nil {
+			d.MaxMemoryBytes = n
+		}
 		d.Ports = []openshell.PortRequirement{
 			{Name: "ingress", Port: a.Cfg.OpenShellIngressPort()},
 			{Name: "egress", Port: a.Cfg.OpenShellEgressPort()},
@@ -180,6 +189,9 @@ func (a *App) probeDaemon(ctx context.Context) *statusProbe {
 func gatewayText(g *sandboxapi.Gateway) string {
 	if g == nil {
 		return "the OpenShell gateway"
+	}
+	if g.Driver == string(openshell.DriverVM) {
+		return "OpenShell " + g.Version + " gateway " + g.Name + " (MicroVM driver)"
 	}
 	return "OpenShell " + g.Version + " gateway " + g.Name
 }
