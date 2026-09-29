@@ -325,12 +325,18 @@ type Endpoint struct {
 	ReportedAt string   `json:"reported_at,omitempty"`
 }
 
-// EgressStats totals the proxy's view of one sandbox.
+// EgressStats totals one sandbox's egress since the daemon started. Its
+// counts are destinations, as the activity feed names them: Destinations
+// those the sandbox reached, Blocked those refused at least once (by
+// DefenseClaw's proxy, invalid destinations included, or by OpenShell), so
+// a sandbox whose feed shows two ✗ destinations reports Blocked 2 however
+// often each was tried. BlockedRequests counts the refused requests.
 type EgressStats struct {
-	Destinations int   `json:"destinations"`
-	Blocked      int   `json:"blocked"`
-	BytesUp      int64 `json:"bytes_up"`
-	BytesDown    int64 `json:"bytes_down"`
+	Destinations    int   `json:"destinations"`
+	Blocked         int   `json:"blocked"`
+	BlockedRequests int   `json:"blocked_requests"`
+	BytesUp         int64 `json:"bytes_up"`
+	BytesDown       int64 `json:"bytes_down"`
 }
 
 // WorkspaceSummary is the launch-banner view of a mounted project.

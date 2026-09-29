@@ -442,6 +442,18 @@ func TestProxyRefusalMatrix(t *testing.T) {
 			t.Errorf("CONNECT %s body = %+v", tt.target, b)
 		}
 	}
+	// An invalid destination is a refused destination like any other: the
+	// feed names it as blocked, so the counts include it (cert copilot:F8).
+	stats := map[string]DestinationStats{}
+	for _, s := range h.proxy.Counter().DestinationsFor("binding-one") {
+		stats[s.Host] = s
+	}
+	if s := stats["exa$mple.com"]; s.Blocked != 1 || s.Contacted {
+		t.Errorf("invalid destination counted as %+v; want one refusal and no contact", s)
+	}
+	if s := stats["example.com"]; s.Blocked < 3 || s.Contacted {
+		t.Errorf("example.com counted as %+v (all %+v); want its refusals, the one without a port among them", s, stats)
+	}
 
 	// An origin-form request is not a proxy request.
 	conn, br := h.dialProxy()

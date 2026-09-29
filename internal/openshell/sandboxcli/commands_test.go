@@ -65,7 +65,8 @@ func TestListAndStatus(t *testing.T) {
 	ta.ok(t, ta.Status(bg, "", OutputText))
 	has(t, ta.output(), "Sandboxes       on", "openshell 0.1.1", "Organization    openshell.admin is advisory: you own config.yaml")
 	ta.ok(t, ta.fresh().Status(bg, "a-box", OutputText))
-	has(t, ta.output(), "skip-permissions on", "managed tier", "9 requests, 4 tool calls, 1 blocked", "2.0 KiB up, 1.0 MiB down")
+	has(t, ta.output(), "skip-permissions on", "managed tier", "9 requests, 4 tool calls, 1 blocked",
+		"3 destinations contacted, 1 blocked, 2.0 KiB up, 1.0 MiB down")
 	ta.ok(t, ta.fresh().Status(bg, "a-box", OutputJSON))
 	var sb sandboxapi.Sandbox
 	if err := json.Unmarshal(ta.out.Bytes(), &sb); err != nil || sb.Name != "a-box" {

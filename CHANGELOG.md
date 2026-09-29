@@ -334,6 +334,14 @@ deleted.
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
   checks. On a Mac still on the Docker driver, a run that fails OpenShell's
   Landlock check names the switch.
+- Fixes from the macOS connector certification (every driver unless noted):
+  a copy names the secret files it holds back once; a Kiro tool block names
+  DefenseClaw once (host hooks too); the egress counts are destinations
+  everywhere: the session summary reads `N new sites contacted · M sites
+  blocked` with M matching its `✗` lines, `sandbox status` reads
+  `N destinations contacted, M blocked`, and an invalid destination (a host
+  without a dot) counts as blocked like the feed shows it (the status JSON
+  keeps the request count as `egress.blocked_requests`).
 
 ### Legacy OpenShell standalone sandbox removed
 

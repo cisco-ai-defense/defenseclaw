@@ -345,7 +345,7 @@ func TestSessionSummary(t *testing.T) {
 	const cont = "continue this conversation: defenseclaw sandbox connect " + sbName
 	evil := "notes\x1b[2J\x1b]0;DCMARKER\x07\rx\u202etxt.sh"
 	runCases(t, []runCase{
-		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted (2 requests blocked)"}, setup: func(ta *testApp) {
+		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted · 2 sites blocked"}, setup: func(ta *testApp) {
 			noChanges(ta)
 			var armed atomic.Bool
 			var late atomic.Int32

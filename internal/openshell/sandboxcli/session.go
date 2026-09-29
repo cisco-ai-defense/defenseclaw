@@ -101,6 +101,9 @@ type session struct {
 	notices    []sessionNotice
 	noticeKeys map[string]bool
 	titleSet   bool
+	// blockedHosts are the destinations the session announced blocked
+	// (blockNotice), which the summary counts.
+	blockedHosts map[string]bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -395,6 +398,14 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	if ev.Unblockable {
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
 	}
+	s.noticeMu.Lock()
+	if s.blockedHosts == nil {
+		s.blockedHosts = map[string]bool{}
+	}
+	if len(s.blockedHosts) < maxSeenEvents {
+		s.blockedHosts[strings.ToLower(ev.Host)] = true
+	}
+	s.noticeMu.Unlock()
 	s.notice("block "+ev.Host, text, text)
 }
 
@@ -885,6 +896,7 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 			break
 		}
 		same := next.Egress.Destinations == after.Egress.Destinations && next.Egress.Blocked == after.Egress.Blocked &&
+			next.Egress.BlockedRequests == after.Egress.BlockedRequests &&
 			next.Hooks.ToolCalls == after.Hooks.ToolCalls && next.Hooks.ToolBlocked == after.Hooks.ToolBlocked &&
 			next.Hooks.HookFailed == after.Hooks.HookFailed
 		after = next
@@ -902,10 +914,12 @@ const (
 )
 
 // summaryLine is "Session ended · 57 tool calls (1 blocked: <rule title>
-// (RULE-ID)) · 23 new sites contacted (1 request blocked) · 8 files changed
-// (+212 −37)". Sites count destinations the sandbox had not contacted
-// before the session and blocks count refused requests, so the blocked
-// number is labelled as requests. A daemon restart during the session
+// (RULE-ID)) · 23 new sites contacted · 2 sites blocked · 8 files changed
+// (+212 −37)". Both counts are destinations: the sites contacted are those
+// the sandbox reached for the first time, and the sites blocked those the
+// session announced blocked (its ✗ lines, which the summary repeats), or
+// the daemon's count of newly blocked ones when that is higher (a late
+// denial, or a flood the feed paced). A daemon restart during the session
 // starts its counters from zero: the session's then count from zero too.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
@@ -917,7 +931,8 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
 		hooksBefore, restarted = sandboxapi.HookCoverage{}, true
 	}
-	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked {
+	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
 		egressBefore = sandboxapi.EgressStats{}
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
@@ -941,12 +956,13 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		parts = append(parts, plural(failed, "hook call", "hook calls")+" failed (blocked)")
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
-	requestsBlocked := after.Egress.Blocked - egressBefore.Blocked
-	siteText := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
-	if requestsBlocked > 0 {
-		siteText += " (" + plural(int64(requestsBlocked), "request blocked", "requests blocked") + ")"
+	parts = append(parts, plural(int64(max(sites, 0)), "new site contacted", "new sites contacted"))
+	s.noticeMu.Lock()
+	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
+	s.noticeMu.Unlock()
+	if sitesBlocked > 0 {
+		parts = append(parts, plural(int64(sitesBlocked), "site blocked", "sites blocked"))
 	}
-	parts = append(parts, siteText)
 	switch {
 	case rev != nil && rev.Summary != "":
 		parts = append(parts, rev.Summary)

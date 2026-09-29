@@ -364,7 +364,9 @@ stopped first, so nothing it left running changes the folder after the
 review. If the sandbox was stopped, undone or deleted from elsewhere (another
 terminal, the TUI), which ends the harness, the summary starts by saying so.
 You then get a summary line: tool calls and blocks (the blocking rule's
-title and ID), new sites contacted and requests blocked, and files changed,
+title and ID), new sites contacted and sites blocked (destinations, each
+counted once; the blocked ones are the `✗` lines that follow, invalid
+destinations included), and files changed,
 followed by the session's notices. Changes that can run code on your machine
 are called out, and asks still waiting are named. For a mounted folder you
 then keep the changes, undo them, or see the diff first (a letter, then
@@ -626,7 +628,9 @@ the organization policy, and counts. With a name, shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
 policy, hook tamper tier, hook traffic and the last blocked tool call, the
 tool calls that ran without a DefenseClaw verdict (hook tamper), egress
-totals, credential endpoints, the undo point, waiting asks, nested
+totals (destinations contacted and blocked, each counted once, as the
+activity feed names them; the JSON also has `blocked_requests`), credential
+endpoints, the undo point, waiting asks, nested
 repositories, and warnings, including a stopped sandbox the current policy
 would not start.
 

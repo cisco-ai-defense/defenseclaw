@@ -73,7 +73,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
-		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted (1 request blocked) · 2 files changed (+10 −3)",
+		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted · 1 site blocked · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b")
 	if strings.Contains(ta.output(), "sk-test-not-a-secret") || strings.Contains(ta.output(), "stripe-test-value") {
@@ -754,18 +754,35 @@ func TestSummaryLine(t *testing.T) {
 		want          string
 	}{
 		{egress(1), egress(1), "Session ended · 0 tool calls · 0 new sites contacted"},
-		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted (1 request blocked)"},
-		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted (2 requests blocked)"},
+		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted · 1 site blocked"},
+		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted · 2 sites blocked"},
 		// Hook calls DefenseClaw answered with an error were blocked (the
 		// hooks fail closed).
 		{&sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}, &failed,
-			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted (1 request blocked)"},
+			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted · 1 site blocked"},
 		{&failed, &failed, "Session ended · 0 tool calls · 0 new sites contacted"},
 	} {
 		s := &session{app: newTestApp(t, "").App, before: c.before}
 		if got := s.summaryLine(c.after, nil); got != c.want {
 			t.Errorf("summaryLine(%+v) = %q, want %q", c.after.Egress, got, c.want)
 		}
+	}
+	// The blocked sites are the ✗ lines the session announced, one per
+	// destination however often it was tried, also when the daemon had
+	// blocked one of them before the session (cert copilot:F8, kiro:KR-F7,
+	// hermes:HERMES-8, openhands:MAC-OSH-OH-5: an invalid destination and
+	// webhook.site read "1 request blocked" over two ✗ lines).
+	box := sampleSandbox("f-box")
+	s := &session{app: newTestApp(t, "").App, sb: &box, before: egress(1)}
+	for _, ev := range []sandboxapi.ActivityEvent{
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site", Port: 443, Category: "webhook_catcher"},
+	} {
+		s.blockNotice(ev)
+	}
+	if got, want := s.summaryLine(egress(2), nil), "Session ended · 0 tool calls · 1 new site contacted · 2 sites blocked"; got != want {
+		t.Errorf("summaryLine after two blocked destinations = %q, want %q", got, want)
 	}
 	// Manual R2-17: a blocked call is named by its rule's title and ID, not
 	// the cut-off start of the reason.

@@ -140,7 +140,7 @@ func TestTriageRejectsHarnessFetches(t *testing.T) {
 func TestOpenShellDenialsCountConnections(t *testing.T) {
 	e := liveEnv(t, "denialbox", nil)
 	feed := func() []sandboxapi.ActivityEvent { return e.events("denialbox", sandboxapi.ActivityEgressBlocked, "") }
-	blocked := func() int { return e.get("denialbox").Egress.Blocked }
+	blocked := func() int { return e.get("denialbox").Egress.BlockedRequests }
 	push := func(line string) { e.ocsf("denialbox", line, time.Now()) }
 	push("NET:REFUSE [MED] DENIED evil.example.net [reason:policy_dns_ineligible]")
 	push("NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.example.net:443 [reason:transparent_tcp_policy_denied]")
@@ -167,6 +167,11 @@ func TestOpenShellDenialsCountConnections(t *testing.T) {
 		got[3].Reason != sandboxapi.ReasonHostPortClosed || !strings.Contains(got[3].Message, "port 29170 on this machine is closed to the sandbox") ||
 		!strings.Contains(got[3].Message, "--host-port 29170") {
 		t.Fatalf("feed = %+v, blocked %d; want the host alias's port named once", got, blocked())
+	}
+	// The blocked destinations are the feed's: four, however often each was
+	// tried.
+	if sb := e.get("denialbox"); sb.Egress.Blocked != 4 || sb.Egress.Destinations != 0 {
+		t.Fatalf("egress = %+v; want the feed's four blocked destinations and none reached", sb.Egress)
 	}
 	if asks, _ := e.m.Approvals(t.Context(), "denialbox"); len(asks) != 0 {
 		t.Fatalf("asks = %+v; an undeclared port does not ask", asks)
@@ -787,8 +792,9 @@ func TestDeclaredHostPortAsks(t *testing.T) {
 	}
 	ask := asks[0]
 	requested := slices.DeleteFunc(e.events("hpbox", sandboxapi.ActivityApprovalRequested, ""), func(ev sandboxapi.ActivityEvent) bool { return ev.ApprovalID != ask.ID })
-	if len(requested) != 1 || e.get("hpbox").Egress.Blocked != 2 {
-		t.Fatalf("%d approval.requested events, %d blocked; want 1 and both denials", len(requested), e.get("hpbox").Egress.Blocked)
+	// Both denials are refused requests; an ask is no blocked destination.
+	if eg := e.get("hpbox").Egress; len(requested) != 1 || eg.BlockedRequests != 2 || eg.Blocked != 0 {
+		t.Fatalf("%d approval.requested events, egress %+v; want 1, both denials and no blocked destination", len(requested), eg)
 	}
 	if res, err := e.m.DecideApproval(t.Context(), ask.ID, approve); err != nil || res.Approval.Status != sandboxapi.ApprovalQueued {
 		t.Fatalf("approve = %+v, %v", res, err)

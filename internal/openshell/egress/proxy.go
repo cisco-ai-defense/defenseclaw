@@ -1020,9 +1020,13 @@ func (p *Proxy) refuseRaw(conn net.Conn, pr Principal, method string, dec Decisi
 }
 
 // recordRefusal counts and reports a refusal; tunnelID is set when an
-// established tunnel was refused.
+// established tunnel was refused. An invalid destination counts like any
+// other refusal, under the host the event names: the feed shows it as a
+// blocked destination, and the counts must agree with the feed. The
+// refusal-only records are capped (CounterOptions.MaxDestinations), so a
+// flood of made-up names costs nothing else.
 func (p *Proxy) recordRefusal(pr Principal, method string, dec Decision, status int, start time.Time, tunnelID string) {
-	if dec.Category != CategoryInvalidDestination {
+	if dec.Host != "" {
 		p.counter.recordBlocked(pr, dec.Host)
 	}
 	e := p.event(EventBlocked, pr, method, dec)

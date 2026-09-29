@@ -251,7 +251,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		}
 		row("Hook error", last+" (the hook failed closed)")
 	}
-	row("Egress", fmt.Sprintf("%d destinations (%d blocked), %s up, %s down", sb.Egress.Destinations, sb.Egress.Blocked,
+	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
 		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown)))
 	for _, ep := range sb.Endpoints {
 		row("Endpoint", ep.Host+" "+ep.Result)
