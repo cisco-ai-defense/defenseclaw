@@ -893,11 +893,16 @@ func copyPolicyNote(ex *sandboxapi.Explain, o RunOptions, d openshell.Driver) st
 		}
 	}
 	for _, s := range ex.Settings {
-		if s.Key != "workdir.mode" || s.Value != config.OpenShellWorkdirCopy || s.Source != string(packs.SourceAdmin) {
+		if s.Key != "workdir.mode" || s.Value != config.OpenShellWorkdirCopy {
 			continue
 		}
 		if s.Origin == packs.ConstraintComputeDriver {
+			// The gateway's clamp: its source is the gateway, not the
+			// organization.
 			return driverCopyNote(d)
+		}
+		if s.Source != string(packs.SourceAdmin) {
+			continue
 		}
 		why := "your organization's policy runs it on a copy"
 		switch s.Origin {

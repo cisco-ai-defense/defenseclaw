@@ -1035,12 +1035,13 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 			}
 		}
 	}
-	// The daemon's own clamp of a mount the user configured.
+	// The daemon's own clamp of a mount the user configured, as the
+	// resolver gives it: its source is the gateway, not the organization.
 	clamped := func(ta *testApp) {
-		ta.daemon.explain.Settings[0] = sandboxapi.Setting{Key: "workdir.mode", Value: "copy", Source: "admin",
+		ta.daemon.explain.Settings[0] = sandboxapi.Setting{Key: "workdir.mode", Value: "copy", Source: string(packs.SourceGateway),
 			Origin: packs.ConstraintComputeDriver, Requested: "mount"}
 		clamp := sandboxapi.Violation{Key: "workdir.mode", Source: "user", Attempted: "mount", Enforced: "copy", Constraint: packs.ConstraintComputeDriver,
-			Message: sandboxapi.AdminMessage + ": workdir.mode", Detail: "the OpenShell MicroVM (vm) driver mounts no host folders"}
+			Message: "the project cannot be mounted live on this gateway; the agent works on a copy", Detail: "the OpenShell MicroVM (vm) driver mounts no host folders"}
 		ta.daemon.explain.Violations = []sandboxapi.Violation{clamp}
 		ta.daemon.createViolations = []sandboxapi.Violation{clamp}
 	}
