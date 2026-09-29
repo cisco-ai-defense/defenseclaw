@@ -327,6 +327,12 @@ only in the image; nothing on your host changes.
   no opinion, so the sandbox hook prints a Hermes block directive on every
   failure: missing token, ingress down, or a bad reply. It does so well inside
   the 30-second hook timeout.
+- **Blocks on screen.** Hermes 0.19 shows nothing for a tool call a hook
+  blocked: the reason goes to the model as the tool's error, and the terminal
+  shows only `preparing terminal…`. A root-owned module in the image prints
+  the reason under that line, the way Hermes prints its own tool lines, for
+  example `┊ ✗ terminal blocked by DefenseClaw rule <ID>: <title>. …`. It
+  prints only to a terminal, and what the model gets is unchanged.
 - **Known gaps.** An agent can still start a second Hermes from a tool call,
   for example by running the pinned binary directly. That start skips the
   launcher's checks. DefenseClaw judges that tool call first, and

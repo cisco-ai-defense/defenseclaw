@@ -345,6 +345,10 @@ deleted.
   `KIRO_SKIP_BINARY_PINNING=1`, so an interactive session runs the root-owned
   `kiro-cli-chat` rather than the copy Kiro makes in
   `~/.local/share/kiro-cli/run`.
+- A DefenseClaw block now shows in the Hermes TUI: a root-owned module in the
+  Hermes image prints the block reason under the tool's line
+  (`┊ ✗ terminal blocked by DefenseClaw rule <ID>: …`), where Hermes 0.19
+  printed nothing. The reason the model gets is unchanged.
 
 ### Legacy OpenShell standalone sandbox removed
 
