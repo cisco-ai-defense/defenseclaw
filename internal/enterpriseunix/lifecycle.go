@@ -16,6 +16,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1521,11 +1522,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	var errs []error
 	// Per-user registrations go first, while the binaries they name still
-	// exist: each user's worker removes only DefenseClaw's own entries.
+	// exist: each user's worker removes only DefenseClaw's own entries (and,
+	// on purge, that user's DefenseClaw state).
+	perUserLeft := false
 	if record != nil && exists(filepath.Join(env.P(env.Layout.BinDir), binGateway)) {
-		if _, err := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json"); err != nil {
-			r.AddWarning(codePerUserHooks, "some per-user DefenseClaw hook registrations were not removed (they name a binary this uninstall removes): "+err.Error())
-		}
+		perUserLeft = l.removePerUserRegistrations(ctx)
 	}
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -1544,6 +1545,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if !repairsRegistrations(unit) {
 			stopUnit(unit)
 		}
+	}
+	if perUserLeft {
+		// Some users' agents still name the hook binary. Removing it now
+		// would leave those registrations calling a program that no longer
+		// exists, with nothing left to remove them: the binaries, the
+		// deployment record and the state stay, so a rerun of this uninstall
+		// removes the rest and ensure restores the deployment.
+		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		return 0
 	}
 	// On Linux the deb/rpm removes its own files. A macOS pkg has no
 	// uninstaller, so the lifecycle removes the binaries and the receipt.
@@ -1657,6 +1667,73 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	r.Installed = false
 	return 0
+}
+
+// removePerUserRegistrations runs `enterprise hooks remove-all` (with
+// --purge on a purge) and reports what it could not do, one message per
+// account and connector: an error for a registration that is still in
+// place, a warning for an account whose home is unavailable or whose
+// per-user state stayed, and for a check that names no registration. It
+// returns whether any registration is left.
+func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
+	env, r := l.env, l.result
+	args := []string{"enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json"}
+	if l.opts.Purge {
+		args = append(args, "--purge")
+	}
+	out, err := env.runGatewayCLI(ctx, args...)
+	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
+		// An installed binary from before remove-all took --purge: remove
+		// the registrations, which is what the binaries are kept for.
+		out, err = env.runGatewayCLI(ctx, args[:len(args)-1]...)
+	}
+	var report struct {
+		Pending     []string `json:"pending"`
+		Failed      []string `json:"failed"`
+		StateFailed []string `json:"state_failed"`
+	}
+	if jsonErr := json.Unmarshal(out.Stdout, &report); jsonErr != nil && err == nil {
+		return false
+	}
+	rerun := "`" + l.uninstallCommand() + "`"
+	left := false
+	for _, entry := range report.Failed {
+		label, reason, _ := strings.Cut(entry, ": ")
+		user, connector, ok := strings.Cut(label, "/")
+		if !ok {
+			// A check that names no registration (an unreadable eligible
+			// accounts file, say) does not hold up the uninstall.
+			r.AddWarning(codePerUserHooks, "some per-user hook registrations were not checked: "+entry)
+			continue
+		}
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))
+		left = true
+	}
+	if err != nil && len(report.Failed) == 0 {
+		r.AddError(codePerUserHooks, "the per-user hook registrations could not be removed: "+err.Error()+"; fix the cause and rerun "+rerun)
+		left = true
+	}
+	for _, entry := range report.Pending {
+		user, connector, _ := strings.Cut(entry, "/")
+		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
+	}
+	for _, entry := range report.StateFailed {
+		user, reason, _ := strings.Cut(entry, ": ")
+		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user state of user %s was not removed: %s", user, reason))
+	}
+	return left
+}
+
+// uninstallCommand is this run's uninstall command line, for a rerun.
+func (l *lifecycle) uninstallCommand() string {
+	command := l.env.lifecycleCommand(ActionUninstall)
+	if l.opts.Purge {
+		command += " --purge"
+	}
+	if l.opts.RemoveServiceAccount {
+		command += " --remove-service-account"
+	}
+	return command
 }
 
 func mergeUnique(values ...[]string) []string {
