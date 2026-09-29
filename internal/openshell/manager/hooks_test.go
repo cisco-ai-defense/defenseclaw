@@ -699,7 +699,7 @@ func TestHookReachRefusedConnections(t *testing.T) {
 // A hook connection cut by a policy reload (a HIGH alarm live) is no refusal
 // but an attempt: like an answered one, it is flagged only when no request
 // authenticates within the grace period. So is a mapping denial of the
-// ingress (OpenShell republishing the host alias), then as a refusal.
+// ingress no settings reload explains, then as a refusal of its own.
 func TestHookReachUnansweredConnections(t *testing.T) {
 	ingress := strconv.Itoa(testIngressPort)
 	for _, tc := range []struct {
@@ -711,7 +711,7 @@ func TestHookReachUnansweredConnections(t *testing.T) {
 			"not one request authenticated", 0},
 		{"allowed", ingressLine("ALLOWED"), "not one request authenticated", 0},
 		{"mapping denial", "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> host.openshell.internal:" + ingress + " [reason:transparent_tcp_mapping_denied]",
-			"OpenShell refused", 1},
+			"does not cover the port", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newReachEnv(t)
@@ -739,6 +739,98 @@ func TestHookReachUnansweredConnections(t *testing.T) {
 	r.check()
 	if r.hooks().Unreachable || r.hooks().IngressRefused != 0 {
 		t.Fatalf("a mapping denial the next request answered = %+v", r.hooks())
+	}
+	// A connection that gets through answers it too: the mapping covers the
+	// port, and it is that connection's request that did not authenticate.
+	r = newReachEnv(t)
+	r.line("NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> host.openshell.internal:" + ingress + " [reason:transparent_tcp_mapping_denied]")
+	r.advance(time.Second)
+	r.line(ingressLine("ALLOWED"))
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || h.IngressRefused != 0 || !strings.Contains(h.UnreachableReason, "not one request authenticated") {
+		t.Fatalf("a mapping denial a connection answered = %+v", h)
+	}
+}
+
+// OpenShell reloads a running sandbox's settings whenever a gateway-global
+// provider profile changes (a sandbox's --credential profile imported or
+// deleted, by either daemon on the gateway) and maps the host alias again
+// on the next lookup: a client connecting to the address it looked up
+// before the reload (OpenCode's runtime keeps a lookup for 30 s) is denied
+// its mapping. Seen live on an idle OpenCode's first plugin event and on a
+// hook just before the harness quit, neither followed by a hook within the
+// grace period: that is no refusal and no attempt. Past the reload's
+// window, or once the mapping OpenShell reports leaves the port out (as
+// when another daemon replaced the ingress profile), it is a refusal again.
+func TestHookReachReloadMappingDenial(t *testing.T) {
+	ingress := strconv.Itoa(testIngressPort)
+	mapped := func(ports ...int) string {
+		list := make([]string, len(ports))
+		for i, p := range ports {
+			list[i] = strconv.Itoa(p)
+		}
+		return "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=" +
+			strings.Join(list, ",") + " mapping_id=m1"
+	}
+	const reload = "CONFIG:DETECTED [INFO] Settings poll: config change detected [old_revision:7 new_revision:7 policy_changed:false provider_env_changed:true]"
+	denied := "NET:OPEN [MED] DENIED " + testClaudeBin + "(0) -> 198.18.0.2:" + ingress + " [reason:transparent_tcp_mapping_denied]"
+	idle := func(r *reachEnv) {
+		for range 12 {
+			r.advance(hookReachInterval)
+			r.check()
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		lines   []string
+		gap     time.Duration // between the last line and the denial
+		flagged bool
+	}{
+		{"after a provider reload", []string{mapped(testEgressPort, testIngressPort), reload}, 10 * time.Second, false},
+		{"after a policy reload", []string{mapped(testIngressPort), strings.Replace(reload, "policy_changed:false", "policy_changed:true", 1)}, 0, false},
+		{"long after a reload", []string{mapped(testEgressPort, testIngressPort), reload}, reloadMappingWindow + time.Second, true},
+		{"no reload", []string{mapped(testEgressPort, testIngressPort)}, time.Second, true},
+		{"a reload that changed nothing", []string{mapped(testIngressPort), strings.Replace(reload, "provider_env_changed:true", "provider_env_changed:false", 1)}, 0, true},
+		{"the mapping leaves the port out", []string{reload, mapped(38971, 38972)}, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReachEnv(t)
+			for _, l := range tc.lines {
+				r.line(l)
+				r.advance(time.Second)
+			}
+			r.advance(tc.gap)
+			r.line(denied)
+			idle(r)
+			h := r.hooks()
+			if !tc.flagged {
+				if h.Unreachable || h.IngressRefused != 0 || len(r.feed(sandboxapi.ReasonHooksUnreachable)) != 0 || len(r.findings()) != 0 {
+					t.Fatalf("a mapping denial after a reload was flagged: %+v", h)
+				}
+				return
+			}
+			warn := r.feed(sandboxapi.ReasonHooksUnreachable)
+			if !h.Unreachable || h.IngressRefused != 1 || !strings.Contains(h.UnreachableReason, "does not cover the port") ||
+				strings.Contains(h.UnreachableReason, "network policy does not allow") || len(warn) != 1 ||
+				!strings.HasPrefix(warn[0].Message, "⚠ "+sandboxapi.HooksUnreachableWarning) {
+				t.Fatalf("hooks = %+v, feed = %+v", h, warn)
+			}
+		})
+	}
+	// A hook through after the reload does not stretch its window.
+	r := newReachEnv(t)
+	r.line(mapped(testIngressPort))
+	r.line(reload)
+	r.line(denied)
+	r.advance(time.Second)
+	r.m.ObserveIngress(r.binding, sandboxauth.RouteHook)
+	r.advance(reloadMappingWindow)
+	r.line(denied)
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || h.IngressRefused != 1 {
+		t.Fatalf("a mapping denial past the reload after a hook = %+v", h)
 	}
 }
 
