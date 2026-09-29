@@ -235,6 +235,9 @@ type Manager struct {
 	// in progress.
 	gwPort   atomic.Int64
 	gwDriver atomic.Pointer[openshell.Driver]
+	// gwCheckedAt is when the connected gateway last said which driver it
+	// runs (UnixNano; recheckDriver).
+	gwCheckedAt atomic.Int64
 
 	mu            sync.Mutex
 	boxes         map[string]*box
@@ -531,7 +534,48 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 	m.gwPort.Store(int64(gw.Port))
 	driver := gw.Driver
 	m.gwDriver.Store(&driver)
+	m.gwCheckedAt.Store(m.now().UnixNano())
 	return gw, m.gwGone, nil
+}
+
+// driverRecheck is how long Status trusts the compute driver the
+// connected gateway last reported before it asks again.
+const driverRecheck = 5 * time.Second
+
+// driverGateway is gateway for the work that depends on the compute driver
+// the gateway runs (create, start, reconcile): it asks the gateway again
+// which driver it runs (recheckDriver).
+func (m *Manager) driverGateway(ctx context.Context) (*Gateway, error) {
+	gw, err := m.gateway(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return m.recheckDriver(ctx, gw)
+}
+
+// recheckDriver asks a connection's gateway which compute driver it runs
+// now. A connection outlives a restart of its gateway (gRPC dials again on
+// its own), and `sandbox setup` or `sandbox doctor --fix` restart the
+// gateway on another driver: a connection whose gateway now runs another
+// driver, or does not say which, is dropped, and the connection that
+// replaces it reads the driver the gateway runs.
+func (m *Manager) recheckDriver(ctx context.Context, gw *Gateway) (*Gateway, error) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	d, err := connectedDriver(cctx, gw.Client)
+	cancel()
+	if err == nil && d.Name == gw.Driver.Name {
+		m.gwCheckedAt.Store(m.now().UnixNano())
+		return gw, nil
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err == nil {
+		err = fmt.Errorf("the OpenShell gateway now runs the %s compute driver, not %s", d.Name, gw.Driver.Name)
+		m.logf("%v; connecting to it again", err)
+	}
+	m.forgetGateway(gw, err)
+	return m.gateway(ctx)
 }
 
 // gatewayUp reports whether a gateway connection is held, without dialing.
@@ -546,6 +590,11 @@ func (m *Manager) dropGateway(gw *Gateway, err error) {
 	if gw == nil || !openshell.IsUnavailable(err) {
 		return
 	}
+	m.forgetGateway(gw, err)
+}
+
+// forgetGateway forgets a connection, so the next call dials again at once.
+func (m *Manager) forgetGateway(gw *Gateway, err error) {
 	m.gwMu.Lock()
 	if m.gw == gw {
 		m.gw, m.gwErr, m.gwErrAt = nil, err, time.Time{}

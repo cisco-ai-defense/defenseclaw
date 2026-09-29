@@ -71,6 +71,9 @@ type fakeDaemon struct {
 	// onGet runs before a sandbox is returned (hook counters move during
 	// a session).
 	onGet func(sb *sandboxapi.Sandbox)
+	// onStatus runs before the status is returned (the daemon notices a
+	// change).
+	onStatus func(st *sandboxapi.Status)
 	// createMCP and createWarnings are what create reports.
 	createMCP        *sandboxapi.MCPSummary
 	createWarnings   []string
@@ -211,6 +214,9 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 	defer d.mu.Unlock()
 	switch {
 	case path == sandboxapi.PathStatus:
+		if d.onStatus != nil {
+			d.onStatus(&d.status)
+		}
 		reply(d.status)
 	case path == sandboxapi.PathPolicyExplain:
 		reply(d.explain)

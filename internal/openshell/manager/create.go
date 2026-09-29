@@ -99,7 +99,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
-	gw, err := m.gateway(ctx)
+	// What the sandbox is sent depends on the driver the gateway runs
+	// now, which a restart since the connection may have changed.
+	gw, err := m.driverGateway(ctx)
 	if err != nil {
 		return nil, err
 	}

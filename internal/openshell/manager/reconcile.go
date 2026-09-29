@@ -69,7 +69,8 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
-	gw, err := m.gateway(ctx)
+	// Adoption stamps records with the driver the gateway runs now.
+	gw, err := m.driverGateway(ctx)
 	if err != nil {
 		return err
 	}

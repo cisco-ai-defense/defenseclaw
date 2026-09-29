@@ -658,6 +658,37 @@ func TestSetupSwitchesADockerDesktopMacToMicroVMs(t *testing.T) {
 	}
 }
 
+// TestSetupWaitsForTheDaemonToDriveMicroVMs: the daemon learns that the
+// gateway switched drivers when it next asks the gateway, so setup waits
+// for its status to name the MicroVM driver, and says so when it never
+// does.
+func TestSetupWaitsForTheDaemonToDriveMicroVMs(t *testing.T) {
+	for _, notices := range []bool{true, false} {
+		ta := setupApp(t, "", "", false)
+		ta.IO.TTY = false
+		ta.GOOS = "darwin"
+		ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
+		ta.gateway.applyRes = &openshell.GatewayApplyResult{}
+		_, _ = useGateway(ta)
+		polls := 0
+		ta.daemon.status.Gateway = &sandboxapi.Gateway{Name: "openshell", Driver: "docker"}
+		ta.daemon.onStatus = func(st *sandboxapi.Status) {
+			if polls++; notices && polls > 3 {
+				st.Gateway.Driver = "vm"
+			}
+		}
+		ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+		const stale = "the daemon still drives the OpenShell gateway as the docker driver, not vm"
+		if notices {
+			has(t, ta.output(), "the daemon runs the sandbox subsystem")
+			lacks(t, ta.output(), stale)
+			continue
+		}
+		has(t, ta.output(), stale)
+		lacks(t, ta.output(), "the daemon runs the sandbox subsystem")
+	}
+}
+
 // TestSetupSaysASwitchNotAppliedLeavesDocker: a switch waits for the
 // gateway restart, which --yes does not give while a sandbox runs on the
 // gateway. Setup then does not say every run works on a copy in a

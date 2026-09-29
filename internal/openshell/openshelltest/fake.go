@@ -163,13 +163,24 @@ func WithGatewayInfo(info types.GatewayInfo) Option {
 // template driver_config other than {"vm": {"gpu_device_ids": [...]}}
 // fails with InvalidArgument.
 func WithDriver(d openshell.ComputeDriver) Option {
-	return func(f *Fake) {
-		info := types.ComputeDriverInfo{Name: string(d), DriverName: string(d), DriverVersion: openshell.SupportedMin}
-		if d == openshell.DriverVM {
-			info.DriverName = "openshell-driver-vm"
-		}
-		f.gatewayInfo.ComputeDrivers = []types.ComputeDriverInfo{info}
+	return func(f *Fake) { f.gatewayInfo.ComputeDrivers = []types.ComputeDriverInfo{driverInfo(d)} }
+}
+
+// driverInfo is the compute driver d as a live 0.1.1 gateway reports it.
+func driverInfo(d openshell.ComputeDriver) types.ComputeDriverInfo {
+	info := types.ComputeDriverInfo{Name: string(d), DriverName: string(d), DriverVersion: openshell.SupportedMin}
+	if d == openshell.DriverVM {
+		info.DriverName = "openshell-driver-vm"
 	}
+	return info
+}
+
+// SetDriver makes the gateway run another compute driver from now on, as
+// a restart on it does (WithDriver). Sandboxes already made stay.
+func (f *Fake) SetDriver(d openshell.ComputeDriver) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gatewayInfo.ComputeDrivers = []types.ComputeDriverInfo{driverInfo(d)}
 }
 
 // New returns an empty, healthy fake gateway with the docker driver.

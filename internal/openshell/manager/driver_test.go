@@ -19,12 +19,14 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
@@ -99,6 +101,56 @@ func TestStatusNamesTheDriver(t *testing.T) {
 	e := newVMEnv(t, nil)
 	if got := e.m.gatewayDriver(); got.Name != openshell.DriverDocker {
 		t.Fatalf("gatewayDriver before connecting = %+v", got)
+	}
+}
+
+// A connection outlives a restart of its gateway, and `sandbox setup` or
+// `doctor --fix` restart it on another driver. A create and a start ask
+// the gateway which driver it runs now, and the status asks again once
+// the last answer is a few seconds old: a switch drops the connection,
+// and the next one drives the new driver.
+func TestTheDaemonFollowsADriverSwitch(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC))
+	connects := 0
+	e.m.opts.Connect = func(ctx context.Context) (*Gateway, error) {
+		connects++
+		d, err := connectedDriver(ctx, e.client)
+		if err != nil {
+			return nil, err
+		}
+		gw := *e.gw
+		gw.Driver = d
+		return &gw, nil
+	}
+	useOpenCode(t, e)
+	e.fake.HandleExec(e.workloadChecks(nil, nil))
+	if st, err := e.m.Status(t.Context()); err != nil || st.Gateway == nil || st.Gateway.Driver != "docker" {
+		t.Fatalf("status = %+v, %v", st, err)
+	}
+	// The gateway restarts on MicroVMs under the connection.
+	e.fake.SetDriver(openshell.DriverVM)
+	if st, _ := e.m.Status(t.Context()); st.Gateway.Driver != "docker" || connects != 1 {
+		t.Fatalf("status within the recheck = %+v (connects %d)", st.Gateway, connects)
+	}
+	advance(driverRecheck)
+	if st, _ := e.m.Status(t.Context()); st.Gateway.Driver != "vm" || connects != 2 || e.m.gatewayDriver().Name != openshell.DriverVM {
+		t.Fatalf("status after the recheck = %+v (connects %d)", st.Gateway, connects)
+	}
+
+	// Back on docker: the create does not wait for the status to notice.
+	e.fake.SetDriver(openshell.DriverDocker)
+	e.create(sandboxapi.CreateRequest{Name: "dk-open", Harness: "opencode", Copy: true})
+	if rec := e.boxOf("dk-open").rec; rec.Driver != string(openshell.DriverDocker) || connects != 3 {
+		t.Fatalf("record driver %q (connects %d)", rec.Driver, connects)
+	}
+	e.stopBox("dk-open")
+	// On vm again, the start judges the record against the driver the
+	// gateway runs now: a sandbox made on docker cannot start.
+	e.fake.SetDriver(openshell.DriverVM)
+	_, err := e.m.Start(t.Context(), "dk-open", sandboxapi.StartRequest{})
+	if apiErr := wantCode(t, err, sandboxapi.CodeConflict); !strings.Contains(apiErr.Error(), "was created on the docker driver") || connects != 4 {
+		t.Fatalf("start = %v (connects %d)", apiErr, connects)
 	}
 }
 

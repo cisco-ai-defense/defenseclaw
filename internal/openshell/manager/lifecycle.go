@@ -80,7 +80,13 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	st := &sandboxapi.Status{
 		Enabled: cfg.OpenShell.Enabled, IngressAddr: m.opts.IngressAddr, EgressAddr: m.opts.EgressAddr,
 	}
-	if gw, err := m.gateway(ctx); err != nil {
+	gw, err := m.gateway(ctx)
+	if err == nil && m.now().Sub(time.Unix(0, m.gwCheckedAt.Load())) >= driverRecheck {
+		// The CLI and the TUI decide on the driver said here; a restart
+		// since the last check may have changed it.
+		gw, err = m.recheckDriver(ctx, gw)
+	}
+	if err != nil {
 		st.Reason = sandboxapi.AsError(err).Error()
 	} else {
 		st.Available = true
@@ -325,7 +331,8 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := m.listenersReady(); err != nil {
 		return err
 	}
-	gw, err := m.gateway(ctx)
+	// The record is judged against the driver the gateway runs now.
+	gw, err := m.driverGateway(ctx)
 	if err != nil {
 		return err
 	}

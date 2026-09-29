@@ -492,8 +492,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	a.importIngressProfile(ctx)
 
-	// 8. The daemon picks the change up.
-	a.waitDaemon(ctx)
+	// 8. The daemon picks the change up, the driver included.
+	var driver openshell.ComputeDriver
+	if onMicroVMs {
+		driver = openshell.DriverVM
+	}
+	a.waitDaemon(ctx, driver)
 	for _, s := range skipped {
 		a.note("skipped: " + s)
 	}
@@ -893,28 +897,42 @@ func (a *App) importIngressProfile(ctx context.Context) {
 	}
 }
 
-// waitDaemon waits briefly for the daemon to turn sandboxes on.
-func (a *App) waitDaemon(ctx context.Context) {
+// waitDaemon waits briefly for the daemon to turn sandboxes on and, when
+// driver is set, to drive the gateway on it: the daemon learns a driver
+// switch when it next asks the gateway.
+func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) {
 	api, err := a.api()
 	if err != nil {
 		return
 	}
-	deadline := a.Now().Add(30 * time.Second)
-	for {
+	const wait, poll = 30 * time.Second, 2 * time.Second
+	deadline := a.Now().Add(wait)
+	for polls := 1; ; polls++ {
 		st, err := api.Status(ctx)
+		// An older daemon names no driver: docker.
+		drives := openshell.DriverDocker
+		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
+			drives = openshell.ComputeDriver(st.Gateway.Driver)
+		}
 		switch {
 		case err != nil:
 			a.warn("the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`")
 			return
-		case st.Enabled && st.Available:
+		case st.Enabled && st.Available && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
 			return
 		}
-		if a.Now().After(deadline) {
+		// The polls bound the wait when the clock does not move.
+		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
+			if st.Enabled && st.Available {
+				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
+					"if `%s doctor` says the same", drives, driver, CommandName))
+				return
+			}
 			a.warn("the daemon has not turned sandboxes on yet: " + firstNonEmpty(st.Reason, "see `"+CommandName+" doctor`"))
 			return
 		}
-		if a.Sleep(ctx, 2*time.Second) != nil {
+		if a.Sleep(ctx, poll) != nil {
 			return
 		}
 	}
