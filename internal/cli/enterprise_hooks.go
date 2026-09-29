@@ -778,8 +778,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		removedAccountFailures = enterpriseHookRemovedAccountFailures(state)
 		if removedAccountFailures > 0 {
 			for _, issue := range enterpriseHookGuardianFailureIssues(state) {
-				report.Warnings = append(report.Warnings,
-					issue+" (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)")
+				report.Warnings = append(report.Warnings, issue+enterpriseHookRemovedAccountNote)
 			}
 		} else {
 			report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
@@ -804,12 +803,22 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if stateExists && authorizationExists && activationExists &&
 		stateErr == nil && authorizationErr == nil && activationErr == nil {
+		expectedManifestSHA256 := manifestSHA256
+		if manifestSHA256 != "" && activation.ManifestSHA256 != manifestSHA256 && enterpriseHookManifestCatchUpAllowed() {
+			expectedManifestSHA256 = ""
+			message, waiting := enterpriseHookManifestActivationIssue(enterpriseHookManifest, manifestSHA256, activation, time.Now())
+			if waiting {
+				report.Warnings = append(report.Warnings, message)
+			} else {
+				report.Errors = append(report.Errors, message)
+			}
+		}
 		report.Errors = append(report.Errors, compareEnterpriseHookGuardianRecordsExcusing(
 			state,
 			authorization,
 			activation,
 			enterpriseHookManifest,
-			manifestSHA256,
+			expectedManifestSHA256,
 			removedAccountFailures,
 		)...)
 		// The Guardian is the trusted live verifier on native Windows: it runs
@@ -861,6 +870,44 @@ func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusR
 	}
 	return err
 }
+
+// enterpriseHookManifestCatchUpWindow is how long standalone status waits,
+// after the enumerator republishes targets.yaml, for the guardian to
+// activate it. The guardian reconciles a changed manifest within seconds and
+// runs at least once a minute.
+const enterpriseHookManifestCatchUpWindow = 2 * time.Minute
+
+// enterpriseHookManifestActivationIssue words, for standalone status, a
+// guardian activation of other targets.yaml bytes than the installed ones.
+// A manifest the enumerator republished after that activation, less than
+// enterpriseHookManifestCatchUpWindow ago, is the guardian catching up
+// (waiting): until it activates the new file the gateway keeps enforcing
+// the targets it last activated.
+func enterpriseHookManifestActivationIssue(
+	manifestPath, manifestSHA256 string,
+	activation enterpriseHookGuardianActivation,
+	now time.Time,
+) (message string, waiting bool) {
+	activatedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(activation.UpdatedAt))
+	info, statErr := os.Stat(manifestPath)
+	if parseErr != nil || statErr != nil || !info.ModTime().After(activatedAt) {
+		return fmt.Sprintf("the hook guardian last activated other targets.yaml bytes than the installed file "+
+			"(activated %.12s, installed %.12s); check that the hook guardian service is running and read its log",
+			activation.ManifestSHA256, manifestSHA256), false
+	}
+	changedAt := info.ModTime().UTC()
+	if age := now.Sub(changedAt); age >= 0 && age < enterpriseHookManifestCatchUpWindow {
+		return fmt.Sprintf("the hook enumerator updated targets.yaml %s ago and the hook guardian has not activated it yet; "+
+			"it does within about a minute, and until then enforces the targets it last activated", age.Round(time.Second)), true
+	}
+	return fmt.Sprintf("the hook guardian has not activated the targets.yaml the enumerator published at %s "+
+		"(its last activation was at %s); check that the hook guardian service is running and read its log",
+		changedAt.Format(time.RFC3339), activatedAt.UTC().Format(time.RFC3339)), false
+}
+
+// enterpriseHookRemovedAccountNote follows each failure status and verify
+// report as a warning for a deleted account whose profile folder was removed.
+const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
 
 // enterpriseHookRemovedAccountFailures is the number of failed rows in the
 // last reconcile when every one of them belongs to a deleted account whose

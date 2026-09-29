@@ -32,6 +32,11 @@ func enterpriseHookDeferredTargetSessionAvailable(
 // check; no unix row is excused.
 var enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
 
+// enterpriseHookManifestCatchUpAllowed is the Windows standalone
+// manifest catch-up check (enterpriseHookManifestActivationIssue); unix
+// status keeps the exact manifest binding.
+var enterpriseHookManifestCatchUpAllowed = func() bool { return false }
+
 func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool, error) {
 	return true, nil
 }

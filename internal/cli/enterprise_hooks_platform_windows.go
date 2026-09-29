@@ -47,6 +47,14 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 	return windowsEnterpriseAccountDeleted(row.SID)
 }
 
+// enterpriseHookManifestCatchUpAllowed reports a standalone deployment,
+// whose status waits for the guardian to activate a targets.yaml the
+// enumerator just republished (enterpriseHookManifestActivationIssue).
+// Tests replace it.
+var enterpriseHookManifestCatchUpAllowed = func() bool {
+	return cfg != nil && cfg.StandaloneEnterprise()
+}
+
 func enterpriseHookTargetSessionAvailable(
 	target enterprisehooks.ManifestTarget,
 ) (bool, error) {

@@ -542,6 +542,33 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	if err := runEnterpriseHooksStatus(cmd, nil); err == nil {
 		t.Fatal("status accepted Guardian coverage for replaced manifest bytes")
 	}
+	// Standalone: a manifest the enumerator republished after the guardian's
+	// last activation is the guardian catching up, which status reports as a
+	// warning; bytes older than that activation still fail it.
+	previousCatchUp := enterpriseHookManifestCatchUpAllowed
+	t.Cleanup(func() { enterpriseHookManifestCatchUpAllowed = previousCatchUp })
+	enterpriseHookManifestCatchUpAllowed = func() bool { return true }
+	for _, republished := range []bool{true, false} {
+		modTime := time.Now()
+		if !republished {
+			modTime = modTime.Add(-time.Hour)
+		}
+		if err := os.Chtimes(manifest, modTime, modTime); err != nil {
+			t.Fatal(err)
+		}
+		stdout.Reset()
+		err := runEnterpriseHooksStatus(cmd, nil)
+		report = enterpriseHookStatusReport{}
+		if decodeErr := json.Unmarshal(stdout.Bytes(), &report); decodeErr != nil {
+			t.Fatalf("decode status report: %v", decodeErr)
+		}
+		waiting := err == nil && report.OK && len(report.Warnings) == 1 &&
+			strings.Contains(report.Warnings[0], "has not activated it yet")
+		if waiting != republished {
+			t.Fatalf("republished=%t: status err=%v report=%+v", republished, err, report)
+		}
+	}
+	enterpriseHookManifestCatchUpAllowed = previousCatchUp
 	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
