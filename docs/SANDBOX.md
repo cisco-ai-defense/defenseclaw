@@ -192,7 +192,13 @@ not the driver's name or `runtime.GOOS`.
   minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
   keyed by image ID and kept by OpenShell); a cached one starts in seconds.
   The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
-  its "about a minute" note. `delete` keeps a sandbox's run image even when
+  its "about a minute" note and a disk check before it stages the copy
+  (`openshell.VMDiskShortage`: refused below the image's size plus 1 GiB,
+  never below the doctor's 6 GiB `VMDiskFailBytes`, warned below twice that,
+  never below 12 GiB; `image build` warns the same after a build). The
+  daemon's create refuses the same shortage (`unavailable`) once it knows the
+  image ID the sandbox boots and finds no disk prepared from it
+  (`Options.VMDiskFree`). `delete` keeps a sandbox's run image even when
   no other sandbox uses it, and `image prune` keeps every run image of an
   overlay image it keeps: the run image adds only its files' few layers to
   Docker, while a rebuilt one gets a new image ID, which the driver

@@ -49,6 +49,9 @@ type ImageService interface {
 	// GoneIDs returns the image IDs among ids Docker holds no image of
 	// (image.Builder.GoneIDs).
 	GoneIDs(ctx context.Context, ids []string) (map[string]bool, error)
+	// Size is the size in Docker of spec's current hook-verified image, or
+	// of the image ref when spec is nil; 0 when there is none.
+	Size(ctx context.Context, spec *harness.Spec, ref string) (uint64, error)
 	// Prune removes superseded images (image.Builder.Prune).
 	Prune(ctx context.Context, opts image.PruneOptions) (image.PruneReport, error)
 	// Remove deletes every image this data dir built or named: its overlay
@@ -109,6 +112,21 @@ func (b *builderImages) List() ([]image.Record, error) { return b.store().List()
 func (b *builderImages) Gone(ctx context.Context, recs []image.Record) (map[string]bool, error) {
 	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
 	return builder.Gone(ctx, recs)
+}
+
+func (b *builderImages) Size(ctx context.Context, h *harness.Spec, ref string) (uint64, error) {
+	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	if h != nil {
+		rec, ok, err := builder.Current(b.spec(h))
+		if err != nil || !ok {
+			return 0, err
+		}
+		ref = rec.ImageID
+	}
+	if ref == "" {
+		return 0, nil
+	}
+	return builder.ImageSize(ctx, ref)
 }
 
 func (b *builderImages) GoneIDs(ctx context.Context, ids []string) (map[string]bool, error) {
@@ -262,7 +280,57 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 		how = "built in " + a.Now().Sub(started).Round(time.Second).String()
 	}
 	a.ok(fmt.Sprintf("%s %s: %s, hooks verified (%s)", spec.DisplayName, rec.HarnessVersion, rec.Tag, how))
+	if built {
+		// A new image is a new image ID: on MicroVMs its first sandbox
+		// prepares a disk from it.
+		if warning, err := a.vmDiskShortage(ctx, a.gatewayDriverNow(ctx), nil, rec.ImageID, "the first start of a sandbox from it"); err != nil {
+			a.warn(err.Error())
+		} else if warning != "" {
+			a.warn(warning)
+		}
+	}
 	return nil
+}
+
+// vmDiskShortage judges the free space where the gateway's compute driver d
+// would prepare a disk from spec's current image (or, with spec nil, the
+// image ref) for what, when d prepares one (the MicroVM driver): an error
+// below the floor, a warning below the recommended space
+// (openshell.VMDiskShortage). Nothing on another driver, or when the space
+// cannot be measured.
+func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harness.Spec, ref, what string) (string, error) {
+	if d.ImageCache == "" {
+		return "", nil
+	}
+	dir := a.vmImageCache()
+	if dir == "" {
+		return "", nil
+	}
+	free, err := openshell.FreeUnder(a.DiskFree, dir)
+	if err != nil {
+		return "", nil
+	}
+	// An image to build first: its size is not known yet.
+	size, _ := a.Images.Size(ctx, spec, ref)
+	return openshell.VMDiskShortage(a.tildePath(dir), free, size, what)
+}
+
+// gatewayDriverNow is the compute driver of the gateway sandboxes start
+// on: the one the daemon reports, else the one the gateway's configuration
+// selects (docker when it names none, or cannot be read).
+func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
+	if api, err := a.api(); err == nil {
+		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
+			return gatewayDriver(st)
+		}
+	}
+	if st, err := a.Gateway.State(); err == nil && st != nil {
+		if d, ok := openshell.LookupDriver(string(st.ComputeDriver)); ok {
+			return d
+		}
+	}
+	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
+	return d
 }
 
 // defaultHarnesses are the harnesses setup selects, and image commands and

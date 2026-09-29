@@ -195,7 +195,9 @@ defenseclaw sandbox image list
 Builds and hook-checks the images of the named harnesses, or of
 `openshell.harnesses` (then Claude Code and Codex) when you name none. A
 current, checked image is kept unless you pass `--force`. The build log is
-written to `<data_dir>/logs/sandbox-image-<harness>.log`.
+written to `<data_dir>/logs/sandbox-image-<harness>.log`. On a MicroVM gateway
+it warns after a build when the volume of the driver's image cache lacks the
+room the first start of the new image needs (see `sandbox run`).
 
 ```bash
 defenseclaw sandbox image build
@@ -503,6 +505,12 @@ A few rules the flags follow:
   effect: every MicroVM gets the gateway's `vcpus` and `mem_mib`, so an
   organization's limit on the flags is not applied to them. The first start
   of an image the driver has not prepared yet says it takes about a minute.
+  That start prepares a disk of about the image's size in the driver's image
+  cache: before anything is copied, `run` refuses it when the volume has less
+  free space than the image's size plus 1 GiB (at least 6 GiB), and warns
+  below twice that (at least 12 GiB), naming what is free and
+  `sandbox image prune`. The daemon refuses such a create from any client the
+  same way.
 
 {/* AUTOGEN-BEGIN: sandbox-flags run */}
 | Flag | Takes | Default | Description |

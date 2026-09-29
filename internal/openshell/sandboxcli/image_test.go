@@ -280,6 +280,36 @@ func TestImageListNamesImagesGoneFromDocker(t *testing.T) {
 	}
 }
 
+// `image build` on a MicroVM gateway warns when the volume the driver
+// prepares disks on is short of room for the new image's first start; on
+// docker, or with the room, it says nothing of it (OC-F1).
+func TestImageBuildWarnsOfTheMicroVMDisk(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		driver string
+		free   uint64
+		want   string
+	}{
+		{"full", "vm", 3 << 30, "not enough free disk space for the first start of a sandbox from it: the MicroVM driver prepares a disk of about 6.0 GiB " +
+			"from its image in ~/.local/state/openshell/vm-driver/images, where 3.0 GiB is free and at least 7.0 GiB is needed"},
+		{"low", "vm", 9 << 30, "only 9.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and the first start of a sandbox from it prepares " +
+			"a MicroVM disk of about 6.0 GiB there (14.0 GiB or more is recommended"},
+		{"room", "vm", 40 << 30, ""},
+		{"docker", "docker", 1 << 30, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.driver
+			ta.diskFree, ta.images.sizes = tc.free, map[string]uint64{"": 6 << 30}
+			ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"codex"}}))
+			out := ta.output() + ta.err.String()
+			if tc.want == "" && strings.Contains(out, "free") || tc.want != "" && !strings.Contains(out, tc.want) {
+				t.Fatalf("image build:\n%s", out)
+			}
+		})
+	}
+}
+
 // The doctor's image check lists every harness built for this user, not
 // only the configured ones, and counts no image Docker no longer has
 // (KR-F9, MAC-OSH-OH-6).

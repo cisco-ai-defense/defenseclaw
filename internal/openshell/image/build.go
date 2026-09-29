@@ -23,6 +23,7 @@ import (
 	"io"
 	"maps"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -550,6 +551,21 @@ func removedImageIDs(records []Record, runs []RunImage, keep []string, report *P
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ImageSize is the size of the image ref (a tag or an image ID) in Docker,
+// its layers uncompressed: about what the MicroVM driver's root disk
+// prepared from it takes.
+func (b *Builder) ImageSize(ctx context.Context, ref string) (uint64, error) {
+	out, err := output(ctx, b.Docker, nil, "image", "inspect", "--format", "{{.Size}}", ref)
+	if err != nil {
+		return 0, fmt.Errorf("openshell image: inspect %s: %w", ref, err)
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("openshell image: inspect %s returned the size %q", ref, out)
+	}
+	return n, nil
 }
 
 // GoneIDs returns those of the image IDs ids that Docker holds no image of

@@ -323,8 +323,8 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 	if d.ImageCache == "" || m.opts.Images == nil || !ok {
 		return false
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	cache := m.vmImageCache(d)
+	if cache == "" {
 		return false
 	}
 	img, err := m.image(ctx, cfg, spec, false)
@@ -349,12 +349,30 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 		}
 		id = ri.ImageID
 	}
-	for _, disk := range image.VMDisks(filepath.Join(home, d.ImageCache), id) {
+	for _, disk := range image.VMDisks(cache, id) {
 		if disk.UID == img.UID && disk.GID == img.GID {
 			return false
 		}
 	}
 	return true
+}
+
+// vmImageCache is where the gateway's compute driver d keeps what it
+// prepares from each image: the directory Options.VMDiskFree reports (the
+// gateway's state_dir, when its configuration sets one), else d.ImageCache
+// under the home of the daemon's user, who runs the gateway. "" when
+// neither is known.
+func (m *Manager) vmImageCache(d openshell.Driver) string {
+	if m.opts.VMDiskFree != nil {
+		if dir, _, err := m.opts.VMDiskFree(); err == nil && dir != "" {
+			return dir
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || d.ImageCache == "" {
+		return ""
+	}
+	return filepath.Join(home, d.ImageCache)
 }
 
 // newestRunInputs are the creation environment, credential names and model

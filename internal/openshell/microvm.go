@@ -461,14 +461,7 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Status, c.Detail = StatusWarn, "the MicroVM driver's state directory is unknown (no home directory)"
 		return c
 	}
-	measured := dir
-	for {
-		if _, err := os.Stat(measured); err == nil || filepath.Dir(measured) == measured {
-			break
-		}
-		measured = filepath.Dir(measured)
-	}
-	free, err := r.DiskFree(measured)
+	free, err := FreeUnder(r.DiskFree, dir)
 	if err != nil {
 		c.Status, c.Detail = StatusWarn, fmt.Sprintf("could not measure free space under %s: %v", dir, err)
 		return c

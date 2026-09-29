@@ -131,6 +131,10 @@ type App struct {
 	WSL func() bool
 	// Geteuid is the effective uid (sandboxes refuse root).
 	Geteuid func() int
+	// DiskFree is the free space of the file system holding a path
+	// (openshell.DiskFree): the MicroVM driver prepares a disk of about an
+	// image's size from each image a sandbox first boots.
+	DiskFree func(path string) (uint64, error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// HookWindow is how long a harness session may run before its first
@@ -256,6 +260,9 @@ func (a *App) defaults() {
 		}
 		if a.Geteuid == nil {
 			a.Geteuid = os.Geteuid
+		}
+		if a.DiskFree == nil {
+			a.DiskFree = openshell.DiskFree
 		}
 		if a.ConfigPath == "" && a.Cfg != nil {
 			a.ConfigPath = strings.TrimSpace(a.Cfg.ConfigFilePath)

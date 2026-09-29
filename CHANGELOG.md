@@ -341,6 +341,13 @@ deleted.
   that it does not start at login) and that DefenseClaw cannot restart it.
   The doctor's disk line counts only the MicroVM disks prepared from images,
   not the driver's overlay templates and bootstrap rootfs.
+- The first start of an image on MicroVMs prepares a disk of about the
+  image's size (about 5 GB): `sandbox run` now refuses it before copying
+  anything when the volume of the driver's image cache has less free space
+  than the image plus 1 GiB (at least the doctor's 6 GiB), warns below twice
+  that (at least 12 GiB), and names `sandbox image prune`; the daemon refuses
+  such a create from any client (`unavailable`), and `image build` warns
+  after a build. Docker-driver runs are not checked.
 - `sandbox image prune` and `sandbox teardown` on a Mac give back the disk
   of what they remove: the MicroVM disk (about 5 GB) OpenShell prepared from
   each image ID they removed, in `<state_dir>/images`, and say how much they

@@ -522,6 +522,8 @@ type fakeImages struct {
 	// one is gone), and goneIDsErr its failure.
 	presentIDs map[string]bool
 	goneIDsErr error
+	// sizes are the sizes of images (Size), by harness or image ref.
+	sizes map[string]uint64
 	// pruned are the options of each Prune; pruneReport, when set, is its
 	// answer.
 	pruned      []image.PruneOptions
@@ -559,6 +561,15 @@ func (f *fakeImages) Gone(_ context.Context, recs []image.Record) (map[string]bo
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeImages) Size(_ context.Context, spec *harness.Spec, ref string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if spec != nil {
+		return f.sizes[spec.Name], nil
+	}
+	return f.sizes[ref], nil
 }
 
 func (f *fakeImages) GoneIDs(_ context.Context, ids []string) (map[string]bool, error) {
@@ -742,6 +753,10 @@ type testApp struct {
 	gitConfig map[string]string
 	// live is the stderr liveErr set.
 	live *lockedBuffer
+	// diskFree is the free space App.DiskFree reports anywhere, and
+	// diskProbed the path it was last asked about.
+	diskFree   uint64
+	diskProbed string
 }
 
 // newTestApp is an App wired to fakes, whose daemon holds sandboxes and
@@ -757,6 +772,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		copy: &fakeCopy{}, gateway: &fakeGateway{}, env: map[string]string{"SHELL": "/bin/bash"},
 		out: &bytes.Buffer{}, err: &bytes.Buffer{}, in: strings.NewReader(input),
 		project: filepath.Join(root, "home", "proj"), home: filepath.Join(root, "home"),
+		diskFree: 100 << 30,
 	}
 	for _, d := range []string{ta.project, ta.home, filepath.Join(root, "data")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -794,6 +810,7 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		GOARCH:     "arm64", // a test that makes this a Mac makes it an Apple-silicon one
 		WSL:        func() bool { return false },
 		Geteuid:    func() int { return 1000 },
+		DiskFree:   func(p string) (uint64, error) { ta.diskProbed = p; return ta.diskFree, nil },
 		Sleep:      func(context.Context, time.Duration) error { return nil },
 		OpenShell: func(context.Context) (openshell.Client, *openshell.Registration, error) {
 			return nil, nil, io.ErrClosedPipe
