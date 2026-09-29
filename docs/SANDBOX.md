@@ -216,10 +216,15 @@ not the driver's name or `runtime.GOOS`.
   are built as before, byte for byte. Go's own resolver (a Go binary built without cgo, or with
   `netgo`) and statically linked musl programs read `/etc/hosts` and DNS
   themselves and still cannot, until OpenShell writes `/etc/hosts`. The
-  hook-fire probe runs every harness with a MicroVM's name resolution too,
-  and a driver without a hosts file (`HostsFile` in the driver table) boots
-  only an image that passed that run: `create` refuses any other with the
-  probe's reason. A harness that exits at once in a sandbox where localhost
+  hook-fire probe runs every image for the vm driver with a MicroVM's name
+  resolution too, and a driver without a hosts file (`HostsFile` in the
+  driver table) boots only an image that passed that run. An image whose
+  run settled nothing (it could not run, or the harness failed without a
+  failed lookup of localhost) is checked again before the next sandbox on
+  that driver boots it (`Record.MicroVMUnchecked`); `create` refuses an
+  image that still did not pass, with the probe's reason, and every refusal
+  names `defenseclaw sandbox image build <harness> --force`, which checks
+  it again. A harness that exits at once in a sandbox where localhost
   does not resolve is named as such in the end-of-session summary, with
   what to do (a sandbox made before the images answered localhost is
   deleted and made again).
@@ -1386,13 +1391,20 @@ default wherever the data dir is (a managed install's
 `/opt/cisco/defenseclaw/runtime` is not shared), and removed with the
 container; the doctor's file sharing check on a vm gateway is of that
 directory. An image for the docker driver never runs this scenario. Its
-verdict is kept apart (`MicroVMVerified` and `MicroVMProblem` in
-`images.json`) and never fails the probe: a MicroVM run that could not run
-at all (a mount Docker refused, a timeout, an address relay mode could not
-learn) is recorded as its problem, and only an interrupted probe fails.
-`sandbox image build` says that a MicroVM gateway refuses such an image,
-and why. A harness that could not resolve localhost there is named with the
-line it printed.
+verdict is kept apart (`MicroVMVerified`, `MicroVMProblem` and
+`MicroVMInconclusive` in `images.json`) and never fails the probe; only an
+interrupted probe fails. It is definitive only two ways: a pass, or a
+harness that failed and printed a failed lookup of localhost
+(`MicroVMProblem`, named with the line it printed): it resolves names on
+its own, which the image cannot answer. Anything else settles nothing
+(`MicroVMInconclusive`): a MicroVM run that could not run at all (a mount
+Docker refused, a timeout, an address relay mode could not learn), or a
+harness that exited or fired no hook without saying why. Such an image
+stays unchecked for a MicroVM (`Record.MicroVMUnchecked`): `Build` probes
+it again when it is next asked for it, which the daemon's create on the vm
+driver does, and so does `sandbox image build`; a definitive problem stays
+until `sandbox image build <harness> --force`. `sandbox image build` says
+which of the two an image has.
 
 Kiro CLI has no model endpoint a mock can stand in for; its own
 scripted-response mode (`KIRO_MOCK_CHAT_RESPONSE`, with a placeholder

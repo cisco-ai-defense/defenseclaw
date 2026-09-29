@@ -65,7 +65,8 @@ type BuildOptions struct {
 // diagnosis) and Build returns the ErrHooksNotFired error. A new build is
 // recorded with HookFireVerified unset (a rebuild clears an earlier
 // verdict); a cached image keeps its verdict and is probed again only when
-// it is not verified yet.
+// it is not verified yet, or, built for the MicroVM driver, not checked for
+// it yet (Record.MicroVMUnchecked).
 func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) (Record, error) {
 	c, err := b.Context(spec)
 	if err != nil {
@@ -76,7 +77,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 			return Record{}, err
 		} else if ok && recordMatches(rec, c) {
 			if id, err := b.imageID(ctx, c.Tag); err == nil && id == rec.ImageID {
-				if rec.HookFireVerified || opts.SkipHookFire {
+				if (rec.HookFireVerified && !rec.MicroVMUnchecked()) || opts.SkipHookFire {
 					return rec, nil
 				}
 				return b.verifyBuilt(ctx, c, rec, opts)

@@ -1175,10 +1175,12 @@ func TestHookFireProbeMountsRunFiles(t *testing.T) {
 // resolution (no localhost in /etc/hosts, a resolver that answers
 // nothing), on both network modes, from files in the system temp
 // directory, which Docker Desktop shares by default wherever the data dir
-// is. A harness that cannot start there (Antigravity CLI before the image
-// answered localhost) leaves the probe passing and records why a MicroVM
-// cannot, naming the lookup that failed; VerifyHooks then keeps the image
-// verified but not for a MicroVM.
+// is. A harness that cannot start there because it could not resolve
+// localhost (Antigravity CLI before the image answered it) leaves the probe
+// passing and records why a MicroVM cannot, naming the lookup that failed;
+// VerifyHooks then keeps the image verified but not for a MicroVM. Any
+// other failure there settles nothing: the image stays unchecked for a
+// MicroVM, and is checked again.
 func TestHookFireMicroVMScenario(t *testing.T) {
 	const agy = "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"
 	for _, mode := range []HookFireNetwork{HookFireNetworkHost, HookFireNetworkRelay} {
@@ -1217,14 +1219,16 @@ func TestHookFireMicroVMScenario(t *testing.T) {
 					}
 				case agy:
 					want := `Claude Code cannot resolve localhost in an OpenShell MicroVM: it printed "` + agy + `". A MicroVM's /etc/hosts is empty`
-					if rec.MicroVMVerified || !strings.HasPrefix(rec.MicroVMProblem, want) || res.MicroVMProblem != rec.MicroVMProblem {
+					if rec.MicroVMVerified || !strings.HasPrefix(rec.MicroVMProblem, want) || res.MicroVMProblem != rec.MicroVMProblem ||
+						rec.MicroVMInconclusive != "" || rec.MicroVMUnchecked() {
 						t.Fatalf("MicroVM problem = %q (verified %t), want it to start %q", rec.MicroVMProblem, rec.MicroVMVerified, want)
 					}
 				default:
 					want := "with the name resolution of an OpenShell MicroVM (an empty /etc/hosts, and a DNS relay that does not answer localhost), " +
 						"Claude Code exited 1; hook SessionStart never fired"
-					if rec.MicroVMVerified || !strings.HasPrefix(rec.MicroVMProblem, want) {
-						t.Fatalf("MicroVM problem = %q, want it to start %q", rec.MicroVMProblem, want)
+					if rec.MicroVMVerified || rec.MicroVMProblem != "" || !strings.HasPrefix(rec.MicroVMInconclusive, want) ||
+						res.MicroVMInconclusive != rec.MicroVMInconclusive || !rec.MicroVMUnchecked() {
+						t.Fatalf("MicroVM inconclusive = %q (problem %q), want it to start %q", rec.MicroVMInconclusive, rec.MicroVMProblem, want)
 					}
 				}
 				// The scenario mounted its two files from the temp directory,
@@ -1246,10 +1250,9 @@ func TestHookFireMicroVMScenario(t *testing.T) {
 
 // A MicroVM run that cannot run at all (Docker refuses its mounts, it
 // times out, relay mode cannot learn host.docker.internal's address) says
-// nothing about the hooks the other runs proved: the image is verified,
-// for the docker driver's sandboxes as well, and the MicroVM run's
-// failure is recorded as its problem. An interrupted probe still fails,
-// and leaves the record alone.
+// nothing about the hooks the other runs proved, nor about the harness in
+// a MicroVM: the image is verified and stays unchecked for a MicroVM, with
+// why. An interrupted probe still fails, and leaves the record alone.
 func TestHookFireMicroVMRunThatCannotRun(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1284,8 +1287,8 @@ func TestHookFireMicroVMRunThatCannotRun(t *testing.T) {
 			}
 			rec, res, err := b.VerifyHooks(context.Background(), c, HookFireOptions{Network: tc.mode, SinkHost: "127.0.0.1"})
 			want := "the hook-fire probe could not run Claude Code with an OpenShell MicroVM's name resolution: "
-			if err != nil || !rec.HookFireVerified || rec.MicroVMVerified || !strings.HasPrefix(rec.MicroVMProblem, want) ||
-				!strings.Contains(rec.MicroVMProblem, tc.reason) || res.MicroVMProblem != rec.MicroVMProblem {
+			if err != nil || !rec.HookFireVerified || rec.MicroVMVerified || rec.MicroVMProblem != "" || !strings.HasPrefix(rec.MicroVMInconclusive, want) ||
+				!strings.Contains(rec.MicroVMInconclusive, tc.reason) || res.MicroVMInconclusive != rec.MicroVMInconclusive || !rec.MicroVMUnchecked() {
 				t.Fatalf("VerifyHooks = %+v, %v", rec, err)
 			}
 		})
@@ -1309,8 +1312,58 @@ func TestHookFireMicroVMRunThatCannotRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec, _, err := b.VerifyHooks(ctx, c, HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"})
-	if err == nil || errors.Is(err, ErrHooksNotFired) || rec.HookFireVerified || rec.MicroVMProblem != "" {
+	if err == nil || errors.Is(err, ErrHooksNotFired) || rec.HookFireVerified || rec.MicroVMProblem != "" || rec.MicroVMInconclusive != "" {
 		t.Fatalf("interrupted VerifyHooks = %+v, %v", rec, err)
+	}
+}
+
+// One MicroVM run that settled nothing does not block the harness on the
+// MicroVM driver for good: Build probes such a cached image again (a
+// sandbox on that driver resolves its image through Build), and a pass
+// then verifies it for a MicroVM. A verified image, or one the scenario
+// found cannot resolve localhost, is not probed again; Force checks the
+// latter again.
+func TestBuildChecksAgainAnImageNotCheckedForAMicroVM(t *testing.T) {
+	c := hookFireVMContext(t)
+	sim := &containerSim{t: t, events: fullClaudeRun, port: c.Spec.IngressPort, llm: true, microVMOutput: "panic: a flake"}
+	vmRuns := 0
+	docker := verifyDocker(t, c, sim, func(args []string) int {
+		if slices.ContainsFunc(args, func(a string) bool { return strings.HasSuffix(a, ",target=/etc/hosts,readonly") }) {
+			vmRuns++
+		}
+		return 0
+	})
+	b := &Builder{Docker: docker, Store: testStore(t), TempDir: t.TempDir()}
+	opts := BuildOptions{HookFire: HookFireOptions{Network: HookFireNetworkHost, SinkHost: "127.0.0.1"}}
+	ctx := context.Background()
+	rec, err := b.Build(ctx, c.Spec, opts)
+	if err != nil || !rec.HookFireVerified || !rec.MicroVMUnchecked() || vmRuns != 1 {
+		t.Fatalf("first build = %+v, %v (MicroVM runs %d)", rec, err, vmRuns)
+	}
+	// Still settling nothing: probed again, still unchecked.
+	if rec, err = b.Build(ctx, c.Spec, opts); err != nil || !rec.MicroVMUnchecked() || vmRuns != 2 || docker.count("build") != 1 {
+		t.Fatalf("second build = %+v, %v (MicroVM runs %d)", rec, err, vmRuns)
+	}
+	// The next run passes: verified for a MicroVM, and not probed again.
+	sim.microVMOutput = ""
+	if rec, err = b.Build(ctx, c.Spec, opts); err != nil || !rec.MicroVMVerified || rec.MicroVMInconclusive != "" || rec.MicroVMUnchecked() || vmRuns != 3 {
+		t.Fatalf("third build = %+v, %v (MicroVM runs %d)", rec, err, vmRuns)
+	}
+	if _, err = b.Build(ctx, c.Spec, opts); err != nil || vmRuns != 3 || docker.count("build") != 1 {
+		t.Fatalf("a MicroVM-verified image was probed again (MicroVM runs %d): %v", vmRuns, err)
+	}
+	// A harness found to resolve localhost on its own stays refused until
+	// a forced build checks it again.
+	sim.microVMOutput = "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"
+	if rec, err = b.Build(ctx, c.Spec, BuildOptions{Force: true, HookFire: opts.HookFire}); err != nil || rec.MicroVMProblem == "" || rec.MicroVMUnchecked() || vmRuns != 4 {
+		t.Fatalf("forced build = %+v, %v (MicroVM runs %d)", rec, err, vmRuns)
+	}
+	if _, err = b.Build(ctx, c.Spec, opts); err != nil || vmRuns != 4 {
+		t.Fatalf("an image found to fail in a MicroVM was probed again (MicroVM runs %d): %v", vmRuns, err)
+	}
+	sim.microVMOutput = ""
+	if rec, err = b.Build(ctx, c.Spec, BuildOptions{Force: true, HookFire: opts.HookFire}); err != nil || !rec.MicroVMVerified || rec.MicroVMProblem != "" || vmRuns != 5 {
+		t.Fatalf("forced re-check = %+v, %v (MicroVM runs %d)", rec, err, vmRuns)
 	}
 }
 

@@ -90,7 +90,10 @@ func (b BuilderImages) Resolve(ctx context.Context, spec image.BuildSpec, build 
 	}
 	if rec, ok, err := b.Builder.Current(spec); err != nil {
 		return image.Record{}, err
-	} else if ok && rec.HookFireVerified {
+	} else if ok && rec.HookFireVerified && (!build || !rec.MicroVMUnchecked()) {
+		// An image for the MicroVM driver whose last MicroVM check settled
+		// nothing is checked again by the build below; without one, create
+		// refuses it with the command that checks it (microVMRefusal).
 		return rec, nil
 	}
 	if !build {

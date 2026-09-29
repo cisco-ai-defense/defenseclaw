@@ -888,15 +888,26 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 // microVMRefusal refuses a sandbox on a gateway whose driver writes no
 // /etc/hosts (openshell.Driver.HostsFile: a MicroVM) when its image did not
 // pass the hook-fire probe's MicroVM scenario: the harness would exit at
-// once, as Antigravity CLI did when localhost did not resolve.
+// once, as Antigravity CLI did when localhost did not resolve. A harness
+// the scenario found to resolve names on its own cannot start; an image
+// whose scenario settled nothing, or never ran, is not checked yet. Each
+// refusal names the command that checks the image again.
 func microVMRefusal(spec *harness.Spec, img image.Record) error {
-	detail := img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName + "."
-	if img.MicroVMProblem == "" {
-		detail = "its image " + img.Tag + " was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
-			"rebuild it: `defenseclaw sandbox image build " + spec.Name + " --force`"
+	recheck := "`defenseclaw sandbox image build " + spec.Name + " --force`"
+	if img.MicroVMProblem != "" {
+		return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
+			Message: spec.DisplayName + " cannot start in an OpenShell MicroVM (the vm driver this gateway runs)",
+			Detail: img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName +
+				"; to check the image again: " + recheck}
+	}
+	detail := "its image " + img.Tag + " was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
+		"check it: " + recheck
+	if img.MicroVMInconclusive != "" {
+		detail = "its image " + img.Tag + " was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive +
+			"; check it again: " + recheck + " (a run without --no-build checks it first, too)"
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
-		Message: spec.DisplayName + " cannot start in an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}
+		Message: spec.DisplayName + "'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}
 }
 
 // runAs is the one source of a sandbox's run-as identity: the numeric host
