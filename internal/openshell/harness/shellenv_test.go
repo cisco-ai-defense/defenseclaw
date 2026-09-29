@@ -32,7 +32,7 @@ const testEgressProxy = "http://dcx-0123456789abcdef:0123abcd@host.openshell.int
 
 // shellEnvRecord is a shell fragment that prints the proxy variables and
 // PATH, one NAME=value per line ("<unset>" when absent).
-const shellEnvRecord = `for v in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy PATH BASH_ENV NODE_OPTIONS; do
+const shellEnvRecord = `for v in HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NODE_NO_WARNINGS NO_PROXY no_proxy PATH BASH_ENV NODE_OPTIONS; do
   eval "printf '%s=%s\n' \"\$v\" \"\${$v-<unset>}\""
 done
 `
@@ -140,11 +140,15 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 	got := run("HTTPS_PROXY=http://elsewhere:1", openshell.EnvEgressURL+"="+testEgressProxy, openshell.EnvEgressBypass+"="+bypass)
 	for key, want := range map[string]string{
 		"HTTPS_PROXY": testEgressProxy, "HTTP_PROXY": testEgressProxy, "https_proxy": testEgressProxy, "http_proxy": testEgressProxy,
-		"NODE_USE_ENV_PROXY": "1", "NO_PROXY": bypass, "no_proxy": bypass, "PATH": ShimDir + ":/usr/bin:/bin",
+		"NODE_USE_ENV_PROXY": "1", "NODE_NO_WARNINGS": "1", "NO_PROXY": bypass, "no_proxy": bypass, "PATH": ShimDir + ":/usr/bin:/bin",
 	} {
 		if got[key] != want {
 			t.Errorf("%s = %q, want %q", key, got[key], want)
 		}
+	}
+	// A shell whose caller asked for Node's warnings keeps them (#951).
+	if got := run("NODE_NO_WARNINGS=0", openshell.EnvEgressURL+"="+testEgressProxy); got["NODE_NO_WARNINGS"] != "0" {
+		t.Errorf("the caller's NODE_NO_WARNINGS=0 became %q", got["NODE_NO_WARNINGS"])
 	}
 	// Sourcing prints nothing (a POSIX sh, or bash in POSIX mode, never sees
 	// the function definition).
@@ -179,7 +183,7 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 		{"HTTPS_PROXY=http://elsewhere:1"},
 	} {
 		got := run(env...)
-		if got["HTTPS_PROXY"] != "http://elsewhere:1" || got["https_proxy"] != "<unset>" || got["NODE_USE_ENV_PROXY"] != "<unset>" {
+		if got["HTTPS_PROXY"] != "http://elsewhere:1" || got["https_proxy"] != "<unset>" || got["NODE_USE_ENV_PROXY"] != "<unset>" || got["NODE_NO_WARNINGS"] != "<unset>" {
 			t.Errorf("%v: the caller's proxy settings changed: %v", env, got)
 		}
 	}
@@ -262,7 +266,7 @@ func TestSandboxEnvRunsTheCommand(t *testing.T) {
 	}
 	got := shellEnvLines(string(out))
 	for key, want := range map[string]string{
-		"HTTPS_PROXY": testEgressProxy, "http_proxy": testEgressProxy, "NODE_USE_ENV_PROXY": "1", "NO_PROXY": "host.openshell.internal",
+		"HTTPS_PROXY": testEgressProxy, "http_proxy": testEgressProxy, "NODE_USE_ENV_PROXY": "1", "NODE_NO_WARNINGS": "1", "NO_PROXY": "host.openshell.internal",
 		"PATH": ShimDir + ":" + LauncherSystemPATH + ":/usr/bin:/bin", "BASH_ENV": "<unset>", "NODE_OPTIONS": "<unset>", "ARGS": "one two words",
 	} {
 		if got[key] != want {

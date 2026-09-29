@@ -70,16 +70,27 @@ const (
 // proxy; without one (the strict profile), or with a URL carrying anything
 // but URL characters, the caller's environment is left alone. NO_PROXY
 // defaults to the ingress host, which hooks reach directly.
+//
+// With NODE_USE_ENV_PROXY=1, Node 22 (the base image's node, which runs
+// Codex's wrapper, Copilot's npm launcher and every node or npm command the
+// agent runs) prints "[UNDICI-EHPA] Warning: EnvHttpProxyAgent is
+// experimental" at every start, into the harness's terminal and into tool
+// output (#951). NODE_NO_WARNINGS=1 silences it (and every other Node
+// warning) on every Node release; NODE_OPTIONS=--disable-warning would
+// silence only that one, but a project's Node older than 20.11 refuses to
+// start with it. A NODE_NO_WARNINGS the caller sets (sandbox run --env
+// NODE_NO_WARNINGS=0) is kept.
 const egressEnvScript = `# OpenShell drops the standard proxy variables passed at sandbox creation;
-# DefenseClaw passes them under its own names.
+# DefenseClaw passes them under its own names. Node warns at every start that
+# the proxy support NODE_USE_ENV_PROXY turns on is experimental.
 case "${` + openshell.EnvEgressURL + `:-}" in
   http://*[!A-Za-z0-9:@._/-]*) ;;
   http://?*)
     HTTPS_PROXY="$` + openshell.EnvEgressURL + `"; HTTP_PROXY="$` + openshell.EnvEgressURL + `"
     https_proxy="$` + openshell.EnvEgressURL + `"; http_proxy="$` + openshell.EnvEgressURL + `"
-    NODE_USE_ENV_PROXY=1
+    NODE_USE_ENV_PROXY=1; NODE_NO_WARNINGS="${NODE_NO_WARNINGS:-1}"
     NO_PROXY="${` + openshell.EnvEgressBypass + `:-` + connector.SandboxIngressHost + `}"; no_proxy="$NO_PROXY"
-    export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NO_PROXY no_proxy
+    export HTTPS_PROXY HTTP_PROXY https_proxy http_proxy NODE_USE_ENV_PROXY NODE_NO_WARNINGS NO_PROXY no_proxy
     ;;
 esac
 `

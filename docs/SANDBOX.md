@@ -308,7 +308,8 @@ The harness spec builds the environment passed to `openshell sandbox create
   strict profile sets no proxy. `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`
   (and their lowercase forms) and `NODE_USE_ENV_PROXY=1` are passed too, but
   OpenShell 0.1.1 drops them at create, so the workload gets them from the
-  shell fragment below.
+  shell fragment below. `NODE_NO_WARNINGS=1` goes with the proxy (see the
+  fragment below).
 - `DEFENSECLAW_SANDBOX_ID` and `DEFENSECLAW_SANDBOX_NAME` identify the
   sandbox. The ID is also meant to tell a nested DefenseClaw launch that it
   already runs sandboxed.
@@ -337,7 +338,22 @@ One shell fragment (`egressEnvScript` in
 `HTTP_PROXY`, `NO_PROXY` (and their lowercase forms) and
 `NODE_USE_ENV_PROXY=1` from those two variables, only for a well-formed
 `http://` URL and in place of any proxy settings the caller's environment
-carries. It runs wherever a process starts in a DefenseClaw image:
+carries. With `NODE_USE_ENV_PROXY=1`, the base image's Node 22 prints
+`(node:…) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental` at
+every start: above Codex's and Copilot CLI's TUI (their Node wrappers) and
+in the output of every `node`, `npm` or `npx` command the agent runs
+([#951](https://github.com/cisco-ai-defense/defenseclaw/issues/951)). So the
+fragment also exports `NODE_NO_WARNINGS=1`, which hides that warning and
+every other Node process warning (deprecations included) on every Node
+release. `NODE_OPTIONS=--disable-warning=UNDICI-EHPA` would hide only that
+one, but a project's Node older than 20.11 refuses to start with it, so
+only the Codex and Copilot launchers pass it, to their own Node wrapper
+(Codex blanks it again for its commands; Copilot's inherit it). The
+fragment keeps a `NODE_NO_WARNINGS` the environment already has: to see
+Node's warnings, create the sandbox with `--env NODE_NO_WARNINGS=0`
+(`sandbox run <harness> --new --env NODE_NO_WARNINGS=0` for a folder that
+has one), or `unset NODE_NO_WARNINGS` in a sandbox shell. It runs wherever
+a process starts in a DefenseClaw image:
 
 | Start | How it gets the proxy |
 | --- | --- |
@@ -1940,12 +1956,17 @@ These were measured on the pinned releases inside the community base image
   GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
   GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
   the per-plan Copilot API hosts) come from the CLI, not from a live run: no
-  Copilot-entitled account was available. With the proxy settings, Copilot's
-  Node printed its `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
-  above the TUI at every start, so the launcher passes
-  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
-  Copilot's tool commands inherit it (a Node older than 20.11 would refuse
-  the flag).
+  Copilot-entitled account was available. With the proxy settings, Copilot
+  printed Node's `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
+  above the TUI at every start. It comes from Copilot's npm launcher
+  (`npm-loader.js`, run by the image's Node 22), not from the native
+  single-executable CLI the launcher starts, which ignores `NODE_OPTIONS`
+  but printed no warning (1.0.88 on Linux arm64 with `NODE_USE_ENV_PROXY=1`:
+  `--version`, a `-p` run and a TUI prompt). The DefenseClaw launcher passes
+  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex, which
+  silences the npm launcher, and the sandbox's `NODE_NO_WARNINGS=1` does the
+  same for it and for Copilot's tool commands. Those inherit the
+  `NODE_OPTIONS` too (a Node older than 20.11 would refuse the flag).
   In the interactive TUI every hook waits out Copilot's 30-second hook
   timeout ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)),
   on the Docker driver and in the macOS MicroVM alike: the sandbox's seccomp

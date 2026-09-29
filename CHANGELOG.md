@@ -401,10 +401,17 @@ deleted.
   harness whose own suspend fails (Copilot CLI) is explained at once in the
   terminal's title, and the notice after it exits (and Hermes' at once) says
   there is nothing to bring back with `fg`.
-- Harness start-up fixes from the macOS certification, on both drivers: the
-  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
-  the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no
-  longer prints above the TUI at every start.
+- Node's `[UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental` no
+  longer prints in a sandbox
+  ([#951](https://github.com/cisco-ai-defense/defenseclaw/issues/951)). The
+  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as the
+  Codex one does, to Copilot's npm launcher, which printed it above the TUI
+  at every start (the native CLI that launcher starts does not print it). And
+  every open or balanced sandbox now sets `NODE_NO_WARNINGS=1` with its proxy
+  settings, so the `node`, `npm` and `npx` commands the agent runs no longer
+  print it into their output either. That hides Node's other warnings as
+  well; create a sandbox with `--env NODE_NO_WARNINGS=0` to keep them. Both
+  drivers; the images rebuild.
 - The Kiro image unpacks the embedding model Kiro CLI downloads at its first
   start (`all-MiniLM-L6-v2`, 79 MiB, each file checked against the SHA-256
   the pinned `kiro-cli-chat` carries) into the image HOME, so a new Kiro
