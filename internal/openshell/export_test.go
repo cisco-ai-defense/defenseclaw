@@ -38,12 +38,43 @@ func SetProcessTranslated(t *testing.T, translated func(goos, goarch string) boo
 }
 
 // SetSSHShimBase makes NewSSHShim make its directories in dir for the
-// rest of t.
+// rest of t, with no fallback directory (SetSSHShimFallback).
 func SetSSHShimBase(t *testing.T, dir string) {
 	prev := sshShimBase
 	sshShimBase = dir
 	t.Cleanup(func() { sshShimBase = prev })
+	SetSSHShimFallback(t, "")
 }
+
+// SetSSHShimFallback makes NewSSHShim fall back to dir (none when empty)
+// for the rest of t.
+func SetSSHShimFallback(t *testing.T, dir string) {
+	prev := sshShimFallback
+	sshShimFallback = func() string { return dir }
+	t.Cleanup(func() { sshShimFallback = prev })
+}
+
+// SetSSHShimNoexec makes NewSSHShim judge a directory mounted noexec with
+// noexec for the rest of t.
+func SetSSHShimNoexec(t *testing.T, noexec func(dir string) (bool, error)) {
+	prev := sshShimNoexec
+	sshShimNoexec = noexec
+	t.Cleanup(func() { sshShimNoexec = prev })
+}
+
+// SetSSHShimMode makes NewSSHShim write its shims with mode for the rest
+// of t: 0600 stands for a shim the system will not run.
+func SetSSHShimMode(t *testing.T, mode fs.FileMode) {
+	prev := sshShimMode
+	sshShimMode = mode
+	t.Cleanup(func() { sshShimMode = prev })
+}
+
+// MountedNoexec is mountedNoexec.
+var MountedNoexec = mountedNoexec
+
+// SSHShimFallbackDir is where NewSSHShim falls back to by default.
+func SSHShimFallbackDir() string { return defaultSSHShimFallback() }
 
 // SetSSHShimOwners makes owned judge the shim and its directory, and
 // trusted the directories above it, for the rest of t.

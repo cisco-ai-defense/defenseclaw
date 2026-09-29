@@ -19,6 +19,7 @@ package openshell
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -86,7 +87,7 @@ func (r *doctorRun) checkSSHSharing(ctx context.Context) {
 	case err != nil:
 		c.Status = StatusFail
 		c.Detail = "DefenseClaw cannot give the OpenShell CLI an ssh with connection sharing off, so it refuses to start sandbox sessions: " + err.Error()
-		c.Fix = &Fix{Summary: "set TMPDIR to a directory only you can write: DefenseClaw makes a private folder there for each OpenShell command"}
+		c.Fix = &Fix{Summary: "set TMPDIR to a directory only you can write, on a filesystem not mounted noexec: DefenseClaw makes a private folder there for each OpenShell command"}
 		return
 	case shim == nil:
 		c.Status = StatusWarn
@@ -108,6 +109,9 @@ func (r *doctorRun) checkSSHSharing(ctx context.Context) {
 	}
 	c.Status = StatusPass
 	c.Detail = "off for the OpenShell sessions DefenseClaw runs (ssh " + strings.Join(SSHNoSharingOptions(), " ") + ")"
+	if shim.Fallback != "" {
+		c.Detail += "; its ssh is under " + filepath.Dir(shim.Dir) + ", not the temporary directory: " + shim.Fallback
+	}
 	theirs, err := r.sshConfigFor(ctx, shim.Real)
 	switch {
 	case err != nil:

@@ -285,6 +285,10 @@ func (a *App) defaults() {
 			a.GitConfig = a.hostGitConfig
 		}
 		a.reader = bufio.NewReader(a.IO.In)
+		// The ssh shim every openshell invocation runs with falls back to
+		// this data directory when the temporary directory cannot hold one
+		// that runs.
+		openshell.SetSSHShimDataDir(a.dataDir())
 	})
 }
 

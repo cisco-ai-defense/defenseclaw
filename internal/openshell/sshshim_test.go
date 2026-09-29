@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -79,7 +80,8 @@ func TestSSHShimRunsTheRealSSHWithSharingOff(t *testing.T) {
 		t.Fatalf("SSHNoSharingOptions = %q", got)
 	}
 
-	env := shim.Environ([]string{"HOME=/h", "PATH=/usr/bin:/bin", "PATH=/last"})
+	// The variable that makes the shim answer a probe never reaches the CLI.
+	env := shim.Environ([]string{"HOME=/h", "PATH=/usr/bin:/bin", "DEFENSECLAW_SSH_SHIM_PROBE=1", "PATH=/last"})
 	if strings.Join(env, " ") != "HOME=/h PATH="+shim.Dir+":/last" {
 		t.Fatalf("Environ = %q", env)
 	}
@@ -236,6 +238,138 @@ func TestSSHShimRefusesUnsafeDirectories(t *testing.T) {
 	}
 }
 
+// A shim that a PATH search would pass over is never used, since the
+// OpenShell CLI would then run the user's own ssh, with its connection
+// sharing: on a filesystem mounted noexec (as /tmp on hardened Linux
+// hosts) the shim goes under DefenseClaw's data directory instead, and
+// when no directory can hold one that runs, NewSSHShim refuses.
+func TestSSHShimMustRun(t *testing.T) {
+	skipOnWindows(t)
+	bin := filepath.Join(t.TempDir(), "bin")
+	realSSH := recordingSSH(t, bin)
+	base := realTempDir(t)
+	fallback := filepath.Join(realTempDir(t), "data", "openshell-ssh")
+	openshell.SetSSHShimBase(t, base)
+	openshell.SetSSHShimFallback(t, fallback)
+	empty := func(dir string) {
+		t.Helper()
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Fatalf("a refused shim left %v in %s", entries, dir)
+		}
+	}
+
+	// The temporary directory is on a noexec mount: the shim is made under
+	// the data directory, and runs from there.
+	openshell.SetSSHShimNoexec(t, func(dir string) (bool, error) { return dir == base, nil })
+	s, err := openshell.NewSSHShim(bin)
+	if err != nil || s == nil {
+		t.Fatalf("NewSSHShim with a noexec temporary directory = %v, %v", s, err)
+	}
+	defer s.Remove()
+	if filepath.Dir(s.Dir) != fallback || s.Fallback != base+" is on a filesystem mounted noexec" {
+		t.Fatalf("shim = %+v; want one under %s saying why", s, fallback)
+	}
+	expectMode(t, fallback, 0o700)
+	empty(base)
+	out, err := exec.Command(s.Path, "sandbox").Output()
+	if want := "[-o][ControlMaster=no][-o][ControlPath=none][-o][ControlPersist=no][sandbox]"; err != nil || string(out) != want {
+		t.Fatalf("the fallback shim ran ssh with %q, %v; want %q", out, err, want)
+	}
+	if err := s.Remove(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Neither directory can run it: refused, naming both.
+	openshell.SetSSHShimNoexec(t, func(string) (bool, error) { return true, nil })
+	if s, err := openshell.NewSSHShim(bin); err == nil || s != nil ||
+		!strings.Contains(err.Error(), base+" is on a filesystem mounted noexec") ||
+		!strings.Contains(err.Error(), fallback+" is on a filesystem mounted noexec") ||
+		!strings.HasSuffix(err.Error(), "; set TMPDIR to a directory only you can write, on a filesystem not mounted noexec") {
+		t.Fatalf("NewSSHShim with no directory that runs programs = %+v, %v", s, err)
+	}
+
+	// A shim the system will not run (the EACCES a noexec mount gives, or
+	// an execution policy) is refused however its mount looks.
+	openshell.SetSSHShimNoexec(t, func(string) (bool, error) { return false, nil })
+	openshell.SetSSHShimMode(t, 0o600)
+	s, err = openshell.NewSSHShim(bin)
+	if err == nil || s != nil || !strings.Contains(err.Error(), "(a PATH search passes over the shim in "+base+"/defenseclaw-ssh-") ||
+		!strings.Contains(err.Error(), "; a PATH search passes over the shim in "+fallback+"/defenseclaw-ssh-") ||
+		strings.Count(err.Error(), ", which it cannot execute, and finds "+realSSH) != 2 {
+		t.Fatalf("NewSSHShim of a shim that cannot run = %+v, %v", s, err)
+	}
+	empty(base)
+	empty(fallback)
+}
+
+// The fallback directory is the openshell-ssh folder of the data directory
+// DefenseClaw runs with, else of $DEFENSECLAW_HOME.
+func TestSSHShimFallbackIsUnderTheDataDirectory(t *testing.T) {
+	skipOnWindows(t)
+	t.Cleanup(func() { openshell.SetSSHShimDataDir("") })
+	t.Setenv("DEFENSECLAW_HOME", "/srv/dc-home")
+	if got := openshell.SSHShimFallbackDir(); got != "/srv/dc-home/openshell-ssh" {
+		t.Fatalf("fallback = %q", got)
+	}
+	openshell.SetSSHShimDataDir("/data/dc")
+	if got := openshell.SSHShimFallbackDir(); got != "/data/dc/openshell-ssh" {
+		t.Fatalf("fallback = %q", got)
+	}
+	openshell.SetSSHShimDataDir("relative")
+	if got := openshell.SSHShimFallbackDir(); got != "" {
+		t.Fatalf("fallback for a relative data directory = %q", got)
+	}
+}
+
+// mountedNoexec reads the mount's flags: the filesystem this test binary
+// runs from allows running programs, and a known noexec mount does not.
+func TestMountedNoexecReadsTheMountFlags(t *testing.T) {
+	skipOnWindows(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noexec, err := openshell.MountedNoexec(filepath.Dir(exe)); err != nil || noexec {
+		t.Fatalf("MountedNoexec(%s) = %v, %v; the test binary runs from it", filepath.Dir(exe), noexec, err)
+	}
+	mount := knownNoexecMount()
+	if mount == "" {
+		t.Skip("no noexec mount to compare with")
+	}
+	if noexec, err := openshell.MountedNoexec(mount); err != nil || !noexec {
+		t.Fatalf("MountedNoexec(%s) = %v, %v; it is mounted noexec", mount, noexec, err)
+	}
+}
+
+// knownNoexecMount is a mount point this host lists as noexec, if any.
+func knownNoexecMount() string {
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile("/proc/self/mounts")
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 4 && (f[1] == "/proc" || f[1] == "/sys" || f[1] == "/dev/shm") && slices.Contains(strings.Split(f[3], ","), "noexec") {
+				return f[1]
+			}
+		}
+	case "darwin":
+		// macOS mounts its VM swap volume noexec.
+		out, err := exec.Command("/sbin/mount").Output()
+		if err != nil {
+			return ""
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.Contains(line, " on /System/Volumes/VM (") && strings.Contains(line, "noexec") {
+				return "/System/Volumes/VM"
+			}
+		}
+	}
+	return ""
+}
+
 // Directories that are not the user's are refused: the shim's own, and
 // any above it that is neither the user's nor root's.
 func TestSSHShimRefusesDirectoriesOfOtherUsers(t *testing.T) {
@@ -331,6 +465,18 @@ func TestInvocationRefusesAnUnsafeShimDirectory(t *testing.T) {
 	if calls := rec.Calls(t); len(calls) != 0 {
 		t.Fatalf("the CLI ran: %+v", calls)
 	}
+
+	// So does a shim that would not run: the CLI would run the user's ssh.
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	openshell.SetSSHShimMode(t, 0o600)
+	if cmd, _, err := inv.Command(context.Background()); err == nil || cmd != nil || !strings.Contains(err.Error(), "which it cannot execute") {
+		t.Fatalf("Command = %v, %v; want a shim that does not run refused", cmd, err)
+	}
+	if calls := rec.Calls(t); len(calls) != 0 {
+		t.Fatalf("the CLI ran: %+v", calls)
+	}
 }
 
 // spawnSites are the files under internal/openshell that start processes
@@ -340,6 +486,7 @@ func TestInvocationRefusesAnUnsafeShimDirectory(t *testing.T) {
 // either do the same or be added here with its reason.
 var spawnSites = map[string]string{
 	"cli.go":                      "Invocation.Command: every openshell sandbox invocation, with the ssh shim",
+	"sshshim.go":                  "runs the ssh shim once, answering a probe without ssh, to prove a PATH search runs it",
 	"runner.go":                   "ExecRunner: docker, brew, systemctl, the installer and openshell commands that open no ssh session",
 	"image/docker.go":             "docker image builds",
 	"sandboxcli/gitidentity.go":   "git config",
