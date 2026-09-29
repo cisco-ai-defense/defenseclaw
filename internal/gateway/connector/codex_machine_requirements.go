@@ -65,6 +65,7 @@ type WindowsCodexMachineRequirementsOptions struct {
 	ClaudeTargetEnabled           bool
 	CodexTargetEnabled            bool
 	CursorTargetEnabled           bool
+	CopilotTargetEnabled          bool
 }
 
 // WindowsCodexManagedRuntimeTarget is the non-secret mapping a standard-user
@@ -116,6 +117,7 @@ type WindowsCodexMachineRequirementsReport struct {
 	ClaudeEffectivePolicyVerified bool     `json:"claude_effective_policy_verified"`
 	CodexTargetEnabled            bool     `json:"codex_target_enabled"`
 	CursorTargetEnabled           bool     `json:"cursor_target_enabled"`
+	CopilotTargetEnabled          bool     `json:"copilot_target_enabled"`
 	SecurityComplete              bool     `json:"security_complete"`
 	PreimageSHA256                string   `json:"preimage_sha256,omitempty"`
 	PostimageSHA256               string   `json:"postimage_sha256,omitempty"`
@@ -171,6 +173,7 @@ func windowsCodexMachineReport(action string, opts WindowsCodexMachineRequiremen
 		ClaudeEffectivePolicyVerified:       opts.ClaudeEffectivePolicyVerified,
 		CodexTargetEnabled:                  opts.CodexTargetEnabled,
 		CursorTargetEnabled:                 opts.CursorTargetEnabled,
+		CopilotTargetEnabled:                opts.CopilotTargetEnabled,
 	}
 }
 
@@ -668,13 +671,14 @@ func windowsCodexCountOwnedPathReferences(value interface{}, needles []string) i
 
 func windowsCodexMachineSecurityComplete(opts WindowsCodexMachineRequirementsOptions) bool {
 	return opts.EnterpriseTargetEnabled &&
+		opts.AgentApplicationControlEnforced &&
 		(!opts.ClaudeTargetEnabled || opts.ClaudeEffectivePolicyVerified)
 }
 
 // validateWindowsCodexMachinePrerequisites is the centralized compatibility
-// hook for lifecycle preconditions. Application control is optional posture,
-// and Claude's effective-policy proof is established after initial policy
-// publication, so neither blocks a Codex policy mutation here.
+// hook for lifecycle preconditions. Application-control and Claude effective-
+// policy evidence are established after initial policy publication, so neither
+// blocks the mutation itself; both still gate the final security_complete bit.
 func validateWindowsCodexMachinePrerequisites(opts WindowsCodexMachineRequirementsOptions) error {
 	return nil
 }

@@ -609,6 +609,38 @@ var builtinHookContracts = map[string][]HookContract{
 			"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
 			"Copilot CLI can emit optional native traces and metrics through standard OTLP environment variables; DefenseClaw reports the required values but does not mutate shell startup files.",
 		},
+	}, {
+		Connector:               "copilot",
+		ContractID:              CopilotEnterpriseHookContractID,
+		MinAgentVersion:         CopilotEnterpriseMinVersion,
+		HookScriptVersion:       "native-v1",
+		HookConfigPathTemplates: []string{CopilotEnterprisePolicyPathTemplate},
+		ResponseFieldName:       "hook_output",
+		Events:                  append([]string(nil), CopilotEnterpriseHookEvents...),
+		AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents: []string{
+				"preToolUse",
+				"permissionRequest",
+				"agentStop",
+				"subagentStop",
+			},
+			// Copilot's command-hook transport deliberately fails open when
+			// DefenseClaw infrastructure is unavailable. Valid policy verdicts
+			// still deny preToolUse/permissionRequest and rewrite prompt/result.
+			SupportsFailClosed: false,
+			Scope:              "machine-policy,user-runtime",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          false,
+		ToolCallLifecycle:   copilotToolCallLifecycle(),
+		Notes: []string{
+			"Windows managed-enterprise only. The machine policy launches the protected native hook executable directly and binds each event plus this contract in argv.",
+			"userPromptTransformed and postToolUse blocks are model-input rewrites, not native enforcement; preToolUse and permissionRequest are native denial surfaces.",
+			"Infrastructure failures are successful no-ops to avoid Copilot treating hook process failures as synthetic denials.",
+		},
 	}},
 	"antigravity": {{
 		Connector:               "antigravity",
@@ -928,8 +960,44 @@ func resolveHookContractForOptions(
 	connectorName string,
 	opts SetupOpts,
 ) HookContractResolution {
+	name := normalizeConnectorName(connectorName)
+	pinnedID := strings.TrimSpace(opts.HookContractID)
+	if name == "copilot" && pinnedID == CopilotEnterpriseHookContractID {
+		pinned, ok := hookContractByID(name, pinnedID)
+		if !ok {
+			return HookContractResolution{
+				Connector:  name,
+				RawVersion: strings.TrimSpace(opts.AgentVersion),
+				Status:     HookCompatibilityUnknown,
+				Reason:     "managed Copilot hook contract is not registered",
+			}
+		}
+		raw := strings.TrimSpace(opts.AgentVersion)
+		normalized := NormalizeAgentVersion(name, raw)
+		resolution := HookContractResolution{
+			Connector:         name,
+			RawVersion:        raw,
+			NormalizedVersion: normalized,
+			Status:            HookCompatibilityUnknown,
+			Contract:          pinned,
+		}
+		switch {
+		case !opts.ManagedEnterprise:
+			resolution.Reason = "copilot-hooks-v2 is restricted to managed enterprise setup"
+		case raw == "":
+			resolution.Reason = "managed Copilot requires an authenticated exact agent version"
+		case normalized == "":
+			resolution.Reason = "could not normalize managed Copilot agent version"
+		case !versionInRange(normalized, pinned.MinAgentVersion, pinned.MaxAgentVersion):
+			resolution.Reason = fmt.Sprintf("managed Copilot agent version %s is outside hook contract %s", normalized, pinnedID)
+		default:
+			resolution.Status = HookCompatibilityKnown
+			resolution.Reason = fmt.Sprintf("matched managed enterprise hook contract %s", pinnedID)
+		}
+		return resolution
+	}
 	resolution := ResolveHookContract(connectorName, opts.AgentVersion)
-	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
+	if pinnedID != "" {
 		pinned, ok := hookContractByID(connectorName, pinnedID)
 		switch {
 		case !ok:

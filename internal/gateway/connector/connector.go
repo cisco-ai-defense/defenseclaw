@@ -505,7 +505,10 @@ func (profile HookProfile) ExperimentalToolLifecycleEligible() bool {
 // Decode implementations MUST populate at least HookEventName and
 // Payload; other fields are populated when the corresponding payload
 // keys are present. The unified collector treats empty fields as
-// "not provided" and falls back to generic-extraction helpers.
+// "not provided" and falls back to generic-extraction helpers unless
+// ContentProvided is true. ContentProvided distinguishes an explicitly empty
+// model-facing field from an absent field so an attacker-controlled fallback
+// cannot replace the connector's authoritative empty value.
 type HookProfileRequest struct {
 	ConnectorName             string
 	HookEventName             string
@@ -545,6 +548,7 @@ type HookProfileRequest struct {
 	CWD                       string
 	ToolName                  string
 	Content                   string
+	ContentProvided           bool
 	Direction                 string
 	Model                     string
 	Payload                   map[string]interface{}
@@ -584,7 +588,9 @@ type HookRespondInput struct {
 	Req               HookProfileRequest
 	Action            string
 	RawAction         string
+	Mode              string
 	Reason            string
+	Findings          []string
 	AdditionalContext string
 	Caps              HookCapability
 }

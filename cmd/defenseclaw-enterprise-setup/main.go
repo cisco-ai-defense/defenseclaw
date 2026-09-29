@@ -227,7 +227,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 		// Keep this closed set aligned with the native Windows lifecycle. Each
 		// entry must have reconcile, trusted-runtime, rollback, and teardown
 		// coverage before it is accepted at this boundary.
-		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true}
+		supportedOnWindows := map[string]bool{"codex": true, "claudecode": true, "cursor": true, "copilot": true}
 		for _, entry := range strings.Split(opts.Connector, ",") {
 			trimmed := strings.ToLower(strings.TrimSpace(entry))
 			if trimmed == "" {
@@ -236,7 +236,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 			if !supportedOnWindows[trimmed] {
 				return opts, false, fmt.Errorf(
 					"--connector entry %q is not supported on Windows managed_enterprise; "+
-						"supported: codex, claudecode, cursor.",
+						"supported: codex, claudecode, cursor, copilot.",
 					trimmed,
 				)
 			}

@@ -147,6 +147,25 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 				filepath.Clean(strings.TrimSpace(target.DataDir))
 		}
 	}
+	existingCopilot := make(map[string]string)
+	if windowsDeferredPoliciesContainConnector(validated, "copilot") {
+		targets, active, err := ReadWindowsCopilotManagedPolicyTargets()
+		if err != nil {
+			return err
+		}
+		if active {
+			if err := VerifyWindowsCopilotManagedPolicyIdentity(hookExecutable, apiAddr, gatewayServiceName); err != nil {
+				return err
+			}
+		}
+		for _, target := range targets {
+			existingCopilot[strings.ToUpper(strings.TrimSpace(target.SID))] =
+				filepath.Clean(strings.TrimSpace(target.DataDir))
+		}
+		if active && len(targets) == 0 {
+			return errors.New("enterprise hooks: active Copilot policy has no authenticated targets")
+		}
+	}
 	for _, target := range validated {
 		name := strings.ToLower(strings.TrimSpace(target.manifest.Connector))
 		if name == "codex" {
@@ -206,6 +225,21 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			}
 			rollbacks = append(rollbacks, undo)
 			existingCursor[strings.ToUpper(target.sid)] = target.dataDir
+		case "copilot":
+			if currentDataDir, alreadyStaged := existingCopilot[strings.ToUpper(target.sid)]; alreadyStaged {
+				if !sameWindowsEnterprisePath(currentDataDir, target.dataDir) {
+					return rollback(errors.New("enterprise hooks: existing deferred Copilot target has a different data directory"))
+				}
+				continue
+			}
+			setup.HookFailMode = "open"
+			setup.HookContractID = connector.CopilotEnterpriseHookContractID
+			undo, err := installWindowsCopilotManagedPolicy(setup, sid, target.dataDir)
+			if err != nil {
+				return rollback(err)
+			}
+			rollbacks = append(rollbacks, undo)
+			existingCopilot[strings.ToUpper(target.sid)] = target.dataDir
 		default:
 			return rollback(fmt.Errorf("enterprise hooks: unsupported deferred connector %q", name))
 		}

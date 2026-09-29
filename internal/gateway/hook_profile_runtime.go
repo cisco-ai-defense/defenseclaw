@@ -57,7 +57,7 @@ func hookRuntimeForProfile(profile connector.HookProfile) hookProfileRuntime {
 	return runtime
 }
 
-func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
+func defaultHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
 		RememberRawEvents: func(a *APIServer, req agentHookRequest, _ []byte, _ map[string]interface{}) []string {
 			return a.rememberHookRawEvents(req)
@@ -66,7 +66,7 @@ func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 			a.emitAgentHookLLMEvent(ctx, req, rawBody)
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, req agentHookRequest, _ []byte, _ map[string]interface{}) agentHookResponse {
-			return a.evaluateAgentHook(ctx, req)
+			return a.evaluateAgentHookWithProfile(ctx, req, profile)
 		},
 	}
 }

@@ -203,7 +203,16 @@ func NewGeminiCLIConnector() *hookOnlyConnector {
 	}
 }
 
-func NewCopilotConnector() *hookOnlyConnector {
+// CopilotConnector keeps ordinary user/workspace Copilot setup on the shared
+// hook-only implementation while providing a distinct type for the Windows
+// managed-enterprise policy contract. Defining the managed-policy methods on
+// hookOnlyConnector itself would make every generic hook connector satisfy
+// ManagedHookPolicyProvider.
+type CopilotConnector struct {
+	*hookOnlyConnector
+}
+
+func newCopilotHookOnlyConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "copilot",
 		description: "user-global Copilot CLI hooks, with optional workspace .github/hooks override",
@@ -228,6 +237,30 @@ func NewCopilotConnector() *hookOnlyConnector {
 			}
 		},
 	}
+}
+
+// NewCopilotConnector retains the public OSS constructor and its concrete
+// hookOnlyConnector return type for compatibility with existing setup/tests.
+func NewCopilotConnector() *hookOnlyConnector {
+	return newCopilotHookOnlyConnector()
+}
+
+// NewCopilotEnterpriseConnector is used only by the Windows managed registry
+// and the trusted gateway profile fallback.
+func NewCopilotEnterpriseConnector() *CopilotConnector {
+	return &CopilotConnector{hookOnlyConnector: newCopilotHookOnlyConnector()}
+}
+
+// HookProfile preserves the OSS profile unless the trusted enterprise caller
+// explicitly pins copilot-hooks-v2. The managed profile has its own decoder
+// and response shaper because prompt/result mutation is not part of v1.
+func (c *CopilotConnector) HookProfile(opts SetupOpts) HookProfile {
+	profile := c.hookOnlyConnector.HookProfile(opts)
+	if opts.ManagedEnterprise && strings.TrimSpace(opts.HookContractID) == CopilotEnterpriseHookContractID {
+		profile.Decode = copilotEnterpriseProfileDecode
+		profile.Respond = copilotEnterpriseProfileRespond
+	}
+	return profile
 }
 
 func NewOpenHandsConnector() *hookOnlyConnector {
@@ -879,10 +912,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err != nil {
 		return fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
-	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
-		failMode = "open"
-	}
+	failMode := effectiveHookFailMode(opts, c)
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		APIAddr:     opts.APIAddr,
 		TokenFileJS: javaScriptStringContent(tokenPath),

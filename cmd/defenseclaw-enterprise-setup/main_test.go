@@ -112,6 +112,15 @@ func TestParseEnterpriseSetupShorthandAcceptsModeAndConnector(t *testing.T) {
 	if err != nil || help || opts.Connector != "codex,claudecode,cursor" {
 		t.Fatalf("Cursor shorthand install: opts=%+v help=%v err=%v", opts, help, err)
 	}
+
+	opts, help, err = parseEnterpriseSetupOptions([]string{
+		"/install",
+		"MODE=action",
+		"CONNECTOR=copilot",
+	})
+	if err != nil || help || opts.Connector != "copilot" {
+		t.Fatalf("Copilot shorthand install: opts=%+v help=%v err=%v", opts, help, err)
+	}
 }
 
 // TestParseEnterpriseSetupShorthandRejectsBadGrammar covers the

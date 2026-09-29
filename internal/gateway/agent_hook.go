@@ -173,7 +173,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 
-		profile := a.hookProfileForConnector(connectorName)
+		profile, boundEvent, profileErr := a.hookProfileForRequest(connectorName, r)
+		if profileErr != nil {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "managed_binding", int64(len(b)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid managed hook binding"})
+			return
+		}
+		if boundEvent != "" {
+			if declaredEvent, present := hookPayloadDeclaredEvent(payload); present && declaredEvent != boundEvent {
+				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "event_binding_mismatch", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event does not match managed policy binding"})
+				return
+			}
+			payload["hookEventName"] = boundEvent
+		}
 		runtime := hookRuntimeForProfile(profile)
 		req := normalizeAgentHookRequestWithProfile(connectorName, payload, profile)
 		if req.HookEventName == "" {
@@ -419,6 +432,21 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	}
 }
 
+func hookPayloadDeclaredEvent(payload map[string]interface{}) (string, bool) {
+	for _, key := range []string{"hookEventName", "hook_event_name", "eventName", "event"} {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		event, ok := value.(string)
+		if !ok {
+			return "", true
+		}
+		return strings.TrimSpace(event), true
+	}
+	return "", false
+}
+
 type hookFinalizationResult struct {
 	AuditPersisted       bool
 	EnforcementPersisted bool
@@ -485,6 +513,12 @@ func (a *APIServer) finalizeAgentHook(
 		env.Extra = map[string]string{"panic": "true"}
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	if rewrite := copilotModelInputRewriteRequested(resp); rewrite != "" {
+		if env.Extra == nil {
+			env.Extra = map[string]string{}
+		}
+		env.Extra["model_input_rewrite_requested"] = rewrite
+	}
 	safeSection("identity", func() {
 		a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
 		result.Enforced = env.Enforced
@@ -533,6 +567,19 @@ func (a *APIServer) finalizeAgentHook(
 		})
 	}
 	return result
+}
+
+func copilotModelInputRewriteRequested(resp agentHookResponse) string {
+	if resp.Mode != "action" || resp.RawAction != "block" || resp.Action == "block" || resp.HookOutput == nil {
+		return ""
+	}
+	if _, ok := resp.HookOutput["modifiedTransformedPrompt"]; ok {
+		return "prompt"
+	}
+	if _, ok := resp.HookOutput["modifiedResult"]; ok {
+		return "tool_result"
+	}
+	return ""
 }
 
 // dispatchFinalizedAgentHookNotification prevents a user-visible notification
@@ -1623,7 +1670,7 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
 	}
-	if decoded.Content != "" {
+	if decoded.ContentProvided || decoded.Content != "" {
 		req.Content = decoded.Content
 	}
 	if decoded.Direction != "" {
@@ -1730,6 +1777,15 @@ func inferAgentHookEvent(payload map[string]interface{}) string {
 var hookEvaluatorPanicHook func()
 
 func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest) agentHookResponse {
+	return a.evaluateAgentHookWithProfile(ctx, req, a.hookProfileForConnector(req.ConnectorName))
+}
+
+// evaluateAgentHookWithProfile keeps evaluation bound to the exact profile
+// selected at the authenticated HTTP boundary. This matters for managed hook
+// contracts whose decoder, capability matrix, verdict mapper, or response
+// shaper differs from the connector's ordinary profile. Re-resolving by name
+// here would silently discard that trusted request binding.
+func (a *APIServer) evaluateAgentHookWithProfile(ctx context.Context, req agentHookRequest, profile connector.HookProfile) agentHookResponse {
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
@@ -1741,7 +1797,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
-	profile := a.hookProfileForConnector(req.ConnectorName)
 	toolCallRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 	structuredToolEvent := toolCallRoute == connector.ToolEventRouteStructuredAction ||
 		(profile.ToolCallLifecycle.Version == 0 &&
@@ -2144,7 +2199,9 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 			Req:               hookProfileRequestFromAgentHook(req),
 			Action:            action,
 			RawAction:         rawAction,
+			Mode:              mode,
 			Reason:            safeReason,
+			Findings:          append([]string(nil), findings...),
 			AdditionalContext: additional,
 			Caps:              caps,
 		})
@@ -2416,7 +2473,7 @@ func isGenericToolInspectionEvent(event string) bool {
 
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
-	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "subagentstart",
+	case "userpromptsubmit", "userpromptsubmitted", "userprompttransformed", "beforesubmitprompt", "preuserprompt", "subagentstart",
 		"prellmcall", "beforeagent", "beforemodel",
 		// Amp agent.start carries the exact user prompt and stable message ID.
 		"agentstart",

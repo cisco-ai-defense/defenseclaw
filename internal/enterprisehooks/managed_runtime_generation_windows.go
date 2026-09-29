@@ -1355,7 +1355,7 @@ func canonicalWindowsManagedRuntimeConnector(raw string) (string, error) {
 		return "", errors.New("connector is not canonical")
 	}
 	switch raw {
-	case "claudecode", "codex", "cursor":
+	case "claudecode", "codex", "cursor", "copilot":
 		return raw, nil
 	default:
 		return "", fmt.Errorf("unsupported managed connector %q", raw)
@@ -1483,7 +1483,7 @@ func parseWindowsManagedRuntimeBundleLeaf(leaf string) (string, string, bool) {
 		return "", "", false
 	}
 	identity := strings.TrimSuffix(strings.TrimPrefix(leaf, ".managed-runtime-"), ".json")
-	for _, connectorName := range []string{"claudecode", "codex", "cursor"} {
+	for _, connectorName := range []string{"claudecode", "codex", "cursor", "copilot"} {
 		prefix := connectorName + "-"
 		if !strings.HasPrefix(identity, prefix) {
 			continue
@@ -1691,6 +1691,12 @@ func defaultWindowsManagedRuntimeSelectorPath(connectorName string) (string, err
 			return "", err
 		}
 		directory = cursorPaths.Root
+	case "copilot":
+		copilotPaths, err := windowsCopilotManagedPathsResolve()
+		if err != nil {
+			return "", err
+		}
+		directory = copilotPaths.Root
 	case "codex":
 		requirementsPath, err := windowsCodexMachineRequirementsPath()
 		if err != nil {

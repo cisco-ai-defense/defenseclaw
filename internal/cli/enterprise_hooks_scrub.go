@@ -129,7 +129,7 @@ Exit codes:
 
 func init() {
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubConnectorFlag, "connector", "",
-		"Connector whose entries to remove: codex, claudecode, or cursor (required)")
+		"Connector whose entries to remove: codex, claudecode, cursor, or copilot (required)")
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubFileFlag, "file", "",
 		"Path to the agent config file to scrub (required)")
 	enterpriseHooksScrubCmd.Flags().StringVar(&scrubDataDirMarker, "datadir-marker", "",

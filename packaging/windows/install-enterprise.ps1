@@ -1743,8 +1743,8 @@ function Assert-DefenseClawBootstrapModuleTrust {
 # reconcile, trusted-runtime, rollback, and teardown lifecycle. Cursor uses its
 # documented machine enterprise hook source while retaining per-user scoped
 # DefenseClaw runtime and credentials.
-$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'amp')
-$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor')
+$script:DefenseClawSupportedConnectors = @('codex', 'cursor', 'claudecode', 'copilot', 'amp')
+$script:DefenseClawWindowsManagedEnterpriseSupportedConnectors = @('codex', 'claudecode', 'cursor', 'copilot')
 
 function ConvertTo-DefenseClawConnectorList {
     param([Parameter(Mandatory)][string]$Connector)
@@ -2850,6 +2850,102 @@ function Get-DefenseClawCodexWinGetMetadataVersion {
     return [string]($versions | Sort-Object -Descending | Select-Object -First 1)
 }
 
+function Get-DefenseClawCopilotWinGetMetadataVersion {
+    param(
+        [Parameter(Mandatory)][string]$UserHome,
+        [ref]$CandidateObserved
+    )
+
+    if ($null -ne $CandidateObserved) {
+        $CandidateObserved.Value = $false
+    }
+    try {
+        $userHomeFull = [IO.Path]::GetFullPath($UserHome).TrimEnd('\')
+        $packageRoot = [IO.Path]::Combine(
+            $userHomeFull,
+            'AppData\Local\Microsoft\WinGet\Packages'
+        )
+        $packageDirectory = [IO.Path]::Combine(
+            $packageRoot,
+            'GitHub.Copilot_Microsoft.Winget.Source_8wekyb3d8bbwe'
+        )
+        $executable = [IO.Path]::Combine($packageDirectory, 'copilot.exe')
+    }
+    catch {
+        return ''
+    }
+    if (-not [IO.Directory]::Exists($packageDirectory) -and
+        -not [IO.File]::Exists($executable)) {
+        return ''
+    }
+    if ($null -ne $CandidateObserved) {
+        $CandidateObserved.Value = $true
+    }
+    if (-not (Test-DefenseClawConnectorMetadataPath `
+            -Root $userHomeFull -Path $packageRoot -Directory) -or
+        -not (Test-DefenseClawConnectorMetadataPath `
+            -Root $packageRoot -Path $packageDirectory -Directory) -or
+        -not (Test-DefenseClawConnectorMetadataPath `
+            -Root $packageRoot -Path $executable)) {
+        return ''
+    }
+
+    $stream = $null
+    try {
+        # Hold the image without delete sharing across path, signature, and
+        # version checks. The executable is inspected but never launched.
+        $stream = [IO.FileStream]::new(
+            $executable,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        if ($stream.Length -le 0 -or $stream.Length -gt 512MB) { return '' }
+        $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
+            -LiteralPath $executable `
+            -ErrorAction Stop
+        if ($signature.Status -ne
+            [Management.Automation.SignatureStatus]::Valid -or
+            $null -eq $signature.SignerCertificate) {
+            return ''
+        }
+        $signer = $signature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+        if ([string]$signer -cnotin @('GitHub, Inc.', 'GitHub Inc.')) {
+            return ''
+        }
+        $identity = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
+        if ($null -eq $identity -or
+            [string]$identity.OriginalFilename -cne 'copilot.exe' -or
+            [string]$identity.ProductName -cnotin @(
+                'GitHub Copilot CLI',
+                'Copilot CLI'
+            )) {
+            return ''
+        }
+        $version = ConvertTo-DefenseClawConnectorMetadataVersion `
+            -Value $identity.ProductVersion
+        if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = ConvertTo-DefenseClawConnectorMetadataVersion `
+                -Value $identity.FileVersion
+        }
+        if ([string]::IsNullOrWhiteSpace($version)) { return '' }
+        if (-not (Test-DefenseClawConnectorMetadataPath `
+                -Root $packageRoot -Path $executable)) {
+            return ''
+        }
+        return $version
+    }
+    catch {
+        return ''
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Get-DefenseClawConnectorMetadataVersion {
     param(
         [Parameter(Mandatory)][string]$Connector,
@@ -2899,9 +2995,25 @@ function Get-DefenseClawConnectorMetadataVersion {
         return ''
     }
 
+    if ($Connector -eq 'copilot') {
+        $copilotCandidateObserved = $false
+        $version = Get-DefenseClawCopilotWinGetMetadataVersion `
+            -UserHome $userHomeFull `
+            -CandidateObserved ([ref]$copilotCandidateObserved)
+        if ($copilotCandidateObserved) {
+            if ($null -ne $NativeCandidateObserved) {
+                $NativeCandidateObserved.Value = $true
+            }
+            # A present native package is authoritative. Never fall through to
+            # mutable npm metadata when its signer or version is untrusted.
+            return $version
+        }
+    }
+
     $package = switch ($Connector) {
         'codex' { '@openai\codex'; break }
         'claudecode' { '@anthropic-ai\claude-code'; break }
+        'copilot' { '@github\copilot'; break }
         'amp' { '@ampcode\cli'; break }
         default { return '' }
     }

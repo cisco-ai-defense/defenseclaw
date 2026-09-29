@@ -47,15 +47,15 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 	opts.ClaudeTargetEnabled = false
 	opts.ClaudeEffectivePolicyVerified = false
 	opts.CodexTargetEnabled = true
-	opts.AgentApplicationControlEnforced = false
+	opts.AgentApplicationControlEnforced = true
 	if !windowsCodexMachineSecurityComplete(opts) {
-		t.Fatal("Codex-only target should be security-complete without optional application control")
+		t.Fatal("Codex-only target should be security-complete with application-control evidence")
 	}
 
 	opts.CodexTargetEnabled = false
 	opts.CursorTargetEnabled = true
 	if !windowsCodexMachineSecurityComplete(opts) {
-		t.Fatal("Cursor-only target should be security-complete without optional application control")
+		t.Fatal("Cursor-only target should be security-complete with application-control evidence")
 	}
 	// Regression guard: Cursor plumbing must reach the emitted report so
 	// a future refactor that drops CursorTargetEnabled from
@@ -65,6 +65,18 @@ func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) 
 		report.CodexTargetEnabled || report.ClaudeTargetEnabled {
 		t.Fatalf("Cursor target flag did not reach the report: %+v", report)
 	}
+
+	opts.CursorTargetEnabled = false
+	opts.CopilotTargetEnabled = true
+	if report := windowsCodexMachineReport("inspect", opts); !report.CopilotTargetEnabled ||
+		report.CodexTargetEnabled || report.CursorTargetEnabled || report.ClaudeTargetEnabled {
+		t.Fatalf("Copilot target flag did not reach the report: %+v", report)
+	}
+	opts.AgentApplicationControlEnforced = false
+	if windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("Copilot-only target must not report security-complete without application-control evidence")
+	}
+	opts.AgentApplicationControlEnforced = true
 
 	opts.EnterpriseTargetEnabled = false
 	if windowsCodexMachineSecurityComplete(opts) {
