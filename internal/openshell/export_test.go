@@ -36,3 +36,19 @@ func SetProcessTranslated(t *testing.T, translated func(goos, goarch string) boo
 	processTranslated = translated
 	t.Cleanup(func() { processTranslated = prev })
 }
+
+// SetSSHShimBase makes NewSSHShim make its directories in dir for the
+// rest of t.
+func SetSSHShimBase(t *testing.T, dir string) {
+	prev := sshShimBase
+	sshShimBase = dir
+	t.Cleanup(func() { sshShimBase = prev })
+}
+
+// SetSSHShimOwners makes owned judge the shim and its directory, and
+// trusted the directories above it, for the rest of t.
+func SetSSHShimOwners(t *testing.T, owned, trusted func(fs.FileInfo) bool) {
+	prevOwned, prevTrusted := sshShimOwned, sshShimTrusted
+	sshShimOwned, sshShimTrusted = owned, trusted
+	t.Cleanup(func() { sshShimOwned, sshShimTrusted = prevOwned, prevTrusted })
+}

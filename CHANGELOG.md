@@ -287,6 +287,14 @@ deleted.
   `DEFENSECLAW_SANDBOX_TOKEN`, `DEFENSECLAW_EGRESS_URL`,
   `DEFENSECLAW_EGRESS_BYPASS`, `DEFENSECLAW_NO_SANDBOX`); see the
   configuration and environment-variable references.
+- The `openshell` commands DefenseClaw runs (sandbox connect and the harness
+  terminal, copy-mode uploads, pulls, port forwards) use an ssh with
+  connection sharing off. With `ControlMaster` and `ControlPath` in
+  `~/.ssh/config`, OpenShell's CLI sent every sandbox's ssh session over the
+  connection the first one left open, so an upload landed in, and a connect
+  could attach to, another sandbox. Your ssh configuration is not changed;
+  `sandbox doctor` gains an `ssh-connection-sharing` check that names the
+  risk for `openshell` commands you run yourself.
 - Fixes that also apply outside sandboxes:
   - The Claude Code and Codex hook scripts treated an `alert` verdict (flag
     without blocking) as an invalid reply, so a fail-closed install blocked

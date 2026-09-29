@@ -2388,6 +2388,7 @@ These were not measured, so the design does not rely on a result for them:
 | Ending an exec stream does not stop the command in 0.1.1. | `Exec` wraps commands in `timeout(1)` inside the sandbox and retries only attempts whose stream never opened (plus unanswered attempts of idempotent commands). |
 | While `openshell sandbox exec` or `sandbox connect` holds a session open, the SSH proxy it starts carries that session's credential where other local users of the host can see it. | DefenseClaw starts every session through those two commands and does not handle that credential itself. Closing the exposure is OpenShell's (or means replacing both commands' session set-up); until then it lasts while a session is attached, which matters on a host other users share. |
 | `WatchSandbox` OCSF lines arrive at level `OCSF` with structured fields empty. The cursor looks like `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log buffer. | The shorthand text is parsed; an `OUT_OF_RANGE` cursor becomes a gap and a fresh subscription. |
+| The CLI opens `sandbox connect`, `upload`, `download` and `forward start` sessions by running `ssh` from `PATH`, with a `ProxyCommand` (`openshell ssh-proxy … --sandbox <name> --token …`) and the same host name, `sandbox`, for every sandbox, so the user's `ssh_config` applies to all of them alike. Measured on a Mac with `Host *`, `ControlMaster auto`, `ControlPersist 10m` and `ControlPath ~/.ssh/cm-%C`: every sandbox gets the same control socket, and for ten minutes after one session every other `openshell` ssh rides its connection, whatever sandbox it names. An `upload` to a second sandbox put its files in the first (the gateway logged a `CreateSshSession` and no `ForwardTcp` for it), and `forward start --background` failed with `ssh exited before local forward listener opened`. | Every openshell invocation DefenseClaw runs (`openshell.Invocation.Command`: connect, the harness terminal, copy-mode uploads, pulls, forwards and execs) gets a new private directory (0700, under `TMPDIR`) first on its `PATH`, holding an `ssh` shim that execs the first real `ssh` on the user's `PATH` with `-o ControlMaster=no -o ControlPath=none -o ControlPersist=no` before the CLI's arguments; options on the ssh command line win over every `ssh_config` file. The shim is written atomically and read back, removed when the command ends, and refused (the command does not run) when `TMPDIR` or a directory above it could be changed by another user. DefenseClaw never edits `~/.ssh/config`. The doctor's `ssh-connection-sharing` check confirms the override with `ssh -G sandbox` through the shim, and warns when the user's own configuration shares connections for `openshell` commands run outside DefenseClaw. |
 
 ### macOS and Docker Desktop
 
@@ -2426,9 +2427,9 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, host networking, file sharing, disk),
-  systemd linger, the gateway service, CLI, registration, mTLS files, gateway
-  version and driver, global policy, bind mounts, OpenShell telemetry and the
-  sandbox ports; on a vm gateway also `vm-driver` (e2fsprogs, the
+  systemd linger, the gateway service, CLI, ssh connection sharing,
+  registration, mTLS files, gateway version and driver, global policy, bind
+  mounts, OpenShell telemetry and the sandbox ports; on a vm gateway also `vm-driver` (e2fsprogs, the
   Hypervisor signature, image architecture), `vm-identity` and
   `vm-resources`, and the disk of the prepared-rootfs cache.
 
