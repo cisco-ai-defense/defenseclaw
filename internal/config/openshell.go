@@ -163,7 +163,13 @@ type OpenShellConfig struct {
 	// (OpenShellLLMChoices): the default of `sandbox run --llm`, so the runs
 	// the shell wrappers, the TUI and the macOS app start, which pass no
 	// --llm, take it too. Empty means auto.
-	LLM               string                    `mapstructure:"llm"                yaml:"llm,omitempty"`
+	LLM string `mapstructure:"llm" yaml:"llm,omitempty"`
+	// KeepHeadless keeps the sandbox a one-prompt `sandbox run --prompt` (or
+	// a harness print mode, such as the shell wrapper's `claude -p`) creates
+	// in the foreground, as `sandbox run --keep` does for one run. By default
+	// that sandbox is deleted when the run ends and nothing is left in it to
+	// bring back or undo, by the rules of --rm.
+	KeepHeadless      bool                      `mapstructure:"keep_headless"      yaml:"keep_headless,omitempty"`
 	Workdir           OpenShellWorkdirConfig    `mapstructure:"workdir"            yaml:"workdir,omitempty"`
 	Egress            OpenShellEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
 	Image             OpenShellImageConfig      `mapstructure:"image"              yaml:"image,omitempty"`

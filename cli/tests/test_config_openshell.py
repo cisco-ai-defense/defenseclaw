@@ -65,6 +65,7 @@ _FULL_SECTION = {
     "profile": "strict",
     "yolo": False,
     "llm": "bedrock",
+    "keep_headless": True,
     "workdir": {
         "mode": "copy",
         "masks": [".env*"],
@@ -123,6 +124,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertTrue(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.token_delivery, "provider")
         self.assertEqual(oc.llm, "auto")
+        self.assertFalse(oc.keep_headless)
         self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
         # Pack-governed keys stay unset so the selected pack supplies them.
         self.assertEqual(oc.pack, "")
@@ -154,6 +156,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.profile, "strict")
         self.assertIs(oc.yolo, False)
         self.assertEqual(oc.llm, "bedrock")
+        self.assertTrue(oc.keep_headless)
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")

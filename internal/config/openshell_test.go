@@ -131,6 +131,7 @@ openshell:
   profile: strict
   yolo: false
   llm: bedrock
+  keep_headless: true
   workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep}
   egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, feed: none}
   image: {base: 'registry.example/base@sha256:abc', harness_versions: {codex: 0.146.0}}
@@ -171,6 +172,7 @@ openshell:
 		Profile:           "strict",
 		Yolo:              &f,
 		LLM:               "bedrock",
+		KeepHeadless:      true,
 		Workdir:           OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep"},
 		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
 		Image:             OpenShellImageConfig{Base: "registry.example/base@sha256:abc", HarnessVersions: map[string]string{"codex": "0.146.0"}},

@@ -49,6 +49,14 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
+	// autoRm marks an rm the run did not ask for: a headless run's sandbox,
+	// which goes by the rules of --rm unless --keep or
+	// openshell.keep_headless keeps it (App.headlessRm). The end of the
+	// session says why it went, or why it stayed, without naming --rm.
+	autoRm bool
+	// keptWhy says why a sandbox the end of its session was to delete
+	// (autoRm) is kept instead.
+	keptWhy string
 	// started is set when the session created or started the sandbox; one
 	// that was already running (a detached run, another session) is left
 	// running when the session ends.
@@ -792,23 +800,35 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	name := s.sb.Name
 	switch {
 	case s.rm && s.liveRun:
-		a.warn(name + " is not deleted (--rm): its detached run is still going; delete it once the run ends: `" + CommandName + " delete " + name + "`")
-		s.rm = false
+		s.notDeleted("its detached run is still going", "the run ends")
 	case s.rm && s.others > 0:
-		a.warn(name + " is not deleted (--rm): " + s.othersText() + "; delete it once they end: `" + CommandName + " delete " + name + "`")
-		s.rm = false
+		s.notDeleted(s.othersText(), "they end")
 	}
 	if s.rm {
 		if _, err := s.api.Delete(ctx, name, sandboxapi.DeleteRequest{KeepSnapshot: s.keepSnapshot}); err != nil {
-			return fmt.Errorf("delete %s: %w", name, apiError(err))
+			if !s.autoRm {
+				return fmt.Errorf("delete %s: %w", name, apiError(err))
+			}
+			// Nobody asked for this delete: the run still succeeded, and
+			// the sandbox is kept as without it.
+			s.rm, s.keptWhy = false, "it could not be deleted ("+apiError(err).Error()+")"
 		}
+	}
+	if s.rm {
 		a.forgetCLIState(name)
+		why := " (--rm)"
+		if s.autoRm {
+			why = " (" + autoRmKeep + ")"
+		}
 		if s.keepSnapshot {
-			a.ok("sandbox " + name + " deleted (--rm); its undo point is kept because " + s.keepWhy + " → review: " +
+			a.ok("sandbox " + name + " deleted" + why + "; its undo point is kept because " + s.keepWhy + " → review: " +
 				CommandName + " review " + name + "   undo: " + CommandName + " undo " + name + "   drop it: " + CommandName + " delete " + name)
 			return nil
 		}
-		a.ok("sandbox " + name + " deleted (--rm)")
+		if s.autoRm {
+			why = ": nothing is left in it to bring back or undo (" + autoRmKeep + ")"
+		}
+		a.ok("sandbox " + name + " deleted" + why)
 		return nil
 	}
 	if !stopped {
@@ -837,6 +857,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	kept := "Sandbox kept (stopped)"
 	if s.undoStopped {
 		kept = "Sandbox " + name + " is stopped now (undo stops it) and kept"
+	}
+	if s.keptWhy != "" {
+		kept += ": " + s.keptWhy
 	}
 	a.note(kept + " → " + next + "   delete: " + CommandName + " delete " + name)
 	s.continueHint()
@@ -1235,7 +1258,22 @@ func (s *session) keepInSandbox(ctx context.Context, after *sandboxapi.Sandbox, 
 // and said.
 func (s *session) keepUnpulled() {
 	if s.rm {
-		s.app.warn(s.sb.Name + " is not deleted (--rm): its work was not brought back; delete it once it is: `" + CommandName + " delete " + s.sb.Name + "`")
+		s.notDeleted("its work was not brought back", "it is")
+	}
+	s.rm = false
+}
+
+// autoRmKeep is what keeps the sandbox of a headless run (App.headlessRm).
+const autoRmKeep = "a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it"
+
+// notDeleted drops the session's rm, saying why the sandbox stays: a
+// warning for --rm, which asked for the delete; for a headless run's
+// sandbox (autoRm) the reason goes on the line that says it was kept.
+func (s *session) notDeleted(why, until string) {
+	if s.autoRm {
+		s.keptWhy = why
+	} else {
+		s.app.warn(s.sb.Name + " is not deleted (--rm): " + why + "; delete it once " + until + ": `" + CommandName + " delete " + s.sb.Name + "`")
 	}
 	s.rm = false
 }

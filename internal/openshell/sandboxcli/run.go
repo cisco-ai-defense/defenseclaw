@@ -57,6 +57,10 @@ type RunOptions struct {
 	Detach      bool
 	// Rm deletes the sandbox when the session ends.
 	Rm bool
+	// Keep keeps the sandbox of a headless run, which is otherwise deleted
+	// at its end when nothing is left in it to bring back or undo
+	// (headlessRm).
+	Keep bool
 	// Prompt runs the harness headless with one prompt.
 	Prompt string
 	// Env adds non-secret KEY=VALUE variables to the sandbox.
@@ -116,6 +120,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}()
 	if o.Detach && o.Rm {
 		return errors.New("--rm cannot be combined with --detach: nothing is left to delete the sandbox when the run ends")
+	}
+	if o.Keep && o.Rm {
+		return errors.New("--keep keeps the sandbox and --rm deletes it; pass one of them")
 	}
 	o.Name = strings.TrimSpace(o.Name)
 	if err := checkNewName(o.Name); err != nil {
@@ -316,7 +323,8 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		return a.landlockHint(apiError(err), func() openshell.Driver { return drv })
 	}
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: true, headless: headless}
+	autoRm := a.headlessRm(o, headless)
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from
 	// attach means the harness never started (its exit status, a signal's
@@ -362,6 +370,22 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 		return err
 	}
 	return s.exit(code)
+}
+
+// headlessRm reports whether a run's sandbox goes at the end of its session
+// though it has no --rm: a headless run in the foreground (--prompt, or the
+// harness's print mode, as the shell wrapper's `claude -p` passes it) that
+// created its sandbox, without --keep or openshell.keep_headless. It goes
+// by the rules of --rm: a copy whose work was not brought back is kept, and
+// a mounted folder's undo point stays when its changes could not be
+// reviewed or nobody kept them. A detached run keeps its sandbox, and a run
+// that resumes this folder's sandbox (offerResume) is a connect, which
+// keeps it too.
+func (a *App) headlessRm(o RunOptions, headless bool) bool {
+	if !headless || o.Detach || o.Rm || o.Keep {
+		return false
+	}
+	return a.Cfg == nil || !a.Cfg.OpenShell.KeepHeadless
 }
 
 func printMode(spec *harness.Spec, args []string) bool {

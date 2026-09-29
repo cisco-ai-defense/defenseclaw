@@ -809,6 +809,7 @@ openshell:
   profile: balanced
   yolo: true
   llm: auto
+  keep_headless: false
   workdir: {mode: mount, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 500, git_depth: 200, on_exit: ask}
   egress: {block: [webhook.site], allow: ['*.npmjs.org'], unblocked: [paste.example], ports: [80, 443], large_upload_mb: 25, feed: builtin}
   image: {base: 'ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e', harness_versions: {codex: 0.146.0}}
@@ -1062,6 +1063,7 @@ func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
 		{"unknown feed", openshell(map[string]any{"egress": map[string]any{"feed": "custom"}})},
 		{"unknown token delivery", openshell(map[string]any{"token_delivery": "file"})},
 		{"unknown llm", openshell(map[string]any{"llm": "vertex"})},
+		{"keep_headless not a boolean", openshell(map[string]any{"keep_headless": "yes"})},
 		{"unknown workdir mode", openshell(map[string]any{"workdir": map[string]any{"mode": "overlay"}})},
 		{"host glob with scheme", openshell(map[string]any{"egress": map[string]any{"block": []any{"https://paste.example"}}})},
 		{"host glob with port", openshell(map[string]any{"egress": map[string]any{"block": []any{"paste.example:443"}}})},

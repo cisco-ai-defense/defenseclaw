@@ -22,6 +22,7 @@ cases:
         pack: balanced
         profile: strict
         llm: bedrock
+        keep_headless: true
         workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep}
         egress: {block: [Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2', 198.51.100.0/24, '2001:db8:1::/48', '::ffff:192.0.2.0/120'], allow: ['*.npmjs.org', pypi.org, _dmarc.example], ports: [443]}
         resources: {cpu: '1.5', memory: 512Mi}

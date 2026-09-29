@@ -477,6 +477,17 @@ deleted.
   credential set, after every other one, so a host with only a Bedrock key
   reaches its model without `--llm bedrock`. The key is in the Python config,
   the v8 schema, and the TUI and macOS app config editors. Both drivers.
+- A headless `sandbox run` in the foreground (`--prompt`, or the harness's
+  print mode, such as the shell wrapper's `claude -p`) now deletes the
+  sandbox it created when it ends and nothing is left in it to bring back or
+  undo, by the rules of `--rm` (#948), so one-prompt runs no longer pile up
+  stopped sandboxes. Changes nobody kept in a mounted folder keep their undo
+  point (`sandbox undo NAME` still reverts them), and a copy whose work was
+  not brought back keeps its sandbox; the run's last line says it was
+  deleted and why, or why it was kept. `--keep` (a new `sandbox run` flag)
+  and `openshell.keep_headless: true` keep it. Interactive sessions,
+  `--detach` runs and a run that resumes the folder's sandbox are unchanged.
+  Both drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 

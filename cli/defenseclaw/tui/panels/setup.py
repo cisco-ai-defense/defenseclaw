@@ -7660,6 +7660,12 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             dc_config.OPENSHELL_LLM_CHOICES,
             hint="What a run shares (sandbox run --llm; the wrappers, TUI and app too). auto: the first key found, Bedrock last.",
         ),
+        field(
+            "Keep Headless Sandboxes",
+            "openshell.keep_headless",
+            "bool",
+            hint="Keep a --prompt run's sandbox (sandbox run --keep); off deletes it when nothing is left to bring back or undo.",
+        ),
         field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder (Docker driver); copy: untrusted repos, and every run on a MicroVM (vm) gateway."),
         field("Secret Masks", "openshell.workdir.masks", hint="Extra secret-file globs, comma-separated."),
         field("Unmask", "openshell.workdir.unmask", hint="Masked paths to share, comma-separated."),

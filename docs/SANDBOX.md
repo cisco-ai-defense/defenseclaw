@@ -1172,6 +1172,20 @@ Host-executable files that git ignores are found by re-walking the folder.
 The ClawShield secret rules and CodeGuard also scan the changed files (files
 up to 1 MiB, at most 2,000 of them).
 
+After the review and the keep/undo (or, from a copy, bring-back) answer, the
+CLI stops the sandbox the session started and keeps it, or deletes it
+(`sandboxcli.session.finish`). `--rm` asks for the delete, which keeps the
+snapshot (`DeleteRequest.KeepSnapshot`) when the changes could not be
+reviewed or nobody kept them, so undo still finds it under the sandbox's
+name, and drops the delete when a copy's work was not brought back or
+another session or a detached run still uses the sandbox. A headless run in
+the foreground that created its sandbox (`--prompt`, or the harness's print
+mode such as the shell wrapper's `claude -p`) deletes it by the same rules
+without `--rm` (`App.headlessRm`), so one-prompt runs do not pile up
+stopped sandboxes; `--keep` or `openshell.keep_headless: true` keeps it.
+Interactive sessions, `--detach` runs and a run that resumes the folder's
+sandbox keep theirs.
+
 ### Planted nested repositories and the live guard
 
 Mount mode cannot stop the agent from creating a new git repository inside

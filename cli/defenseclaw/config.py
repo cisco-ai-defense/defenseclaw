@@ -1081,6 +1081,9 @@ class OpenShellConfig:
     # The model credential a run shares (``sandbox run --llm``'s default,
     # which the shell wrappers, the TUI and the macOS app take too).
     llm: str = "auto"
+    # Keep the sandbox of a foreground one-prompt run (``sandbox run --keep``);
+    # by default it goes when nothing is left in it to bring back or undo.
+    keep_headless: bool = False
     workdir: OpenShellWorkdirConfig = field(default_factory=OpenShellWorkdirConfig)
     egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
     image: OpenShellImageConfig = field(default_factory=OpenShellImageConfig)
@@ -5100,6 +5103,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         profile=_openshell_str(raw.get("profile")),
         yolo=_openshell_optional_bool(raw.get("yolo")),
         llm=_openshell_str(raw.get("llm")) or "auto",
+        keep_headless=_coerce_bool(raw.get("keep_headless", False)),
         workdir=OpenShellWorkdirConfig(
             mode=_openshell_str(workdir.get("mode")),
             masks=_openshell_str_list(workdir.get("masks")),

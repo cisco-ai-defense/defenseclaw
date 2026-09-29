@@ -1059,7 +1059,7 @@ _OPENSHELL_INHERIT_STRING_KEYS = frozenset(
     {"openshell.profile", "openshell.workdir.mode", "openshell.egress.feed"}
 )
 _OPENSHELL_BOOL_KEYS = frozenset(
-    {"openshell.enabled", "openshell.upstream_telemetry", "openshell.middleware.enabled"}
+    {"openshell.enabled", "openshell.upstream_telemetry", "openshell.middleware.enabled", "openshell.keep_headless"}
 )
 _OPENSHELL_INT_KEYS = frozenset(
     {

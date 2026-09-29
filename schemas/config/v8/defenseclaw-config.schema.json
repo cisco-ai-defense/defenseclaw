@@ -685,6 +685,11 @@
           ],
           "default": "auto"
         },
+        "keep_headless": {
+          "description": "Keep the sandbox a foreground one-prompt `sandbox run --prompt` (or a harness print mode) creates; by default it is deleted at the run's end when nothing is left in it to bring back or undo.",
+          "type": "boolean",
+          "default": false
+        },
         "workdir": {
           "$ref": "#/$defs/openShellWorkdir"
         },

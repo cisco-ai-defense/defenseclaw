@@ -556,6 +556,11 @@
         "default": "[]"
       },
       {
+        "name": "keep",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "llm",
         "type": "string"
       },
