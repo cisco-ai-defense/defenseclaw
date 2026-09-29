@@ -543,6 +543,28 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
     return "reloaded", ""
 
 
+def _skill_actions_from_policy(data: dict):  # noqa: ANN202 - SkillActionsConfig, imported lazily
+    """The ``skill_actions`` block of a policy as the config.yaml section."""
+    from defenseclaw.config import SeverityAction, SkillActionsConfig
+
+    actions_raw = data.get("skill_actions", {})
+
+    def _parse_action(raw: dict) -> SeverityAction:
+        return SeverityAction(
+            file=raw.get("file", "none"),
+            runtime=raw.get("runtime", "enable"),
+            install=raw.get("install", "none"),
+        )
+
+    return SkillActionsConfig(
+        critical=_parse_action(actions_raw.get("critical", {})),
+        high=_parse_action(actions_raw.get("high", {})),
+        medium=_parse_action(actions_raw.get("medium", {})),
+        low=_parse_action(actions_raw.get("low", {})),
+        info=_parse_action(actions_raw.get("info", {})),
+    )
+
+
 def _activate_policy(app: AppContext, name: str) -> str:
     """Apply the named policy to config.yaml and sync OPA data.json.
 
@@ -559,30 +581,8 @@ def _activate_policy(app: AppContext, name: str) -> str:
 
     data = _load_policy(path)
 
-    actions_raw = data.get("skill_actions", {})
-
-    from defenseclaw.config import (
-        SeverityAction,
-        SkillActionsConfig,
-    )
-
-    def _parse_action(raw: dict) -> SeverityAction:
-        return SeverityAction(
-            file=raw.get("file", "none"),
-            runtime=raw.get("runtime", "enable"),
-            install=raw.get("install", "none"),
-        )
-
-    new_actions = SkillActionsConfig(
-        critical=_parse_action(actions_raw.get("critical", {})),
-        high=_parse_action(actions_raw.get("high", {})),
-        medium=_parse_action(actions_raw.get("medium", {})),
-        low=_parse_action(actions_raw.get("low", {})),
-        info=_parse_action(actions_raw.get("info", {})),
-    )
-
     watch_raw = data.get("watch", {})
-    app.cfg.skill_actions = new_actions
+    app.cfg.skill_actions = _skill_actions_from_policy(data)
     if "rescan_enabled" in watch_raw:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
@@ -900,6 +900,12 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         return
 
     synced = _save_and_maybe_sync(app, path, data, name)
+    if synced:
+        # CLI skill-action paths fall back to config.yaml's skill_actions,
+        # which `policy activate` writes; an edit to the active policy
+        # updates them the same way. A draft edit leaves them alone.
+        app.cfg.skill_actions = _skill_actions_from_policy(data)
+        app.cfg.save()
     ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 

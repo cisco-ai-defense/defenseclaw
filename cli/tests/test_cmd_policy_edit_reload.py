@@ -76,6 +76,12 @@ def test_thresholds_reach_data_json_before_the_reload(app, reloads) -> None:
     assert (guardrail["block_threshold"], guardrail["alert_threshold"]) == (3, 1)
 
 
+def test_an_active_action_edit_also_updates_the_config_actions(app, reloads) -> None:
+    # CLI skill-action paths fall back to config.yaml's skill_actions.
+    assert _invoke(app, EDITS[1]).exit_code == 0
+    assert app.cfg.skill_actions.medium.runtime == "disable"
+
+
 @pytest.mark.parametrize("args", EDITS, ids=lambda a: a[1])
 def test_no_reload_and_drafts_leave_the_gateway_alone(app, monkeypatch, args) -> None:
     def _boom(self):
