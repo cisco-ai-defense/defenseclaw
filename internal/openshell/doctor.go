@@ -407,6 +407,10 @@ type doctorRun struct {
 	dockerRoot  string
 	landlock    CheckStatus
 	micro       *MicroVMHost
+	// procs are this user's processes, once a Mac's check has listed them
+	// (processes).
+	procs     []process
+	procsDone bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -461,6 +465,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkRegistration()
 	r.checkGateway(ctx)
 	r.macChecks(ctx)
+	r.unmanagedService(ctx)
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
 	r.report.Driver = r.driver()

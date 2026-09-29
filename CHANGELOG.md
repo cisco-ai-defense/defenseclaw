@@ -334,6 +334,13 @@ deleted.
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
   checks. On a Mac still on the Docker driver, a run that fails OpenShell's
   Landlock check names the switch.
+- With OpenShell's release binaries outside Homebrew, a gateway that answers
+  on the vm driver no longer fails the doctor: `vm-driver` passes on the
+  driver it runs (naming the binary when found), and `gateway-service` says
+  how the gateway runs (a launchd label, or started by hand, which warns
+  that it does not start at login) and that DefenseClaw cannot restart it.
+  The doctor's disk line counts only the MicroVM disks prepared from images,
+  not the driver's overlay templates and bootstrap rootfs.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -193,9 +193,13 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			}},
 		{name: "codesign unavailable", setup: func(f *doctorFixture) { f.runner.On(codesign, "", exec.ErrNotFound) },
 			want: checkWant{"vm-driver", warn, "could not check the signature of"}},
-		{name: "driver not installed", setup: func(f *doctorFixture) { _ = os.Remove(f.vmDriverPath()) },
-			want: checkWant{"vm-driver", fail, "openshell-driver-vm is not installed (the nvidia/openshell/openshell formula installs it)"},
-			fix:  &fixWant{command: "defenseclaw sandbox setup --install-openshell", manual: true}},
+		// A gateway that answers on vm runs the driver (TestDoctorOnReleaseBinaries);
+		// one that does not answer tells nothing.
+		{name: "driver not installed", setup: func(f *doctorFixture) {
+			_ = os.Remove(f.vmDriverPath())
+			f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not installed (the nvidia/openshell/openshell formula installs it)"},
+			fix: &fixWant{command: "defenseclaw sandbox setup --install-openshell", manual: true}},
 		{name: "driver in driver_dir", setup: func(f *doctorFixture) {
 			dir := filepath.Join(f.home, "libexec")
 			touchExecutable(f.t, filepath.Join(dir, "openshell-driver-vm"))
@@ -324,6 +328,95 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDoctorOnReleaseBinaries: on a Mac whose gateway runs OpenShell's
+// release binaries (the ones the formula downloads) outside Homebrew, from
+// a LaunchAgent of the user's own or started by hand, a gateway that
+// answers on vm passes the MicroVM driver check, naming the driver it runs
+// where it can, and the service check says how the gateway runs instead of
+// failing with "not installed".
+func TestDoctorOnReleaseBinaries(t *testing.T) {
+	const pass, warn, fail = openshell.StatusPass, openshell.StatusWarn, openshell.StatusFail
+	release := func(t *testing.T) (*doctorFixture, string) {
+		f := newDoctorFixture(t)
+		f.onMicroVMs()
+		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+		_ = os.Remove(f.vmDriverPath())
+		prefix := filepath.Join(f.home, "openshell-direct", "prefix")
+		touchExecutable(t, filepath.Join(prefix, "libexec", "openshell-driver-vm"))
+		return f, prefix
+	}
+	ps := func(prefix string) string {
+		return "    1     0     0 /sbin/launchd\n" +
+			" 7976  7974   501 " + filepath.Join(prefix, "bin", "openshell-gateway") + "\n" +
+			" 7980  7974   502 /Users/other/bin/openshell-driver-vm\n" +
+			" 7989  7976   501 " + filepath.Join(prefix, "libexec", "openshell-driver-vm") + "\n"
+	}
+
+	t.Run("started by hand", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.runner.On("launchctl list", "PID\tStatus\tLabel\n-\t0\tcom.apple.progressd\n", nil)
+		r := f.run()
+		driver := filepath.Join(prefix, "libexec", "openshell-driver-vm")
+		expectCheck(t, r, openshell.CheckIDVMDriver, pass, "e2fsprogs in "+f.e2fsprogs+"; "+driver+" signed for Apple's Hypervisor")
+		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
+			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
+			t.Fatalf("service fix = %+v", c.Fix)
+		}
+		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
+			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
+		}
+		if !f.runner.Called(codesign + " " + driver) {
+			t.Fatalf("the running driver's signature was not checked: %v", f.runner.Calls())
+		}
+	})
+	t.Run("a LaunchAgent", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.runner.On("launchctl list", "PID\tStatus\tLabel\n7976\t0\tcom.example.openshell-gateway\n", nil)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayService, pass, filepath.Join(prefix, "bin", "openshell-gateway")+
+			" runs under launchd (com.example.openshell-gateway), not Homebrew's nvidia/openshell/openshell service, so DefenseClaw cannot restart it")
+		if c.Fix != nil || !r.OK() {
+			t.Fatalf("fix %+v\n%s", c.Fix, r)
+		}
+	})
+	// The driver next to the openshell-gateway on PATH, in the libexec
+	// beside its bin, is found without asking ps.
+	t.Run("on PATH", func(t *testing.T) {
+		f, prefix := release(t)
+		lookPath := f.doctor.LookPath
+		f.doctor.LookPath = func(name string) (string, error) {
+			if name == "openshell-gateway" {
+				return filepath.Join(prefix, "bin", name), nil
+			}
+			return lookPath(name)
+		}
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDVMDriver, pass, filepath.Join(prefix, "libexec", "openshell-driver-vm")+" signed for Apple's Hypervisor")
+		expectCheck(t, r, openshell.CheckIDGatewayService, pass, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)")
+	})
+	// ps lists nothing: the answering gateway still runs the driver.
+	t.Run("driver not found", func(t *testing.T) {
+		f, _ := release(t)
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMDriver, pass, "; the gateway runs openshell-driver-vm (DefenseClaw did not find where, to check its signature)")
+		if c.Fix != nil || !r.OK() {
+			t.Fatalf("fix %+v\n%s", c.Fix, r)
+		}
+	})
+	// A gateway that does not answer proves nothing.
+	t.Run("gateway down", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDVMDriver, fail, "openshell-driver-vm is not installed")
+		expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed")
+	})
 }
 
 // TestDoctorFollowsTheDriverTheGatewayRuns: a gateway can run vm through
