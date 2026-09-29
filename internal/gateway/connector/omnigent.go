@@ -268,25 +268,11 @@ func (c *OmnigentConnector) setupLocked(ctx context.Context, opts SetupOpts) (re
 		}
 	}
 
-	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	rendered, err := c.renderPolicyModule(opts)
 	if err != nil {
-		return rollback(fmt.Errorf("omnigent read policy template: %w", err))
+		return rollback(err)
 	}
-	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.Name())
-	if err != nil {
-		return rollback(fmt.Errorf("omnigent resolve scoped hook credential: %w", err))
-	}
-	tokenPath, err = filepath.Abs(tokenPath)
-	if err != nil {
-		return rollback(fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err))
-	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
-	// A managed standalone install on a unix host sends the bridge through
-	// the gateway's peer-authorized hook socket, like every other per-user
-	// hook there; everywhere else the socket is empty and TCP is kept.
-	hookSocket, serviceUID := managedPluginHookSocket(opts)
-	rendered := renderOmnigentPolicyWithTransport(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID)
-	if err := atomicWriteFile(modulePath, []byte(rendered), 0o600); err != nil {
+	if err := atomicWriteFile(modulePath, rendered, 0o600); err != nil {
 		return rollback(fmt.Errorf("omnigent write policy module: %w", err))
 	}
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "module", modulePath); err != nil {
@@ -305,6 +291,30 @@ func (c *OmnigentConnector) setupLocked(ctx context.Context, opts SetupOpts) (re
 		return rollback(fmt.Errorf("omnigent update config backup: %w", err))
 	}
 	return nil
+}
+
+// renderPolicyModule renders the policy module Setup writes for opts; the
+// standalone guardian compares the installed module with it
+// (HookScriptRenderDrift).
+func (c *OmnigentConnector) renderPolicyModule(opts SetupOpts) ([]byte, error) {
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		return nil, fmt.Errorf("omnigent read policy template: %w", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.Name())
+	if err != nil {
+		return nil, fmt.Errorf("omnigent resolve scoped hook credential: %w", err)
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		return nil, fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err)
+	}
+	failMode := normalizeHookFailMode(opts.HookFailMode)
+	// A managed standalone install on a unix host sends the bridge through
+	// the gateway's peer-authorized hook socket, like every other per-user
+	// hook there; everywhere else the socket is empty and TCP is kept.
+	hookSocket, serviceUID := managedPluginHookSocket(opts)
+	return []byte(renderOmnigentPolicyWithTransport(string(templateBytes), opts.APIAddr, tokenPath, failMode, hookSocket, serviceUID)), nil
 }
 
 func prepareOmnigentManagedBackup(dataDir, connectorName, logicalName, targetPath string) error {
