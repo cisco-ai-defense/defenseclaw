@@ -907,6 +907,13 @@ func TestScanCorrelationFromContextPropagatesConnector(t *testing.T) {
 	if got := ScanCorrelationFromContext(peer); got.UserID != "1002" || got.UserIDKind != "posix_uid" || got.UserName != "bob" {
 		t.Fatalf("verified caller missing from the scan correlation: %+v", got)
 	}
+
+	// The Secure Client profile's finding and scan rows are unchanged.
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(false) })
+	if got := ScanCorrelationFromContext(peer); got.UserID != "" || got.UserIDKind != "" || got.UserName != "" {
+		t.Fatalf("Secure Client scan correlation gained caller fields: %+v", got)
+	}
 }
 
 // TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity guards the

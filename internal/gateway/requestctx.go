@@ -448,8 +448,11 @@ func ScanCorrelationFromContext(ctx context.Context) audit.ScanCorrelation {
 	}
 	// Finding and scan rows name the same caller the hook_decision rows do:
 	// the verified caller on a standalone gateway, never an identity the
-	// request only claims.
-	caller := auditCallerIdentity(ctx)
+	// request only claims. Secure Client rows keep their existing shape.
+	var caller auditCaller
+	if !ManagedEnterpriseActive() {
+		caller = auditCallerIdentity(ctx)
+	}
 	return audit.ScanCorrelation{
 		RunID:           envelope.RunID,
 		RequestID:       firstNonEmpty(RequestIDFromContext(ctx), envelope.RequestID),

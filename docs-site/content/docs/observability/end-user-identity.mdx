@@ -48,8 +48,8 @@ decision.
 Hook lifecycle records carry identity near real time in the
 `agent.lifecycle`, `tool.activity`, and `guardrail.evaluation` buckets, and the
 findings and scan verdicts of an inspected request carry the same identity in
-`security.finding` and `asset.scan`. Managed per-profile MCP inventory carries
-the same identity in `ai.discovery`.
+`security.finding` and `asset.scan` (except on the Secure Client profile).
+Managed per-profile MCP inventory carries the same identity in `ai.discovery`.
 
 Join records by `user.id` only after checking
 `defenseclaw.user.id_kind`. Do not join a POSIX uid to a Windows SID or assume
