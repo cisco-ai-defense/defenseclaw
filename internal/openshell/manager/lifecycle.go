@@ -375,12 +375,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// The harness run files follow the re-resolved policy (safe mode, MCP
 	// servers) before the sandbox runs again.
-	mcp, runConfig, err := m.refreshRunConfig(ctx, rec, eff, sb.Spec.Environment)
+	mcp, runConfig, verify, err := m.refreshRunConfig(ctx, rec, eff, sb.Spec.Environment)
 	if err != nil {
 		return err
 	}
 	m.mu.Lock()
-	b.rec.MCP, b.rec.RunConfig = mcp, runConfig
+	b.rec.MCP, b.rec.RunConfig, b.rec.Verify = mcp, runConfig, verify
 	m.mu.Unlock()
 	// With token_delivery: provider the token is rotated, so a credential
 	// from an earlier session is useless, and the provider carries the new

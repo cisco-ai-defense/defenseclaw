@@ -102,30 +102,29 @@ func TestStatusNamesTheDriver(t *testing.T) {
 	}
 }
 
-// Claude Code's per-run managed files reach a sandbox as read-only bind
-// mounts, which a MicroVM cannot take: the create fails closed before
-// anything is made, on the host or on the gateway, in mount and copy mode.
-func TestCreateOnVMRefusesRunFilesBeforeAnySideEffect(t *testing.T) {
-	for _, copyMode := range []bool{false, true} {
-		e := newVMEnv(t, nil)
-		_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-claude", Copy: copyMode, LLM: anthropicLLM, Credentials: stripeCred})
-		apiErr := wantCode(t, err, sandboxapi.CodeUnavailable)
-		if !strings.Contains(apiErr.Message, "Claude Code") || !strings.Contains(apiErr.Detail, "mounts no host folders") {
-			t.Fatalf("copy %v: refusal = %+v", copyMode, apiErr)
-		}
-		for _, method := range []string{openshelltest.MethodCreateSandbox, openshelltest.MethodCreateProvider} {
-			if n := e.fake.Calls(method); n != 0 {
-				t.Fatalf("copy %v: %s calls = %d", copyMode, method, n)
-			}
-		}
-		if len(e.ws.planned) != 0 || len(e.ws.snapshots) != 0 || len(e.importer.imported) != 0 {
-			t.Fatalf("copy %v: planned %v, snapshots %v, imported profiles %v", copyMode, e.ws.planned, e.ws.snapshots, e.importer.imported)
-		}
-		if _, err := os.Stat(filepath.Join(e.dataDir, "sandboxes", "vm-claude")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("copy %v: host state was written: %v", copyMode, err)
-		}
-		assertNothingLeft(t, e)
+// A MicroVM cannot take a live mount of the project: a Claude Code create in
+// mount mode fails closed before anything is made, on the host or on the
+// gateway. (In copy mode its run files go into a run image, see
+// TestCreateOnVMBakesRunFilesIntoARunImage.)
+func TestCreateOnVMRefusesAMountBeforeAnySideEffect(t *testing.T) {
+	e := newVMEnv(t, nil)
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-claude", LLM: anthropicLLM, Credentials: stripeCred})
+	apiErr := wantCode(t, err, sandboxapi.CodeUnavailable)
+	if !strings.Contains(apiErr.Message, "mounted live") || !strings.Contains(apiErr.Detail, "mounts no host folders") {
+		t.Fatalf("refusal = %+v", apiErr)
 	}
+	for _, method := range []string{openshelltest.MethodCreateSandbox, openshelltest.MethodCreateProvider} {
+		if n := e.fake.Calls(method); n != 0 {
+			t.Fatalf("%s calls = %d", method, n)
+		}
+	}
+	if len(e.ws.planned) != 0 || len(e.ws.snapshots) != 0 || len(e.importer.imported) != 0 || len(e.images.runCalls()) != 0 {
+		t.Fatalf("planned %v, snapshots %v, imported profiles %v, run images %d", e.ws.planned, e.ws.snapshots, e.importer.imported, len(e.images.runCalls()))
+	}
+	if _, err := os.Stat(filepath.Join(e.dataDir, "sandboxes", "vm-claude")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("host state was written: %v", err)
+	}
+	assertNothingLeft(t, e)
 }
 
 // A harness without per-run files runs on a MicroVM in copy mode: its

@@ -781,7 +781,7 @@ func wireAdmin(a packs.AdminStatus) sandboxapi.AdminStatus {
 }
 
 // Explain resolves a sandbox posture with provenance.
-func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
+func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
 	cfg := m.config()
 	var flags packs.Flags
 	if req.Sandbox != "" {
@@ -824,6 +824,10 @@ func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sa
 		out.Settings = append(out.Settings, sandboxapi.Setting{
 			Key: s.Key, Value: s.Value, Source: string(s.Source), Origin: s.Origin, Requested: s.Requested,
 		})
+	}
+	if req.Sandbox == "" {
+		// Only the daemon knows the image a new sandbox would boot.
+		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff)
 	}
 	return out, nil
 }

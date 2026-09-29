@@ -1,0 +1,425 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package manager
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+)
+
+// fakeRunImages makes run images and aliases in memory, content-addressed
+// like image.Builder's, and records the files of each RunImage call.
+type fakeRunImages struct {
+	runMu  sync.Mutex
+	made   map[string]image.RunImage
+	builds int
+	calls  [][]connector.SandboxFile
+	runErr error
+}
+
+func (f *fakeRunImages) runTag(base image.Record, files []connector.SandboxFile, repo string) (string, string) {
+	digest := image.RunConfigDigest(files)
+	return image.RunRepository(repo) + ":" + base.Connector + "-" + digest[:12], digest
+}
+
+func (f *fakeRunImages) aliasTag(base image.Record, repo string) string {
+	_, name, _ := strings.Cut(base.Tag, ":")
+	return repo + ":" + name
+}
+
+func (f *fakeRunImages) RunImage(_ context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, error) {
+	f.runMu.Lock()
+	defer f.runMu.Unlock()
+	f.calls = append(f.calls, slices.Clone(files))
+	if f.runErr != nil {
+		return image.RunImage{}, f.runErr
+	}
+	tag, digest := f.runTag(base, files, repo)
+	if ri, ok := f.made[tag]; ok {
+		return ri, nil
+	}
+	f.builds++
+	ri := image.RunImage{Tag: tag, ImageID: "sha256:" + digest, Digest: digest, BaseTag: base.Tag, BaseImageID: base.ImageID,
+		Connector: base.Connector, UID: base.UID, GID: base.GID}
+	if f.made == nil {
+		f.made = map[string]image.RunImage{}
+	}
+	f.made[tag] = ri
+	return ri, nil
+}
+
+func (f *fakeRunImages) AliasImage(_ context.Context, base image.Record, repo string) (image.RunImage, error) {
+	f.runMu.Lock()
+	defer f.runMu.Unlock()
+	ri := image.RunImage{Tag: f.aliasTag(base, repo), ImageID: base.ImageID, Alias: true, BaseTag: base.Tag, BaseImageID: base.ImageID,
+		Connector: base.Connector, UID: base.UID, GID: base.GID}
+	if f.made == nil {
+		f.made = map[string]image.RunImage{}
+	}
+	f.made[ri.Tag] = ri
+	return ri, nil
+}
+
+func (f *fakeRunImages) RecordedRunImage(_ context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, bool, error) {
+	f.runMu.Lock()
+	defer f.runMu.Unlock()
+	tag := f.aliasTag(base, repo)
+	if len(files) > 0 {
+		tag, _ = f.runTag(base, files, repo)
+	}
+	ri, ok := f.made[tag]
+	return ri, ok, nil
+}
+
+// runCalls are the files of each RunImage call.
+func (f *fakeRunImages) runCalls() [][]connector.SandboxFile {
+	f.runMu.Lock()
+	defer f.runMu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+// readRecord is sandbox name's record as the manager saved it.
+func readRecord(t *testing.T, e *harnessEnv, name string) record {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(e.dataDir, "sandboxes", "manager", name+".json"))
+	must(t, err)
+	var rec record
+	must(t, json.Unmarshal(data, &rec))
+	return rec
+}
+
+// runFileOf returns the file at path among files.
+func runFileOf(t *testing.T, files []connector.SandboxFile, path string) connector.SandboxFile {
+	t.Helper()
+	for _, f := range files {
+		if f.Path == path {
+			return f
+		}
+	}
+	t.Fatalf("no run file %s among %d", path, len(files))
+	return connector.SandboxFile{}
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// On a MicroVM gateway Claude Code's run files are baked into a run image:
+// nothing is written on the host, the template names the run image and no
+// driver_config, the record keeps what the workload check must find (root
+// 0644 files with their digests), and a second sandbox of the same posture
+// boots the same image.
+func TestCreateOnVMBakesRunFilesIntoARunImage(t *testing.T) {
+	e := newVMEnv(t, nil)
+	sb := e.create(sandboxapi.CreateRequest{Name: "vm-claude", Copy: true, LLM: anthropicLLM, Credentials: stripeCred})
+	if sb.Phase != "ready" || sb.WorkdirMode != config.OpenShellWorkdirCopy {
+		t.Fatalf("sandbox = %+v", sb)
+	}
+	calls := e.images.runCalls()
+	if len(calls) != 1 {
+		t.Fatalf("RunImage calls = %d", len(calls))
+	}
+	files := calls[0]
+	dropIn := decodeJSON(t, runFileOf(t, files, connector.ClaudeCodeSandboxRunDropInPath).Data)
+	if dropIn["allowManagedMcpServersOnly"] != true {
+		t.Fatalf("baked drop-in = %v", dropIn)
+	}
+	runFileOf(t, files, connector.ClaudeCodeSandboxManagedMCPPath)
+	got, err := e.client.GetSandbox(t.Context(), "vm-claude")
+	must(t, err)
+	if got.Spec.Template == nil || got.Spec.Template.DriverConfig != nil ||
+		!strings.HasPrefix(got.Spec.Template.Image, "defenseclaw.invalid/sandbox-run:claudecode-") {
+		t.Fatalf("template = %+v", got.Spec.Template)
+	}
+	if _, err := os.Stat(e.m.runConfigDir("vm-claude")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("run files were written on the host: %v", err)
+	}
+	rec := readRecord(t, e, "vm-claude")
+	digest := image.RunConfigDigest(files)
+	if rec.RunImage != got.Spec.Template.Image || rec.RunImageID != "sha256:"+digest || rec.ImageID != e.images.rec.ImageID ||
+		rec.RunConfig == nil || rec.RunConfig.Delivery != runDeliveryImage || rec.RunConfig.Digest != digest {
+		t.Fatalf("record: run image %s (%s), run config %+v", rec.RunImage, rec.RunImageID, rec.RunConfig)
+	}
+	if rec.Verify == nil || rec.Verify.UID != 1000 || rec.Verify.GID != 1000 || len(rec.Verify.Files) != len(files) {
+		t.Fatalf("verify = %+v", rec.Verify)
+	}
+	for _, v := range rec.Verify.Files {
+		f := runFileOf(t, files, v.Path)
+		if v.SHA256 != sha256Hex(f.Data) || v.UID != 0 || v.GID != 0 || v.Mode != 0o644 || v.ReadOnlyMount {
+			t.Fatalf("verify file %+v", v)
+		}
+	}
+	if sb.RunImage != rec.RunImage || sb.RunImageID != rec.RunImageID {
+		t.Fatalf("view run image = %s (%s)", sb.RunImage, sb.RunImageID)
+	}
+
+	e.create(sandboxapi.CreateRequest{Name: "vm-claude2", Copy: true, LLM: anthropicLLM, Credentials: stripeCred, Project: e.otherProject("other")})
+	if e.images.builds != 1 || readRecord(t, e, "vm-claude2").RunImage != rec.RunImage {
+		t.Fatalf("a second sandbox of the posture built %d run images", e.images.builds)
+	}
+	// The project is still never mounted live.
+	_, err = e.tryCreate(sandboxapi.CreateRequest{Name: "vm-mount", Project: e.otherProject("third")})
+	if apiErr := wantCode(t, err, sandboxapi.CodeUnavailable); !strings.Contains(apiErr.Error(), "--copy") {
+		t.Fatalf("mount refusal = %+v", apiErr)
+	}
+}
+
+// On docker the run files stay read-only bind mounts of host files, the
+// template names the overlay image, and the record keeps their digests on
+// a read-only mount.
+func TestCreateOnDockerMountsRunFiles(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "dk-claude", LLM: anthropicLLM})
+	got, err := e.client.GetSandbox(t.Context(), "dk-claude")
+	must(t, err)
+	if got.Spec.Template.Image != e.images.rec.Tag || len(e.images.runCalls()) != 0 {
+		t.Fatalf("docker template image = %s, run image calls %d", got.Spec.Template.Image, len(e.images.runCalls()))
+	}
+	files := e.runFiles("dk-claude")
+	rec := readRecord(t, e, "dk-claude")
+	if rec.RunImage != "" || rec.RunConfig.Delivery != runDeliveryMount || rec.Verify == nil || len(rec.Verify.Files) != len(files) {
+		t.Fatalf("record: run image %q, run config %+v, verify %+v", rec.RunImage, rec.RunConfig, rec.Verify)
+	}
+	for _, v := range rec.Verify.Files {
+		if v.SHA256 != sha256Hex(files[v.Path]) || !v.ReadOnlyMount || v.UID != 1000 || v.Mode != 0o644 {
+			t.Fatalf("verify file %+v", v)
+		}
+	}
+}
+
+// A driver that neither mounts host folders nor bakes run files into an
+// image still refuses Claude Code before anything is made.
+func TestCreateRefusesRunFilesADriverCannotTake(t *testing.T) {
+	e := newEnv(t, nil)
+	e.gw.Driver = openshell.Driver{}
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "none", Copy: true})
+	if apiErr := wantCode(t, err, sandboxapi.CodeUnavailable); !strings.Contains(apiErr.Message, "Claude Code") {
+		t.Fatalf("refusal = %+v", apiErr)
+	}
+	if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 0 || len(e.images.runCalls()) != 0 {
+		t.Fatalf("create calls %d, run images %d", n, len(e.images.runCalls()))
+	}
+	assertNothingLeft(t, e)
+}
+
+// A hooks-only harness is sent its overlay image's alias under the
+// driver's repository, which no registry serves.
+func TestCreateOnVMSendsTheAlias(t *testing.T) {
+	e := newVMEnv(t, nil)
+	res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
+	e.images.rec.HarnessVersion, e.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+	e.create(sandboxapi.CreateRequest{Name: "vm-oc", Harness: "opencode", Copy: true})
+	got, err := e.client.GetSandbox(t.Context(), "vm-oc")
+	must(t, err)
+	rec := readRecord(t, e, "vm-oc")
+	if got.Spec.Template.Image != "defenseclaw.invalid/sandbox:test" || rec.RunImage != got.Spec.Template.Image ||
+		rec.RunImageID != e.images.rec.ImageID || rec.RunConfig != nil || len(e.images.runCalls()) != 0 {
+		t.Fatalf("template image %s, record run image %s (%s), run config %+v", got.Spec.Template.Image, rec.RunImage, rec.RunImageID, rec.RunConfig)
+	}
+}
+
+// Codex's imported MCP servers get no per-repository cwd on a MicroVM
+// gateway, so one run image serves every repository.
+func TestCreateOnVMSharesCodexRunImagesAcrossRepositories(t *testing.T) {
+	e := newVMEnv(t, nil)
+	useCodex(e)
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{{Name: "github", Command: "npx", Args: []string{"srv"}}}}
+	e.create(sandboxapi.CreateRequest{Name: "cx-a", Harness: "codex", Copy: true})
+	e.create(sandboxapi.CreateRequest{Name: "cx-b", Harness: "codex", Copy: true, Project: e.otherProject("second")})
+	calls := e.images.runCalls()
+	if len(calls) != 2 || e.images.builds != 1 {
+		t.Fatalf("RunImage calls %d, builds %d", len(calls), e.images.builds)
+	}
+	managed := decodeTOML(t, runFileOf(t, calls[0], connector.CodexSandboxManagedConfigPath).Data)
+	if gh, _ := managed["mcp_servers"].(map[string]any)["github"].(map[string]any); gh["command"] != "npx" || gh["cwd"] != nil {
+		t.Fatalf("baked github server = %v", gh)
+	}
+}
+
+// A credential passed with --env that the run files would carry is refused
+// on a MicroVM gateway, before any image is made; a plain URL is not.
+func TestCreateOnVMRefusesACredentialBakedIntoTheImage(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"token":         {"ANTHROPIC_AUTH_TOKEN": "sk-ant-not-real"},
+		"headers":       {"ANTHROPIC_CUSTOM_HEADERS": "X-Api-Key: not-real"},
+		"url with auth": {"ANTHROPIC_BASE_URL": "https://user:pw@llm.example.com"},
+	} {
+		e := newVMEnv(t, nil)
+		_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-secret", Copy: true, Env: env})
+		apiErr := wantCode(t, err, sandboxapi.CodeInvalid)
+		if !strings.Contains(apiErr.Detail, "--credential") || !strings.Contains(apiErr.Message, "baked into the image") {
+			t.Fatalf("%s: refusal = %+v", name, apiErr)
+		}
+		if len(e.images.runCalls()) != 0 {
+			t.Fatalf("%s: a run image was made", name)
+		}
+		assertNothingLeft(t, e)
+	}
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "vm-url", Copy: true, Env: map[string]string{"ANTHROPIC_BASE_URL": "http://host.openshell.internal:28921"}})
+	// On docker the value stays in the owner-only run-config directory.
+	d := newEnv(t, nil)
+	d.create(sandboxapi.CreateRequest{Name: "dk-token", Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-ant-not-real"}})
+}
+
+// A start renders a MicroVM sandbox's run files again and compares them
+// with the baked ones: equal starts, stricter is refused (they cannot
+// change), looser keeps them and never rebuilds.
+func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "vm-same", Copy: true})
+	e.stopBox("vm-same")
+	e.startBox("vm-same", sandboxapi.StartRequest{})
+	if len(e.images.runCalls()) != 1 {
+		t.Fatalf("a start made a run image: %d calls", len(e.images.runCalls()))
+	}
+
+	// Looser: an MCP server the inventory lists now is not brought along.
+	before := readRecord(t, e, "vm-same")
+	e.m.opts.MCP = &fakeMCP{entries: []config.MCPServerEntry{{Name: "github", Command: "npx"}}}
+	e.stopBox("vm-same")
+	e.startBox("vm-same", sandboxapi.StartRequest{})
+	after := readRecord(t, e, "vm-same")
+	if after.RunConfig.Digest != before.RunConfig.Digest || len(after.MCP.Imported) != 0 || after.RunConfig.Safe != before.RunConfig.Safe ||
+		after.RunImage != before.RunImage || len(e.images.runCalls()) != 1 {
+		t.Fatalf("a looser start changed the baked run config: %+v / %+v", before.RunConfig, after.RunConfig)
+	}
+
+	// Stricter: skip-permissions is no longer allowed.
+	e.create(sandboxapi.CreateRequest{Name: "vm-yolo", Copy: true, Yolo: true, Project: e.otherProject("yolo")})
+	e.stopBox("vm-yolo")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) })
+	_, err := e.m.Start(t.Context(), "vm-yolo", sandboxapi.StartRequest{})
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") {
+		t.Fatalf("stricter start = %+v", apiErr)
+	}
+}
+
+// On docker a start that rewrites the run files records their new digests,
+// so the session's workload check compares with what was just written.
+func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "dk-yolo", Yolo: true})
+	before := readRecord(t, e, "dk-yolo")
+	e.stopBox("dk-yolo")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) })
+	e.startBox("dk-yolo", sandboxapi.StartRequest{})
+	files := e.runFiles("dk-yolo")
+	e.m.mu.Lock()
+	after := e.m.boxes["dk-yolo"].rec
+	e.m.mu.Unlock()
+	if after.RunConfig.Digest == before.RunConfig.Digest || after.Verify == nil {
+		t.Fatalf("digest %s -> %s, verify %+v", before.RunConfig.Digest, after.RunConfig.Digest, after.Verify)
+	}
+	for _, v := range after.Verify.Files {
+		if v.SHA256 != sha256Hex(files[v.Path]) {
+			t.Fatalf("verify %s = %s, file holds %s", v.Path, v.SHA256, sha256Hex(files[v.Path]))
+		}
+	}
+}
+
+// The pre-create Explain says whether the image a new sandbox would boot
+// has a prepared MicroVM disk yet: never on docker; on vm by the alias's
+// (the overlay image's) ID for a hooks-only harness, and by the run image
+// of the posture for one with run files.
+func TestExplainReportsAVMFirstBoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	vm, _ := openshell.LookupDriver("vm")
+	cache := filepath.Join(home, vm.ImageCache)
+	prepare := func(id string) {
+		t.Helper()
+		name := "sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-1000-1000-sha256-" + strings.TrimPrefix(id, "sha256:")
+		must(t, os.MkdirAll(filepath.Join(cache, name), 0o755))
+	}
+	explain := func(e *harnessEnv, req sandboxapi.ExplainRequest) bool {
+		t.Helper()
+		req.Project = orDefault(req.Project, e.project)
+		ex, err := e.m.Explain(t.Context(), req)
+		must(t, err)
+		return ex.VMFirstBoot
+	}
+
+	d := newEnv(t, nil)
+	if _, err := d.m.gateway(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if explain(d, sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true}) {
+		t.Fatal("a docker gateway reported a MicroVM first boot")
+	}
+
+	e := newVMEnv(t, nil)
+	if _, err := e.m.gateway(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !explain(e, sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true}) {
+		t.Fatal("no run image yet, but no first boot")
+	}
+	sb := e.create(sandboxapi.CreateRequest{Name: "vm-first", Copy: true})
+	if !explain(e, sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true}) {
+		t.Fatal("the run image has no prepared disk yet, but no first boot")
+	}
+	prepare(sb.RunImageID)
+	if explain(e, sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true}) {
+		t.Fatal("the posture's run image is prepared, but a first boot")
+	}
+	if !explain(e, sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Safe: true}) {
+		t.Fatal("another posture (safe mode) reported no first boot")
+	}
+	// An existing sandbox's Explain describes no create.
+	if explain(e, sandboxapi.ExplainRequest{Sandbox: "vm-first"}) {
+		t.Fatal("an existing sandbox's Explain reported a first boot")
+	}
+
+	o := newVMEnv(t, nil)
+	res := connector.ResolveSandboxHookContract("opencode", "1.18.31")
+	o.images.rec.HarnessVersion, o.images.rec.HookContract = "1.18.31", res.Contract.ContractID
+	if _, err := o.m.gateway(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !explain(o, sandboxapi.ExplainRequest{Harness: "opencode", Copy: true}) {
+		t.Fatal("hooks-only: no prepared disk, but no first boot")
+	}
+	prepare(o.images.rec.ImageID)
+	if explain(o, sandboxapi.ExplainRequest{Harness: "opencode", Copy: true}) {
+		t.Fatal("hooks-only: the overlay image is prepared, but a first boot")
+	}
+	// An image to build first is a first boot too.
+	o.images.err = ErrImageMissing
+	if !explain(o, sandboxapi.ExplainRequest{Harness: "opencode", Copy: true}) {
+		t.Fatal("no image built yet, but no first boot")
+	}
+}

@@ -644,7 +644,9 @@ A `Sandbox` carries its `name` and OpenShell `id`, the `harness`, its
 `phase` (lowercase OpenShell phase such as `ready` or `stopped`, or `missing`
 when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
 `profile`, `network_mode`, `approvals`, and `yolo`. It also carries
-`workdir_mode` (`mount` or `copy`), `project`, and `workdir`, the image and
+`workdir_mode` (`mount` or `copy`), `project`, and `workdir`, the image
+(`image`, `image_id`, and on a MicroVM gateway the `run_image` and
+`run_image_id` it boots, which carries its run's harness settings) and
 `tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
 plain reason, tamper counts, and whether hooks are `silent` or
 `unreachable`), `endpoints` (the last result of each credentialed endpoint),
@@ -687,7 +689,9 @@ with, against the current config) or the run options `harness`, `pack`,
 `profile`, `project`, `copy`, `safe`, `yolo`, and `unmask` (repeatable).
 The `Explain` response has the `pack`, `pack_source`, and `pack_digest`, the
 `profile`, `network_mode`, and `approvals`, the `admin` status, `settings`,
-and `violations`.
+and `violations`. Before a create on a MicroVM gateway, `vm_first_boot` says
+the image the sandbox would boot has no prepared MicroVM disk yet, so its
+first start takes about a minute.
 
 Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `admin`,
 `gateway`, or `default`), `origin` (such as `openshell.admin.min_profile`),

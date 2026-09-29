@@ -140,6 +140,7 @@ type fakeImages struct {
 	err error
 	// fixedUID keeps rec's UID/GID instead of the build spec's.
 	fixedUID bool
+	fakeRunImages
 }
 
 func (f *fakeImages) Resolve(_ context.Context, spec image.BuildSpec, _ bool) (image.Record, error) {

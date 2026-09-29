@@ -28,6 +28,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
@@ -59,6 +60,19 @@ type Images interface {
 	// verification) and otherwise returns ErrImageMissing. An unverified
 	// image is never returned.
 	Resolve(ctx context.Context, spec image.BuildSpec, build bool) (image.Record, error)
+	// RunImage returns the run image that bakes a sandbox's per-run files
+	// into the verified image base, named in the run repository of repo
+	// (openshell.Driver.ImageRepository), for a driver that cannot mount
+	// them: the recorded one for the same files, else a new build
+	// (image.Builder.RunImage).
+	RunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, error)
+	// AliasImage returns base under repo, the name a sandbox without run
+	// files is sent on such a driver. It is base's image ID.
+	AliasImage(ctx context.Context, base image.Record, repo string) (image.RunImage, error)
+	// RecordedRunImage returns, without building or tagging anything, the
+	// run image RunImage would return for files (the alias for none) when
+	// it is recorded and present, and false otherwise.
+	RecordedRunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, bool, error)
 }
 
 // BuilderImages implements Images with the overlay image builder.
@@ -91,6 +105,30 @@ func (b BuilderImages) Resolve(ctx context.Context, spec image.BuildSpec, build 
 		return image.Record{}, fmt.Errorf("overlay image %s was built but its hooks are not verified", rec.Tag)
 	}
 	return rec, nil
+}
+
+// RunImage implements Images.
+func (b BuilderImages) RunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, error) {
+	if b.Builder == nil {
+		return image.RunImage{}, errors.New("no image builder configured")
+	}
+	return b.Builder.RunImage(ctx, base, files, repo)
+}
+
+// AliasImage implements Images.
+func (b BuilderImages) AliasImage(ctx context.Context, base image.Record, repo string) (image.RunImage, error) {
+	if b.Builder == nil {
+		return image.RunImage{}, errors.New("no image builder configured")
+	}
+	return b.Builder.AliasImage(ctx, base, repo)
+}
+
+// RecordedRunImage implements Images.
+func (b BuilderImages) RecordedRunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, bool, error) {
+	if b.Builder == nil {
+		return image.RunImage{}, false, errors.New("no image builder configured")
+	}
+	return b.Builder.RecordedRunImage(ctx, base, files, repo)
 }
 
 // Workspace is the project-folder surface the manager uses. It is a thin

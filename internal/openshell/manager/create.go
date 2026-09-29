@@ -428,7 +428,8 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 
 	// Per-run managed harness configuration: the model provider pins, safe
-	// mode and the MCP servers the run brings along, mounted read-only.
+	// mode and the MCP servers the run brings along, mounted read-only, or
+	// baked into the run image on a driver without host mounts.
 	var modelProvider *connector.SandboxModelProvider
 	if llm != nil {
 		modelProvider = llm.cp.ModelProvider
@@ -436,20 +437,25 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	credNames := credentialNames(llm, creds)
 	rc, err := m.planRunConfig(ctx, runConfigInput{
 		spec: spec, target: target, eff: eff, yolo: eff.Yolo, env: envOut, credentials: credNames,
-		provider: modelProvider, workdir: rec.Workdir, project: in.project,
+		provider: modelProvider, workdir: runWorkdir(gw.Driver, rec.Workdir), project: in.project,
 	})
 	if err != nil {
 		return nil, err
 	}
 	rb.add("remove run configuration", func(context.Context) error { return m.removeRunConfig(name) })
-	runMounts, err := m.writeRunConfig(name, rc)
+	delivered, err := m.deliverRunConfig(ctx, gw.Driver, name, img, rc, in.req.Env)
 	if err != nil {
 		return nil, err
 	}
 	if rc != nil {
 		rec.MCP = rc.mcp
 		rec.Warnings = append(rec.Warnings, rc.notices...)
-		rec.RunConfig = &runConfigRecord{Files: rc.paths(), Credentials: credNames, ModelProvider: modelProvider, Safe: !eff.Yolo}
+		rec.RunConfig = &runConfigRecord{Files: rc.paths(), Credentials: credNames, ModelProvider: modelProvider, Safe: !eff.Yolo,
+			Delivery: delivered.how, Digest: delivered.digest}
+		rec.Verify = withRunFileChecks(rec.Verify, img.UID, img.GID, runFileChecks(rc.files, delivered.how, img.UID, img.GID))
+	}
+	if ri := delivered.runImage; ri != nil {
+		rec.RunImage, rec.RunImageID = ri.Tag, ri.ImageID
 	}
 
 	// Policy: the workload runs as the identity the image was built for.
@@ -485,11 +491,11 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if key, value := workspace.ProjectLabel(in.project); value != "" {
 		labels[key] = value
 	}
-	tmpl := &openshell.SandboxTemplate{Image: img.Tag}
+	tmpl := &openshell.SandboxTemplate{Image: delivered.image}
 	if plan != nil {
 		tmpl.DriverConfig = plan.DriverConfig()
 	}
-	tmpl.DriverConfig = withRunConfigMounts(tmpl.DriverConfig, runMounts)
+	tmpl.DriverConfig = withRunConfigMounts(tmpl.DriverConfig, delivered.mounts)
 	if res := templateResources(eff.Resources); res != nil && gw.Driver.SandboxLimits {
 		tmpl.Resources = res
 	}
@@ -569,8 +575,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 
 // driverRefusal refuses a create the gateway's compute driver cannot carry
 // out as DefenseClaw prepares it: without host mounts (the MicroVM driver)
-// a sandbox can take neither a live mount of the project nor the per-run
-// managed harness files, which reach a docker sandbox as read-only bind
+// a sandbox cannot take a live mount of the project, and unless the driver
+// takes them baked into an image it cannot take the per-run managed
+// harness files either, which reach a docker sandbox as read-only bind
 // mounts and keep the harness's settings and MCP servers locked down. It
 // runs before anything is made, so a refused create leaves nothing behind.
 //
@@ -588,7 +595,7 @@ func driverRefusal(d openshell.Driver, spec *harness.Spec, eff *packs.Effective,
 	if why == "" {
 		why = "the gateway's compute driver mounts no host folders"
 	}
-	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles {
+	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles && !d.RunFilesInImage {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
 			Message: spec.DisplayName + " sandboxes cannot run on this gateway: DefenseClaw delivers their per-run harness configuration as read-only host mounts",
 			Detail:  why}
