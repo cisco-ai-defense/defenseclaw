@@ -131,6 +131,11 @@ type CreateRequest struct {
 	// Env adds non-secret environment variables. DefenseClaw, proxy and
 	// loader variables are refused.
 	Env map[string]string `json:"env,omitempty"`
+	// TimeZone is the IANA time zone of the machine the run starts on
+	// ("America/New_York"); the sandbox's harnesses and shells run in it
+	// where the image has its zone file (openshell.EnvHostTimeZone), and
+	// on UTC without it.
+	TimeZone string `json:"time_zone,omitempty"`
 }
 
 // LLMCredential selects one of the harness's provider profiles and carries

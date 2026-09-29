@@ -84,6 +84,25 @@ case "${` + openshell.EnvEgressURL + `:-}" in
 esac
 `
 
+// timeZoneScript exports TZ from openshell.EnvHostTimeZone, the zone of
+// the machine the sandbox was created from, when TZ is not set already and
+// the image has that zone's file (without it, libc would show UTC under
+// the zone's name). A sandbox otherwise runs on UTC, and a harness's
+// clock disagrees with the host's. POSIX sh, like egressEnvScript.
+const timeZoneScript = `# The host's time zone, where the image has its zone file.
+if [ -z "${TZ:-}" ]; then
+  case "${` + openshell.EnvHostTimeZone + `:-}" in
+    ""|/*|*..*|*[!A-Za-z0-9_+/-]*) ;;
+    *)
+      if [ -f "/usr/share/zoneinfo/$` + openshell.EnvHostTimeZone + `" ]; then
+        TZ="$` + openshell.EnvHostTimeZone + `"
+        export TZ
+      fi
+      ;;
+  esac
+fi
+`
+
 // shimPathScript puts ShimDir first on PATH, once.
 const shimPathScript = `case ":${PATH:-}:" in
   *:` + ShimDir + `:*) ;;
@@ -100,9 +119,10 @@ esac
 func (s *Spec) profile() string {
 	return `# defenseclaw-sandbox-profile v1
 # DefenseClaw sandbox shell environment (OpenShell sandbox images,
-# root-owned). Login shells get the egress proxy settings every harness
-# launcher exports, and the harness command starts its launcher.
-` + egressEnvScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
+# root-owned). Login shells get the egress proxy settings and the time zone
+# every harness launcher exports, and the harness command starts its
+# launcher.
+` + egressEnvScript + timeZoneScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
   eval '` + s.Command + `() { ` + s.ShimPath() + ` "$@"; }; export -f ` + s.Command + `' 2>/dev/null || true
 fi
 `

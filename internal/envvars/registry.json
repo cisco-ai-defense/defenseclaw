@@ -1788,6 +1788,29 @@
       "since": "0.1.0"
     },
     {
+      "name": "DEFENSECLAW_HOST_TZ",
+      "category": "hook_internal",
+      "purpose": "IANA time zone of the machine a sandbox was created from (`America/New_York`), set inside every OpenShell sandbox by `sandbox run`. The harness launchers, the login-shell profile and the sandbox exec wrapper export TZ from it when TZ is not set and the image has /usr/share/zoneinfo/<zone>, so the sandbox's clock reads like the host's instead of UTC.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "IANA zone name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/timezone.go",
+          "description": "Go constant and the host's zone the CLI sends with a create"
+        },
+        {
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "timeZoneScript: the in-image shells export TZ from it"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_CONNECTOR",
       "category": "hook_internal",
       "purpose": "Internal label identifying which connector's hook is executing. Set by every *-hook.sh; do not override manually.",

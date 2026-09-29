@@ -289,6 +289,15 @@ The harness spec builds the environment passed to `openshell sandbox create
   address. `--env` overrides them. OpenShell's refusal of a lookup of the
   container's own host name (Docker's 12-hex-digit default) is audited but is
   neither a blocked site nor a feed line.
+- `DEFENSECLAW_HOST_TZ` is the IANA time zone of the machine `sandbox run`
+  ran on (`CreateRequest.TimeZone`: `TZ`, else the zone `/etc/localtime`
+  links to, else `/etc/timezone`; `openshell.HostTimeZone`). A second
+  fragment next to the proxy one (`timeZoneScript`) exports `TZ` from it
+  in the launchers, the login-shell profile and the `sandbox exec` wrapper,
+  when `TZ` is not set already and the image has
+  `/usr/share/zoneinfo/<zone>`; without the file libc would show UTC under
+  the zone's name, so the sandbox stays on UTC. Both compute drivers. A
+  sandbox keeps the zone it was created with.
 
 One shell fragment (`egressEnvScript` in
 `internal/openshell/harness/shellenv.go`) exports `HTTPS_PROXY`,

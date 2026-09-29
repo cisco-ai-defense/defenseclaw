@@ -45,6 +45,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	ta.env["TZ"] = ":America/New_York"
 	notice := "MCP: blocked the repository's servers repo-tool (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)"
 	ta.daemon.createMCP = &sandboxapi.MCPSummary{Imported: []string{"github", "linear"}, ProjectServers: "block", Project: []string{"repo-tool"}}
 	ta.daemon.createWarnings = []string{notice}
@@ -61,7 +62,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	if req.Harness != "claudecode" || req.Project != ta.project || req.Copy || req.LLM == nil ||
 		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-test-not-a-secret" ||
 		len(req.Credentials) != 1 || req.Credentials[0].Host != "api.stripe.com" || req.Credentials[0].Value != "stripe-test-value" ||
-		req.Env["FOO"] != "bar" {
+		req.Env["FOO"] != "bar" || req.TimeZone != "America/New_York" {
 		t.Fatalf("create request = %+v", req)
 	}
 	has(t, ta.output(),

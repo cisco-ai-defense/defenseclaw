@@ -284,6 +284,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err := validateExtraEnv(in.req.Env, pinned); err != nil {
 		return nil, err
 	}
+	if tz := in.req.TimeZone; tz != "" && !openshell.ValidTimeZone(tz) {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "time zone %q is not an IANA zone name", truncate(tz, 80))
+	}
 
 	// Workspace: the live mount (and its snapshot), or the copy workdir.
 	rec := record{
@@ -427,6 +430,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	for k, v := range in.req.Env {
 		envOut[k] = v
+	}
+	// The host's time zone: the in-image shell fragment exports TZ from it
+	// where the image has that zone's file (a sandbox runs on UTC
+	// otherwise, and the harness's clock disagrees with the host's).
+	if in.req.TimeZone != "" {
+		envOut[openshell.EnvHostTimeZone] = in.req.TimeZone
 	}
 
 	// Per-run managed harness configuration: the model provider pins, safe

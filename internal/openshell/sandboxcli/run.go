@@ -1182,6 +1182,8 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 		Name: strings.TrimSpace(o.Name), Harness: spec.Name, Project: project, Pack: o.Pack, Profile: o.Profile,
 		Copy: copyMode, Safe: o.Safe, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: o.CPU, Memory: o.Memory, NoSnapshot: o.NoSnapshot, NoBuild: o.NoBuild, Env: env,
+		// The sandbox's clock reads like this machine's.
+		TimeZone: openshell.HostTimeZone(a.Getenv),
 	}
 	reserved := map[string]bool{}
 	for _, c := range o.Credentials {

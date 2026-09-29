@@ -353,7 +353,9 @@ deleted.
   copy-mode sandbox shows, reviews and merges only what changed since that
   apply (`… since the last apply`); with nothing new it asks nothing, and
   `sandbox delete` of the stopped sandbox does not warn about unpulled work.
-  `sandbox pull` asks the same confirmation as a session's end.
+  `sandbox pull` asks the same confirmation as a session's end. A new
+  sandbox runs in this machine's time zone (`DEFENSECLAW_HOST_TZ`, exported
+  as `TZ` where the image has the zone's file) instead of UTC.
 
 ### Legacy OpenShell standalone sandbox removed
 

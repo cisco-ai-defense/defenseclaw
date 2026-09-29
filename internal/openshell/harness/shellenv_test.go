@@ -185,6 +185,53 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 	}
 }
 
+// TestSandboxShellsTakeTheHostTimeZone: the login-shell profile and the
+// sandbox exec wrapper (the launchers share its preamble) export TZ from
+// the host's zone when this system has the zone's file and TZ is unset;
+// an unknown zone, a path and a caller's TZ are left alone (cert
+// copilot:F10: the sandbox ran on UTC).
+func TestSandboxShellsTakeTheHostTimeZone(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("/bin/bash is required")
+	}
+	if _, err := os.Stat("/usr/share/zoneinfo/UTC"); err != nil {
+		t.Skip("this system has no /usr/share/zoneinfo/UTC")
+	}
+	dir := t.TempDir()
+	profile := filepath.Join(dir, "profile.sh")
+	wrapper := filepath.Join(dir, "sandbox-env")
+	if err := os.WriteFile(profile, shellFile(t, Copilot, SandboxProfilePath).Data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrapper, shellFile(t, Copilot, SandboxEnvPath).Data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const record = `printf 'TZ=%s\n' "${TZ-<unset>}"`
+	for _, c := range []struct {
+		env  []string
+		want string
+	}{
+		{[]string{openshell.EnvHostTimeZone + "=UTC"}, "UTC"},
+		{[]string{openshell.EnvHostTimeZone + "=Nowhere/Zone"}, "<unset>"},
+		{[]string{openshell.EnvHostTimeZone + "=../../../etc/passwd"}, "<unset>"},
+		{[]string{openshell.EnvHostTimeZone + "=/etc/localtime"}, "<unset>"},
+		{[]string{openshell.EnvHostTimeZone + "=UTC", "TZ=Asia/Tokyo"}, "Asia/Tokyo"},
+		{nil, "<unset>"},
+	} {
+		env := append([]string{"PATH=/usr/bin:/bin"}, c.env...)
+		login := exec.Command("/bin/sh", "-c", ". "+profile+"\n"+record)
+		login.Env = env
+		wrapped := exec.Command(wrapper, "/bin/sh", "-c", record)
+		wrapped.Env = env
+		for what, cmd := range map[string]*exec.Cmd{"login shell": login, "sandbox exec": wrapped} {
+			out, err := cmd.CombinedOutput()
+			if got := shellEnvLines(string(out))["TZ"]; err != nil || got != c.want {
+				t.Errorf("%s with %v: TZ = %q (%v), want %q\n%s", what, c.env, got, err, c.want, out)
+			}
+		}
+	}
+}
+
 // TestSandboxEnvRunsTheCommand starts a command through the sandbox exec
 // wrapper: it gets the launchers' environment (shim directory, then the
 // system directories, first on PATH; the DefenseClaw proxy; no shell
