@@ -348,13 +348,18 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 }
 
 // stopUnverified stops a sandbox that failed the workload check after a
-// start, and records the phase OpenShell reports then.
+// start, flushing its disk first where the driver's stop does not (the
+// last session's work stays for pull), and records the phase OpenShell
+// reports then.
 func (m *Manager) stopUnverified(ctx context.Context, gw *Gateway, b *box) {
 	ctx, cancel := detached(ctx, rollbackTimeout)
 	defer cancel()
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
+	if !gw.Driver.StopFlushes {
+		m.flushSandbox(ctx, gw, name)
+	}
 	_, err := gw.Client.StopSandbox(ctx, name)
 	if err == nil {
 		_, err = gw.Client.WaitStopped(ctx, name)

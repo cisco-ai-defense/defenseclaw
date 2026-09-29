@@ -19,9 +19,14 @@
 package manager
 
 import (
+	"context"
+	"errors"
+	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
@@ -280,5 +285,87 @@ func TestDeleteOfAnotherDriversSandboxWhenTheGatewayFails(t *testing.T) {
 	}
 	if _, err := e.store.Lookup("stuckcopy"); err == nil {
 		t.Fatal("the binding was kept")
+	}
+}
+
+// On vm a stop flushes the sandbox's disk first, in the harness's exit
+// exec, after the harness exited: a MicroVM's stop loses what was not
+// synced. A stop the flush did not reach is reported. On docker the exec
+// is what it always was.
+func TestStopOnVMFlushesFirst(t *testing.T) {
+	e := newVMEnv(t, nil)
+	useOpenCode(t, e)
+	e.run()
+	e.create(sandboxapi.CreateRequest{Name: "flushbox", Harness: "opencode", Copy: true})
+	e.watch.waitStarted(t, "flushbox")
+	var mu sync.Mutex
+	var order []string
+	answer := "exited\nsynced\n"
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, "exec "+call.Command[0])
+		return openshelltest.ExecResponse{Stdout: []byte(answer)}
+	}))
+	e.fake.Intercept(func(method string) error {
+		if method == openshelltest.MethodStopSandbox {
+			mu.Lock()
+			order = append(order, "stop")
+			mu.Unlock()
+		}
+		return nil
+	})
+	e.stopBox("flushbox")
+	calls := e.fake.ExecCalls()
+	last := calls[len(calls)-1]
+	if len(order) != 2 || order[0] != "exec /bin/sh" || order[1] != "stop" ||
+		!strings.HasPrefix(last.Command[2], flushTrap) || !strings.HasSuffix(last.Command[2], endHarnessScript) ||
+		last.Timeout != harnessExitWait+3*time.Second+flushWait {
+		t.Fatalf("order = %v, exec = %+v", order, last)
+	}
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 0 {
+		t.Fatalf("a flushed stop was reported: %+v", got)
+	}
+
+	// The sandbox answers, but the flush did not finish.
+	e.startBox("flushbox", sandboxapi.StartRequest{})
+	answer = "exited\n"
+	e.stopBox("flushbox")
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 || !strings.Contains(got[0].Message, "may come back empty") {
+		t.Fatalf("feed = %+v", got)
+	}
+
+	// The exec failed: the flush is tried once more, on its own.
+	e.startBox("flushbox", sandboxapi.StartRequest{})
+	e.fake.HandleExec(e.workloadChecks(nil, func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if call.Command[0] == "/bin/sync" {
+			return openshelltest.ExecResponse{}
+		}
+		return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
+	}))
+	before := len(e.fake.ExecCalls())
+	e.stopBox("flushbox")
+	calls = e.fake.ExecCalls()[before:]
+	if len(calls) != 2 || !slices.Equal(calls[1].Command, []string{"/bin/sync"}) {
+		t.Fatalf("exec calls = %+v", calls)
+	}
+	if got := e.events("flushbox", "", "stop_unflushed"); len(got) != 1 {
+		t.Fatalf("a flushed stop was reported: %+v", got)
+	}
+
+	// Docker's stop keeps its exec as it was: no flush.
+	d := liveEnv(t, "dockerstop", nil)
+	d.stopBox("dockerstop")
+	dc := d.fake.ExecCalls()
+	if len(dc) != 1 || dc[0].Command[2] != endHarnessScript || dc[0].Timeout != harnessExitWait+3*time.Second {
+		t.Fatalf("docker exec = %+v", dc)
+	}
+}
+
+// The flush runs as the script ends, whichever way it ends, and says so.
+func TestEndHarnessScriptFlushes(t *testing.T) {
+	out, err := exec.Command("/bin/sh", "-c", flushTrap+endHarnessScript, "defenseclaw-end-harness", "/nonexistent/harness", "1").Output()
+	if err != nil || strings.Join(strings.Fields(string(out)), " ") != "none synced" {
+		t.Fatalf("script = %q, %v", out, err)
 	}
 }

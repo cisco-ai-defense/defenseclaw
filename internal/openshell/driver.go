@@ -42,8 +42,8 @@ const (
 // Code that behaves differently on a driver asks these fields, never the
 // driver's name or runtime.GOOS, so this one table says what differs. The
 // zero Driver has every capability off and fails closed: it mounts no host
-// folders, bakes nothing into an image and checks the workload after
-// ready.
+// folders, bakes nothing into an image, syncs before a stop and checks
+// the workload after ready.
 type Driver struct {
 	Name ComputeDriver
 	// HostMounts says the driver honours a template's docker driver_config
@@ -76,6 +76,12 @@ type Driver struct {
 	// process can listen on its ports without root, and Docker talks to a
 	// localhost registry over plain HTTP.
 	ImageRepository string
+	// StopFlushes says the driver's stop keeps what the workload wrote. A
+	// MicroVM's stop does not flush the guest's page cache: a file written
+	// and not synced before it comes back empty at the next start (OpenShell
+	// 0.1.1), so without it DefenseClaw runs sync in the sandbox before
+	// every stop, and a copy's unpulled work survives the stop.
+	StopFlushes bool
 	// SkipWorkloadCheck leaves out the check after ready (the identity the
 	// workload runs as, its capabilities, DefenseClaw's files in the
 	// sandbox). It is new on docker and waits for a live run there before
@@ -87,7 +93,7 @@ type Driver struct {
 // drivers is the table: what each compute driver DefenseClaw drives can
 // and cannot do.
 var drivers = map[ComputeDriver]Driver{
-	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, SkipWorkloadCheck: true},
+	DriverDocker: {Name: DriverDocker, HostMounts: true, SandboxLimits: true, StopFlushes: true, SkipWorkloadCheck: true},
 	DriverVM: {
 		Name: DriverVM, RunFilesInImage: true, GatewayIdentity: true,
 		ImageRepository: "defenseclaw.invalid/sandbox",
