@@ -16541,6 +16541,41 @@ function Get-DefenseClawStandaloneManifestAdoption {
             "$InstalledManifestSHA256; $retry"
         ) -1
     }
+    # A reconcile that fails only because each failed target's account is
+    # signed out stays failed until that account signs in, so a retry cannot
+    # help: name the accounts instead.
+    $signedOut = [Collections.Generic.List[string]]::new()
+    $otherFailure = $false
+    foreach ($row in @(& $field $records.state 'results')) {
+        if ($null -eq $row -or
+            [bool](& $field $row 'ok') -or
+            [bool](& $field $row 'pending')) {
+            continue
+        }
+        if ([string](& $field $row 'error') -notmatch
+            'exact active Windows session is unavailable|no active interactive session token matches') {
+            $otherFailure = $true
+            continue
+        }
+        $account = [string](& $field $row 'user')
+        $sid = [string](& $field $row 'sid')
+        if ([string]::IsNullOrWhiteSpace($account)) {
+            $account = $sid
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($sid)) {
+            $account = "$account ($sid)"
+        }
+        if (-not $signedOut.Contains($account)) {
+            $signedOut.Add($account)
+        }
+    }
+    if ($signedOut.Count -gt 0 -and -not $otherFailure) {
+        $retry = (
+            'the guardian finishes only after these signed-out accounts sign in, because it repairs ' +
+            'their DefenseClaw hooks in their own Windows session: ' + ($signedOut -join ', ') +
+            '; have each account sign in, or remove it with its profile, then run this command again'
+        )
+    }
     $targetCount = & $count $records.activation 'target_count'
     $activationStamp = & $stamp $records.activation
     foreach ($name in @('activation', 'state', 'authorization')) {
