@@ -100,7 +100,8 @@ func output(ctx context.Context, d Docker, stdin io.Reader, args ...string) (str
 
 // buildImage streams files as a build context (writeContextTar) to
 // `docker build --pull=false --label k=v ... -t tag -`, the labels sorted,
-// with docker's output going to log.
+// with docker's output going to log (nil discards it). A failed build
+// returns a *BuildError with the end of that output, unless ctx ended it.
 func buildImage(ctx context.Context, d Docker, files []ContextFile, labels map[string]string, tag string, log io.Writer) error {
 	pr, pw := io.Pipe()
 	go func() {
@@ -116,11 +117,17 @@ func buildImage(ctx context.Context, d Docker, files []ContextFile, labels map[s
 		args = append(args, "--label", key+"="+labels[key])
 	}
 	args = append(args, "-t", tag, "-")
-	if log == nil {
-		log = io.Discard
+	tail := &outputTail{}
+	var out io.Writer = tail
+	if log != nil {
+		// The tail first: a log that fails a write stops the ones after it.
+		out = io.MultiWriter(tail, log)
 	}
-	err := d.Run(ctx, pr, log, log, args...)
+	err := d.Run(ctx, pr, out, out, args...)
 	_ = pr.CloseWithError(io.ErrClosedPipe)
+	if err != nil && ctx.Err() == nil {
+		return &BuildError{Err: err, Output: tail.String()}
+	}
 	return err
 }
 

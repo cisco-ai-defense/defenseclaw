@@ -238,7 +238,13 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, force, verbose
 	rec, built, err := a.Images.Build(ctx, spec, force, log)
 	if err != nil {
 		if logPath != "" {
-			return fmt.Errorf("%s image: %w (build log: %s)", spec.DisplayName, err, logPath)
+			// A failed docker build ends with the last lines docker
+			// printed, one per line: the log path goes after them.
+			sep := " "
+			if strings.Contains(err.Error(), "\n") {
+				sep = "\n"
+			}
+			return fmt.Errorf("%s image: %w%s(build log: %s)", spec.DisplayName, err, sep, logPath)
 		}
 		return fmt.Errorf("%s image: %w", spec.DisplayName, err)
 	}

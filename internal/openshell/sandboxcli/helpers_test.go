@@ -520,6 +520,10 @@ type fakeImages struct {
 	// answer.
 	pruned      []image.PruneOptions
 	pruneReport *image.PruneReport
+	// buildOutput is what Build writes to the build log; buildErr, when
+	// set, fails it.
+	buildOutput string
+	buildErr    error
 }
 
 func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
@@ -528,9 +532,15 @@ func (f *fakeImages) Current(spec *harness.Spec) (bool, error) {
 	return !f.missing[spec.Name], nil
 }
 
-func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, _ bool, _ io.Writer) (image.Record, bool, error) {
+func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, _ bool, log io.Writer) (image.Record, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if log != nil {
+		_, _ = io.WriteString(log, f.buildOutput)
+	}
+	if f.buildErr != nil {
+		return image.Record{}, true, f.buildErr
+	}
 	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true}
 	f.built = append(f.built, spec.Name)
 	f.recs = append(f.recs, rec)

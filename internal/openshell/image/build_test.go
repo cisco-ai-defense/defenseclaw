@@ -23,6 +23,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -194,6 +196,65 @@ func TestBuildFailures(t *testing.T) {
 		if records, _ := store.List(); len(records) != 0 {
 			t.Fatalf("%s: a failed build was recorded: %v", name, records)
 		}
+	}
+}
+
+// TestBuildFailureReportsTheEndOfDockersOutput: the error of a failed
+// build ends with the last lines docker printed, made safe to show, even
+// when the builder's log discards them (the daemon's), and the log still
+// gets all of it. An interrupted build is reported without them.
+func TestBuildFailureReportsTheEndOfDockersOutput(t *testing.T) {
+	var out strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&out, "#%d [internal] step %d\n", i, i)
+	}
+	out.WriteString("#201 \x1b[31mERROR: failed to build: the --chmod option requires BuildKit\x1b[0m\n")
+	out.WriteString("#201 fetch https://bob:hunter2hunter2@registry.example/v2/ with NPM_TOKEN=npm_" + strings.Repeat("a", 36) + "\n")
+	docker := func() *fakeDocker {
+		return &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+			if args[0] == "build" {
+				return out.String(), 1
+			}
+			return "", 1 // nothing is built
+		}}
+	}
+	for _, log := range []*bytes.Buffer{nil, {}} {
+		b := &Builder{Docker: docker(), Store: testStore(t)}
+		if log != nil {
+			b.Log = log
+		}
+		_, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{})
+		var buildErr *BuildError
+		var cmdErr *CommandError
+		if !errors.As(err, &buildErr) || !errors.As(err, &cmdErr) || cmdErr.ExitCode != 1 {
+			t.Fatalf("Build error = %#v", err)
+		}
+		msg := err.Error()
+		for _, want := range []string{
+			"docker build exited 1; the last lines docker printed:\n    #",
+			"\n    #200 [internal] step 200\n    #201 ERROR: failed to build: the --chmod option requires BuildKit\n",
+			"\n    #201 fetch https://bob:[redacted]@registry.example/v2/ with NPM_TOKEN=[redacted]\n    fake failure",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("Build error lacks %q:\n%s", want, msg)
+			}
+		}
+		if n := strings.Count(buildErr.Output, "\n") + 1; n != buildTailLines || strings.Contains(msg, "step 1\n") ||
+			strings.Contains(msg, "hunter2") || strings.Contains(msg, "npm_aaaa") || strings.Contains(msg, "\x1b") {
+			t.Fatalf("Build error (%d lines of output):\n%s", n, msg)
+		}
+		if log != nil && log.String() != out.String()+"fake failure" {
+			t.Fatalf("the build log got %q", log.String())
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b := &Builder{Docker: docker(), Store: testStore(t)}
+	_, err := b.Build(ctx, testSpec(harness.ClaudeCode), BuildOptions{})
+	var buildErr *BuildError
+	if err == nil || errors.As(err, &buildErr) || strings.Contains(err.Error(), "step 200") {
+		t.Fatalf("interrupted Build error = %v", err)
 	}
 }
 
