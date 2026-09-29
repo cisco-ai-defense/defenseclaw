@@ -1597,6 +1597,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		_, _ = env.Runner.Run(ctx, "systemctl", append([]string{"reset-failed"}, names...)...)
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	// Runtime leftovers of the stopped services: the sensor helper's socket
+	// directory and the gateway's plugin cache (its TempDir is /tmp: the
+	// service manager sets no TMPDIR).
+	_ = os.RemoveAll(env.P(env.Layout.SensorSocketDir))
+	if record != nil && record.ServiceUID > 0 {
+		_ = os.RemoveAll(env.P(fmt.Sprintf("/tmp/defenseclaw-plugin-cache-%d", record.ServiceUID)))
+	}
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
