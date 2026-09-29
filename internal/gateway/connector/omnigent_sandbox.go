@@ -54,6 +54,14 @@ var OmnigentSandboxPolicyModulePath = path.Join(OmnigentSandboxPolicyDir, omnige
 // still passes the DefenseClaw policy.
 var OmnigentSandboxAgentPath = path.Join(OmnigentSandboxPolicyDir, "agent")
 
+// omnigentSandboxAgent is the sandbox agent's spec. A DefenseClaw deny
+// reaches the user only through the model: OmniGent 0.13.0's TUI hides tool
+// results until Ctrl+T (with no setting to show them), the deny reason
+// travels only as the denied call's tool result, a policy result has no
+// field meant for the user (result, reason, data, state_updates,
+// set_labels), and the TUI does not render the server's
+// response.policy_denied event. So the prompt asks the model to pass the
+// reason on.
 const omnigentSandboxAgent = `# DefenseClaw OmniGent agent for OpenShell sandboxes (root-owned).
 # OpenShell is the sandbox: OmniGent's own bubblewrap sandbox cannot nest
 # inside it, so the shell runs in the caller process. Every request, model
@@ -76,6 +84,11 @@ prompt: |
   You are a coding agent working in the current directory, which is the
   user's project inside a DefenseClaw OpenShell sandbox. Use your sys_os_*
   tools to read, edit and run what the task needs.
+
+  DefenseClaw checks every tool call, and the user's terminal does not show
+  tool results. When a tool result says the call was denied by policy, tell
+  the user that DefenseClaw blocked it and quote the reason the result
+  gives, word for word, before you go on.
 `
 
 // SandboxArtifacts renders the OmniGent overlay: the policy bridge and the
@@ -143,6 +156,13 @@ func renderOmnigentSandboxPolicy(rt resolvedSandboxTarget) ([]byte, error) {
 // the REPL starts (omnigent-ui-sdk 0.13.0 _config.update_user_config), so
 // the image pins OmniGent's dark theme; /theme cannot change it inside a
 // sandbox.
+//
+// telemetry: false switches off OmniGent's usage telemetry, which otherwise
+// fetches config.omnigent-telemetry.io at every server start and posts
+// events to its ingestion host (omnigent 0.13.0 telemetry/client.py). Every
+// OmniGent process reads this file through OMNIGENT_CONFIG_HOME, including
+// the runner, whose environment OmniGent strips to an allowlist that an
+// environment switch such as OMNIGENT_DISABLE_TELEMETRY is not on.
 func omnigentSandboxConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"default_agent":  OmnigentSandboxAgentPath,
@@ -150,9 +170,18 @@ func omnigentSandboxConfig() map[string]interface{} {
 		"policies": map[string]interface{}{
 			omnigentPolicyConfigKey: map[string]interface{}{"type": "function", "handler": omnigentPolicyHandler},
 		},
-		"tui": map[string]interface{}{"theme": "dark"},
+		"telemetry": false,
+		"tui":       map[string]interface{}{"theme": "dark"},
 	}
 }
+
+// omnigentThemeNote explains, in the file OmniGent's /theme error names
+// ("Failed to write TUI user config at /etc/omnigent/config.yaml: [Errno
+// 13] Permission denied"), why the theme cannot change. The file cannot be
+// made writable, nor its directory (the TUI writes a temporary file there
+// and renames it over this one): it carries DefenseClaw's policy.
+const omnigentThemeNote = "# OmniGent's /theme cannot change the TUI theme in a sandbox: it writes this file,\n" +
+	"# which holds DefenseClaw's policy and stays root-owned, so the theme is pinned to dark.\n"
 
 func renderOmnigentSandboxConfig(rt resolvedSandboxTarget) ([]byte, error) {
 	body, err := yaml.Marshal(omnigentSandboxConfig())
@@ -160,13 +189,14 @@ func renderOmnigentSandboxConfig(rt resolvedSandboxTarget) ([]byte, error) {
 		return nil, fmt.Errorf("marshal OmniGent sandbox config: %w", err)
 	}
 	header := "# DefenseClaw managed OmniGent server configuration (OpenShell sandbox image, root-owned).\n" +
-		"# Read through OMNIGENT_CONFIG_HOME=" + OmnigentSandboxConfigHome + "; policy contract " + rt.contract.ContractID + ".\n"
+		"# Read through OMNIGENT_CONFIG_HOME=" + OmnigentSandboxConfigHome + "; policy contract " + rt.contract.ContractID + ".\n" +
+		omnigentThemeNote
 	return append([]byte(header), body...), nil
 }
 
 // verifyOmnigentSandboxConfig reads the configuration back and requires the
-// DefenseClaw module, its server-wide policy and the pinned TUI theme, and
-// nothing else.
+// DefenseClaw module, its server-wide policy, telemetry off and the pinned
+// TUI theme, and nothing else.
 func verifyOmnigentSandboxConfig(data []byte) error {
 	var cfg map[string]interface{}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

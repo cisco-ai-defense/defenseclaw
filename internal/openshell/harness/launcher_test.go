@@ -330,7 +330,7 @@ func TestLaunchersPinTheirEnvironment(t *testing.T) {
 		{"omnigent", OmniGent, []string{"DEFENSECLAW_EGRESS_URL=http://10.200.0.1:28772", "DEFENSECLAW_SANDBOX_TOKEN=" + omnigentToken,
 			"OMNIGENT_CONFIG=/tmp/elsewhere.yaml", "OMNIGENT_RUNNER_ENV_PASSTHROUGH=MY_TOOL_VAR"}, []string{"run", "-p", "hi"},
 			map[string]string{"OMNIGENT_CONFIG": unset, "OMNIGENT_CONFIG_HOME": connector.OmnigentSandboxConfigHome, "OMNIGENT_NO_UPDATE_CHECK": "1",
-				"OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN": omnigentToken, "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_TOOL_VAR," + omnigentRunnerProxyPassthrough,
+				"OMNIGENT_DISABLE_TELEMETRY": "1", "OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN": omnigentToken, "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_TOOL_VAR," + omnigentRunnerProxyPassthrough,
 				"HTTPS_PROXY": "http://10.200.0.1:28772", "NO_PROXY": loopback, "no_proxy": loopback}},
 		// Without the egress proxy nothing extra is passed through, and a
 		// token that is not placeholder-shaped is not copied.

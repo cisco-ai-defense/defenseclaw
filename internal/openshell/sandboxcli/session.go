@@ -844,6 +844,9 @@ var continueArgs = map[string]string{
 	"kiro":       "--resume",
 	"hermes":     "--continue",
 	"openhands":  "--resume --last",
+	// OmniGent's run --continue picks the sandbox agent's latest
+	// conversation.
+	"omnigent": "--continue",
 }
 
 // ownResumeHint is how the resume command a harness prints as it exits
@@ -859,6 +862,7 @@ var ownResumeHint = map[string]string{
 	"kiro":       "kiro-cli --resume-id",
 	"hermes":     "hermes --resume",
 	"openhands":  "openhands --resume",
+	"omnigent":   "omnigent run",
 }
 
 // continueHint names, last and not dimmed, the command that continues this

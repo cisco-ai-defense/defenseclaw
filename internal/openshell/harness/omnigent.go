@@ -77,7 +77,7 @@ var OmniGent = register(&Spec{
 			}
 			argv = append(argv, cp.LaunchArgs...)
 		}
-		return append(argv, opts.Args...), nil
+		return append(argv, omnigentPassThrough(opts.Args)...), nil
 	},
 	credentialProfiles: []CredentialProfile{
 		{
@@ -106,13 +106,49 @@ var OmniGent = register(&Spec{
 		"refuse --server with a URL and a project .omnigent/config.yaml that sets server, as OmniGent's YAML loader reads it, or that the loader cannot parse (sessions stay on the local server, which loads DefenseClaw's policy)",
 		"stop, and stop reusing, any OmniGent server or host daemon its records in ~/.omnigent name that is not the pinned OmniGent started with that configuration (OmniGent reuses a live one whatever configuration it started with)",
 		"copy BEDROCK_MANTLE_API_KEY into OPENAI_API_KEY for the Mantle profile",
-		"set OMNIGENT_NO_UPDATE_CHECK=1 (the pinned install cannot upgrade itself)",
+		"set OMNIGENT_NO_UPDATE_CHECK=1 (the pinned install cannot upgrade itself) and OMNIGENT_DISABLE_TELEMETRY=1 (the configuration also sets telemetry: false, which the runner reads too)",
 	},
 })
 
 // omnigentMantleModel is the Mantle model the Bedrock profile defaults to:
 // an OpenAI open-weight model Mantle serves on its Responses route.
 const omnigentMantleModel = "openai.gpt-oss-20b"
+
+// omnigentRunValueOptions are the options of OmniGent 0.13.0's run command
+// that take a value; -r/--resume takes one only when an argument that is
+// not an option follows.
+var omnigentRunValueOptions = map[string]bool{
+	"--tools": true, "--harness": true, "--from-openclaw": true, "--model": true, "-p": true, "--prompt": true,
+	"--system-prompt": true, "--fork": true, "--server": true, "--profile": true,
+}
+
+// omnigentPassThrough drops OmniGent's run subcommand from the pass-through
+// arguments. The launch runs `omnigent run` itself, and the shell wrapper
+// forwards `omnigent run …` as typed (OmniGent's own exit hint, `Resume:
+// omnigent run <agent> --model <m> --resume <id>`, among them), which would
+// start `omnigent run run …`, with "run" taken for the agent. Only the
+// first positional argument is dropped, and only when it is "run"; the
+// values of run's options are skipped to find it.
+func omnigentPassThrough(args []string) []string {
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "run":
+			return append(append([]string(nil), args[:i]...), args[i+1:]...)
+		case a == "--":
+			return args
+		case omnigentRunValueOptions[a]:
+			i++
+		case a == "-r" || a == "--resume":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+			}
+		case !strings.HasPrefix(a, "-"):
+			// The agent.
+			return args
+		}
+	}
+	return args
+}
 
 // hasFlag reports whether args pass the long option name, alone or as
 // name=value.
@@ -139,7 +175,10 @@ set -u
 ` + launcherPreamble + pythonStartupScrub + `unset OMNIGENT_CONFIG OMNIGENT_DATA_DIR OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN
 OMNIGENT_CONFIG_HOME=` + shellQuote(connector.OmnigentSandboxConfigHome) + `
 OMNIGENT_NO_UPDATE_CHECK=1
-export OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK
+# Usage telemetry is off in the configuration, which every OmniGent process
+# reads; the switch covers the CLI, the host daemon and the server as well.
+OMNIGENT_DISABLE_TELEMETRY=1
+export OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DISABLE_TELEMETRY
 # The Mantle profile delivers its key under its own name; the sandbox agent's
 # openai-agents harness reads OPENAI_API_KEY.
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${BEDROCK_MANTLE_API_KEY:-}" ]; then
