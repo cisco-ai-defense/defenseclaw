@@ -1200,7 +1200,9 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 		return fmt.Errorf("workspace: copy %s was not uploaded", name)
 	}
 	script := remoteGitPrelude(rec) + "\n" + strings.Join([]string{
-		`test -d "$W"`,
+		// Say which: set -e would end the script without a word.
+		`test -d "$W" || { echo "$W is missing: the copy is not in the sandbox" >&2; exit 1; }`,
+		`test -d "$G" || { echo "$G is missing: the copy has no git directory" >&2; exit 1; }`,
 		`mkdir -p "$D"`,
 		`g update-ref ` + baselineRef + ` ` + rec.Baseline,
 		`b=$(g rev-parse -q --verify '` + baselineRef + `^{commit}')`,
@@ -1215,7 +1217,7 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("workspace: set the baseline in the sandbox (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
+		return fmt.Errorf("workspace: set the baseline in the sandbox (exit %d): %s", res.ExitCode, stderrReason(res.Stderr))
 	}
 	kv := parseKV(res.Stdout)
 	if kv["baseline"] != rec.Baseline {
