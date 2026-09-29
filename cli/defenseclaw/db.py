@@ -27,6 +27,7 @@ import math
 import os
 import sqlite3
 import stat
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -239,6 +240,15 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "runtime": {"", "disable", "enable"},
 }
 _SUMMARY_DETAILS_BYTES = 4096
+
+# Live Store connections in this process, by database path. A connection
+# whose POSIX lock was dropped looks absent to a peer process that closes the
+# database: the peer checkpoints and unlinks the WAL and SHM files under it,
+# and the live connection's later commits go to that unlinked WAL and corrupt
+# audit.db once checkpointed. Store therefore opens and closes audit.db for
+# its permission fix only while no Store here has it open.
+_OPEN_STORES: dict[str, int] = {}
+_OPEN_STORES_LOCK = threading.Lock()
 _ALERT_EVENT_ELIGIBILITY_SQL = """(
     bucket IS NULL
     OR (bucket = 'security.finding' AND event_name = 'finding.observed')
@@ -275,26 +285,9 @@ class Store:
         self._audit_schema_version: int | None = None
         self._audit_event_columns_cache: frozenset[str] = frozenset()
         self._audit_tables_cache: frozenset[str] = frozenset()
+        self._open_key: str | None = None
         newly_created = not read_only and self._db_will_be_created(db_path)
         connect_path = self._read_only_uri(db_path) if read_only else db_path
-        self.db = sqlite3.connect(
-            connect_path,
-            detect_types=sqlite3.PARSE_DECLTYPES,
-            timeout=timeout,
-            uri=read_only,
-        )
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.create_function("dc_hook_connector", 3, connector_hook_connector)
-        self.db.create_function("dc_hook_decision", 3, aggregate_connector_hook_decision)
-        if read_only:
-            # ``mode=ro`` prevents file writes while ``query_only`` also
-            # rejects accidental mutations through writable attached DBs.
-            # In particular, do not run the journal-mode pragma here: a TUI
-            # reader must never attempt to change writer-owned journal state.
-            self.db.execute("PRAGMA query_only=ON")
-        else:
-            self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         # The audit DB stores audit events, scan results, findings, raw
         # scanner JSON, target paths, and action decisions, so it must be
         # private to the operator / service account. sqlite3.connect()
@@ -302,8 +295,43 @@ class Store:
         # world- or group-readable (F-0083). Pin the file to owner-only
         # (0600) and, for a DB we just created, drop world access on the
         # parent directory so a different local user cannot traverse to it.
-        if not read_only:
-            self._harden_permissions(db_path, newly_created)
+        #
+        # The fix opens and closes audit.db, and on POSIX closing a descriptor
+        # drops every lock this process holds on the file, SQLite's included
+        # (see _OPEN_STORES). There it runs before connecting, and only while
+        # no other Store here has the file open. Windows keeps SQLite's locks
+        # per handle, so it still hardens after connecting.
+        if self._is_disk_path(db_path) and not db_path.startswith("file:"):
+            self._open_key = os.path.realpath(db_path)
+        with _OPEN_STORES_LOCK:
+            if not read_only and os.name != "nt" and not _OPEN_STORES.get(self._open_key or ""):
+                self._harden_permissions(db_path, newly_created)
+            if self._open_key is not None:
+                _OPEN_STORES[self._open_key] = _OPEN_STORES.get(self._open_key, 0) + 1
+        try:
+            self.db = sqlite3.connect(
+                connect_path,
+                detect_types=sqlite3.PARSE_DECLTYPES,
+                timeout=timeout,
+                uri=read_only,
+            )
+            self.db.execute("PRAGMA foreign_keys=ON")
+            self.db.create_function("dc_hook_connector", 3, connector_hook_connector)
+            self.db.create_function("dc_hook_decision", 3, aggregate_connector_hook_decision)
+            if read_only:
+                # ``mode=ro`` prevents file writes while ``query_only`` also
+                # rejects accidental mutations through writable attached DBs.
+                # In particular, do not run the journal-mode pragma here: a TUI
+                # reader must never attempt to change writer-owned journal state.
+                self.db.execute("PRAGMA query_only=ON")
+            else:
+                self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
+            if not read_only and os.name == "nt":
+                self._harden_permissions(db_path, newly_created)
+        except BaseException:
+            self._release_open_key()
+            raise
 
     @classmethod
     def open_read_only(cls, db_path: str, *, timeout: float = 0.1) -> Store:
@@ -345,6 +373,16 @@ class Store:
     def _harden_permissions(self, db_path: str, newly_created: bool) -> None:
         if not self._is_disk_path(db_path):
             return
+        if newly_created and os.name != "nt":
+            # POSIX hardens before SQLite opens the file, so create it here,
+            # owner-only from the start.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            try:
+                os.close(os.open(db_path, flags, 0o600))
+            except FileExistsError:
+                pass
+            except FileNotFoundError:
+                return  # no parent directory: sqlite3.connect reports it
         # Always tighten the DB file itself to owner read/write only.
         # This is functionally safe for pre-existing DBs (the owner keeps
         # full access) while closing the world/group-readable hole.
@@ -390,6 +428,19 @@ class Store:
 
     def close(self) -> None:
         self.db.close()
+        self._release_open_key()
+
+    def _release_open_key(self) -> None:
+        key = getattr(self, "_open_key", None)
+        self._open_key = None
+        if key is None:
+            return
+        with _OPEN_STORES_LOCK:
+            remaining = _OPEN_STORES.get(key, 0) - 1
+            if remaining > 0:
+                _OPEN_STORES[key] = remaining
+            else:
+                _OPEN_STORES.pop(key, None)
 
     # -- Old list migration (matches Go migrateOldLists) --
 
