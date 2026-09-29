@@ -178,6 +178,12 @@ type GatewayConfigurator struct {
 	// Apply checks after a restart that switches it (default: discover the
 	// Discover registration, dial it and read GetGatewayInfo).
 	RunningDriver func(context.Context) (Driver, error)
+	// FlushSandboxes runs before every restart, which stops every sandbox
+	// on the gateway: where the running driver's stop keeps nothing the
+	// workload has not synced (the MicroVM driver), it flushes the disk of
+	// every ready sandbox, and an error refuses the restart (default:
+	// discover the Discover registration, dial it and FlushSandboxes).
+	FlushSandboxes func(context.Context) error
 }
 
 func (g *GatewayConfigurator) defaults() error {
@@ -225,6 +231,9 @@ func (g *GatewayConfigurator) defaults() error {
 	}
 	if g.RunningDriver == nil {
 		g.RunningDriver = func(ctx context.Context) (Driver, error) { return runningDriver(ctx, g.Discover) }
+	}
+	if g.FlushSandboxes == nil {
+		g.FlushSandboxes = func(ctx context.Context) error { return flushGatewaySandboxes(ctx, g.Discover) }
 	}
 	return nil
 }
@@ -900,7 +909,9 @@ type GatewayApplyResult struct {
 
 // Apply writes the plan, restarts the gateway and waits for it. A file
 // that changed since Plan, a TOML preflight failure, an unsafe path or a
-// gateway that fails Plan's checks aborts before anything is written.
+// gateway that fails Plan's checks aborts before anything is written. A
+// running sandbox that cannot be flushed before the restart
+// (FlushSandboxes) restores the previous files without a restart.
 // When the restart or the health check fails, the restarted gateway with
 // bind mounts no longer turns away a client without a certificate, or it
 // does not run the compute driver the plan configures, the previous files
@@ -961,7 +972,13 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 		}
 		res.Files = append(res.Files, applied)
 	}
-	if err := g.Restart(ctx); err != nil {
+	// The restart stops every sandbox on the gateway: their disks are
+	// flushed first where its driver's stop would not keep what they
+	// wrote, and one that cannot be flushed refuses it.
+	if err := g.FlushSandboxes(ctx); err != nil {
+		return res, g.rollbackAfter(ctx, res, err, false)
+	}
+	if err := g.restart(ctx); err != nil {
 		return res, g.rollbackAfter(ctx, res, err, true)
 	}
 	if plan.BindMounts {
@@ -1104,7 +1121,10 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 		return fmt.Errorf("%w; restoring the previous configuration also failed: %v", cause, err)
 	}
 	if restart {
-		if err := g.Restart(ctx); err != nil {
+		// The gateway must go back to its previous configuration: a
+		// sandbox that cannot be flushed does not hold that up.
+		_ = g.FlushSandboxes(ctx)
+		if err := g.restart(ctx); err != nil {
 			// The service manager refused both restarts (brew services
 			// without the formula, for one): the gateway may never have
 			// stopped. Only one that does not answer is down.
@@ -1128,13 +1148,18 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if res == nil || len(res.Files) == 0 {
 		return nil
 	}
+	// Before anything changes: a sandbox that cannot be flushed refuses
+	// the restart.
+	if err := g.FlushSandboxes(ctx); err != nil {
+		return err
+	}
 	if err := g.markRestartPending(); err != nil {
 		return err
 	}
 	if err := g.restore(res); err != nil {
 		return err
 	}
-	return g.Restart(ctx)
+	return g.restart(ctx)
 }
 
 func (g *GatewayConfigurator) restartPendingPath() string {
@@ -1265,11 +1290,22 @@ func (g *GatewayConfigurator) answers(ctx context.Context) bool {
 	return g.VerifyGateway(ctx) == nil
 }
 
-// Restart restarts the gateway service and waits until it is healthy.
+// Restart flushes the disks of the gateway's running sandboxes where its
+// driver's stop would not (FlushSandboxes), restarts the gateway service
+// and waits until it is healthy. A sandbox that could not be flushed
+// refuses the restart.
 func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	if err := g.defaults(); err != nil {
 		return err
 	}
+	if err := g.FlushSandboxes(ctx); err != nil {
+		return err
+	}
+	return g.restart(ctx)
+}
+
+// restart restarts the gateway service and waits until it is healthy.
+func (g *GatewayConfigurator) restart(ctx context.Context) error {
 	c := g.restartCommand()
 	if out, err := g.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
 		return fmt.Errorf("%w: %v: %s", errRestartCommand, err, strings.TrimSpace(string(out)))
@@ -1279,6 +1315,68 @@ func (g *GatewayConfigurator) Restart(ctx context.Context) error {
 	}
 	g.clearRestartPending()
 	return nil
+}
+
+// ErrUnflushed means the gateway was not restarted: the disks of some of
+// its running sandboxes could not be flushed first.
+var ErrUnflushed = errors.New("openshell: the gateway was not restarted, because the disks of sandboxes running on it could not be flushed first")
+
+// sandboxFlushWait bounds sync(1) in one sandbox.
+const sandboxFlushWait = 20 * time.Second
+
+// FlushSandboxes runs sync(1) in every ready sandbox of the gateway c
+// talks to when its compute driver's stop does not keep what a workload
+// has not synced (Driver.StopFlushes). A gateway restart stops all of its
+// sandboxes, and a MicroVM stopped without a flush brings what it wrote
+// since its last one back empty (OpenShell 0.1.1). A gateway that does
+// not answer runs nothing a flush could reach; one that answers but whose
+// sandboxes could not be listed or flushed fails with ErrUnflushed,
+// naming them.
+func FlushSandboxes(ctx context.Context, c Client) error {
+	info, err := c.GatewayInfo(ctx)
+	if err != nil {
+		return nil
+	}
+	if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
+		return nil
+	}
+	list, err := c.ListSandboxes(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w (they could not be listed: %v)", ErrUnflushed, err)
+	}
+	var failed []string
+	for _, sb := range list {
+		if sb == nil || sb.Status.Phase != PhaseReady {
+			continue
+		}
+		res, err := c.Exec(ctx, sb.Name, []string{"/bin/sync"}, ExecOptions{Timeout: sandboxFlushWait, Attempts: 1, MaxOutputBytes: 256})
+		if err == nil && res.ExitCode != 0 {
+			err = fmt.Errorf("sync(1) exited with status %d", res.ExitCode)
+		}
+		if err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", sb.Name, err))
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%w (%s): a MicroVM stopped without a flush brings back empty what it wrote since its last one; "+
+			"stop them first, then try again", ErrUnflushed, strings.Join(failed, "; "))
+	}
+	return nil
+}
+
+// flushGatewaySandboxes is FlushSandboxes on the gateway of opts. A
+// gateway that cannot be reached has no sandbox a flush could reach.
+func flushGatewaySandboxes(ctx context.Context, opts DiscoverOptions) error {
+	reg, err := Discover(opts)
+	if err != nil {
+		return nil
+	}
+	c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	return FlushSandboxes(ctx, c)
 }
 
 // ServiceState is the gateway service as its manager reports it.

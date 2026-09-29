@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -342,5 +343,105 @@ func TestGatewayConfigSeedsASharedHomebrewPrefix(t *testing.T) {
 	}
 	if st, err := f.cfg.Read(); err != nil || st.TOMLPath != dirTOML || st.ComputeDriver != openshell.DriverVM {
 		t.Fatalf("after Apply: %+v, %v", st, err)
+	}
+}
+
+// TestFlushSandboxesBeforeARestart: a restart stops every sandbox on the
+// gateway, and a MicroVM stopped without a flush brings back empty what
+// it wrote since its last one (OpenShell 0.1.1). On the vm driver every
+// ready sandbox runs sync(1) first, of every owner, and one that cannot
+// be flushed refuses the restart; the docker driver's stop keeps what a
+// container wrote.
+func TestFlushSandboxesBeforeARestart(t *testing.T) {
+	gateway := func(t *testing.T, d openshell.ComputeDriver, phases map[string]openshell.SandboxPhase) *openshelltest.Fake {
+		t.Helper()
+		f := openshelltest.New(openshelltest.WithDriver(d))
+		c := f.Client(openshell.ClientOptions{})
+		for name, phase := range phases {
+			if _, err := c.CreateSandbox(context.Background(), name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.SetPhase(openshell.DefaultWorkspace, name, phase); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return f
+	}
+	flushed := func(f *openshelltest.Fake) []string {
+		var out []string
+		for _, c := range f.ExecCalls() {
+			if strings.Join(c.Command, " ") == "/bin/sync" {
+				out = append(out, c.Sandbox)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	phases := map[string]openshell.SandboxPhase{"dc-a": openshell.PhaseReady, "dc-b": openshell.PhaseStopped, "theirs": openshell.PhaseReady}
+
+	vm := gateway(t, openshell.DriverVM, phases)
+	if err := openshell.FlushSandboxes(context.Background(), vm.Client(openshell.ClientOptions{})); err != nil {
+		t.Fatal(err)
+	}
+	if got := flushed(vm); !slices.Equal(got, []string{"dc-a", "theirs"}) {
+		t.Fatalf("flushed %v, want the ready ones", got)
+	}
+
+	docker := gateway(t, openshell.DriverDocker, phases)
+	if err := openshell.FlushSandboxes(context.Background(), docker.Client(openshell.ClientOptions{})); err != nil || len(flushed(docker)) != 0 {
+		t.Fatalf("docker: %v, flushed %v", err, flushed(docker))
+	}
+
+	stuck := gateway(t, openshell.DriverVM, phases)
+	stuck.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if call.Sandbox == "theirs" {
+			return openshelltest.ExecResponse{ExitCode: 1}
+		}
+		return openshelltest.ExecResponse{}
+	})
+	err := openshell.FlushSandboxes(context.Background(), stuck.Client(openshell.ClientOptions{}))
+	if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "theirs: sync(1) exited with status 1") || strings.Contains(err.Error(), "dc-a:") {
+		t.Fatalf("flush with a stuck sandbox = %v", err)
+	}
+
+	// A gateway that does not answer has nothing a flush could reach.
+	down := gateway(t, openshell.DriverVM, phases)
+	down.FailNext(openshelltest.MethodGatewayInfo, errors.New("connection refused"))
+	if err := openshell.FlushSandboxes(context.Background(), down.Client(openshell.ClientOptions{})); err != nil || len(flushed(down)) != 0 {
+		t.Fatalf("gateway down: %v, flushed %v", err, flushed(down))
+	}
+}
+
+// TestGatewayConfigFlushesBeforeTheRestart: every restart flushes first,
+// and a sandbox that cannot be flushed refuses it: Apply leaves the
+// previous configuration in place without restarting, and Restart and
+// Rollback do not restart.
+func TestGatewayConfigFlushesBeforeTheRestart(t *testing.T) {
+	f := newGatewayFixture(t)
+	running := openshell.DriverVM
+	prefix := f.onHomebrew(t, homebrewTOML, &running)
+	f.flush = fmt.Errorf("%w (dc-a: exec relay closed)", openshell.ErrUnflushed)
+	_, err := f.apply(f.plan(t, microVMs))
+	if !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "previous configuration was restored") || f.brewRestarts() != 0 || f.flushes != 1 {
+		t.Fatalf("Apply = %v (restarts %d, flushes %d)", err, f.brewRestarts(), f.flushes)
+	}
+	if got := readFile(t, filepath.Join(prefix, "gateway.toml")); got != homebrewTOML {
+		t.Fatalf("gateway.toml not restored:\n%s", got)
+	}
+	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || f.brewRestarts() != 0 {
+		t.Fatalf("Restart = %v (restarts %d)", err, f.brewRestarts())
+	}
+
+	f.flush = nil
+	res, err := f.apply(f.plan(t, microVMs))
+	if err != nil || f.brewRestarts() != 1 || f.flushes != 3 {
+		t.Fatalf("Apply = %v (restarts %d, flushes %d)", err, f.brewRestarts(), f.flushes)
+	}
+	f.flush = fmt.Errorf("%w (dc-a: exec relay closed)", openshell.ErrUnflushed)
+	if err := f.cfg.Rollback(context.Background(), res); !errors.Is(err, openshell.ErrUnflushed) || f.brewRestarts() != 1 {
+		t.Fatalf("Rollback = %v (restarts %d)", err, f.brewRestarts())
+	}
+	if st, _ := f.cfg.Read(); st.ComputeDriver != openshell.DriverVM {
+		t.Fatalf("a refused rollback changed the configuration: %+v", st)
 	}
 }

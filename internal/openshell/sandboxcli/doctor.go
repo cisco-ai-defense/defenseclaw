@@ -351,10 +351,26 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 	rep := a.runDoctor(ctx)
 	if o.Fix {
 		outcomes, err := rep.ApplyFixes(ctx, func(c openshell.Check) (bool, error) {
-			if o.Output == OutputJSON {
-				return o.Yes, nil
+			// A fix that restarts the gateway stops every sandbox running
+			// on it, of every owner. Where the driver's stop keeps only
+			// what was flushed (MicroVMs), with any running (or none
+			// known) it is a no by default, and --yes takes that default.
+			def := true
+			if d, _ := openshell.LookupDriver(string(rep.Driver)); c.Fix.RestartsGateway && !d.StopFlushes {
+				if why := a.restartStops(ctx); why != "" {
+					def = false
+					if o.Output != OutputJSON {
+						a.warn(c.Title + ": " + why)
+						if o.Yes {
+							a.note("not fixed with --yes while sandboxes run on the gateway; stop them, or run `" + CommandName + " doctor --fix` on a terminal")
+						}
+					}
+				}
 			}
-			return a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), true, o.Yes)
+			if o.Output == OutputJSON {
+				return o.Yes && def, nil
+			}
+			return a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), def, o.Yes)
 		})
 		if err != nil {
 			return err

@@ -1035,6 +1035,67 @@ func TestDoctorJudgesMicroVMsAgainstTheAdminMaximum(t *testing.T) {
 	has(t, ta.output(), "connected to OpenShell 0.1.1 gateway openshell (MicroVM driver)")
 }
 
+// TestDoctorFixAsksBeforeARestartStopsSandboxes: a fix that restarts a
+// MicroVM gateway stops every sandbox running on it, once its disk is
+// flushed. With none running it is a yes by default, as every fix; with
+// some running it names them and is a no by default, which --yes takes.
+// On docker, whose stop keeps what a container wrote, nothing changes.
+func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
+	applied := 0
+	on := func(driver openshell.ComputeDriver) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+		return hostReport(func(r *openshell.DoctorReport) {
+			r.Driver = driver
+			r.Checks = append(r.Checks, openshell.Check{ID: openshell.CheckIDVMResources, Title: "MicroVM resources", Status: openshell.StatusWarn,
+				Detail: "every MicroVM gets 2 vCPUs", Fix: &openshell.Fix{Summary: "raise them and restart the gateway", Automatic: true, RestartsGateway: true,
+					Apply: func(context.Context) error { applied++; return nil }}})
+		})
+	}
+	report := on(openshell.DriverVM)
+	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
+	const stops = "MicroVM resources: this restarts the OpenShell gateway, which stops the 1 sandbox running on it (dc-claude-theirs-a), once their disks are flushed"
+
+	ta := newTestApp(t, "\n")
+	ta.IO.TTY = true
+	ta.HostDoctor = report
+	runningOn(t, ta, 1)
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true})
+	has(t, ta.output(), stops, question+" [y/N]")
+	if applied != 0 {
+		t.Fatalf("the default applied the fix %d times", applied)
+	}
+
+	ta = newTestApp(t, "")
+	ta.HostDoctor = report
+	runningOn(t, ta, 1)
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	has(t, ta.output(), stops, "not fixed with --yes while sandboxes run on the gateway")
+	_ = ta.fresh().RunDoctor(bg, DoctorOptions{Fix: true, Yes: true, Output: OutputJSON})
+	if applied != 0 {
+		t.Fatalf("--yes applied the fix %d times", applied)
+	}
+
+	// None running: yes by default.
+	ta = newTestApp(t, "\n")
+	ta.IO.TTY = true
+	ta.HostDoctor = report
+	runningOn(t, ta, 0)
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true})
+	has(t, ta.output(), question+" [Y/n]")
+	lacks(t, ta.output(), "this restarts the OpenShell gateway")
+	if applied != 1 {
+		t.Fatalf("applied %d times", applied)
+	}
+
+	ta = newTestApp(t, "")
+	ta.HostDoctor = on(openshell.DriverDocker)
+	runningOn(t, ta, 1)
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	lacks(t, ta.output(), "this restarts the OpenShell gateway", "not fixed with --yes")
+	if applied != 2 {
+		t.Fatalf("docker: applied %d times", applied)
+	}
+}
+
 // TestDoctorVerdict pins the doctor's last line: not "ready" while
 // sandboxes are turned off, and no image to build for a harness the
 // organization forbids.

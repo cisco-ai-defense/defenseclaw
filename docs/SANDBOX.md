@@ -131,6 +131,10 @@ not the driver's name or `runtime.GOOS`.
   and a record is re-resolved with its own driver, never the connected
   gateway's. Setup and the doctor, before any gateway answers, read the
   configured driver from the effective `gateway.env` and `gateway.toml`.
+  A connection outlives a gateway restart, which setup or `doctor --fix` can
+  make onto the other driver: create, start and reconcile ask the gateway
+  again, the status asks once its last answer is five seconds old, and a
+  gateway that now runs another driver is connected to again.
 - **No host mounts on vm.** libkrun attaches no shared folders, and the vm
   `driver_config` takes only `gpu_device_ids`. So every vm sandbox is in copy
   mode: the packs resolver clamps `workdir.mode` to copy with the constraint
@@ -177,6 +181,14 @@ not the driver's name or `runtime.GOOS`.
   keyed by image ID and kept by OpenShell); a cached one starts in seconds.
   The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
   its "about a minute" note.
+- **Stops.** A MicroVM stopped without a flush brings back empty what its
+  workload wrote since the last one (OpenShell 0.1.1; `StopFlushes` is off
+  for vm). The daemon's stop runs `sync` in the sandbox first. Every gateway
+  restart that setup or the doctor makes (`GatewayConfigurator.Restart`, and
+  the restart of an `Apply`) first runs it in every ready sandbox on the
+  gateway, of every owner, and a sandbox that cannot be flushed refuses the
+  restart. On vm, `doctor --fix` asks before a fix that restarts the gateway
+  while sandboxes run on it, no by default, and `--yes` takes that default.
 - **Switching.** A record made on the other driver is never started, gc'd or
   released as if it were this gateway's: `start` refuses it before any other
   check, and `delete` releases DefenseClaw's host state for it.

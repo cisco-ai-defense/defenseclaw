@@ -518,9 +518,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 // default), and --yes, --non-interactive or no terminal restart only with
 // --restart-gateway. A gateway whose sandboxes cannot be listed counts as
 // running some. microVM is a restart on the MicroVM driver, whose running
-// sandboxes stop and come back with the gateway; switching one onto it,
-// after which no sandbox made on the docker driver can start, so any
-// sandbox on the gateway, running or not, is asked about.
+// sandboxes have their disks flushed and stop (the gateway's Restart
+// flushes them: a MicroVM stopped without a flush loses what it wrote
+// since its last one); switching one onto it, after which no sandbox made
+// on the docker driver can start, so any sandbox on the gateway, running
+// or not, is asked about.
 func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume, microVM, switching bool) (bool, error) {
 	if o.RestartGateway {
 		return true, nil
@@ -540,11 +542,27 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	case switching:
 		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it")
 	case microVM:
-		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes stop and are restored when it returns, and " + what)
+		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes have their disks flushed and stop, and " + what)
 	default:
 		a.warn("applying this restarts the OpenShell gateway, which drops the connections of every sandbox on it, and " + what)
 	}
 	return a.ask("Restart the OpenShell gateway now?", false, assume)
+}
+
+// restartStops says what a restart of a MicroVM gateway does to the
+// sandboxes running on it, of every owner, for a doctor fix that restarts
+// it: "" when none runs. Their disks are flushed before they stop
+// (openshell.FlushSandboxes).
+func (a *App) restartStops(ctx context.Context) string {
+	running, known := a.runningSandboxes(ctx)
+	if known && len(running) == 0 {
+		return ""
+	}
+	what := "every sandbox running on it (they could not be listed)"
+	if known {
+		what = "the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
+	}
+	return "this restarts the OpenShell gateway, which stops " + what + ", once their disks are flushed"
 }
 
 // shortList names at most five of names.

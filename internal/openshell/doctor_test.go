@@ -151,6 +151,9 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 			RunningDriver: func(context.Context) (openshell.Driver, error) {
 				d, _ := openshell.LookupDriver(string(f.restartedOn))
 				return d, nil
+			},
+			FlushSandboxes: func(ctx context.Context) error {
+				return openshell.FlushSandboxes(ctx, f.fake.Client(openshell.ClientOptions{}))
 			}},
 		Ports:               []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
 		LandlockABI:         func() (int, error) { return 6, nil },

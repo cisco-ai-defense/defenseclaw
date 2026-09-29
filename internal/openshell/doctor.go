@@ -108,6 +108,10 @@ type Fix struct {
 	Sudo bool `json:"sudo,omitempty"`
 	// Automatic reports whether Apply is available.
 	Automatic bool `json:"automatic"`
+	// RestartsGateway marks an Apply that restarts the OpenShell gateway,
+	// which stops every sandbox running on it (their disks flushed first
+	// where the driver's stop would not keep what they wrote).
+	RestartsGateway bool `json:"restarts_gateway,omitempty"`
 	// Apply performs the fix as the current user; nil when the operator
 	// must act. Callers ask for consent first (ApplyFixes does).
 	Apply func(ctx context.Context) error `json:"-"`
@@ -825,7 +829,7 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 // (starting it again would do nothing) and starts one that is stopped.
 func (r *doctorRun) gatewayRecoveryFix() *Fix {
 	if r.service != nil && r.service.Active {
-		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	}
 	start := r.startCommand()
 	return &Fix{Summary: "start the gateway", Command: start.String(), Automatic: true, Apply: r.runAndWait(start, true)}
@@ -1074,7 +1078,7 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		// what it started with.
 		c.Status = StatusWarn
 		c.Detail = fmt.Sprintf("%s, but its configuration selects vm (OpenShell MicroVM): the gateway has not been restarted since", r.running.Name)
-		c.Fix = &Fix{Summary: "restart the gateway to run sandboxes in MicroVMs", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+		c.Fix = &Fix{Summary: "restart the gateway to run sandboxes in MicroVMs", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	case mac && r.landlock == StatusFail:
 		c.Status = StatusFail
 		c.Detail = fmt.Sprintf("%s: the Linux VM Docker runs in has no usable Landlock, so no sandbox can start on it", r.running.Name)
@@ -1100,7 +1104,7 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
-	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	if d, known := r.traits(); known && !d.HostMounts {
 		// Nothing to enable, and no reason to edit docker settings or
 		// restart the gateway for them.
@@ -1132,7 +1136,7 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		switch why := errors.Join(blocked, unverified); {
 		case why == nil:
 			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
-				Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
+				RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
 		default:
 			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
@@ -1169,7 +1173,7 @@ func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr e
 		tele.Status = StatusWarn
 		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
 		tele.Fix = &Fix{Summary: "set " + EnvTelemetryEnabled + "=" + want + " in gateway.env and restart the gateway", Automatic: true,
-			Apply: r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}})}
+			RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}})}
 	default:
 		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
 	}

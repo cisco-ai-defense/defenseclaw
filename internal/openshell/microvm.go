@@ -336,10 +336,10 @@ func (r *doctorRun) vmIdentityCheck() Check {
 		c.Detail = fmt.Sprintf("the MicroVM driver would run sandboxes as %s; DefenseClaw's images are built for %s", have, want)
 		c.Fix = &Fix{Summary: fmt.Sprintf("set sandbox_uid = %d and sandbox_gid = %d under [openshell.drivers.vm] in %s and restart the gateway "+
 			"(gateway-wide: every MicroVM sandbox on it then runs as you)", want.UID, want.GID, r.config.TOMLPath),
-			Automatic: true, Apply: r.applyGateway(GatewayChanges{VMIdentity: &want})}
+			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMIdentity: &want})}
 	case restartPending(r.config, r.service):
 		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s; restart the gateway if you have not since it changed", want, r.config.TOMLPath)
-		c.Fix = &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+		c.Fix = &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	default:
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("sandboxes run as %s, your user", want)
 	}
@@ -378,7 +378,7 @@ func (r *doctorRun) vmResourcesCheck() Check {
 		c.Status = StatusFail
 		c.Detail += "; your organization's openshell.admin.max_resources allows less, so every create is refused"
 		c.Fix = &Fix{Summary: "lower vcpus and mem_mib under [openshell.drivers.vm] in " + r.config.TOMLPath + " to the maximum and restart the gateway",
-			Automatic: true, Apply: r.applyGateway(GatewayChanges{VMResources: &lower})}
+			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMResources: &lower})}
 	default:
 		want := r.micro.Recommended
 		raise := VMResources{}
@@ -395,7 +395,7 @@ func (r *doctorRun) vmResourcesCheck() Check {
 		c.Status = StatusWarn
 		c.Detail += "; an agent that builds code may need more"
 		c.Fix = &Fix{Summary: fmt.Sprintf("raise them under [openshell.drivers.vm] in %s and restart the gateway (the disk is sparse on the host: it costs nothing until used)", r.config.TOMLPath),
-			Automatic: true, Apply: r.applyGateway(GatewayChanges{VMResources: &raise})}
+			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMResources: &raise})}
 	}
 	return c
 }
@@ -509,5 +509,5 @@ func (r *doctorRun) microVMFix() *Fix {
 	}
 	return &Fix{Summary: `run sandboxes in OpenShell MicroVMs: set compute_driver = "vm" and your user as the sandboxes' in ` + where +
 		` and restart the gateway (sandboxes made on the docker driver cannot start after the switch)`,
-		Command: "defenseclaw sandbox setup", Automatic: true, Apply: r.applyGateway(r.microVMChanges())}
+		Command: "defenseclaw sandbox setup", Automatic: true, RestartsGateway: true, Apply: r.applyGateway(r.microVMChanges())}
 }
