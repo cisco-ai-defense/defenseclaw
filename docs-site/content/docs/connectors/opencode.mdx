@@ -244,8 +244,11 @@ replaces that list, so name every harness you want:
   loads none. DefenseClaw also reports a sandbox whose hooks go silent while
   the harness is active.
 - **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
-  command line only, so the plugin also shows DefenseClaw's reason in a toast
-  (the model gets the same reason as the tool's error).
+  command line only, in red, and shows the reason only when you click that
+  line; a plugin cannot put it in the tool's output. So the plugin also
+  shows DefenseClaw's reason in a toast for 15 seconds, which says to click
+  the red line to see it again (the model gets the same reason as the
+  tool's error). The session summary counts the block too.
 - **Esc, not Ctrl-C, interrupts a turn.** Ctrl-C with an empty prompt quits
   OpenCode, also while a tool runs, and that ends the session; the banner's
   `Keys` line says so.

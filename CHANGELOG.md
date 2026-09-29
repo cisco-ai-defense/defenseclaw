@@ -349,6 +349,10 @@ deleted.
   records the pinned version as installed in `~/.config/opencode`, which
   OpenCode's install check accepts. Both drivers; the OpenCode image
   rebuilds.
+- The toast for a tool call DefenseClaw blocked in an OpenCode sandbox says
+  to click the tool's red line to see the reason again: OpenCode shows a
+  refused call's reason only there, and its plugins cannot set the tool's
+  output.
 
 ### Legacy OpenShell standalone sandbox removed
 

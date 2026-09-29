@@ -645,14 +645,18 @@ async function defenseclawPostLifecycle(event, cwd) {
   }
 }
 
-{{if .Sandbox}}// OpenCode's TUI shows a tool the plugin refused as its bare command line;
-// the thrown reason reaches only the model. A toast shows the user why.
-// Best effort and never awaited: a headless run has no TUI, and a missing
-// client or a failed request never changes the verdict.
+{{if .Sandbox}}// OpenCode's TUI (1.18.31) draws a tool the plugin refused as its bare
+// command line in the error color, and shows the thrown reason, which the
+// model gets, only once that line is clicked; a pre-tool hook cannot set
+// the tool's visible output. A toast shows the user why at once, and says
+// where the reason stays. Best effort and never awaited: a headless run has
+// no TUI, and a missing client or a failed request never changes the
+// verdict.
+const DC_TOAST_AGAIN = "Click the tool's red line in the conversation to show this again.";
 function defenseclawToast(client, reason) {
   try {
     const shown = client && client.tui && typeof client.tui.showToast === "function" &&
-      client.tui.showToast({ body: { title: "DefenseClaw blocked this tool call", message: reason, variant: "error", duration: 15000 } });
+      client.tui.showToast({ body: { title: "DefenseClaw blocked this tool call", message: reason + "\n\n" + DC_TOAST_AGAIN, variant: "error", duration: 15000 } });
     if (shown && typeof shown.catch === "function") shown.catch(() => {});
   } catch (_) {
     // No TUI to tell.
