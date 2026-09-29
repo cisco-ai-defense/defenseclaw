@@ -31,7 +31,8 @@ import (
 // hides it), or with DOCKER_BUILDKIT=0, docker falls back to the legacy
 // builder: it runs every step before the first COPY --chmod, the harness
 // install among them, and then stops with "the --chmod option requires
-// BuildKit". The image builder checks first (image.Builder).
+// BuildKit". The image builder checks first (image.Builder), and the
+// doctor reports it (CheckIDDockerBuildKit).
 
 // BuildKitArgs is the docker command that succeeds only when docker finds
 // its buildx plugin.
@@ -73,6 +74,17 @@ func BuildKitFix(goos string) string {
 	}
 	return "install Docker's buildx plugin (" + from + "), and make sure DOCKER_CONFIG, or ~/.docker when it is unset, " +
 		"is the Docker config whose cli-plugins directory has docker-buildx"
+}
+
+// BuildKitVersion is the version `docker buildx version` printed
+// ("github.com/docker/buildx v0.30.1 c6f062d…"), or "" when it names none.
+func BuildKitVersion(out []byte) string {
+	for _, f := range strings.Fields(firstOutputLine(out)) {
+		if len(f) > 1 && f[0] == 'v' && f[1] >= '0' && f[1] <= '9' {
+			return f
+		}
+	}
+	return ""
 }
 
 func firstOutputLine(out []byte) string {

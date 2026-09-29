@@ -99,7 +99,7 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	for _, c := range r.Checks {
 		got = append(got, c.ID)
 	}
-	want := []string{"platform", "user", "landlock", "docker", "docker-host-network", "docker-file-sharing", "vm-driver", "vm-identity",
+	want := []string{"platform", "user", "landlock", "docker", "docker-buildkit", "docker-host-network", "docker-file-sharing", "vm-driver", "vm-identity",
 		"vm-resources", "disk", "linger", "gateway-service", "openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version",
 		"gateway-driver", "global-policy", "bind-mounts", "telemetry", "port-ingress", "port-egress"}
 	if !r.OK() || strings.Join(got, ",") != strings.Join(want, ",") {
@@ -126,6 +126,22 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	if f.diskProbed != f.home || r.Driver != openshell.DriverVM || r.ConfiguredDriver != openshell.DriverVM || r.MicroVM == nil ||
 		r.MicroVM.Identity != (openshell.VMIdentity{UID: 501, GID: 20}) || !r.MicroVM.HypervisorSigned {
 		t.Fatalf("facts = %+v, microvm %+v (disk probed at %q)", r, r.MicroVM, f.diskProbed)
+	}
+}
+
+// TestDoctorOnAMacWithoutBuildx: DefenseClaw builds a MicroVM's images in
+// Docker too, so on a Mac whose docker does not find its buildx plugin (a
+// HOME without Docker Desktop's ~/.docker/cli-plugins) the BuildKit check
+// fails, after the Docker check, with a fix that names Docker Desktop.
+func TestDoctorOnAMacWithoutBuildx(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onMicroVMs()
+	f.runner.On("docker buildx version", "docker: unknown command: docker buildx\n", errors.New("docker: exit status 1"))
+	r := f.run()
+	c := expectCheck(t, r, openshell.CheckIDDockerBuildKit, openshell.StatusFail, "docker's buildx plugin is not available")
+	if c.Fix == nil || !strings.HasPrefix(c.Fix.Summary, "install Docker's buildx plugin (Docker Desktop provides it), and make sure DOCKER_CONFIG") ||
+		c.Fix.Automatic || r.OK() || r.Checks[3].ID != openshell.CheckIDDocker || r.Checks[4].ID != openshell.CheckIDDockerBuildKit {
+		t.Fatalf("BuildKit check = %+v, fix %+v\n%s", c, c.Fix, r)
 	}
 }
 

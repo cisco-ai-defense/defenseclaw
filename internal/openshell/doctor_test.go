@@ -80,6 +80,8 @@ type doctorFixture struct {
 	// restartedOn is the compute driver the gateway runs once a change
 	// restarts it (empty: docker).
 	restartedOn openshell.ComputeDriver
+	// env is the environment docker runs in (Doctor.Getenv).
+	env map[string]string
 }
 
 // unit renders the service as systemd reports it, started at f.started
@@ -120,6 +122,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	f.writeTOML(enabledTOML, f.started.Add(-time.Minute))
 
 	f.runner.On("docker info", dockerInfoJSON("29.4.0", "Ubuntu 24.04.4 LTS", nil), nil)
+	f.runner.On("docker buildx version", "github.com/docker/buildx v0.30.1 c6f062d0eef6a18ae703d0433e2c8a4dd34d4513\n", nil)
 	f.runner.On("loginctl show-user dev", "yes\n", nil)
 	f.runner.OnFunc("systemctl --user show openshell-gateway", func(context.Context, openshell.Command) ([]byte, error) {
 		return []byte(f.unit("active", "enabled")), nil
@@ -168,6 +171,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		HomeDir:             func() (string, error) { return f.home, nil },
 		DockerDesktop:       func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
 		DockerGroup:         func() (bool, bool, error) { return true, true, nil },
+		Getenv:              func(k string) string { return f.env[k] },
 	}
 	return f
 }
@@ -256,13 +260,14 @@ func TestDoctorHealthyHost(t *testing.T) {
 			t.Errorf("%s = %s: %s", c.ID, c.Status, c.Detail)
 		}
 	}
-	want := []string{"platform", "user", "landlock", "docker", "docker-host-network", "docker-file-sharing", "disk", "linger",
+	want := []string{"platform", "user", "landlock", "docker", "docker-buildkit", "docker-host-network", "docker-file-sharing", "disk", "linger",
 		"gateway-service", "openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-driver",
 		"global-policy", "bind-mounts", "telemetry", "port-ingress", "port-egress"}
 	if !r.OK() || strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("checks = %v\nwant     %v\n%s", got, want, r)
 	}
 	expectCheck(t, r, openshell.CheckIDLandlock, openshell.StatusPass, "ABI 6")
+	expectCheck(t, r, openshell.CheckIDDockerBuildKit, openshell.StatusPass, "docker build uses BuildKit (buildx v0.30.1)")
 	if f.vmProbes != 0 {
 		t.Fatalf("a Linux host asked a Docker VM for Landlock %d times", f.vmProbes)
 	}
@@ -405,8 +410,22 @@ func TestDoctorChecks(t *testing.T) {
 			want: []checkWant{{"landlock", fail, "no Landlock support"}}, fix: &fixWant{sudo: true, manual: true}},
 
 		{name: "docker not installed", setup: func(f *doctorFixture) { f.found["docker"] = false },
-			want: []checkWant{{"docker", fail, "not installed"}, {"docker-host-network", skip, ""}, {"docker-file-sharing", skip, ""}, {"disk", skip, ""}},
-			fix:  &fixWant{text: "install Docker Engine 28"}},
+			want: []checkWant{{"docker", fail, "not installed"}, {"docker-buildkit", skip, "not available"}, {"docker-host-network", skip, ""},
+				{"docker-file-sharing", skip, ""}, {"disk", skip, ""}},
+			fix: &fixWant{text: "install Docker Engine 28"}},
+		// Without its buildx plugin (another HOME or DOCKER_CONFIG hides
+		// it), or with DOCKER_BUILDKIT off, docker build uses the legacy
+		// builder, which cannot build the images (COPY --chmod).
+		{name: "docker without buildx", setup: func(f *doctorFixture) {
+			f.runner.On("docker buildx version", "docker: unknown command: docker buildx\n\nRun 'docker --help' for more information\n", errors.New("docker: exit status 1"))
+		}, want: []checkWant{{"docker-buildkit", fail, "docker's buildx plugin is not available (`docker buildx version`: docker: unknown command: docker buildx), " +
+			"so docker build would fall back to the legacy builder"}, {"docker", pass, ""}},
+			fix: &fixWant{manual: true, text: "install Docker's buildx plugin (the docker-buildx-plugin package from Docker's repository, or Docker Desktop), " +
+				"and make sure DOCKER_CONFIG, or ~/.docker when it is unset, is the Docker config whose cli-plugins directory has docker-buildx"}},
+		{name: "DOCKER_BUILDKIT off", setup: func(f *doctorFixture) { f.env = map[string]string{"DOCKER_BUILDKIT": "0"} },
+			want: []checkWant{{"docker-buildkit", fail, "DOCKER_BUILDKIT=0 turns BuildKit off"}}, fix: &fixWant{manual: true, text: "unset DOCKER_BUILDKIT"}},
+		{name: "DOCKER_BUILDKIT on", setup: func(f *doctorFixture) { f.env = map[string]string{"DOCKER_BUILDKIT": "1"} },
+			want: []checkWant{{"docker-buildkit", pass, "docker build uses BuildKit (buildx v0.30.1)"}}},
 		{name: "docker permission denied, not in the group", setup: func(f *doctorFixture) {
 			docker("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock", errors.New("exit status 1"))(f)
 			f.doctor.DockerGroup = func() (bool, bool, error) { return false, false, nil }
