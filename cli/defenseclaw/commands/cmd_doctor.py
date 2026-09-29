@@ -1684,6 +1684,19 @@ def _health_remediation_text(choices: tuple[object, ...]) -> str:
     return str(getattr(choice, "summary", "") or "")
 
 
+def _openclaw_plugin_required(cfg, enabled_connectors) -> bool:
+    """Whether the OpenClaw plugin is a required component.
+
+    Only an enabled OpenClaw connector needs it. The ``claw.mode`` openclaw
+    default on a machine without OpenClaw (#958) is not one: the OpenClaw
+    gateway row reads "off (OpenClaw is not installed)", and ``defenseclaw
+    version`` lists no plugin row.
+    """
+    if "openclaw" not in enabled_connectors:
+        return False
+    return not openclaw_implied_but_not_installed(cfg)
+
+
 def _check_component_connector_compatibility(
     cfg,
     connectors: list[str],
@@ -1724,7 +1737,7 @@ def _check_component_connector_compatibility(
         return
 
     component_required = {"cli", "gateway"}
-    if "openclaw" in enabled:
+    if _openclaw_plugin_required(cfg, enabled):
         component_required.add("plugin")
     for finding in report.components:
         label = f"Component compatibility: {finding.component}"
@@ -8486,7 +8499,7 @@ def _component_compatibility_problems_for_executable(
     enabled_connectors = {
         connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector)
     }
-    if "openclaw" in enabled_connectors:
+    if _openclaw_plugin_required(cfg, enabled_connectors):
         required.add("plugin")
     findings = assess_component_health(
         _doctor_component_evidence_for_executable(gateway_executable)

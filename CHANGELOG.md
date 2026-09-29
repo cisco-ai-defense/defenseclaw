@@ -202,8 +202,9 @@ rest also reach per-user installs.
   and no `openclaw` binary, the gateway no longer dials: the Gateway
   subsystem is `disabled` with `OpenClaw gateway off (OpenClaw is not
   installed)` in `defenseclaw-gateway status`, the TUI and the Mac app,
-  doctor reports `OpenClaw gateway: off (OpenClaw is not installed)`, the
-  token is not required, the watchdog stops reporting the fleet down, and
+  doctor reports `OpenClaw gateway: off (OpenClaw is not installed)` and no
+  longer requires the OpenClaw plugin, `defenseclaw version` lists no plugin
+  row, the token is not required, the watchdog stops reporting the fleet down, and
   the Secure Client service status reads ready instead of degraded. An installed or configured OpenClaw, an explicit
   `openclaw` connector, a non-loopback host or `fleet_mode: enabled` keeps
   the dial. The gateway decides when it starts; restart it after installing

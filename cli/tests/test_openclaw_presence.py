@@ -231,3 +231,60 @@ def test_doctor_sidecar_row_shows_the_gateway_summary(tmp_path, no_openclaw_bina
     assert [(c["status"], c["detail"]) for c in gateway_rows] == [
         ("skip", "disabled — OpenClaw gateway off (OpenClaw is not installed)"),
     ]
+
+
+def test_version_omits_the_plugin_row(tmp_path, no_openclaw_binary):
+    from defenseclaw.commands import cmd_version
+
+    cfg = _cfg(tmp_path)
+    assert cmd_version._openclaw_active_in(cfg) is False
+    _configure_openclaw(cfg)
+    assert cmd_version._openclaw_active_in(cfg) is True
+
+
+def _component_rows(cfg, monkeypatch):
+    from defenseclaw.doctor_health import ComponentEvidence
+
+    components = (
+        ComponentEvidence("cli", "0.8.6"),
+        ComponentEvidence("gateway", "0.8.6"),
+        ComponentEvidence("plugin", "", status="missing"),
+    )
+    monkeypatch.setattr("defenseclaw.doctor_health.read_cached_discovery", lambda _data_dir: None)
+    monkeypatch.setattr("defenseclaw.doctor_health.probe_component_evidence", lambda **_kw: components)
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_component_connector_compatibility(cfg, cmd_doctor._doctor_active_connectors(cfg), result)
+    problems = cmd_doctor._component_compatibility_problems_for_executable(cfg, None)
+    return result.checks, [finding.component for finding in problems]
+
+
+def test_doctor_does_not_require_the_plugin(tmp_path, no_openclaw_binary, monkeypatch):
+    cfg = _cfg(tmp_path)
+    rows, problems = _component_rows(cfg, monkeypatch)
+    plugin = next(r for r in rows if r["check_id"] == "doctor.component.plugin.compatibility")
+    assert plugin["status"] == "skip", rows
+    assert "plugin" not in problems
+
+    _configure_openclaw(cfg)
+    rows, problems = _component_rows(cfg, monkeypatch)
+    plugin = next(r for r in rows if r["check_id"] == "doctor.component.plugin.compatibility")
+    assert plugin["status"] == "fail"
+    assert "plugin" in problems
+
+
+def test_version_reads_a_sandbox_only_config(tmp_path, no_openclaw_binary, monkeypatch):
+    """A config.yaml with only an openshell block relies on the claw.mode default."""
+    from defenseclaw.commands import cmd_version
+
+    home = tmp_path / "dc"
+    home.mkdir()
+    (home / "config.yaml").write_text("config_version: 8\nopenshell:\n  enabled: true\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    assert cmd_version._openclaw_connector_active() is False
+    openclaw = tmp_path / ".openclaw"
+    openclaw.mkdir()
+    (openclaw / "openclaw.json").write_text("{}", encoding="utf-8")
+    assert cmd_version._openclaw_connector_active() is True

@@ -40,6 +40,7 @@ import click
 
 import defenseclaw
 from defenseclaw import gateway, ux
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 from defenseclaw.paths import bundled_extensions_dir
 
 
@@ -198,13 +199,23 @@ def _openclaw_connector_active() -> bool:
 
 
 def _openclaw_active_in(cfg) -> bool:
-    """Apply doctor's rule: OpenClaw is in ``active_connectors()`` and enabled."""
+    """Apply doctor's rule: OpenClaw is in ``active_connectors()`` and enabled.
+
+    The ``claw.mode`` openclaw default on a machine without OpenClaw (a
+    sandbox-only or hook-only install, #958) is not OpenClaw: the gateway
+    reports it "not installed", and the plugin row would only read missing.
+    """
     try:
         names = {str(name).strip().lower() for name in cfg.active_connectors()}
     except Exception:  # noqa: BLE001 - unknown shape keeps the old table.
         return True
     if "openclaw" not in names:
         return False
+    try:
+        if openclaw_implied_but_not_installed(cfg):
+            return False
+    except Exception:  # noqa: BLE001 - an unusable probe keeps the old table.
+        return True
     effective_enabled = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
     if not callable(effective_enabled):
         return True
