@@ -162,6 +162,12 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
         color: {DEFAULT_TOKENS.accent_amber};
     }}
 
+    #sandbox-launch-copy-note {{
+        height: auto;
+        padding-left: 4;
+        color: {DEFAULT_TOKENS.text_secondary};
+    }}
+
     #sandbox-launch-status.-empty {{
         display: none;
     }}
@@ -187,10 +193,14 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
         harnesses: tuple[tuple[str, str], ...] = (),
         *,
         folder: str = "",
+        copy_only: str = "",
     ) -> None:
         super().__init__()
         self.harnesses = harnesses or tuple((label, name) for name, label in SANDBOX_HARNESSES)
         self.folder = folder
+        # Why every run works on a copy (the gateway's compute driver mounts
+        # no host folders): the copy box is then ticked and locked.
+        self.copy_only = copy_only
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="sandbox-launch-dialog"):
@@ -216,7 +226,14 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
                 allow_blank=False,
                 id="sandbox-launch-profile",
             )
-            yield Checkbox("Work on a copy (untrusted repository or task)", id="sandbox-launch-copy")
+            yield Checkbox(
+                "Work on a copy (untrusted repository or task)",
+                value=bool(self.copy_only),
+                disabled=bool(self.copy_only),
+                id="sandbox-launch-copy",
+            )
+            if self.copy_only:
+                yield Static(self.copy_only, id="sandbox-launch-copy-note", markup=False)
             yield Checkbox("Keep the harness's own permission prompts (--safe)", id="sandbox-launch-safe")
             with Horizontal(id="sandbox-launch-buttons"):
                 yield Button("Cancel", id="sandbox-launch-cancel")
@@ -241,7 +258,7 @@ class SandboxLaunchScreen(ModalScreen[SandboxLaunch | None]):
             harness=str(harness) if harness not in (None, Select.BLANK) else "",
             folder=self.query_one("#sandbox-launch-folder", Input).value,
             name=self.query_one("#sandbox-launch-name", Input).value,
-            copy=self.query_one("#sandbox-launch-copy", Checkbox).value,
+            copy=bool(self.copy_only) or self.query_one("#sandbox-launch-copy", Checkbox).value,
             safe=self.query_one("#sandbox-launch-safe", Checkbox).value,
             profile=str(profile) if profile not in (None, Select.BLANK) else "",
         )
