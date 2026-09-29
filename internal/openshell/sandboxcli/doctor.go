@@ -26,6 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -102,7 +103,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
 		}
-		rep.Checks = append(rep.Checks, a.imagesCheck(), a.wrappersCheck(), a.adminCheck())
+		d, _ := openshell.LookupDriver(string(rep.Driver))
+		rep.Checks = append(rep.Checks, a.imagesCheck(image.MicroVMTarget(d)), a.wrappersCheck(), a.adminCheck())
 	}
 	return rep
 }
@@ -196,7 +198,10 @@ func gatewayText(g *sandboxapi.Gateway) string {
 	return "OpenShell " + g.Version + " gateway " + g.Name
 }
 
-func (a *App) imagesCheck() openshell.Check {
+// imagesCheck reports the configured harnesses' images for the driver the
+// gateway runs: the MicroVM ones (microVM) on the vm driver, which boots
+// no other, else the docker ones.
+func (a *App) imagesCheck(microVM bool) openshell.Check {
 	c := openshell.Check{ID: CheckIDImages, Title: "Harness images"}
 	specs, err := a.harnesses(nil)
 	if err != nil {
@@ -217,7 +222,7 @@ func (a *App) imagesCheck() openshell.Check {
 	for _, spec := range specs {
 		found := false
 		for _, r := range recs {
-			if r.Connector == spec.Name && r.HookFireVerified && r.UID == os.Getuid() &&
+			if r.Connector == spec.Name && r.HookFireVerified && r.MicroVM == microVM && r.UID == os.Getuid() &&
 				r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
 				found = true
 				ready = append(ready, spec.Name+" "+r.HarnessVersion)

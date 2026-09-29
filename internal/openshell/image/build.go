@@ -262,8 +262,8 @@ type PruneReport struct {
 // Prune removes overlay images this store built, in one repository, except,
 // per (connector, uid, gid, ingress port, docker or MicroVM image), the most
 // recent image and the most recent hook-verified one (what Store.Current
-// selects for an unchanged spec), plus opts.Keep, and forgets store records whose image no longer
-// exists. An image is removed only when this store recorded it under its own
+// selects for an unchanged spec), plus opts.Keep, and forgets store records
+// whose image no longer exists. An image is removed only when this store recorded it under its own
 // owner and the image carries that owner label; every other DefenseClaw
 // image is reported, never removed, so data dirs sharing a Docker daemon (or
 // a data dir that lost images.json) never delete images another one runs.

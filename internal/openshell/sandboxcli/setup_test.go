@@ -1152,6 +1152,33 @@ func TestDoctorVerdict(t *testing.T) {
 	lacks(t, ta.output(), "image build codex", "not built yet: codex")
 }
 
+// The doctor's image check counts the images for the driver the gateway
+// runs: a MicroVM gateway boots only an image built for it, so the image a
+// docker gateway ran is not built for it yet.
+func TestDoctorCountsTheImagesForTheGatewayDriver(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		driver       openshell.ComputeDriver
+		microVMImage bool
+		want         string
+	}{
+		{"docker image, docker gateway", openshell.DriverDocker, false, "hook-verified: claudecode 2.1.156"},
+		{"docker image, vm gateway", openshell.DriverVM, false, "not built yet: claudecode"},
+		{"MicroVM image, vm gateway", openshell.DriverVM, true, "hook-verified: claudecode 2.1.156"},
+		{"MicroVM image, docker gateway", openshell.DriverDocker, true, "not built yet: claudecode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.Cfg.OpenShell.Harnesses = []string{"claudecode"}
+			ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) { r.Driver = tc.driver })
+			ta.images.recs = readyImages(ta)
+			ta.images.recs[0].MicroVM = tc.microVMImage
+			_ = ta.RunDoctor(bg, DoctorOptions{})
+			has(t, ta.output(), tc.want)
+		})
+	}
+}
+
 // TestDoctorWrapperHintNamesAConfiguredHarness pins that the doctor's
 // wrapper hint names a harness this install set up (manual test R2-44).
 func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
