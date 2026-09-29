@@ -73,6 +73,11 @@ const (
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
 	enterpriseHookWorkerModeRemoveLeftover = "remove_leftover"
+	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
+	// state (standalone uninstall --purge). It runs after the request's
+	// removals and only when every one of them succeeded: the state holds
+	// the backups a failed removal needs when it is retried.
+	enterpriseHookWorkerModePurge = "purge"
 )
 
 // enterpriseHookWorkerTimeout bounds one worker process.
@@ -374,6 +379,7 @@ var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
+	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
 )
 
 func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWorkerRequest) enterpriseHookWorkerResponse {
@@ -387,6 +393,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			return enterpriseHookWorkerResponse{Targets: results}
 		}
 	}
+	removalFailed := false
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -415,6 +422,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				err = enterpriseHookWorkerRemover(ctx, opts)
 				outcome.Removed = err == nil
 			}
+		case enterpriseHookWorkerModePurge:
+			if removalFailed {
+				err = errors.New("not removed, because a DefenseClaw hook registration of this account was not removed")
+				break
+			}
+			err = enterpriseHookWorkerPurger(ctx, opts)
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)
 		}
@@ -426,9 +439,10 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if !outcome.Pending {
 				outcome.Error = err.Error()
 			}
+			removalFailed = removalFailed || target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover
 		} else {
 			outcome.OK = true
-			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover {
+			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
 				outcome.Result = &result
 			}
 		}

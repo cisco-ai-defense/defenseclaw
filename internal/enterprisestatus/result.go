@@ -111,8 +111,13 @@ type Result struct {
 	SecurityComplete   bool                          `json:"security_complete"`
 	Errors             []Message                     `json:"errors"`
 	Warnings           []Message                     `json:"warnings,omitempty"`
-	LogPath            string                        `json:"log_path,omitempty"`
-	ExitCode           int                           `json:"exit_code"`
+	// Changes lists, in plain words, what a Linux or macOS repair or ensure
+	// changed on a deployment that was already installed (files rewritten,
+	// services started, per-account hooks rewritten). Empty means there was
+	// nothing to repair.
+	Changes  []string `json:"changes,omitempty"`
+	LogPath  string   `json:"log_path,omitempty"`
+	ExitCode int      `json:"exit_code"`
 }
 
 // New returns a result with the schema version and empty collections set,

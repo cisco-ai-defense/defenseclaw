@@ -334,6 +334,11 @@ func (e *Env) leftoversNextStep(ctx context.Context) string {
 		remove := ""
 		if _, err := e.Runner.Run(ctx, "dpkg", "-S", gateway); err == nil {
 			remove = "apt remove defenseclaw-enterprise"
+			if !exists(e.P(e.Layout.ConfigDir)) {
+				// After uninstall --purge, purge the package too: it also
+				// forgets the package's configuration files.
+				remove = "apt purge defenseclaw-enterprise"
+			}
 		} else if _, err := e.Runner.Run(ctx, "rpm", "-qf", "--quiet", gateway); err == nil {
 			remove = "dnf remove defenseclaw-enterprise"
 		}

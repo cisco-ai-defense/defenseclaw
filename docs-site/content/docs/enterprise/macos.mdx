@@ -316,6 +316,8 @@ Add `--all` to also delete `~/.defenseclaw`. See
 Run these as root from `/opt/cisco/defenseclaw/bin`. Uninstall removes each
 user's DefenseClaw hook registrations and DefenseClaw's own machine-policy
 entries first. Administrator entries in those files stay as they were.
+With `--purge` it also removes each enrolled user's `~/.defenseclaw`, except
+inert hook stubs. See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. For
 a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,

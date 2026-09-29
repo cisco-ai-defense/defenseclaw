@@ -1146,7 +1146,7 @@ Warnings and errors to provoke once (CLI-03):
 | `no_connectors_enabled` | Install with no `guardrail.connectors` on a host with eligible users | Warning; `security_complete: false` |
 | `hook_contract_unverified` | Install an out-of-range agent version for std2 | `status` warns naming the connector, version and user; `verify` fails |
 | `agent_unprotected` | An agent in a shared prefix another account controls | Reported as unprotected with "(not run: ...)"; discovery does not run it |
-| `guardian_target_account_removed` | Delete an enrolled account ([Enrollment](#enrollment)) | Warning; `verify` stays healthy; `reconcile` fails for that target until revocation or `repair` |
+| `guardian_target_account_removed` | Delete an enrolled account ([Enrollment](#enrollment)) | Warning; `verify` and `reconcile` stay healthy until revocation or `repair` |
 | `guardian_target_user_path` | As std1, replace an agent config folder with a link, or `chmod 000 ~/.kiro` | Warning only, naming the account, connector and path; `verify` and `reconcile` exit `0`; `security_complete` stays true |
 | `unit_failed` | A DefenseClaw unit left in the failed state (Linux) | Warning; clear with `systemctl reset-failed <unit>` |
 | `claude_version_floor_missing` | Delete DefenseClaw's Claude Code floor drop-in | Warning; `verify` still passes; `policy verify` exits `1`; the next `ensure`, `repair` or `reconcile` writes it back |

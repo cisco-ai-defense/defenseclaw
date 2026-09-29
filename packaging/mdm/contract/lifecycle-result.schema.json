@@ -66,6 +66,7 @@
     "security_complete": { "type": "boolean" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
     "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "changes": { "type": "array", "items": { "type": "string" } },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
