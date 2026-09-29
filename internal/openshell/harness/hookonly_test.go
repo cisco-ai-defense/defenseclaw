@@ -331,6 +331,74 @@ func TestAntigravityLauncher(t *testing.T) {
 	}
 }
 
+// TestAntigravityLauncherTrustsTheWorkspace (#963): agy asks whether to
+// trust a folder, by its exact path, at its first start there, so the
+// launcher adds the working directory under /work or /sandbox to
+// trustedWorkspaces once, keeping the user's other settings and trusted
+// folders, and trusts nothing outside those two trees. The fixture's
+// project directory stands in for one under /work.
+func TestAntigravityLauncherTrustsTheWorkspace(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/jq"); err != nil {
+		t.Skip("/usr/bin/jq is required")
+	}
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(parent, "my project")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	l := newLauncher(t, Antigravity, "  /work/*|/sandbox|/sandbox/*) ag_trust=", "  /work/*|/sandbox|/sandbox/*|"+parent+"/*) ag_trust=")
+	settings := filepath.Join(l.dir, ".gemini", "antigravity-cli", "settings.json")
+	read := func() map[string]interface{} {
+		t.Helper()
+		raw, err := os.ReadFile(settings)
+		var doc map[string]interface{}
+		if err != nil || json.Unmarshal(raw, &doc) != nil {
+			t.Fatalf("settings: %v %s", err, raw)
+		}
+		return doc
+	}
+	trusted := func(doc map[string]interface{}) []interface{} {
+		list, _ := doc["trustedWorkspaces"].([]interface{})
+		return list
+	}
+	// A new HOME: the file is created with the project trusted.
+	if r := l.run(t, project, nil); r.exit != 0 || !r.started() {
+		t.Fatalf("exit %d: %s", r.exit, r.output)
+	}
+	if doc := read(); !slices.Equal(trusted(doc), []interface{}{project}) || doc["modelProvider"] != nil {
+		t.Fatalf("settings = %v", doc)
+	}
+	// The user's settings and folders stay, and a second start adds nothing.
+	writeFile(t, settings, []byte(`{"theme":"dark","trustedWorkspaces":["/work/other"]}`))
+	for range 2 {
+		if r := l.run(t, project, []string{"GEMINI_API_KEY=openshell:resolve:env:v6_GEMINI_API_KEY"}); r.exit != 0 {
+			t.Fatalf("exit %d: %s", r.exit, r.output)
+		}
+	}
+	if doc := read(); !slices.Equal(trusted(doc), []interface{}{project, "/work/other"}) || doc["theme"] != "dark" || doc["modelProvider"] != "gemini" {
+		t.Fatalf("settings = %v", doc)
+	}
+	// A trustedWorkspaces agy could not read is replaced.
+	writeFile(t, settings, []byte(`{"trustedWorkspaces":"/work/other"}`))
+	if r := l.run(t, project, nil); r.exit != 0 {
+		t.Fatalf("exit %d: %s", r.exit, r.output)
+	}
+	if doc := read(); !slices.Equal(trusted(doc), []interface{}{project}) {
+		t.Fatalf("settings = %v", doc)
+	}
+	// Outside /work and /sandbox nothing is trusted.
+	writeFile(t, settings, []byte(`{"theme":"dark"}`))
+	if r := l.run(t, t.TempDir(), nil); r.exit != 0 {
+		t.Fatalf("exit %d: %s", r.exit, r.output)
+	}
+	if raw, _ := os.ReadFile(settings); string(raw) != `{"theme":"dark"}` {
+		t.Fatalf("trusted a folder outside /work and /sandbox: %s", raw)
+	}
+}
+
 // jsonEscape spells s with a JSON \u escape for every character.
 func jsonEscape(s string) string {
 	var b strings.Builder

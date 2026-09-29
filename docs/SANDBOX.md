@@ -2162,6 +2162,32 @@ These were measured on the pinned releases inside the community base image
   The login check comes before the trust check, so the bypass is unverified
   in a real turn. The login credential lands in
   `~/.local/share/devin/credentials.toml`.
+- **Antigravity CLI 1.2.12.** The first interactive start with a Gemini API
+  key shows a colour-scheme picker, then "Terms of Service & Data Use", whose
+  "Yes, I agree to help improve Antigravity CLI by allowing Google to collect
+  and use my Interactions data" box is ticked by default, then "Do you trust
+  the contents of this project?" for the working directory
+  ([#963](https://github.com/cisco-ai-defense/defenseclaw/issues/963)).
+  Done on the terms screen writes
+  `~/.gemini/antigravity-cli/cache/onboarding.json` (`onboardingComplete`
+  and `consumerOnboardingComplete` true), and a start that finds it skips
+  both screens. Folder trust is an exact path in `trustedWorkspaces` of
+  `~/.gemini/antigravity-cli/settings.json`: a trusted parent does not cover
+  its subfolders. The data-sharing choice is kept nowhere on disk: `/settings`
+  shows Enable Telemetry on for the rest of a session that left the box
+  ticked, and off at the next start. So the image seeds that onboarding
+  record, workload-owned, which accepts Google's Antigravity CLI terms for
+  the user with data sharing off (the box is never ticked, and Enable
+  Telemetry is off), and the launcher adds the exact working directory under
+  `/work` or `/sandbox` to `trustedWorkspaces` at every start: a sandbox
+  starts at agy's prompt. A start without `GEMINI_API_KEY` still asks how to
+  sign in; a Google sign-in inside a sandbox is untested, and a Business
+  sign-in with a Google Cloud project keeps its own terms
+  (`enterpriseOnboardingComplete` stays false). Enable Telemetry off does not
+  stop agy's start-up requests to `antigravity-unleash.goog` (feature flags)
+  and `play.googleapis.com` (usage logging), about 15 KB sent in a measured
+  start with the box unticked or ticked alike; block those hosts with
+  `openshell.egress.block` if your organization requires it.
 
 ## Policy packs and admin constraints
 
