@@ -102,6 +102,7 @@ func TestQuiescingRecoveryLeavesPerUserRuntimeStoppedBesideEnterprise(t *testing
 		Rollback: func(got setupTransaction) error {
 			return rollbackSetupTransactionWithRuntime(
 				got,
+				func(string, string) error { return nil },
 				func(string, string) (serviceState, error) { return serviceState{}, nil },
 				func(string, string) error { return nil },
 				func(setupTransaction) error { return nil },
@@ -290,6 +291,7 @@ func TestRollbackRestoresPerUserRuntimeWithoutEnterpriseDeployment(t *testing.T)
 	var restored serviceState
 	err := rollbackSetupTransactionWithRuntime(
 		transaction,
+		func(string, string) error { return nil },
 		func(string, string) (serviceState, error) { return serviceState{}, nil },
 		func(string, string) error { return nil },
 		func(setupTransaction) error { return nil },
