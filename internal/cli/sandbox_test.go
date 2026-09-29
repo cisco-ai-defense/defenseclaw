@@ -187,6 +187,11 @@ func TestSandboxRunHelpNamesEveryHarness(t *testing.T) {
 			t.Errorf("run %s resolves to %v, %v; want %s", name, got, err, spec.Name)
 		}
 	}
+	// Certification AG-MAC-F8: Antigravity is named as image build names
+	// it, and the help says its command works too.
+	if !strings.Contains(long, "omnigent or antigravity (its command, agy, works too;") {
+		t.Errorf("run --help does not name antigravity with agy:\n%s", long)
+	}
 	if stub := pythonStubLong(t, "run"); stub != long {
 		t.Errorf("the Python stub's run help differs from the Go one:\n stub: %s\n   go: %s", stub, long)
 	}

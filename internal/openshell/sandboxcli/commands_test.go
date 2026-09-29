@@ -1143,6 +1143,18 @@ func TestResolveHarness(t *testing.T) {
 		}
 	}
 	wantErr(t, errOf(ResolveHarness("vim")), "claude (Claude Code)")
+	// Certification AG-MAC-F8: Antigravity is named as image build, image
+	// list and openshell.harnesses name it, and its command agy works too;
+	// Kiro by its connector name, not the kiro-cli-chat nobody types.
+	for _, in := range []string{"antigravity", "agy", "Antigravity"} {
+		if spec, err := ResolveHarness(in); err != nil || spec.Name != "antigravity" {
+			t.Errorf("ResolveHarness(%q) = %v, %v; want antigravity", in, spec, err)
+		}
+	}
+	if got := HarnessArg(harnessSpec(t, "antigravity")); got != "antigravity" {
+		t.Errorf("HarnessArg(antigravity) = %q", got)
+	}
+	wantErr(t, errOf(ResolveHarness("vim")), "antigravity (Antigravity)", "kiro (Kiro CLI)")
 	// Every harness's name, as setup and the hints give it, resolves back.
 	for _, h := range harness.Names() {
 		spec, _ := harness.Get(h)

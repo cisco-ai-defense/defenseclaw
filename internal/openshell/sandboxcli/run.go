@@ -459,7 +459,7 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	if args[0] == "--help" || args[0] == "-h" {
 		a.println(spec.Command + " is not installed on this machine; DefenseClaw runs " + spec.DisplayName + " in a sandbox.")
-		a.println("  " + CommandName + " run " + spec.Command + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
+		a.println("  " + CommandName + " run " + HarnessArg(spec) + " [-- " + spec.DisplayName + " arguments]   (see `" + CommandName + " run --help`)")
 		return nil
 	}
 	var latest image.Record
@@ -472,7 +472,7 @@ func (a *App) runInfo(spec *harness.Spec, args []string) error {
 	}
 	if latest.HarnessVersion == "" {
 		return fmt.Errorf("%s is not installed on this machine, and no %s sandbox image is built yet (`%s image build %s`)",
-			spec.Command, spec.DisplayName, CommandName, spec.Command)
+			spec.Command, spec.DisplayName, CommandName, HarnessArg(spec))
 	}
 	a.println(latest.HarnessVersion + " (" + spec.DisplayName + ", in the DefenseClaw sandbox image)")
 	return nil
@@ -988,7 +988,7 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 		}
 		return true, false, nil
 	default:
-		a.note("nothing started; `" + CommandName + " run " + spec.Command + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
+		a.note("nothing started; `" + CommandName + " run " + HarnessArg(spec) + " --copy` works on a copy, `" + CommandName + " connect " + holder.Name +
 			"` resumes " + holder.Name + ", `" + CommandName + " delete " + holder.Name + "` frees the folder")
 		return false, false, nil
 	}

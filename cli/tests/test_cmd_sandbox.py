@@ -259,8 +259,10 @@ def test_run_help_names_every_harness(exec_capture) -> None:
     result = CliRunner().invoke(sandbox, ["run", "--help"], obj=AppContext())
     assert result.exit_code == 0
     text = " ".join(result.output.split())
-    assert "The harness is claude, codex, copilot, opencode, kiro, hermes, openhands, omnigent or agy" in text
-    assert "(amp, cursor-agent and devin are not verified yet, so they do not run)" in text
+    # Certification AG-MAC-F8: Antigravity by the name image build, image
+    # list and openshell.harnesses use, with its command accepted too.
+    assert "The harness is claude, codex, copilot, opencode, kiro, hermes, openhands, omnigent or antigravity" in text
+    assert "(its command, agy, works too; amp, cursor-agent and devin are not verified yet, so they do not run)" in text
     assert exec_capture == []
 
 
