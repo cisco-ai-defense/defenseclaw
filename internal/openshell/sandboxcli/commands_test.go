@@ -744,6 +744,26 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	lacks(t, ta.output(), "applied 0 changes")
 }
 
+// An apply that had fewer paths to write than the pull changed says the
+// rest already matched the folder (retest RT-B-2: "3 files changed", then
+// "applied 2 changes" with nothing about the third, which an undo had left
+// on the host).
+func TestPullApplySaysWhatAlreadyMatched(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Changes: []workspace.TreeChange{
+		{Path: "README.md", Status: "M"}, {Path: "alpha.txt", Status: "A"}, {Path: "beta.txt", Status: "A"}}}
+	ta.copy.applied = &workspace.ApplyResult{Mode: workspace.ApplyMerge, Applied: true,
+		Changes: []workspace.TreeChange{{Path: "README.md", Status: "M"}, {Path: "beta.txt", Status: "A"}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "applied 2 changes to ", "; 1 already matched your folder")
+	// Every path written: nothing more is said.
+	ta.out.Reset()
+	ta.copy.applied.Changes = append(ta.copy.applied.Changes, workspace.TreeChange{Path: "alpha.txt", Status: "A"})
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "applied 3 changes to ")
+	lacks(t, ta.output(), "already matched")
+}
+
 // A conflicted `pull --apply` exits 4 and says how to merge (manual test
 // L2: status 0 and no hint).
 func TestPullApplyConflictExitsWithItsOwnStatus(t *testing.T) {
