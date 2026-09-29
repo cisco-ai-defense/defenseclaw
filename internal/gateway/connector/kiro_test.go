@@ -410,6 +410,11 @@ func assertKiroV2AgentHooks(t *testing.T, path, script string) {
 		if entry["matcher"] != "*" {
 			t.Fatalf("agent %s matcher = %#v, want the glob \"*\"", spec.event, entry["matcher"])
 		}
+		// Kiro's default hook timeout (about 10 s) ignores a slower verdict
+		// and runs the tool.
+		if entry["timeout_ms"] != float64(kiroV2HookTimeoutMillis) {
+			t.Fatalf("agent %s timeout_ms = %#v, want %d", spec.event, entry["timeout_ms"], kiroV2HookTimeoutMillis)
+		}
 	}
 }
 
@@ -628,6 +633,29 @@ func TestKiroSetupProducesEffectiveHookRegistration(t *testing.T) {
 	if entry["matcher"] != "*" {
 		t.Fatalf("preToolUse matcher = %#v, want \"*\"", entry["matcher"])
 	}
+
+	// An agent an earlier build rendered without timeout_ms left Kiro's
+	// default hook timeout (about ten seconds) in place, so a slower verdict
+	// let the tool run. It fails the check too, and Setup adds the timeout.
+	for _, list := range agent["hooks"].(map[string]interface{}) {
+		for _, item := range list.([]interface{}) {
+			delete(item.(map[string]interface{}), "timeout_ms")
+		}
+	}
+	stale, _ = json.Marshal(agent)
+	if err := os.WriteFile(agentPath, stale, 0o600); err != nil {
+		t.Fatalf("write agent without timeouts: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("agent without timeout_ms: present=%v err=%v, want not present", present, err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	if present, err = OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("after the timeout repair: present=%v err=%v", present, err)
+	}
+	assertKiroV2AgentHooks(t, agentPath, conn.hookCommand(opts))
 }
 
 // containsHookScript is shared by every connector that stores hooks under

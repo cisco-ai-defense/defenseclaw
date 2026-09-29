@@ -2059,7 +2059,11 @@ These were measured on the pinned releases inside the community base image
   hooks' payloads carry `session_id`, `tool_name` and `tool_input` (and
   `tool_response` after the tool), but no per-call ID. Exit code
   2 from `preToolUse` blocks the tool (Kiro reports it as failed); any other
-  exit code shows as a warning and the tool runs. A missing or unparseable
+  exit code shows as a warning and the tool runs. So does a hook that has not
+  answered within its timeout: Kiro's default is about ten seconds (a
+  `preToolUse` hook that took 12 s and then exited 2 did not stop the tool),
+  so every DefenseClaw agent hook sets `timeout_ms` 30000, the envelope the
+  hook's two ingress attempts fit in. A missing or unparseable
   agent file makes Kiro print only `failed to set agent` and run the tool
   with no hooks. So the DefenseClaw agent lives alone in root-owned
   `/usr/local/lib/defenseclaw/kiro`, which the launcher forces

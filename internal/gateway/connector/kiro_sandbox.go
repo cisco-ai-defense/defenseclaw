@@ -147,6 +147,7 @@ func kiroSandboxAgentHook(description string) map[string]interface{} {
 	return map[string]interface{}{
 		"command":     kiroSandboxHookScript(),
 		"matcher":     kiroV2MatchAllTools,
+		"timeout_ms":  kiroV2HookTimeoutMillis,
 		"description": description,
 	}
 }
@@ -216,7 +217,8 @@ func verifyKiroSandboxAgent(body []byte) error {
 		if err := json.Unmarshal(entries[0], &got); err != nil {
 			return fmt.Errorf("verify Kiro sandbox agent: %s: %w", event, err)
 		}
-		if got["command"] != kiroSandboxHookScript() || got["matcher"] != "*" || len(got) != 3 {
+		if got["command"] != kiroSandboxHookScript() || got["matcher"] != kiroV2MatchAllTools ||
+			!kiroV2HookTimeoutIs(got["timeout_ms"], kiroV2HookTimeoutMillis) || len(got) != 4 {
 			return fmt.Errorf("verify Kiro sandbox agent: %s hook %v is not the DefenseClaw hook", event, got)
 		}
 	}

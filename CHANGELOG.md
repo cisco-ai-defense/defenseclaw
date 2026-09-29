@@ -472,6 +472,13 @@ deleted.
   like Kiro CLI's, by session, tool name and tool arguments; measured on the
   pinned 1.0.88, a call a hook denied or the user refused sends no
   `postToolUse`. Devin CLI is still not paired (not measured). Both drivers.
+- Kiro CLI 2.x: a DefenseClaw verdict that took longer than about ten
+  seconds let the tool run, on the host and in a Kiro sandbox. DefenseClaw's
+  agent hooks set no `timeout_ms`, and Kiro ignores a hook past its default
+  timeout (measured on 2.24.1: a `preToolUse` hook that took 12 s to block
+  did not stop the tool). Every DefenseClaw agent hook now sets
+  `timeout_ms` 30000; the gateway rewrites a host agent at its next start,
+  and the Kiro sandbox image rebuilds.
 
 ### Legacy OpenShell standalone sandbox removed
 

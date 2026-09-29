@@ -21,6 +21,15 @@ rewrites DefenseClaw's entries the first time it starts after an upgrade, and
 `defenseclaw setup kiro` rewrites them too. Hook entries you added yourself
 are not changed.
 
+Each of the agent's hooks also sets `timeout_ms` 30000. Kiro ignores a hook
+that has not answered within its timeout and runs the tool, and its default
+is about ten seconds: measured on kiro-cli 2.24.1, a `preToolUse` hook that
+took 12 seconds to block did not stop the tool. Earlier releases set no
+timeout, so a DefenseClaw verdict that took longer than that (a slow scan or
+judge) let the tool run. The gateway adds the timeout to DefenseClaw's
+entries the first time it starts after an upgrade. The `.kiro/hooks` file
+already set `"timeout": 30`.
+
 The `.kiro/hooks` file keeps the matcher `.*` on purpose. Kiro IDE and the
 v3 engine of `kiro-cli --v3` read a matcher as a regular expression, so `.*`
 matches every tool there, and `*` is not a valid regular expression: a hook

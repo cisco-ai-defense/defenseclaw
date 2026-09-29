@@ -52,6 +52,16 @@ var kiroV3HookSpecs = []struct {
 // so a v3 prompt is checked twice (once per config).
 const kiroV2MatchAllTools = "*"
 
+// kiroV2HookTimeoutMillis is the timeout_ms of DefenseClaw's CLI 2.x agent
+// hooks: the 30-second envelope the hook scripts budget for (the v3 file's
+// "timeout": 30). Without it Kiro applies its own default, about ten
+// seconds (Kiro's /upgrade-agent writes "timeout": 10 for a hook that set
+// none), and a hook that answers later is ignored: measured on kiro-cli
+// 2.24.1, a preToolUse hook that took 12 s and then exited 2 did not stop
+// the tool, while the same hook with timeout_ms 30000 blocked it. A slow
+// verdict therefore let the tool run.
+const kiroV2HookTimeoutMillis = 30000
+
 var kiroV2HookSpecs = []struct {
 	event       string
 	description string
@@ -140,11 +150,26 @@ func patchKiroV2AgentHooks(path, hookScript string) error {
 		entry := map[string]interface{}{
 			"command":     hookScript,
 			"matcher":     spec.matcher,
+			"timeout_ms":  kiroV2HookTimeoutMillis,
 			"description": spec.description,
 		}
 		hooks[spec.event] = reconcileKiroV2Hooks(hooks[spec.event], hookScript, entry)
 	}
 	return writeJSONObject(path, cfg)
+}
+
+// kiroV2HookTimeoutIs reports whether a decoded JSON number is want.
+func kiroV2HookTimeoutIs(raw interface{}, want int) bool {
+	switch v := raw.(type) {
+	case float64:
+		return v == float64(want)
+	case int:
+		return v == want
+	case json.Number:
+		n, err := v.Int64()
+		return err == nil && n == int64(want)
+	}
+	return false
 }
 
 func removeKiroV2AgentHooks(path, hookScript string) error {
@@ -202,9 +227,10 @@ func kiroV3FileReferencesHook(path, hookScript string) (bool, error) {
 }
 
 // kiroV2AgentReferencesHook reports whether the CLI 2.x agent holds
-// DefenseClaw's entry for every kiroV2HookSpecs event with the matcher this
-// build writes. An entry an earlier build rendered with another matcher does
-// not count, so verification fails and the guardian re-renders the agent.
+// DefenseClaw's entry for every kiroV2HookSpecs event with the matcher and
+// timeout this build writes. An entry an earlier build rendered with another
+// matcher or without the timeout does not count, so verification fails and
+// the guardian re-renders the agent.
 func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -226,7 +252,8 @@ func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 		current := false
 		for _, item := range list {
 			entry, _ := item.(map[string]interface{})
-			if kiroV2EntryOwned(item, hookScript) && entry["matcher"] == spec.matcher {
+			if kiroV2EntryOwned(item, hookScript) && entry["matcher"] == spec.matcher &&
+				kiroV2HookTimeoutIs(entry["timeout_ms"], kiroV2HookTimeoutMillis) {
 				current = true
 				break
 			}
