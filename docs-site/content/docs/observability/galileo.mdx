@@ -259,6 +259,26 @@ leaves the gateway. Fresh v8 destinations default to `none` (unredacted), so
 shared deployments should explicitly select `sensitive`, `content`, `strict`,
 or a reviewed custom profile.
 
+### Guardrail decisions: find blocked, confirmed, and alerted tool calls
+
+A tool call that a guardrail blocks, asks the user to confirm, or alerts on
+carries the decision on its tool span:
+
+- A blocked call never runs, so its span ends at the decision with status
+  `ERROR`; the status description and the tool result are the redacted reason.
+  Confirmed and alerted calls keep status `OK`.
+- A `defenseclaw.guardrail.block`, `defenseclaw.guardrail.ask`, or
+  `defenseclaw.guardrail.alert` span event names the rule, severity, connector,
+  user, and redacted reason.
+- The flat `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id`, and
+  `defenseclaw.guardrail.severity` attributes, next to `user.id` and
+  `defenseclaw.user.name`, let you filter spans by one value.
+
+Decisions that do not belong to a tool call, such as a blocked prompt, produce
+an `apply_guardrail` span with the same status, event, and attributes. Galileo
+has no span type for it, so it reaches local observability and other OTLP
+destinations but not Galileo.
+
 Galileo and Agent360 are complementary rather than competing views:
 
 | Use | Galileo | Local Agent360 |

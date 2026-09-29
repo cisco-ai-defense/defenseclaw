@@ -323,6 +323,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = enrichAgentHookContext(ctx, req)
+		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
 			a.hookJudge.ResetToolJudgeSession(req.SessionID)
 		}
@@ -619,6 +620,9 @@ func (a *APIServer) finalizeAgentHook(
 	if !req.SuppressCorrelationEmit {
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			if !panicked {
+				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
+			}
 		})
 
 		safeSection("audit", func() {

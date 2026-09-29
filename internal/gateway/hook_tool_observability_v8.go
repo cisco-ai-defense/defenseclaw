@@ -326,6 +326,7 @@ func generatedToolV8Input(observation generatedToolV8Observation) observability.
 	input.GenAIToolCallID = hookModelV8OptionalID(meta.ToolID)
 	input.DefenseClawToolID = hookModelV8OptionalID(meta.ToolID)
 	applyGeneratedToolV8Identity(&input, observation)
+	applyToolGuardrailOutcome(&input, observation)
 	return input
 }
 

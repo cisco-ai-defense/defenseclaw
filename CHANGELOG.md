@@ -83,6 +83,16 @@ rest also reach per-user installs.
   same identity the `hook_decision` rows carry, so findings can be filtered
   by user without joining on `evaluation_id`. On the enterprise standalone
   profile only the verified caller is recorded.
+- **Guardrail blocks show on spans.** A tool call a hook blocks now gets a
+  tool span that ends at the decision with status `ERROR`; before, a blocked
+  call left no span. Blocked, confirmed and alerted calls carry a
+  `defenseclaw.guardrail.block`, `.ask` or `.alert` span event (rule,
+  severity, connector, user, redacted reason) and the
+  `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id` and
+  `defenseclaw.guardrail.severity` attributes, on every trace destination
+  including Galileo. Other hook decisions, such as a blocked prompt, and the
+  `/api/v1/inspect/*` routes produce an `apply_guardrail` span with the same
+  status, event and attributes; that span no longer reports `OK` for a block.
 - **Disabling Kiro leaves an inert hook script.** Teardown replaces
   `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached

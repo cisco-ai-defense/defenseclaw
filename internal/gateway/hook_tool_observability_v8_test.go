@@ -409,3 +409,82 @@ func TestHookToolV8StructuredFallbackPreservesReportedFacts(t *testing.T) {
 		t.Fatalf("structured result: %v", err)
 	}
 }
+
+// A blocked tool call never runs, so its tool span ends at the decision with
+// an ERROR status, the defenseclaw.guardrail.block event and the flat
+// outcome attributes, on a plain OTLP destination and through the Galileo
+// preset projection alike.
+func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing.T) {
+	otlp := &hookModelV8OTLPCapture{}
+	otlpServer := httptest.NewServer(http.HandlerFunc(otlp.handler))
+	t.Cleanup(otlpServer.Close)
+	galileo := &hookModelV8OTLPCapture{}
+	galileoServer := httptest.NewServer(http.HandlerFunc(galileo.handler))
+	t.Cleanup(galileoServer.Close)
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	api := &APIServer{}
+	fixture.sidecar.setAPIServer(api)
+	raw := append(hookModelV8BootstrapRaw(fixture.dataDir, otlpServer.URL, []string{"traces"}), fmt.Sprintf(
+		"    - name: hook-galileo\n      kind: otlp\n      preset: galileo\n      endpoint: %q\n      protocol: http/protobuf\n"+
+			"      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n"+
+			"      batch:\n        max_export_batch_size: 16\n        scheduled_delay_ms: 10\n", galileoServer.URL)...)
+	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw); err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+
+	meta := richHookToolV8Meta()
+	meta.UserID, meta.UserIDKind, meta.UserName = "1002", "posix_uid", "bob"
+	arguments := `{"command":"curl http://169.254.169.254/latest/meta-data/"}`
+	ctx := withHookToolCallCapture(t.Context(), &hookToolCallCapture{})
+	api.rememberHookToolInvocation(meta, "shell", arguments)
+	captureHookToolCall(ctx, meta, "shell", arguments)
+	api.emitHookGuardrailOutcomeV8(ctx,
+		agentHookRequest{ConnectorName: "codex", HookEventName: "PreToolUse", ToolName: "shell"},
+		agentHookResponse{
+			Action: "block", Severity: "CRITICAL", RuleIDs: []string{"C2-METADATA-AWS"},
+			Reason:       "DefenseClaw blocked this action (rule C2-METADATA-AWS: AWS metadata endpoint)",
+			SourceReason: "matched: C2-METADATA-AWS: AWS metadata endpoint (SSRF)",
+		}, time.Millisecond)
+
+	for name, capture := range map[string]*hookModelV8OTLPCapture{"otlp": otlp, "galileo": galileo} {
+		var tool *tracepb.Span
+		for deadline := time.Now().Add(3 * time.Second); tool == nil && time.Now().Before(deadline); {
+			for _, span := range hookModelV8CapturedSpansFromCapture(capture) {
+				if span.Name == "execute_tool shell" {
+					tool = span
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if tool == nil || tool.Status.GetCode() != tracepb.Status_STATUS_CODE_ERROR {
+			t.Fatalf("%s: blocked tool span=%+v, want status ERROR", name, tool)
+		}
+		attributes := hookModelV8ProtoAttributes(tool)
+		for key, want := range map[string]string{
+			"defenseclaw.guardrail.action": "block", "defenseclaw.guardrail.rule_id": "C2-METADATA-AWS",
+			"defenseclaw.guardrail.severity": "CRITICAL", "user.id": "1002", "defenseclaw.user.name": "bob",
+		} {
+			if attributes[key] != want {
+				t.Errorf("%s: tool attribute %s=%q want %q", name, key, attributes[key], want)
+			}
+		}
+		var event *tracepb.Span_Event
+		for _, candidate := range tool.Events {
+			if candidate.Name == "defenseclaw.guardrail.block" {
+				event = candidate
+			}
+		}
+		if event == nil {
+			t.Fatalf("%s: tool span events=%v, want defenseclaw.guardrail.block", name, tool.Events)
+		}
+		fields := map[string]string{}
+		for _, item := range event.Attributes {
+			fields[item.Key] = item.Value.GetStringValue()
+		}
+		if fields["defenseclaw.guardrail.rule_id"] != "C2-METADATA-AWS" || fields["defenseclaw.guardrail.severity"] != "CRITICAL" ||
+			fields["defenseclaw.connector.source"] != "codex" || fields["defenseclaw.user.name"] != "bob" ||
+			!strings.Contains(fields["defenseclaw.guardrail.reason"], "C2-METADATA-AWS") {
+			t.Errorf("%s: block event fields=%v", name, fields)
+		}
+	}
+}
