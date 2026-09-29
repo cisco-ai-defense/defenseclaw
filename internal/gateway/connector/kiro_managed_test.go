@@ -83,6 +83,35 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 	}
 }
 
+func TestKiroManagedTeardownDisablesCachedHookScript(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", ManagedEnterprise: true}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	script, err := os.ReadFile(filepath.Join(dataDir, "hooks", kiroHookScriptName))
+	if err != nil {
+		t.Fatalf("read disabled hook: %v", err)
+	}
+	if !strings.Contains(string(script), "disabled tombstone") || !strings.Contains(string(script), "exit 0") || strings.Contains(string(script), kiroHookAPIPath) {
+		t.Fatalf("Kiro teardown left an active hook script: %s", script)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup after teardown: %v", err)
+	}
+	script, err = os.ReadFile(filepath.Join(dataDir, "hooks", kiroHookScriptName))
+	if err != nil || !strings.Contains(string(script), kiroHookAPIPath) {
+		t.Fatalf("Kiro setup did not replace the disabled hook script: %v", err)
+	}
+}
+
 // A managed install never edits the user's own agents. With a custom
 // chat.defaultAgent, it leaves that agent byte for byte and makes the
 // defenseclaw agent the default instead, so bare kiro-cli still runs a

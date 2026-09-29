@@ -83,6 +83,8 @@ installed there, the lane copies it into the real profile's
 
 ## Enterprise Install Lanes
 
+For end-to-end manual certification on Windows, macOS and Linux, use the [enterprise test plan](ENTERPRISE-TEST-PLAN.md).
+
 The standalone managed-enterprise packages have their own install lanes.
 They install and remove system services, so run them only on a disposable
 host (a CI runner, a container or a throwaway VM), as root or from an

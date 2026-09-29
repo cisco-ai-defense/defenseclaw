@@ -2970,6 +2970,27 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			},
 		},
 		{
+			name:       "kiro",
+			hookScript: "kiro-hook.sh",
+			hookAPI:    "/api/v1/kiro/hook",
+			setup: func(t *testing.T) (Connector, SetupOpts) {
+				t.Helper()
+				home := t.TempDir()
+				prevHome, prevHooks := KiroHomeOverride, KiroHooksPathOverride
+				KiroHomeOverride = home
+				KiroHooksPathOverride = filepath.Join(home, "hooks", kiroManagedHooksName)
+				t.Cleanup(func() {
+					KiroHomeOverride, KiroHooksPathOverride = prevHome, prevHooks
+				})
+				return NewKiroConnector(), SetupOpts{
+					DataDir:      t.TempDir(),
+					APIAddr:      "127.0.0.1:18970",
+					APIToken:     "tok-test",
+					WorkspaceDir: t.TempDir(),
+				}
+			},
+		},
+		{
 			name:       "hermes",
 			hookScript: "hermes-hook.sh",
 			hookAPI:    "/api/v1/hermes/hook",
