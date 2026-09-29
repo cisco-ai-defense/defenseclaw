@@ -359,7 +359,10 @@ deleted.
   `Exception ignored in atexit callback` / `RuntimeError: App is not running`
   traceback above the session summary: a root-owned module in the OpenHands
   image runs the `SessionEnd` hooks as before and drops only the display
-  event OpenHands hands to its already stopped TUI.
+  event OpenHands hands to its already stopped TUI. The same module starts a
+  DefenseClaw block's hook line with the block, so the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: …` instead of
+  `Status: BLOCKED - Blocked by DefenseCla...`.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -31,29 +31,37 @@ var openHandsTool = uvTool{
 	commands:     []string{"openhands"},
 	versionCheck: `OPENHANDS_SUPPRESS_BANNER=1 /usr/local/bin/openhands --version | awk '/^OpenHands CLI /{print $3; exit}'`,
 	extra: pyShimInstall(InstallRootBase+"/openhands/tools/openhands/bin/python", InstallRootBase+"/openhands", "OpenHands",
-		pyShim{name: openHandsSessionEndModuleName, source: openHandsSessionEndModule}),
+		pyShim{name: openHandsShimModuleName, source: openHandsShimModule}),
 }
 
-// openHandsSessionEndModuleName is the root-owned module the OpenHands tool
+// openHandsShimModuleName is the root-owned module the OpenHands tool
 // environment imports at start.
-const openHandsSessionEndModuleName = "defenseclaw_openhands_session_end"
+const openHandsShimModuleName = "defenseclaw_openhands"
 
-// openHandsSessionEndModule keeps the end of an OpenHands session free of a
-// traceback. OpenHands 1.16.0 closes the conversation from an atexit
-// callback (LocalConversation.close), after its Textual app has stopped;
-// close runs the SessionEnd hooks (DefenseClaw's among them) and then hands
-// each result to the app as a HookExecutionEvent, which raises "App is not
-// running". Python printed "Exception ignored in atexit callback" and the
-// traceback just above DefenseClaw's session summary, and the rest of close
-// (the agent and tool executors) never ran. The shim runs
-// HookEventProcessor.run_session_end as it is and drops only a display event
-// the stopped app cannot take; the hooks' own results and every other
-// event are unchanged.
-const openHandsSessionEndModule = `"""DefenseClaw: end an OpenHands session without a traceback.
+// openHandsShimModule adjusts what OpenHands 1.16.0 shows in a sandbox
+// session; no hook's verdict or result changes.
+//
+//   - The end of a session stays free of a traceback. OpenHands closes the
+//     conversation from an atexit callback (LocalConversation.close), after
+//     its Textual app has stopped; close runs the SessionEnd hooks
+//     (DefenseClaw's among them) and then hands each result to the app as a
+//     HookExecutionEvent, which raises "App is not running". Python printed
+//     "Exception ignored in atexit callback" and the traceback just above
+//     DefenseClaw's session summary, and the rest of close (the agent and
+//     tool executors) never ran. HookEventProcessor.run_session_end runs as
+//     it is and drops only a display event the stopped app cannot take.
+//   - A DefenseClaw block leads its hook line. The TUI titles a collapsed
+//     HookExecutionEvent with the first 70 characters of its rendering,
+//     "Hook: PreToolUse (terminal) Status: BLOCKED - Blocked by DefenseCla...",
+//     so the rule and reason showed only after Ctrl+O. For a block whose
+//     reason is DefenseClaw's, the rendering starts with
+//     "BLOCKED by DefenseClaw rule <ID>: <title>. ..." instead, followed by
+//     the rest of OpenHands' own rendering.
+const openHandsShimModule = `"""DefenseClaw: OpenHands in an OpenShell sandbox.
 
-OpenHands closes a conversation at interpreter exit, after its TUI stopped,
-and hands the SessionEnd hook results to that TUI, which raises. Run the
-SessionEnd hooks and drop only the display event the stopped TUI refuses.
+End a session without a traceback: OpenHands hands the SessionEnd hook
+results to its TUI after the TUI stopped. And lead a DefenseClaw block's hook
+line with the block, which the collapsed line otherwise cuts off.
 """
 ` + pyOnImport + `
 
@@ -81,7 +89,31 @@ def _defenseclaw_patch_hooks(hooks):
     cls.run_session_end = run_session_end
 
 
+def _defenseclaw_patch_hook_event(events):
+    cls = events.HookExecutionEvent
+    render = cls.visualize.fget
+
+    def visualize(self):
+        reason = " ".join(str(self.reason or "").split())
+        if not self.blocked or not reason.startswith(("Blocked by DefenseClaw", "DefenseClaw")):
+            return render(self)
+        from rich.text import Text
+
+        text = Text()
+        text.append("BLOCKED", style="bold red")
+        if reason.startswith("Blocked by "):
+            text.append(" " + reason[len("Blocked "):])
+        else:
+            text.append(": " + reason)
+        text.append("\n")
+        text.append_text(render(self.model_copy(update={"reason": None})))
+        return text
+
+    cls.visualize = property(visualize, doc=cls.visualize.__doc__)
+
+
 _defenseclaw_on_import("openhands.sdk.hooks.conversation_hooks", _defenseclaw_patch_hooks)
+_defenseclaw_on_import("openhands.sdk.event.hook_execution", _defenseclaw_patch_hook_event)
 `
 
 // OpenHands is the OpenHands CLI harness. OpenHands takes its model only

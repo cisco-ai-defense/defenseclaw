@@ -67,10 +67,10 @@ func TestOpenHandsSessionEndShim(t *testing.T) {
 	for name, body := range openHandsStandIn {
 		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), []byte(body))
 	}
-	writeFile(t, filepath.Join(dir, openHandsSessionEndModuleName+".py"), []byte(openHandsSessionEndModule))
+	writeFile(t, filepath.Join(dir, openHandsShimModuleName+".py"), []byte(openHandsShimModule))
 	script := `import sys
 sys.path.insert(0, sys.argv[1])
-import ` + openHandsSessionEndModuleName + `
+import ` + openHandsShimModuleName + `
 from openhands.sdk.hooks import conversation_hooks as hooks
 assert type(hooks.__loader__).__name__ == "SourceFileLoader", hooks.__loader__
 assert hooks.HookEventProcessor.run_session_end.__doc__.startswith("Run SessionEnd hooks")
@@ -102,9 +102,9 @@ print("session end ok")
 	}
 	run := steps[0].Run
 	for _, want := range []string{
-		base64.StdEncoding.EncodeToString([]byte(openHandsSessionEndModule)),
+		base64.StdEncoding.EncodeToString([]byte(openHandsShimModule)),
 		`case "$site" in ` + InstallRootBase + `/openhands/*)`,
-		`printf 'import ` + openHandsSessionEndModuleName + `\n' >"$site/` + openHandsSessionEndModuleName + `.pth"`,
+		`printf 'import ` + openHandsShimModuleName + `\n' >"$site/` + openHandsShimModuleName + `.pth"`,
 	} {
 		if !strings.Contains(run, want) {
 			t.Fatalf("the OpenHands install does not write %q:\n%s", want, run)
@@ -114,4 +114,87 @@ print("session end ok")
 		t.Fatal("the OpenHands install step spans lines (a Dockerfile RUN is one line)")
 	}
 	shParses(t, "OpenHands install step", run)
+}
+
+// openHandsEventStandIn is the part of OpenHands the block-title patch works
+// with: rich's Text and the SDK's frozen HookExecutionEvent, whose
+// rendering starts "Hook: <event> (<tool>)" and puts the reason after
+// "Status: BLOCKED - ".
+var openHandsEventStandIn = map[string]string{
+	"rich/__init__.py": "",
+	"rich/text.py": `class Text:
+    def __init__(self):
+        self.parts = []
+
+    def append(self, text, style=None):
+        self.parts.append(text)
+
+    def append_text(self, other):
+        self.parts.extend(other.parts)
+
+    def __str__(self):
+        return "".join(self.parts)
+`,
+	"openhands/sdk/__init__.py":       "",
+	"openhands/sdk/event/__init__.py": "",
+	"openhands/sdk/event/hook_execution.py": `from rich.text import Text
+
+
+class HookExecutionEvent:
+    def __init__(self, blocked, reason):
+        self.blocked, self.reason = blocked, reason
+
+    def model_copy(self, update):
+        copy = HookExecutionEvent(self.blocked, self.reason)
+        copy.__dict__.update(update)
+        return copy
+
+    @property
+    def visualize(self):
+        """Rich rendering."""
+        text = Text()
+        text.append("Hook: PreToolUse (terminal)\n")
+        text.append("Status: BLOCKED" if self.blocked else "Status: SUCCESS")
+        if self.blocked and self.reason:
+            text.append(" - " + self.reason)
+        text.append("\nExit Code: 2")
+        return text
+`,
+}
+
+// TestOpenHandsShimLeadsWithADefenseClawBlock: a hook line blocked with
+// DefenseClaw's reason renders the block first, where the TUI's collapsed
+// title (the rendering's first 70 characters) shows the rule; other blocks
+// and allowed calls render as OpenHands renders them.
+func TestOpenHandsShimLeadsWithADefenseClawBlock(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required")
+	}
+	dir := t.TempDir()
+	for name, body := range openHandsEventStandIn {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), []byte(body))
+	}
+	writeFile(t, filepath.Join(dir, openHandsShimModuleName+".py"), []byte(openHandsShimModule))
+	script := `import sys
+sys.path.insert(0, sys.argv[1])
+import ` + openHandsShimModuleName + `
+from openhands.sdk.event.hook_execution import HookExecutionEvent as E
+assert E.visualize.__doc__ == "Rich rendering."
+for event in (
+    E(True, "Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. Try another approach."),
+    E(True, "DefenseClaw hook failed closed"),
+    E(True, "Blocked by hook"),
+    E(False, None),
+):
+    print(str(event.visualize).replace("\n", " | "))
+`
+	out, err := exec.Command(python, "-I", "-c", script, dir).CombinedOutput()
+	want := "BLOCKED by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox marker command. Try another approach. | Hook: PreToolUse (terminal) | Status: BLOCKED | Exit Code: 2\n" +
+		"BLOCKED: DefenseClaw hook failed closed | Hook: PreToolUse (terminal) | Status: BLOCKED | Exit Code: 2\n" +
+		"Hook: PreToolUse (terminal) | Status: BLOCKED - Blocked by hook | Exit Code: 2\n" +
+		"Hook: PreToolUse (terminal) | Status: SUCCESS | Exit Code: 2\n"
+	if err != nil || string(out) != want {
+		t.Fatalf("shim run: %v\n%s\nwant:\n%s", err, out, want)
+	}
 }

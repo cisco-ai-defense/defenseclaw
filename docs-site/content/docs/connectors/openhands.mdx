@@ -175,6 +175,13 @@ exist only in the image; nothing on your host changes.
   summary at every exit. A root-owned module in the image runs the
   `SessionEnd` hooks as before and drops only that display event, so the
   session ends cleanly and DefenseClaw still gets the hook.
+- **Blocks on screen.** OpenHands shows a hook result as a collapsed line cut
+  at 70 characters, which left `Status: BLOCKED - Blocked by DefenseCla...`.
+  The same module starts a DefenseClaw block's rendering with the block, so
+  the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: <title>...`; Ctrl+O still expands it to
+  the full reason and OpenHands' own details. The reason the model gets is
+  unchanged.
 - **Known gaps.** The agent can edit `~/.openhands/hooks.json`, or start a
   second OpenHands with another `HOME`, from a tool call. DefenseClaw sees that
   tool call first, and hook-silence detection is the backstop. Command rules
