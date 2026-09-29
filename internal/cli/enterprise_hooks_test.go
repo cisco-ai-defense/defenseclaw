@@ -240,6 +240,37 @@ func TestEnterpriseHookVerifyDispositionIssuesRejectsStalePendingEvidence(t *tes
 			t.Fatalf("canonical authorization was rejected: %v", issues)
 		}
 	})
+
+	// The guardian carries a deleted account's prior protected rows forward
+	// while its reconcile fails them; verify leaves out exactly those rows.
+	t.Run("deleted account rows excused", func(t *testing.T) {
+		active := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1001", Connector: "codex", OK: true}
+		removed := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1022", Connector: "codex", Error: "inspect user home: not found"}
+		prior := removed
+		prior.OK, prior.Error = true, ""
+		run := enterpriseHookVerifyRun{Rows: []enterpriseHookReconcileRow{active, removed}, Failures: 1}
+		authorization := enterpriseHookGuardianAuthorization{
+			TargetCount: 2, SuccessCount: 1, FailureCount: 1,
+			ProtectedTargets: []enterpriseHookReconcileRow{active, prior},
+		}
+		activation := enterpriseHookGuardianActivation{
+			TargetCount: 2, SuccessCount: 1, FailureCount: 1,
+			ProtectedTargets: authorization.ProtectedTargets,
+		}
+		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) == 0 {
+			t.Fatal("a failed row that is not excused passed against its carried-forward prior row")
+		}
+		run.Excused = []enterpriseHookReconcileRow{removed}
+		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); len(issues) != 0 {
+			t.Fatalf("excused deleted-account row: issues = %v", issues)
+		}
+		stale := prior
+		stale.SID = "S-1-5-21-1-2-3-1099"
+		activation.ProtectedTargets = append(append([]enterpriseHookReconcileRow(nil), activation.ProtectedTargets...), stale)
+		if issues := enterpriseHookVerifyDispositionIssues(run, authorization, activation); !strings.Contains(strings.Join(issues, "; "), "extra or stale") {
+			t.Fatalf("stale target next to an excused row: issues = %v", issues)
+		}
+	})
 }
 
 func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *testing.T) {
@@ -281,7 +312,7 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 	}
 
 	proof, err := enterpriseHookAuthenticatedPendingTargets(
-		manifest, state, authorization, activation, manifestPath, digest,
+		manifest, state, authorization, activation, manifestPath, digest, 0,
 	)
 	if err != nil {
 		t.Fatalf("authenticate pending proof: %v", err)
@@ -293,7 +324,7 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 
 	manifest.Targets[1].Deferred = false
 	if _, err := enterpriseHookAuthenticatedPendingTargets(
-		manifest, state, authorization, activation, manifestPath, digest,
+		manifest, state, authorization, activation, manifestPath, digest, 0,
 	); err == nil || !strings.Contains(err.Error(), "noncanonical pending target") {
 		t.Fatalf("non-deferred pending proof error = %v, want fail closed", err)
 	}
@@ -301,7 +332,7 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 	manifest.Targets[1].Deferred = true
 	state.Results[1].UserHome = filepath.Join(string(filepath.Separator), "Users", "other")
 	if _, err := enterpriseHookAuthenticatedPendingTargets(
-		manifest, state, authorization, activation, manifestPath, digest,
+		manifest, state, authorization, activation, manifestPath, digest, 0,
 	); err == nil || !strings.Contains(err.Error(), "identity differs") {
 		t.Fatalf("wrong-home pending proof error = %v, want fail closed", err)
 	}
