@@ -1836,11 +1836,13 @@ call, a read of `~/.ssh/id_rsa`. A tool call's plain `curl` (no `--proxy`)
 reached example.org through the DefenseClaw proxy the launcher exported, the
 proxy blocked webhook.site, and a connection that bypassed the proxy was
 refused by OpenShell. Besides the model endpoint, OpenCode contacted
-`models.opencode.ai` (its model catalog) and `registry.npmjs.org` (it
-installs its plugin SDK into each config directory in the background; a
-failure is only logged). Since the launcher exports the proxy, those
-registry installs go through the DefenseClaw proxy and succeed. Copilot CLI
-in offline bring-your-own-provider mode contacted nothing else.
+`models.opencode.ai` (its model catalog). The OpenCode image now records
+OpenCode's plugin package as installed in `~/.config/opencode` (see
+[overlay images](#overlay-images)), so a new sandbox no longer downloads it
+from `registry.npmjs.org` at start; a writable config directory the image
+does not record, such as a project's own `.opencode`, still gets OpenCode's
+background install, through the DefenseClaw proxy. Copilot CLI in offline
+bring-your-own-provider mode contacted nothing else.
 
 Kiro CLI ran the same checks end to end in an OpenShell 0.1.1 sandbox
 through its scripted-response mode, which replays the E2E scenarios in place
