@@ -128,7 +128,8 @@ const (
 	DefaultPollInterval = 500 * time.Millisecond
 	// DefaultReadyTimeout bounds WaitReady/WaitStopped/WaitDeleted when the
 	// context has no deadline. The first sandbox on a host pulls a
-	// multi-gigabyte base image.
+	// multi-gigabyte base image, and on the MicroVM (vm) driver the first
+	// start of each image also prepares its MicroVM disk (about a minute).
 	DefaultReadyTimeout = 15 * time.Minute
 )
 

@@ -307,6 +307,24 @@ func TestCheckHost(t *testing.T) {
 	}
 }
 
+// TestCheckHostNamesRosetta: the Intel build under Rosetta on Apple
+// silicon is told to install the arm64 build, not that Macs like it are
+// unsupported.
+func TestCheckHostNamesRosetta(t *testing.T) {
+	openshell.SetProcessTranslated(t, func(goos, goarch string) bool { return true })
+	if err := openshell.CheckHost("darwin", "amd64"); !errors.Is(err, openshell.ErrUnsupportedPlatform) || !strings.Contains(err.Error(), "running under Rosetta") ||
+		!strings.Contains(err.Error(), "install the arm64 build") {
+		t.Fatalf("CheckHost = %v", err)
+	}
+	if err := openshell.CheckHost("darwin", "arm64"); err != nil {
+		t.Fatalf("CheckHost(darwin/arm64) = %v", err)
+	}
+	openshell.SetProcessTranslated(t, func(goos, goarch string) bool { return false })
+	if err := openshell.CheckHost("darwin", "amd64"); err == nil || strings.Contains(err.Error(), "Rosetta") {
+		t.Fatalf("CheckHost on an Intel Mac = %v", err)
+	}
+}
+
 // testPKI is a gateway CA with a loopback server certificate and a client
 // certificate, as openshell-gateway generate-certs produces.
 type testPKI struct {

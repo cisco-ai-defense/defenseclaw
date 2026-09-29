@@ -305,6 +305,10 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
+	if i.GOOS == "darwin" {
+		plan.Notes = append(plan.Notes, "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, "+
+			"which the formula does not install ("+InstallE2fsprogsCommand+"; setup offers it next)")
+	}
 	if plan.BreakingUpgrade {
 		plan.Env = append(plan.Env, "OPENSHELL_ACK_BREAKING_UPGRADE=1")
 		plan.Notes = append(plan.Notes,
@@ -358,6 +362,24 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		return nil, fmt.Errorf("openshell: %s installed but the gateway is not healthy: %w", after.Version, err)
 	}
 	return &InstallResult{Plan: plan, Installed: true, CLIVersion: after.Version}, nil
+}
+
+// InstallE2fsprogs installs e2fsprogs with Homebrew
+// (InstallE2fsprogsCommand): OpenShell's MicroVM driver formats every
+// MicroVM's disks with its mke2fs and debugfs. The caller has the user's
+// consent.
+func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
+	i.defaults()
+	return brew(ctx, i.Runner, "install", "e2fsprogs")
+}
+
+// ResignVMDriver reruns the nvidia/openshell formula's post-install step
+// (ResignVMDriverCommand), which signs its MicroVM driver for Apple's
+// Hypervisor, without the rebuild `brew reinstall` needs where NVIDIA's
+// tap has no bottle. The caller has the user's consent.
+func (i *Installer) ResignVMDriver(ctx context.Context) error {
+	i.defaults()
+	return brew(ctx, i.Runner, "postinstall", GatewayFormula)
 }
 
 func existingVersion(e *ExistingInstall) string {

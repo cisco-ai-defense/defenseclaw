@@ -14,25 +14,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !darwin
+
 package openshell
 
-import (
-	"io/fs"
-	"testing"
-)
+import "io/fs"
 
-// SetGatewayFileOwner makes owned judge which gateway files are the
-// caller's for the rest of t: only root could make another user's file.
-func SetGatewayFileOwner(t *testing.T, owned func(fs.FileInfo) bool) {
-	prev := gatewayFileOwned
-	gatewayFileOwned = owned
-	t.Cleanup(func() { gatewayFileOwned = prev })
-}
+// rosetta is macOS only.
+func rosetta() bool { return false }
 
-// SetProcessTranslated makes translated report whether a goos/goarch
-// build runs under Rosetta, for the rest of t.
-func SetProcessTranslated(t *testing.T, translated func(goos, goarch string) bool) {
-	prev := processTranslated
-	processTranslated = translated
-	t.Cleanup(func() { processTranslated = prev })
-}
+// hostMemory is asked only on macOS, whose MicroVM resources are sized
+// from it.
+func hostMemory() uint64 { return 0 }
+
+// allocatedBytes measures the MicroVM driver's cache, which is macOS
+// only: elsewhere a file's size stands in.
+func allocatedBytes(info fs.FileInfo) uint64 { return uint64(info.Size()) }

@@ -74,6 +74,12 @@ type doctorFixture struct {
 	vmKernel string
 	vmErr    error
 	vmProbes int
+	// brew is the Homebrew prefix of a Mac, e2fsprogs the directory the
+	// MicroVM driver would find e2fsprogs in (empty until installed).
+	brew, e2fsprogs string
+	// restartedOn is the compute driver the gateway runs once a change
+	// restarts it (empty: docker).
+	restartedOn openshell.ComputeDriver
 }
 
 // unit renders the service as systemd reports it, started at f.started
@@ -109,6 +115,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		vmABI:    6,
 		vmKernel: "6.12.65-linuxkit",
 	}
+	f.brew, f.e2fsprogs = filepath.Join(f.home, "homebrew"), filepath.Join(f.home, "homebrew", "opt", "e2fsprogs", "sbin")
 	f.regDir = f.addRegistration("openshell", nil)
 	f.writeTOML(enabledTOML, f.started.Add(-time.Minute))
 
@@ -137,20 +144,27 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Dial: func(*openshell.Registration) (openshell.Client, error) {
 			return f.fake.Client(openshell.ClientOptions{}), nil
 		},
-		Gateway: &openshell.GatewayConfigurator{Dir: f.dir, GOOS: "linux", Runner: f.runner,
+		Gateway: &openshell.GatewayConfigurator{Dir: f.dir, GOOS: "linux", Runner: f.runner, BrewPrefix: f.brew,
 			VerifyGateway:        func(context.Context) error { f.verified++; return nil },
 			ProbeClientAuth:      func(context.Context, *openshell.Registration) error { f.probes++; return f.probe },
-			BrewFormulaInstalled: func() bool { return true }},
-		Ports:         []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
-		LandlockABI:   func() (int, error) { return 6, nil },
-		VMLandlockABI: func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
-		DiskFree:      func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
-		Listen:        f.listen,
-		Geteuid:       func() int { return 1000 },
-		Username:      func() (string, error) { return "dev", nil },
-		HomeDir:       func() (string, error) { return f.home, nil },
-		DockerDesktop: func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
-		DockerGroup:   func() (bool, bool, error) { return true, true, nil },
+			BrewFormulaInstalled: func() bool { return true },
+			RunningDriver: func(context.Context) (openshell.Driver, error) {
+				d, _ := openshell.LookupDriver(string(f.restartedOn))
+				return d, nil
+			}},
+		Ports:               []openshell.PortRequirement{{Name: "ingress", Port: 18971}, {Name: "egress", Port: 18972}},
+		LandlockABI:         func() (int, error) { return 6, nil },
+		DockerVMLandlockABI: func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
+		E2fsprogsDirs:       []string{f.e2fsprogs},
+		HostMemory:          func() uint64 { return 32 << 30 },
+		DiskFree:            func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
+		Listen:              f.listen,
+		Geteuid:             func() int { return 1000 },
+		Getegid:             func() int { return 1000 },
+		Username:            func() (string, error) { return "dev", nil },
+		HomeDir:             func() (string, error) { return f.home, nil },
+		DockerDesktop:       func() (*openshell.DockerDesktop, error) { return nil, errors.New("not Docker Desktop") },
+		DockerGroup:         func() (bool, bool, error) { return true, true, nil },
 	}
 	return f
 }
@@ -490,7 +504,7 @@ func TestDoctorChecks(t *testing.T) {
 		{name: "wrong compute driver", setup: func(f *doctorFixture) {
 			f.fake = openshelltest.New(openshelltest.WithGatewayInfo(types.GatewayInfo{Version: "0.1.1",
 				ComputeDrivers: []types.ComputeDriverInfo{{Name: "podman", DriverName: "podman"}}}))
-		}, want: []checkWant{{"gateway-driver", fail, "runs podman"}}},
+		}, want: []checkWant{{"gateway-driver", fail, `this gateway runs "podman"`}}},
 		{name: "global policy", setup: func(f *doctorFixture) { f.fake.SetGlobalPolicy(&openshell.SandboxPolicy{Version: 1}) },
 			want: []checkWant{{"global-policy", warn, "approvals are disabled"}}},
 
@@ -665,7 +679,7 @@ func TestDoctorChecksLandlockInTheDockerVM(t *testing.T) {
 	const (
 		pass, warn, fail, skip = openshell.StatusPass, openshell.StatusWarn, openshell.StatusFail, openshell.StatusSkip
 		vm                     = "Docker Desktop's Linux VM (kernel 6.12.65-linuxkit)"
-		today                  = "macOS sandboxes cannot run on Docker Desktop today"
+		today                  = "macOS sandboxes cannot run on Docker Desktop's kernel: run them in OpenShell MicroVMs"
 	)
 	for _, tc := range []struct {
 		name   string
@@ -764,7 +778,7 @@ func TestDoctorAsksTheDockerVMKernel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDoctorFixture(t)
 			f.onBrew()
-			f.doctor.VMLandlockABI = nil
+			f.doctor.DockerVMLandlockABI = nil
 			f.doctor.ProbeImages = []string{"", overlay}
 			f.runner.On("docker image inspect --format {{.Id}} "+overlay, "sha256:1a2b\n", nil)
 			f.runner.On(run, tc.out, tc.err)
@@ -777,7 +791,7 @@ func TestDoctorAsksTheDockerVMKernel(t *testing.T) {
 	t.Run("no local image", func(t *testing.T) {
 		f := newDoctorFixture(t)
 		f.onBrew()
-		f.doctor.VMLandlockABI = nil
+		f.doctor.DockerVMLandlockABI = nil
 		f.doctor.ProbeImages = []string{overlay}
 		expectCheck(t, f.run(), openshell.CheckIDLandlock, openshell.StatusWarn, "not checked")
 		if f.runner.Called("docker run") || f.runner.Called("docker pull") {
