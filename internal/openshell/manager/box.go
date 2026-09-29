@@ -202,12 +202,21 @@ var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // Manager.mu.
 func (b *box) identity() audit.SandboxIdentity {
 	id := audit.SandboxIdentity{
-		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness,
-		Runtime: audit.SandboxRuntimeOpenShell, Driver: audit.SandboxDriverDocker,
+		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness, Runtime: audit.SandboxRuntimeOpenShell,
 		Profile: b.rec.Profile, Pack: b.rec.Pack, Phase: b.phase, WorkdirMode: b.rec.WorkdirMode,
 	}
-	if imageDigestPattern.MatchString(b.rec.ImageID) {
-		id.ImageDigest = b.rec.ImageID
+	// Telemetry names the driver as OpenShell does (audit.SandboxDriverVM is
+	// "vm"); one this build does not know is left out, not guessed.
+	if d, ok := openshell.LookupDriver(b.rec.Driver); ok {
+		id.Driver = string(d.Name)
+	}
+	// The image that runs: the run image when the driver runs one.
+	digest := b.rec.ImageID
+	if b.rec.RunImageID != "" {
+		digest = b.rec.RunImageID
+	}
+	if imageDigestPattern.MatchString(digest) {
+		id.ImageDigest = digest
 	}
 	if b.sb != nil {
 		id.PolicyVersion = b.sb.Status.CurrentPolicyVersion
@@ -438,6 +447,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
 		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: launchYolo(b),
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
+		RunImage: r.RunImage, RunImageID: r.RunImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),

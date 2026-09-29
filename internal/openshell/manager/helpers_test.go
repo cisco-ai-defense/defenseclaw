@@ -708,11 +708,13 @@ type harnessEnv struct {
 
 // daemonOptions place a harnessEnv's manager on a gateway, as one
 // DefenseClaw daemon (data dir) of several. Zero values take a new gateway,
-// testOwner, testIngressPort, testEgressPort and 18970.
+// testOwner, testIngressPort, testEgressPort and 18970. driver is the
+// compute driver of the new gateway (docker by default).
 type daemonOptions struct {
 	fake                             *openshelltest.Fake
 	owner                            string
 	ingressPort, egressPort, apiPort int
+	driver                           openshell.ComputeDriver
 }
 
 func claudeContract(t *testing.T) string {
@@ -732,8 +734,11 @@ func newEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 // newDaemonEnv is newEnv for one of several daemons sharing a gateway.
 func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *harnessEnv {
 	t.Helper()
+	if d.driver == "" {
+		d.driver = openshell.DriverDocker
+	}
 	if d.fake == nil {
-		d.fake = openshelltest.New()
+		d.fake = openshelltest.New(openshelltest.WithDriver(d.driver))
 	}
 	e := &harnessEnv{t: t, fake: d.fake, dataDir: t.TempDir(), owner: orDefault(d.owner, testOwner),
 		ingressPort: orDefault(d.ingressPort, testIngressPort), egressPort: orDefault(d.egressPort, testEgressPort), apiPort: orDefault(d.apiPort, 18970)}
@@ -776,7 +781,11 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	e.watch = &fakeWatch{handlers: map[string]func(stream.Event){}, ends: map[string]chan error{}, started: make(chan string, 64), settle: e.waitTriage}
 	e.dns = &fakeDNS{answers: map[string][]string{}, rebinds: map[string]rebind{}, calls: map[string]int{}, hang: map[string]bool{}, errs: map[string]error{}}
 	e.guard = &fakeGuard{running: map[string]nestguard.Options{}}
-	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1"}
+	// The driver DiscoverConnector would read off the gateway: a Gateway
+	// without one fails closed and mounts nothing.
+	driver, err := connectedDriver(t.Context(), e.client)
+	must(t, err)
+	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1", Driver: driver}
 	e.m = e.newManager()
 	return e
 }

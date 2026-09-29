@@ -83,10 +83,11 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		st.Reason = sandboxapi.AsError(err).Error()
 	} else {
 		st.Available = true
-		st.Gateway = &sandboxapi.Gateway{Name: gw.Name, Endpoint: gw.Endpoint, Workspace: gw.Client.Workspace(), Version: gw.Version, Healthy: true}
+		st.Gateway = &sandboxapi.Gateway{Name: gw.Name, Endpoint: gw.Endpoint, Workspace: gw.Client.Workspace(), Version: gw.Version, Healthy: true,
+			Driver: string(gw.Driver.Name)}
 	}
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		st.Available, st.Reason = false, openshell.ErrUnsupportedPlatform.Error()
+	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
+		st.Available, st.Reason = false, err.Error()
 	}
 	if eff, err := m.baseEffective(cfg); err == nil {
 		st.Profile = eff.Profile

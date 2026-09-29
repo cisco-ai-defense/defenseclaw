@@ -108,7 +108,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
 		CPU: req.CPU, Memory: req.Memory, Context: req.Context,
 	}
-	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gw.Port))
+	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
 		return nil, err
 	}
@@ -135,6 +135,10 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		}
 	}
 	if err := m.checkPolicySources(mode, project, eff); err != nil {
+		return nil, err
+	}
+	// Before anything is made, on the host or on the gateway.
+	if err := driverRefusal(gw.Driver, spec, mode); err != nil {
 		return nil, err
 	}
 
@@ -281,6 +285,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		Violations: wireViolations(in.violations), TokenDelivery: config.OpenShellTokenDeliveryProvider,
 	}
 	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
+	rec.Driver = string(gw.Driver.Name)
 	resources := eff.Resources
 	rec.Resources = &resources
 	rec.ProviderEndpoints = providerEndpoints(name, llm, creds)
@@ -472,6 +477,12 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if res := templateResources(eff.Resources); res != nil {
 		tmpl.Resources = res
 	}
+	// driverRefusal keeps host mounts away from a driver without them; this
+	// keeps any other path from sending one.
+	if !gw.Driver.HostMounts && tmpl.DriverConfig != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal,
+			"sandbox %s: host mounts were planned on a gateway whose compute driver mounts none", name)
+	}
 	// The guard's baseline is what the project holds before the sandbox
 	// first runs.
 	m.takeGuardBaseline(ctx, &rec)
@@ -527,6 +538,32 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	m.refreshEgress()
 	view := m.viewOf(b)
 	return &view, nil
+}
+
+// driverRefusal refuses a create the gateway's compute driver cannot carry
+// out as DefenseClaw prepares it: without host mounts (the MicroVM driver)
+// a sandbox can take neither a live mount of the project nor the per-run
+// managed harness files, which reach a docker sandbox as read-only bind
+// mounts and keep the harness's settings and MCP servers locked down. It
+// runs before anything is made, so a refused create leaves nothing behind.
+func driverRefusal(d openshell.Driver, spec *harness.Spec, mode string) error {
+	if d.HostMounts {
+		return nil
+	}
+	why := d.MountRefusal
+	if why == "" {
+		why = "the gateway's compute driver mounts no host folders"
+	}
+	if _, runFiles := spec.Provider.(connector.SandboxRunConfigProvider); runFiles {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+			Message: spec.DisplayName + " sandboxes cannot run on this gateway: DefenseClaw delivers their per-run harness configuration as read-only host mounts",
+			Detail:  why}
+	}
+	if mode == config.OpenShellWorkdirMount {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+			Message: "the project cannot be mounted live on this gateway", Detail: why + "; run it with --copy"}
+	}
+	return nil
 }
 
 // deleteCreated is a failed create's rollback of its sandbox: it deletes

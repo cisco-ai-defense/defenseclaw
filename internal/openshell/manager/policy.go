@@ -73,7 +73,7 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		return nil, nil, err
 	}
 	cfg := m.config()
-	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
+	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec)))
 	if err == nil {
 		err = m.checkPolicySources(rec.WorkdirMode, rec.Project, eff)
 	}
@@ -632,6 +632,28 @@ func (m *Manager) gatewayPort() int {
 	return int(m.gwPort.Load())
 }
 
+// gatewayDriver is the compute driver of the gateway last connected. Until
+// one answered it is docker's: an Explain before any create then describes
+// the docker posture, and the create, which holds a connection, decides
+// with the driver the gateway reports.
+func (m *Manager) gatewayDriver() openshell.Driver {
+	if d := m.gwDriver.Load(); d != nil {
+		return *d
+	}
+	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
+	return d
+}
+
+// recordFacts are the gateway facts a sandbox's policy is re-resolved with:
+// the connected gateway's port, and the driver the sandbox was created on,
+// not the connected gateway's: a sandbox made on docker keeps its mount
+// mode after the gateway switched drivers, instead of being re-resolved to
+// a copy it never had.
+func (m *Manager) recordFacts(rec record) gatewayFacts {
+	d, _ := openshell.LookupDriver(rec.Driver)
+	return gatewayFacts{Port: m.gatewayPort(), Driver: d}
+}
+
 // policyGatewayPort is the OpenShell gateway port a sandbox policy
 // reserves: the registration's, else the local gateway's default, the
 // same fallback packs.Resolve applies to Flags.OpenShellGatewayPort
@@ -741,7 +763,7 @@ func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sa
 		m.mu.Lock()
 		rec := b.rec
 		m.mu.Unlock()
-		flags = rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort())
+		flags = rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec))
 	} else {
 		project := req.Project
 		if project != "" {
@@ -755,6 +777,7 @@ func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sa
 		flags = packs.Flags{
 			Harness: config.NormalizeConnectorName(req.Harness), Pack: req.Pack, Profile: req.Profile, Project: project,
 			Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo, Unmask: req.Unmask, OpenShellGatewayPort: m.gatewayPort(),
+			MountUnsupported: m.gatewayDriver().MountRefusal,
 		}
 	}
 	eff, violations, err := m.resolve(cfg, flags)

@@ -98,6 +98,12 @@ type Flags struct {
 	// reserved like DefenseClaw's own listeners; 0 reserves the default
 	// OpenShellGatewayPort instead.
 	OpenShellGatewayPort int
+	// MountUnsupported is not a flag either: why the compute driver of the
+	// gateway the run uses cannot mount host folders
+	// (openshell.Driver.MountRefusal), empty when it can. Mount mode cannot
+	// be honoured while it is set; ConstraintComputeDriver names the driver
+	// as what stops it.
+	MountUnsupported string
 	// Observability is not a flag either: the compiled observability plan
 	// of the gateway the sandbox reports to. The listener port of each of
 	// its enabled Prometheus destinations is reserved. config.Config does
@@ -372,6 +378,11 @@ type resolver struct {
 }
 
 const requiredPackConstraint = "openshell.admin.required_pack"
+
+// ConstraintComputeDriver is the constraint of a setting the gateway's
+// compute driver decides (Flags.MountUnsupported): a MicroVM sandbox mounts
+// no host folders, so its workdir.mode is copy.
+const ConstraintComputeDriver = "openshell.gateway.compute_driver"
 
 // osHostname is swapped in tests.
 var osHostname = os.Hostname

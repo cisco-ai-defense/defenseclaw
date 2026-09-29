@@ -243,6 +243,11 @@ type Gateway struct {
 	// Port is the gateway's own port, which sandboxes must never reach.
 	Port    int
 	Version string
+	// Driver is the compute driver the gateway runs (GetGatewayInfo): what
+	// DefenseClaw does differently per driver comes from it. The zero
+	// Driver has no capability, so a Gateway built without one fails
+	// closed (it mounts nothing).
+	Driver openshell.Driver
 	// Close releases the connection.
 	Close func() error
 }
@@ -251,7 +256,8 @@ type Gateway struct {
 type Connector func(ctx context.Context) (*Gateway, error)
 
 // DiscoverConnector connects to the registration Discover selects, refusing
-// gateways outside the supported version window.
+// gateways outside the supported version window and gateways that run no
+// compute driver DefenseClaw drives (connectedDriver).
 func DiscoverConnector(discover openshell.DiscoverOptions, client openshell.ClientOptions) Connector {
 	return func(ctx context.Context) (*Gateway, error) {
 		reg, err := openshell.Discover(discover)
@@ -271,6 +277,11 @@ func DiscoverConnector(discover openshell.DiscoverOptions, client openshell.Clie
 			_ = c.Close()
 			return nil, err
 		}
+		driver, err := connectedDriver(ctx, c)
+		if err != nil {
+			_ = c.Close()
+			return nil, err
+		}
 		conn, err := reg.DialGRPC()
 		if err != nil {
 			_ = c.Close()
@@ -278,12 +289,24 @@ func DiscoverConnector(discover openshell.DiscoverOptions, client openshell.Clie
 		}
 		return &Gateway{
 			Client: c, Conn: conn, Name: reg.Name, Endpoint: reg.Endpoint, Port: registrationPort(reg),
-			Version: health.RawVersion,
+			Version: health.RawVersion, Driver: driver,
 			Close: func() error {
 				return errors.Join(c.Close(), conn.Close())
 			},
 		}, nil
 	}
+}
+
+// connectedDriver asks the gateway which compute driver it runs. A gateway
+// that does not say, or runs one DefenseClaw does not drive, is refused
+// rather than driven as docker: what a sandbox is sent, and what keeps it
+// contained, depends on the driver (openshell.GatewayDriver).
+func connectedDriver(ctx context.Context, c openshell.Client) (openshell.Driver, error) {
+	info, err := c.GatewayInfo(ctx)
+	if err != nil {
+		return openshell.Driver{}, fmt.Errorf("ask the OpenShell gateway which compute driver it runs: %w", err)
+	}
+	return openshell.GatewayDriver(info)
 }
 
 func registrationPort(reg *openshell.Registration) int {

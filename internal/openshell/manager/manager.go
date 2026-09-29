@@ -221,9 +221,11 @@ type Manager struct {
 	// gwErrAt paces reconnects: requests arriving within connectBackoff of
 	// a failed attempt get its error instead of dialing again.
 	gwErrAt time.Time
-	// gwPort is the connected gateway's port, readable while a connect is
+	// gwPort is the connected gateway's port, and gwDriver its compute
+	// driver (nil until a gateway answered), readable while a connect is
 	// in progress.
-	gwPort atomic.Int64
+	gwPort   atomic.Int64
+	gwDriver atomic.Pointer[openshell.Driver]
 
 	mu            sync.Mutex
 	boxes         map[string]*box
@@ -518,6 +520,8 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 		m.opts.OnGateway(nil)
 	}
 	m.gwPort.Store(int64(gw.Port))
+	driver := gw.Driver
+	m.gwDriver.Store(&driver)
 	return gw, m.gwGone, nil
 }
 

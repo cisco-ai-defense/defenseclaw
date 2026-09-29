@@ -76,6 +76,11 @@ type Gateway struct {
 	Workspace string `json:"workspace"`
 	Version   string `json:"version,omitempty"`
 	Healthy   bool   `json:"healthy"`
+	// Driver is the compute driver the gateway runs: "docker", or "vm"
+	// (OpenShell's MicroVM driver, which mounts no host folders, so every
+	// sandbox on it works on a copy). Empty from a daemon older than the
+	// field, which drove docker only.
+	Driver string `json:"driver,omitempty"`
 }
 
 // AdminStatus says whether openshell.admin constrains sandboxes and how far
@@ -190,9 +195,15 @@ type Sandbox struct {
 	WorkdirMode string `json:"workdir_mode"`
 	Project     string `json:"project,omitempty"`
 	// Workdir is the project's path inside the sandbox.
-	Workdir        string    `json:"workdir,omitempty"`
-	Image          string    `json:"image,omitempty"`
-	ImageID        string    `json:"image_id,omitempty"`
+	Workdir string `json:"workdir,omitempty"`
+	Image   string `json:"image,omitempty"`
+	ImageID string `json:"image_id,omitempty"`
+	// RunImage and RunImageID are the image the sandbox runs when that is
+	// not Image: on the MicroVM (vm) driver, the image its per-run harness
+	// files are baked into, or an alias of Image under a name no registry
+	// serves. Empty on the docker driver.
+	RunImage       string    `json:"run_image,omitempty"`
+	RunImageID     string    `json:"run_image_id,omitempty"`
 	HarnessVersion string    `json:"harness_version,omitempty"`
 	HookContract   string    `json:"hook_contract,omitempty"`
 	TamperTier     string    `json:"tamper_tier,omitempty"`
@@ -590,6 +601,11 @@ type Explain struct {
 	Admin       AdminStatus `json:"admin"`
 	Settings    []Setting   `json:"settings"`
 	Violations  []Violation `json:"violations,omitempty"`
+	// VMFirstBoot says the sandbox would boot an image the gateway's
+	// MicroVM (vm) driver has not prepared yet: the first start of each
+	// image prepares its MicroVM disk, which takes about a minute. Always
+	// false on the docker driver.
+	VMFirstBoot bool `json:"vm_first_boot,omitempty"`
 }
 
 // Setting is one resolved key and where its value came from.
