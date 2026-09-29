@@ -28,6 +28,10 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
+// enterpriseHookRemovedAccountRow is the Windows standalone deleted-account
+// check; no unix row is excused.
+var enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
+
 func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool, error) {
 	return true, nil
 }

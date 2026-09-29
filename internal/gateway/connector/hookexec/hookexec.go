@@ -163,8 +163,9 @@ type Options struct {
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
 	// ExplainUnenrolledAccount makes the refusal of an account absent from
-	// the protected target set (managedSIDUnregisteredReason) say so, not
-	// "gateway unreachable". The Windows standalone hook sets it; Secure
+	// the protected target set (managedSIDUnregisteredReason), or registered
+	// but without a runtime yet (managedEnrollmentPendingReason), say so,
+	// not "gateway unreachable". The Windows standalone hook sets it; Secure
 	// Client keeps its message.
 	ExplainUnenrolledAccount bool
 	// ManagedGatewayServiceName is the administrator-protected SCM identity
@@ -245,7 +246,8 @@ func Run(ctx context.Context, opts Options) int {
 			return failForeignHookBlocked(opts, sp, reason)
 		}
 		resolveManagedStandaloneFailureEvent(&opts, sp)
-		if opts.ExplainUnenrolledAccount && reason == managedSIDUnregisteredReason && !sp.failOpenOnly {
+		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
+			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
 			return failUnenrolled(opts, sp, reason)
 		}
 		return failUnreachable(
@@ -967,6 +969,11 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 // WindowsManagedSIDUnregisteredReason: the account running the agent is not
 // in the administrator's protected target set.
 const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
+
+// managedEnrollmentPendingReason is enterprisehooks'
+// WindowsManagedEnrollmentPendingReason: the machine policy registers the
+// account, but it has not signed in since, so it has no runtime yet.
+const managedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
 
 // unenrolledAccountExplanation is why an unenrolled account's call is blocked.
 const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
