@@ -207,7 +207,10 @@ func (c *foreignHookRemovalCache) forIdentity(dir, identity string) ([]enterpris
 		return nil, nil
 	}
 	now := time.Now()
-	if err == nil && (path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
+	// A failed read is not cached: the guardian sets the file's group only
+	// after it replaces the file, and a read in between must not deny every
+	// account's calls until the next recheck.
+	if err == nil && (c.err != nil || path != c.path || !info.ModTime().Equal(c.modTime) || info.Size() != c.size ||
 		now.Sub(c.checkedAt) >= foreignHookRemovalRecheck) {
 		c.path, c.modTime, c.size, c.checkedAt = path, info.ModTime(), info.Size(), now
 		c.removals, c.err = readForeignHookRemovals(path)

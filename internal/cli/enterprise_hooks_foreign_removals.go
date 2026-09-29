@@ -37,34 +37,41 @@ func enterpriseForeignHookAccountID(sid string, uid int) string {
 }
 
 // recordEnterpriseForeignHookRemovals adds the hook files the guardian just
-// cleaned for one account and connector to the removal ledger the gateway
-// reads (enterprisepolicy.ForeignHookRemovalsFile), so that account's agent
-// processes of that connector that started before now stay denied: they may
-// still run a hook they loaded. It runs after the files were cleaned, so
-// every process that could have loaded one started before the recorded
-// time. Failures are logged; the per-call check still applies.
-func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, connectorName string, paths []string) {
+// cleaned for one account (home) and connector to the removal ledger the
+// gateway reads (enterprisepolicy.ForeignHookRemovalsFile), so that
+// account's agent processes of that connector, and of any other that loads
+// the same file, that started before now stay denied: they may still run a
+// hook they loaded. It runs after the files were cleaned, so every process
+// that could have loaded one started before the recorded time. Failures are
+// logged; the per-call check still applies.
+func recordEnterpriseForeignHookRemovals(stderr io.Writer, account, home, connectorName string, paths []string) {
 	identity, ok := connector.CanonicalUserScopedIdentity(account)
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
-	if !ok || len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
+	if !ok || connectorName == "" || len(paths) == 0 || cfg == nil || !cfg.StandaloneEnterprise() {
 		return
 	}
 	enterpriseForeignHookRemovalsMu.Lock()
 	defer enterpriseForeignHookRemovalsMu.Unlock()
 	err := func() error {
+		dataDir := cfg.DataDir
+		if !filepath.IsAbs(managed.HookGuardianAuthorizationDir(dataDir)) {
+			return errors.New("the data directory is not an absolute path")
+		}
 		mark := agentprocess.Now()
 		if mark == "" {
 			return errors.New("the process clock is unavailable")
 		}
 		now := time.Now().UTC()
+		connectors := enterprisepolicy.StandaloneConnectors(cfg)
 		added := make([]enterprisepolicy.ForeignHookRemoval, 0, len(paths))
 		for _, path := range paths {
-			added = append(added, enterprisepolicy.ForeignHookRemoval{
-				Identity: identity, Connector: connectorName, Path: foreignGuardLogField(path, 512),
-				At: now.Format(time.RFC3339), Mark: mark,
-			})
+			for _, name := range enterprisepolicy.ForeignHookRemovalConnectors(home, path, connectorName, connectors) {
+				added = append(added, enterprisepolicy.ForeignHookRemoval{
+					Identity: identity, Connector: name, Path: foreignGuardLogField(path, 512),
+					At: now.Format(time.RFC3339), Mark: mark,
+				})
+			}
 		}
-		dataDir := cfg.DataDir
 		path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), enterprisepolicy.ForeignHookRemovalsFile)
 		existing, loadErr := loadEnterpriseForeignHookRemovals(path)
 		if loadErr != nil {

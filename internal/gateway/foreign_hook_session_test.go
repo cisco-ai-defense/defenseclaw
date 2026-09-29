@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -95,9 +96,17 @@ func TestForeignHookSessionGatewayPersistsAndBindsTheCaller(t *testing.T) {
 	}
 	// The guardian removed alice's Claude Code hook at clock 200 (and a Codex
 	// one later): only her Claude Code processes started before then are
-	// denied, naming the file.
+	// denied, naming the file. Bob's earlier Codex removals, however many and
+	// however long the paths he chose (and one incomplete entry), never make
+	// the ledger unreadable, which would deny everyone's calls.
 	removed := "/home/alice/.claude/settings.json"
-	data, err := enterprisepolicy.EncodeForeignHookRemovals(nil, []enterprisepolicy.ForeignHookRemoval{
+	earlier := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	flood := []enterprisepolicy.ForeignHookRemoval{{Identity: bob, Connector: "codex", At: earlier, Mark: runtime.GOOS + ":b:900"}}
+	for i := 0; i < 2000; i++ {
+		flood = append(flood, enterprisepolicy.ForeignHookRemoval{Identity: bob, Connector: "codex",
+			Path: "/home/bob/" + strconv.Itoa(i) + strings.Repeat("<", 480), At: earlier, Mark: runtime.GOOS + ":b:900"})
+	}
+	data, err := enterprisepolicy.EncodeForeignHookRemovals(flood, []enterprisepolicy.ForeignHookRemoval{
 		{Identity: alice, Connector: "claudecode", Path: removed, At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:200"},
 		{Identity: alice, Connector: "codex", Path: "/home/alice/.codex/hooks.json", At: time.Now().UTC().Format(time.RFC3339), Mark: runtime.GOOS + ":b:900"},
 	}, time.Now())

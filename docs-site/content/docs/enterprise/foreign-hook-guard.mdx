@@ -86,12 +86,13 @@ Codex's on Windows, which DefenseClaw always sets; see
    the removal (account, connector, file and time) in its protected
    directory, `foreign-hook-removals.json` next to its authorization ledger.
    The gateway then denies the calls of that account's agent processes for
-   that connector that started before the removal, naming the file: they may
-   have loaded the hook, and an agent that sends its session-start event only
-   with the first prompt (Hermes) takes its snapshot after the file was
-   cleaned. Restart the agent to clear it. Agents started after the removal,
-   other accounts and other connectors are not affected, and the record
-   lasts 7 days.
+   that connector, and for any other connector that loads the same file
+   (Cursor and Devin load `~/.claude/settings.json`), that started before
+   the removal, naming the file: they may have loaded the hook, and an agent
+   that sends its session-start event only with the first prompt (Hermes)
+   takes its snapshot after the file was cleaned. Restart the agent to clear
+   it. Agents started after the removal, other accounts and other connectors
+   are not affected, and the record lasts 7 days.
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
    `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`,

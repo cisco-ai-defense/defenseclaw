@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -23,11 +25,12 @@ import (
 // session-start snapshot can miss a hook the guardian removed in between.
 // The guardian therefore records each removal (account, connector, file and
 // time) in its protected authorization directory, and the gateway denies the
-// calls of that account's agent processes of that connector that started
-// before the removal: they may still run the hook. A process that started
-// afterwards loaded the cleaned files, and other accounts and connectors are
-// not affected. A process DefenseClaw cannot name has no start time to
-// compare, so only its session-start snapshot applies.
+// calls of that account's agent processes of that connector (and of any
+// other that loads the file) that started before the removal: they may
+// still run the hook. A process that started afterwards loaded the cleaned
+// files, and other accounts and connectors are not affected. A process
+// DefenseClaw cannot name has no start time to compare, so only its
+// session-start snapshot applies.
 
 // ForeignHookRemovalsFile is the removal ledger in the hook guardian's
 // authorization directory. The guardian writes it; the gateway reads it.
@@ -79,32 +82,43 @@ func ParseForeignHookRemovals(data []byte) ([]ForeignHookRemoval, error) {
 		return nil, errors.New("foreign-hook removal ledger has an invalid schema")
 	}
 	for _, removal := range ledger.Removals {
-		if _, err := time.Parse(time.RFC3339Nano, removal.At); err != nil || removal.Identity == "" ||
-			removal.Connector == "" || removal.Path == "" || removal.Mark == "" {
+		if _, err := time.Parse(time.RFC3339Nano, removal.At); err != nil || !removal.complete() {
 			return nil, errors.New("foreign-hook removal ledger contains an incomplete entry")
 		}
 	}
 	return ledger.Removals, nil
 }
 
+func (r ForeignHookRemoval) complete() bool {
+	return r.Identity != "" && r.Connector != "" && r.Path != "" && r.Mark != ""
+}
+
+// foreignHookRemovalIndent bounds what indentation adds to one encoded
+// entry, and to the ledger around them.
+const foreignHookRemovalIndent = 64
+
 // EncodeForeignHookRemovals adds added to existing, keeping the latest entry
-// per account, connector and file, drops the entries older than
-// sessionRecordTTL (a session block lasts as long) and keeps the newest
-// foreignHookRemovalsLimit, and encodes the ledger.
+// per account, connector and file, drops incomplete entries and those older
+// than sessionRecordTTL (a session block lasts as long), keeps the newest
+// that fit foreignHookRemovalsLimit and ForeignHookRemovalsMaxBytes, and
+// encodes the ledger. The gateway denies every account's calls while the
+// ledger does not parse, so one account's removals (paths the user names)
+// must never make it unreadable.
 func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Time) ([]byte, error) {
 	type dated struct {
 		removal ForeignHookRemoval
 		at      time.Time
+		key     string
 	}
 	latest := map[string]dated{}
 	for _, removal := range append(append([]ForeignHookRemoval{}, existing...), added...) {
 		at, err := time.Parse(time.RFC3339Nano, removal.At)
-		if err != nil || now.Sub(at) > sessionRecordTTL {
+		if err != nil || now.Sub(at) > sessionRecordTTL || !removal.complete() {
 			continue
 		}
 		key := removal.Identity + "\x00" + removal.Connector + "\x00" + removal.Path
 		if previous, ok := latest[key]; !ok || !at.Before(previous.at) {
-			latest[key] = dated{removal, at}
+			latest[key] = dated{removal, at, key}
 		}
 	}
 	entries := make([]dated, 0, len(latest))
@@ -115,20 +129,50 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 		if !entries[i].at.Equal(entries[j].at) {
 			return entries[i].at.After(entries[j].at)
 		}
-		return entries[i].removal.Path < entries[j].removal.Path
+		return entries[i].key < entries[j].key
 	})
-	if len(entries) > foreignHookRemovalsLimit {
-		entries = entries[:foreignHookRemovalsLimit]
-	}
 	ledger := foreignHookRemovalLedger{Version: foreignHookRemovalsVersion, Removals: []ForeignHookRemoval{}}
+	size := foreignHookRemovalIndent
 	for _, entry := range entries {
+		encoded, err := json.Marshal(entry.removal)
+		if err != nil {
+			return nil, err
+		}
+		size += len(encoded) + foreignHookRemovalIndent
+		if len(ledger.Removals) == foreignHookRemovalsLimit || size > ForeignHookRemovalsMaxBytes {
+			break
+		}
 		ledger.Removals = append(ledger.Removals, entry.removal)
 	}
 	data, err := json.MarshalIndent(ledger, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	return append(data, '\n'), nil
+	if data = append(data, '\n'); len(data) > ForeignHookRemovalsMaxBytes {
+		return nil, errors.New("foreign-hook removal ledger exceeds the size limit")
+	}
+	return data, nil
+}
+
+// ForeignHookRemovalConnectors returns connector and each of candidates
+// whose agent loads the user file path from its default location under
+// home: Cursor and Devin also load Claude Code's ~/.claude/settings.json. A
+// pass removes an entry once, for the first connector it cleans, so the
+// removal is recorded for every agent that may have loaded it.
+func ForeignHookRemovalConnectors(home, path, connector string, candidates []string) []string {
+	out := []string{connector}
+	for _, name := range candidates {
+		if slices.Contains(out, name) {
+			continue
+		}
+		for _, source := range guardSources(GuardRequest{Connector: name, Home: home, AccountHome: home}) {
+			if source.scope == ScopeUser && samePath(filepath.Clean(source.path), filepath.Clean(path)) {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // removalAfterProcessStart returns the earliest live removal of the key's
