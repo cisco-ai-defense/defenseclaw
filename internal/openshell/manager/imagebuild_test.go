@@ -32,16 +32,29 @@ import (
 )
 
 // buildFailingDocker is a Docker daemon without images whose builds print
-// output and fail.
+// output and fail. It has the buildx plugin unless noBuildx is set.
 type buildFailingDocker struct {
-	output string
+	output   string
+	noBuildx bool
+	builds   *int
 }
 
-func (d buildFailingDocker) Run(_ context.Context, stdin io.Reader, _, stderr io.Writer, args ...string) error {
+func (d buildFailingDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	if stdin != nil {
 		_, _ = io.Copy(io.Discard, stdin)
 	}
-	if args[0] == "build" {
+	switch args[0] {
+	case "buildx":
+		if d.noBuildx {
+			_, _ = io.WriteString(stderr, "docker: unknown command: docker buildx\n\nRun 'docker --help' for more information\n")
+			return &image.CommandError{Args: args, ExitCode: 1}
+		}
+		_, _ = io.WriteString(stdout, "github.com/docker/buildx v0.30.1 c6f062d\n")
+		return nil
+	case "build":
+		if d.builds != nil {
+			*d.builds++
+		}
 		_, _ = io.WriteString(stderr, d.output)
 	}
 	return &image.CommandError{Args: args, ExitCode: 1}
@@ -82,6 +95,30 @@ func TestCreateReportsTheEndOfAFailedImageBuild(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the daemon log lacks the build's output:\n%s", strings.Join(logs, "\n"))
+	}
+	assertNothingLeft(t, e)
+}
+
+// TestCreateNamesTheMissingBuildxPlugin: a daemon whose docker lacks the
+// buildx plugin (another HOME or DOCKER_CONFIG hides it) refuses the image
+// build before docker build runs, and the create error says how to fix it.
+func TestCreateNamesTheMissingBuildxPlugin(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "")
+	e := newEnv(t, nil)
+	builds := 0
+	e.m.opts.Images = BuilderImages{Builder: &image.Builder{
+		Docker: buildFailingDocker{noBuildx: true, builds: &builds}, Store: image.NewStore(e.dataDir), Log: io.Discard,
+	}}
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "img-box"})
+	apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
+	for _, want := range []string{"docker's buildx plugin is not available (`docker buildx version`: docker: unknown command: docker buildx)",
+		"install Docker's buildx plugin", "DOCKER_CONFIG"} {
+		if !strings.Contains(apiErr.Detail, want) {
+			t.Fatalf("create error detail = %q, want %q", apiErr.Detail, want)
+		}
+	}
+	if builds != 0 {
+		t.Fatalf("docker build ran %d times", builds)
 	}
 	assertNothingLeft(t, e)
 }

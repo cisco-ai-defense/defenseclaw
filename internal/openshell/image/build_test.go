@@ -39,12 +39,19 @@ import (
 )
 
 // fakeDocker answers docker CLI invocations from a handler and records them.
+// It has the buildx plugin unless noBuildx is set; the handler never sees
+// `docker buildx version`.
 type fakeDocker struct {
-	mu      sync.Mutex
-	calls   [][]string
-	stdin   map[int][]byte
-	handler func(args []string, stdin []byte) (stdout string, exit int)
+	mu       sync.Mutex
+	calls    [][]string
+	stdin    map[int][]byte
+	handler  func(args []string, stdin []byte) (stdout string, exit int)
+	noBuildx bool
 }
+
+// dockerWithoutBuildx is what `docker buildx version` prints without the
+// plugin.
+const dockerWithoutBuildx = "docker: unknown command: docker buildx\n\nRun 'docker --help' for more information\n"
 
 func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	var in []byte
@@ -58,6 +65,14 @@ func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.W
 	}
 	f.stdin[len(f.calls)-1] = in
 	f.mu.Unlock()
+	if len(args) == 2 && args[0] == "buildx" && args[1] == "version" {
+		if f.noBuildx {
+			_, _ = io.WriteString(stderr, dockerWithoutBuildx)
+			return &CommandError{Args: args, ExitCode: 1}
+		}
+		_, _ = io.WriteString(stdout, "github.com/docker/buildx v0.30.1 c6f062d0eef6a18ae703d0433e2c8a4dd34d4513\n")
+		return nil
+	}
 	out, exit := f.handler(args, in)
 	if stdout != nil {
 		_, _ = io.WriteString(stdout, out)
@@ -258,6 +273,52 @@ func TestBuildFailureReportsTheEndOfDockersOutput(t *testing.T) {
 	}
 }
 
+// TestBuildRefusesADockerWithoutBuildKit: a docker without its buildx
+// plugin, or with DOCKER_BUILDKIT off (or not a boolean), would build with
+// the legacy builder, which runs the harness install and then fails on the
+// first COPY --chmod; the build is refused before docker build runs, with
+// the fix. DOCKER_BUILDKIT=1 with the plugin builds.
+func TestBuildRefusesADockerWithoutBuildKit(t *testing.T) {
+	fix := "install Docker's buildx plugin"
+	for name, tc := range map[string]struct {
+		noBuildx  bool
+		env, want string
+	}{
+		"no buildx plugin": {true, "", "docker's buildx plugin is not available (`docker buildx version`: docker: unknown command: docker buildx), " +
+			"so docker build would fall back to the legacy builder"},
+		"DOCKER_BUILDKIT=0": {false, "0", "DOCKER_BUILDKIT=0 turns BuildKit off, and docker's legacy builder cannot build the sandbox images " +
+			"(their Dockerfile uses COPY --chmod); unset DOCKER_BUILDKIT, or set it to 1"},
+		"DOCKER_BUILDKIT=false": {true, "false", "DOCKER_BUILDKIT=false turns BuildKit off"},
+		"DOCKER_BUILDKIT=maybe": {false, "maybe", `DOCKER_BUILDKIT="maybe" is not true or false`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("DOCKER_BUILDKIT", tc.env)
+			docker := &fakeDocker{noBuildx: tc.noBuildx, handler: func([]string, []byte) (string, int) { return "", 1 }}
+			store := testStore(t)
+			b := &Builder{Docker: docker, Store: store}
+			_, err := b.Build(context.Background(), testSpec(harness.ClaudeCode), BuildOptions{})
+			if !errors.Is(err, ErrNoBuildKit) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Build error = %v, want %q", err, tc.want)
+			}
+			if tc.env == "" && !strings.Contains(err.Error(), fix) {
+				t.Fatalf("Build error = %v, want the fix %q", err, fix)
+			}
+			if n := docker.count("build"); n != 0 {
+				t.Fatalf("docker build ran %d times", n)
+			}
+			if records, _ := store.List(); len(records) != 0 {
+				t.Fatalf("a refused build was recorded: %v", records)
+			}
+		})
+	}
+	t.Setenv("DOCKER_BUILDKIT", "1")
+	c := mustContext(t, testSpec(harness.Codex))
+	b := &Builder{Docker: imageDocker(t, c, goodProbeOutput(c)), Store: testStore(t)}
+	if _, err := b.Build(context.Background(), testSpec(harness.Codex), BuildOptions{SkipHookFire: true}); err != nil {
+		t.Fatalf("Build with DOCKER_BUILDKIT=1: %v", err)
+	}
+}
+
 func TestPruneKeepsCurrentImagePerIdentity(t *testing.T) {
 	store := testStore(t)
 	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -394,6 +455,8 @@ func (d *fakeDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Writer
 	defer d.mu.Unlock()
 	fail := func() error { return &CommandError{Args: args, ExitCode: 1} }
 	switch {
+	case args[0] == "buildx" && args[1] == "version":
+		return nil
 	case args[0] == "build":
 		labels := map[string]string{}
 		tag := ""

@@ -25,6 +25,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"os"
@@ -60,6 +61,8 @@ type layerDaemon struct {
 	// extraLayers adds layers to what a build makes (a builder that does
 	// not build what it was given).
 	extraLayers int
+	// noBuildx is a docker without its buildx plugin.
+	noBuildx bool
 }
 
 type fakeImage struct {
@@ -110,6 +113,12 @@ func (d *layerDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Write
 	d.calls = append(d.calls, append([]string(nil), args...))
 	fail := func() error { return &CommandError{Args: args, ExitCode: 1} }
 	switch {
+	case args[0] == "buildx" && args[1] == "version":
+		if d.noBuildx {
+			_, _ = io.WriteString(stdout, dockerWithoutBuildx)
+			return fail()
+		}
+		return nil
 	case args[0] == "tag":
 		id, ok := d.resolve(args[1])
 		if !ok {
@@ -415,6 +424,22 @@ func TestRunImageRefusals(t *testing.T) {
 	}
 	if n := daemon.count("build") + daemon.count("tag"); n != 0 {
 		t.Fatalf("a refused run image ran docker: %v", daemon.calls)
+	}
+}
+
+// A run image is built with BuildKit too (its Dockerfile uses COPY
+// --chmod): a docker without the buildx plugin is refused before docker
+// build runs, and no run image is recorded (only the alias it builds FROM).
+func TestRunImageRefusesADockerWithoutBuildKit(t *testing.T) {
+	t.Setenv("DOCKER_BUILDKIT", "")
+	b, daemon, base := runBase(t)
+	daemon.noBuildx = true
+	_, err := b.RunImage(context.Background(), base, claudeRunFiles(`{"env":{}}`+"\n"), testAliasRepo)
+	if !errors.Is(err, ErrNoBuildKit) || !strings.Contains(err.Error(), "docker: unknown command: docker buildx") {
+		t.Fatalf("RunImage = %v, want ErrNoBuildKit", err)
+	}
+	if runs, _ := b.Store.RunImages(); daemon.count("build") != 0 || len(runs) != 1 || !runs[0].Alias {
+		t.Fatalf("builds %d, run images recorded %+v", daemon.count("build"), runs)
 	}
 }
 
