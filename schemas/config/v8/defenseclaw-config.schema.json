@@ -671,6 +671,25 @@
             "null"
           ]
         },
+        "llm": {
+          "description": "The model credential a sandbox run shares: the default of `sandbox run --llm`, which the shell wrappers, the TUI and the macOS app take too.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "anthropic",
+            "claude-oauth",
+            "openai",
+            "bedrock",
+            "gemini"
+          ],
+          "default": "auto"
+        },
+        "keep_headless": {
+          "description": "Keep the sandbox a foreground one-prompt `sandbox run --prompt` (or a harness print mode) creates; by default it is deleted at the run's end when nothing is left in it to bring back or undo.",
+          "type": "boolean",
+          "default": false
+        },
         "workdir": {
           "$ref": "#/$defs/openShellWorkdir"
         },
@@ -879,6 +898,45 @@
             "undo"
           ],
           "default": "ask"
+        },
+        "undo_ignored": {
+          "$ref": "#/$defs/openShellUndoIgnored"
+        }
+      }
+    },
+    "openShellUndoIgnored": {
+      "description": "Keep, with a mounted project's undo point (Linux mount mode), a copy of the dependency directories git ignores, so `sandbox undo` restores them. Copy mode, every sandbox on a Mac, is unaffected.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_mb": {
+          "description": "The cap on one undo point's copies, in MiB; 0 means 500. A directory whose copy would pass it keeps none.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 500
+        },
+        "dirs": {
+          "description": "Directory names kept at any depth; empty means node_modules, .venv and venv.",
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$",
+            "not": {
+              "const": ".git"
+            }
+          },
+          "default": [
+            "node_modules",
+            ".venv",
+            "venv"
+          ]
         }
       }
     },

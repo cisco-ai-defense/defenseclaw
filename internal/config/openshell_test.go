@@ -56,11 +56,20 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	if o.Workdir.GitDepth != 200 || o.Workdir.OnExit != "ask" {
 		t.Fatalf("workdir defaults = %+v", o.Workdir)
 	}
+	if u := o.Workdir.UndoIgnored; u.Enabled || u.MaxMB != 500 || strings.Join(u.Dirs, ",") != "node_modules,.venv,venv" {
+		t.Fatalf("undo_ignored defaults = %+v", u)
+	}
+	if u := (OpenShellUndoIgnoredConfig{}); u.EffectiveMaxBytes() != 500<<20 || strings.Join(u.EffectiveDirs(), ",") != "node_modules,.venv,venv" {
+		t.Fatalf("undo_ignored effective defaults = %d, %v", u.EffectiveMaxBytes(), u.EffectiveDirs())
+	}
 	if o.Approvals.DebounceMs != 3000 || !o.Approvals.AgentProposalsEnabled() {
 		t.Fatalf("approvals defaults = %+v", o.Approvals)
 	}
 	if o.TokenDelivery != "provider" {
 		t.Fatalf("token_delivery = %q", o.TokenDelivery)
+	}
+	if o.LLM != "auto" {
+		t.Fatalf("llm = %q, want auto", o.LLM)
 	}
 	// Pack-governed keys stay unset so the selected pack supplies them.
 	if o.Pack != "" || o.Profile != "" || o.Yolo != nil || o.Workdir.Mode != "" ||
@@ -127,7 +136,9 @@ openshell:
   pack_dir: '`+packDir+`'
   profile: strict
   yolo: false
-  workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep}
+  llm: bedrock
+  keep_headless: true
+  workdir: {mode: copy, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 100, git_depth: 50, on_exit: keep, undo_ignored: {enabled: true, max_mb: 64, dirs: [vendor]}}
   egress: {block: [paste.example], allow: ['*.npmjs.org'], unblocked: [webhook.site], ports: [443, 8443], large_upload_mb: 10, feed: none}
   image: {base: 'registry.example/base@sha256:abc', harness_versions: {codex: 0.146.0}}
   approvals: {debounce_ms: 1500, agent_proposals: false}
@@ -158,15 +169,18 @@ openshell:
 	f := false
 	tr := true
 	want := OpenShellConfig{
-		Enabled:           true,
-		Binary:            binary,
-		Gateway:           OpenShellGatewayConfig{Name: "openshell", Workspace: "team"},
-		EgressPort:        19500,
-		Pack:              "balanced",
-		PackDir:           packDir,
-		Profile:           "strict",
-		Yolo:              &f,
-		Workdir:           OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep"},
+		Enabled:      true,
+		Binary:       binary,
+		Gateway:      OpenShellGatewayConfig{Name: "openshell", Workspace: "team"},
+		EgressPort:   19500,
+		Pack:         "balanced",
+		PackDir:      packDir,
+		Profile:      "strict",
+		Yolo:         &f,
+		LLM:          "bedrock",
+		KeepHeadless: true,
+		Workdir: OpenShellWorkdirConfig{Mode: "copy", Masks: []string{".env*"}, Unmask: []string{".env.example"}, MaxUploadMB: 100, GitDepth: 50, OnExit: "keep",
+			UndoIgnored: OpenShellUndoIgnoredConfig{Enabled: true, MaxMB: 64, Dirs: []string{"vendor"}}},
 		Egress:            OpenShellEgressConfig{Block: []string{"paste.example"}, Allow: []string{"*.npmjs.org"}, Unblocked: []string{"webhook.site"}, Ports: []int{443, 8443}, LargeUploadMB: 10, Feed: "none"},
 		Image:             OpenShellImageConfig{Base: "registry.example/base@sha256:abc", HarnessVersions: map[string]string{"codex": "0.146.0"}},
 		Approvals:         OpenShellApprovalsConfig{DebounceMs: 1500, AgentProposals: &f},
@@ -233,7 +247,11 @@ func TestOpenShellValidate(t *testing.T) {
 		{"on exit", func(o *OpenShellConfig) { o.Workdir.OnExit = "delete" }, "workdir.on_exit"},
 		{"feed", func(o *OpenShellConfig) { o.Egress.Feed = "custom" }, "egress.feed"},
 		{"token delivery", func(o *OpenShellConfig) { o.TokenDelivery = "file" }, "token_delivery"},
+		{"llm", func(o *OpenShellConfig) { o.LLM = "vertex" }, "llm"},
 		{"negative upload", func(o *OpenShellConfig) { o.Workdir.MaxUploadMB = -1 }, "max_upload_mb"},
+		{"undo_ignored cap", func(o *OpenShellConfig) { o.Workdir.UndoIgnored.MaxMB = -1 }, "workdir.undo_ignored.max_mb"},
+		{"undo_ignored path", func(o *OpenShellConfig) { o.Workdir.UndoIgnored.Dirs = []string{"node_modules", "web/node_modules"} }, "workdir.undo_ignored.dirs[1]"},
+		{"undo_ignored git", func(o *OpenShellConfig) { o.Workdir.UndoIgnored.Dirs = []string{".git"} }, "workdir.undo_ignored.dirs[0]"},
 		{"absolute mask", func(o *OpenShellConfig) { o.Workdir.Masks = []string{".env", "/srv/app/.env"} }, "workdir.masks[1]"},
 		{"escaping unmask", func(o *OpenShellConfig) { o.Workdir.Unmask = []string{"../../secrets/app.key"} }, "workdir.unmask[0]"},
 		{"proxy port zero", func(o *OpenShellConfig) { o.Egress.Ports = []int{0} }, "egress.ports[0]"},

@@ -231,6 +231,11 @@ func TestUndo(t *testing.T) {
 	deps := workspace.IgnoredChange{Path: "node_modules/", Modified: 1, Executables: []string{"node_modules/.bin/tool"}, ExecutableCount: 1,
 		Dependencies: true, Remedy: "delete it and reinstall the packages (for example `npm ci`)"}
 	cache := workspace.IgnoredChange{Path: "calc/__pycache__/", Added: 1, Modified: 1, Removed: true, Remedy: "delete it; Python rebuilds it"}
+	restoredDeps, overCap, vendor := deps, deps, deps
+	restoredDeps.Restored, overCap.OverCap, vendor.Path = true, true, "vendor/"
+	undoIgnoredOn := func(ta *testApp) {
+		ta.Cfg.OpenShell.Workdir.UndoIgnored = config.OpenShellUndoIgnoredConfig{Enabled: true, MaxMB: 64}
+	}
 	readme := []workspace.TreeChange{{Path: "README.md", Status: "M"}}
 	before, after := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	for _, c := range []struct {
@@ -239,6 +244,7 @@ func TestUndo(t *testing.T) {
 		undo        *workspace.UndoResult
 		undos       int
 		stopped     bool // -o json: stdout is the restore's response
+		setup       func(*testApp)
 		want, not   []string
 	}{
 		{name: "restore", input: "y\n", undos: 2, want: []string{"revert  README.md", "restored: 1 file restored"}},
@@ -250,6 +256,22 @@ func TestUndo(t *testing.T) {
 			undos: 2, want: []string{"remove  2 files the session wrote to calc/__pycache__/ (a Python bytecode cache)",
 				"undo cannot restore node_modules/", "restored: 1 file restored, except node_modules/ (see above)"},
 			not: []string{"undo cannot restore calc/__pycache__/"}},
+		// Off, a dependency directory undo cannot restore names the key that
+		// makes the next undo point keep a copy of it (#944).
+		{name: "the key that keeps a copy", undo: &workspace.UndoResult{Preview: true, Ignored: []workspace.IgnoredChange{deps}}, undos: 1,
+			want: []string{"openshell.workdir.undo_ignored.enabled: true in ", "config.yaml makes each undo point keep a copy of " +
+				"node_modules, .venv, venv (up to 500 MB), so undo restores them; it applies from the next session's start"}},
+		{name: "a directory the key does not name", setup: undoIgnoredOn,
+			undo: &workspace.UndoResult{Preview: true, Ignored: []workspace.IgnoredChange{vendor}}, undos: 1,
+			want: []string{"add vendor to openshell.workdir.undo_ignored.dirs in "}, not: []string{"undo_ignored.enabled: true"}},
+		{name: "a kept copy is restored", input: "y\n", undo: &workspace.UndoResult{Changes: readme, Ignored: []workspace.IgnoredChange{restoredDeps}},
+			undos: 2, want: []string{"restore node_modules/ from the copy the undo point keeps (1 file added or changed during the session)",
+				"restored: 1 file restored (node_modules/ too, from the copy the undo point keeps)"},
+			not: []string{"undo cannot restore", "undo_ignored"}},
+		{name: "a copy past the cap", setup: undoIgnoredOn, undo: &workspace.UndoResult{Preview: true, Ignored: []workspace.IgnoredChange{overCap}}, undos: 1,
+			want: []string{"undo cannot restore node_modules/ (1 file added or changed during the session, including .bin/tool): " +
+				"delete it and reinstall the packages (for example `npm ci`) (its copy would pass openshell.workdir.undo_ignored.max_mb, 64 MB)"},
+			not: []string{"makes each undo point keep a copy"}},
 		{name: "commits", opts: UndoOptions{Preview: true}, undos: 1,
 			undo: &workspace.UndoResult{Preview: true, HeadBefore: before, HeadAfter: after, BranchBefore: "main", BranchAfter: "main",
 				RefChanges: []workspace.RefChange{{Ref: "refs/heads/fix", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
@@ -263,6 +285,9 @@ func TestUndo(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, c.input)
 			ta.daemon.add(sampleSandbox("box"))
+			if c.setup != nil {
+				c.setup(ta)
+			}
 			if c.undo != nil {
 				r := *c.undo
 				r.Project = ta.project
@@ -1284,7 +1309,15 @@ func TestDetectLLM(t *testing.T) {
 		{"claude api key", claude, map[string]string{"ANTHROPIC_API_KEY": "k"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
 		{"claude oauth", claude, map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "", "auto", profiles.ClaudeOAuthID, "CLAUDE_CODE_OAUTH_TOKEN", false},
 		{"claude bedrock", claude, map[string]string{EnvBedrockToken: "b", "AWS_REGION": "us-west-2"}, "", "bedrock", profiles.ClaudeBedrockMantleID, EnvBedrockToken, false},
-		{"bedrock not automatic", claude, map[string]string{EnvBedrockToken: "b"}, "", "auto", "", "", false},
+		// auto takes an Amazon Bedrock key when it is the one set, and
+		// every other credential before it (#955).
+		{"claude bedrock under auto", claude, map[string]string{EnvBedrockToken: "b"}, "", "auto", profiles.ClaudeBedrockMantleID, EnvBedrockToken, false},
+		{"claude api key before bedrock", claude, map[string]string{EnvBedrockToken: "b", "ANTHROPIC_API_KEY": "k"}, "", "", profiles.AnthropicID, "ANTHROPIC_API_KEY", false},
+		{"codex bedrock under auto", codex, map[string]string{EnvBedrockToken: "b"}, "", "", profiles.CodexBedrockMantleID, EnvBedrockToken, false},
+		{"codex auth.json before bedrock", codex, map[string]string{EnvBedrockToken: "b"}, `{"OPENAI_API_KEY":"from-file"}`, "", profiles.OpenAIID, "~/.codex/auth.json", false},
+		{"copilot bedrock under auto", get("copilot"), map[string]string{EnvBedrockToken: "b"}, "", "", profiles.CopilotBedrockMantleID, EnvBedrockToken, false},
+		{"hermes bedrock under auto", hermes, map[string]string{EnvBedrockToken: "b"}, "", "", profiles.BedrockMantleOpenAIID, EnvBedrockToken, false},
+		{"antigravity has no bedrock", get("antigravity"), map[string]string{EnvBedrockToken: "b"}, "", "", "", "", false},
 		{"codex env", codex, map[string]string{"CODEX_API_KEY": "c"}, "", "", profiles.OpenAIID, "OPENAI_API_KEY", false},
 		{"codex auth.json", codex, nil, `{"OPENAI_API_KEY":"from-file"}`, "", profiles.OpenAIID, "~/.codex/auth.json", false},
 		{"codex chatgpt login", codex, nil, `{"OPENAI_API_KEY":null,"tokens":{"id_token":"x"}}`, "", "", "", false},
@@ -1317,7 +1350,7 @@ func TestDetectLLM(t *testing.T) {
 			if c.auth != "" {
 				writeFile(t, filepath.Join(ta.home, ".codex", "auth.json"), c.auth)
 			}
-			got, err := ta.detectLLM(c.spec, c.choice, "", nil)
+			got, err := ta.detectLLM(c.spec, c.choice, "", "", nil)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("detectLLM err = %v, want error %t", err, c.wantErr)
 			}
@@ -1365,7 +1398,7 @@ func TestDetectLLMNotes(t *testing.T) {
 			if c.setup != nil {
 				c.setup(ta)
 			}
-			got, err := ta.detectLLM(c.spec, c.choice, "", c.bound)
+			got, err := ta.detectLLM(c.spec, c.choice, "", "", c.bound)
 			if err != nil || got.Credential != nil {
 				t.Fatalf("detectLLM = %+v, %v", got, err)
 			}
@@ -1375,7 +1408,7 @@ func TestDetectLLMNotes(t *testing.T) {
 			}
 		})
 	}
-	_, err := newTestApp(t, "").detectLLM(claude, "claude-oauth", "", nil)
+	_, err := newTestApp(t, "").detectLLM(claude, "claude-oauth", "", "", nil)
 	wantErr(t, err, "claude setup-token")
 }
 

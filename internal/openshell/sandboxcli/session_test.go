@@ -131,6 +131,93 @@ func TestSessionEnd(t *testing.T) {
 	})
 }
 
+// A headless run in the foreground (--prompt, or the harness's print flag
+// the shell wrapper's `claude -p` passes) deletes the sandbox it created
+// when it ends and nothing is left in it to bring back or undo, by the rules
+// of --rm: a mounted folder's changes nobody kept keep their undo point, and
+// a copy whose work was not brought back keeps the sandbox, saying why.
+// --keep and openshell.keep_headless keep it; interactive sessions and
+// detached runs are unchanged (#948).
+func TestHeadlessRunDeletesItsSandbox(t *testing.T) {
+	const gone = "sandbox " + sbName + " deleted: nothing is left in it to bring back or undo " +
+		"(a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)"
+	piped := func(ta *testApp) {
+		ta.IO.TTY = false
+		noChanges(ta)
+	}
+	changed := func(ta *testApp) {
+		ta.IO.TTY = false
+		ta.daemon.review = sandboxapi.ReviewResponse{Report: &workspace.ReviewReport{FilesChanged: 1, Insertions: 2}}
+	}
+	keptConfig := func(ta *testApp) {
+		piped(ta)
+		ta.Cfg.OpenShell.KeepHeadless = true
+	}
+	kept := func(name string) func(*testing.T, *testApp) {
+		return func(t *testing.T, ta *testApp) {
+			t.Helper()
+			if stops, deletes := ta.calls("POST", name+"/stop"), ta.calls("DELETE", name); stops != 1 || deletes != 0 {
+				t.Fatalf("stop %d, delete %d calls; want the sandbox stopped and kept\n%s", stops, deletes, ta.output())
+			}
+		}
+	}
+	const copyName = "copybox"
+	runCases(t, []runCase{
+		{name: "one prompt, nothing changed", setup: piped, opts: RunOptions{Harness: "claude", Prompt: "reply ok"},
+			check: deleted(false), want: []string{gone}, not: []string{"Sandbox kept", "--prompt TEXT"}},
+		{name: "the print flag after --", setup: piped, opts: RunOptions{Harness: "claude", Args: []string{"-p", "reply ok"}},
+			check: deleted(false), want: []string{gone}},
+		{name: "one prompt on a terminal", setup: noChanges, opts: RunOptions{Harness: "claude", Prompt: "reply ok"},
+			check: deleted(false), want: []string{gone}},
+		{name: "changes nobody kept keep the undo point", setup: changed, opts: RunOptions{Harness: "claude", Prompt: "fix it"},
+			check: deleted(true), want: []string{"sandbox " + sbName + " deleted (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it); " +
+				"its undo point is kept because nobody accepted the changes", "undo: defenseclaw sandbox undo " + sbName}},
+		{name: "changes kept with --yes", setup: changed, opts: RunOptions{Harness: "claude", Prompt: "fix it", Yes: true},
+			check: deleted(false), want: []string{"kept: the changes stay in the folder", gone}},
+		{name: "--keep", setup: piped, opts: RunOptions{Harness: "claude", Prompt: "reply ok", Keep: true},
+			check: kept(sbName), want: []string{"Sandbox kept (stopped) → resume: defenseclaw sandbox connect " + sbName + " --prompt TEXT"}, not: []string{"deleted"}},
+		{name: "openshell.keep_headless", setup: keptConfig, opts: RunOptions{Harness: "claude", Prompt: "reply ok"},
+			check: kept(sbName), want: []string{"Sandbox kept (stopped)"}, not: []string{"deleted"}},
+		{name: "--rm says --rm", setup: piped, opts: RunOptions{Harness: "claude", Prompt: "reply ok", Rm: true},
+			check: deleted(false), want: []string{"sandbox " + sbName + " deleted (--rm)"}, not: []string{"one-prompt"}},
+		{name: "a copy's unpulled work keeps it", setup: piped, opts: RunOptions{Harness: "claude", Copy: true, Name: copyName, Prompt: "fix it"},
+			check: kept(copyName), want: []string{"nothing was applied: the changes are kept in the sandbox for `defenseclaw sandbox pull " + copyName,
+				"Sandbox kept (stopped): its work was not brought back → resume: defenseclaw sandbox connect " + copyName + " --prompt TEXT"},
+			not: []string{"is not deleted (--rm)"}},
+		{name: "a copy with nothing to bring back goes", setup: func(ta *testApp) {
+			piped(ta)
+			ta.copy.pull = &workspace.PullResult{Name: copyName}
+		}, opts: RunOptions{Harness: "claude", Copy: true, Name: copyName, Prompt: "reply ok"},
+			want:  []string{"the sandbox changed nothing", "sandbox " + copyName + " deleted: nothing is left in it to bring back or undo"},
+			check: func(t *testing.T, ta *testApp) { ta.wantCalls(t, 1, "DELETE", copyName) }},
+		{name: "an interactive session keeps it", input: "", setup: noChanges, opts: RunOptions{Harness: "claude"},
+			check: kept(sbName), not: []string{"deleted"}},
+		// Nobody asked for the delete, so one that fails keeps the sandbox
+		// and the run still succeeds.
+		{name: "a delete that fails", setup: func(ta *testApp) {
+			piped(ta)
+			ta.daemon.errors["DELETE "+sbPath] = sandboxapi.Errorf(sandboxapi.CodeInternal, "the gateway is busy")
+		}, opts: RunOptions{Harness: "claude", Prompt: "reply ok"},
+			want: []string{"Sandbox kept (stopped): it could not be deleted (the gateway is busy) → resume: defenseclaw sandbox connect " + sbName}},
+	})
+	// A detached run keeps its sandbox: nothing is left to delete it.
+	ta := newTestApp(t, "")
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Detach: true, Prompt: "fix the failing tests"}))
+	ta.wantCalls(t, 0, "DELETE", sbName)
+	wantErr(t, newTestApp(t, "").Run(bg, RunOptions{Harness: "claude", Prompt: "x", Keep: true, Rm: true}),
+		"--keep keeps the sandbox and --rm deletes it; pass one of them")
+	// A headless run that resumes this folder's sandbox is a connect: the
+	// sandbox existed before it, so it stays.
+	ta = newTestApp(t, "y\n")
+	noChanges(ta)
+	sb := folderSandbox(ta, "stopped")
+	ta.daemon.add(sb)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Prompt: "next step"}))
+	if ta.creates() != 0 || ta.calls("DELETE", sb.Name) != 0 {
+		t.Fatalf("create %d, delete %d calls; want the resumed sandbox kept\n%s", ta.creates(), ta.calls("DELETE", sb.Name), ta.output())
+	}
+}
+
 // A copy-mode session whose changes nobody brings back (no terminal to ask
 // on, --yes, a skip, a declined secret) ends saying how many files changed
 // and that nothing was applied, with the pull that brings them back; its

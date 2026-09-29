@@ -1813,10 +1813,12 @@ def undo_unrestored(response: Any) -> tuple[dict[str, Any], ...]:
     """The changes undo cannot put back (``UndoResult.Unrestored``).
 
     Files the snapshot holds no copy of: what git ignores and, outside git,
-    dependency folders. Undo deletes only Python bytecode caches (removed).
+    dependency folders. Undo deletes Python bytecode caches (removed) and puts
+    back the directories its undo point keeps a copy of (restored,
+    ``openshell.workdir.undo_ignored``).
     """
     result = _dict(_dict(response).get("result"))
-    return tuple(c for c in _ignored(result) if not c.get("removed"))
+    return tuple(c for c in _ignored(result) if not c.get("removed") and not c.get("restored"))
 
 
 def undo_unrestored_lines(response: Any, limit: int = 8) -> tuple[str, ...]:
@@ -1838,6 +1840,8 @@ def undo_unrestored_lines(response: Any, limit: int = 8) -> tuple[str, ...]:
             if count > len(executables):
                 what += f" and {count - len(executables)} more that run on this machine"
         remedy = _text(change.get("remedy"))
+        if change.get("over_cap"):
+            remedy += " (its copy would pass openshell.workdir.undo_ignored.max_mb)"
         lines.append(f"undo cannot restore {path} ({what})" + (f": {remedy}" if remedy else ""))
     if len(unrestored) > limit:
         lines.append(
@@ -1888,6 +1892,8 @@ def undo_preview_lines(response: Any, unrestored_limit: int = 8) -> tuple[str, .
                 f"Removes {_plural(touched, 'file', 'files')} the session wrote to {_text(change.get('path'))} "
                 "(a Python bytecode cache)."
             )
+        elif change.get("restored"):
+            lines.append(f"Restores {_text(change.get('path'))} from the copy the undo point keeps.")
     for pinned in _list(result.get("pinned_changes")):
         lines.append(f"{_text(pinned)} changed on this machine during the session; it is kept.")
     lines.extend(undo_unrestored_lines(response, unrestored_limit))
@@ -1904,7 +1910,7 @@ def undo_is_empty(response: Any) -> bool:
     """Whether undo has nothing to put back (``UndoResult.Empty``).
 
     Changes undo cannot restore do not count (undo_unrestored lists them);
-    bytecode caches it would delete do.
+    bytecode caches it would delete, and kept directories it would restore, do.
     """
     result = _dict(_dict(response).get("result"))
     if not result:
@@ -1912,7 +1918,7 @@ def undo_is_empty(response: Any) -> bool:
     lists = ("changes", "ref_changes", "control_changes", "nested_repos", "lost_objects")
     if any(_list(result.get(key)) for key in lists):
         return False
-    if any(change.get("removed") for change in _ignored(result)):
+    if any(change.get("removed") or change.get("restored") for change in _ignored(result)):
         return False
     return _text(result.get("head_before")) == _text(result.get("head_after")) and _text(
         result.get("branch_before")
@@ -1923,6 +1929,9 @@ def undo_done_text(response: Any, name: str) -> str:
     """What a finished undo restored, except what it could not (sandboxcli.undoDone)."""
     data = _dict(response)
     message = _text(data.get("summary")) or f"{name}: the project folder is back to its pre-session snapshot"
+    kept = [_text(c.get("path")) for c in _ignored(_dict(data.get("result"))) if c.get("restored")]
+    if kept:
+        message += f" ({_first(kept, 6)} too, from the copy the undo point keeps)"
     left = [_text(c.get("path")) for c in undo_unrestored(response)]
     if left:
         message += f", except {_first(left, 6)} (undo cannot restore them)"

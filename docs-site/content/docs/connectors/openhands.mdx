@@ -201,9 +201,9 @@ exist only in the image; nothing on your host changes.
 - **Model access.** Every DefenseClaw provider profile runs OpenHands with
   `--override-with-envs`. The launcher copies the profile's credential
   placeholder into `LLM_API_KEY`; you choose the model with `LLM_MODEL`, a
-  LiteLLM name. `defenseclaw sandbox run openhands` picks a profile from
-  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or, with `--llm bedrock`,
-  `AWS_BEARER_TOKEN_BEDROCK`:
+  LiteLLM name. `defenseclaw sandbox run openhands` picks a profile from the
+  first set of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and
+  `AWS_BEARER_TOKEN_BEDROCK` (`--llm` picks one):
   - `defenseclaw-openai`: `openai/<model>`
   - `defenseclaw-anthropic`: `anthropic/<model>`
   - the regional `defenseclaw-bedrock-mantle-openai-<region>`:

@@ -414,6 +414,23 @@ streams its output, so it works without a terminal too:
 defenseclaw sandbox run codex --prompt "fix the failing tests"
 ```
 
+A headless run deletes its sandbox when it ends and nothing is left in it to
+bring back or undo, so one-prompt runs don't pile up stopped sandboxes. The
+same holds for the harness's own print flag after `--`, which the shell
+wrapper passes for `claude -p "…"`. The rules are those of `--rm`: changes
+nobody kept in a mounted folder keep their undo point (`sandbox undo NAME`
+still reverts them after the delete), and a copy whose work was not brought
+back keeps its sandbox for `sandbox pull`. The end of the run says which:
+
+```text
+  ✓ sandbox myapp-1c2d deleted: nothing is left in it to bring back or undo (a one-prompt run's sandbox; --keep or openshell.keep_headless keeps it)
+```
+
+`--keep` keeps the sandbox, for a next prompt with
+`defenseclaw sandbox connect NAME --prompt TEXT`; `openshell.keep_headless:
+true` keeps every one. Interactive sessions and `--detach` runs keep their
+sandbox as before.
+
 If a sandbox already holds this folder for the same harness, an
 interactive `run` without `--name` asks whether to resume it. `--new`
 starts a new sandbox instead, but a second sandbox can't mount the folder
@@ -692,7 +709,8 @@ next session, and a command you start with `defenseclaw sandbox exec` keeps
 what it starts in the background.
 
 The sandbox is then stopped, not deleted, so you can resume it later.
-`--rm` deletes it instead. `--yes` keeps the changes without asking, and
+`--rm` deletes it instead, and so does the end of a headless run
+(`--prompt`) unless you pass `--keep` ([above](#harness-arguments-and-headless-runs)). `--yes` keeps the changes without asking, and
 `openshell.workdir.on_exit` (`ask`, `keep` or `undo`) sets the default for
 every run. With no changes, nothing is asked.
 
@@ -779,6 +797,29 @@ names each directory it cannot restore with what to do about it: delete
 `node_modules/` and reinstall, or recreate `.venv/`. Undo deletes what the
 session wrote to Python bytecode caches, which Python rebuilds.
 
+To have undo restore dependency directories too, turn on
+`openshell.workdir.undo_ignored`:
+
+```yaml
+openshell:
+  workdir:
+    undo_ignored:
+      enabled: true              # off by default
+      max_mb: 500                # cap on one undo point's copies, in MiB
+      dirs: [node_modules, .venv, venv]   # directory names, at any depth
+```
+
+Each undo point then keeps a copy of those directories, taken when the
+session starts: file clones where the filesystem supports them (btrfs, XFS),
+byte copies otherwise (ext4), so on ext4 the copy takes as much disk space
+as the directories. A directory whose copy would pass `max_mb` keeps none,
+and undo reports it as before, naming the cap. Undo puts a kept directory
+back as the session found it: what the session installed or changed there
+is gone, and it is not saved anywhere. The undo that names what it cannot
+restore also names this setting. It applies to a mounted folder on Linux;
+a copy-mode sandbox, every sandbox on a Mac included, has no undo point and
+is unaffected.
+
 The agent runs as you, so it can take read permission away from a folder.
 Nothing can look inside such a folder, yet git still finds a repository in it
 by path, so the review flags it and undo refuses until you make it readable
@@ -826,8 +867,8 @@ how many there are:
 ```
 
 The sandbox is then stopped and kept. `--rm` does not delete a sandbox
-whose work was not brought back, and says so; delete it once you have
-pulled what you want.
+whose work was not brought back, and says so, and neither does the end of a
+headless run; delete it once you have pulled what you want.
 
 Or later, with `pull`:
 
@@ -967,20 +1008,34 @@ By default (`--llm auto`) a run shares the first model credential it finds:
 
 | Harness | Looks for |
 | --- | --- |
-| Claude Code | `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) |
-| Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared) |
-| OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY` |
-| GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key |
-| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY` |
+| Claude Code | `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), then `AWS_BEARER_TOKEN_BEDROCK` |
+| Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared), then `AWS_BEARER_TOKEN_BEDROCK` |
+| OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
+| GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key, then `AWS_BEARER_TOKEN_BEDROCK` |
+| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
 | Antigravity | `GEMINI_API_KEY`; without it, you sign in with Google inside the sandbox |
+
+`AWS_BEARER_TOKEN_BEDROCK` is a short-term Amazon Bedrock key, so it comes
+last: a host with only that key set runs its sandboxes on Bedrock.
 
 OmniGent also needs a model name after `--`, for example
 `defenseclaw sandbox run omnigent -- --model <model>`; `run` refuses to
-start without one. With `--llm bedrock` it defaults to `openai.gpt-oss-20b`.
+start without one. On Bedrock it defaults to `openai.gpt-oss-20b`.
 
 `--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai`,
 `bedrock` or `gemini`), and `--llm none` shares nothing, so you log in inside the
-sandbox. `--llm bedrock` uses a short-term Amazon Bedrock key from
+sandbox. `openshell.llm` in `config.yaml` sets the same choice for every run
+that has no `--llm`, which includes the runs the shell wrappers, the TUI and
+the macOS app start:
+
+```yaml
+openshell:
+  llm: bedrock    # auto (the default) | none | anthropic | claude-oauth | openai | bedrock | gemini
+```
+
+`--llm` still overrides it for one run. A provider the harness has no
+profile for (`gemini` for Claude Code) gives way to `auto`, and the run says
+so; a provider whose key is not set refuses the run and names the key. `--llm bedrock` uses a short-term Amazon Bedrock key from
 `AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`,
 then `$AWS_DEFAULT_REGION`, then `us-east-1`). Codex on Bedrock runs
 `openai.gpt-oss-20b` unless `-- -m MODEL` picks another, and Bedrock rejects
@@ -1056,6 +1111,7 @@ port arrives as an ask for you to approve.
 | `--env KEY=VALUE` | A non-secret environment variable for the sandbox (repeatable). |
 | `--no-snapshot` | Skip the pre-session snapshot, and with it undo (mount mode). |
 | `--rm` | Delete the sandbox when the session ends. A copy-mode sandbox whose work was not brought back is kept. |
+| `--keep` | Keep the sandbox of a headless run (`--prompt`), which is otherwise deleted when nothing is left in it to bring back or undo. `openshell.keep_headless: true` keeps them all. |
 | `--new` | Start a new sandbox even when one already holds this folder. |
 | `--refresh` | When resuming a copy-mode sandbox, copy the folder again. |
 | `--cpu`, `--memory` | Resource limits, for example `--cpu 2 --memory 4Gi`. On a Mac they have no effect: every MicroVM gets the gateway's `vcpus` and `mem_mib`, and the run says so. |

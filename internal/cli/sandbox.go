@@ -226,7 +226,12 @@ Skip-permissions mode is on by default;
 --safe keeps the harness's own prompts. The harness gets your terminal; when it exits
 you get a summary, a review of changed files that can run code on your machine, and
 the choice to keep or undo the changes (from a copy: to bring them back, or leave them
-in the sandbox for pull). Arguments after -- go to the harness.`,
+in the sandbox for pull). Arguments after -- go to the harness.
+
+A headless run in the foreground (--prompt, or the harness's own print flag after --)
+deletes its sandbox when it ends and nothing is left in it to bring back or undo, as
+--rm does; --keep (or openshell.keep_headless) keeps it. Interactive sessions and
+--detach runs keep their sandbox.`,
 		Example: `  defenseclaw sandbox run claude
   defenseclaw sandbox run codex --copy --name fix-tests
   defenseclaw sandbox run claude --detach --prompt "fix the failing tests"
@@ -267,9 +272,10 @@ in the sandbox for pull). Arguments after -- go to the harness.`,
 	f.BoolVar(&o.NoMCP, "no-mcp", false, "leave the harness's MCP servers behind")
 	f.BoolVarP(&o.Detach, "detach", "d", false, "run in the background (needs --prompt); follow with sandbox logs -f")
 	f.BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")
+	f.BoolVar(&o.Keep, "keep", false, "keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when nothing is left in it to bring back or undo")
 	f.StringVarP(&o.Prompt, "prompt", "p", "", "run the harness headless with this prompt")
 	f.StringArrayVar(&o.Env, "env", nil, "KEY=VALUE non-secret variable for the sandbox (repeatable)")
-	f.StringVar(&o.LLM, "llm", sandboxcli.LLMAuto, "model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini")
+	f.StringVar(&o.LLM, "llm", "", "model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini (default: openshell.llm, which is auto unless set)")
 	f.StringVar(&o.BedrockRegion, "bedrock-region", "", "Amazon Bedrock region for --llm bedrock (default $AWS_REGION, then $AWS_DEFAULT_REGION, then us-east-1)")
 	f.BoolVar(&o.NoSnapshot, "no-snapshot", false, "skip the pre-session snapshot (and so undo)")
 	f.BoolVar(&o.NoBuild, "no-build", false, "fail instead of building a missing harness image")
@@ -490,7 +496,9 @@ func newSandboxUndoCmd() *cobra.Command {
 		Short: "Restore the project folder to its pre-session snapshot",
 		Long: "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git ignores\n" +
 			"(dependency directories, build output) have no copy in the snapshot: undo deletes what the session\n" +
-			"wrote to Python bytecode caches and names the rest, with what to do about them.\n\n" +
+			"wrote to Python bytecode caches and names the rest, with what to do about them, unless\n" +
+			"openshell.workdir.undo_ignored has the snapshot keep a copy of node_modules, .venv and the like,\n" +
+			"which undo then restores.\n\n" +
 			"For a copy-mode sandbox (every sandbox on macOS), undo reverts its last `pull --apply` instead; edits you\n" +
 			"made since stay.",
 		Args: nameArg("sandbox"),

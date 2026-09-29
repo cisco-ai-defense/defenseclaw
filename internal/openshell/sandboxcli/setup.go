@@ -890,11 +890,12 @@ func (a *App) printHarnesses(specs []*harness.Spec, configured []string) {
 // credentialText is the model credential a run of s would share, or the
 // next step when there is none.
 func (a *App) credentialText(s *harness.Spec) string {
-	if llm, err := a.detectLLM(s, LLMAuto, "", nil); err == nil && llm.Credential != nil {
+	choice, from, _ := a.runLLM(s, "")
+	if llm, err := a.detectLLM(s, choice, from, "", nil); err == nil && llm.Credential != nil {
 		return "model credential " + llm.Source + " " + a.style("✓", ansiGreen)
 	}
 	next := "you log in inside the sandbox on the first run"
-	if hint := a.llmHint(s, LLMAuto); hint != a.llmHint(&harness.Spec{}, LLMAuto) {
+	if hint := a.llmHint(s, choice); hint != a.llmHint(&harness.Spec{}, choice) {
 		next = "before the first run, " + hint + "; or log in inside the sandbox"
 	}
 	return "model credential " + a.style("none found", ansiYellow) + ": " + next

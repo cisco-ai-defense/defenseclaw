@@ -4059,8 +4059,11 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("openshell.pack_dir", filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName))
 	viper.SetDefault("openshell.workdir.git_depth", DefaultOpenShellGitDepth)
 	viper.SetDefault("openshell.workdir.on_exit", DefaultOpenShellOnExit)
+	viper.SetDefault("openshell.workdir.undo_ignored.max_mb", DefaultOpenShellUndoIgnoredMaxMB)
+	viper.SetDefault("openshell.workdir.undo_ignored.dirs", DefaultOpenShellUndoIgnoredDirs)
 	viper.SetDefault("openshell.approvals.debounce_ms", DefaultOpenShellApprovalDebounceMs)
 	viper.SetDefault("openshell.token_delivery", DefaultOpenShellTokenDelivery)
+	viper.SetDefault("openshell.llm", DefaultOpenShellLLM)
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)

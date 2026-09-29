@@ -196,7 +196,10 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
             "you get a summary, a review of changed files that can run code on your machine, and "
             "the choice to keep or undo the changes (from a copy: to bring them back, or leave them "
-            "in the sandbox for pull). Arguments after -- go to the harness."
+            "in the sandbox for pull). Arguments after -- go to the harness. A headless run in the "
+            "foreground (--prompt, or the harness's own print flag after --) deletes its sandbox when "
+            "it ends and nothing is left in it to bring back or undo, as --rm does; --keep (or "
+            "openshell.keep_headless) keeps it. Interactive sessions and --detach runs keep their sandbox."
         ),
         args=(_Arg("harness"), _Arg("harness_args", required=False, many=True)),
         flags=(
@@ -259,6 +262,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 short="d",
             ),
             _Flag("rm", "bool", "delete the sandbox when the session ends"),
+            _Flag(
+                "keep",
+                "bool",
+                "keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when "
+                "nothing is left in it to bring back or undo",
+            ),
             _Flag("prompt", "string", "run the harness headless with this prompt", short="p", metavar="TEXT"),
             _Flag(
                 "env",
@@ -269,8 +278,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "llm",
                 "string",
-                "model credential to share: auto, none, anthropic, claude-oauth, openai or bedrock",
-                default="auto",
+                "model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini "
+                "(default: openshell.llm, which is auto unless set)",
                 metavar="SOURCE",
             ),
             _Flag(

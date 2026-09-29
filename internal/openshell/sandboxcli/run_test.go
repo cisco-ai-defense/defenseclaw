@@ -504,6 +504,68 @@ func TestRunBanner(t *testing.T) {
 	})
 }
 
+// openshell.llm is the default of --llm, so a run the shell wrapper, the
+// TUI or the macOS app starts (none passes --llm) shares the model
+// credential it names; --llm overrides it for one run, a provider the
+// harness has no credential for gives way to auto, which the run says, and
+// a configured provider without its key refuses the run, naming the key
+// (#955).
+func TestRunLLMFromConfig(t *testing.T) {
+	profileOf := func(t *testing.T, ta *testApp) string {
+		t.Helper()
+		if req := createRequest(t, ta.daemon); req.LLM != nil {
+			return req.LLM.Profile
+		}
+		return ""
+	}
+	configured := func(llm string, env map[string]string) func(*testApp) {
+		return func(ta *testApp) {
+			ta.Cfg.OpenShell.LLM = llm
+			for k, v := range env {
+				ta.env[k] = v
+			}
+			noChanges(ta)
+		}
+	}
+	both := map[string]string{EnvBedrockToken: "bedrock-test-not-a-secret", "ANTHROPIC_API_KEY": "anthropic-test-not-a-secret"}
+	profile := func(want string) func(*testing.T, *testApp) {
+		return func(t *testing.T, ta *testApp) {
+			if got := profileOf(t, ta); got != want {
+				t.Fatalf("credential profile = %q, want %q", got, want)
+			}
+		}
+	}
+	fallback := "openshell.llm is gemini, which Claude Code cannot use, so this run shares the credential --llm auto finds"
+	runCases(t, []runCase{
+		{name: "bedrock from the config", setup: configured("bedrock", both), opts: RunOptions{Harness: "claude"},
+			check: profile(profiles.ClaudeBedrockMantleID), not: []string{"bedrock-test-not-a-secret", fallback}},
+		{name: "--llm overrides it", setup: configured("bedrock", both), opts: RunOptions{Harness: "claude", LLM: LLMAuto},
+			check: profile(profiles.AnthropicID)},
+		{name: "auto from the config", setup: configured("auto", both), opts: RunOptions{Harness: "claude"},
+			check: profile(profiles.AnthropicID)},
+		{name: "none from the config", setup: configured("none", both), opts: RunOptions{Harness: "claude"},
+			check: profile(""), want: []string{"no model credential is shared (openshell.llm none)"}},
+		{name: "a provider the harness cannot use", setup: configured("gemini", both), opts: RunOptions{Harness: "claude"},
+			check: profile(profiles.AnthropicID), want: []string{fallback}},
+	})
+	// The run's record keeps the configured choice: a resume with the same
+	// --llm does not call it ignored.
+	ta := newTestApp(t, "")
+	configured("bedrock", both)(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	sb := ta.mustGet(t, sbName)
+	if got := resumeIgnores(RunOptions{LLM: LLMBedrock}, sb, ta.runLaunchOf(sb)); len(got) != 0 {
+		t.Fatalf("a resume with the configured --llm ignores %v", got)
+	}
+	ta = newTestApp(t, "")
+	configured("bedrock", map[string]string{"ANTHROPIC_API_KEY": "k"})(ta)
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "codex"}),
+		"openshell.llm bedrock: no credential found (set AWS_BEARER_TOKEN_BEDROCK; `--llm auto` overrides openshell.llm for one run)")
+	if n := ta.creates(); n != 0 {
+		t.Fatalf("create calls = %d, want none", n)
+	}
+}
+
 // A --credential binding of the model's key wins over the detected
 // credential, and the banner says where the key comes from; --github-write
 // binds the token, by both names, to the API host alone and says what that

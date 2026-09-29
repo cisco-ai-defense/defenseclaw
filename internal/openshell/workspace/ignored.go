@@ -71,6 +71,12 @@ type ignoredManifest struct {
 	Skip []string `json:"skip,omitempty"`
 	// Truncated reports that the file cap stopped the recording.
 	Truncated bool `json:"truncated,omitempty"`
+	// Kept are the roots ("node_modules/") the snapshot holds a copy of
+	// (keep_ignored.go), which Undo restores; OverCap those of the names
+	// SnapshotOptions.KeepIgnored asked for that were left without one
+	// because the copies would pass SnapshotOptions.KeepIgnoredBytes.
+	Kept    []string `json:"kept,omitempty"`
+	OverCap []string `json:"over_cap,omitempty"`
 
 	complete map[string]bool // Complete roots, without the trailing "/"
 }
@@ -117,9 +123,16 @@ type IgnoredChange struct {
 	// leaves the path as the session left it and Remedy says what to do.
 	Removed bool   `json:"removed,omitempty"`
 	Remedy  string `json:"remedy,omitempty"`
+	// Restored reports that undo puts the path back from the copy its undo
+	// point keeps (SnapshotOptions.KeepIgnored). OverCap reports a path the
+	// undo point was asked to keep a copy of but did not, because the
+	// copies would pass their cap.
+	Restored bool `json:"restored,omitempty"`
+	OverCap  bool `json:"over_cap,omitempty"`
 
 	kind  ignoredKind
 	files []string // added and changed paths
+	gone  []string // deleted paths
 	execs []string
 }
 
@@ -498,7 +511,9 @@ func diffIgnored(project string, m *ignoredManifest, nowRoots []string, skip, in
 	for _, r := range roots {
 		rootSet[r] = true
 	}
-	return &ignoredReport{Changes: groupIgnored(deltas, rootSet), Truncated: truncated || m.Truncated}, nil
+	changes := groupIgnored(deltas, rootSet)
+	m.markKept(changes)
+	return &ignoredReport{Changes: changes, Truncated: truncated || m.Truncated}, nil
 }
 
 // groupIgnored sums deltas up per area. A bytecode cache the session only
@@ -521,6 +536,7 @@ func groupIgnored(deltas []ignoredDelta, roots map[string]bool) []IgnoredChange 
 			c.Modified++
 		case "D":
 			c.Deleted++
+			c.gone = append(c.gone, d.Path)
 			continue
 		}
 		c.files = append(c.files, d.Path)
@@ -569,7 +585,11 @@ func ignoredFlags(changes []IgnoredChange, gitProject bool, sensitive []string) 
 				detail += ", and " + plural(c.ExecutableCount, "command or start-up file", "commands or start-up files") +
 					" changed (" + strings.Join(trimArea(c.Executables, c.Path), ", ") + moreSuffix(c.ExecutableCount, len(c.Executables)) + ")"
 			}
-			detail += ". Undo cannot restore " + c.Path + ": " + c.Remedy
+			if c.Restored {
+				detail += ". Undo restores " + c.Path + " from the copy its undo point keeps"
+			} else {
+				detail += ". Undo cannot restore " + c.Path + ": " + c.Remedy
+			}
 			flags = append(flags, Flag{Path: strings.TrimSuffix(c.Path, "/"), Label: c.Path, Kind: RiskDependencies, Severity: sev, Detail: detail})
 			continue
 		case ignoredBytecode:
@@ -578,8 +598,11 @@ func ignoredFlags(changes []IgnoredChange, gitProject bool, sensitive []string) 
 					"Python runs cached bytecode in place of the source, and " + dirWhy + " (undo deletes them; Python rebuilds the cache)"})
 		}
 		undo := "undo cannot restore it"
-		if c.Removed {
+		switch {
+		case c.Removed:
 			undo = "undo deletes it"
+		case c.Restored:
+			undo = "undo restores it from the copy its undo point keeps"
 		}
 		folded, named := 0, 0
 		for _, p := range c.execs {
@@ -606,7 +629,7 @@ func ignoredFlags(changes []IgnoredChange, gitProject bool, sensitive []string) 
 			flags = append(flags, Flag{Path: p, Label: p, Kind: RiskPolicy, Severity: SeverityHigh,
 				Detail: "matches the sensitive-change pattern " + pattern + "; " + fileWhy + ", and " + undo})
 		}
-		if c.kind == ignoredOther && (folded > 0 || named < len(c.files) || c.Deleted > 0) {
+		if c.kind == ignoredOther && !c.Restored && (folded > 0 || named < len(c.files) || c.Deleted > 0) {
 			quiet = append(quiet, c.Path)
 		}
 	}

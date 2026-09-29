@@ -938,6 +938,15 @@ ahead of time):
 | `defenseclaw-gemini` | `GEMINI_API_KEY` | `x-goog-api-key` | `generativelanguage.googleapis.com:443` (Antigravity) |
 | `dc-cred-<hash>` | the `--credential` variable | bearer | the host and port it is bound to |
 
+Which profile a run takes is `sandbox run --llm`, else `openshell.llm`
+(`auto` unless set; the shell wrappers, the TUI and the macOS app pass no
+`--llm`, so the key decides for the runs they start). `auto` takes the first
+credential set on this machine in `sandboxcli.llmCandidates` order, with
+`AWS_BEARER_TOKEN_BEDROCK` (a Bedrock Mantle profile) last. A configured
+provider the harness has no candidate for falls back to `auto`, and the run
+says so; a configured or flagged provider whose credential is not set refuses
+the run before a sandbox exists.
+
 A Claude subscription (Pro or Max) signs in on this machine: `claude
 setup-token` prints a long-lived token; exported as `CLAUDE_CODE_OAUTH_TOKEN`,
 it reaches the sandbox only as the `defenseclaw-claude-oauth` placeholder.
@@ -1139,6 +1148,25 @@ another name.
 - **Both.** A walk records the files that can run code on the host, the
   nested repositories that already exist, and fingerprints of dependency
   directories, so the review sees changes git ignores.
+- **Ignored dependency directories, when asked.** The snapshot holds no copy
+  of what git ignores (or, without git, of the heavy directories it skips);
+  the ignored manifest (`ignored.json`) records those files by metadata, so
+  review and undo can name what a session changed there. With
+  `openshell.workdir.undo_ignored.enabled` the manager passes
+  `SnapshotOptions.KeepIgnored` (the directory names, `node_modules`, `.venv`
+  and `venv` by default) and `KeepIgnoredBytes` (`max_mb`, 500 MiB), and the
+  snapshot copies each fully recorded ignored root with one of those names
+  to `<data_dir>/snapshots/<name>/ignored-copy/`, through `os.Root` on the
+  project, as file clones where the filesystem supports them and byte copies
+  otherwise, in path order while the copies stay within the cap; a root that
+  would pass it is recorded in the manifest's `over_cap` and keeps none.
+  Undo compares each kept root with its copy (metadata first, then bytes),
+  removes what the session added and copies back what it changed or deleted
+  (`restoreTree`), then re-records those roots in the manifest.
+  `IgnoredChange.Restored` and `OverCap` tell the CLI and the TUI which
+  places undo restores and which were left without a copy for the cap. What
+  the session left in a restored root is not kept. Copy mode has no snapshot,
+  so the key does nothing there, and on a Mac.
 
 Each start of a stopped sandbox is a new session and takes a fresh snapshot,
 unless the folder still holds changes an earlier session made that were
@@ -1222,6 +1250,20 @@ code on your machine:
 Host-executable files that git ignores are found by re-walking the folder.
 The ClawShield secret rules and CodeGuard also scan the changed files (files
 up to 1 MiB, at most 2,000 of them).
+
+After the review and the keep/undo (or, from a copy, bring-back) answer, the
+CLI stops the sandbox the session started and keeps it, or deletes it
+(`sandboxcli.session.finish`). `--rm` asks for the delete, which keeps the
+snapshot (`DeleteRequest.KeepSnapshot`) when the changes could not be
+reviewed or nobody kept them, so undo still finds it under the sandbox's
+name, and drops the delete when a copy's work was not brought back or
+another session or a detached run still uses the sandbox. A headless run in
+the foreground that created its sandbox (`--prompt`, or the harness's print
+mode such as the shell wrapper's `claude -p`) deletes it by the same rules
+without `--rm` (`App.headlessRm`), so one-prompt runs do not pile up
+stopped sandboxes; `--keep` or `openshell.keep_headless: true` keeps it.
+Interactive sessions, `--detach` runs and a run that resumes the folder's
+sandbox keep theirs.
 
 ### Planted nested repositories and the live guard
 

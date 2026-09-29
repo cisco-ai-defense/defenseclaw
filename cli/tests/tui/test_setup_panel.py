@@ -1233,6 +1233,13 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
     assert "standalone" in legacy.value and "legacy-cleanup" in legacy.value
     assert _field_by_key(sections, "openshell.enabled").kind == "bool"
     assert _field_by_key(sections, "openshell.profile").options == ("inherit", "open", "balanced", "strict")
+    llm = _field_by_key(sections, "openshell.llm")
+    assert llm.kind == "choice"
+    assert llm.options == ("auto", "none", "anthropic", "claude-oauth", "openai", "bedrock", "gemini")
+    assert _field_by_key(sections, "openshell.keep_headless").kind == "bool"
+    assert _field_by_key(sections, "openshell.workdir.undo_ignored.enabled").kind == "bool"
+    assert _field_by_key(sections, "openshell.workdir.undo_ignored.max_mb").kind == "int"
+    assert _field_by_key(sections, "openshell.workdir.undo_ignored.dirs").kind == "string"
 
 
 def test_sandbox_wizard_slot_runs_the_openshell_setup_on_linux_and_macos() -> None:

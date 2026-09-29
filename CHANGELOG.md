@@ -551,6 +551,42 @@ deleted.
   with the path quoted for the shell. Both drivers; the OpenCode image
   rebuilds.
 
+### OpenShell sandbox lifecycle and configuration
+
+- `openshell.llm` (default `auto`) chooses the model credential a sandbox
+  run shares, as `sandbox run --llm` does (#955). The shell wrappers, the TUI
+  and the macOS app pass no `--llm`, so the runs they start now share the
+  credential it names; `--llm` still overrides it for one run. A provider the
+  harness has no profile for falls back to `auto` with a note, and one whose
+  key is not set refuses the run, naming the key. `--llm auto` now also picks
+  Amazon Bedrock (`AWS_BEARER_TOKEN_BEDROCK`) when that is the only
+  credential set, after every other one, so a host with only a Bedrock key
+  reaches its model without `--llm bedrock`. The key is in the Python config,
+  the v8 schema, and the TUI and macOS app config editors. Both drivers.
+- A headless `sandbox run` in the foreground (`--prompt`, or the harness's
+  print mode, such as the shell wrapper's `claude -p`) now deletes the
+  sandbox it created when it ends and nothing is left in it to bring back or
+  undo, by the rules of `--rm` (#948), so one-prompt runs no longer pile up
+  stopped sandboxes. Changes nobody kept in a mounted folder keep their undo
+  point (`sandbox undo NAME` still reverts them), and a copy whose work was
+  not brought back keeps its sandbox; the run's last line says it was
+  deleted and why, or why it was kept. `--keep` (a new `sandbox run` flag)
+  and `openshell.keep_headless: true` keep it. Interactive sessions,
+  `--detach` runs and a run that resumes the folder's sandbox are unchanged.
+  Both drivers.
+- `openshell.workdir.undo_ignored` (#944) lets `sandbox undo` restore the
+  dependency directories git ignores, which it only reported before
+  (`undo cannot restore node_modules/ …: delete it and reinstall`). Off by
+  default; with `enabled: true` each undo point of a mounted project keeps a
+  copy of `dirs` (`node_modules`, `.venv` and `venv` unless set), as file
+  clones where the filesystem supports them and byte copies otherwise, up to
+  `max_mb` (500 MiB). A directory whose copy would pass the cap keeps none and
+  is reported as before, naming the cap; review says which directories undo
+  restores. Undo that cannot restore a dependency directory names the key.
+  Linux mount mode only: copy mode, every sandbox on a Mac included, has no
+  undo point. In the Python config, the v8 schema, and the TUI and macOS app
+  config editors; the TUI's undo preview names what it restores.
+
 ### Legacy OpenShell standalone sandbox removed
 
 - **Breaking:** removes the legacy standalone sandbox integration for the

@@ -574,9 +574,13 @@
         "default": "[]"
       },
       {
+        "name": "keep",
+        "type": "bool",
+        "default": "false"
+      },
+      {
         "name": "llm",
-        "type": "string",
-        "default": "auto"
+        "type": "string"
       },
       {
         "name": "memory",

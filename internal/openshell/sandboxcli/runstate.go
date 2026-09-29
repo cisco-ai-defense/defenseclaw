@@ -79,7 +79,7 @@ const runLaunchFile = "launch.json"
 func newRunLaunch(sb *sandboxapi.Sandbox, spec *harness.Spec, o RunOptions, llm llmChoice) runLaunch {
 	rec := runLaunch{
 		SandboxID: sb.ID, Args: launchOptions(spec, o.Args), Credentials: o.Credentials, GitHubWrite: o.GitHubWrite,
-		EnvNames: envNames(o.Env), EnvDigest: envDigest(o.Env), LLM: strings.ToLower(strings.TrimSpace(o.LLM)),
+		EnvNames: envNames(o.Env), EnvDigest: envDigest(o.Env), LLM: firstNonEmpty(strings.ToLower(strings.TrimSpace(o.LLM)), llm.Configured),
 		BedrockRegion: o.BedrockRegion, Context: o.Context, Unmask: o.Unmask, HostPorts: o.HostPorts, NoMCP: o.NoMCP,
 		CPU: strings.TrimSpace(o.CPU), Memory: strings.TrimSpace(o.Memory), NoSnapshot: o.NoSnapshot,
 	}

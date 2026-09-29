@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -208,6 +209,13 @@ func undoDone(res *sandboxapi.UndoResponse, where string) string {
 	if res.Result == nil {
 		return msg
 	}
+	var kept []string
+	for _, c := range res.Result.RestoredIgnored() {
+		kept = append(kept, c.Path)
+	}
+	if len(kept) > 0 {
+		msg += " (" + strings.Join(firstN(kept, 6), ", ") + " too, from the copy the undo point keeps)"
+	}
 	var left []string
 	for _, c := range res.Result.Unrestored() {
 		left = append(left, c.Path)
@@ -393,6 +401,9 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 			a.line(fmt.Sprintf("  remove  %s the session wrote to %s (a Python bytecode cache)", plural(int64(c.Added+c.Modified), "file", "files"), c.Path))
 		}
 	}
+	for _, c := range r.RestoredIgnored() {
+		a.line("  restore " + c.Path + " from the copy the undo point keeps (" + c.Summary() + " during the session)")
+	}
 	for _, p := range r.PinnedChanges {
 		a.warn(p + " changed on this machine during the session; it is kept")
 	}
@@ -400,9 +411,20 @@ func (a *App) printUndo(r *workspace.UndoResult, preview bool) {
 }
 
 // printUnrestored warns about each change undo cannot put back (files the
-// snapshot holds no copy of) and what to do about it.
+// snapshot holds no copy of) and what to do about it. A dependency
+// directory gets the setting that makes the next undo point keep a copy of
+// it (openshell.workdir.undo_ignored), or, when that copy would pass the
+// cap, the cap.
 func (a *App) printUnrestored(list []workspace.IgnoredChange) {
 	const shown = 8
+	u := config.OpenShellUndoIgnoredConfig{}
+	if a.Cfg != nil {
+		u = a.Cfg.OpenShell.Workdir.UndoIgnored
+	}
+	// The dependency directories the key would cover, and the names it
+	// would need added to its dirs.
+	covered, missing := false, []string{}
+	dirs := u.EffectiveDirs()
 	for i, c := range list {
 		if i == shown {
 			a.warn(fmt.Sprintf("… and %d more places undo cannot restore (`%s review` lists them)", len(list)-shown, CommandName))
@@ -419,7 +441,31 @@ func (a *App) printUnrestored(list []workspace.IgnoredChange) {
 				what += fmt.Sprintf(" and %d more that run on this machine", c.ExecutableCount-len(ex))
 			}
 		}
-		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", c.Path, what, c.Remedy))
+		remedy := c.Remedy
+		if c.OverCap {
+			remedy += fmt.Sprintf(" (its copy would pass openshell.workdir.undo_ignored.max_mb, %d MB)", u.EffectiveMaxBytes()>>20)
+		}
+		if c.Dependencies && !c.OverCap {
+			if base := path.Base(strings.TrimSuffix(c.Path, "/")); slices.Contains(dirs, base) {
+				covered = true
+			} else if !slices.Contains(missing, base) {
+				missing = append(missing, base)
+			}
+		}
+		a.warn(fmt.Sprintf("undo cannot restore %s (%s): %s", c.Path, what, remedy))
+	}
+	switch {
+	case !u.Enabled && (covered || len(missing) > 0):
+		add := ""
+		if len(missing) > 0 {
+			add = " (add " + strings.Join(missing, ", ") + " to its dirs for those too)"
+		}
+		a.note(fmt.Sprintf("openshell.workdir.undo_ignored.enabled: true in %s makes each undo point keep a copy of %s (up to %d MB)%s, "+
+			"so undo restores them; it applies from the next session's start",
+			a.tildePath(a.ConfigPath), strings.Join(dirs, ", "), u.EffectiveMaxBytes()>>20, add))
+	case len(missing) > 0:
+		a.note("add " + strings.Join(missing, ", ") + " to openshell.workdir.undo_ignored.dirs in " + a.tildePath(a.ConfigPath) +
+			" to have the next undo point keep a copy that undo restores")
 	}
 }
 

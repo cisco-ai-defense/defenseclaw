@@ -67,6 +67,26 @@ const (
 	OpenShellTokenDeliveryEnv      = "env"
 )
 
+// The model credential a sandbox run shares (openshell.llm, and `sandbox run
+// --llm`, which overrides it for one run): auto takes the first one found for
+// the harness, none shares none, and a provider shares that one only.
+const (
+	OpenShellLLMAuto        = "auto"
+	OpenShellLLMNone        = "none"
+	OpenShellLLMAnthropic   = "anthropic"
+	OpenShellLLMClaudeOAuth = "claude-oauth"
+	OpenShellLLMOpenAI      = "openai"
+	OpenShellLLMBedrock     = "bedrock"
+	OpenShellLLMGemini      = "gemini"
+)
+
+// OpenShellLLMChoices are the values openshell.llm and `sandbox run --llm`
+// take.
+var OpenShellLLMChoices = []string{
+	OpenShellLLMAuto, OpenShellLLMNone, OpenShellLLMAnthropic, OpenShellLLMClaudeOAuth,
+	OpenShellLLMOpenAI, OpenShellLLMBedrock, OpenShellLLMGemini,
+}
+
 // Loader defaults for the openshell section. Keys the sandbox policy pack
 // governs (profile, yolo, workdir mode, upload caps, egress lists, MCP import)
 // have no loader default: an unset key inherits the pack's value.
@@ -76,6 +96,10 @@ const (
 	DefaultOpenShellGitDepth           = 200
 	DefaultOpenShellOnExit             = OpenShellOnExitAsk
 	DefaultOpenShellTokenDelivery      = OpenShellTokenDeliveryProvider
+	DefaultOpenShellLLM                = OpenShellLLMAuto
+	// DefaultOpenShellUndoIgnoredMaxMB caps the copies of
+	// openshell.workdir.undo_ignored, in MiB.
+	DefaultOpenShellUndoIgnoredMaxMB = 500
 	// DefaultOpenShellPackDirName is the directory under <policy_dir> that
 	// holds custom sandbox policy packs (<name>/pack.yaml), mirroring the
 	// repository's policies/sandbox layout.
@@ -86,6 +110,11 @@ const (
 	// LEGACY(openshell-0.0.x): delete one release after cleanup.
 	DefaultSandboxHome = "/home/sandbox"
 )
+
+// DefaultOpenShellUndoIgnoredDirs are the directories
+// openshell.workdir.undo_ignored keeps a copy of when it names none: the
+// installed-package directories whose files run on this machine.
+var DefaultOpenShellUndoIgnoredDirs = []string{"node_modules", ".venv", "venv"}
 
 // OpenShellLockableKeys are the openshell keys an administrator can list in
 // openshell.admin.locked so `sandbox run` flags cannot loosen them.
@@ -138,7 +167,18 @@ type OpenShellConfig struct {
 	// Profile overrides the pack's network profile (open|balanced|strict).
 	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
 	// Yolo overrides the pack's skip-permissions default for the harness.
-	Yolo              *bool                     `mapstructure:"yolo"               yaml:"yolo,omitempty"`
+	Yolo *bool `mapstructure:"yolo" yaml:"yolo,omitempty"`
+	// LLM is the model credential a run shares with its sandbox
+	// (OpenShellLLMChoices): the default of `sandbox run --llm`, so the runs
+	// the shell wrappers, the TUI and the macOS app start, which pass no
+	// --llm, take it too. Empty means auto.
+	LLM string `mapstructure:"llm" yaml:"llm,omitempty"`
+	// KeepHeadless keeps the sandbox a one-prompt `sandbox run --prompt` (or
+	// a harness print mode, such as the shell wrapper's `claude -p`) creates
+	// in the foreground, as `sandbox run --keep` does for one run. By default
+	// that sandbox is deleted when the run ends and nothing is left in it to
+	// bring back or undo, by the rules of --rm.
+	KeepHeadless      bool                      `mapstructure:"keep_headless"      yaml:"keep_headless,omitempty"`
 	Workdir           OpenShellWorkdirConfig    `mapstructure:"workdir"            yaml:"workdir,omitempty"`
 	Egress            OpenShellEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
 	Image             OpenShellImageConfig      `mapstructure:"image"              yaml:"image,omitempty"`
@@ -185,6 +225,66 @@ type OpenShellWorkdirConfig struct {
 	MaxUploadMB int    `mapstructure:"max_upload_mb" yaml:"max_upload_mb,omitempty"`
 	GitDepth    int    `mapstructure:"git_depth"     yaml:"git_depth,omitempty"`
 	OnExit      string `mapstructure:"on_exit"       yaml:"on_exit,omitempty"`
+	// UndoIgnored keeps, with a mounted project's undo point, a copy of the
+	// dependency directories git ignores, so `sandbox undo` restores them.
+	UndoIgnored OpenShellUndoIgnoredConfig `mapstructure:"undo_ignored" yaml:"undo_ignored,omitempty"`
+}
+
+// OpenShellUndoIgnoredConfig is openshell.workdir.undo_ignored. The undo
+// point of a mounted project (Linux mount mode) holds no copy of what git
+// ignores, so undo only reports what a session changed in node_modules or
+// .venv; with Enabled, each undo point keeps a copy of the directories named
+// Dirs (at any depth), as file clones where the filesystem supports them and
+// byte copies otherwise, up to MaxMB of file content, and undo restores
+// them. A directory whose copy would pass the cap is reported as before.
+// Copy mode, every sandbox on a Mac, has no undo point and is unaffected.
+type OpenShellUndoIgnoredConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// MaxMB caps the copies of one undo point, in MiB; 0 means
+	// DefaultOpenShellUndoIgnoredMaxMB.
+	MaxMB int `mapstructure:"max_mb" yaml:"max_mb,omitempty"`
+	// Dirs are directory names ("node_modules"); empty means
+	// DefaultOpenShellUndoIgnoredDirs.
+	Dirs []string `mapstructure:"dirs" yaml:"dirs,omitempty"`
+}
+
+// EffectiveMaxBytes is the cap on the copies, in bytes.
+func (u OpenShellUndoIgnoredConfig) EffectiveMaxBytes() int64 {
+	mb := u.MaxMB
+	if mb <= 0 {
+		mb = DefaultOpenShellUndoIgnoredMaxMB
+	}
+	return int64(mb) << 20
+}
+
+// EffectiveDirs are the directory names kept.
+func (u OpenShellUndoIgnoredConfig) EffectiveDirs() []string {
+	var out []string
+	for _, d := range u.Dirs {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), DefaultOpenShellUndoIgnoredDirs...)
+	}
+	return out
+}
+
+// openShellUndoIgnoredDir is one path segment that is not "." or "..":
+// a directory name matched at any depth.
+var openShellUndoIgnoredDir = regexp.MustCompile(`^\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
+
+func validateOpenShellUndoIgnored(u OpenShellUndoIgnoredConfig) error {
+	if u.MaxMB < 0 || u.MaxMB > 1<<20 {
+		return fmt.Errorf("workdir.undo_ignored.max_mb %d must be between 0 and %d", u.MaxMB, 1<<20)
+	}
+	for i, d := range u.Dirs {
+		if !openShellUndoIgnoredDir.MatchString(d) || d == ".git" {
+			return fmt.Errorf("workdir.undo_ignored.dirs[%d]: %q must be a directory name such as node_modules or .venv (not .git, no \"/\")", i, d)
+		}
+	}
+	return nil
 }
 
 // OpenShellEgressConfig adds to the pack's egress posture.
@@ -853,8 +953,10 @@ func (o *OpenShellConfig) Validate() error {
 		OpenShellFeedBuiltin, OpenShellFeedNone))
 	check(validateOpenShellEnum("token_delivery", o.TokenDelivery, true,
 		OpenShellTokenDeliveryProvider, OpenShellTokenDeliveryEnv))
+	check(validateOpenShellEnum("llm", o.LLM, true, OpenShellLLMChoices...))
 	check(validateOpenShellNonNegative("workdir.max_upload_mb", o.Workdir.MaxUploadMB))
 	check(validateOpenShellNonNegative("workdir.git_depth", o.Workdir.GitDepth))
+	check(validateOpenShellUndoIgnored(o.Workdir.UndoIgnored))
 	check(validateOpenShellNonNegative("egress.large_upload_mb", o.Egress.LargeUploadMB))
 	check(validateOpenShellNonNegative("approvals.debounce_ms", o.Approvals.DebounceMs))
 	for i, port := range o.Egress.Ports {

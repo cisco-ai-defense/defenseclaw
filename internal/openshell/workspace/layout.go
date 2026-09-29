@@ -118,7 +118,7 @@ func readJSON(path string, v any) error {
 
 // snapshotDirEntries are the only names Snapshot writes into a snapshot
 // directory, besides safefile's ".safefile-*" temporaries.
-var snapshotDirEntries = map[string]bool{"snapshot.json": true, "tree": true, ignoredManifestName: true}
+var snapshotDirEntries = map[string]bool{"snapshot.json": true, "tree": true, ignoredManifestName: true, keptIgnoredDirName: true}
 
 // checkSnapshotDir refuses a snapshot directory that holds anything
 // Snapshot does not write there, so a per-name write or delete never mixes

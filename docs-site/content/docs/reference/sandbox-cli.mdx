@@ -496,14 +496,28 @@ A few rules the flags follow:
   `-- exec "TEXT"` for Codex). It can't be combined with `--rm`. Follow the
   run with `sandbox logs -f`.
 - Without a terminal, `run` needs `--prompt`.
+- A headless run in the foreground (`--prompt`, or the harness's print flag
+  after `--`, as the shell wrapper's `claude -p` passes it) deletes the
+  sandbox it created when it ends, by the rules of `--rm`: a mounted
+  folder's undo point stays when nobody kept the changes, and a copy whose
+  work was not brought back keeps its sandbox. `--keep`, or
+  `openshell.keep_headless: true`, keeps it; `--keep` with `--rm` is
+  refused. Interactive sessions, `--detach` runs and a run that resumes this
+  folder's sandbox keep theirs.
 - `--llm auto` shares the first model credential it finds for the harness.
   For Claude Code that is `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`.
   For Codex it is `OPENAI_API_KEY` (or `CODEX_API_KEY`), then the API key
   that `codex login --with-api-key` saved in `~/.codex/auth.json`; a ChatGPT
-  login is not shared. `--llm bedrock` shares `AWS_BEARER_TOKEN_BEDROCK` for
-  Amazon Bedrock in `--bedrock-region`, and `auto` never picks it. OpenShell
+  login is not shared. An Amazon Bedrock key (`AWS_BEARER_TOKEN_BEDROCK`)
+  comes last, for the harnesses that have a Bedrock profile. `--llm bedrock`
+  shares only that key, for Amazon Bedrock in `--bedrock-region`. OpenShell
   gives the harness a placeholder that works only against the provider's
-  hosts. With `--llm none`, or when nothing is found, you log in inside the
+  hosts.
+- Without `--llm`, a run takes `openshell.llm` (`auto` unless set). The shell
+  wrappers, the TUI and the macOS app pass no `--llm`, so that key is how the
+  runs they start share a chosen credential. A provider in `openshell.llm`
+  that the harness has no profile for gives way to `auto`, and the run says
+  so; one whose key is not set refuses the run, naming the key. With `--llm none`, or when nothing is found, you log in inside the
   sandbox, which stores a real token there that the agent can read. A Claude
   subscription can instead run `claude setup-token` on this machine (with
   the shell wrapper on, `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`) and
@@ -570,7 +584,8 @@ A few rules the flags follow:
 | `--env` | text, repeatable |  | KEY=VALUE non-secret variable for the sandbox (repeatable). |
 | `--github-write` | switch |  | Bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered. |
 | `--host-port` | port, repeatable or comma-separated |  | Open this localhost port on your machine to the sandbox (repeatable). |
-| `--llm` | text | `auto` | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini. |
+| `--keep` | switch |  | Keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when nothing is left in it to bring back or undo. |
+| `--llm` | text |  | Model credential to share: auto, none, anthropic, claude-oauth, openai, bedrock or gemini (default: openshell.llm, which is auto unless set). |
 | `--memory` | text |  | Memory limit, for example 4Gi. |
 | `--name` | text |  | Sandbox name, at most 19 lowercase letters, digits and '-' (default `<folder>-<random>`). |
 | `--new` | switch |  | Start a new sandbox even when one already holds this folder. |
@@ -950,7 +965,12 @@ started from). It shows a preview first, then asks. The sandbox is stopped
 before the restore, and `--restart` starts it again afterwards. Branches and
 tags the session moved are put back too, unless you pass `--keep-refs`. The
 session's own state is kept in a commit, and the command `undo` prints
-(`git -C FOLDER checkout COMMIT -- .`) brings its files back.
+(`git -C FOLDER checkout COMMIT -- .`) brings its files back. Files git
+ignores have no copy in the undo point: undo deletes what the session wrote
+to Python bytecode caches and names the rest, unless
+`openshell.workdir.undo_ignored` has the undo point keep a copy of
+dependency directories such as `node_modules` and `.venv`, which undo then
+restores as the session found them.
 
 For a copy-mode sandbox, which changes your folder only through
 `pull --apply`, `undo` reverts the last `pull --apply` instead, after the
