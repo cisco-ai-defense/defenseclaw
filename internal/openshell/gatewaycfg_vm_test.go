@@ -19,11 +19,13 @@ package openshell_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
@@ -204,6 +206,42 @@ func TestGatewayConfigSwitchesToMicroVMs(t *testing.T) {
 	_, err = g.apply(g.plan(t, microVMs))
 	if err == nil || !strings.Contains(err.Error(), "the restarted gateway runs the docker compute driver, not vm") ||
 		!strings.Contains(err.Error(), "previous configuration was restored") || g.brewRestarts() != 2 {
+		t.Fatalf("Apply = %v (restarts %d)", err, g.brewRestarts())
+	}
+	if got := readFile(t, filepath.Join(prefix, "gateway.toml")); got != homebrewTOML {
+		t.Fatalf("gateway.toml not restored:\n%s", got)
+	}
+}
+
+// TestGatewayConfigWaitsForTheRestartedDriver: a restarted gateway can be
+// healthy before it says which driver it runs (its driver has not
+// connected yet). Apply asks again within the restart wait instead of
+// undoing the switch, and undoes it only for a gateway that never says.
+func TestGatewayConfigWaitsForTheRestartedDriver(t *testing.T) {
+	f := newGatewayFixture(t)
+	running := openshell.DriverVM
+	f.onHomebrew(t, homebrewTOML, &running)
+	f.cfg.RestartWait = 5 * time.Second
+	asked := 0
+	f.cfg.RunningDriver = func(context.Context) (openshell.Driver, error) {
+		if asked++; asked < 3 {
+			return openshell.Driver{}, fmt.Errorf("%w; this gateway reports no compute driver", openshell.ErrUnsupportedDriver)
+		}
+		d, _ := openshell.LookupDriver(string(running))
+		return d, nil
+	}
+	if res, err := f.apply(f.plan(t, microVMs)); err != nil || !res.Restarted || f.brewRestarts() != 1 || asked != 3 {
+		t.Fatalf("Apply = %+v, %v (restarts %d, asked %d times)", res, err, f.brewRestarts(), asked)
+	}
+
+	g := newGatewayFixture(t)
+	prefix := g.onHomebrew(t, homebrewTOML, &running)
+	g.cfg.RestartWait = 50 * time.Millisecond
+	g.cfg.RunningDriver = func(context.Context) (openshell.Driver, error) {
+		return openshell.Driver{}, errors.New("openshell: gateway info: unavailable")
+	}
+	_, err := g.apply(g.plan(t, microVMs))
+	if err == nil || !strings.Contains(err.Error(), "gateway info: unavailable") || g.brewRestarts() != 2 {
 		t.Fatalf("Apply = %v (restarts %d)", err, g.brewRestarts())
 	}
 	if got := readFile(t, filepath.Join(prefix, "gateway.toml")); got != homebrewTOML {

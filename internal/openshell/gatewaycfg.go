@@ -958,7 +958,7 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if plan.ComputeDriver != "" {
 		// A gateway.env the plan did not see (launchd's own environment,
 		// for one) could still select another driver.
-		d, err := g.RunningDriver(ctx)
+		d, err := g.restartedDriver(ctx)
 		if err == nil && d.Name != plan.ComputeDriver {
 			err = fmt.Errorf("openshell: the restarted gateway runs the %s compute driver, not %s; something else in its environment selects it", d.Name, plan.ComputeDriver)
 		}
@@ -968,6 +968,29 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	}
 	res.Restarted = true
 	return res, nil
+}
+
+// restartedDriver asks the restarted gateway which compute driver it runs
+// until it says, within RestartWait: a gateway can answer its health check
+// before it answers GetGatewayInfo, or before its driver has connected
+// and it has one to report. A driver it names is a definite answer; only
+// the last error of a gateway that never names one is returned.
+func (g *GatewayConfigurator) restartedDriver(ctx context.Context) (Driver, error) {
+	interval := min(2*time.Second, max(g.RestartWait/20, time.Millisecond))
+	deadline := time.Now().Add(g.RestartWait)
+	for {
+		d, err := g.RunningDriver(ctx)
+		if err == nil || !time.Now().Before(deadline) {
+			return d, err
+		}
+		t := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return d, err
+		case <-t.C:
+		}
+	}
 }
 
 // ErrBindMountsRefused means bind mounts were not enabled because someone
