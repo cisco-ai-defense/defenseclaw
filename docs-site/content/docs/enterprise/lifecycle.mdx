@@ -264,8 +264,8 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
 - **Deleted accounts (Linux and macOS).** `repair` also removes the guardian
   targets of accounts that no longer exist. Otherwise they stay until the
   enumerator removes them, 10 to 15 minutes after the account is deleted:
-  meanwhile `status` and `verify` show the warning
-  `guardian_target_account_removed` and `reconcile` fails. See
+  meanwhile `status`, `verify` and `reconcile` show the warning
+  `guardian_target_account_removed` and do not fail on it. See
   [New, changed and removed users](/docs/enterprise/enrollment#new-changed-and-removed-users).
 - **Windows.** Use the Setup of the release that is installed. `/ensure` also
   repairs a deployment whose `verify` fails.

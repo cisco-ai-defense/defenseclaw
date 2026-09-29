@@ -1419,9 +1419,9 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	// target, after writing a report that names each one. describe reports
 	// those targets for their accounts, so the reconcile fails for them in
 	// the same words (not with the command line and its log output), and not
-	// at all for a path an account broke in its own home, which verify does
-	// not fail on either. The oneshot's failed state would only repeat the
-	// report.
+	// at all for a path an account broke in its own home or for the target
+	// of an account that no longer exists, which verify does not fail on
+	// either. The oneshot's failed state would only repeat the report.
 	targets := err != nil && l.guardianTargetFailedSince(since)
 	if targets && env.GOOS == "linux" {
 		_, _ = env.Runner.Run(ctx, "systemctl", "reset-failed", unitGuardianOneshot)
@@ -1434,10 +1434,10 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 		named := false
 		for _, warning := range r.Warnings {
 			switch warning.Code {
-			case codeHookContractUnverified, codeGuardianTargetFailed, codeGuardianTargetAccountRemoved:
+			case codeHookContractUnverified, codeGuardianTargetFailed:
 				r.AddError(codeReconcile, warning.Message)
 				named = true
-			case codeGuardianTargetUserPath:
+			case codeGuardianTargetUserPath, codeGuardianTargetAccountRemoved:
 				named = true
 			}
 		}

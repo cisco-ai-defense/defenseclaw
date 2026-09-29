@@ -50,7 +50,8 @@ func (r failingReconcileRunner) Run(ctx context.Context, name string, args ...st
 // the account's own path, giving the guardian command line, the manifest
 // path and the guardian's log output (a foreign-hook guard line) as the
 // reason. It no longer fails for that path, and it names any other failed
-// target in the words of its warning.
+// target in the words of its warning. reconcile failed for the deleted
+// account's target too, while verify only warned; it warns now as well.
 func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -100,11 +101,11 @@ func TestOneAccountsTargetDoesNotFailTheHost(t *testing.T) {
 			failed := errors.New("the guardian reconcile command exited 1")
 			h.services.failStart[unitGuardianOneshot] = failed
 			h.env.Runner = failingReconcileRunner{Runner: h.runner, err: failed}
-			writeState("/home/carol/.config/amp/plugins")
+			writeState("/home/carol/.config/amp/plugins", bob)
 			reconcile := h.run(Options{Action: ActionReconcile})
 			requireOK(t, reconcile)
-			if !hasWarning(reconcile, codeGuardianTargetUserPath) {
-				t.Fatalf("reconcile does not report the account's own path: %+v", reconcile.Warnings)
+			if !hasWarning(reconcile, codeGuardianTargetUserPath) || !hasWarning(reconcile, codeGuardianTargetAccountRemoved) {
+				t.Fatalf("reconcile does not report the account targets as warnings: %+v", reconcile.Warnings)
 			}
 			if goos == "linux" && !strings.Contains(strings.Join(h.runner.calls, "\n"), "systemctl reset-failed "+unitGuardianOneshot) {
 				t.Fatalf("the reconcile oneshot is left failed: %v", h.runner.calls)

@@ -380,10 +380,10 @@ avoid lookups.
   10 to 15 minutes after the account is deleted, or sooner when the
   enumerator restarts, because it runs a cycle when it starts. Until then
   the guardian reports the user's targets as pending (the home is gone) or
-  as `target account "<name>" does not exist`. `status` and `verify` show
-  the second as the warning `guardian_target_account_removed` and do not
-  fail on it, and `security_complete` stays true, but `reconcile` fails
-  until the targets are removed. To remove them at once, run
+  as `target account "<name>" does not exist`. `status`, `verify` and
+  `reconcile` show the second as the warning `guardian_target_account_removed`
+  and do not fail on it, and `security_complete` stays true. To remove the
+  targets at once, run
   `enterprise linux repair` or `enterprise macos repair` as root. Repair
   removes the targets of accounts that no longer exist and lists them in its
   result (`deleted_account_targets_removed`). An account that a directory
