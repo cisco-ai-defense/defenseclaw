@@ -108,7 +108,9 @@ application control that allows approved agent versions closes it; see
 When the enumerator finds an agent installed for an eligible user but cannot
 enroll it, it records the agent in an administrator-only file beside the
 target manifest (`unprotected-agents.json`), and `status` and `verify` report
-it with `security_complete: false`. `status` warns; `verify` fails.
+it with `security_complete: false`. `status` warns. On Linux and macOS
+`verify` fails; on Windows it warns too, because only that account's agent is
+unprotected, and `enterprise policy show` lists the agent.
 
 | Code | Meaning |
 | --- | --- |

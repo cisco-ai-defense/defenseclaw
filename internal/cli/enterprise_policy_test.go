@@ -145,6 +145,20 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	if err != nil || !strings.Contains(out, "codex") || !strings.Contains(out, "covered") {
 		t.Fatalf("show only reports: %v\n%s", err, out)
 	}
+
+	// Show names one account's unprotected agent without changing coverage.
+	previousUnprotected := enterprisePolicyUnprotectedAgents
+	t.Cleanup(func() { enterprisePolicyUnprotectedAgents = previousUnprotected })
+	enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.UnprotectedAgent {
+		return []enterprisehooks.UnprotectedAgent{{
+			User: "alice", Connector: "cursor", Version: "4.1.0", Code: enterprisehooks.UnprotectedCodeHookContractUnverified,
+			Reason: "version 4.1.0 is not verified against a known hook contract",
+		}}
+	}
+	out, err = runPolicyCommand(t, runEnterprisePolicyShow)
+	if err != nil || !strings.Contains(out, "hook_contract_unverified: cursor 4.1.0 for user alice is not protected") {
+		t.Fatalf("show must name the unprotected agent: %v\n%s", err, out)
+	}
 }
 
 func TestEnterprisePolicyLiveNeedsExplicitTarget(t *testing.T) {

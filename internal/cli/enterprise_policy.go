@@ -24,6 +24,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -170,6 +171,11 @@ type enterprisePolicyReport struct {
 	Result     enterprisepolicy.Result                           `json:"result"`
 	Guard      map[string]enterprisepolicy.PublicConnectorPolicy `json:"guard"`
 	User       *enterprisePolicyUserReport                       `json:"user,omitempty"`
+	// Unprotected lists the agents of the selected connectors the
+	// enumerator found installed for one account but could not enroll
+	// (Windows). Each runs without DefenseClaw hooks for that account only,
+	// so it does not change machine-policy coverage.
+	Unprotected []enterprisehooks.UnprotectedAgent `json:"unprotected_agents,omitempty"`
 	// goos is the host the report describes; it only changes wording.
 	goos string
 }
@@ -184,6 +190,14 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		Result:     result,
 		Guard:      summary.Connectors,
 		goos:       ctx.opts.GOOS,
+	}
+	for _, agent := range enterprisePolicyUnprotectedAgents(ctx.layout.ManifestPath) {
+		for _, name := range connectors {
+			if agent.Connector == name {
+				report.Unprotected = append(report.Unprotected, agent)
+				break
+			}
+		}
 	}
 	if strings.TrimSpace(enterprisePolicyUser) == "" {
 		return report, err
@@ -407,6 +421,12 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		}
 		if guard, ok := report.Guard[state.Connector]; ok && guard.Guard {
 			fmt.Fprintf(out, "    guard:     foreign hooks %s (%d allowlisted)\n", guard.ForeignHooks, len(guard.AllowedHooks))
+		}
+	}
+	if len(report.Unprotected) != 0 {
+		fmt.Fprintln(out, "\nUnprotected agents (each runs without DefenseClaw hooks for that account only):")
+		for _, agent := range report.Unprotected {
+			fmt.Fprintf(out, "    %s: %s\n", agent.Code, agent.Message())
 		}
 	}
 	if report.User != nil {

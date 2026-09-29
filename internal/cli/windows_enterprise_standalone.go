@@ -587,28 +587,30 @@ var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.Unprote
 // found installed for an eligible user but could not enroll (no verified
 // hook contract, below the platform minimum, an install the guardian cannot
 // manage, or an unreadable version) and marks the deployment
-// security-incomplete. Verify fails on them; the other actions warn, so
-// ensure never loops on a state only the user or administrator can change.
+// security-incomplete. Each is one account's agent, so every action, verify
+// included, reports it as a warning for that account: the rest of the host
+// stays compliant, and ensure never loops on a state only the user or
+// administrator can change. An unreadable record hides which agents they
+// are, so verify fails on it.
 func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
-	report := func(code, message string) {
-		if result.Action == "verify" {
-			result.AddError(code, message)
-		} else {
-			result.AddWarning(code, message)
-		}
-		result.SecurityComplete = false
-	}
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
 	if err != nil {
 		// A token that cannot read the protected record reports nothing
 		// about it, as for the manifest summary.
 		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
-			report(enterprisehooks.UnprotectedCodeAgentUnprotected, "the enumerator's unprotected-agents record is unreadable: "+err.Error())
+			message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
+			if result.Action == "verify" {
+				result.AddError(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
+			} else {
+				result.AddWarning(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
+			}
+			result.SecurityComplete = false
 		}
 		return
 	}
 	for _, agent := range agents {
-		report(agent.Code, agent.Message())
+		result.AddWarning(agent.Code, agent.Message())
+		result.SecurityComplete = false
 	}
 }
 
