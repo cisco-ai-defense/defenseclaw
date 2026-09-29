@@ -221,6 +221,11 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return err
 	}
 	reportMachinePolicy(r, p.intended, result, err)
+	for _, state := range result.States {
+		if state.Changed {
+			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
+		}
+	}
 	covered := coveredMachinePolicy(p.intended, result)
 	if sameStrings(covered, p.machinePolicy) {
 		return nil
@@ -241,6 +246,9 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		}
 		file.Data = data
 		file.SHA = sha256Bytes(data)
+		if !changed[file.Path] {
+			l.noteChange("rewrote %s", file.Path)
+		}
 		changed[file.Path] = true
 		return nil
 	}

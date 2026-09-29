@@ -795,6 +795,15 @@ func TestStatusAndVerify(t *testing.T) {
 	repair := h.run(Options{Action: ActionRepair})
 	requireOK(t, repair)
 	requireOK(t, h.run(Options{Action: ActionVerify}))
+	// repair says what it repaired, and that there was nothing to repair
+	// on a healthy deployment.
+	changes := strings.Join(repair.Changes, "\n")
+	if !strings.Contains(changes, "rewrote /etc/systemd/system/"+unitGateway) || !strings.Contains(changes, "started "+unitEnumerator+", which was not running") {
+		t.Fatalf("repair does not list what it changed: %q", repair.Changes)
+	}
+	if again := h.run(Options{Action: ActionRepair}); len(again.Changes) != 0 {
+		t.Fatalf("a repair of a healthy deployment lists changes: %q", again.Changes)
+	}
 }
 
 func TestReadSecretValue(t *testing.T) {

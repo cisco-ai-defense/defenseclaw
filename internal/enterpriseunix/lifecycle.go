@@ -114,6 +114,17 @@ type lifecycle struct {
 	serviceUID int
 	// planned are the inputs the last transaction of this run applied.
 	planned *plannedInputs
+	// reportChanges is set while a repair or ensure re-applies an installed
+	// deployment: the result then lists what the transaction changed.
+	reportChanges bool
+}
+
+// noteChange records one change a repair or ensure made to an installed
+// deployment, so its result says what was repaired.
+func (l *lifecycle) noteChange(format string, args ...any) {
+	if l.reportChanges {
+		l.result.Changes = append(l.result.Changes, fmt.Sprintf(format, args...))
+	}
 }
 
 // plannedInputs are the administrator inputs one transaction planned from.
@@ -751,6 +762,8 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	l.serviceUID = account.UID
 	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
+	l.reportChanges = record != nil && (l.opts.Action == ActionRepair || l.opts.Action == ActionEnsure)
+	changesBefore := len(r.Changes)
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
@@ -827,6 +840,8 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
+		// The rollback undoes this transaction's changes.
+		r.Changes = r.Changes[:changesBefore]
 		if record == nil {
 			// A failed first install leaves no DefenseClaw entries behind in
 			// vendor machine policy; an upgrade or repair keeps the previous
@@ -926,6 +941,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			}
 			return failAndRollback(codeActivate, err)
 		}
+		for _, unit := range units {
+			if unit.Activate && !contains(previouslyActive, unit.Name) && env.Services.Active(ctx, unit) {
+				l.noteChange("started %s, which was not running", unit.Name)
+			}
+		}
 	} else {
 		for _, unit := range units {
 			if unit.Activate {
@@ -990,7 +1010,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if !l.opts.NoStart {
 		// The result reports what the guardian found under the new state
 		// (an agent the change left without hooks), not its previous report.
-		l.awaitGuardianReport(ctx, activationStarted)
+		if l.awaitGuardianReport(ctx, activationStarted) {
+			l.noteRepairedTargets(activationStarted)
+		}
 	}
 	l.describe(ctx, newRecord, false)
 	return 0
@@ -1078,6 +1100,9 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
 		current, _ := sha256File(env.P(file.Path))
 		if current == file.SHA {
+			if l.reportChanges && env.metadataDiffers(env.P(file.Path), file.Mode, file.Owner) {
+				l.noteChange("restored the mode and owner of %s", file.Path)
+			}
 			if err := env.fixMetadata(env.P(file.Path), file.Mode, file.Owner); err != nil {
 				return nil, err
 			}
@@ -1104,17 +1129,30 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 			return nil, err
 		}
 		changed[file.Path] = true
+		l.noteChange("rewrote %s", file.Path)
 	}
 	for _, path := range p.stale {
 		if err := removeFile(env.P(path)); err != nil {
 			return nil, err
 		}
 		changed[path] = true
+		l.noteChange("removed %s, which the deployment no longer uses", path)
 		if ownedParent(filepath.Dir(path)) {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
 		}
 	}
 	return changed, nil
+}
+
+// metadataDiffers reports whether path's permission bits or owner differ
+// from the managed ones fixMetadata sets.
+func (e *Env) metadataDiffers(path string, mode os.FileMode, owner fileOwner) bool {
+	_, _, current, err := statOwnerMode(path)
+	if err != nil {
+		return false
+	}
+	uid, gid, err := e.OwnerOf(path)
+	return err == nil && (current.Perm() != mode.Perm() || uid != owner.UID || gid != owner.GID)
 }
 
 func (e *Env) fixMetadata(path string, mode os.FileMode, owner fileOwner) error {

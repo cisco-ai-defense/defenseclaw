@@ -120,6 +120,13 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		warns = append(warns, warning.Code+": "+warning.Message)
 	}
 	writeLifecycleSummary(w, result.Action, result.OK, result.Noop, result.NoopReason, errs, warns)
+	// repair (and an ensure that re-applied) says what it changed.
+	for _, change := range result.Changes {
+		fmt.Fprintf(w, "  - %s\n", change)
+	}
+	if result.Action == enterpriseunix.ActionRepair && result.OK && len(result.Changes) == 0 {
+		fmt.Fprintln(w, "  nothing to repair")
+	}
 	if result.Action == enterpriseunix.ActionStatus || result.Action == enterpriseunix.ActionVerify {
 		fmt.Fprintf(w, "  installed=%v version=%s gateway_ready=%v guardian_ready=%v enumerator_ready=%v sensor_helper_ready=%v\n",
 			result.Installed, result.InstalledVersion, result.Readiness.Gateway, result.Readiness.Guardian,

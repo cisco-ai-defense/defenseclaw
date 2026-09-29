@@ -739,6 +739,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
 	repairs := 0
+	var repaired []enterpriseHookGuardianRepair
 	for index, slot := range slots {
 		row := rows[index]
 		outcome, ok := outcomes[index]
@@ -754,6 +755,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			row.UserHome = outcome.result.UserHome
 			row.Connector = outcome.result.Connector
 			if outcome.repaired {
+				repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
 				repairs++
 			}
 		default:
@@ -783,6 +785,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 
 	bindingsErr := saveEnterpriseHookUnixBindings(next)
+	writeEnterpriseHookGuardianRepairs(cfg.DataDir, repaired)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
@@ -1020,4 +1023,36 @@ var enterpriseHookStandaloneMachinePolicyCovered = func(connectorName string) (b
 		return false, errors.New("no standalone layout for this platform")
 	}
 	return enterprisepolicy.MachinePolicyPresent(opts, connectorName)
+}
+
+// hookGuardianRepairsFile lists the targets the last standalone Unix
+// reconcile rewrote because they no longer verified, which the lifecycle's
+// repair reports. It is its own file: the state and authorization files keep
+// the schema a prior binary reads strictly.
+const hookGuardianRepairsFile = "hook_guardian_repairs.json"
+
+type enterpriseHookGuardianRepair struct {
+	User      string `json:"user"`
+	Connector string `json:"connector"`
+}
+
+// writeEnterpriseHookGuardianRepairs records this reconcile's repairs, if
+// any, before its state report; a reconcile that repaired nothing keeps the
+// last record, which the lifecycle reads only when it is newer than its
+// change. It is best effort: only the repair report reads it.
+func writeEnterpriseHookGuardianRepairs(dataDir string, repaired []enterpriseHookGuardianRepair) {
+	if len(repaired) == 0 {
+		return
+	}
+	data, err := json.Marshal(struct {
+		UpdatedAt string                         `json:"updated_at"`
+		Repaired  []enterpriseHookGuardianRepair `json:"repaired"`
+	}{time.Now().UTC().Format(time.RFC3339Nano), repaired})
+	if err != nil || strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	path := filepath.Join(dataDir, hookGuardianRepairsFile)
+	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
+		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: record repaired targets: %v\n", err)
+	}
 }
