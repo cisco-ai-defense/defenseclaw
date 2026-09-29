@@ -192,6 +192,39 @@ func TestResourcesOnVM(t *testing.T) {
 	e.startBox("grows", sandboxapi.StartRequest{})
 }
 
+// The gateway-wide values the daemon reads from the gateway's files may
+// not be the ones the running gateway took (launchd's environment, a file
+// changed since its restart): under an organization's maximum the workload
+// check judges what the MicroVM actually got, and a create or start above
+// it does not keep running.
+func TestTheWorkloadCheckJudgesWhatTheMicroVMGot(t *testing.T) {
+	e := newVMEnv(t, func(c *config.Config) {
+		c.OpenShell.Admin.MaxResources = config.OpenShellResourcesConfig{CPU: "2", Memory: "4Gi"}
+	})
+	useOpenCode(t, e)
+	e.m.opts.GatewayResources = func() (packs.Resources, error) { return packs.Resources{CPU: "2", Memory: "4096Mi"}, nil }
+	e.create(sandboxapi.CreateRequest{Name: "fits", Harness: "opencode", Copy: true})
+	e.stopBox("fits")
+
+	cpus := 16
+	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.cpus = cpus }, nil))
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "more", Harness: "opencode", Copy: true, Project: e.otherProject("more")})
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected); !strings.Contains(apiErr.Detail,
+		"the workload has 16 processors, and your organization caps sandbox cpu at 2; lower vcpus and mem_mib under [openshell.drivers.vm]") {
+		t.Fatalf("create = %+v", apiErr)
+	}
+	if _, err := e.client.GetSandbox(t.Context(), "more"); !openshell.IsNotFound(err) {
+		t.Fatalf("the refused sandbox is still there: %v", err)
+	}
+	_, err = e.m.Start(t.Context(), "fits", sandboxapi.StartRequest{})
+	wantCode(t, err, sandboxapi.CodePolicyRejected)
+	if got, _ := e.client.GetSandbox(t.Context(), "fits"); got.Status.Phase != openshell.PhaseStopped {
+		t.Fatalf("after the refused start: %s", got.Status.Phase)
+	}
+	cpus = 2
+	e.startBox("fits", sandboxapi.StartRequest{})
+}
+
 // The list and a sandbox's view warn about a MicroVM sandbox's resources
 // as its start judges them: by what every MicroVM gets now, not what the
 // record kept at create, and with the fix that works on the vm driver

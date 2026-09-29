@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -66,8 +67,9 @@ const (
 // read-only /usr and /bin: at a start the sandbox keeps what the last
 // session wrote, and an id or sha256sum planted earlier on the image PATH
 // (under /sandbox) would otherwise answer for itself. The shell reads the
-// hostname and the capabilities itself. The arguments are the files to
-// check; a "mount" line names each that is a mount point, with its options.
+// hostname, the capabilities, the processors and the memory (in kB) itself.
+// The arguments are the files to check; a "mount" line names each that is a
+// mount point, with its options.
 const verifyScript = `printf 'uid %s\n' "$(/usr/bin/id -u)"
 printf 'gid %s\n' "$(/usr/bin/id -g)"
 host=
@@ -77,6 +79,14 @@ if [ -w "$HOME" ]; then echo 'home writable'; else echo 'home read-only'; fi
 while read -r key value; do
   [ "$key" = CapEff: ] && printf 'capeff %s\n' "$value"
 done < /proc/self/status
+cpus=0
+while read -r key rest; do
+  [ "$key" = processor ] && cpus=$((cpus + 1))
+done < /proc/cpuinfo
+printf 'cpus %s\n' "$cpus"
+while read -r key value rest; do
+  [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
+done < /proc/meminfo
 if [ "$#" -gt 0 ]; then
   /usr/bin/sha256sum -- "$@" | while read -r sum file; do printf 'sha256 %s %s\n' "$sum" "$file"; done
   /usr/bin/stat -c 'stat %u %g %a %n' -- "$@"
@@ -122,7 +132,12 @@ type workloadFacts struct {
 	Hostname     string
 	HomeWritable bool
 	CapEff       string
-	Files        map[string]*fileFacts
+	// CPUs are the processors the workload sees, and MemTotalKB the
+	// memory (/proc/meminfo MemTotal, in kB; a little under what the
+	// MicroVM was given, the kernel keeps some).
+	CPUs       int
+	MemTotalKB int64
+	Files      map[string]*fileFacts
 	// seen holds the tags of the single-valued lines read.
 	seen map[string]bool
 	// End is set when the answer was complete.
@@ -162,7 +177,7 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 		}
 		tag, rest, _ := strings.Cut(line, " ")
 		switch tag {
-		case "uid", "gid", "hostname", "home", "capeff":
+		case "uid", "gid", "hostname", "home", "capeff", "cpus", "memtotal":
 			if facts.seen[tag] {
 				return facts, fmt.Errorf("the answer has %s twice", tag)
 			}
@@ -180,6 +195,10 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 			facts.HomeWritable = rest == "writable"
 		case "capeff":
 			facts.CapEff = rest
+		case "cpus":
+			facts.CPUs, err = strconv.Atoi(rest)
+		case "memtotal":
+			facts.MemTotalKB, err = strconv.ParseInt(rest, 10, 64)
 		case "sha256":
 			sum, path, ok := strings.Cut(rest, " ")
 			if !ok || path == "" {
@@ -223,10 +242,60 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 	return facts, nil
 }
 
+// workloadLimits is an organization's openshell.admin.max_resources as the
+// workload check judges it: the settings as written, and parsed (0 is no
+// maximum; the resolver refuses a malformed one on its own).
+type workloadLimits struct {
+	cpu, memory            string
+	cpuMillis, memoryBytes int64
+}
+
+func adminLimits(max config.OpenShellResourcesConfig) workloadLimits {
+	l := workloadLimits{cpu: strings.TrimSpace(max.CPU), memory: strings.TrimSpace(max.Memory)}
+	if n, err := config.ParseOpenShellCPU(l.cpu); l.cpu != "" && err == nil {
+		l.cpuMillis = n
+	}
+	if n, err := config.ParseOpenShellMemory(l.memory); l.memory != "" && err == nil {
+		l.memoryBytes = n
+	}
+	return l
+}
+
+// sharedLimitProblems judges what a workload of a driver without
+// per-sandbox limits (vm) sees against the organization's maximum. The
+// create and the start judged the gateway-wide vcpus and mem_mib the
+// daemon reads from the gateway's configuration, but the running gateway
+// can take others (launchd's environment, a file changed since its last
+// restart): what the MicroVM got is checked too.
+func sharedLimitProblems(got workloadFacts, d openshell.Driver, limits workloadLimits) []string {
+	var out []string
+	fix := "; lower vcpus and mem_mib under [openshell.drivers." + string(d.Name) + "] in the gateway's gateway.toml and restart it " +
+		"(`defenseclaw sandbox doctor --fix`)"
+	if limits.cpuMillis > 0 {
+		switch {
+		case !got.seen["cpus"] || got.CPUs <= 0:
+			out = append(out, "the check could not count the workload's processors, which your organization caps at "+limits.cpu)
+		case int64(got.CPUs)*1000 > limits.cpuMillis:
+			out = append(out, fmt.Sprintf("the workload has %d processors, and your organization caps sandbox cpu at %s%s", got.CPUs, limits.cpu, fix))
+		}
+	}
+	if limits.memoryBytes > 0 {
+		switch {
+		case !got.seen["memtotal"] || got.MemTotalKB <= 0:
+			out = append(out, "the check could not read the workload's memory, which your organization caps at "+limits.memory)
+		case got.MemTotalKB*1024 > limits.memoryBytes:
+			out = append(out, fmt.Sprintf("the workload has %d MiB of memory, and your organization caps sandbox memory at %s%s", got.MemTotalKB>>10, limits.memory, fix))
+		}
+	}
+	return out
+}
+
 // workloadProblems lists how the sandbox differs from want, as the user
 // reads it; none means it runs as DefenseClaw prepared it. d is the
-// sandbox's compute driver, which says where a wrong identity comes from.
-func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver) []string {
+// sandbox's compute driver, which says where a wrong identity comes from,
+// and whether the cpu and memory the workload sees are judged against the
+// organization's limits (a driver without per-sandbox limits).
+func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, limits workloadLimits) []string {
 	var out []string
 	if !got.End {
 		return []string{"the check's answer was cut short"}
@@ -253,6 +322,9 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver) 
 	}
 	if caps, err := strconv.ParseUint(got.CapEff, 16, 64); err != nil || caps != 0 {
 		out = append(out, "the workload holds capabilities (CapEff "+truncate(got.CapEff, 32)+"); DefenseClaw runs it with none")
+	}
+	if !d.SandboxLimits {
+		out = append(out, sharedLimitProblems(got, d, limits)...)
 	}
 	for _, w := range want.Files {
 		f := got.Files[w.Path]
@@ -304,7 +376,7 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	case res.ExitCode != 0:
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
-		problems = workloadProblems(want, facts, gw.Driver)
+		problems = workloadProblems(want, facts, gw.Driver, adminLimits(m.config().OpenShell.Admin.MaxResources))
 	}
 	if len(problems) == 0 {
 		return facts, nil

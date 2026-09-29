@@ -176,7 +176,10 @@ not the driver's name or `runtime.GOOS`.
 - **Workload check.** After ready, at create and at every start, one exec
   (`/usr/bin/env -i`, every tool by absolute path) proves the uid and gid,
   a writable HOME, an empty `CapEff`, and the digests, owners and modes of
-  the hook entrypoints and run files against what create recorded. A
+  the hook entrypoints and run files against what create recorded. Under
+  an admin `max_resources` it also counts the processors and reads the
+  memory the MicroVM got, since the running gateway can take other values
+  than its files say (launchd's environment, a change since its restart). A
   mismatch rolls the create back or stops the started sandbox. It runs on
   the vm driver, where the workload's identity is the gateway's
   configuration. On docker it is off (`SkipWorkloadCheck` in the driver

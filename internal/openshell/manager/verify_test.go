@@ -37,6 +37,7 @@ import (
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -55,7 +56,10 @@ type workloadAnswer struct {
 	hostname string
 	home     string
 	capEff   string
-	files    []answerFile
+	// cpus and memKB are the processors and the MemTotal (kB) it sees.
+	cpus  int
+	memKB int64
+	files []answerFile
 	// cut leaves out the end line.
 	cut bool
 }
@@ -71,7 +75,7 @@ type answerFile struct {
 
 func (a workloadAnswer) stdout() []byte {
 	var b strings.Builder
-	fmt.Fprintf(&b, "uid %d\ngid %d\nhostname %s\nhome %s\ncapeff %s\n", a.uid, a.gid, a.hostname, a.home, a.capEff)
+	fmt.Fprintf(&b, "uid %d\ngid %d\nhostname %s\nhome %s\ncapeff %s\ncpus %d\nmemtotal %d\n", a.uid, a.gid, a.hostname, a.home, a.capEff, a.cpus, a.memKB)
 	for _, f := range a.files {
 		if f.sha256 != "" {
 			fmt.Fprintf(&b, "sha256 %s %s\n", f.sha256, f.path)
@@ -96,7 +100,7 @@ func (a workloadAnswer) stdout() []byte {
 // answerFor is the answer of a sandbox named hostname (a MicroVM's
 // hostname is its name) that runs as want expects.
 func answerFor(want verifyRecord, hostname string) workloadAnswer {
-	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000"}
+	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000", cpus: 2, memKB: 2000000}
 	for _, f := range want.Files {
 		af := answerFile{path: f.Path, sha256: f.SHA256, uid: f.UID, gid: f.GID, mode: f.Mode}
 		if f.ReadOnlyMount {
@@ -161,31 +165,48 @@ func testVerify() verifyRecord {
 func TestWorkloadProblems(t *testing.T) {
 	vm, _ := openshell.LookupDriver("vm")
 	docker, _ := openshell.LookupDriver("docker")
+	var none config.OpenShellResourcesConfig
+	capped := func(cpu, memory string) config.OpenShellResourcesConfig {
+		return config.OpenShellResourcesConfig{CPU: cpu, Memory: memory}
+	}
 	for _, tc := range []struct {
 		name   string
 		driver openshell.Driver
 		edit   func(a *workloadAnswer)
 		want   string // "" passes
+		// limits is the organization's max_resources.
+		limits config.OpenShellResourcesConfig
 	}{
-		{"as prepared on vm", vm, nil, ""},
-		{"as prepared on docker", docker, nil, ""},
+		{"as prepared on vm", vm, nil, "", none},
+		{"as prepared on docker", docker, nil, "", none},
 		{"the vm driver's default identity", vm, func(a *workloadAnswer) { a.uid, a.gid = 1000, 1000 },
 			"the OpenShell vm driver runs sandboxes as uid 1000:1000, but DefenseClaw's images are built for 501:20; " +
-				"set sandbox_uid = 501 and sandbox_gid = 20 under [openshell.drivers.vm]"},
-		{"another identity on docker", docker, func(a *workloadAnswer) { a.uid = 0 }, "runs as uid 0:20, not 501:20"},
-		{"capabilities", vm, func(a *workloadAnswer) { a.capEff = "00000000a80425fb" }, "holds capabilities (CapEff 00000000a80425fb)"},
-		{"no CapEff", vm, func(a *workloadAnswer) { a.capEff = "" }, "holds capabilities"},
-		{"a home it cannot write", vm, func(a *workloadAnswer) { a.home = "read-only" }, "cannot write its home /sandbox"},
+				"set sandbox_uid = 501 and sandbox_gid = 20 under [openshell.drivers.vm]", none},
+		{"another identity on docker", docker, func(a *workloadAnswer) { a.uid = 0 }, "runs as uid 0:20, not 501:20", none},
+		{"capabilities", vm, func(a *workloadAnswer) { a.capEff = "00000000a80425fb" }, "holds capabilities (CapEff 00000000a80425fb)", none},
+		{"no CapEff", vm, func(a *workloadAnswer) { a.capEff = "" }, "holds capabilities", none},
+		{"a home it cannot write", vm, func(a *workloadAnswer) { a.home = "read-only" }, "cannot write its home /sandbox", none},
 		{"a changed hook", vm, func(a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("f", 64) },
-			"claude-code-hook.sh is not the file DefenseClaw delivered"},
-		{"a missing hook", vm, func(a *workloadAnswer) { a.files[0].sha256 = "" }, "claude-code-hook.sh is missing"},
-		{"a group-writable hook", vm, func(a *workloadAnswer) { a.files[0].mode = 0o775 }, "writable by its group or others (mode 775)"},
-		{"a world-writable setting", vm, func(a *workloadAnswer) { a.files[1].mode = 0o646 }, "writable by its group or others"},
-		{"a hook the workload owns", vm, func(a *workloadAnswer) { a.files[0].uid, a.files[0].gid = 501, 20 }, "is owned by 501:20, not 0:0"},
-		{"another mode", vm, func(a *workloadAnswer) { a.files[0].mode = 0o700 }, "has mode 700, not 755"},
-		{"a run file on a writable mount", docker, func(a *workloadAnswer) { a.files[2].mount = "rw,relatime" }, "60-defenseclaw-run.json is not on a read-only mount"},
-		{"a run file not mounted", docker, func(a *workloadAnswer) { a.files[2].mount = "" }, "60-defenseclaw-run.json is not on a read-only mount"},
-		{"an answer cut short", vm, func(a *workloadAnswer) { a.cut = true }, "cut short"},
+			"claude-code-hook.sh is not the file DefenseClaw delivered", none},
+		{"a missing hook", vm, func(a *workloadAnswer) { a.files[0].sha256 = "" }, "claude-code-hook.sh is missing", none},
+		{"a group-writable hook", vm, func(a *workloadAnswer) { a.files[0].mode = 0o775 }, "writable by its group or others (mode 775)", none},
+		{"a world-writable setting", vm, func(a *workloadAnswer) { a.files[1].mode = 0o646 }, "writable by its group or others", none},
+		{"a hook the workload owns", vm, func(a *workloadAnswer) { a.files[0].uid, a.files[0].gid = 501, 20 }, "is owned by 501:20, not 0:0", none},
+		{"another mode", vm, func(a *workloadAnswer) { a.files[0].mode = 0o700 }, "has mode 700, not 755", none},
+		{"a run file on a writable mount", docker, func(a *workloadAnswer) { a.files[2].mount = "rw,relatime" }, "60-defenseclaw-run.json is not on a read-only mount", none},
+		{"a run file not mounted", docker, func(a *workloadAnswer) { a.files[2].mount = "" }, "60-defenseclaw-run.json is not on a read-only mount", none},
+		{"an answer cut short", vm, func(a *workloadAnswer) { a.cut = true }, "cut short", none},
+		// What a MicroVM got is judged against the organization's maximum,
+		// whatever the gateway's files said at the create.
+		{"within the organization's maximum", vm, nil, "", capped("2", "2Gi")},
+		{"more processors than the maximum", vm, func(a *workloadAnswer) { a.cpus = 16 },
+			"the workload has 16 processors, and your organization caps sandbox cpu at 2; lower vcpus and mem_mib under [openshell.drivers.vm]", capped("2", "")},
+		{"more memory than the maximum", vm, func(a *workloadAnswer) { a.memKB = 8 << 20 },
+			"the workload has 8192 MiB of memory, and your organization caps sandbox memory at 2Gi", capped("", "2Gi")},
+		{"processors not counted", vm, func(a *workloadAnswer) { a.cpus = 0 }, "could not count the workload's processors", capped("2", "")},
+		// A container sees the host's processors; docker enforces the
+		// template's limits itself.
+		{"docker's own limits", docker, func(a *workloadAnswer) { a.cpus = 16 }, "", capped("1", "")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := answerFor(testVerify(), "vmbox")
@@ -194,7 +215,7 @@ func TestWorkloadProblems(t *testing.T) {
 			}
 			facts, err := parseWorkloadFacts(a.stdout())
 			must(t, err)
-			problems := strings.Join(workloadProblems(testVerify(), facts, tc.driver), "; ")
+			problems := strings.Join(workloadProblems(testVerify(), facts, tc.driver, adminLimits(tc.limits)), "; ")
 			if tc.want == "" {
 				if problems != "" || facts.Hostname != "vmbox" {
 					t.Fatalf("problems = %q, hostname %q", problems, facts.Hostname)
@@ -262,7 +283,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	}
 	facts, err := parseWorkloadFacts(out)
 	must(t, err)
-	if !facts.End || facts.UID != os.Getuid() || facts.GID != os.Getgid() || facts.Hostname == "" || facts.CapEff == "" {
+	if !facts.End || facts.UID != os.Getuid() || facts.GID != os.Getgid() || facts.Hostname == "" || facts.CapEff == "" || facts.CPUs < 1 || facts.MemTotalKB < 1 {
 		t.Fatalf("facts = %+v (%s)", facts, out)
 	}
 	f := facts.Files[hook]
@@ -271,7 +292,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	}
 	// HOME is /sandbox, which this host may lack, and the test may run with
 	// capabilities: the file and the identity are as recorded.
-	problems := strings.Join(workloadProblems(want, facts, openshell.Driver{}), "; ")
+	problems := strings.Join(workloadProblems(want, facts, openshell.Driver{}, workloadLimits{}), "; ")
 	if strings.Contains(problems, hook) || strings.Contains(problems, "runs as uid") {
 		t.Fatalf("problems = %q", problems)
 	}
