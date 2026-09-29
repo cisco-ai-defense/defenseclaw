@@ -355,8 +355,10 @@ copy a genuine entry.
 `status` and `verify` also name every agent the enumerator found installed
 but could not enroll (`hook_contract_unverified`, `agent_unprotected`); see
 [Enrollment](/docs/enterprise/enrollment#agents-that-cannot-be-enrolled).
-The text output prints each one as a `warning <code>: <message>` line (status)
-or an `error` line (verify); `--json` lists them under `warnings` or `errors`.
+Each is one account's agent, so both print it as a `warning <code>: <message>`
+line and `--json` lists it under `warnings`: `security_complete` is `false`,
+but `verify`, and so MDM detection, still passes. `enterprise policy show`
+lists them as well.
 Cursor's machine hooks file is published only while a user is enrolled for
 Cursor; see [Machine policy](/docs/enterprise/machine-policy#routes-by-connector).
 `include_groups` and `exclude_groups` apply on Windows as described there.
@@ -544,8 +546,10 @@ registrations. Users who are signed out during the uninstall keep theirs as
 well: no guardian is left to clean them at their next sign-in. The uninstall
 result names what stays: the `user_registrations_pending` warning lists each
 connector and user SID it could not act as, and `user_registrations_failed`
-lists removals that failed. To clean every user, run the uninstall as
-LocalSystem while they are signed in.
+lists removals that failed, including a registration that a connector's
+removal left in the user's agent configuration (the message names the file).
+To clean every user, run the uninstall as LocalSystem while they are signed
+in.
 
 What stays is inert. Uninstall has already revoked every enrollment. The
 OpenCode and Amp plugins stop enforcing once uninstall removes

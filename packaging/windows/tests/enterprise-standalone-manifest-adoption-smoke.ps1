@@ -135,7 +135,7 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @()) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -160,11 +160,13 @@ try {
                 if ($Failures -ne 0) {
                     $errors += 'last guardian reconcile failed for alice/codex: marker'
                 }
+                $state = & $record $StateStamp
+                $state | Microsoft.PowerShell.Utility\Add-Member -NotePropertyName results -NotePropertyValue $Results
                 $report = [ordered]@{
                     ok = $Ok
                     errors = $errors
                     activation = $activation
-                    state = (& $record $StateStamp)
+                    state = $state
                 }
                 if (-not $NoAuthorization) {
                     $report['authorization'] = (& $record $stamp)
@@ -239,6 +241,14 @@ try {
             Assert-TestSyncRefuses 'guardian still on the old manifest' 'guardian'
             Set-TestGuardian $false $republishedSHA256 2 1
             Assert-TestSyncRefuses 'guardian reconcile failed' 'marker'
+            # A failure that lasts until a signed-out account signs in names
+            # that account instead of asking for a retry.
+            $signedOut = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
+            Assert-TestSyncRefuses 'signed-out account' 'Windows session: alice (S-1-5-21-1-2-3-1018); have each account sign in'
             Set-TestGuardian $true $republishedSHA256 2 0 '2026-09-27T15:50:44Z'
             Assert-TestSyncRefuses 'guardian records from two reconciles' 'state record'
             Set-TestGuardian $true $republishedSHA256 2 -NoAuthorization

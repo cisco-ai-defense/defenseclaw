@@ -30,8 +30,9 @@ func stubWindowsUnprotectedAgents(t *testing.T, agents []enterprisehooks.Unprote
 }
 
 // Agents the enumerator found installed but could not enroll run without
-// DefenseClaw (or are refused by machine policy); status names them and
-// reports the deployment security-incomplete, and verify fails.
+// DefenseClaw (or are refused by machine policy); status and verify name
+// them for their account and report the deployment security-incomplete, and
+// verify still passes.
 func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{{
 		User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor", Version: "4.1.0",
@@ -55,9 +56,11 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 	}
 
 	verify := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.0")
+	verify.SecurityComplete = true
 	applyWindowsEnterpriseUnprotectedAgents(verify)
-	if len(verify.Errors) != 1 || verify.Errors[0].Code != enterprisehooks.UnprotectedCodeHookContractUnverified {
-		t.Fatalf("verify errors = %+v, want the unprotected agent", verify.Errors)
+	if len(verify.Errors) != 0 || len(verify.Warnings) != 1 ||
+		verify.Warnings[0].Code != enterprisehooks.UnprotectedCodeHookContractUnverified || verify.SecurityComplete {
+		t.Fatalf("verify = %+v, want a warning for the unprotected agent", verify)
 	}
 
 	// No record, or a record this token cannot read, reports nothing.

@@ -778,8 +778,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		removedAccountFailures = enterpriseHookRemovedAccountFailures(state)
 		if removedAccountFailures > 0 {
 			for _, issue := range enterpriseHookGuardianFailureIssues(state) {
-				report.Warnings = append(report.Warnings,
-					issue+" (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)")
+				report.Warnings = append(report.Warnings, issue+enterpriseHookRemovedAccountNote)
 			}
 		} else {
 			report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
@@ -804,12 +803,22 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if stateExists && authorizationExists && activationExists &&
 		stateErr == nil && authorizationErr == nil && activationErr == nil {
+		expectedManifestSHA256 := manifestSHA256
+		if manifestSHA256 != "" && activation.ManifestSHA256 != manifestSHA256 && enterpriseHookManifestCatchUpAllowed() {
+			expectedManifestSHA256 = ""
+			message, waiting := enterpriseHookManifestActivationIssue(enterpriseHookManifest, manifestSHA256, activation, time.Now())
+			if waiting {
+				report.Warnings = append(report.Warnings, message)
+			} else {
+				report.Errors = append(report.Errors, message)
+			}
+		}
 		report.Errors = append(report.Errors, compareEnterpriseHookGuardianRecordsExcusing(
 			state,
 			authorization,
 			activation,
 			enterpriseHookManifest,
-			manifestSHA256,
+			expectedManifestSHA256,
 			removedAccountFailures,
 		)...)
 		// The Guardian is the trusted live verifier on native Windows: it runs
@@ -861,6 +870,47 @@ func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusR
 	}
 	return err
 }
+
+// enterpriseHookManifestCatchUpWindow is how long standalone status waits,
+// after the enumerator republishes targets.yaml, for the guardian to
+// activate it. The guardian reconciles a changed manifest within seconds and
+// runs at least once a minute.
+const enterpriseHookManifestCatchUpWindow = 2 * time.Minute
+
+// enterpriseHookManifestActivationIssue words, for standalone status, a
+// guardian activation of other targets.yaml bytes than the installed ones.
+// A targets.yaml the enumerator changed less than
+// enterpriseHookManifestCatchUpWindow ago is the guardian catching up
+// (waiting): until it activates the new file the gateway keeps enforcing
+// the targets it last activated. The change can predate that activation's
+// stamp: the guardian reads targets.yaml when a reconcile starts and stamps
+// the activation when it ends.
+func enterpriseHookManifestActivationIssue(
+	manifestPath, manifestSHA256 string,
+	activation enterpriseHookGuardianActivation,
+	now time.Time,
+) (message string, waiting bool) {
+	activatedAt, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(activation.UpdatedAt))
+	if info, statErr := os.Stat(manifestPath); statErr == nil {
+		changedAt := info.ModTime().UTC()
+		if age := now.Sub(changedAt); age >= 0 && age < enterpriseHookManifestCatchUpWindow {
+			return fmt.Sprintf("the hook enumerator updated targets.yaml %s ago and the hook guardian has not activated it yet; "+
+				"it does within about a minute, and until then enforces the targets it last activated", age.Round(time.Second)), true
+		}
+		if parseErr == nil && changedAt.After(activatedAt) {
+			return fmt.Sprintf("the hook guardian has not activated the targets.yaml the enumerator published at %s "+
+				"(its last activation was at %s); check that the hook guardian service is running and read its log",
+				changedAt.Format(time.RFC3339), activatedAt.UTC().Format(time.RFC3339)), false
+		}
+	}
+	return fmt.Sprintf("the hook guardian last activated other targets.yaml bytes than the installed file "+
+		"(activated %.12s, installed %.12s); check that the hook guardian service is running and read its log",
+		activation.ManifestSHA256, manifestSHA256), false
+}
+
+// enterpriseHookRemovedAccountNote follows each failure status and verify
+// report as a warning for a deleted account whose profile folder was removed.
+const enterpriseHookRemovedAccountNote = " (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)"
 
 // enterpriseHookRemovedAccountFailures is the number of failed rows in the
 // last reconcile when every one of them belongs to a deleted account whose
@@ -1196,11 +1246,28 @@ func enterpriseHookTargetLabel(row enterpriseHookReconcileRow) string {
 }
 
 type enterpriseHookVerifyRun struct {
-	Manifest         string
-	Rows             []enterpriseHookReconcileRow
-	Failures         int
-	Pending          int
+	Manifest string
+	Rows     []enterpriseHookReconcileRow
+	Failures int
+	Pending  int
+	// Excused are the failed rows of a deleted account whose profile folder
+	// was removed, when every failed row of the guardian's last reconcile is
+	// one (enterpriseHookRemovedAccountFailures). They count in Failures, so
+	// the dispositions still match the guardian's records, and verify
+	// reports them as warnings, as status does.
+	Excused          []enterpriseHookReconcileRow
 	AuthorizationErr error
+}
+
+// enterpriseHookVerifyRowExcused reports whether row is one of run.Excused.
+func enterpriseHookVerifyRowExcused(run enterpriseHookVerifyRun, row enterpriseHookReconcileRow) bool {
+	key := enterpriseHookProtectedTargetKey(row)
+	for _, excused := range run.Excused {
+		if key != "" && enterpriseHookProtectedTargetKey(excused) == key {
+			return true
+		}
+	}
+	return false
 }
 
 var enterpriseHookDeferredPendingStateVerifier = enterprisehooks.RequireWindowsEnterpriseDeferredTargetPending
@@ -1254,7 +1321,8 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	ok := run.Failures == 0 && run.AuthorizationErr == nil
+	failures := run.Failures - len(run.Excused)
+	ok := failures == 0 && run.AuthorizationErr == nil
 	if enterpriseHookJSON {
 		payload := map[string]any{
 			"ok":                               ok,
@@ -1264,6 +1332,13 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		}
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
+		}
+		if len(run.Excused) != 0 {
+			warnings := make([]string, 0, len(run.Excused))
+			for _, row := range run.Excused {
+				warnings = append(warnings, enterpriseHookTargetLabel(row)+": "+row.Error+enterpriseHookRemovedAccountNote)
+			}
+			payload["warnings"] = warnings
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
@@ -1278,6 +1353,8 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
+		} else if enterpriseHookVerifyRowExcused(run, row) {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: %s%s\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row), row.Error, enterpriseHookRemovedAccountNote)
 		} else {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), enterpriseHookTargetLabel(row), row.Error)
 		}
@@ -1286,7 +1363,7 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
 	}
 	if !ok {
-		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", run.Failures)
+		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", failures)
 	}
 	return nil
 }
@@ -1392,7 +1469,9 @@ func runEnterpriseHookVerifyGenerationConsistent(
 			// publication window. Preserve their original fail-closed result.
 			return last, err
 		}
-		failed := err != nil || last.Failures != 0 || last.AuthorizationErr != nil
+		// A deleted account's excused rows fail every pass until the
+		// enumerator drops them; retrying cannot change them.
+		failed := err != nil || last.Failures != len(last.Excused) || last.AuthorizationErr != nil
 		if stable && !failed {
 			return last, nil
 		}
@@ -1447,12 +1526,19 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	authorization, exists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
 	activation, activationExists, activationErr := loadEnterpriseHookGuardianActivation(cfg.DataDir)
 	guardianState, guardianStateExists, guardianStateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
+	// The rows of a deleted account whose profile folder was removed fail
+	// every reconcile until the enumerator drops them; verify accepts exactly
+	// those failures, as status does.
+	excused := 0
+	if guardianStateErr == nil && guardianStateExists {
+		excused = enterpriseHookRemovedAccountFailures(guardianState)
+	}
 	if authorizationErr != nil {
 		run.AuthorizationErr = authorizationErr
 	} else if !exists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is missing")
-	} else if !authorization.OK || authorization.FailureCount != 0 ||
-		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount {
+	} else if !enterpriseHookGuardianRecordComplete(authorization.OK, authorization.SuccessCount, authorization.FailureCount,
+		authorization.PendingCount, authorization.TargetCount, excused) {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
 	} else if freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); freshnessErr != nil {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
@@ -1460,7 +1546,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		run.AuthorizationErr = activationErr
 	} else if !activationExists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation is missing")
-	} else if !activation.OK ||
+	} else if !(activation.OK || (excused > 0 && activation.FailureCount == excused)) ||
 		activation.UpdatedAt != authorization.UpdatedAt ||
 		activation.ManifestSHA256 != manifestSHA256 {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian activation does not cover the current manifest bytes")
@@ -1480,6 +1566,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				activation,
 				enterpriseHookManifest,
 				manifestSHA256,
+				excused,
 			)
 			if err != nil {
 				run.AuthorizationErr = err
@@ -1602,6 +1689,9 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 			row.OK = false
 			row.Error = targetErr.Error()
 			run.Failures++
+			if excused > 0 && enterpriseHookRemovedAccountRow(row) {
+				run.Excused = append(run.Excused, row)
+			}
 		}
 		run.Rows = append(run.Rows, row)
 	}
@@ -1641,13 +1731,15 @@ func enterpriseHookAuthenticatedPendingTargets(
 	activation enterpriseHookGuardianActivation,
 	manifestPath,
 	manifestSHA256 string,
+	excused int,
 ) (map[string]struct{}, error) {
-	if issues := compareEnterpriseHookGuardianRecords(
+	if issues := compareEnterpriseHookGuardianRecordsExcusing(
 		state,
 		authorization,
 		activation,
 		manifestPath,
 		manifestSHA256,
+		excused,
 	); len(issues) != 0 {
 		return nil, fmt.Errorf(
 			"protected Guardian pending proof is invalid: %s",
@@ -1712,6 +1804,13 @@ func enterpriseHookVerifyDispositionIssues(
 	wantSuccesses := len(protected)
 	wantPending := run.Pending
 	wantFailures := run.Failures
+	authorizationTargets, activationTargets := authorization.ProtectedTargets, activation.ProtectedTargets
+	if len(run.Excused) != 0 {
+		// Both records carry forward the excused targets' prior rows; every
+		// other target must still match exactly.
+		authorizationTargets = enterpriseHookTargetsExceptFailed(authorizationTargets, run.Excused)
+		activationTargets = enterpriseHookTargetsExceptFailed(activationTargets, run.Excused)
+	}
 	var issues []string
 	if authorization.TargetCount != wantTargets ||
 		authorization.SuccessCount != wantSuccesses ||
@@ -1749,7 +1848,7 @@ func enterpriseHookVerifyDispositionIssues(
 		issues,
 		compareEnterpriseHookProtectedTargetSets(
 			protected,
-			authorization.ProtectedTargets,
+			authorizationTargets,
 			"authorization",
 		)...,
 	)
@@ -1757,7 +1856,7 @@ func enterpriseHookVerifyDispositionIssues(
 		issues,
 		compareEnterpriseHookProtectedTargetSets(
 			protected,
-			activation.ProtectedTargets,
+			activationTargets,
 			"activation",
 		)...,
 	)

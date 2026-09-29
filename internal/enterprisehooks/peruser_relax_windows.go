@@ -51,9 +51,9 @@ func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManaged
 	dirs := append([]string{
 		filepath.Join(target.dataDir, "connector_backups", target.conn.Name()),
 	}, footprint.CreatedDirs...)
-	// Hermes setup and teardown re-protect <data dir> itself (its lifecycle
-	// lock lives there), and hardening after any earlier connector left that
-	// directory without the owner's WRITE_DAC.
+	// Hermes keeps its lifecycle lock in <data dir> itself, and hardening
+	// after any earlier connector left that directory without the owner's
+	// WRITE_DAC.
 	if windowsStandaloneSetupProtectsDataDir(target.conn.Name()) {
 		dirs = append(dirs, target.dataDir)
 	}
@@ -230,9 +230,9 @@ func relaxWindowsStandalonePerUserDirectory(target windowsGenericManagedTarget, 
 const windowsSetupRelaxedFileSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;OW)"
 
 // windowsStandaloneSetupProtectsDataDir reports whether the connector's own
-// setup and teardown call safefile.ProtectDirectory on <data dir> itself
-// (Hermes keeps .hermes-lifecycle.lock there), so the relax step must return
-// that directory to the owner-private shape too.
+// setup and teardown keep lifecycle state in <data dir> itself (Hermes keeps
+// .hermes-lifecycle.lock there), so the relax step returns that directory to
+// the owner-private shape too.
 func windowsStandaloneSetupProtectsDataDir(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), "hermes")
 }

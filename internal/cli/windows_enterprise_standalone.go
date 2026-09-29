@@ -234,8 +234,43 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	if action != "status" && action != "verify" {
+		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
+	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseFailureWithDeploymentState gives a lifecycle action that
+// failed before it read the host (the installer's failure document carries
+// no installed state) the deployment state a status probe reads, and keeps
+// the action's own errors. Without it a refused repair reported installed
+// false, no services and readiness all false for a deployment that was
+// installed and running, and an MDM reading that result would treat the
+// host as uninstalled. A probe that cannot read the host leaves the report
+// as it was.
+func windowsEnterpriseFailureWithDeploymentState(
+	ctx context.Context,
+	cmd *cobra.Command,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+	failure *windowsEnterpriseInstallerReport,
+) *windowsEnterpriseInstallerReport {
+	if failure == nil || !failure.probeFailed {
+		return failure
+	}
+	status, _, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
+		windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
+	if err != nil || status.probeFailed {
+		return failure
+	}
+	merged := *status
+	merged.OK = false
+	merged.Action = failure.Action
+	merged.Error, merged.Errors = failure.Error, failure.Errors
+	merged.UserRegistrationsPending, merged.UserRegistrationsFailed = failure.UserRegistrationsPending, failure.UserRegistrationsFailed
+	merged.RecoveryGatewayRuns, merged.RecoveryGatewayRefusal = failure.RecoveryGatewayRuns, failure.RecoveryGatewayRefusal
+	return &merged
 }
 
 // windowsEnterpriseRecoveredFailedInstall reports whether the lifecycle
@@ -552,28 +587,30 @@ var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.Unprote
 // found installed for an eligible user but could not enroll (no verified
 // hook contract, below the platform minimum, an install the guardian cannot
 // manage, or an unreadable version) and marks the deployment
-// security-incomplete. Verify fails on them; the other actions warn, so
-// ensure never loops on a state only the user or administrator can change.
+// security-incomplete. Each is one account's agent, so every action, verify
+// included, reports it as a warning for that account: the rest of the host
+// stays compliant, and ensure never loops on a state only the user or
+// administrator can change. An unreadable record hides which agents they
+// are, so verify fails on it.
 func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
-	report := func(code, message string) {
-		if result.Action == "verify" {
-			result.AddError(code, message)
-		} else {
-			result.AddWarning(code, message)
-		}
-		result.SecurityComplete = false
-	}
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
 	if err != nil {
 		// A token that cannot read the protected record reports nothing
 		// about it, as for the manifest summary.
 		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
-			report(enterprisehooks.UnprotectedCodeAgentUnprotected, "the enumerator's unprotected-agents record is unreadable: "+err.Error())
+			message := "the enumerator's unprotected-agents record is unreadable: " + err.Error()
+			if result.Action == "verify" {
+				result.AddError(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
+			} else {
+				result.AddWarning(enterprisehooks.UnprotectedCodeAgentUnprotected, message)
+			}
+			result.SecurityComplete = false
 		}
 		return
 	}
 	for _, agent := range agents {
-		report(agent.Code, agent.Message())
+		result.AddWarning(agent.Code, agent.Message())
+		result.SecurityComplete = false
 	}
 }
 
@@ -1323,6 +1360,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 		}
 	}
+	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))

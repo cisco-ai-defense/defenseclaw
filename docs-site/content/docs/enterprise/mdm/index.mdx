@@ -420,8 +420,10 @@ Versions are dotted releases. A leading `v` and build metadata (`+...`) are
 ignored, and a prerelease sorts before its release (`1.4.0-rc1` is older than
 `1.4.0`).
 
-`verify`, and so the health checks above, fails when an installed agent runs
-without DefenseClaw hooks (`agent_unprotected`, `hook_contract_unverified`).
+On Linux and macOS, `verify`, and so the health checks above, fails when an
+installed agent runs without DefenseClaw hooks (`agent_unprotected`,
+`hook_contract_unverified`). On Windows it reports each as a warning for that
+account and passes, with `security_complete: false`.
 It does not require the Windows Claude Code attestation: a host without it
 passes `verify` and reports `security_complete: false`. To collect
 `security_complete` across a fleet, read it from the last lifecycle result

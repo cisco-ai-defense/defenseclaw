@@ -1263,7 +1263,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
 			return err
 		}
-		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
+		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
@@ -1274,6 +1274,22 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return c.setupOpenHandsWithTokenRollback(ctx, opts)
 	}
 	return c.setup(ctx, opts, "")
+}
+
+// prepareHermesLifecycleDataDir makes <data dir>, which holds Hermes'
+// lifecycle lock, owner-private. On Windows the managed enterprise guardian
+// creates and protects that directory itself: re-protecting it under the
+// user's token needs the WRITE_DAC its DACL withholds (teardown failed with
+// "Access is denied" and left Hermes' hooks), and doing so rewrote the
+// inherited entries of every other subfolder to the user and SYSTEM only,
+// so an administrator could not remove them. There it is used as it is.
+func prepareHermesLifecycleDataDir(opts SetupOpts) error {
+	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
+		if info, err := os.Lstat(opts.DataDir); err == nil && info.IsDir() {
+			return nil
+		}
+	}
+	return ensureManagedBackupDirRestricted(opts.DataDir)
 }
 
 // setupOpenHandsWithTokenRollback binds the optional process-environment OTLP
@@ -1826,7 +1842,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
 			return err
 		}
-		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
+		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
