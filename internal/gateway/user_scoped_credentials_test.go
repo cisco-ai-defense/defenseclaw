@@ -5,10 +5,12 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/user"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -340,4 +342,60 @@ func rootOnlyAccountLookup(name string) (*user.User, error) {
 		return &user.User{Uid: "0", Gid: "0", Username: "root"}, nil
 	}
 	return nil, errors.New("unknown user")
+}
+
+// A credential rotation stages the next key beside the committed one. Until
+// it commits, the credentials of both keys authenticate and /health names
+// both keys, so users the guardian has already moved to the new key and
+// users it has not reached yet keep working; after the commit renames the
+// staged key over the committed one, the old key's credentials are refused.
+// A staged key that fails its trust checks never authenticates.
+func TestUserScopedCredentialsFollowAKeyRotation(t *testing.T) {
+	ledger := &userScopedTestLedger{}
+	ledger.set(managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: "codex", OK: true})
+	api, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{"1001": "alice"})
+	const stagedKey = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	committed, pending, pendingErr := userScopedTestKey, "", error(nil)
+	api.userScopedCredentials.loadKey = func(string) (string, error) { return committed, nil }
+	api.userScopedCredentials.loadPendingKey = func(string) (string, error) { return pending, pendingErr }
+	credential := func(key string) string {
+		token, err := connector.UserScopedHookAPIToken(key, "codex", "1001")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	previous, next := credential(userScopedTestKey), credential(stagedKey)
+	check := func(label string, wantPrevious, wantNext bool, wantKeys ...string) {
+		t.Helper()
+		for token, want := range map[string]bool{previous: wantPrevious, next: wantNext} {
+			if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", token, nil); (code == http.StatusOK) != want {
+				t.Fatalf("%s: status %d, want accepted=%v", label, code, want)
+			}
+		}
+		response := httptest.NewRecorder()
+		api.handleHealth(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+		var health struct {
+			UserScoped struct {
+				KeyIDs []string `json:"key_ids"`
+			} `json:"user_scoped_credentials"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &health); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{}
+		for _, key := range wantKeys {
+			want = append(want, connector.UserScopedTokenKeyFingerprint(key))
+		}
+		if !slices.Equal(health.UserScoped.KeyIDs, want) {
+			t.Fatalf("%s: /health key_ids = %v, want %v", label, health.UserScoped.KeyIDs, want)
+		}
+	}
+	check("before the rotation", true, false, userScopedTestKey)
+	pending = stagedKey
+	check("staged", true, true, userScopedTestKey, stagedKey)
+	pendingErr = errors.New("untrusted owner")
+	check("untrusted staged key", true, false, userScopedTestKey)
+	committed, pending, pendingErr = stagedKey, "", nil
+	check("committed", false, true, stagedKey)
 }

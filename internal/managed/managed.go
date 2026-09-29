@@ -26,6 +26,15 @@ const (
 	// the DefenseClaw per-user registrations the hook guardian still has to
 	// remove from the homes of users it no longer enrolls.
 	HookGuardianUserCleanupFile = "user-cleanup.json"
+	// HookGuardianCredentialAttestationFile, next to the ledger, is the
+	// standalone Unix guardian's root-only record of what its last reconcile
+	// did to each target and which per-user credential key it rendered from
+	// (enterprisehooks.CredentialAttestation).
+	HookGuardianCredentialAttestationFile = "credential-attestation.json"
+	// HookGuardianReconcileLockFile, next to the ledger, serializes the
+	// standalone Unix guardian's reconciles with each other and with a
+	// credential rotation staging or committing a key.
+	HookGuardianReconcileLockFile = "reconcile.lock"
 	// WindowsServiceAccountEnv identifies the exact virtual service account
 	// permitted to write the managed runtime tree. It is installed in the
 	// administrator-owned per-service registry Environment value; it never

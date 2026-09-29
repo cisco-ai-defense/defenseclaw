@@ -112,6 +112,23 @@ func TestEnterpriseHookUserScopedTokensDeriveFromTheProtectedKey(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("key custody: %v %v", info, err)
 	}
+	// While a credential rotation has staged the next key, rendering and
+	// verification both derive from it and leave the committed key alone.
+	staged := strings.Repeat("ab", 32)
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".user-scoped-token.key.next"), []byte(staged+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wantStaged, _ := connector.UserScopedHookAPIToken(staged, "codex", "1001")
+	for name, derive := range map[string]func(string, string, string) (string, string, error){
+		"mint": enterpriseHookUserScopedTokens, "load": loadEnterpriseHookUserScopedTokens,
+	} {
+		if got, _, err := derive(dataDir, "codex", "1001"); err != nil || got != wantStaged {
+			t.Fatalf("%s with a staged key: derived from it=%v err=%v", name, got == wantStaged, err)
+		}
+	}
+	if committed, err := connector.LoadUserScopedTokenKey(dataDir); err != nil || committed != key {
+		t.Fatalf("rendering from the staged key changed the committed key: %v", err)
+	}
 	if _, _, err := enterpriseHookUserScopedTokens("", "codex", "1001"); err == nil || !strings.Contains(err.Error(), "data_dir") {
 		t.Fatalf("empty data dir: %v", err)
 	}

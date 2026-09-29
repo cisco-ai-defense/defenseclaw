@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -31,6 +33,10 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 		enterprisehooks.ManifestTarget{User: "alice", Connector: "codex"},
 		enterprisehooks.ManifestTarget{User: "alice", Connector: "openhands"},
 	)
+	keyID := strings.Repeat("c", 64)
+	origKeyID := enterpriseHookCredentialKeyID
+	t.Cleanup(func() { enterpriseHookCredentialKeyID = origKeyID })
+	enterpriseHookCredentialKeyID = func(string) (string, error) { return keyID, nil }
 	run, err := runEnterpriseHookReconcileOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +44,31 @@ func TestStandaloneReconcileRendersPerUserCredentialsOverTheHookSocket(t *testin
 	requireLedgerOrStateTrust(t, run.StateErr)
 	if run.Failures != 0 {
 		t.Fatalf("rows = %+v", run.Rows)
+	}
+	// Each run publishes what it did to every target and which key it
+	// rendered from. A first install is not a verification; the next run
+	// verifies the installed hooks without repairing them.
+	var previousID string
+	for pass, wantVerified := range []bool{false, true} {
+		if pass > 0 {
+			if run, err = runEnterpriseHookReconcileOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := os.ReadFile(filepath.Join(f.authDir, managed.HookGuardianCredentialAttestationFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		attestation, err := enterprisehooks.ParseCredentialAttestation(data)
+		if err != nil || attestation.KeyID != keyID || attestation.ID == previousID || len(attestation.Targets) != 2 {
+			t.Fatalf("pass %d: attestation = %+v %v", pass, attestation, err)
+		}
+		previousID = attestation.ID
+		for _, target := range attestation.Targets {
+			if target.State != enterprisehooks.CredentialTargetCurrent || !target.Credentials || target.UID != uid || target.Verified != wantVerified {
+				t.Fatalf("pass %d: target = %+v", pass, target)
+			}
+		}
 	}
 	identity := strconv.Itoa(uid)
 	targets := f.workerTargets()

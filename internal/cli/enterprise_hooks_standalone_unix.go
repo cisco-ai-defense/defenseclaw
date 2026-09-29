@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -45,7 +46,7 @@ import (
 // entry point is gated on enterpriseHooksStandaloneUnixActive.
 
 const (
-	enterpriseHookReconcileLockFile    = "reconcile.lock"
+	enterpriseHookReconcileLockFile    = managed.HookGuardianReconcileLockFile
 	enterpriseHookUnixBindingsFile     = "unix_target_bindings.json"
 	enterpriseHookUnixBindingsMaxBytes = 4 << 20
 	enterpriseHookUnixBindingsVersion  = 1
@@ -497,6 +498,9 @@ type enterpriseHookStandaloneSlot struct {
 	account enterpriseHookWorkerAccount
 	inode   uint64
 	binding *enterpriseHookUnixBinding
+	// verifiable: the worker verifies the target before repairing it (a
+	// target that was not protected before is installed without a verify).
+	verifiable bool
 }
 
 // runEnterpriseHookReconcileOnceStandaloneUnix is the standalone Unix
@@ -718,7 +722,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		}
 		index := len(rows)
 		rows = append(rows, row)
-		slot := enterpriseHookStandaloneSlot{key: key, account: account, inode: check.Inode}
+		slot := enterpriseHookStandaloneSlot{key: key, account: account, inode: check.Inode, verifiable: previousProtection.PreviouslyProtected}
 		if hasBinding && bindingMatches {
 			slot.binding = &binding
 		}
@@ -739,6 +743,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
 	repairs := 0
+	verified := map[int]bool{}
 	for index, slot := range slots {
 		row := rows[index]
 		outcome, ok := outcomes[index]
@@ -756,6 +761,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			if outcome.repaired {
 				repairs++
 			}
+			verified[index] = slot.verifiable && !outcome.repaired
 		default:
 			row.Error = outcome.err
 		}
@@ -790,6 +796,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	if stateErr == nil && cleanupErr != nil {
 		stateErr = fmt.Errorf("persist the per-user cleanup ledger: %w", cleanupErr)
 	}
+	if err := writeEnterpriseHookCredentialAttestation(manifestSHA256, rows, slots, verified); err != nil && stateErr == nil {
+		stateErr = fmt.Errorf("publish the guardian credential attestation: %w", err)
+	}
 	run.Rows = rows
 	run.Failures = failures
 	run.Pending = pending
@@ -800,6 +809,72 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
 	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), enterpriseHookPerUserEnrolled(manifest, machinePolicy))
 	return run, nil
+}
+
+// enterpriseHookCredentialKeyID names the per-user credential key a
+// reconcile rendered from; a seam for tests, whose minter reads no key.
+var enterpriseHookCredentialKeyID = currentEnterpriseHookUserTokenKeyID
+
+// writeEnterpriseHookCredentialAttestation publishes what this reconcile did
+// to each enabled target (enterprisehooks.CredentialAttestation), root-only
+// next to the ledger. It runs under the reconcile lock, which a credential
+// rotation also takes to stage or commit a key, so the key cannot change
+// between rendering the targets and naming it here.
+func writeEnterpriseHookCredentialAttestation(
+	manifestSHA256 string,
+	rows []enterpriseHookReconcileRow,
+	slots map[int]enterpriseHookStandaloneSlot,
+	verified map[int]bool,
+) error {
+	keyID, err := enterpriseHookCredentialKeyID(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return err
+	}
+	attestation := enterprisehooks.CredentialAttestation{
+		Version:        enterprisehooks.CredentialAttestationVersion,
+		ID:             hex.EncodeToString(id),
+		UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		ManifestSHA256: manifestSHA256,
+		KeyID:          keyID,
+		Targets:        make([]enterprisehooks.CredentialAttestationTarget, 0, len(rows)),
+	}
+	for index, row := range rows {
+		target := enterprisehooks.CredentialAttestationTarget{
+			Connector: row.Connector,
+			User:      row.User,
+			UserHome:  row.UserHome,
+			UID:       -1,
+			State:     enterprisehooks.CredentialTargetFailed,
+		}
+		if row.UID > 0 {
+			target.UID = row.UID
+		}
+		switch {
+		case row.Pending:
+			target.State = enterprisehooks.CredentialTargetPending
+		case row.OK:
+			target.State = enterprisehooks.CredentialTargetCurrent
+			if slot, dispatched := slots[index]; dispatched && keyID != "" {
+				target.UID = slot.account.UID
+				target.Credentials = true
+				target.Verified = verified[index]
+			}
+		}
+		attestation.Targets = append(attestation.Targets, target)
+	}
+	data, err := json.MarshalIndent(attestation, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(cfg.DataDir), managed.HookGuardianCredentialAttestationFile)
+	if err := writeEnterpriseHookProtectedFile(path, append(data, '\n')); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func enterpriseHookListenAddrs() (string, string) {
