@@ -1956,7 +1956,27 @@ These were measured on the pinned releases inside the community base image
   `/agent` in an interactive session (it can switch to Kiro's built-in
   agent), project MCP servers, and a nested `kiro-cli-chat` started from a
   tool call, which skips the launcher. A real model through a Kiro Pro `KIRO_API_KEY` or
-  a device-flow login is unverified.
+  a device-flow login is unverified. At its first start Kiro downloads its
+  semantic-search embedding model, `all-MiniLM-L6-v2.zip` (79 MiB, from
+  `desktop-release.q.us-east-1.amazonaws.com/models`), into
+  `~/.semantic_search/models/all-MiniLM-L6-v2`; that was most of a new
+  sandbox's first-session download. `kiro-cli-chat` carries the SHA-256 of
+  both files and checks the ones it finds at every start, downloading again
+  when they differ. The image unpacks those files there at build, each
+  checked against the digests the pinned binary accepts (the URL names no
+  release, so the archive's own bytes are not pinned); a base image without
+  `/usr/bin/python3` leaves the download to Kiro. Kiro's TUI runtime (`bun`
+  and `tui.js`, about 92 MB) is embedded in `kiro-cli-chat` and extracted into
+  `~/.local/share/kiro-cli` at the first interactive start, without a
+  download. Kiro extracts it again when the `.sha256` file next to it does
+  not match the embedded digest, and offers no supported way to run it from
+  elsewhere (`KIRO_TEST_TUI_JS_PATH` is a test hook), so it stays in the
+  workload-writable HOME. An interactive session also "pins" `kiro-cli-chat`
+  into `~/.local/share/kiro-cli/run` (a hard link, or a copy where the link
+  fails; with `fs.protected_hardlinks`, the usual default, the sandbox user
+  cannot hard-link a root-owned file it cannot write) and runs that path; the
+  launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so Kiro runs the root-owned binary.
 - **Devin CLI 3000.4.25.** Devin's versioned release manifest publishes
   SHA-256 digests. Hooks come from `~/.config/devin/config.json` (`hooks`) or
   a project `.devin/hooks.v1.json`; there is no system hook tier, so the tier
