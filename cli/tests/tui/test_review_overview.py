@@ -85,6 +85,16 @@ async def test_service_details_read_as_words_at_80_columns(tmp_path, monkeypatch
     async with app.run_test(size=(80, 120)) as pilot:
         await settle_panel(app, pilot)  # the Overview body renders after the first frame
         text = screen_text(app)
-    # The Telemetry detail used to fold four letters a line ("cano", "nica");
-    # now each word stays whole, wherever the lines wrap.
-    assert all(word in text for word in ("canonical", "destination", "loading"))
+    # Read the Services card's own column (the text between its borders),
+    # so the check holds wherever the detail wraps.
+    lines = text.splitlines()
+    top = next(index for index, line in enumerate(lines) if "SERVICES" in line)
+    column: list[str] = []
+    for line in lines[top + 1 :]:
+        cells = line.split("│")
+        if len(cells) < 3 or "╰" in cells[0]:
+            break
+        column.append(cells[1])
+    services = " ".join(" ".join(column).split())
+    # The Telemetry detail used to fold four letters a line ("cano", "nica").
+    assert "canonical destination plan loading" in services, services
