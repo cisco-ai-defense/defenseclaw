@@ -139,7 +139,7 @@ func TestResourcesOnVM(t *testing.T) {
 
 	e := vmWith(t, config.OpenShellResourcesConfig{}, true)
 	sb := e.create(sandboxapi.CreateRequest{Name: "vmres", Harness: "opencode", Copy: true, CPU: "4", Memory: "8Gi"})
-	if findWarning(sb.Warnings, "cpu/memory limits have no effect on the OpenShell vm driver: every sandbox gets [openshell.drivers.vm] vcpus and mem_mib") == "" {
+	if findWarning(sb.Warnings, "cpu/memory limits have no effect on the OpenShell vm driver: every MicroVM gets [openshell.drivers.vm] vcpus and mem_mib") == "" {
 		t.Fatalf("warnings = %q", sb.Warnings)
 	}
 	got, _ := e.client.GetSandbox(t.Context(), "vmres")

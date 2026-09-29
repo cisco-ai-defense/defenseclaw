@@ -667,14 +667,16 @@ func sharedResourcesViolation(d openshell.Driver, shared *packs.Resources, max c
 
 // limitsNote says that the cpu and memory limits asked for (a flag, or
 // openshell.resources) do nothing on a driver that sets no per-sandbox
-// limits; "" otherwise.
+// limits (the vm driver); "" otherwise. The CLI prints the same text
+// before the create (sandboxcli's limitsIgnoredText) and does not repeat
+// this one.
 func limitsNote(d openshell.Driver, eff *packs.Effective) string {
 	if d.SandboxLimits {
 		return ""
 	}
 	for _, key := range []string{"resources.cpu", "resources.memory"} {
 		if s, _ := eff.Setting(key); s.Source == packs.SourceUser || s.Source == packs.SourceFlag {
-			return "cpu/memory limits have no effect on the OpenShell " + string(d.Name) + " driver: every sandbox gets " +
+			return "cpu/memory limits have no effect on the OpenShell " + string(d.Name) + " driver: every MicroVM gets " +
 				"[openshell.drivers." + string(d.Name) + "] vcpus and mem_mib"
 		}
 	}
