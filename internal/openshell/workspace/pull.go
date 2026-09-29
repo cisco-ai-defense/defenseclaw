@@ -889,6 +889,24 @@ func mergeTrees(ctx context.Context, g gitCmd, args []string, ours, theirs strin
 	return "", dedupe(conflicts), nil
 }
 
+// onMergeBase commits the trees of ours and theirs on a parentless commit
+// of base's tree, so a merge-tree of the two uses base as its merge base.
+func onMergeBase(ctx context.Context, g gitCmd, base, ours, theirs, name string) (string, string, error) {
+	b, err := g.line(ctx, "commit-tree", base+"^{tree}", "-m", "defenseclaw: merge base for sandbox "+name)
+	if err != nil {
+		return "", "", err
+	}
+	o, err := g.line(ctx, "commit-tree", ours+"^{tree}", "-p", b, "-m", "defenseclaw: folder for sandbox "+name)
+	if err != nil {
+		return "", "", err
+	}
+	t, err := g.line(ctx, "commit-tree", theirs+"^{tree}", "-p", b, "-m", "defenseclaw: result of sandbox "+name)
+	if err != nil {
+		return "", "", err
+	}
+	return o, t, nil
+}
+
 func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult, opts ApplyOptions) (*ApplyResult, error) {
 	v, err := hostGitVersion(ctx, rec.Project)
 	if err != nil {
@@ -939,11 +957,15 @@ func applyMerge(ctx context.Context, lay layout, rec *CopyRecord, pr *PullResult
 		return nil, err
 	}
 
-	mergeArgs := []string{"--allow-unrelated-histories"}
-	if v.atLeast(2, 40) {
-		mergeArgs = []string{"--merge-base=" + baseline}
+	// Both sides go on one parentless commit of the base, which makes it
+	// the merge base on every git: 2.38 and 2.39 have no --merge-base and
+	// take the base from ancestry, which would be the baseline and bring
+	// back what the operator took back of an earlier apply, unreviewed.
+	ours, theirs, err := onMergeBase(ctx, g, baseline, cur, result, rec.Name)
+	if err != nil {
+		return nil, err
 	}
-	merged, conflicts, err := mergeTrees(ctx, g, mergeArgs, cur, result)
+	merged, conflicts, err := mergeTrees(ctx, g, nil, ours, theirs)
 	if err != nil {
 		return nil, fmt.Errorf("workspace: merge the sandbox result: %w", err)
 	}

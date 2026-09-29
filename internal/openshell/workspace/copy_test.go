@@ -267,7 +267,36 @@ func TestCopyReapplyKeepsThePreApplyState(t *testing.T) {
 // offered the same three files, the Makefile warning and two questions,
 // then said "nothing to apply").
 func TestCopyPullStartsFromTheLastApply(t *testing.T) {
-	e := newEnv(t)
+	testPullStartsFromTheLastApply(t, newEnv(t))
+}
+
+// TestCopyPullStartsFromTheLastApplyOnGit239: git 2.38 and 2.39 have
+// merge-tree --write-tree but not --merge-base; the apply still merges
+// from where the pull's review started, so work the operator took back
+// after an earlier apply does not come back unreviewed.
+func TestCopyPullStartsFromTheLastApplyOnGit239(t *testing.T) {
+	e := newSerialEnv(t)
+	pinHostGit(t, gitVersion{2, 39, 5})
+	testPullStartsFromTheLastApply(t, e)
+}
+
+// pinHostGit makes the package see host git v for the rest of a serial
+// test.
+func pinHostGit(t *testing.T, v gitVersion) {
+	t.Helper()
+	hostGit.mu.Lock()
+	savedV, savedOK := hostGit.v, hostGit.ok
+	hostGit.v, hostGit.ok = v, true
+	hostGit.mu.Unlock()
+	t.Cleanup(func() {
+		hostGit.mu.Lock()
+		hostGit.v, hostGit.ok = savedV, savedOK
+		hostGit.mu.Unlock()
+	})
+}
+
+func testPullStartsFromTheLastApply(t *testing.T, e *env) {
+	t.Helper()
 	e.initRepo()
 	_, fs := launchCopy(t, e, "c1", nil)
 	fs.write(remoteRepo+"/Makefile", "all:\n\techo hi\n")
