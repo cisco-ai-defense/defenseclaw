@@ -160,6 +160,9 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	} else {
 		discardManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName)
 	}
+	if err := writeDisabledHookTombstone(opts, kiroHookScriptName, c.Name()); err != nil {
+		errs = append(errs, fmt.Errorf("kiro disabled hook tombstone: %w", err))
+	}
 	return errors.Join(errs...)
 }
 
