@@ -459,7 +459,7 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         flags=(_OUTPUT,),
     ),
     _Cmd(("pack", "validate"), "Validate a pack file strictly", args=(_Arg("path"),)),
-    _Cmd(("image",), "Build, list and prune the harness images"),
+    _Cmd(("image",), "Build, list, prune and remove the harness images"),
     _Cmd(
         ("image", "build"),
         "Build and hook-verify harness images (default: the configured harnesses)",
@@ -474,6 +474,23 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ("image", "prune"),
         "Remove superseded harness images",
         flags=(_Flag("dry-run", "bool", "only show what would be removed"),),
+    ),
+    _Cmd(
+        ("image", "rm"),
+        "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+        long=(
+            "Removes the images DefenseClaw built for the named harnesses under this data directory: the "
+            "harness images and, on the MicroVM driver, the run images and aliases made from them, and "
+            "forgets their records. On a Mac it also removes the MicroVM disks OpenShell prepared from them "
+            "(about 5 GB each), once Docker no longer has their images; that needs the DefenseClaw daemon's "
+            "list of sandboxes. It refuses, removing nothing, while a sandbox is recorded with one of the "
+            "images: delete that sandbox first. The next run of the harness builds its image again."
+        ),
+        args=(_Arg("harnesses", many=True),),
+        flags=(
+            _Flag("yes", "bool", "do not ask", short="y"),
+            _Flag("dry-run", "bool", "only show what would be removed"),
+        ),
     ),
     _Cmd(
         ("enable",),

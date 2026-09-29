@@ -407,6 +407,16 @@ deleted.
   forgets its record, and the doctor's image check does not count it. That
   check also lists every harness image built for you, not only the
   configured harnesses'.
+- New `sandbox image rm <harness>...` (#960) removes every image recorded
+  for the named harnesses, current ones included: the harness image and, on
+  a Mac, its run images and aliases and the MicroVM disks (about 5 GB each)
+  OpenShell prepared from them, by prune's rules for disks. It forgets their
+  records, also of images already removed with `docker rmi`, shows what it
+  removes and asks first (`--yes`, `--dry-run`). It refuses, removing
+  nothing, while a sandbox uses one of the images, and names the sandbox to
+  delete first; it also refuses while the daemon does not answer and such
+  MicroVM disks exist, so no disk is left that nothing would remove later.
+  The TUI command palette offers it.
 - Fixes from the macOS connector certification (every driver unless noted):
   a copy names the secret files it holds back once; a Kiro tool block names
   DefenseClaw once (host hooks too); the egress counts are destinations

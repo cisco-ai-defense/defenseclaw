@@ -749,7 +749,7 @@ func newSandboxPackCmd() *cobra.Command {
 func newSandboxImageCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "image",
-		Short: "Build, list and prune the harness images",
+		Short: "Build, list, prune and remove the harness images",
 	}
 	var bo sandboxcli.ImageBuildOptions
 	build := &cobra.Command{
@@ -785,7 +785,27 @@ func newSandboxImageCmd() *cobra.Command {
 		}),
 	}
 	prune.Flags().BoolVar(&dryRun, "dry-run", false, "only show what would be removed")
-	cmd.AddCommand(build, list, prune)
+	var ro sandboxcli.ImageRemoveOptions
+	rm := &cobra.Command{
+		Use:   "rm <harness>...",
+		Short: "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+		Long: `Removes the images DefenseClaw built for the named harnesses under this data
+directory: the harness images and, on the MicroVM driver, the run images and
+aliases made from them, and forgets their records. On a Mac it also removes the
+MicroVM disks OpenShell prepared from them (about 5 GB each), once Docker no
+longer has their images; that needs the DefenseClaw daemon's list of sandboxes.
+It refuses, removing nothing, while a sandbox is recorded with one of the
+images: delete that sandbox first. The next run of the harness builds its image
+again.`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
+			ro.Harnesses = args
+			return app.ImageRemove(ctx, ro)
+		}),
+	}
+	rm.Flags().BoolVarP(&ro.Yes, "yes", "y", false, "do not ask")
+	rm.Flags().BoolVar(&ro.DryRun, "dry-run", false, "only show what would be removed")
+	cmd.AddCommand(build, list, prune, rm)
 	return cmd
 }
 

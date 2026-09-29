@@ -613,16 +613,21 @@ func (f *fakeImages) Prune(_ context.Context, opts image.PruneOptions) (image.Pr
 	return image.PruneReport{Removed: []string{"defenseclaw/sandbox:old"}}, nil
 }
 
-func (f *fakeImages) Remove(_ context.Context, dryRun bool) ([]string, error) {
+func (f *fakeImages) Remove(_ context.Context, harnesses []string, dryRun bool) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var tags []string
+	var kept []image.Record
 	for _, r := range f.recs {
-		tags = append(tags, r.Tag)
+		if harnessOf(harnesses, r.Connector) {
+			tags = append(tags, r.Tag)
+		} else {
+			kept = append(kept, r)
+		}
 	}
 	if !dryRun {
 		f.removed = append(f.removed, tags...)
-		f.recs = nil
+		f.recs = kept
 	}
 	return tags, nil
 }
