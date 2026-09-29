@@ -296,9 +296,10 @@ func TestCreateOnVMSharesCodexRunImagesAcrossRepositories(t *testing.T) {
 // on a MicroVM gateway, before any image is made; a plain URL is not.
 func TestCreateOnVMRefusesACredentialBakedIntoTheImage(t *testing.T) {
 	for name, env := range map[string]map[string]string{
-		"token":         {"ANTHROPIC_AUTH_TOKEN": "sk-ant-not-real"},
-		"headers":       {"ANTHROPIC_CUSTOM_HEADERS": "X-Api-Key: not-real"},
-		"url with auth": {"ANTHROPIC_BASE_URL": "https://user:pw@llm.example.com"},
+		"token":          {"ANTHROPIC_AUTH_TOKEN": "sk-ant-not-real"},
+		"headers":        {"ANTHROPIC_CUSTOM_HEADERS": "X-Api-Key: not-real"},
+		"url with auth":  {"ANTHROPIC_BASE_URL": "https://user:pw@llm.example.com"},
+		"url with a key": {"ANTHROPIC_BASE_URL": "https://gw.example.com/v1/?key=not-real"},
 	} {
 		e := newVMEnv(t, nil)
 		_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-secret", Copy: true, Env: env})
@@ -316,6 +317,73 @@ func TestCreateOnVMRefusesACredentialBakedIntoTheImage(t *testing.T) {
 	// On docker the value stays in the owner-only run-config directory.
 	d := newEnv(t, nil)
 	d.create(sandboxapi.CreateRequest{Name: "dk-token", Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": "sk-ant-not-real"}})
+}
+
+// An imported MCP server whose command line or URL looks like it carries
+// a credential stays behind on a MicroVM gateway, where it would be baked
+// into the run image, which outlives the sandbox; the others come along.
+// On docker the files go with the sandbox, and every server comes along.
+func TestCreateOnVMLeavesMCPCredentialsBehind(t *testing.T) {
+	entries := []config.MCPServerEntry{
+		{Name: "github", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-github"}},
+		{Name: "keyed", Command: "npx", Args: []string{"mcp-server", "--api-key", "not-real"}},
+		{Name: "remote", Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse", "--header", "Authorization: Bearer not-real"}},
+		{Name: "query", URL: "https://mcp.example.com/sse?token=not-real", Transport: "sse"},
+		{Name: "linear", URL: "https://mcp.linear.app/mcp"},
+	}
+	e := newVMEnv(t, nil)
+	e.m.opts.MCP = &fakeMCP{entries: entries}
+	sb := e.create(sandboxapi.CreateRequest{Name: "vm-mcp", Copy: true})
+	if !slices.Equal(sb.MCP.Imported, []string{"github", "linear"}) {
+		t.Fatalf("imported = %v", sb.MCP.Imported)
+	}
+	var behind []string
+	for _, l := range sb.MCP.LeftBehind {
+		if strings.Contains(l.Reason, "look like they carry a credential") && strings.Contains(l.Reason, "--credential") {
+			behind = append(behind, l.Name)
+		}
+	}
+	if slices.Sort(behind); !slices.Equal(behind, []string{"keyed", "query", "remote"}) {
+		t.Fatalf("left behind = %+v", sb.MCP.LeftBehind)
+	}
+	for _, f := range e.images.runCalls()[0] {
+		if strings.Contains(string(f.Data), "not-real") {
+			t.Fatalf("%s carries a credential:\n%s", f.Path, f.Data)
+		}
+	}
+
+	d := newEnv(t, nil)
+	d.m.opts.MCP = &fakeMCP{entries: entries}
+	if sb := d.create(sandboxapi.CreateRequest{Name: "dk-mcp"}); len(sb.MCP.Imported) != len(entries) {
+		t.Fatalf("docker imported = %v, left behind %+v", sb.MCP.Imported, sb.MCP.LeftBehind)
+	}
+}
+
+// What looks like a credential in an MCP server's command line or URL.
+func TestMCPCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		s    connector.SandboxMCPServer
+		want bool
+	}{
+		{"a package", connector.SandboxMCPServer{Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-github"}}, false},
+		{"a flag with a path", connector.SandboxMCPServer{Command: "uvx", Args: []string{"mcp-server-git", "--repository", "/sandbox/work/app"}}, false},
+		{"a plain URL", connector.SandboxMCPServer{URL: "https://mcp.linear.app/mcp"}, false},
+		{"an empty query value", connector.SandboxMCPServer{URL: "https://mcp.example.com/mcp?debug"}, false},
+		{"--token VALUE", connector.SandboxMCPServer{Command: "srv", Args: []string{"--token", "abc"}}, true},
+		{"--auth-token=VALUE", connector.SandboxMCPServer{Command: "srv", Args: []string{"--auth-token=abc"}}, true},
+		{"a flag without a value", connector.SandboxMCPServer{Command: "srv", Args: []string{"--api-key", "--verbose"}}, false},
+		{"NAME=VALUE", connector.SandboxMCPServer{Command: "env", Args: []string{"GITHUB_TOKEN=abc", "srv"}}, true},
+		{"a key header", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "--header", "X-API-Key: abc"}}, true},
+		{"a bearer header", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "--header", "Authorization:Bearer abc"}}, true},
+		{"a GitHub token", connector.SandboxMCPServer{Command: "srv", Args: []string{"ghp_0123456789abcdefghij"}}, true},
+		{"a query value", connector.SandboxMCPServer{URL: "https://mcp.example.com/sse?key=abc"}, true},
+		{"a fragment", connector.SandboxMCPServer{URL: "https://mcp.example.com/sse#abc"}, true},
+	} {
+		if got := mcpCredential(tc.s); got != tc.want {
+			t.Errorf("%s: mcpCredential(%+v) = %t, want %t", tc.name, tc.s, got, tc.want)
+		}
+	}
 }
 
 // A start renders a MicroVM sandbox's run files again and compares them

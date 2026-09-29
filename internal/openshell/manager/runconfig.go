@@ -103,6 +103,11 @@ type runConfigInput struct {
 	provider    *connector.SandboxModelProvider
 	workdir     string
 	project     string
+	// baked says the files go into a run image (the driver's
+	// RunFilesInImage), which outlives the sandbox: an imported MCP server
+	// whose arguments or URL look like they carry a credential stays
+	// behind.
+	baked bool
 }
 
 // runConfigRecord is what a start needs to render a sandbox's run files
@@ -213,7 +218,9 @@ var runFileSecretEnv = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADER
 
 // bakedSecret names the --env variable (extra), if any, whose value the run
 // files carry and which is a credential: one of runFileSecretEnv, or a URL
-// with a user name or password in it. Baked into a run image the value
+// with a user name or password in it, or with a query or fragment value,
+// where gateways take keys and tokens (a base URL such as
+// https://gw.example/?key=...). Baked into a run image the value
 // would outlive the sandbox, in a Docker layer anyone who reaches the Docker
 // socket can read and in the disk the MicroVM driver prepares from the
 // image and never removes. Credential placeholders are never in the files.
@@ -229,7 +236,7 @@ func bakedSecret(files []connector.SandboxFile, extra map[string]string) string 
 			continue
 		}
 		secret := slices.Contains(runFileSecretEnv, k)
-		if u, err := url.Parse(v); err == nil && u.User != nil {
+		if u, err := url.Parse(v); err == nil && (u.User != nil || u.Host != "" && (u.Fragment != "" || queryValue(u))) {
 			secret = true
 		}
 		if secret && filesCarry(files, v) {
@@ -331,7 +338,7 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 		target := connector.SandboxRenderTarget{IngressPort: m.opts.IngressPort, AgentVersion: img.HarnessVersion, HookContractID: img.HookContract}
 		rc, err := m.planRunConfig(ctx, runConfigInput{
 			spec: spec, target: target, eff: eff, yolo: eff.Yolo, env: env, credentials: creds,
-			provider: provider, workdir: runWorkdir(d, ""), project: flags.Project,
+			provider: provider, workdir: runWorkdir(d, ""), project: flags.Project, baked: d.RunFilesInImage,
 		})
 		if err != nil || rc == nil {
 			return true
@@ -401,6 +408,9 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 		}
 		var dropped []string
 		servers, summary.LeftBehind, dropped = importMCPServers(in.spec.Name, entries, summary.LeftBehind, in.eff.MCP.HostPorts)
+		if in.baked {
+			servers, summary.LeftBehind = dropCredentialMCPServers(servers, summary.LeftBehind)
+		}
 		for _, s := range servers {
 			if port, ok := hostPortOfMCP(s.URL); ok {
 				notices = append(notices, fmt.Sprintf("MCP: %s reaches port %d on this machine as %s:%d; it connects once you approve the sandbox's ask for the port",
@@ -550,6 +560,109 @@ func dropShadowedMCPServers(servers []connector.SandboxMCPServer, project []stri
 		kept = append(kept, s)
 	}
 	return kept, skipped
+}
+
+// bakedMCPCredential is why an imported server whose command line or URL
+// looks like it carries a credential stays behind on a driver that bakes
+// the run files into an image.
+const bakedMCPCredential = "its arguments or URL look like they carry a credential, which a MicroVM sandbox's image would keep " +
+	"after the sandbox is gone; give it the secret with --credential NAME=host"
+
+// dropCredentialMCPServers leaves behind the imported servers whose
+// arguments or URL look like they carry a credential (mcpCredential). On a
+// driver that bakes the run files into a run image their command lines and
+// URLs would sit in a Docker layer and in the disk the MicroVM driver
+// prepares from it, which outlive the sandbox; on docker they stay in the
+// sandbox's owner-only run-config directory and go with it.
+func dropCredentialMCPServers(servers []connector.SandboxMCPServer, skipped []sandboxapi.MCPLeftBehind) ([]connector.SandboxMCPServer, []sandboxapi.MCPLeftBehind) {
+	kept := servers[:0:0]
+	for _, s := range servers {
+		if mcpCredential(s) {
+			skipped = append(skipped, sandboxapi.MCPLeftBehind{Name: displayMCPName(s.Name), Reason: bakedMCPCredential})
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept, skipped
+}
+
+// credentialWords are the words of a flag, variable or header name that
+// says its value is a credential (--api-key, --auth-token, GITHUB_TOKEN,
+// X-API-Key).
+var credentialWords = []string{"token", "secret", "password", "passwd", "apikey", "key", "auth", "authorization",
+	"credential", "credentials", "bearer", "cookie"}
+
+// credentialPrefixes start well-known credential formats (GitHub, OpenAI
+// and Anthropic, Slack, AWS access keys, Stripe), of at least
+// credentialMinLen characters.
+var credentialPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "sk-", "xoxb-", "xoxp-", "xoxa-", "AKIA", "sk_live_", "rk_live_"}
+
+const credentialMinLen = 20
+
+// mcpCredential reports an MCP server whose command line or URL looks like
+// it carries a credential: a URL with a query or fragment value (where
+// tokens and keys are passed), an argument that follows or holds the value
+// of a credential flag (--api-key VALUE, --token=VALUE), a NAME=VALUE
+// argument or a "Name: value" header with a credential name, a Bearer
+// value, or a value in a well-known credential format. It errs on the side
+// of leaving a server behind.
+func mcpCredential(s connector.SandboxMCPServer) bool {
+	if s.URL != "" {
+		if u, err := url.Parse(s.URL); err != nil || u.User != nil || u.Fragment != "" || queryValue(u) {
+			return true
+		}
+	}
+	for i, arg := range s.Args {
+		name, value, hasValue := strings.Cut(arg, "=")
+		header, headerValue, isHeader := strings.Cut(arg, ":")
+		switch {
+		case strings.Contains(strings.ToLower(arg), "bearer "):
+			return true
+		case hasValue && value != "" && credentialName(name):
+			// --token=VALUE, or NAME=VALUE for env(1) and the like.
+			return true
+		case isHeader && strings.TrimSpace(headerValue) != "" && credentialName(header):
+			// --header "X-API-Key: VALUE" (mcp-remote and the like).
+			return true
+		case strings.HasPrefix(name, "-") && !hasValue && credentialName(name) && i+1 < len(s.Args) && !strings.HasPrefix(s.Args[i+1], "-"):
+			// --api-key VALUE.
+			return true
+		}
+		for _, v := range []string{arg, value, strings.TrimSpace(headerValue)} {
+			for _, p := range credentialPrefixes {
+				if len(v) >= credentialMinLen && strings.HasPrefix(v, p) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// queryValue reports a URL whose query gives some parameter a value.
+func queryValue(u *url.URL) bool {
+	for _, values := range u.Query() {
+		for _, v := range values {
+			if v != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// credentialName reports a flag or variable name one of whose words is a
+// credentialWords entry (--api-key, --github-token, CLIENT_SECRET).
+func credentialName(name string) bool {
+	words := strings.FieldsFunc(strings.ToLower(strings.TrimLeft(name, "-")), func(r rune) bool {
+		return r == '-' || r == '_' || r == '.'
+	})
+	for _, w := range words {
+		if slices.Contains(credentialWords, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // localMCPUnreachable is why a server only this machine reaches stays
@@ -757,7 +870,7 @@ func (m *Manager) refreshRunConfig(ctx context.Context, rec record, eff *packs.E
 	}
 	rc, err := m.planRunConfig(ctx, runConfigInput{
 		spec: spec, target: target, eff: eff, yolo: yolo, env: env, credentials: rr.Credentials,
-		provider: rr.ModelProvider, workdir: runWorkdir(d, rec.Workdir), project: rec.Project,
+		provider: rr.ModelProvider, workdir: runWorkdir(d, rec.Workdir), project: rec.Project, baked: d.RunFilesInImage,
 	})
 	if err != nil || rc == nil {
 		return rec.MCP, rr, rec.Verify, err

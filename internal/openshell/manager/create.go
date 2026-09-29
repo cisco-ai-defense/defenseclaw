@@ -439,7 +439,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	credNames := credentialNames(llm, creds)
 	rc, err := m.planRunConfig(ctx, runConfigInput{
 		spec: spec, target: target, eff: eff, yolo: eff.Yolo, env: envOut, credentials: credNames,
-		provider: modelProvider, workdir: runWorkdir(gw.Driver, rec.Workdir), project: in.project,
+		provider: modelProvider, workdir: runWorkdir(gw.Driver, rec.Workdir), project: in.project, baked: gw.Driver.RunFilesInImage,
 	})
 	if err != nil {
 		return nil, err

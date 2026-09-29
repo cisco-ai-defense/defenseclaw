@@ -156,7 +156,13 @@ not the driver's name or `runtime.GOOS`.
   with before deleting it and running it again. A value
   of a secret-bearing variable that came from `--env` is refused on vm,
   since it would sit in an image layer and in OpenShell's prepared-rootfs
-  cache.
+  cache; so is a URL from `--env` with a user name, a password, or a query
+  or fragment value. For the same reason an imported MCP server whose
+  arguments or URL look like they carry a credential (a `--api-key VALUE`
+  or `--token=VALUE` argument, a `NAME=VALUE` or `X-API-Key: VALUE`
+  argument with a credential name, a Bearer value, a well-known token
+  format, a URL query or fragment value) is left behind on vm, with a
+  `--credential` hint.
 - **Image names.** The vm driver reads images from the local Docker image
   store and falls back to a registry pull of the same name when it does not
   find one. Its references use a registry host under the reserved `.invalid`
