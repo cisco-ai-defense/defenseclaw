@@ -74,6 +74,7 @@ const (
 	CheckIDLinger            = "linger"
 	CheckIDGatewayService    = "gateway-service"
 	CheckIDCLI               = "openshell-cli"
+	CheckIDSSHSharing        = "ssh-connection-sharing"
 	CheckIDRegistration      = "gateway-registration"
 	CheckIDMTLS              = "mtls-permissions"
 	CheckIDGatewayVersion    = "gateway-version"
@@ -304,6 +305,9 @@ type Doctor struct {
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
 	DockerGroup func() (member, inSession bool, err error)
+	// SSHShim makes the ssh the OpenShell CLI runs with (NewSSHShim over
+	// PATH by default); the check removes it afterwards.
+	SSHShim func() (*SSHShim, error)
 }
 
 func (d *Doctor) defaults() {
@@ -371,6 +375,9 @@ func (d *Doctor) defaults() {
 	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership
+	}
+	if d.SSHShim == nil {
+		d.SSHShim = func() (*SSHShim, error) { return NewSSHShim(os.Getenv("PATH")) }
 	}
 }
 
@@ -458,6 +465,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkLinger(ctx)
 	r.checkService(ctx)
 	r.checkCLI(ctx)
+	r.checkSSHSharing(ctx)
 	r.checkRegistration()
 	r.checkGateway(ctx)
 	r.macChecks(ctx)

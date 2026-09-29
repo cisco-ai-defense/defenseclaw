@@ -100,7 +100,7 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 		got = append(got, c.ID)
 	}
 	want := []string{"platform", "user", "landlock", "docker", "docker-host-network", "docker-file-sharing", "vm-driver", "vm-identity",
-		"vm-resources", "disk", "linger", "gateway-service", "openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version",
+		"vm-resources", "disk", "linger", "gateway-service", "openshell-cli", "ssh-connection-sharing", "gateway-registration", "mtls-permissions", "gateway-version",
 		"gateway-driver", "global-policy", "bind-mounts", "telemetry", "port-ingress", "port-egress"}
 	if !r.OK() || strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("checks = %v\nwant     %v\n%s", got, want, r)
