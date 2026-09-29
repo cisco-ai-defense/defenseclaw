@@ -131,6 +131,7 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -4298,15 +4299,18 @@ def _run_cursor_windows_runtime_process(
     from defenseclaw.tui.windows_process import WindowsJob
 
     creationflags |= getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
-    process = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        env=env,
-        creationflags=creationflags,
-    )
+    # Hold the custody-checked PowerShell image open without write or delete
+    # sharing until the process exists, so it is the file that was checked.
+    with pinned_executable(argv[0]) as pinned:
+        process = pinned.popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            creationflags=creationflags,
+        )
     job = None
     try:
         try:
@@ -8523,10 +8527,11 @@ def _plan_watchdog_runtime(cfg) -> RepairDecision:
 
     repair, detail = _watchdog_repair_posture(cfg)
     if repair:
-        if not shutil.which("defenseclaw-gateway"):
+        if not _watchdog_lifecycle_executable():
             return RepairDecision(
                 "manual",
-                f"{detail}; defenseclaw-gateway is not on PATH, so no supported repair is available",
+                f"{detail}; no verified defenseclaw-gateway executable is installed, so no supported "
+                "repair is available",
                 effects=_WATCHDOG_REPAIR_EFFECTS,
                 blockers=("verified watchdog lifecycle executable is unavailable",),
             )
@@ -10744,17 +10749,24 @@ def _watchdog_repair_posture(
     return (False, f"watchdog lifecycle cannot be inspected safely: {detail}")
 
 
+def _watchdog_lifecycle_executable() -> str | None:
+    """Resolve the custody-checked gateway controller, as other lifecycle repairs do."""
+    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
+
+    return _gateway_lifecycle_executable(native=True)
+
+
 def _preview_watchdog_runtime_fix(cfg) -> tuple[str, str]:
     repair, detail = _watchdog_repair_posture(cfg)
     if not repair:
         tag = "warn" if detail.startswith(("refusing", "watchdog lifecycle cannot")) else "skip"
         return (tag, f"{detail} (dry-run; no changes made)")
-    gw_binary = shutil.which("defenseclaw-gateway")
+    gw_binary = _watchdog_lifecycle_executable()
     if not gw_binary:
         return (
             "warn",
-            f"{detail}; defenseclaw-gateway is not on PATH, so no supported repair is available "
-            "(dry-run; no changes made)",
+            f"{detail}; no verified defenseclaw-gateway executable is installed, so no supported "
+            "repair is available (dry-run; no changes made)",
         )
     return (
         "skip",
@@ -10770,19 +10782,21 @@ def _fix_watchdog_runtime(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not repair:
         tag = "warn" if detail.startswith(("refusing", "watchdog lifecycle cannot")) else "skip"
         return (tag, detail)
-    gw_binary = shutil.which("defenseclaw-gateway")
+    gw_binary = _watchdog_lifecycle_executable()
     if not gw_binary:
-        return ("warn", f"{detail}; defenseclaw-gateway is not on PATH")
+        return ("warn", f"{detail}; no verified defenseclaw-gateway executable is installed")
     if not assume_yes and not click.confirm(
         "    Start the enabled stopped watchdog through the guarded gateway lifecycle?",
         default=True,
     ):
         return ("skip", "declined by user")
     try:
-        result = subprocess.run(
+        result = run_pinned_executable(
             [gw_binary, "watchdog", "start"],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
             timeout=30,
             check=False,
         )

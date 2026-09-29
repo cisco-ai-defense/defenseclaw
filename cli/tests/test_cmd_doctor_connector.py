@@ -951,7 +951,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired):
             _run_cursor_windows_runtime_process(
-                ["powershell.exe"],
+                [sys.executable],
                 env={},
                 timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
             )
@@ -999,7 +999,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         job.terminate_sync.side_effect = terminate_sync
 
         result = _run_cursor_windows_runtime_process(
-            ["powershell.exe"],
+            [sys.executable],
             env={},
             timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )

@@ -198,6 +198,14 @@ rest also reach per-user installs.
   writes the request, and otherwise reports `the connected gateway endpoint is
   not served by the verified gateway process`. The Codex telemetry runtime
   check, which sent the token without checking the listener, does the same.
+- **Doctor and setup run the gateway controller they checked.** Starting,
+  restarting and stopping the gateway ran `defenseclaw-gateway` by path after
+  checking who can write it, so the path could name another file by the time
+  it ran. Linux now runs the checked file itself, Windows keeps it locked
+  against replacement until the process exists, and macOS stops the launch if
+  the file or a directory above it changed. The Windows Cursor runtime probe
+  does the same for PowerShell, and the Windows watchdog repair uses the
+  verified gateway executable instead of the first one on `PATH`.
 
 ### Added
 

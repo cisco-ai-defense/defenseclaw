@@ -751,8 +751,10 @@ class WindowsWatchdogFixTests(unittest.TestCase):
         with (
             patch.object(cmd_doctor.sys, "platform", "win32"),
             patch.object(cmd_doctor, "GatewayEvidence", return_value=self.empty),
-            patch.object(cmd_doctor.shutil, "which", return_value=r"D:\bin\defenseclaw-gateway.exe"),
-            patch.object(cmd_doctor.subprocess, "run") as run_mock,
+            patch.object(
+                cmd_doctor, "_watchdog_lifecycle_executable", return_value=r"D:\bin\defenseclaw-gateway.exe"
+            ),
+            patch.object(cmd_doctor, "run_pinned_executable") as run_mock,
         ):
             outcome = cmd_doctor._preview_watchdog_runtime_fix(self.cfg)
         self.assertEqual(outcome[0], "skip")
@@ -767,8 +769,10 @@ class WindowsWatchdogFixTests(unittest.TestCase):
         with (
             patch.object(cmd_doctor.sys, "platform", "win32"),
             patch.object(cmd_doctor, "GatewayEvidence", return_value=self.empty),
-            patch.object(cmd_doctor.shutil, "which", return_value=r"D:\bin\defenseclaw-gateway.exe"),
-            patch.object(cmd_doctor.subprocess, "run", return_value=completed) as run_mock,
+            patch.object(
+                cmd_doctor, "_watchdog_lifecycle_executable", return_value=r"D:\bin\defenseclaw-gateway.exe"
+            ),
+            patch.object(cmd_doctor, "run_pinned_executable", return_value=completed) as run_mock,
         ):
             outcome = cmd_doctor._fix_watchdog_runtime(self.cfg, assume_yes=True)
         self.assertEqual(outcome[0], "pass")
@@ -776,6 +780,8 @@ class WindowsWatchdogFixTests(unittest.TestCase):
             [r"D:\bin\defenseclaw-gateway.exe", "watchdog", "start"],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
             timeout=30,
             check=False,
         )
