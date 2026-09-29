@@ -71,6 +71,11 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Disabling Kiro leaves an inert hook script.** Teardown replaces
+  `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
+  Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
+  the path stops posting to the gateway until it restarts; setup writes
+  the active script again.
 - **OpenHands tool calls are inspected.** OpenHands sends PascalCase
   `event_type` values (`PreToolUse`) that DefenseClaw did not route, so
   terminal calls ran uninspected even in action mode. OpenHands payloads now

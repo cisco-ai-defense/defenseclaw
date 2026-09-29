@@ -53,9 +53,15 @@ from any shell.
 | A check failed | `1` | `1603` |
 | Invalid arguments | `2` | `1639` |
 
-`verify` does not take the lifecycle lock. While another run's transaction is
-pending, it fails (`1` with `verify_failed`, or `1603` on Windows); run it
-again after that run finishes.
+On Linux and macOS, `verify` first waits up to 5 seconds for another
+lifecycle run to finish, and holds no lock while it checks. If that run is
+still going, `verify` skips its checks and exits `75` with `lifecycle_busy`.
+The Linux verify unit accepts that exit, so a daily run that met an
+administrator's change is not left failed. On Windows, `verify` does not
+wait: while another run's transaction is pending, it fails (`1603`); run it
+again after that run finishes. A transaction that an interrupted run left
+pending fails `verify` (`1` with `verify_failed`, or `1603`) until the next
+mutating run recovers it.
 
 `verify` also runs on a schedule, and its result goes to the logs listed in
 [Logs and events](#logs-and-events).
@@ -259,11 +265,11 @@ account is fixed, the next reconcile (within a minute) clears the warning.
 
 When the guardian is refused by a path in the user's own home (a link, a
 file where a folder belongs or a folder where a file belongs, or a folder
-the user made unreadable), `status` and `verify` report it for that account
-as the warning `guardian_target_user_path`, which names the path. It does
-not fail `verify`, `detect.sh --require-healthy` or `security_complete`,
-because only that account is affected and the user could have made the
-change themselves. Any other reason the account cannot be protected is
+the user made unreadable), `status`, `verify` and `reconcile` report it for
+that account as the warning `guardian_target_user_path`, which names the
+path. It does not fail `reconcile`, `verify`, `detect.sh --require-healthy`
+or `security_complete`, because only that account is affected and the user
+could have made the change themselves. Any other reason the account cannot be protected is
 reported as `guardian_target_failed`: it sets `security_complete: false`,
 `verify` fails, and `detect.sh --require-healthy` reports the device as not
 compliant.

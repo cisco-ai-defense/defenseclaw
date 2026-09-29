@@ -118,6 +118,12 @@ other key in `cli.json`). An agent the user picks explicitly
 (`--agent`, `/agent swap`) runs without DefenseClaw's hooks. A per-user
 `defenseclaw setup kiro` still adds the hooks to the user's own default agent.
 
+After Kiro is disabled on Linux or macOS, `~/.defenseclaw/hooks/kiro-hook.sh`
+remains as an inert stub that exits successfully. A running Kiro session may
+still call the path it cached until it restarts. The same stub is left by
+per-user `defenseclaw guardrail disable --connector kiro` and
+`defenseclaw setup remove kiro`.
+
 On macOS the guardian also finds `kiro-cli` inside `Kiro CLI.app`, in
 `~/Applications` or `/Applications`, before the app's shell setup links it
 into a bin directory.
