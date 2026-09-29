@@ -353,6 +353,11 @@ deleted.
   to click the tool's red line to see the reason again: OpenCode shows a
   refused call's reason only there, and its plugins cannot set the tool's
   output.
+- The OpenCode launcher's refusal of a plugin, custom tool or config file
+  inside the sandbox gives the commands that remove it from your machine
+  (`sandbox start`, `sandbox exec <name> -- rm <file>`, `sandbox connect`),
+  with the path quoted for the shell. Both drivers; the OpenCode image
+  rebuilds.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -241,8 +241,12 @@ replaces that list, so name every harness you want:
   other plugin and custom tool into the same process, where one could answer
   for the bridge. So the launcher refuses to start, naming the file, while
   any other plugin or custom tool would load, and refuses `--pure`, which
-  loads none. DefenseClaw also reports a sandbox whose hooks go silent while
-  the harness is active.
+  loads none. The refusal also gives the commands that remove the file from
+  your machine (`defenseclaw sandbox start <name> && defenseclaw sandbox exec
+  <name> -- rm <file>`, then `defenseclaw sandbox connect <name>`); the
+  refused start does not appear in `sandbox activity`, as the launcher has no
+  way to report there. DefenseClaw also reports a sandbox whose hooks go
+  silent while the harness is active.
 - **Blocked tool calls.** OpenCode's TUI shows a refused tool call as its
   command line only, in red, and shows the reason only when you click that
   line; a plugin cannot put it in the tool's output. So the plugin also

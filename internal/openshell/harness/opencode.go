@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
@@ -244,8 +245,20 @@ unset OPENCODE_PURE OPENCODE_TEST_MANAGED_CONFIG_DIR OPENCODE_TEST_HOME
 OPENCODE_DISABLE_AUTOUPDATE=1
 export OPENCODE_DISABLE_AUTOUPDATE
 
+# The sandbox's name, for the host commands that remove a refused file.
+case "${` + openshell.EnvSandboxName + `:-}" in
+  ''|*[!a-z0-9-]*) dc_sandbox='<sandbox>' ;;
+  *) dc_sandbox="$` + openshell.EnvSandboxName + `" ;;
+esac
 refuse() {
-  echo "defenseclaw: refusing to start OpenCode: $1 $2. OpenCode loads plugins, custom tools and provider SDKs into the process that runs the DefenseClaw policy plugin, where they could switch it off. Remove it and start OpenCode again." >&2
+  local fix="Remove it and start OpenCode again." file
+  if [ -f "$1" ] || [ -L "$1" ]; then
+    file="$1"
+    case "$file" in /*) ;; *) file="$PWD/$file" ;; esac
+    file="$(printf '%q' "$file")"
+    fix="Remove it and start OpenCode again. From your machine: defenseclaw sandbox start $dc_sandbox && defenseclaw sandbox exec $dc_sandbox -- rm $file, then defenseclaw sandbox connect $dc_sandbox."
+  fi
+  echo "defenseclaw: refusing to start OpenCode: $1 $2. OpenCode loads plugins, custom tools and provider SDKs into the process that runs the DefenseClaw policy plugin, where they could switch it off. $fix" >&2
   exit 2
 }
 bundled='` + jsonStringArray(openCodeBundledProviderSDKs) + `'

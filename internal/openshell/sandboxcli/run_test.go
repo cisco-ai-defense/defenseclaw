@@ -1199,3 +1199,14 @@ func TestBannerNamesOpenCodesInterruptKey(t *testing.T) {
 		})
 	}
 }
+
+// Cert opencode:OC-10: the OpenCode launcher's refusal of a file in the
+// sandbox names this CLI's own commands for removing it from the host.
+func TestOpenCodeLauncherRefusalNamesTheSandboxCommands(t *testing.T) {
+	script := string(harness.OpenCode.Launcher().Data)
+	for _, verb := range []string{"start", "exec", "connect"} {
+		if !strings.Contains(script, CommandName+" "+verb+" $dc_sandbox") {
+			t.Errorf("the OpenCode launcher's refusal does not name `%s %s`", CommandName, verb)
+		}
+	}
+}
