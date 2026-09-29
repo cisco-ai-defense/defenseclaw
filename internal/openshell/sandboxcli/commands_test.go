@@ -874,6 +874,34 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 	}
 }
 
+// A pull with no mode that finds nothing to bring back says so, as --apply
+// does, instead of how to bring it back (retest RT-B-1: "bring it back with
+// --apply, --branch or --patch-out FILE" after "0 files changed … since the
+// last apply"). So does `review` of a copy-mode sandbox.
+func TestPullWithNothingToBringBackSaysSo(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		since   bool
+		preview bool
+		want    string
+	}{
+		{"since the last apply", true, false, "nothing new since the last apply to "},
+		{"nothing changed", false, false, "nothing to bring back"},
+		{"review since the last apply", true, true, "nothing new since the last apply to "},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "", copySandbox("copybox"))
+			ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+			if c.since {
+				ta.copy.pull.Since = strings.Repeat("d", 40)
+			}
+			ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", preview: c.preview}))
+			has(t, ta.output(), "copybox: 0 files changed", c.want)
+			lacks(t, ta.output(), "bring it back with", "nothing was applied")
+		})
+	}
+}
+
 // `policy allow|block` edits config.yaml. A refused entry writes nothing: a
 // catch-all, any edit of a managed install, and a host the organization's
 // policy keeps closed, whatever the entry says (manual test M10: "✓ added"

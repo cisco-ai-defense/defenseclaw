@@ -597,6 +597,21 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	for _, b := range res.Blocking {
 		a.warn(b)
 	}
+	nothing := func() error {
+		if stdout == nil {
+			return nil
+		}
+		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
+	}
+	// With a mode or without: there is nothing to bring back either way.
+	if res.Empty() {
+		if res.Since != "" {
+			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
+		} else {
+			a.ok("nothing to bring back")
+		}
+		return nothing()
+	}
 	if modes == 0 {
 		switch {
 		case o.preview && res.Kind == workspace.CopyPlain:
@@ -609,20 +624,6 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			a.note("bring it back with --apply, --branch or --patch-out FILE")
 		}
 		return nil
-	}
-	nothing := func() error {
-		if stdout == nil {
-			return nil
-		}
-		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
-	}
-	if res.Empty() {
-		if res.Since != "" {
-			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
-		} else {
-			a.ok("nothing to bring back")
-		}
-		return nothing()
 	}
 	if res.Review.Sensitive() && !o.AcceptSensitive {
 		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
