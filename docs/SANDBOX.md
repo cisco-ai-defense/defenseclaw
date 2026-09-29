@@ -1857,7 +1857,12 @@ These were measured on the pinned releases inside the community base image
   GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
   GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
   the per-plan Copilot API hosts) come from the CLI, not from a live run: no
-  Copilot-entitled account was available.
+  Copilot-entitled account was available. With the proxy settings, Copilot's
+  Node printed its `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
+  above the TUI at every start, so the launcher passes
+  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
+  Copilot's tool commands inherit it (a Node older than 20.11 would refuse
+  the flag).
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is

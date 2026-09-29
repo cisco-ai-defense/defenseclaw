@@ -334,6 +334,10 @@ deleted.
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
   checks. On a Mac still on the Docker driver, a run that fails OpenShell's
   Landlock check names the switch.
+- Harness start-up fixes from the macOS certification, on both drivers: the
+  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
+  the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no
+  longer prints above the TUI at every start.
 
 ### Legacy OpenShell standalone sandbox removed
 
