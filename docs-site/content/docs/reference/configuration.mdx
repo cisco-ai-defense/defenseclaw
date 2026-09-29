@@ -531,6 +531,10 @@ openshell:
     max_upload_mb: 0           # copy-mode size limit; 0 follows the pack
     git_depth: 200             # history depth of the copy-mode clone
     on_exit: ask               # ask | keep | undo
+    undo_ignored:
+      enabled: false           # true: undo restores these directories (Linux mount mode)
+      max_mb: 500              # cap on one undo point's copies, in MiB
+      dirs: [node_modules, .venv, venv]
   egress:
     block: []                  # host patterns added to the pack's block list
     allow: []                  # host patterns added to the allow list
@@ -580,6 +584,9 @@ openshell:
 | `workdir.unmask` | `[]` | Project globs that stay visible even though a mask covers them, added to the pack's own unmask list. |
 | `workdir.max_upload_mb` | `0` | Copy-mode size limit in MiB, 0–1048576. `0` follows the pack. |
 | `workdir.git_depth` | `200` | History depth of the copy-mode clone, 0–1000000. `0` uses 200. |
+| `workdir.undo_ignored.enabled` | `false` | Whether a mounted project's undo point keeps a copy of the directories in `workdir.undo_ignored.dirs` that git ignores (in a folder without git, the dependency directories its snapshot skips), so `sandbox undo` restores them as the session found them. Copies are file clones where the filesystem supports them (btrfs, XFS) and byte copies otherwise (ext4). It applies from the next session's start, on Linux in mount mode; copy mode, every sandbox on a Mac, has no undo point. |
+| `workdir.undo_ignored.max_mb` | `500` | The cap on one undo point's copies in MiB, 0–1048576; `0` means 500. A directory whose copy would pass it keeps none, and undo reports it as before. |
+| `workdir.undo_ignored.dirs` | `[node_modules, .venv, venv]` | Directory names kept, matched at any depth: one path segment, not `.git`, up to 64 names. Empty means the default. |
 | `workdir.on_exit` | `ask` | What happens to a mounted project's changes when a session ends: `ask`, `keep`, or `undo`. Without a terminal, or with `--yes`, `ask` keeps them. |
 | `egress.block` | `[]` | Host patterns added to the pack's block list. An unblock can't lift an entry; remove it to reach the host. A "reject always" answer to an ask adds its hosts here. |
 | `egress.allow` | `[]` | Host patterns added to the allow list. An entry exempts the host from the blocklist feed, and one that names a private host (an exact name, an intranet wildcard such as `*.corp`, or an address) opens it. Under `strict`, a direct connection to an entry is approved without asking. Entries that cover every host or a whole top-level domain are ignored, and all entries are ignored when `admin.allow_unblock` is `false`. |

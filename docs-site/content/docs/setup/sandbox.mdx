@@ -791,6 +791,29 @@ names each directory it cannot restore with what to do about it: delete
 `node_modules/` and reinstall, or recreate `.venv/`. Undo deletes what the
 session wrote to Python bytecode caches, which Python rebuilds.
 
+To have undo restore dependency directories too, turn on
+`openshell.workdir.undo_ignored`:
+
+```yaml
+openshell:
+  workdir:
+    undo_ignored:
+      enabled: true              # off by default
+      max_mb: 500                # cap on one undo point's copies, in MiB
+      dirs: [node_modules, .venv, venv]   # directory names, at any depth
+```
+
+Each undo point then keeps a copy of those directories, taken when the
+session starts: file clones where the filesystem supports them (btrfs, XFS),
+byte copies otherwise (ext4), so on ext4 the copy takes as much disk space
+as the directories. A directory whose copy would pass `max_mb` keeps none,
+and undo reports it as before, naming the cap. Undo puts a kept directory
+back as the session found it: what the session installed or changed there
+is gone, and it is not saved anywhere. The undo that names what it cannot
+restore also names this setting. It applies to a mounted folder on Linux;
+a copy-mode sandbox, every sandbox on a Mac included, has no undo point and
+is unaffected.
+
 The agent runs as you, so it can take read permission away from a folder.
 Nothing can look inside such a folder, yet git still finds a repository in it
 by path, so the review flags it and undo refuses until you make it readable

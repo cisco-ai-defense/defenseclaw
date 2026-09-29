@@ -360,9 +360,10 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			}
 		}
 		if !in.req.NoSnapshot {
+			keep, keepBytes := m.keepIgnored()
 			snap, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: in.project, Name: name, DataDir: m.opts.DataDir, Skip: plan.MaskedRels(), Replace: true,
-				Protected: eff.PolicySources(),
+				Protected: eff.PolicySources(), KeepIgnored: keep, KeepIgnoredBytes: keepBytes,
 			})
 			if err != nil {
 				return nil, workspaceError(err)

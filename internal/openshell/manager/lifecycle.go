@@ -439,9 +439,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 				Message: "sandbox " + rec.Name + " kept its undo point: " + why + ", which undo still reverts (`defenseclaw sandbox start " +
 					rec.Name + " --new-snapshot` accepts the changes instead)"})
 		} else {
+			keep, keepBytes := m.keepIgnored()
 			if _, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: rec.Project, Name: rec.Name, DataDir: m.opts.DataDir, Replace: true,
 				Skip: maskedRels(binding, rec.Workdir), Protected: eff.PolicySources(),
+				KeepIgnored: keep, KeepIgnoredBytes: keepBytes,
 			}); err != nil {
 				return workspaceError(err)
 			}

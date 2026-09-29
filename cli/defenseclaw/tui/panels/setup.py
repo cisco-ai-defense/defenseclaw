@@ -7672,6 +7672,23 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         field("Max Upload MB", "openshell.workdir.max_upload_mb", "int", hint="Copy-mode upload cap; 0 inherits."),
         field("Git Depth", "openshell.workdir.git_depth", "int", hint="Copy-mode history depth."),
         field("On Exit", "openshell.workdir.on_exit", "choice", ("ask", "keep", "undo"), hint="End-of-session default."),
+        field(
+            "Undo Restores Ignored Dirs",
+            "openshell.workdir.undo_ignored.enabled",
+            "bool",
+            hint="Keep a copy of node_modules/.venv with each undo point so undo restores them (Linux mount mode).",
+        ),
+        field(
+            "Undo Ignored Max MB",
+            "openshell.workdir.undo_ignored.max_mb",
+            "int",
+            hint="Cap on one undo point's copies; a directory past it is only reported. 0 is 500.",
+        ),
+        field(
+            "Undo Ignored Dirs",
+            "openshell.workdir.undo_ignored.dirs",
+            hint="Directory names kept at any depth, comma-separated; empty is node_modules, .venv, venv.",
+        ),
         field("Egress Block", "openshell.egress.block", hint="Blocked hosts, comma-separated."),
         field("Egress Allow", "openshell.egress.allow", hint="Allowlist for balanced/strict, comma-separated."),
         field("Egress Unblocked", "openshell.egress.unblocked", hint="'Always' unblocks the daemon wrote, comma-separated."),

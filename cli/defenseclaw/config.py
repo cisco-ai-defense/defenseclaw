@@ -971,6 +971,24 @@ class OpenShellGatewayConfig:
     workspace: str = ""
 
 
+# openshell.workdir.undo_ignored defaults (mirror
+# DefaultOpenShellUndoIgnoredMaxMB and DefaultOpenShellUndoIgnoredDirs).
+OPENSHELL_UNDO_IGNORED_MAX_MB = 500
+OPENSHELL_UNDO_IGNORED_DIRS = ("node_modules", ".venv", "venv")
+
+
+@dataclass
+class OpenShellUndoIgnoredConfig:
+    """``openshell.workdir.undo_ignored``: keep, with a mounted project's undo
+    point, a copy of the dependency directories git ignores, so ``sandbox
+    undo`` restores them (Linux mount mode; copy mode is unaffected)."""
+
+    enabled: bool = False
+    # 0 means OPENSHELL_UNDO_IGNORED_MAX_MB; an empty list the default names.
+    max_mb: int = OPENSHELL_UNDO_IGNORED_MAX_MB
+    dirs: list[str] = field(default_factory=lambda: list(OPENSHELL_UNDO_IGNORED_DIRS))
+
+
 @dataclass
 class OpenShellWorkdirConfig:
     # Empty/zero values inherit the selected sandbox policy pack.
@@ -980,6 +998,7 @@ class OpenShellWorkdirConfig:
     max_upload_mb: int = 0
     git_depth: int = 200
     on_exit: str = "ask"
+    undo_ignored: OpenShellUndoIgnoredConfig = field(default_factory=OpenShellUndoIgnoredConfig)
 
 
 @dataclass
@@ -5069,6 +5088,17 @@ def _merge_openshell_resources(raw: Any) -> OpenShellResourcesConfig:
     )
 
 
+def _merge_openshell_undo_ignored(raw: Any) -> OpenShellUndoIgnoredConfig:
+    """``openshell.workdir.undo_ignored`` with the Go loader defaults for absent keys."""
+    raw = _openshell_mapping(raw)
+    dirs = raw.get("dirs")
+    return OpenShellUndoIgnoredConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        max_mb=_openshell_int(raw.get("max_mb"), OPENSHELL_UNDO_IGNORED_MAX_MB),
+        dirs=_openshell_str_list(dirs) if dirs is not None else list(OPENSHELL_UNDO_IGNORED_DIRS),
+    )
+
+
 def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShellConfig:
     """Build :class:`OpenShellConfig` from the raw ``openshell:`` mapping.
 
@@ -5111,6 +5141,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
             max_upload_mb=_openshell_int(workdir.get("max_upload_mb")),
             git_depth=_openshell_int(workdir.get("git_depth"), 200),
             on_exit=_openshell_str(workdir.get("on_exit")) or "ask",
+            undo_ignored=_merge_openshell_undo_ignored(workdir.get("undo_ignored")),
         ),
         egress=OpenShellEgressConfig(
             block=_openshell_str_list(egress.get("block")),

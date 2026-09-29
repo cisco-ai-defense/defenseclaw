@@ -23,7 +23,7 @@ cases:
         profile: strict
         llm: bedrock
         keep_headless: true
-        workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep}
+        workdir: {mode: copy, masks: ['.env*'], git_depth: 50, on_exit: keep, undo_ignored: {enabled: true, max_mb: 200, dirs: [node_modules, .venv, vendor]}}
         egress: {block: [Paste.Example., '*.ngrok.io', 203.0.113.9, '[2001:db8::1]', '2001:db8::2', 198.51.100.0/24, '2001:db8:1::/48', '::ffff:192.0.2.0/120'], allow: ['*.npmjs.org', pypi.org, _dmarc.example], ports: [443]}
         resources: {cpu: '1.5', memory: 512Mi}
         admin:
@@ -614,3 +614,31 @@ cases:
       config_version: 8
       openshell:
         llm: Bedrock
+
+  - name: undo-ignored-dir-with-a-slash
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {enabled: true, dirs: [web/node_modules]}}
+
+  - name: undo-ignored-dot-dot
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {dirs: [..]}}
+
+  - name: undo-ignored-git-dir
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {dirs: [.git]}}
+
+  - name: undo-ignored-cap-too-large
+    valid: false
+    source: |
+      config_version: 8
+      openshell:
+        workdir: {undo_ignored: {max_mb: 1048577}}

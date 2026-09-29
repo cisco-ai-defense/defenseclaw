@@ -1088,6 +1088,25 @@ another name.
 - **Both.** A walk records the files that can run code on the host, the
   nested repositories that already exist, and fingerprints of dependency
   directories, so the review sees changes git ignores.
+- **Ignored dependency directories, when asked.** The snapshot holds no copy
+  of what git ignores (or, without git, of the heavy directories it skips);
+  the ignored manifest (`ignored.json`) records those files by metadata, so
+  review and undo can name what a session changed there. With
+  `openshell.workdir.undo_ignored.enabled` the manager passes
+  `SnapshotOptions.KeepIgnored` (the directory names, `node_modules`, `.venv`
+  and `venv` by default) and `KeepIgnoredBytes` (`max_mb`, 500 MiB), and the
+  snapshot copies each fully recorded ignored root with one of those names
+  to `<data_dir>/snapshots/<name>/ignored-copy/`, through `os.Root` on the
+  project, as file clones where the filesystem supports them and byte copies
+  otherwise, in path order while the copies stay within the cap; a root that
+  would pass it is recorded in the manifest's `over_cap` and keeps none.
+  Undo compares each kept root with its copy (metadata first, then bytes),
+  removes what the session added and copies back what it changed or deleted
+  (`restoreTree`), then re-records those roots in the manifest.
+  `IgnoredChange.Restored` and `OverCap` tell the CLI and the TUI which
+  places undo restores and which were left without a copy for the cap. What
+  the session left in a restored root is not kept. Copy mode has no snapshot,
+  so the key does nothing there, and on a Mac.
 
 Each start of a stopped sandbox is a new session and takes a fresh snapshot,
 unless the folder still holds changes an earlier session made that were

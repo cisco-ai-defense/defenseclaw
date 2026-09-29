@@ -496,7 +496,9 @@ func newSandboxUndoCmd() *cobra.Command {
 		Short: "Restore the project folder to its pre-session snapshot",
 		Long: "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git ignores\n" +
 			"(dependency directories, build output) have no copy in the snapshot: undo deletes what the session\n" +
-			"wrote to Python bytecode caches and names the rest, with what to do about them.\n\n" +
+			"wrote to Python bytecode caches and names the rest, with what to do about them, unless\n" +
+			"openshell.workdir.undo_ignored has the snapshot keep a copy of node_modules, .venv and the like,\n" +
+			"which undo then restores.\n\n" +
 			"For a copy-mode sandbox (every sandbox on macOS), undo reverts its last `pull --apply` instead; edits you\n" +
 			"made since stay.",
 		Args: nameArg("sandbox"),

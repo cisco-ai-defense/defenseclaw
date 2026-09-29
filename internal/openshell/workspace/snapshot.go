@@ -69,6 +69,13 @@ type SnapshotOptions struct {
 	// NoProjectRef skips writing refs/defenseclaw/pre/<name> into the
 	// project repository (the shadow copy is always written).
 	NoProjectRef bool
+	// KeepIgnored names the directories ("node_modules", ".venv") among
+	// what git ignores, or a folder without git skips, that the snapshot
+	// keeps a copy of, so Undo restores them (keep_ignored.go); empty keeps
+	// none. KeepIgnoredBytes caps the file content of the copies: a
+	// directory whose copy would pass it keeps none.
+	KeepIgnored      []string
+	KeepIgnoredBytes int64
 	// Now overrides the clock (tests).
 	Now func() time.Time
 }
@@ -305,6 +312,11 @@ func Snapshot(ctx context.Context, opts SnapshotOptions) (*SnapshotRecord, error
 		return nil, err
 	}
 	manifest.Truncated = manifest.Truncated || !ignoredListed
+	rec.Warnings = append(rec.Warnings, keepIgnored(lay, opts.Name, src.Path, manifest, opts.KeepIgnored, opts.KeepIgnoredBytes)...)
+	if len(manifest.OverCap) > 0 {
+		rec.Warnings = append(rec.Warnings, fmt.Sprintf("undo keeps no copy of %s: the copies would pass their %s cap",
+			strings.Join(firstN(manifest.OverCap, 5), ", "), humanBytes(opts.KeepIgnoredBytes)))
+	}
 	if err := writeIgnored(lay, opts.Name, manifest); err != nil {
 		_ = removeSnapshotDir(dir)
 		return nil, err

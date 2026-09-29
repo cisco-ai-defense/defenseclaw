@@ -813,6 +813,12 @@ def test_edits_are_written_with_the_go_types() -> None:
         ("openshell.harnesses", "string", "not a name", False),
         ("openshell.harnesses", "string", "-leading", False),
         ("openshell.workdir.git_depth", "int", "-1", False),
+        ("openshell.workdir.undo_ignored.max_mb", "int", "500", True),
+        ("openshell.workdir.undo_ignored.max_mb", "int", "1048577", False),
+        ("openshell.workdir.undo_ignored.dirs", "string", "node_modules, .venv, vendor", True),
+        ("openshell.workdir.undo_ignored.dirs", "string", "web/node_modules", False),
+        ("openshell.workdir.undo_ignored.dirs", "string", ".git", False),
+        ("openshell.workdir.undo_ignored.dirs", "string", "..", False),
     ],
 )
 def test_openshell_validation(key: str, kind: str, value: str, ok: bool) -> None:

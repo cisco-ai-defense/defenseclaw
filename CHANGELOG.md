@@ -488,6 +488,18 @@ deleted.
   and `openshell.keep_headless: true` keep it. Interactive sessions,
   `--detach` runs and a run that resumes the folder's sandbox are unchanged.
   Both drivers.
+- `openshell.workdir.undo_ignored` (#944) lets `sandbox undo` restore the
+  dependency directories git ignores, which it only reported before
+  (`undo cannot restore node_modules/ …: delete it and reinstall`). Off by
+  default; with `enabled: true` each undo point of a mounted project keeps a
+  copy of `dirs` (`node_modules`, `.venv` and `venv` unless set), as file
+  clones where the filesystem supports them and byte copies otherwise, up to
+  `max_mb` (500 MiB). A directory whose copy would pass the cap keeps none and
+  is reported as before, naming the cap; review says which directories undo
+  restores. Undo that cannot restore a dependency directory names the key.
+  Linux mount mode only: copy mode, every sandbox on a Mac included, has no
+  undo point. In the Python config, the v8 schema, and the TUI and macOS app
+  config editors; the TUI's undo preview names what it restores.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -913,7 +913,12 @@ started from). It shows a preview first, then asks. The sandbox is stopped
 before the restore, and `--restart` starts it again afterwards. Branches and
 tags the session moved are put back too, unless you pass `--keep-refs`. The
 session's own state is kept in a commit, and the command `undo` prints
-(`git -C FOLDER checkout COMMIT -- .`) brings its files back.
+(`git -C FOLDER checkout COMMIT -- .`) brings its files back. Files git
+ignores have no copy in the undo point: undo deletes what the session wrote
+to Python bytecode caches and names the rest, unless
+`openshell.workdir.undo_ignored` has the undo point keep a copy of
+dependency directories such as `node_modules` and `.venv`, which undo then
+restores as the session found them.
 
 For a copy-mode sandbox, which changes your folder only through
 `pull --apply`, `undo` reverts the last `pull --apply` instead, after the

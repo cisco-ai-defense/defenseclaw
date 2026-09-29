@@ -1059,7 +1059,13 @@ _OPENSHELL_INHERIT_STRING_KEYS = frozenset(
     {"openshell.profile", "openshell.workdir.mode", "openshell.egress.feed"}
 )
 _OPENSHELL_BOOL_KEYS = frozenset(
-    {"openshell.enabled", "openshell.upstream_telemetry", "openshell.middleware.enabled", "openshell.keep_headless"}
+    {
+        "openshell.enabled",
+        "openshell.upstream_telemetry",
+        "openshell.middleware.enabled",
+        "openshell.keep_headless",
+        "openshell.workdir.undo_ignored.enabled",
+    }
 )
 _OPENSHELL_INT_KEYS = frozenset(
     {
@@ -1067,6 +1073,7 @@ _OPENSHELL_INT_KEYS = frozenset(
         "openshell.egress_port",
         "openshell.workdir.max_upload_mb",
         "openshell.workdir.git_depth",
+        "openshell.workdir.undo_ignored.max_mb",
         "openshell.egress.large_upload_mb",
         "openshell.approvals.debounce_ms",
     }
@@ -1080,6 +1087,7 @@ _OPENSHELL_STRING_LIST_KEYS = frozenset(
         "openshell.egress.allow",
         "openshell.egress.unblocked",
         "openshell.harnesses",
+        "openshell.workdir.undo_ignored.dirs",
     }
 )
 # Keys only the daemon and the sandbox commands write.
@@ -1088,6 +1096,8 @@ _OPENSHELL_CPU = re.compile(r"^(\d+(\.\d+)?|\d+m)$")
 _OPENSHELL_MEMORY = re.compile(r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|K|M|G|T|k)?$")
 # config.openShellNamePattern.
 _OPENSHELL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# config.openShellUndoIgnoredDir: one path segment, not "." or "..".
+_OPENSHELL_UNDO_IGNORED_DIR = re.compile(r"^\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
 
 
 def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
@@ -1108,6 +1118,8 @@ def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
             return ValidationResult("error", "expected an integer")
         if number < 0:
             return ValidationResult("error", "value must be zero or greater")
+        if key == "openshell.workdir.undo_ignored.max_mb" and number > 1 << 20:
+            return ValidationResult("error", f"at most {1 << 20} MB")
         return ValidationResult()
     if key in _OPENSHELL_PORT_LIST_KEYS:
         for item in split_csv(value):
@@ -1120,6 +1132,11 @@ def _validate_openshell_field(key: str, value: str) -> ValidationResult | None:
         return ValidationResult("error", "memory is bytes with an optional suffix, for example 512Mi or 4Gi")
     if key == "openshell.harnesses":
         return _validate_openshell_harnesses(value)
+    if key == "openshell.workdir.undo_ignored.dirs":
+        for name in split_csv(value):
+            if not _OPENSHELL_UNDO_IGNORED_DIR.match(name) or name == ".git":
+                return ValidationResult("error", f"{name!r} is not a directory name such as node_modules or .venv")
+        return ValidationResult()
     return None
 
 

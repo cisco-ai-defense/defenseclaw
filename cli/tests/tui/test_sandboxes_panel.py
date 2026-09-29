@@ -1178,6 +1178,8 @@ def test_undo_is_empty_mirrors_go() -> None:
     # bytecode caches it deletes do.
     assert undo_is_empty({"result": {"ignored": [NODE_MODULES]}}) is True
     assert undo_is_empty({"result": {"ignored": [PYCACHE]}}) is False
+    # A directory the undo point keeps a copy of is restored (#944).
+    assert undo_is_empty({"result": {"ignored": [{**NODE_MODULES, "restored": True}]}}) is False
 
 
 # UndoResult.Ignored entries: a dependency folder with a host executable,
@@ -1215,6 +1217,22 @@ def test_undo_preview_says_what_undo_cannot_restore() -> None:
         "restored 1 file, except node_modules/ (undo cannot restore them)"
     )
     assert undo_done_text({}, "docs") == "docs: the project folder is back to its pre-session snapshot"
+
+
+def test_undo_preview_names_the_kept_directories_it_restores() -> None:
+    # openshell.workdir.undo_ignored: the undo point keeps a copy (#944).
+    from defenseclaw.tui.services.sandbox_state import undo_done_text, undo_unrestored_lines
+
+    kept = {**NODE_MODULES, "restored": True}
+    over = {**NODE_MODULES, "path": "web/node_modules/", "over_cap": True}
+    preview = {"result": {"ignored": [kept, over]}}
+    lines = undo_unrestored_lines(preview)
+    assert len(lines) == 1 and lines[0].startswith("undo cannot restore web/node_modules/")
+    assert lines[0].endswith("(its copy would pass openshell.workdir.undo_ignored.max_mb)")
+    assert "Restores node_modules/ from the copy the undo point keeps." in undo_preview_text(preview)
+    assert undo_done_text({"summary": "restored 1 file", "result": {"ignored": [kept]}}, "docs") == (
+        "restored 1 file (node_modules/ too, from the copy the undo point keeps)"
+    )
 
 
 @pytest.mark.asyncio

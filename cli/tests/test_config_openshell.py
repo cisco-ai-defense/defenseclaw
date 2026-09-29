@@ -37,6 +37,7 @@ from defenseclaw.config import (
     OpenShellConfig,
     OpenShellMCPConfig,
     OpenShellResourcesConfig,
+    OpenShellUndoIgnoredConfig,
     _merge_openshell,
     load,
 )
@@ -73,6 +74,7 @@ _FULL_SECTION = {
         "max_upload_mb": 100,
         "git_depth": 50,
         "on_exit": "keep",
+        "undo_ignored": {"enabled": True, "max_mb": 64, "dirs": ["vendor"]},
     },
     "egress": {
         "block": ["paste.example"],
@@ -120,6 +122,10 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.pack_dir, os.path.join("/var/dc", "policies", "sandbox"))
         self.assertEqual(oc.workdir.git_depth, 200)
         self.assertEqual(oc.workdir.on_exit, "ask")
+        self.assertEqual(
+            oc.workdir.undo_ignored,
+            OpenShellUndoIgnoredConfig(enabled=False, max_mb=500, dirs=["node_modules", ".venv", "venv"]),
+        )
         self.assertEqual(oc.approvals.debounce_ms, 3000)
         self.assertTrue(oc.approvals.agent_proposals_enabled())
         self.assertEqual(oc.token_delivery, "provider")
@@ -160,6 +166,7 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.workdir.mode, "copy")
         self.assertEqual(oc.workdir.masks, [".env*"])
         self.assertEqual(oc.workdir.on_exit, "keep")
+        self.assertEqual(oc.workdir.undo_ignored, OpenShellUndoIgnoredConfig(enabled=True, max_mb=64, dirs=["vendor"]))
         self.assertEqual(oc.egress.ports, [443, 8443])
         self.assertEqual(oc.egress.feed, "none")
         self.assertEqual(oc.egress.unblocked, ["webhook.site"])
