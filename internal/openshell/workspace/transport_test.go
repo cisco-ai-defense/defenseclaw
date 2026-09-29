@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 )
 
 var _ Transport = (*CLI)(nil)
@@ -159,6 +160,30 @@ func late(stdout, stderr string, code int) scriptedAnswer {
 	return func(context.Context) ([]byte, []byte, int, error) {
 		time.Sleep(time.Millisecond)
 		return []byte(stdout), []byte(stderr), code, nil
+	}
+}
+
+// Copy mode's upload, pull's download and the transport's execs run the
+// OpenShell CLI with DefenseClaw's ssh shim first on its PATH, so the
+// user's ssh connection sharing cannot send them into another sandbox.
+func TestCLITransportRunsTheSSHShim(t *testing.T) {
+	rec := openshelltest.NewSSHRecorder(t)
+	c := &CLI{Binary: rec.OpenShell, Gateway: "openshell"}
+	ctx := context.Background()
+	if err := c.Upload(ctx, "box", t.TempDir(), "/sandbox"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Download(ctx, "box", "/sandbox/.defenseclaw", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, "box", ExecRequest{Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	calls := rec.ExpectShimmed(t, 3)
+	for i, verb := range []string{"upload", "download", "exec"} {
+		if args := calls[i].Args; !slices.Contains(args, verb) || !slices.Contains(args, "box") {
+			t.Fatalf("call %d = %q, want the %s of box", i, args, verb)
+		}
 	}
 }
 

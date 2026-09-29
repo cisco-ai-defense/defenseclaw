@@ -23,6 +23,9 @@
 // talks to the local OpenShell gateway through the Go SDK, and uses the
 // upstream `openshell` CLI only where the SDK has no transport (terminal
 // attach, file transfer, port forwarding, gateway registration, install).
+// The CLI's sandbox sessions run over ssh, which DefenseClaw gives it with
+// connection sharing turned off (SSHShim), whatever the user's ssh_config
+// says.
 //
 // A gateway runs one compute driver: docker, or vm, OpenShell's MicroVM
 // driver, which a Mac runs sandboxes with. What DefenseClaw does

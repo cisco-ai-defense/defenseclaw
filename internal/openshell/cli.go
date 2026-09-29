@@ -337,15 +337,29 @@ func Environ(env []string) []string {
 // to the null device): with a pipe, Wait would outlast the command until
 // WaitDelay and then fail with exec.ErrWaitDelay although it succeeded,
 // and closing the pipe under the background process can break it.
-// Interactive commands inherit the terminal. The returned cancel must be
-// called once the command is done.
+// Interactive commands inherit the terminal. Every command runs with an
+// ssh that has connection sharing off first on its PATH (SSHShim), so the
+// user's ssh_config cannot send one sandbox's session into another; a
+// temporary directory another user could replace that ssh in is refused.
+// The returned cancel must be called once the command is done: it also
+// removes the shim.
 func (inv Invocation) Command(ctx context.Context) (*exec.Cmd, context.CancelFunc, error) {
 	if len(inv.Argv) == 0 {
 		return nil, nil, errors.New("openshell: empty invocation")
 	}
-	cancel := context.CancelFunc(func() {})
+	env := Environ(os.Environ())
+	shim, err := NewSSHShim(envValue(env, "PATH"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("openshell: %w", err)
+	}
+	if shim != nil {
+		env = shim.Environ(env)
+	}
+	cancel := context.CancelFunc(func() { _ = shim.Remove() })
 	if !inv.Interactive && inv.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, inv.Timeout)
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeout(ctx, inv.Timeout)
+		cancel = func() { stop(); _ = shim.Remove() }
 	}
 	var cmd *exec.Cmd
 	if inv.Interactive {
@@ -356,8 +370,19 @@ func (inv Invocation) Command(ctx context.Context) (*exec.Cmd, context.CancelFun
 		cmd.Stdin = nil // os/exec connects nil stdin to the null device
 		cmd.WaitDelay = 5 * time.Second
 	}
-	cmd.Env = Environ(os.Environ())
+	cmd.Env = env
 	return cmd, cancel, nil
+}
+
+// envValue is the value of name in env (the last one, as os/exec uses).
+func envValue(env []string, name string) string {
+	value := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == name {
+			value = v
+		}
+	}
+	return value
 }
 
 // maxInvocationOutput bounds what Output returns.

@@ -1,0 +1,394 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package openshell_test
+
+import (
+	"bytes"
+	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
+)
+
+// recordingSSH writes an ssh that prints each argument it gets in
+// brackets, in dir.
+func recordingSSH(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestSSHShimRunsTheRealSSHWithSharingOff(t *testing.T) {
+	skipOnWindows(t)
+	base := realTempDir(t)
+	openshell.SetSSHShimBase(t, base)
+	bin := filepath.Join(t.TempDir(), "it's bin")
+	realSSH := recordingSSH(t, bin)
+	shim, err := openshell.NewSSHShim("relative/bin" + string(os.PathListSeparator) + bin + string(os.PathListSeparator) + "/usr/bin")
+	if err != nil || shim == nil {
+		t.Fatalf("NewSSHShim = %v, %v", shim, err)
+	}
+	if shim.Real != realSSH || shim.Path != filepath.Join(shim.Dir, "ssh") || filepath.Dir(shim.Dir) != base ||
+		!strings.HasPrefix(filepath.Base(shim.Dir), "defenseclaw-ssh-") {
+		t.Fatalf("shim = %+v; want one running %s, in a new directory under %s", shim, realSSH, base)
+	}
+	expectMode(t, shim.Dir, 0o700)
+	expectMode(t, shim.Path, 0o700)
+	if err := shim.Verify(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The options come first, then the CLI's own arguments, untouched.
+	out, err := exec.Command(shim.Path, "-tt", "-o", "SetEnv=TERM=xterm", "sandbox", "a b", "").Output()
+	want := "[-o][ControlMaster=no][-o][ControlPath=none][-o][ControlPersist=no][-tt][-o][SetEnv=TERM=xterm][sandbox][a b][]"
+	if err != nil || string(out) != want {
+		t.Fatalf("shim ran ssh with %q, %v; want %q", out, err, want)
+	}
+	if got := openshell.SSHNoSharingOptions(); !slices.Equal(got, []string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"}) {
+		t.Fatalf("SSHNoSharingOptions = %q", got)
+	}
+
+	env := shim.Environ([]string{"HOME=/h", "PATH=/usr/bin:/bin", "PATH=/last"})
+	if strings.Join(env, " ") != "HOME=/h PATH="+shim.Dir+":/last" {
+		t.Fatalf("Environ = %q", env)
+	}
+	if err := shim.Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(shim.Dir); !os.IsNotExist(err) {
+		t.Fatalf("Remove left %s: %v", shim.Dir, err)
+	}
+	if err := shim.Remove(); err != nil {
+		t.Fatalf("second Remove = %v", err)
+	}
+	// A shim DefenseClaw did not make is never deleted.
+	if err := (&openshell.SSHShim{Dir: bin}).Remove(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(realSSH); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The shim runs the ssh a command lookup of PATH finds, never a shim (its
+// own or another DefenseClaw process's), a relative entry, a directory
+// named ssh or a file that is not executable.
+func TestSSHShimFindsTheRealSSH(t *testing.T) {
+	skipOnWindows(t)
+	openshell.SetSSHShimBase(t, realTempDir(t))
+	root := t.TempDir()
+	realSSH := recordingSSH(t, filepath.Join(root, "real"))
+	recordingSSH(t, filepath.Join(root, "defenseclaw-ssh-123"))
+	if err := os.MkdirAll(filepath.Join(root, "dirs", "ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "plain"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "plain", "ssh"), "#!/bin/sh\n", 0o600)
+	join := func(dirs ...string) string { return strings.Join(dirs, string(os.PathListSeparator)) }
+
+	first, err := openshell.NewSSHShim(join(filepath.Join(root, "real")))
+	if err != nil || first == nil {
+		t.Fatalf("NewSSHShim = %v, %v", first, err)
+	}
+	defer first.Remove()
+	// A shim elsewhere, under any name, is recognised by its content.
+	other := filepath.Join(root, "other")
+	if err := os.MkdirAll(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(first.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(other, "ssh"), string(data), 0o700)
+
+	path := join(".", "", first.Dir, other, filepath.Join(root, "defenseclaw-ssh-123"), filepath.Join(root, "dirs"), filepath.Join(root, "plain"), filepath.Join(root, "real"))
+	s, err := openshell.NewSSHShim(path)
+	if err != nil || s == nil || s.Real != realSSH {
+		t.Fatalf("NewSSHShim(%s) = %+v, %v; want one running %s", path, s, err, realSSH)
+	}
+	defer s.Remove()
+
+	// No ssh at all: nothing for the CLI to share connections with.
+	if s, err := openshell.NewSSHShim(join(filepath.Join(root, "plain"), first.Dir, "relative")); s != nil || err != nil {
+		t.Fatalf("NewSSHShim without an ssh = %+v, %v; want nil, nil", s, err)
+	}
+	if s, err := openshell.NewSSHShim(""); s != nil || err != nil {
+		t.Fatalf("NewSSHShim with no PATH = %+v, %v; want nil, nil", s, err)
+	}
+}
+
+// A temporary directory that another user could swap the shim out of is
+// refused, and so is a shim that changed after it was written.
+func TestSSHShimRefusesUnsafeDirectories(t *testing.T) {
+	skipOnWindows(t)
+	skipAsRoot(t)
+	bin := filepath.Join(t.TempDir(), "bin")
+	recordingSSH(t, bin)
+	mk := func(parent string, mode fs.FileMode) string {
+		dir, err := os.MkdirTemp(parent, "base-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+		return dir
+	}
+	root := realTempDir(t)
+	for _, tc := range []struct {
+		name string
+		base string
+		want string
+	}{
+		{"world-writable", mk(root, 0o777), "is writable by other users (mode 0777)"},
+		{"group-writable", mk(root, 0o770), "is writable by other users (mode 0770)"},
+		{"below a world-writable directory", mk(mk(root, 0o777), 0o700), "is writable by other users (mode 0777)"},
+		{"missing", filepath.Join(root, "missing"), "no such file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			openshell.SetSSHShimBase(t, tc.base)
+			s, err := openshell.NewSSHShim(bin)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("NewSSHShim in %s = %+v, %v; want an error containing %q", tc.base, s, err, tc.want)
+			}
+			if tc.name != "missing" && !strings.Contains(err.Error(), "set TMPDIR to a directory only you can write") {
+				t.Fatalf("error %q does not say what to do", err)
+			}
+			if entries, _ := os.ReadDir(tc.base); len(entries) != 0 {
+				t.Fatalf("a refused shim left %v in %s", entries, tc.base)
+			}
+		})
+	}
+
+	// A sticky world-writable directory (as /tmp) keeps what is inside it.
+	sticky := mk(root, 0o777|fs.ModeSticky)
+	openshell.SetSSHShimBase(t, sticky)
+	s, err := openshell.NewSSHShim(bin)
+	if err != nil || s == nil {
+		t.Fatalf("NewSSHShim in a sticky directory = %v, %v", s, err)
+	}
+	defer s.Remove()
+
+	// A symbolic link is resolved first: the shim's directory is below the
+	// realSSH one, whatever the link points at later.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	openshell.SetSSHShimBase(t, link)
+	linked, err := openshell.NewSSHShim(bin)
+	if err != nil || filepath.Dir(linked.Dir) != root {
+		t.Fatalf("NewSSHShim through a link = %+v, %v; want a directory in %s", linked, err, root)
+	}
+	defer linked.Remove()
+
+	// Changed content, mode or directory after the write.
+	writeFile(t, s.Path, "#!/bin/sh\nexec /usr/bin/ssh \"$@\"\n", 0o700)
+	if err := s.Verify(); err == nil || !strings.Contains(err.Error(), "is not the shim DefenseClaw wrote") {
+		t.Fatalf("Verify of a rewritten shim = %v", err)
+	}
+	if err := os.Chmod(linked.Path, 0o722); err != nil {
+		t.Fatal(err)
+	}
+	if err := linked.Verify(); err == nil || !strings.Contains(err.Error(), "is not a private file of yours") {
+		t.Fatalf("Verify of a writable shim = %v", err)
+	}
+	if err := os.Chmod(linked.Dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := linked.Verify(); err == nil || !strings.Contains(err.Error(), "is writable by other users") {
+		t.Fatalf("Verify in a group-writable directory = %v", err)
+	}
+}
+
+// Directories that are not the user's are refused: the shim's own, and
+// any above it that is neither the user's nor root's.
+func TestSSHShimRefusesDirectoriesOfOtherUsers(t *testing.T) {
+	skipOnWindows(t)
+	bin := filepath.Join(t.TempDir(), "bin")
+	recordingSSH(t, bin)
+	base := realTempDir(t)
+	openshell.SetSSHShimBase(t, base)
+	yes := func(fs.FileInfo) bool { return true }
+	notBase := func(info fs.FileInfo) bool { return info.Name() != filepath.Base(base) }
+
+	openshell.SetSSHShimOwners(t, yes, notBase)
+	if s, err := openshell.NewSSHShim(bin); err == nil || !strings.Contains(err.Error(), base+" belongs to another user") {
+		t.Fatalf("NewSSHShim below another user's directory = %+v, %v", s, err)
+	}
+	openshell.SetSSHShimOwners(t, func(fs.FileInfo) bool { return false }, yes)
+	if s, err := openshell.NewSSHShim(bin); err == nil || !strings.Contains(err.Error(), "is not owned by you") {
+		t.Fatalf("NewSSHShim in a directory of another user's = %+v, %v", s, err)
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Fatalf("a refused shim left %v in %s", entries, base)
+	}
+}
+
+// Every openshell invocation DefenseClaw builds runs with the shim first
+// on its PATH (sandbox connect, the exec terminal, upload, download,
+// forward start and stop, version), and the shim is gone once the
+// command is done.
+func TestInvocationsRunTheSSHShim(t *testing.T) {
+	rec := openshelltest.NewSSHRecorder(t)
+	cli := openshell.CLI{Binary: rec.OpenShell, Gateway: "openshell"}
+	local := t.TempDir()
+	build := []func() (openshell.Invocation, error){
+		func() (openshell.Invocation, error) { return cli.Connect("box") },
+		func() (openshell.Invocation, error) {
+			return cli.Exec("box", []string{"claude"}, openshell.CLIExecOptions{TTY: true})
+		},
+		func() (openshell.Invocation, error) {
+			return cli.Exec("box", []string{"true"}, openshell.CLIExecOptions{Timeout: time.Minute})
+		},
+		func() (openshell.Invocation, error) { return cli.Upload("box", local, "/sandbox", false) },
+		func() (openshell.Invocation, error) { return cli.Download("box", "/sandbox/x", local) },
+		func() (openshell.Invocation, error) { return cli.ForwardStart("box", 18789, "") },
+		func() (openshell.Invocation, error) { return cli.ForwardStop("box", 18789) },
+		func() (openshell.Invocation, error) { return cli.Version(), nil },
+	}
+	for i, b := range build {
+		inv, err := b()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inv.Interactive {
+			cmd, cancel, err := inv.Command(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, &out, &out
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("%s: %v: %s", inv.Argv, err, out.String())
+			}
+			cancel()
+		} else if out, err := inv.Output(context.Background()); err != nil {
+			t.Fatalf("%s: %v: %s", inv.Argv, err, out)
+		}
+		calls := rec.ExpectShimmed(t, i+1)
+		if got := calls[i].Args[len(openshell.SSHNoSharingOptions()):]; !slices.Equal(got, inv.Argv[1:]) {
+			t.Fatalf("ssh got %q after the options, want the CLI's %q", got, inv.Argv[1:])
+		}
+	}
+}
+
+// A shim that cannot be made safely stops the invocation before the CLI
+// runs.
+func TestInvocationRefusesAnUnsafeShimDirectory(t *testing.T) {
+	skipAsRoot(t)
+	rec := openshelltest.NewSSHRecorder(t)
+	base := realTempDir(t)
+	if err := os.Chmod(base, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	openshell.SetSSHShimBase(t, base)
+	inv, err := openshell.CLI{Binary: rec.OpenShell, Gateway: "openshell"}.Connect("box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd, _, err := inv.Command(context.Background()); err == nil || cmd != nil || !strings.Contains(err.Error(), "set TMPDIR") {
+		t.Fatalf("Command = %v, %v; want the unsafe directory refused", cmd, err)
+	}
+	if _, err := (openshell.Invocation{Argv: []string{rec.OpenShell}}).Output(context.Background()); err == nil {
+		t.Fatal("Output ran with an unsafe shim directory")
+	}
+	if calls := rec.Calls(t); len(calls) != 0 {
+		t.Fatalf("the CLI ran: %+v", calls)
+	}
+}
+
+// spawnSites are the files under internal/openshell that start processes
+// themselves, and why each needs no ssh shim. Everything that runs the
+// OpenShell CLI for a sandbox session goes through Invocation.Command
+// (cli.go), which gives it the shim; a new process spawn elsewhere must
+// either do the same or be added here with its reason.
+var spawnSites = map[string]string{
+	"cli.go":                      "Invocation.Command: every openshell sandbox invocation, with the ssh shim",
+	"runner.go":                   "ExecRunner: docker, brew, systemctl, the installer and openshell commands that open no ssh session",
+	"image/docker.go":             "docker image builds",
+	"sandboxcli/gitidentity.go":   "git config",
+	"sandboxcli/ui.go":            "the pager",
+	"sandboxcli/terminal_unix.go": "execs a harness in place for a nested run inside a sandbox",
+}
+
+func TestOnlyKnownFilesStartProcesses(t *testing.T) {
+	found := map[string]bool{}
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			var sel *ast.SelectorExpr
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				sel, _ = n.Fun.(*ast.SelectorExpr)
+			case *ast.CompositeLit:
+				sel, _ = n.Type.(*ast.SelectorExpr)
+			}
+			if sel == nil {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok {
+				switch pkg.Name + "." + sel.Sel.Name {
+				case "exec.Command", "exec.CommandContext", "processutil.CommandContext", "os.StartProcess", "syscall.Exec", "syscall.ForkExec", "exec.Cmd":
+					found[filepath.ToSlash(path)] = true
+				}
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path := range found {
+		if _, ok := spawnSites[path]; !ok {
+			t.Errorf("%s starts a process outside Invocation.Command: run the OpenShell CLI through an openshell.Invocation so it gets the ssh shim, or list the file in spawnSites with why it needs none", path)
+		}
+	}
+	for path, why := range spawnSites {
+		if why != "" && !found[path] {
+			t.Errorf("%s no longer starts processes: remove it from spawnSites", path)
+		}
+	}
+}

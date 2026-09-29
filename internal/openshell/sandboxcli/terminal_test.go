@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,6 +35,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -142,6 +144,41 @@ func TestCommandStreamerReportsExitStatus(t *testing.T) {
 	}
 	if _, err := (CommandStreamer{}).Stream(bg, openshell.Invocation{Argv: []string{"/nonexistent/bin"}}, &out, &out); err == nil {
 		t.Fatal("a missing binary was not an error")
+	}
+}
+
+// The terminal and the streamer run the OpenShell CLI with DefenseClaw's
+// ssh shim first on its PATH: sandbox connect and the harness session
+// attach through ForegroundTerminal, streamed execs through
+// CommandStreamer. So the user's ssh connection sharing cannot attach the
+// terminal to another sandbox.
+func TestTerminalAndStreamerRunTheSSHShim(t *testing.T) {
+	rec := openshelltest.NewSSHRecorder(t)
+	cli := openshell.CLI{Binary: rec.OpenShell, Gateway: "openshell"}
+	connect, err := cli.Connect("box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := cli.Exec("box", []string{"claude"}, openshell.CLIExecOptions{TTY: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inv := range []openshell.Invocation{connect, session} {
+		if code, err := (ForegroundTerminal{}).Run(bg, inv); err != nil || code != 0 {
+			t.Fatalf("Run(%q) = %d, %v", inv.Argv, code, err)
+		}
+	}
+	streamed, err := cli.Exec("box", []string{"ls"}, openshell.CLIExecOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code, err := (CommandStreamer{}).Stream(bg, streamed, &out, &out); err != nil || code != 0 {
+		t.Fatalf("Stream = %d, %v: %s", code, err, out.String())
+	}
+	calls := rec.ExpectShimmed(t, 3)
+	if args := calls[0].Args; !slices.Contains(args, "connect") || args[len(args)-1] != "box" {
+		t.Fatalf("connect ran ssh with %q", args)
 	}
 }
 
