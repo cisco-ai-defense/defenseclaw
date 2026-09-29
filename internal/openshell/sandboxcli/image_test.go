@@ -172,3 +172,15 @@ func TestImageBuildFailureShowsDockersLastLines(t *testing.T) {
 		t.Fatalf("ImageBuild error = %v, want %s", err, want)
 	}
 }
+
+// A build refused because docker would not use BuildKit never ran docker
+// build: its error says why and how to fix it, and names no build log.
+func TestImageBuildWithoutBuildKitNamesNoBuildLog(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.images.buildErr = fmt.Errorf("openshell image: docker build defenseclaw/sandbox:claudecode-x-u1000: %w; install Docker's buildx plugin",
+		image.ErrNoBuildKit)
+	err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claudecode"}})
+	if want := "Claude Code image: " + ta.images.buildErr.Error(); err == nil || err.Error() != want || !errors.Is(err, image.ErrNoBuildKit) {
+		t.Fatalf("ImageBuild error = %v, want %s", err, want)
+	}
+}
