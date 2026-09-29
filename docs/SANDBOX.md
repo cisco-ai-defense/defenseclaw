@@ -1446,7 +1446,9 @@ finding and a `finding` activity entry with reason `hooks_unreachable`, when:
   (`_provider_*`), or to a host port. Its start-up and onboarding traffic
   (update checks, telemetry, downloads, through the egress proxy or around
   it) comes before the first prompt fires a hook, so it starts no window,
-  and neither does anything in a sandbox with no harness session. OTLP is no
+  and neither does a model call in the session's first 20 seconds (the Codex
+  TUI asks its model endpoint for the model list as it opens) or anything in
+  a sandbox with no harness session. OTLP is no
   sign of work either: the Codex TUI exports it from its start and posts its
   first hooks only with the first prompt. Since no hook was seen failing,
   the warning then reads "No hook has reached DefenseClaw yet" (hook

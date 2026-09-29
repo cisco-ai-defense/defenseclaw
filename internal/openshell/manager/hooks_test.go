@@ -726,6 +726,26 @@ func TestHookReachUnansweredConnections(t *testing.T) {
 	}
 }
 
+// The Codex TUI asks its model endpoint for the model list as it opens,
+// before any prompt: that start-up call starts no window, so an idle session
+// is not flagged (seen live in a MicroVM). A later call without a hook is.
+func TestHookReachIgnoresStartupModelCall(t *testing.T) {
+	r := newReachEnv(t)
+	r.advance(3 * time.Second)
+	r.line(modelCall)
+	r.advance(time.Minute)
+	r.check()
+	if h := r.hooks(); h.Unreachable || h.NoHookYet {
+		t.Fatalf("an idle session was flagged for its start-up model call: %+v", h)
+	}
+	r.line(modelCall)
+	r.advance(DefaultHookReachWindow + time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || !h.NoHookYet {
+		t.Fatalf("a model call after start-up without a hook was not flagged: %+v", h)
+	}
+}
+
 // A harness calling its model without a hook is flagged after the window as
 // "no hook yet", not as every tool call blocked; one whose hooks arrived is not.
 func TestHookReachSilentWork(t *testing.T) {
@@ -735,6 +755,7 @@ func TestHookReachSilentWork(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := newReachEnv(t)
+			r.advance(harnessStartupGrace)
 			r.line(line)
 			r.advance(DefaultHookReachWindow - time.Second)
 			r.check()

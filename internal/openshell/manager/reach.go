@@ -64,6 +64,11 @@ const (
 	// hookAttemptGrace is how long an ingress connection OpenShell reported
 	// may go without an authenticated request.
 	hookAttemptGrace = 15 * time.Second
+	// harnessStartupGrace is how long after a session starts a model call is
+	// still taken for the harness's start-up: the Codex TUI asks its model
+	// endpoint for the model list as it opens, before any prompt, so that
+	// call starts no window. A prompt's turn makes later calls, which do.
+	harnessStartupGrace = 20 * time.Second
 	// hookReachInterval paces the reachability check.
 	hookReachInterval = 5 * time.Second
 )

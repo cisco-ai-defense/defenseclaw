@@ -583,7 +583,7 @@ func (m *Manager) markWork(b *box, at time.Time, ofHarness, modelCall bool) {
 		return
 	}
 	m.mu.Lock()
-	if !at.Before(b.started) {
+	if !at.Before(b.started.Add(harnessStartupGrace)) {
 		m.noteWorkLocked(b)
 	}
 	m.mu.Unlock()
