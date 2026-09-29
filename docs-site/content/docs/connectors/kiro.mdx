@@ -120,7 +120,9 @@ other key in `cli.json`). An agent the user picks explicitly
 
 After Kiro is disabled on Linux or macOS, `~/.defenseclaw/hooks/kiro-hook.sh`
 remains as an inert stub that exits successfully. A running Kiro session may
-still call the path it cached until it restarts.
+still call the path it cached until it restarts. The same stub is left by
+per-user `defenseclaw guardrail disable --connector kiro` and
+`defenseclaw setup remove kiro`.
 
 On macOS the guardian also finds `kiro-cli` inside `Kiro CLI.app`, in
 `~/Applications` or `/Applications`, before the app's shell setup links it
