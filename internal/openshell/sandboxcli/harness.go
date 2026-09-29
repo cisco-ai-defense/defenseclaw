@@ -327,11 +327,24 @@ func (a *App) llmHint(spec *harness.Spec, choice string) string {
 	return hint
 }
 
-// providerHint is llmHint without the Bedrock alternative of auto.
+// providerHint is llmHint without the Bedrock alternative of auto. A
+// named provider's hint names only that provider's key: with it chosen, no
+// other key is shared, and a run without it is refused, so there is no
+// sandbox to log in inside.
 func (a *App) providerHint(spec *harness.Spec, choice string) string {
 	switch harnessName := spec.Name; {
 	case choice == LLMBedrock:
 		return "set " + EnvBedrockToken
+	case choice == LLMAnthropic:
+		return "set ANTHROPIC_API_KEY"
+	case choice == LLMClaudeOAuth:
+		return "set CLAUDE_CODE_OAUTH_TOKEN from " + a.claudeSetupToken(spec)
+	case harnessName == "codex" && (choice == LLMOpenAI || choice == LLMAuto):
+		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
+	case choice == LLMOpenAI:
+		return "set OPENAI_API_KEY"
+	case choice == LLMGemini:
+		return "set GEMINI_API_KEY"
 	case harnessName == "claudecode":
 		// A Claude subscription logs in on this machine: setup-token prints
 		// a token the sandbox then sees only as a placeholder. The command
@@ -339,13 +352,7 @@ func (a *App) providerHint(spec *harness.Spec, choice string) string {
 		if _, err := a.LookPath(spec.Command); err != nil {
 			return "set ANTHROPIC_API_KEY, or use /login in the sandbox"
 		}
-		setup := "`claude setup-token`"
-		if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, spec.Name) {
-			setup = "`" + wrapper.EnvBypass + "=1 claude setup-token`"
-		}
-		return "set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from " + setup
-	case harnessName == "codex":
-		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
+		return "set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from " + a.claudeSetupToken(spec)
 	case harnessName == "opencode":
 		return "set ANTHROPIC_API_KEY or OPENAI_API_KEY"
 	case harnessName == "copilot":
@@ -356,6 +363,16 @@ func (a *App) providerHint(spec *harness.Spec, choice string) string {
 		return "set GEMINI_API_KEY"
 	}
 	return "set the provider's API key"
+}
+
+// claudeSetupToken is the command that prints a Claude subscription's
+// CLAUDE_CODE_OAUTH_TOKEN on this machine, past the shell wrapper when it
+// is on.
+func (a *App) claudeSetupToken(spec *harness.Spec) string {
+	if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, spec.Name) {
+		return "`" + wrapper.EnvBypass + "=1 claude setup-token`"
+	}
+	return "`claude setup-token`"
 }
 
 // codexAuthKey reads the API key a `codex login --with-api-key` stored.

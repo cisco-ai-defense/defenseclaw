@@ -896,11 +896,20 @@ func (a *App) printHarnesses(specs []*harness.Spec, configured []string) {
 }
 
 // credentialText is the model credential a run of s would share, or the
-// next step when there is none.
+// next step when there is none. It follows openshell.llm as a run does: a
+// configured provider without its key refuses the run (there is no sandbox
+// to log in inside), and none shares nothing whatever keys are set.
 func (a *App) credentialText(s *harness.Spec) string {
 	choice, from, _ := a.runLLM(s, "")
-	if llm, err := a.detectLLM(s, choice, from, "", nil); err == nil && llm.Credential != nil {
+	llm, err := a.detectLLM(s, choice, from, "", nil)
+	switch {
+	case err == nil && llm.Credential != nil:
 		return "model credential " + llm.Source + " " + a.style("✓", ansiGreen)
+	case err != nil && from == llmFromConfig:
+		return "model credential " + a.style("none found", ansiYellow) + ": runs are refused until you " +
+			a.providerHint(s, choice) + " (" + from + " " + choice + "; `--llm auto` overrides it for one run)"
+	case choice == LLMNone:
+		return "model credential " + a.style("none shared", ansiYellow) + " (" + from + " none): you log in inside the sandbox on the first run"
 	}
 	next := "you log in inside the sandbox on the first run"
 	if hint := a.llmHint(s, choice); hint != a.llmHint(&harness.Spec{}, choice) {

@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
@@ -985,6 +986,47 @@ func TestSetupHarnessLines(t *testing.T) {
 	ta.ok(t, ta.Setup(bg, SetupOptions{NoWrappers: true}))
 	if strings.Contains(ta.output(), "image now?") || !slices.Equal(ta.images.built, []string{"codex"}) {
 		t.Fatalf("a current image was asked about: built = %v:\n%s", ta.images.built, ta.output())
+	}
+}
+
+// TestSetupCredentialFollowsOpenShellLLM pins that setup's credential line
+// reports what the configured openshell.llm choice finds: a provider
+// without its key is a refused run (no sandbox to log in inside), none
+// shares nothing whatever keys are set, and a harness with no model
+// credentials only logs in inside.
+func TestSetupCredentialFollowsOpenShellLLM(t *testing.T) {
+	claude, kiro := harnessSpec(t, "claudecode"), harnessSpec(t, "kiro")
+	for _, c := range []struct {
+		name, llm string
+		env       map[string]string
+		spec      *harness.Spec
+		want      string
+		not       []string
+	}{
+		{"provider without its key", "bedrock", map[string]string{"ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential none found: runs are refused until you set AWS_BEARER_TOKEN_BEDROCK (openshell.llm bedrock; `--llm auto` overrides it for one run)",
+			[]string{"log in inside the sandbox", "ANTHROPIC_API_KEY"}},
+		{"claude-oauth without its token", "claude-oauth", map[string]string{"ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential none found: runs are refused until you set CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` (openshell.llm claude-oauth;",
+			[]string{"log in inside the sandbox", "ANTHROPIC_API_KEY"}},
+		{"none", "none", map[string]string{"ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential none shared (openshell.llm none): you log in inside the sandbox on the first run",
+			[]string{"ANTHROPIC_API_KEY", "found"}},
+		{"provider with its key", "bedrock", map[string]string{EnvBedrockToken: "b", "ANTHROPIC_API_KEY": "k"}, claude,
+			"model credential AWS_BEARER_TOKEN_BEDROCK ✓", nil},
+		{"harness without model credentials", "bedrock", nil, kiro,
+			"model credential none found: you log in inside the sandbox on the first run", []string{"refused"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.Cfg.OpenShell.LLM = c.llm
+			for k, v := range c.env {
+				ta.env[k] = v
+			}
+			got := ta.credentialText(c.spec)
+			has(t, got, c.want)
+			lacks(t, got, c.not...)
+		})
 	}
 }
 

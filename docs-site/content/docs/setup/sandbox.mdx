@@ -260,7 +260,10 @@ What setup does, in order:
    `openshell.enabled` on. The `Harnesses` lines are information, not a
    checklist: one line for each harness this run sets up, with the model
    credential it would share, or what to do when none is found (set the
-   named variable, or log in inside the sandbox on the first run). The other
+   named variable, or log in inside the sandbox on the first run). They
+   follow `openshell.llm` as a run does: with `none`, nothing is shared;
+   with a provider whose key is not set, runs are refused until you set it
+   (or pass `--llm auto`), so the line names only that key. The other
    harnesses follow by the names `--harness` and `run` take; set one up with
    `defenseclaw sandbox setup --harness NAME`.
 6. **Offers the shell wrappers** that make typing `claude` or `codex` start
