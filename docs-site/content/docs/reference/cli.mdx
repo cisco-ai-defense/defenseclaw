@@ -479,9 +479,9 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 
 ## Sandbox
 
-Linux and macOS, but no sandbox can start on macOS yet (see
-[macOS](/docs/setup/sandbox#macos)). The `sandbox` commands run coding agents
-in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
+Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
+work on a copy (see [macOS](/docs/setup/sandbox#macos)). The `sandbox`
+commands run coding agents in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
 line, then hands it unchanged to `defenseclaw-gateway sandbox`;
 `legacy-cleanup` is the one command the Python CLI runs itself. Every command
 and flag, with an example, is on [Sandbox CLI](/docs/reference/sandbox-cli);
