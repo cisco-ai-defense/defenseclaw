@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -34,6 +35,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -74,6 +76,17 @@ const (
 	// defaultGatewayPort is where the package gateway listens.
 	defaultGatewayPort = 17670
 
+	// Gateway settings that select the compute driver and shape the
+	// MicroVM (vm) driver's sandboxes. The variables override their
+	// gateway.toml counterparts.
+	envComputeDriver    = "OPENSHELL_COMPUTE_DRIVER"
+	envVMSandboxUID     = "OPENSHELL_VM_SANDBOX_UID"
+	envVMSandboxGID     = "OPENSHELL_VM_SANDBOX_GID"
+	envVMVCPUs          = "OPENSHELL_VM_DRIVER_VCPUS"
+	envVMMemMiB         = "OPENSHELL_VM_DRIVER_MEM_MIB"
+	envVMOverlayDiskMiB = "OPENSHELL_VM_OVERLAY_DISK_MIB"
+	envVMStateDir       = "OPENSHELL_VM_DRIVER_STATE_DIR"
+
 	// restartPendingFile marks configuration DefenseClaw wrote that the
 	// gateway has not been restarted on yet. It lives in the config
 	// directory and survives a crash between the write and the restart.
@@ -97,9 +110,21 @@ var (
 	ErrGatewayMismatch = errors.New("openshell: the gateway service does not match DefenseClaw's view of it")
 )
 
+// What the MicroVM (vm) driver gives every sandbox when
+// [openshell.drivers.vm] and gateway.env do not say (OpenShell 0.1.1).
+const (
+	DefaultVMSandboxUID     = 1000
+	DefaultVMSandboxGID     = 1000
+	DefaultVMVCPUs          = 2
+	DefaultVMMemMiB         = 2048
+	DefaultVMOverlayDiskMiB = 4096
+)
+
 var (
+	gatewayTable           = []string{"openshell", "gateway"}
 	dockerDriverTable      = []string{"openshell", "drivers", "docker"}
 	resourceAdmissionTable = []string{"openshell", "drivers", "docker", "resource_admission"}
+	vmDriverTable          = []string{"openshell", "drivers", "vm"}
 )
 
 // bindMountSettings let the docker driver honor the bind mounts DefenseClaw
@@ -145,6 +170,14 @@ type GatewayConfigurator struct {
 	// service only then: `brew services info` can take most of a minute,
 	// and a formula that is not installed has no service to report.
 	BrewFormulaInstalled func() bool
+	// BrewPrefix is the Homebrew prefix whose var/openshell holds the
+	// Homebrew service's own gateway.env and gateway.toml, which it reads
+	// when Dir has none (macOS; default homebrewPrefix).
+	BrewPrefix string
+	// RunningDriver asks the gateway which compute driver it runs, which
+	// Apply checks after a restart that switches it (default: discover the
+	// Discover registration, dial it and read GetGatewayInfo).
+	RunningDriver func(context.Context) (Driver, error)
 }
 
 func (g *GatewayConfigurator) defaults() error {
@@ -187,33 +220,89 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.BrewFormulaInstalled == nil {
 		g.BrewFormulaInstalled = brewFormulaInstalled
 	}
+	if g.BrewPrefix == "" && g.GOOS == "darwin" {
+		g.BrewPrefix = homebrewPrefix()
+	}
+	if g.RunningDriver == nil {
+		g.RunningDriver = func(ctx context.Context) (Driver, error) { return runningDriver(ctx, g.Discover) }
+	}
 	return nil
 }
 
-// EnvPath is the gateway.env the service reads.
+// EnvPath is the gateway.env the service reads: Dir's. On macOS the
+// Homebrew service's wrapper sources Dir's when it exists, else the one
+// under the Homebrew prefix; with neither, a new file goes to Dir.
 func (g *GatewayConfigurator) EnvPath() (string, error) {
 	if err := g.defaults(); err != nil {
 		return "", err
 	}
-	return filepath.Join(g.Dir, GatewayEnvFile), nil
+	return g.homebrewFallback(filepath.Join(g.Dir, GatewayEnvFile), GatewayEnvFile)
 }
 
 // TOMLPath is the gateway.toml the service reads: OPENSHELL_GATEWAY_CONFIG
 // from gateway.env when it names an absolute path (its directory
-// resolved like Dir), else Dir/gateway.toml.
+// resolved like Dir), else Dir/gateway.toml. On macOS the Homebrew
+// service's wrapper starts the gateway on the one under the Homebrew
+// prefix when Dir has none and the prefix has.
 func (g *GatewayConfigurator) TOMLPath() (string, error) {
 	envPath, err := g.EnvPath()
 	if err != nil {
 		return "", err
 	}
-	data, _, err := readGatewayFile(envPath)
+	data, _, _, err := g.readConfigFile(envPath)
 	if err != nil {
 		return "", err
 	}
 	if p := parseEnvFile(data)[envGatewayConfig]; p != "" && filepath.IsAbs(p) {
 		return resolveFilePath(filepath.Clean(p))
 	}
-	return filepath.Join(g.Dir, GatewayTOMLFile), nil
+	return g.homebrewFallback(filepath.Join(g.Dir, GatewayTOMLFile), GatewayTOMLFile)
+}
+
+// homebrewFile is the Homebrew service's own copy of a gateway file, under
+// the prefix's var/openshell ("" off macOS).
+func (g *GatewayConfigurator) homebrewFile(name string) (string, error) {
+	if g.GOOS != "darwin" || g.BrewPrefix == "" {
+		return "", nil
+	}
+	return resolveFilePath(filepath.Join(g.BrewPrefix, "var", "openshell", name))
+}
+
+// homebrewFallback is the file the service reads in place of dirFile, one
+// of Dir's: on macOS the Homebrew prefix's copy when dirFile does not
+// exist and that copy does, as the formula's wrapper decides. A dirFile
+// that exists in any form is the one read, so a link or a directory
+// there is refused rather than passed over.
+func (g *GatewayConfigurator) homebrewFallback(dirFile, name string) (string, error) {
+	prefixFile, err := g.homebrewFile(name)
+	if err != nil || prefixFile == "" {
+		return dirFile, err
+	}
+	if _, err := os.Lstat(dirFile); !errors.Is(err, fs.ErrNotExist) {
+		return dirFile, nil
+	}
+	if _, err := os.Lstat(prefixFile); err == nil {
+		return prefixFile, nil
+	}
+	return dirFile, nil
+}
+
+// readConfigFile reads one of the service's files like readGatewayFile.
+// foreign marks the Homebrew prefix's copy when another user owns it (a
+// prefix several macOS accounts share): it is read, never written, and a
+// change goes to a copy in Dir, which the service reads from then on.
+func (g *GatewayConfigurator) readConfigFile(path string) (data []byte, info fs.FileInfo, foreign bool, err error) {
+	data, info, err = readGatewayFile(path)
+	if !errors.Is(err, errForeignGatewayFile) {
+		return data, info, false, err
+	}
+	for _, name := range []string{GatewayEnvFile, GatewayTOMLFile} {
+		if prefixFile, perr := g.homebrewFile(name); perr == nil && prefixFile != "" && prefixFile == path {
+			data, info, err = readGatewayFileOf(path, true)
+			return data, info, err == nil && info != nil, err
+		}
+	}
+	return nil, nil, false, err
 }
 
 // BindMounts is the docker driver's bind-mount configuration.
@@ -243,13 +332,108 @@ type GatewayConfigState struct {
 	// RestartPendingSince is when DefenseClaw wrote configuration the
 	// gateway has not been restarted on (zero: none).
 	RestartPendingSince time.Time `json:"restart_pending_since"`
+	// ComputeDriver is the compute driver the configuration selects:
+	// OPENSHELL_COMPUTE_DRIVER from gateway.env, else [openshell.gateway]
+	// compute_driver. Empty when neither names one: the gateway then
+	// detects one, which is never vm.
+	ComputeDriver ComputeDriver `json:"compute_driver,omitempty"`
+	// VM is the MicroVM (vm) driver's configuration.
+	VM VMConfig `json:"vm"`
 	// server holds the gateway.toml listener and authentication settings.
 	server gatewayServer
 }
 
+// Driver is the compute driver the configuration selects, and false when
+// DefenseClaw does not drive it. No driver named is docker.
+func (s *GatewayConfigState) Driver() (Driver, bool) {
+	return LookupDriver(string(s.ComputeDriver))
+}
+
+// VMConfig is [openshell.drivers.vm] in gateway.toml with the gateway.env
+// variables that override it. A nil setting is unset: the driver's
+// default applies. The settings hold for every MicroVM on the gateway.
+type VMConfig struct {
+	SandboxUID     *int64 `json:"sandbox_uid,omitempty"`
+	SandboxGID     *int64 `json:"sandbox_gid,omitempty"`
+	VCPUs          *int64 `json:"vcpus,omitempty"`
+	MemMiB         *int64 `json:"mem_mib,omitempty"`
+	OverlayDiskMiB *int64 `json:"overlay_disk_mib,omitempty"`
+	// StateDir holds the driver's prepared images and sandboxes (empty:
+	// ~/.local/state/openshell/vm-driver).
+	StateDir string `json:"state_dir,omitempty"`
+	// DriverDir is where the gateway finds the openshell-driver-vm binary
+	// (empty: its own search).
+	DriverDir string `json:"driver_dir,omitempty"`
+}
+
+// VMIdentity is the uid and gid the MicroVM driver runs every sandbox's
+// workload as.
+type VMIdentity struct {
+	UID int64 `json:"uid"`
+	GID int64 `json:"gid"`
+}
+
+func (id VMIdentity) String() string { return fmt.Sprintf("%d:%d", id.UID, id.GID) }
+
+// VMResources is what the MicroVM driver gives every sandbox. In a
+// change, a zero field is left alone.
+type VMResources struct {
+	VCPUs          int64 `json:"vcpus,omitempty"`
+	MemMiB         int64 `json:"mem_mib,omitempty"`
+	OverlayDiskMiB int64 `json:"overlay_disk_mib,omitempty"`
+}
+
+// Identity is the uid and gid sandboxes run as.
+func (v VMConfig) Identity() VMIdentity {
+	return VMIdentity{UID: orDefault(v.SandboxUID, DefaultVMSandboxUID), GID: orDefault(v.SandboxGID, DefaultVMSandboxGID)}
+}
+
+// Resources is what every MicroVM gets.
+func (v VMConfig) Resources() VMResources {
+	return VMResources{VCPUs: orDefault(v.VCPUs, DefaultVMVCPUs), MemMiB: orDefault(v.MemMiB, DefaultVMMemMiB),
+		OverlayDiskMiB: orDefault(v.OverlayDiskMiB, DefaultVMOverlayDiskMiB)}
+}
+
+// Unset is want without the settings v already makes, so that a change
+// written with it leaves the user's own values alone.
+func (v VMConfig) Unset(want VMResources) VMResources {
+	if v.VCPUs != nil {
+		want.VCPUs = 0
+	}
+	if v.MemMiB != nil {
+		want.MemMiB = 0
+	}
+	if v.OverlayDiskMiB != nil {
+		want.OverlayDiskMiB = 0
+	}
+	return want
+}
+
+func orDefault(v *int64, def int64) int64 {
+	if v == nil {
+		return def
+	}
+	return *v
+}
+
+// RecommendedVMResources is what DefenseClaw sets up every MicroVM with,
+// above the driver's 2 vCPUs, 2 GiB and 4 GiB overlay, which an agent
+// building code outgrows: 4 vCPUs, 4 GiB of memory (a quarter of a
+// smaller Mac's, at least the driver's 2 GiB; hostMemory 0 is unknown)
+// and a 16 GiB overlay, which is sparse on the host and costs nothing
+// until used.
+func RecommendedVMResources(hostMemory uint64) VMResources {
+	mem := int64(4096)
+	if quarter := int64(hostMemory>>20) / 4 / 256 * 256; hostMemory > 0 && quarter < mem {
+		mem = max(quarter, DefaultVMMemMiB)
+	}
+	return VMResources{VCPUs: 4, MemMiB: mem, OverlayDiskMiB: 16384}
+}
+
 // gatewayServer is the [openshell.gateway] part of gateway.toml that
-// decides who can reach the gateway.
+// decides who can reach the gateway, and the compute driver it runs.
 type gatewayServer struct {
+	ComputeDriver string `toml:"compute_driver"`
 	// BindAddress is "ip:port".
 	BindAddress string `toml:"bind_address"`
 	DisableTLS  *bool  `toml:"disable_tls"`
@@ -286,7 +470,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 		return nil, err
 	}
 	st := &GatewayConfigState{TOMLPath: tomlPath, EnvPath: envPath, BindMounts: BindMounts{ResourceAdmission: true}}
-	envData, envInfo, err := readGatewayFile(envPath)
+	envData, envInfo, _, err := g.readConfigFile(envPath)
 	if err != nil {
 		return nil, err
 	}
@@ -297,38 +481,67 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 	if info, err := os.Lstat(g.restartPendingPath()); err == nil && info.Mode().IsRegular() {
 		st.RestartPendingSince = info.ModTime()
 	}
-	tomlData, tomlInfo, err := readGatewayFile(tomlPath)
+	tomlData, tomlInfo, _, err := g.readConfigFile(tomlPath)
 	if err != nil {
 		return nil, err
 	}
-	if tomlInfo == nil {
-		return st, nil
+	if tomlInfo != nil {
+		st.TOMLExists, st.TOMLModTime = true, tomlInfo.ModTime()
+		var doc struct {
+			OpenShell struct {
+				Gateway gatewayServer `toml:"gateway"`
+				Drivers struct {
+					Docker struct {
+						AllowDriverConfig bool `toml:"allow_driver_config"`
+						EnableBindMounts  bool `toml:"enable_bind_mounts"`
+						ResourceAdmission struct {
+							Enabled *bool `toml:"enabled"`
+						} `toml:"resource_admission"`
+					} `toml:"docker"`
+					VM struct {
+						SandboxUID     *int64 `toml:"sandbox_uid"`
+						SandboxGID     *int64 `toml:"sandbox_gid"`
+						VCPUs          *int64 `toml:"vcpus"`
+						MemMiB         *int64 `toml:"mem_mib"`
+						OverlayDiskMiB *int64 `toml:"overlay_disk_mib"`
+						StateDir       string `toml:"state_dir"`
+						DriverDir      string `toml:"driver_dir"`
+					} `toml:"vm"`
+				} `toml:"drivers"`
+			} `toml:"openshell"`
+		}
+		if err := toml.Unmarshal(tomlData, &doc); err != nil {
+			return st, fmt.Errorf("openshell: parse %s: %w", tomlPath, err)
+		}
+		st.server = doc.OpenShell.Gateway
+		st.ComputeDriver = ComputeDriver(strings.TrimSpace(st.server.ComputeDriver))
+		d := doc.OpenShell.Drivers.Docker
+		st.BindMounts = BindMounts{AllowDriverConfig: d.AllowDriverConfig, EnableBindMounts: d.EnableBindMounts, ResourceAdmission: true}
+		if d.ResourceAdmission.Enabled != nil {
+			st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
+		}
+		st.VM = VMConfig(doc.OpenShell.Drivers.VM)
 	}
-	st.TOMLExists, st.TOMLModTime = true, tomlInfo.ModTime()
-	var doc struct {
-		OpenShell struct {
-			Gateway gatewayServer `toml:"gateway"`
-			Drivers struct {
-				Docker struct {
-					AllowDriverConfig bool `toml:"allow_driver_config"`
-					EnableBindMounts  bool `toml:"enable_bind_mounts"`
-					ResourceAdmission struct {
-						Enabled *bool `toml:"enabled"`
-					} `toml:"resource_admission"`
-				} `toml:"docker"`
-			} `toml:"drivers"`
-		} `toml:"openshell"`
-	}
-	if err := toml.Unmarshal(tomlData, &doc); err != nil {
-		return st, fmt.Errorf("openshell: parse %s: %w", tomlPath, err)
-	}
-	st.server = doc.OpenShell.Gateway
-	d := doc.OpenShell.Drivers.Docker
-	st.BindMounts = BindMounts{AllowDriverConfig: d.AllowDriverConfig, EnableBindMounts: d.EnableBindMounts, ResourceAdmission: true}
-	if d.ResourceAdmission.Enabled != nil {
-		st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
-	}
+	st.overrideFromEnv()
 	return st, nil
+}
+
+// overrideFromEnv applies the gateway.env variables that override the
+// compute driver settings of gateway.toml. An empty variable counts as
+// unset, and one that is not a number is left to the gateway to refuse.
+func (s *GatewayConfigState) overrideFromEnv() {
+	if v := strings.TrimSpace(s.Env[envComputeDriver]); v != "" {
+		s.ComputeDriver = ComputeDriver(v)
+	}
+	for key, field := range map[string]**int64{envVMSandboxUID: &s.VM.SandboxUID, envVMSandboxGID: &s.VM.SandboxGID,
+		envVMVCPUs: &s.VM.VCPUs, envVMMemMiB: &s.VM.MemMiB, envVMOverlayDiskMiB: &s.VM.OverlayDiskMiB} {
+		if n, err := strconv.ParseInt(strings.TrimSpace(s.Env[key]), 10, 64); err == nil {
+			*field = &n
+		}
+	}
+	if v := strings.TrimSpace(s.Env[envVMStateDir]); v != "" {
+		s.VM.StateDir = v
+	}
 }
 
 // GatewayChanges are the configuration changes setup asks for.
@@ -341,11 +554,75 @@ type GatewayChanges struct {
 	// authentication on and the listener on loopback, and the gateway
 	// turns away a client without a certificate (ProbeClientAuth).
 	EnableBindMounts bool
+	// ComputeDriver selects the gateway's compute driver ([openshell.gateway]
+	// compute_driver); empty leaves it. One gateway runs one driver, so
+	// the other driver's sandboxes cannot start after a switch.
+	ComputeDriver ComputeDriver
+	// VMIdentity sets the uid and gid the MicroVM driver runs every
+	// sandbox's workload as ([openshell.drivers.vm] sandbox_uid and
+	// sandbox_gid), gateway-wide: sandboxes made outside DefenseClaw run
+	// as them too. Neither may be root's.
+	VMIdentity *VMIdentity
+	// VMResources sets what the MicroVM driver gives every sandbox
+	// ([openshell.drivers.vm] vcpus, mem_mib, overlay_disk_mib); zero
+	// fields are left alone.
+	VMResources *VMResources
 	// Env sets gateway.env entries (e.g. EnvTelemetryEnabled=false). The
 	// plan summary prints the values, so they must not be secrets.
 	Env map[string]string
 	// UnsetEnv removes gateway.env entries.
 	UnsetEnv []string
+}
+
+// tomlSettings are the gateway.toml assignments the changes make. Where
+// gateway.env overrides one with another value, Plan sets it there too.
+func (ch GatewayChanges) tomlSettings() ([]tomlSetting, error) {
+	var out []tomlSetting
+	if ch.EnableBindMounts {
+		out = append(out, bindMountSettings...)
+	}
+	if ch.ComputeDriver != "" {
+		out = append(out, tomlSetting{Table: gatewayTable, Key: "compute_driver", Value: string(ch.ComputeDriver)})
+	}
+	if id := ch.VMIdentity; id != nil {
+		if id.UID <= 0 || id.GID <= 0 {
+			return nil, fmt.Errorf("openshell: refusing to run MicroVM sandboxes as uid %d, gid %d: DefenseClaw runs them as your own user, never as root", id.UID, id.GID)
+		}
+		out = append(out, tomlSetting{Table: vmDriverTable, Key: "sandbox_uid", Value: id.UID},
+			tomlSetting{Table: vmDriverTable, Key: "sandbox_gid", Value: id.GID})
+	}
+	if r := ch.VMResources; r != nil {
+		for _, s := range []tomlSetting{{Key: "vcpus", Value: r.VCPUs}, {Key: "mem_mib", Value: r.MemMiB}, {Key: "overlay_disk_mib", Value: r.OverlayDiskMiB}} {
+			switch n := s.Value.(int64); {
+			case n < 0:
+				return nil, fmt.Errorf("openshell: [openshell.drivers.vm] %s = %d is not a size", s.Key, n)
+			case n > 0:
+				s.Table = vmDriverTable
+				out = append(out, s)
+			}
+		}
+	}
+	return out, nil
+}
+
+// vmEnvSettings are the gateway.env variables standing for the compute
+// driver settings of the changes, with the values the changes give them.
+func (ch GatewayChanges) vmEnvSettings() map[string]string {
+	out := map[string]string{}
+	if ch.ComputeDriver != "" {
+		out[envComputeDriver] = string(ch.ComputeDriver)
+	}
+	if id := ch.VMIdentity; id != nil {
+		out[envVMSandboxUID], out[envVMSandboxGID] = strconv.FormatInt(id.UID, 10), strconv.FormatInt(id.GID, 10)
+	}
+	if r := ch.VMResources; r != nil {
+		for key, n := range map[string]int64{envVMVCPUs: r.VCPUs, envVMMemMiB: r.MemMiB, envVMOverlayDiskMiB: r.OverlayDiskMiB} {
+			if n > 0 {
+				out[key] = strconv.FormatInt(n, 10)
+			}
+		}
+	}
+	return out
 }
 
 // FileChange is one file's planned content.
@@ -358,6 +635,12 @@ type FileChange struct {
 	TOML bool `json:"toml"`
 	// Summary lists the settings changed.
 	Summary []string `json:"summary"`
+	// SeededFrom is the Homebrew prefix's copy, owned by another user,
+	// that Path is created from with the change: the service reads Path
+	// from then on, and the other user's file is left alone. Apply checks
+	// that it has not changed since (SeedBefore).
+	SeededFrom string `json:"seeded_from,omitempty"`
+	SeedBefore []byte `json:"-"`
 }
 
 // GatewayPlan is exactly what Apply will write. Files that would not
@@ -366,6 +649,21 @@ type GatewayPlan struct {
 	Files []*FileChange `json:"files"`
 	// Restart names how the gateway will be restarted.
 	Restart string `json:"restart"`
+	// BindMounts marks a plan that enables docker-driver bind mounts: Apply
+	// checks again, against the restarted gateway, that only the caller can
+	// reach it.
+	BindMounts bool `json:"bind_mounts,omitempty"`
+	// ComputeDriver is the compute driver the plan configures, which
+	// Apply checks the restarted gateway runs; FromDriver is the one the
+	// configuration selected before (docker when it named none).
+	ComputeDriver ComputeDriver `json:"compute_driver,omitempty"`
+	FromDriver    ComputeDriver `json:"from_driver,omitempty"`
+}
+
+// switchesDriver reports whether the plan moves the gateway to another
+// compute driver.
+func (p *GatewayPlan) switchesDriver() bool {
+	return p.ComputeDriver != "" && p.ComputeDriver != p.FromDriver
 }
 
 // Empty reports whether nothing would change.
@@ -379,9 +677,12 @@ func (p *GatewayPlan) String() string {
 	var b strings.Builder
 	b.WriteString("OpenShell gateway configuration changes\n")
 	for _, f := range p.Files {
-		if f.Before == nil {
+		switch {
+		case f.SeededFrom != "":
+			fmt.Fprintf(&b, "  create %s from %s, which another user owns and is left alone; the gateway reads the new file from then on\n", f.Path, f.SeededFrom)
+		case f.Before == nil:
 			fmt.Fprintf(&b, "  create %s\n", f.Path)
-		} else {
+		default:
 			fmt.Fprintf(&b, "  edit %s (a timestamped backup is kept)\n", f.Path)
 		}
 		for _, s := range f.Summary {
@@ -395,7 +696,13 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "      %s\n", strings.TrimRight(l, " "))
 		}
 	}
-	fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
+	switch {
+	case p.switchesDriver():
+		fmt.Fprintf(&b, "  then restart the gateway (%s) on the %s compute driver; running sandboxes stop, and sandboxes "+
+			"made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.Restart, p.ComputeDriver, p.FromDriver)
+	default:
+		fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
+	}
 	return b.String()
 }
 
@@ -406,67 +713,161 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 		return nil, err
 	}
 	plan := &GatewayPlan{Restart: strings.Join(g.restartCommand().argv(), " ")}
-	if !ch.EnableBindMounts && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 {
+	settings, err := ch.tomlSettings()
+	if err != nil {
+		return nil, err
+	}
+	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 {
 		return plan, nil
 	}
 	env, err := g.serviceEnvironment(ctx)
 	if err != nil {
 		return nil, err
 	}
+	envSet := ch.Env
+	var overrides []string
+	if len(settings) > 0 {
+		st, err := g.Read()
+		if err != nil {
+			return nil, err
+		}
+		if ch.EnableBindMounts {
+			// Bind mounts are the docker driver's: refuse them for a driver
+			// that mounts no host folders, rather than write settings it
+			// never reads.
+			driver := st.ComputeDriver
+			if ch.ComputeDriver != "" {
+				driver = ch.ComputeDriver
+			}
+			if d, known := LookupDriver(string(driver)); known && !d.HostMounts {
+				return nil, fmt.Errorf("%w: %s", ErrBindMountsRefused, d.MountRefusal)
+			}
+		}
+		if ch.ComputeDriver != "" {
+			plan.ComputeDriver, plan.FromDriver = ch.ComputeDriver, st.ComputeDriver
+			if plan.FromDriver == "" {
+				plan.FromDriver = DriverDocker
+			}
+		}
+		// gateway.env overrides gateway.toml: a variable there that says
+		// otherwise is set to match, or the change would not take.
+		for key, want := range ch.vmEnvSettings() {
+			if have := strings.TrimSpace(st.Env[key]); have != "" && have != want {
+				if _, clash := ch.Env[key]; clash || slices.Contains(ch.UnsetEnv, key) {
+					return nil, fmt.Errorf("openshell: %s is both a compute driver setting and a gateway.env change", key)
+				}
+				if len(overrides) == 0 {
+					envSet = maps.Clone(ch.Env)
+					if envSet == nil {
+						envSet = map[string]string{}
+					}
+				}
+				envSet[key] = want
+				overrides = append(overrides, key)
+			}
+		}
+	}
 	if ch.EnableBindMounts {
 		if err := g.requirePrivateGateway(ctx, env); err != nil {
 			return nil, err
 		}
-		path, err := g.TOMLPath()
+	}
+	if len(settings) > 0 {
+		fc, err := g.planTOML(settings)
 		if err != nil {
 			return nil, err
 		}
-		before, info, err := readGatewayFile(path)
+		if fc != nil {
+			plan.Files = append(plan.Files, fc)
+			plan.BindMounts = ch.EnableBindMounts
+		}
+	}
+	if len(envSet) > 0 || len(ch.UnsetEnv) > 0 {
+		fc, err := g.planEnv(envSet, ch.UnsetEnv, overrides)
 		if err != nil {
 			return nil, err
 		}
-		src := before
-		if info == nil {
-			before = nil
-			src = []byte(fmt.Sprintf("# OpenShell gateway configuration.\n\n[openshell]\nversion = %d\n", GatewayConfigVersion))
-		}
-		after, err := editTOML(src, bindMountSettings)
-		if err != nil {
-			return nil, fmt.Errorf("openshell: %s: %w", path, err)
-		}
-		if info == nil || !bytes.Equal(before, after) {
-			fc := &FileChange{Path: path, Before: before, After: after, TOML: true}
-			var current map[string]any
-			_ = toml.Unmarshal(src, &current)
-			for _, s := range bindMountSettings {
-				if v, ok := lookupTOML(current, s.Table, s.Key); !ok || v != s.Value {
-					fc.Summary = append(fc.Summary, s.String())
-				}
-			}
+		if fc != nil {
 			plan.Files = append(plan.Files, fc)
 		}
 	}
-	if len(ch.Env) > 0 || len(ch.UnsetEnv) > 0 {
-		path, err := g.EnvPath()
-		if err != nil {
-			return nil, err
-		}
-		before, info, err := readGatewayFile(path)
-		if err != nil {
-			return nil, err
-		}
-		if info == nil {
-			before = nil
-		}
-		after, summary, err := editEnvFile(before, ch.Env, ch.UnsetEnv)
-		if err != nil {
-			return nil, fmt.Errorf("openshell: %s: %w", path, err)
-		}
-		if !bytes.Equal(before, after) {
-			plan.Files = append(plan.Files, &FileChange{Path: path, Before: before, After: after, Summary: summary})
-		}
+	if plan.Empty() {
+		plan.ComputeDriver, plan.FromDriver = "", ""
 	}
 	return plan, nil
+}
+
+// newGatewayTOML starts a gateway.toml that does not exist yet.
+var newGatewayTOML = fmt.Sprintf("# OpenShell gateway configuration.\n\n[openshell]\nversion = %d\n", GatewayConfigVersion)
+
+// planTOML plans settings in the gateway.toml the service reads; nil when
+// nothing would change.
+func (g *GatewayConfigurator) planTOML(settings []tomlSetting) (*FileChange, error) {
+	path, err := g.TOMLPath()
+	if err != nil {
+		return nil, err
+	}
+	before, info, foreign, err := g.readConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+	src := before
+	if info == nil {
+		before, src = nil, []byte(newGatewayTOML)
+	}
+	after, err := editTOML(src, settings)
+	if err != nil {
+		return nil, fmt.Errorf("openshell: %s: %w", path, err)
+	}
+	if info != nil && bytes.Equal(before, after) {
+		return nil, nil
+	}
+	fc := &FileChange{Path: path, Before: before, After: after, TOML: true}
+	if foreign {
+		fc.Path, fc.Before, fc.SeededFrom, fc.SeedBefore = filepath.Join(g.Dir, GatewayTOMLFile), nil, path, before
+	}
+	var current map[string]any
+	_ = toml.Unmarshal(src, &current)
+	for _, s := range settings {
+		if v, ok := lookupTOML(current, s.Table, s.Key); !ok || v != s.Value {
+			fc.Summary = append(fc.Summary, s.String())
+		}
+	}
+	return fc, nil
+}
+
+// planEnv plans gateway.env entries; nil when nothing would change.
+// overrides are the variables set because they override a gateway.toml
+// setting the plan makes, which the summary says.
+func (g *GatewayConfigurator) planEnv(set map[string]string, unset, overrides []string) (*FileChange, error) {
+	path, err := g.EnvPath()
+	if err != nil {
+		return nil, err
+	}
+	before, info, foreign, err := g.readConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		before = nil
+	}
+	after, summary, err := editEnvFile(before, set, unset)
+	if err != nil {
+		return nil, fmt.Errorf("openshell: %s: %w", path, err)
+	}
+	if bytes.Equal(before, after) {
+		return nil, nil
+	}
+	for i, s := range summary {
+		if k, _, _ := strings.Cut(s, "="); slices.Contains(overrides, k) {
+			summary[i] = s + " (it overrides gateway.toml)"
+		}
+	}
+	fc := &FileChange{Path: path, Before: before, After: after, Summary: summary}
+	if foreign {
+		fc.Path, fc.Before, fc.SeededFrom, fc.SeedBefore = filepath.Join(g.Dir, GatewayEnvFile), nil, path, before
+	}
+	return fc, nil
 }
 
 // AppliedFile records one written file for Rollback.
@@ -485,9 +886,10 @@ type GatewayApplyResult struct {
 // Apply writes the plan, restarts the gateway and waits for it. A file
 // that changed since Plan, a TOML preflight failure, an unsafe path or a
 // gateway that fails Plan's checks aborts before anything is written.
-// When the restart or the health check fails, or the restarted gateway
-// with bind mounts no longer turns away a client without a certificate,
-// the previous files are restored and the gateway restarted again.
+// When the restart or the health check fails, the restarted gateway with
+// bind mounts no longer turns away a client without a certificate, or it
+// does not run the compute driver the plan configures, the previous files
+// are restored and the gateway restarted again.
 func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*GatewayApplyResult, error) {
 	if err := g.defaults(); err != nil {
 		return nil, err
@@ -500,9 +902,7 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err != nil {
 		return nil, err
 	}
-	// gateway.toml changes only enable bind mounts.
-	mounts := slices.ContainsFunc(plan.Files, func(f *FileChange) bool { return f.TOML })
-	if mounts {
+	if plan.BindMounts {
 		if err := g.requirePrivateGateway(ctx, env); err != nil {
 			return nil, err
 		}
@@ -514,6 +914,11 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 		}
 		if (info == nil) != (f.Before == nil) || (info != nil && !bytes.Equal(current, f.Before)) {
 			return nil, fmt.Errorf("%w: %s", ErrConfigChanged, f.Path)
+		}
+		if f.SeededFrom != "" {
+			if seed, _, _, err := g.readConfigFile(f.SeededFrom); err != nil || !bytes.Equal(seed, f.SeedBefore) {
+				return nil, fmt.Errorf("%w: %s", ErrConfigChanged, f.SeededFrom)
+			}
 		}
 		if f.TOML {
 			if err := g.preflight(ctx, f); err != nil {
@@ -544,9 +949,20 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err := g.Restart(ctx); err != nil {
 		return res, g.rollbackAfter(ctx, res, err, true)
 	}
-	if mounts {
+	if plan.BindMounts {
 		// Check again against the gateway that now honours bind mounts.
 		if err := g.requirePrivateGateway(ctx, env); err != nil {
+			return res, g.rollbackAfter(ctx, res, err, true)
+		}
+	}
+	if plan.ComputeDriver != "" {
+		// A gateway.env the plan did not see (launchd's own environment,
+		// for one) could still select another driver.
+		d, err := g.RunningDriver(ctx)
+		if err == nil && d.Name != plan.ComputeDriver {
+			err = fmt.Errorf("openshell: the restarted gateway runs the %s compute driver, not %s; something else in its environment selects it", d.Name, plan.ComputeDriver)
+		}
+		if err != nil {
 			return res, g.rollbackAfter(ctx, res, err, true)
 		}
 	}
@@ -1147,11 +1563,65 @@ func brewFormulaInstalled() bool {
 	return false
 }
 
+// homebrewPrefix is the Homebrew prefix, found once like `brew --prefix`
+// without running brew: HOMEBREW_PREFIX (which `brew shellenv` sets),
+// else the prefix of the brew on PATH (the one holding a Cellar, through
+// its link when it has none), else /opt/homebrew, Apple silicon's.
+var homebrewPrefix = sync.OnceValue(func() string {
+	if p := os.Getenv("HOMEBREW_PREFIX"); filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	if brew, err := exec.LookPath("brew"); err == nil && filepath.IsAbs(brew) {
+		candidates := []string{brew}
+		if real, err := filepath.EvalSymlinks(brew); err == nil {
+			candidates = append(candidates, real)
+		}
+		for _, c := range candidates {
+			prefix := filepath.Dir(filepath.Dir(c))
+			if info, err := os.Stat(filepath.Join(prefix, "Cellar")); err == nil && info.IsDir() {
+				return prefix
+			}
+		}
+	}
+	return "/opt/homebrew"
+})
+
+// runningDriver asks the gateway of opts which compute driver it runs.
+func runningDriver(ctx context.Context, opts DiscoverOptions) (Driver, error) {
+	reg, err := Discover(opts)
+	if err != nil {
+		return Driver{}, err
+	}
+	c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
+	if err != nil {
+		return Driver{}, err
+	}
+	defer c.Close()
+	info, err := c.GatewayInfo(ctx)
+	if err != nil {
+		return Driver{}, fmt.Errorf("openshell: gateway info: %w", err)
+	}
+	return GatewayDriver(info)
+}
+
+// errForeignGatewayFile marks a configuration file another user owns.
+var errForeignGatewayFile = errors.New("is owned by another user")
+
+// gatewayFileOwned reports whether a configuration file is the caller's
+// (tests stand in for a file another user owns).
+var gatewayFileOwned = ownedByCaller
+
 // readGatewayFile reads a configuration file. A missing file returns nil
 // data and nil info. Symlinks, non-regular files and files owned by
 // another user are refused: the gateway runs as the caller, and editing
 // through a link could redirect a write.
 func readGatewayFile(path string) ([]byte, fs.FileInfo, error) {
+	return readGatewayFileOf(path, false)
+}
+
+// readGatewayFileOf is readGatewayFile that, with foreign, also reads a
+// file another user owns (to copy it, never to write it).
+func readGatewayFileOf(path string, foreign bool) ([]byte, fs.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, nil
@@ -1162,8 +1632,8 @@ func readGatewayFile(path string) ([]byte, fs.FileInfo, error) {
 	if !info.Mode().IsRegular() {
 		return nil, nil, fmt.Errorf("openshell: %s is not a regular file", path)
 	}
-	if !ownedByCaller(info) {
-		return nil, nil, fmt.Errorf("openshell: %s is owned by another user", path)
+	if !foreign && !gatewayFileOwned(info) {
+		return nil, nil, fmt.Errorf("openshell: %s %w", path, errForeignGatewayFile)
 	}
 	data, err := safefile.ReadRegularFileBounded(path, maxGatewayFileBytes)
 	if err != nil {

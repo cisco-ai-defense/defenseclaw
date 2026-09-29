@@ -108,6 +108,7 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 	f.cfg = &openshell.GatewayConfigurator{
 		Dir:             f.dir,
 		GOOS:            "linux",
+		BrewPrefix:      filepath.Join(filepath.Dir(f.dir), "homebrew"),
 		Runner:          f.runner,
 		VerifyGateway:   func(context.Context) error { f.verified++; return f.verify },
 		ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
