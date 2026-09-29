@@ -682,8 +682,10 @@ class Store:
         sql = f"SELECT COUNT(*) FROM audit_events WHERE NOT COALESCE({_ACTIONABLE_EVENT_WHERE}, 0)"
         params: tuple[str, ...] = ()
         if connector:
-            sql += " AND lower(COALESCE(details, '')) LIKE ?"
-            params = (f"%connector={connector.lower()}%",)
+            # Match the name literally: % and _ would otherwise be wildcards.
+            name = connector.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            sql += " AND lower(COALESCE(details, '')) LIKE ? ESCAPE '\\'"
+            params = (f"%connector={name}%",)
         return int(self.db.execute(sql, params).fetchone()[0])
 
     def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:

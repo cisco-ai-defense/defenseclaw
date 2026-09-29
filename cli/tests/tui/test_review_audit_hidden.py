@@ -58,5 +58,7 @@ def test_a_store_backed_view_counts_the_routine_rows_it_left_out(tmp_path) -> No
         assert model.hidden_routine_count() == 3
         model.set_connector_filter("codex")
         assert model.hidden_routine_count() == 2
+        model.set_connector_filter("co_ex")  # matched literally, not as a LIKE wildcard
+        assert model.hidden_routine_count() == 0
     finally:
         store.close()
