@@ -54,7 +54,7 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     "idna": (">=3.15", None),
     "pydantic-settings": (">=2.14.2", None),
     "aiohttp": (">=3.14.3,<4", None),
-    "pyjwt": (">=2.13.0", None),
+    "pyjwt": (">=2.14.0", None),
     "starlette": (">=1.3.1,<1.4", None),
     "fastapi": (">=0.137.1,<0.138", None),
 }
