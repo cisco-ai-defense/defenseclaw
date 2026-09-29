@@ -134,3 +134,25 @@ print(len(cli.PRINTED[0]), cli.PRINTED[0].endswith("..."), "\n" in cli.PRINTED[0
 	}
 	shParses(t, "Hermes install step", steps[0].Run)
 }
+
+// TestHermesInstallStampsTheImageInstallMethod: the image writes Hermes'
+// code-scoped install-method stamp, root-owned, next to the code Hermes
+// resolves it from (the site-packages the hermes_cli package lives in), so
+// Hermes reads the install as an image instead of an unsupported pip install
+// (no notice, no pypi.org update check at start).
+func TestHermesInstallStampsTheImageInstallMethod(t *testing.T) {
+	steps, err := Hermes.InstallSteps("")
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("install steps = %v, %v", steps, err)
+	}
+	run := steps[0].Run
+	stamp := `printf 'docker\n' >"$site/.install_method"; chown root:root "$site/.install_method"; chmod 0644 "$site/.install_method"`
+	if hermesInstallMethod != "docker" || !strings.Contains(run, stamp) {
+		t.Fatalf("the Hermes install does not stamp the install method:\n%s", run)
+	}
+	// $site is the checked site-packages of the pinned tool environment.
+	if site := strings.LastIndex(run, `site="$(`); site < 0 || site > strings.Index(run, stamp) ||
+		!strings.Contains(run[site:], `case "$site" in `+InstallRootBase+`/hermes/*)`) {
+		t.Fatalf("the stamp is not written into the checked site-packages:\n%s", run)
+	}
+}

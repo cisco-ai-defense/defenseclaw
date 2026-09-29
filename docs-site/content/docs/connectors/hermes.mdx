@@ -293,8 +293,9 @@ only in the image; nothing on your host changes.
   root-owned file. It also pins `hooks_auto_accept: true` (the hooks register
   without the first-use prompt), `plugins.enabled: []`, `terminal.backend:
   local` (approved commands run inside the sandbox), `agent.disabled_toolsets:
-  [code_execution]`, `security.tirith_enabled: false` and
-  `security.allow_lazy_installs: false`. A user setting can add hooks for
+  [code_execution]`, `security.tirith_enabled: false`,
+  `security.allow_lazy_installs: false` and `model_catalog.enabled: false`.
+  A user setting can add hooks for
   other events but cannot drop or replace DefenseClaw's.
 
   Hermes still reads settings and imports code from its home directory,
@@ -363,12 +364,21 @@ only in the image; nothing on your host changes.
   the OpenShell sandbox refuses. The image answers that call with
   `defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox`, and
   Hermes keeps running, after its own "has been suspended" line.
-- **Other traffic.** Apart from the model, a daemon run on a mock model
-  reached only `pypi.org` (Hermes' update check). The image turns off the
-  Tirith scanner download and runtime installs, which reached `github.com`
-  and fetched about 20 MB from `release-assets.githubusercontent.com` and
-  `files.pythonhosted.org` before. Remaining traffic goes through the
-  DefenseClaw egress proxy, which logs it and applies the blocklist.
+- **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
+  at start (its model metadata, which has no setting to turn off). The
+  image marks the install the way Hermes' own image does (an
+  `.install_method` of `docker` next to the code), so Hermes neither checks
+  `pypi.org` for updates nor prints its "pip installs are no longer an
+  officially supported platform" notice; `hermes update` then says it does
+  not apply in a container (rebuild the image instead). The managed layer
+  pins `model_catalog.enabled: false`, which stops the fetch of Hermes'
+  curated OpenRouter and Nous Portal model lists
+  (`hermes-agent.nousresearch.com`, redirected to `nousresearch.github.io`).
+  It also turns off the Tirith scanner download and runtime installs, which
+  reached `github.com` and fetched about 20 MB from
+  `release-assets.githubusercontent.com` and `files.pythonhosted.org`
+  before. Remaining traffic goes through the DefenseClaw egress proxy, which
+  logs it and applies the blocklist.
 - **Status.** Verified end to end. A run through the DefenseClaw daemon in an
   OpenShell sandbox, on a mock model behind a credential binding, showed:
   - hooks reaching the sandbox ingress, with OpenShell substituting the model

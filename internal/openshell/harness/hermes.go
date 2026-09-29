@@ -44,9 +44,24 @@ var hermesTool = uvTool{
 		`printf 'import ` + hermesSuspendModuleName + `\n' >"$site/` + hermesSuspendModuleName + `.pth"; ` +
 		`chown root:root "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
 		`chmod 0644 "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
+		// The block-notice shim, and the install-method stamp
+		// (hermesInstallMethod) next to the code, root-owned like it.
 		pyShimInstall(InstallRootBase+"/hermes/tools/hermes-agent/bin/python", InstallRootBase+"/hermes", "Hermes",
-			pyShim{name: hermesBlockNoticeModuleName, source: hermesBlockNoticeModule}),
+			pyShim{name: hermesBlockNoticeModuleName, source: hermesBlockNoticeModule}) + `; ` +
+		`printf '` + hermesInstallMethod + `\n' >"$site/.install_method"; chown root:root "$site/.install_method"; chmod 0644 "$site/.install_method"`,
 }
+
+// hermesInstallMethod is the install-method stamp the image writes next to
+// Hermes' code, which Hermes 0.19.0 reads before anything else to tell how
+// it was installed (hermes_cli/config.py detect_install_method). Without it
+// a PyPI install is "pip": the banner then says "pip installs are no longer
+// an officially supported platform and will not receive further updates"
+// at every start, and every start asks pypi.org for a newer release
+// (banner.py check_for_updates). "docker" is how Hermes' own published image
+// marks an install that is updated by replacing the image, which is what a
+// DefenseClaw image is: Hermes then skips the update check and the notice,
+// and `hermes update` explains that it does not apply in a container.
+const hermesInstallMethod = "docker"
 
 // hermesBlockNoticeModuleName is the root-owned module that shows a tool
 // call DefenseClaw blocked.

@@ -349,6 +349,12 @@ deleted.
   Hermes image prints the block reason under the tool's line
   (`┊ ✗ terminal blocked by DefenseClaw rule <ID>: …`), where Hermes 0.19
   printed nothing. The reason the model gets is unchanged.
+- The Hermes image stamps its install the way Hermes' own image does
+  (`.install_method` = `docker`), so Hermes no longer prints "pip installs are
+  no longer an officially supported platform" or asks `pypi.org` for updates
+  at every start, and its managed layer pins `model_catalog.enabled: false`,
+  which stops the start-up fetch from `hermes-agent.nousresearch.com` and
+  `nousresearch.github.io`.
 
 ### Legacy OpenShell standalone sandbox removed
 

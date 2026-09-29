@@ -32,8 +32,8 @@
     "/etc/hermes/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 3253,
-      "sha256": "065167eba8baf1958b9e74d27efbfadc668b95c8b8e3d2c47ca13fde8a366979"
+      "size": 3287,
+      "sha256": "3bfa7c7cbff9b50ea7417b27d736fd7659b142ad346137b1dd4b91504f45cdfc"
     },
     "/sandbox/.hermes/config.yaml": {
       "mode": "-rw-------",
