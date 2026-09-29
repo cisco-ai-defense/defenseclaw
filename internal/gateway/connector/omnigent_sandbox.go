@@ -143,6 +143,13 @@ func renderOmnigentSandboxPolicy(rt resolvedSandboxTarget) ([]byte, error) {
 // the REPL starts (omnigent-ui-sdk 0.13.0 _config.update_user_config), so
 // the image pins OmniGent's dark theme; /theme cannot change it inside a
 // sandbox.
+//
+// telemetry: false switches off OmniGent's usage telemetry, which otherwise
+// fetches config.omnigent-telemetry.io at every server start and posts
+// events to its ingestion host (omnigent 0.13.0 telemetry/client.py). Every
+// OmniGent process reads this file through OMNIGENT_CONFIG_HOME, including
+// the runner, whose environment OmniGent strips to an allowlist that an
+// environment switch such as OMNIGENT_DISABLE_TELEMETRY is not on.
 func omnigentSandboxConfig() map[string]interface{} {
 	return map[string]interface{}{
 		"default_agent":  OmnigentSandboxAgentPath,
@@ -150,7 +157,8 @@ func omnigentSandboxConfig() map[string]interface{} {
 		"policies": map[string]interface{}{
 			omnigentPolicyConfigKey: map[string]interface{}{"type": "function", "handler": omnigentPolicyHandler},
 		},
-		"tui": map[string]interface{}{"theme": "dark"},
+		"telemetry": false,
+		"tui":       map[string]interface{}{"theme": "dark"},
 	}
 }
 
@@ -165,8 +173,8 @@ func renderOmnigentSandboxConfig(rt resolvedSandboxTarget) ([]byte, error) {
 }
 
 // verifyOmnigentSandboxConfig reads the configuration back and requires the
-// DefenseClaw module, its server-wide policy and the pinned TUI theme, and
-// nothing else.
+// DefenseClaw module, its server-wide policy, telemetry off and the pinned
+// TUI theme, and nothing else.
 func verifyOmnigentSandboxConfig(data []byte) error {
 	var cfg map[string]interface{}
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

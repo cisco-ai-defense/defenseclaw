@@ -36,8 +36,10 @@ import (
 )
 
 // TestOmnigentSandboxArtifacts: the root-owned configuration loads only the
-// DefenseClaw policy module and pins the TUI theme (without one the TUI's
-// first-launch picker crashes writing it to the root-owned file, R2-79).
+// DefenseClaw policy module, switches OmniGent's usage telemetry off (it
+// called config.omnigent-telemetry.io and api.omnigent-telemetry.io at every
+// start, OG-U3) and pins the TUI theme (without one the TUI's first-launch
+// picker crashes writing it to the root-owned file, R2-79).
 func TestOmnigentSandboxArtifacts(t *testing.T) {
 	var cfg map[string]interface{}
 	artifacts := sandboxArtifactsFor(t, NewOmnigentConnector(), "0.13.0")
@@ -54,10 +56,24 @@ func TestOmnigentSandboxArtifacts(t *testing.T) {
 	if tui, _ := cfg["tui"].(map[string]interface{}); tui["theme"] != "dark" {
 		t.Fatalf("tui = %v, want a pinned theme", cfg["tui"])
 	}
+	if cfg["telemetry"] != false {
+		t.Fatalf("telemetry = %v, want false", cfg["telemetry"])
+	}
+	// OmniGent reads the switch with a line match on the raw text, not
+	// through its YAML loader (telemetry/client.py _config_telemetry_disabled).
+	if !regexp.MustCompile(`(?im)^\s*telemetry\s*:\s*false\s*$`).Match(config) {
+		t.Fatalf("OmniGent would not see telemetry switched off in:\n%s", config)
+	}
 	if err := verifyOmnigentSandboxConfig(config); err != nil {
 		t.Fatalf("rendered config rejected: %v", err)
 	}
-	for _, bad := range []string{"policy_modules: []\n", "policy_modules: [x]\npolicies: {}\n", "{"} {
+	telemetryOn := omnigentSandboxConfig()
+	telemetryOn["telemetry"] = true
+	telemetryOnYAML, err := yaml.Marshal(telemetryOn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"policy_modules: []\n", "policy_modules: [x]\npolicies: {}\n", "{", string(telemetryOnYAML)} {
 		if err := verifyOmnigentSandboxConfig([]byte(bad)); err == nil {
 			t.Fatalf("verify accepted %q", bad)
 		}

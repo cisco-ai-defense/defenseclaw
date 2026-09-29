@@ -257,13 +257,19 @@ exist only in the image; nothing on your host changes.
   proxy settings in `OMNIGENT_RUNNER_ENV_PASSTHROUGH`, so tool commands also
   go through the DefenseClaw egress proxy. Loopback traffic between
   OmniGent's own processes stays off the proxy.
-- **Other traffic.** Apart from the model, a daemon run on a mock model
-  reached `config.omnigent-telemetry.io` and `api.omnigent-telemetry.io`
-  (telemetry), `github.com` and `release-assets.githubusercontent.com`. An
-  earlier mock-model run also reached `chatgpt.com` and `models.dev` (the
-  model catalog). The launcher sets `OMNIGENT_NO_UPDATE_CHECK=1`. That
-  traffic goes through the DefenseClaw egress proxy, which logs it and
-  applies the blocklist.
+- **Other traffic.** OmniGent's usage telemetry is off in a sandbox: the
+  managed configuration sets `telemetry: false`, which every OmniGent process
+  reads (the tool runner included), and the launcher sets
+  `OMNIGENT_DISABLE_TELEMETRY=1`. So OmniGent does not contact
+  `config.omnigent-telemetry.io` or `api.omnigent-telemetry.io`. The launcher
+  also sets `OMNIGENT_NO_UPDATE_CHECK=1`. At start OmniGent still fetches
+  its model catalog, which gives a model's context window and prices, from
+  MLflow's GitHub releases (`github.com`, redirected to
+  `release-assets.githubusercontent.com`). A session summary counts those two
+  as new sites even when nothing was prompted. An earlier mock-model run also
+  reached `chatgpt.com` and `models.dev` (model catalogs). That traffic goes
+  through the DefenseClaw egress proxy, which logs it and applies the
+  blocklist.
 - **Status.** Verified end to end. A run through the DefenseClaw daemon in an
   OpenShell sandbox, with the sandbox agent on a mock model behind a
   credential binding, showed:

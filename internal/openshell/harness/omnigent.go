@@ -106,7 +106,7 @@ var OmniGent = register(&Spec{
 		"refuse --server with a URL and a project .omnigent/config.yaml that sets server, as OmniGent's YAML loader reads it, or that the loader cannot parse (sessions stay on the local server, which loads DefenseClaw's policy)",
 		"stop, and stop reusing, any OmniGent server or host daemon its records in ~/.omnigent name that is not the pinned OmniGent started with that configuration (OmniGent reuses a live one whatever configuration it started with)",
 		"copy BEDROCK_MANTLE_API_KEY into OPENAI_API_KEY for the Mantle profile",
-		"set OMNIGENT_NO_UPDATE_CHECK=1 (the pinned install cannot upgrade itself)",
+		"set OMNIGENT_NO_UPDATE_CHECK=1 (the pinned install cannot upgrade itself) and OMNIGENT_DISABLE_TELEMETRY=1 (the configuration also sets telemetry: false, which the runner reads too)",
 	},
 })
 
@@ -139,7 +139,10 @@ set -u
 ` + launcherPreamble + pythonStartupScrub + `unset OMNIGENT_CONFIG OMNIGENT_DATA_DIR OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN
 OMNIGENT_CONFIG_HOME=` + shellQuote(connector.OmnigentSandboxConfigHome) + `
 OMNIGENT_NO_UPDATE_CHECK=1
-export OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK
+# Usage telemetry is off in the configuration, which every OmniGent process
+# reads; the switch covers the CLI, the host daemon and the server as well.
+OMNIGENT_DISABLE_TELEMETRY=1
+export OMNIGENT_CONFIG_HOME OMNIGENT_NO_UPDATE_CHECK OMNIGENT_DISABLE_TELEMETRY
 # The Mantle profile delivers its key under its own name; the sandbox agent's
 # openai-agents harness reads OPENAI_API_KEY.
 if [ -z "${OPENAI_API_KEY:-}" ] && [ -n "${BEDROCK_MANTLE_API_KEY:-}" ]; then
