@@ -341,7 +341,10 @@ deleted.
   blocked` with M matching its `✗` lines, `sandbox status` reads
   `N destinations contacted, M blocked`, and an invalid destination (a host
   without a dot) counts as blocked like the feed shows it (the status JSON
-  keeps the request count as `egress.blocked_requests`).
+  keeps the request count as `egress.blocked_requests`). The banner's
+  `Hooks` line says, per user-tier harness, what the image keeps root-owned
+  and what the agent can still change (it said "the agent could edit its own
+  hook settings" also for Kiro and Hermes, whose hooks are root-owned).
 
 ### Legacy OpenShell standalone sandbox removed
 

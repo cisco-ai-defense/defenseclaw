@@ -92,6 +92,7 @@ var Hermes = register(&Spec{
 	// files, profiles and plugins from its workload-writable home at every
 	// start; the launcher's checks keep them from switching the hooks off.
 	TamperTier: connector.SandboxTamperTierUser,
+	TamperNote: "the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start",
 	verification: Verification{Status: VerifiedLive,
 		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=hermes): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a hostile user config.yaml and a planted sitecustomize in the launch environment, and launcher refusals of a planted .env (safe mode, managed dir), model-provider plugin and profile secrets section. Verified with the E2E mock model behind a --credential binding only: no curated provider profile has carried a real model inside a sandbox. The Mantle endpoint set (managed defenseclaw provider, bearer, Chat Completions) answered the pinned Hermes host-direct with openai.gpt-oss-20b; the OpenAI and Anthropic profiles are unverified"},
 	probe: ProbeSpec{

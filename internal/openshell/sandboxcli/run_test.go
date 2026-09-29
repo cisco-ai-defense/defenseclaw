@@ -829,6 +829,20 @@ func TestBanner(t *testing.T) {
 			[]string{"skip-permissions OFF (harness prompts kept)"}, nil},
 		{"omnigent", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.Harness, sb.HarnessName = "omnigent", "OmniGent" }, nil,
 			[]string{"OmniGent · approvals from OmniGent's policies, DefenseClaw's included"}, []string{"skip-permissions"}},
+		// A user tier says what the image protects for that harness: Kiro's
+		// and Hermes' hooks are root-owned (cert kiro:KR-F3,
+		// hermes:HERMES-3).
+		{"kiro's tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings and MCP servers are the agent's to edit"},
+			[]string{"could edit its own hook settings"}},
+		{"hermes' tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "hermes", "Hermes Agent", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
+			nil},
+		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")

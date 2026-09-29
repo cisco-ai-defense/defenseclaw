@@ -100,6 +100,10 @@ func TestRegistry(t *testing.T) {
 			artifactsFor(t, spec).TamperTier != spec.TamperTier {
 			t.Fatalf("%s tamper tier %q does not match its artifacts", name, spec.TamperTier)
 		}
+		// The launch banner says what a user tier leaves open, per harness.
+		if (spec.TamperTier == connector.SandboxTamperTierUser) != (spec.TamperNote != "") {
+			t.Fatalf("%s: tamper tier %q with note %q; every user-tier harness, and only one, says what its tier leaves open", name, spec.TamperTier, spec.TamperNote)
+		}
 		if v := spec.Verification(); v.Status != VerifiedLive && v.Status != Unverified || strings.TrimSpace(v.Note) == "" {
 			t.Fatalf("%s verification %#v carries no status, evidence or reason", name, v)
 		}

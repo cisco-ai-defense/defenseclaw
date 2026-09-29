@@ -45,6 +45,7 @@ var OpenHands = register(&Spec{
 	DefaultVersion: "1.16.0",
 	Provider:       connector.NewOpenHandsConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
+	TamperNote:     "the hook scripts are root-owned; ~/.openhands/hooks.json, which registers them, is the agent's to edit and is restored at every start",
 	verification: Verification{Status: VerifiedLive,
 		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=openhands): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a replaced user hooks.json, a planted sitecustomize in the launch environment and a hooks path replaced by a directory (refused). Verified with the E2E mock model behind a --credential binding only: no curated provider profile has carried a real model inside a sandbox. The Mantle endpoint set (LiteLLM openai/<model>, bearer) answered the pinned OpenHands host-direct with openai.gpt-oss-20b; the OpenAI and Anthropic profiles are unverified"},
 	probe: ProbeSpec{

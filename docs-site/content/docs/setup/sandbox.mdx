@@ -394,7 +394,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `MCP` | Your MCP servers that came along. |
-| `Hooks` | Shown for user-tier harnesses: the agent could edit its own hook settings, and hook silence is detected. |
+| `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings and MCP servers are the agent's to edit (Kiro has no system settings tier) (hook silence is detected)`. It reads the same on every compute driver. The connector pages have the details. |
 | `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
 
 ### Harness arguments and headless runs
