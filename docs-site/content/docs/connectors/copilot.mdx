@@ -248,8 +248,9 @@ GitHub's Copilot CLI 1.0.76 release notes state that per-path sandbox denials ca
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run copilot` runs GitHub Copilot CLI in an NVIDIA
-OpenShell sandbox on Linux (not yet on macOS): the agent sees only your
-project folder, and DefenseClaw hooks gate every tool call. The
+OpenShell sandbox, on Linux or, on an Apple-silicon Mac, in a MicroVM that
+works on a copy of your folder: the agent sees only your project, and
+DefenseClaw hooks gate every tool call. The
 [sandbox guide](/docs/setup/sandbox) covers setup, the session and every flag.
 The first run builds the Copilot CLI image;
 `defenseclaw sandbox image build copilot` builds it ahead of time.
@@ -288,22 +289,36 @@ replaces that list, so name every harness you want:
   which the OpenShell sandbox refuses, and no shell in the sandbox could
   resume a stopped job either. DefenseClaw resumes Copilot at once, also at a
   `sandbox connect --shell` prompt: Copilot shows its own `✗ Error: kill
-  EPERM` and keeps working, and once it exits the terminal shows its "has
-  been suspended" line followed by `defenseclaw: Ctrl-Z cannot suspend a
-  harness in an OpenShell sandbox`.
+  EPERM` and keeps working, and the terminal's title (and a desktop
+  notification, where the terminal shows them) says at once `[defenseclaw]
+  Ctrl-Z cannot suspend a harness in an OpenShell sandbox: it keeps
+  running`. Once Copilot exits, the terminal shows Copilot's own "has been
+  suspended. Use `fg` to resume." line, which DefenseClaw cannot keep off
+  the screen, followed by `defenseclaw: Ctrl-Z cannot suspend a harness in
+  an OpenShell sandbox (the sandbox refuses the signal): it keeps running,
+  and there is nothing to bring back with fg.`
 - **Interactive hook latency.** In the interactive TUI every hook takes
   Copilot's full hook timeout (30 seconds) although DefenseClaw answers in
-  milliseconds, so one tool call can take a minute and a half. This is a
-  limit of OpenShell 0.1.1 and Copilot CLI 1.0.88, not of the hooks: the
-  sandbox refuses `pidfd_open` (ENOSYS), so Copilot's native runtime falls
-  back to watching `SIGCHLD` for its hook processes, and in the TUI Copilot's
-  own Node.js subprocess handling resets that signal to its default. The
-  finished hook stays a zombie until the timeout kills it; its verdict is
-  still applied. Headless runs are not affected: pass the prompt with
+  milliseconds. A prompt takes about a minute to reach the model and one
+  tool call about a minute and a half, Copilot shows only "Working"
+  meanwhile, and a Ctrl-C waits for the hook that is running. The launch
+  banner of `sandbox run` and `sandbox connect` says so. This happens on
+  Linux and in a Mac's MicroVM alike, and it is a limit of OpenShell 0.1.1
+  and Copilot CLI 1.0.88, not of the hooks: the sandbox refuses
+  `pidfd_open` (ENOSYS), in the MicroVM too although its own Linux kernel
+  has the call, so Copilot's native runtime falls back to watching
+  `SIGCHLD` for its hook processes, and in the TUI Copilot's own Node.js
+  subprocess handling resets that signal to its default. The finished hook
+  stays a zombie until the timeout kills it; its verdict is still applied.
+  Headless runs are not affected: pass the prompt with
   `defenseclaw sandbox run copilot --prompt "PROMPT"`, or
   `defenseclaw sandbox connect NAME --prompt "PROMPT"`. DefenseClaw does not
   shorten the timeout, because Copilot allows a tool call whose hook timed
-  out.
+  out. Nor does it use Copilot's HTTP hooks, which start no hook process:
+  Copilot also allows a tool call when an HTTP hook fails (a network error,
+  a timeout or an error status), and the sandbox hooks must block on every
+  failure. Tracked in
+  [#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966).
 - **Image and verification.** The image installs Copilot CLI 1.0.88,
   replacing the base image's 1.0.16, which no hook contract covers. Verified
   end to end: against a mock model

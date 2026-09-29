@@ -345,7 +345,7 @@ func TestSessionSummary(t *testing.T) {
 	const cont = "continue this conversation: defenseclaw sandbox connect " + sbName
 	evil := "notes\x1b[2J\x1b]0;DCMARKER\x07\rx\u202etxt.sh"
 	runCases(t, []runCase{
-		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted (2 requests blocked)"}, setup: func(ta *testApp) {
+		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted · 2 sites blocked"}, setup: func(ta *testApp) {
 			noChanges(ta)
 			var armed atomic.Bool
 			var late atomic.Int32
@@ -382,12 +382,23 @@ func TestSessionSummary(t *testing.T) {
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
-		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{cont +
-			" -- --continue (the `claude --resume …` Claude Code printed would run it on this machine, outside the sandbox)"}},
+		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{"→ " + cont +
+			" -- --continue (the `claude --resume …` Claude Code printed above works only inside the sandbox)"}},
 		{name: "continue claude with the wrapper", opts: claude, setup: continueHint("", true), want: []string{cont +
 			" -- --continue (the `claude --resume …` Claude Code printed resumes it in this sandbox too: the shell wrapper is on)"}},
 		{name: "continue codex", opts: RunOptions{Harness: "codex"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- resume --last (the `codex resume …` Codex printed would run it on this machine, outside the sandbox)"}},
+			want: []string{"-- resume --last (the `codex resume …` Codex printed above works only inside the sandbox)"}},
+		// Every harness that can continue gets the line, after its own
+		// host-useless hint (cert copilot:F7, kiro:KR-F4, hermes:HERMES-4,
+		// openhands:MAC-OSH-OH-7).
+		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
+		{name: "continue kiro", opts: RunOptions{Harness: "kiro"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume (the `kiro-cli --resume-id …` Kiro CLI printed above works only inside the sandbox)"}},
+		{name: "continue hermes", opts: RunOptions{Harness: "hermes"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `hermes --resume …` Hermes Agent printed above works only inside the sandbox)"}},
+		{name: "continue openhands", opts: RunOptions{Harness: "openhands"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume --last (the `openhands --resume …` OpenHands printed above works only inside the sandbox)"}},
 		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
 			ta.IO.TTY = false
 			noChanges(ta)
@@ -1138,6 +1149,49 @@ func TestRunLaunchIsTiedToTheSandbox(t *testing.T) {
 	if ta.runLaunchOf(&other) != nil {
 		t.Fatal("a later sandbox of the name inherited the record")
 	}
+}
+
+// A session after an apply compares with what the apply brought: with
+// nothing new it asks nothing and says so, and `delete` of the sandbox it
+// stopped does not warn about unpulled work; the same after an apply at
+// the session's end (cert hermes:HERMES-5, hermes:HERMES-6,
+// openhands:MAC-OSH-OH-2).
+func TestCopySessionAfterAnApply(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40), Since: strings.Repeat("d", 40)}
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	has(t, ta.output(), "0 files changed (+0 −0) since the last apply", "nothing new since the last apply to ~/proj")
+	lacks(t, ta.output(), "Bring the changes back?", "Bring them back anyway?", "the sandbox changed nothing", "has the sandbox's changes")
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	lacks(t, ta.output(), "may hold work")
+
+	// Applied at the session's end: nothing is left to bring back either.
+	ta = newTestApp(t, "a\n")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	has(t, ta.output(), "applied 1 change to ~/proj")
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	lacks(t, ta.output(), "may hold work")
+}
+
+// `sandbox pull` and a session's end ask the same question before bringing
+// back changes that can run code on this machine (cert
+// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret").
+func TestPullAsksLikeTheSessionEnd(t *testing.T) {
+	ta := newTestApp(t, "n\n")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40),
+		Changes: []workspace.TreeChange{{Path: "Makefile", Status: "M"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "Makefile", Label: "Makefile", Kind: workspace.RiskExecutable,
+			Severity: workspace.SeverityHigh, Detail: "build file"}}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?")
+	lacks(t, ta.output(), "or hold a secret")
 }
 
 // Manual R2-43: a copy-mode session that found nothing to bring back lets

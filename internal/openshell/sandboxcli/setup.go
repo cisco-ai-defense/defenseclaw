@@ -186,8 +186,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// through the Homebrew formula's service. An OpenShell installed
 	// another way is found, but its gateway is not one DefenseClaw can
 	// restart, and the installer, finding its CLI, would change nothing.
-	if cli := rep.Get(openshell.CheckIDCLI); a.GOOS == "darwin" && cli != nil && cli.Status != openshell.StatusFail &&
-		rep.Service != nil && rep.Service.Manager == "brew" && !rep.Service.Installed {
+	if a.GOOS == "darwin" && rep.OpenShellOutsideFormula() {
 		a.bad("Gateway service: the " + openshell.GatewayFormula + " Homebrew formula is not installed")
 		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell " +
 			rep.CLIVersion + " found here was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway " +
@@ -692,6 +691,12 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		}
 		a.ok("e2fsprogs installed")
 		changed = true
+	}
+	if m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == "" && !m.DriverFromFormula {
+		// The formula's post-install step signs only the formula's driver.
+		a.bad("MicroVM driver: " + m.DriverBinary + " is not signed for Apple's Hypervisor")
+		a.note("→ " + openshell.VMDriverSigningFix(m.DriverBinary) + ", then run `" + CommandName + " setup` again")
+		return nil, &Silent{Err: fmt.Errorf("the OpenShell MicroVM driver needs %s signed for Apple's Hypervisor", m.DriverBinary)}
 	}
 	if m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == "" {
 		yes, err := consent("Re-run the OpenShell formula's post-install step so its MicroVM driver is signed for Apple's Hypervisor? (" + openshell.ResignVMDriverCommand + ")")

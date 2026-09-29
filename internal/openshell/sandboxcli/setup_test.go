@@ -566,7 +566,7 @@ func macReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorReport
 		c.Status, c.Detail = openshell.StatusWarn, "darwin/arm64: macOS sandboxes run in OpenShell MicroVMs (the vm driver, experimental upstream)"
 		r.Driver, r.ConfiguredDriver = driver, driver
 		r.MicroVM = &openshell.MicroVMHost{E2fsprogs: "/opt/homebrew/opt/e2fsprogs/sbin", DriverBinary: "/opt/homebrew/opt/openshell/libexec/openshell-driver-vm",
-			HypervisorSigned: true, Identity: openshell.VMIdentity{UID: 501, GID: 20}, Recommended: openshell.VMResources{VCPUs: 4, MemMiB: 4096, OverlayDiskMiB: 16384}}
+			DriverFromFormula: true, HypervisorSigned: true, Identity: openshell.VMIdentity{UID: 501, GID: 20}, Recommended: openshell.VMResources{VCPUs: 4, MemMiB: 4096, OverlayDiskMiB: 16384}}
 		r.Checks = slices.Insert(r.Checks, 4, openshell.Check{ID: openshell.CheckIDVMDriver, Title: "MicroVM driver", Status: openshell.StatusPass})
 		if driver == openshell.DriverVM {
 			*r.Get(openshell.CheckIDLandlock) = openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass,
@@ -822,6 +822,20 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 	has(t, ta.output(), "→ run `brew postinstall nvidia/openshell/openshell`, then `defenseclaw sandbox setup` again")
 	if inst.e2fsprogs != 1 || inst.resigned != 0 || len(ta.gateway.planned) != 0 {
 		t.Fatalf("e2fsprogs %d, resigned %d, plans %+v", inst.e2fsprogs, inst.resigned, ta.gateway.planned)
+	}
+
+	// The formula's post-install step signs only its own driver: for one
+	// elsewhere setup neither asks nor runs it, and names that binary.
+	ta, inst = setup(t, "")
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		r.MicroVM.DriverBinary, r.MicroVM.DriverFromFormula, r.MicroVM.HypervisorSigned = "/opt/openshell/libexec/openshell-driver-vm", false, false
+	})
+	wantErr(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true}), "the OpenShell MicroVM driver needs /opt/openshell/libexec/openshell-driver-vm signed")
+	has(t, ta.output(), "✗ MicroVM driver: /opt/openshell/libexec/openshell-driver-vm is not signed for Apple's Hypervisor",
+		"→ sign /opt/openshell/libexec/openshell-driver-vm with the com.apple.security.hypervisor entitlement")
+	lacks(t, ta.output(), resign)
+	if inst.resigned != 0 || len(ta.gateway.planned) != 0 {
+		t.Fatalf("resigned %d, plans %+v", inst.resigned, ta.gateway.planned)
 	}
 }
 

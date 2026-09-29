@@ -4683,6 +4683,9 @@ class SandboxMachineCheck:
     openshell_needed: bool = False
     openshell_detail: str = ""
     error: str = ""
+    # On macOS, an OpenShell installed another way than the Homebrew
+    # formula, which setup refuses (it would install nothing over it).
+    openshell_refused: bool = False
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
@@ -4697,7 +4700,10 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     or a Mac whose docker driver has no Landlock (which setup switches to
     MicroVMs), a failed ``vm-driver`` check counts too: setup installs
     e2fsprogs or has the driver signed with the same consent. A MicroVM
-    mounts no host folders, so the bind-mount check is left out there.
+    mounts no host folders, so the bind-mount check is left out there. On
+    macOS an OpenShell installed another way than the Homebrew formula is
+    refused, as setup refuses it (it would install nothing over it), and a
+    gateway service that warns is shown with its detail.
     """
 
     if not isinstance(report, Mapping):
@@ -4737,12 +4743,29 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     elif landlock in _DOCTOR_GLYPHS:
         parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock" + (f" {detail('landlock')}" if landlock == "pass" else ""))
     cli = status("openshell-cli")
-    needed = cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
-    if not needed:
-        version = str(report.get("cli_version") or "").strip()
-        name = f"OpenShell {version}" if version else "OpenShell"
+    service = report.get("service")
+    service = service if isinstance(service, Mapping) else {}
+    # On macOS setup refuses an OpenShell installed another way than the
+    # Homebrew formula whose service runs the gateway
+    # (DoctorReport.OpenShellOutsideFormula): it would install nothing.
+    refused = cli not in {"", "fail"} and service.get("manager") == "brew" and not service.get("installed")
+    needed = not refused and (
+        cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
+    )
+    version = str(report.get("cli_version") or "").strip()
+    name = f"OpenShell {version}" if version else "OpenShell"
+    if refused:
+        openshell = (
+            f"{name} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
+            "whose service DefenseClaw runs the gateway through: stop its gateway and remove it, then install OpenShell here"
+        )
+        parts.append(f"✗ {name} is not from Homebrew's nvidia/openshell formula")
+    elif not needed:
         openshell = f"{name} is installed"
-        parts.append(f"✓ {name}")
+        if status("gateway-service") == "warn":
+            parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
+        else:
+            parts.append(f"✓ {name}")
     elif cli in {"", "fail"} and "not on PATH" in detail("openshell-cli"):
         openshell = "OpenShell is not installed"
         parts.append("✗ OpenShell not installed")
@@ -4758,7 +4781,7 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         parts.append("✓ MicroVM driver")
     elif vm_driver in {"warn", "fail"}:
         parts.append(f"{_DOCTOR_GLYPHS[vm_driver]} MicroVM driver: {detail('vm-driver') or vm_driver}")
-    if vm_driver == "fail" and not needed:
+    if vm_driver == "fail" and not needed and not refused:
         needed = True
         openshell = f"the MicroVM driver needs attention: {detail('vm-driver') or 'not ready'}"
     mounts = "" if microvm else status("bind-mounts")
@@ -4769,7 +4792,9 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
     # One check per line: joined on one line, the checks after the first
     # few were cut off at 80 columns.
-    return SandboxMachineCheck(summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell)
+    return SandboxMachineCheck(
+        summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell, openshell_refused=refused
+    )
 
 
 def _sandbox_allowed_harnesses(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -4854,6 +4879,9 @@ def sandbox_wizard_fields(
     elif machine.error:
         machine_line = machine.summary
         install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_refused:
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}."
     elif machine.openshell_needed:
         machine_line = machine.summary
         install = "yes"

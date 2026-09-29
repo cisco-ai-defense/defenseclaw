@@ -115,7 +115,7 @@ export PATH
 # root-owned harness sources.
 NODE_DISABLE_COMPILE_CACHE=1
 export NODE_DISABLE_COMPILE_CACHE
-` + egressEnvScript + launcherJobControl
+` + egressEnvScript + timeZoneScript + launcherJobControl
 
 // launcherJobControl defines dc_launch COMMAND..., which every launcher
 // ends with: it execs COMMAND, except in a terminal session, where nothing
@@ -359,6 +359,11 @@ type Spec struct {
 	// edit, or code the user or a project adds that runs beside the hooks).
 	// It always equals the rendered artifacts' tier.
 	TamperTier string
+	// TamperNote says, for a user-tier harness, what of its hooks the image
+	// protects and what the agent can still change, as the launch banner's
+	// Hooks line shows it (the reason for the tier differs per harness, and
+	// on every compute driver it is the same).
+	TamperNote string
 
 	verification       Verification
 	probe              ProbeSpec
@@ -385,7 +390,16 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
+	// interactiveCaveat is a limit of the pinned harness in an OpenShell
+	// sandbox that an interactive session should know before it starts,
+	// whatever the credential profile; the launch banner prints it.
+	interactiveCaveat string
 }
+
+// InteractiveCaveat is the harness limit an interactive session should know
+// about before it starts ("" when there is none). A one-prompt run is not
+// shown it.
+func (s *Spec) InteractiveCaveat() string { return s.interactiveCaveat }
 
 // DirectFetch is a request the pinned harness binary makes on its own
 // around the egress proxy (its HTTP client ignores the proxy variables)

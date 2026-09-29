@@ -757,7 +757,7 @@ starts with "blocked by your organization's DefenseClaw policy".
 | 422 | `policy_rejected` | OpenShell rejected the sandbox configuration, or the sandbox it made does not run as DefenseClaw prepared it (the check after ready on the MicroVM driver: the identity the workload runs as, its capabilities, and DefenseClaw's hook and settings files). The sandbox is deleted, or stopped again after a start. |
 | 429 | `unavailable` | Too many activity streams are open. |
 | 502 | `upstream_error` | An OpenShell call failed. |
-| 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available. |
+| 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available, or (MicroVM driver) the volume of its image cache lacks the room to prepare the disk of an image the sandbox is the first to boot: the message names what is free and what is needed. |
 | 504 | `unavailable` | The request was cancelled or timed out. |
 | 500 | `internal` | Anything else. |
 

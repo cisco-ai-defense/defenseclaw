@@ -45,6 +45,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	ta := newTestApp(t, "y\n")
 	ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
 	ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+	ta.env["TZ"] = ":America/New_York"
 	notice := "MCP: blocked the repository's servers repo-tool (mcp.project_servers: block; a sandbox pack with mcp.project_servers: allow runs them)"
 	ta.daemon.createMCP = &sandboxapi.MCPSummary{Imported: []string{"github", "linear"}, ProjectServers: "block", Project: []string{"repo-tool"}}
 	ta.daemon.createWarnings = []string{notice}
@@ -61,7 +62,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 	if req.Harness != "claudecode" || req.Project != ta.project || req.Copy || req.LLM == nil ||
 		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-test-not-a-secret" ||
 		len(req.Credentials) != 1 || req.Credentials[0].Host != "api.stripe.com" || req.Credentials[0].Value != "stripe-test-value" ||
-		req.Env["FOO"] != "bar" {
+		req.Env["FOO"] != "bar" || req.TimeZone != "America/New_York" {
 		t.Fatalf("create request = %+v", req)
 	}
 	has(t, ta.output(),
@@ -73,7 +74,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,
-		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted (1 request blocked) · 2 files changed (+10 −3)",
+		"Session ended · 57 tool calls (1 blocked: E2E marker command) · 23 new sites contacted · 1 site blocked · 2 files changed (+10 −3)",
 		"quarantined as vendor/x/.git.defenseclaw-quarantine-1",
 		"Sandbox kept (stopped) → resume: defenseclaw sandbox connect dc-claude-proj-1a2b")
 	if strings.Contains(ta.output(), "sk-test-not-a-secret") || strings.Contains(ta.output(), "stripe-test-value") {
@@ -615,7 +616,12 @@ func TestRunCopySession(t *testing.T) {
 			if r := ta.bodies("POST", "copybox/workspace"); len(r) != 2 || !strings.Contains(r[0], `"operation":"upload"`) || !strings.Contains(r[1], `"pull_mode":"apply"`) {
 				t.Fatalf("workspace reports = %q", r)
 			}
-			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)")
+			has(t, ta.output(), "Project   ~/proj → /sandbox/work/proj (copy)", "applied 1 change to ~/proj", "1 file changed (+4 −1)",
+				"⚠ nested repository vendor/lib is not copied")
+			// The held-back secrets are named once (cert copilot:F5).
+			if out := ta.output(); strings.Count(out, ".env") != 1 || !strings.Contains(out, "⚠ 1 secret file held back from the copy: .env") {
+				t.Fatalf("held-back lines:\n%s", out)
+			}
 		})
 	}
 }
@@ -749,18 +755,35 @@ func TestSummaryLine(t *testing.T) {
 		want          string
 	}{
 		{egress(1), egress(1), "Session ended · 0 tool calls · 0 new sites contacted"},
-		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted (1 request blocked)"},
-		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted (2 requests blocked)"},
+		{egress(1), egress(2), "Session ended · 0 tool calls · 1 new site contacted · 1 site blocked"},
+		{egress(1), egress(3), "Session ended · 0 tool calls · 2 new sites contacted · 2 sites blocked"},
 		// Hook calls DefenseClaw answered with an error were blocked (the
 		// hooks fail closed).
 		{&sandboxapi.Sandbox{Hooks: sandboxapi.HookCoverage{HookFailed: 1}}, &failed,
-			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted (1 request blocked)"},
+			"Session ended · 4 tool calls (1 blocked: marker) · 1 hook call failed (blocked) · 3 new sites contacted · 1 site blocked"},
 		{&failed, &failed, "Session ended · 0 tool calls · 0 new sites contacted"},
 	} {
 		s := &session{app: newTestApp(t, "").App, before: c.before}
 		if got := s.summaryLine(c.after, nil); got != c.want {
 			t.Errorf("summaryLine(%+v) = %q, want %q", c.after.Egress, got, c.want)
 		}
+	}
+	// The blocked sites are the ✗ lines the session announced, one per
+	// destination however often it was tried, also when the daemon had
+	// blocked one of them before the session (cert copilot:F8, kiro:KR-F7,
+	// hermes:HERMES-8, openhands:MAC-OSH-OH-5: an invalid destination and
+	// webhook.site read "1 request blocked" over two ✗ lines).
+	box := sampleSandbox("f-box")
+	s := &session{app: newTestApp(t, "").App, sb: &box, before: egress(1)}
+	for _, ev := range []sandboxapi.ActivityEvent{
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "echo", Port: 80, Category: "invalid_destination"},
+		{Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site", Port: 443, Category: "webhook_catcher"},
+	} {
+		s.blockNotice(ev)
+	}
+	if got, want := s.summaryLine(egress(2), nil), "Session ended · 0 tool calls · 1 new site contacted · 2 sites blocked"; got != want {
+		t.Errorf("summaryLine after two blocked destinations = %q, want %q", got, want)
 	}
 	// Manual R2-17: a blocked call is named by its rule's title and ID, not
 	// the cut-off start of the reason.
@@ -807,6 +830,20 @@ func TestBanner(t *testing.T) {
 			[]string{"skip-permissions OFF (harness prompts kept)"}, nil},
 		{"omnigent", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.Harness, sb.HarnessName = "omnigent", "OmniGent" }, nil,
 			[]string{"OmniGent · approvals from OmniGent's policies, DefenseClaw's included"}, []string{"skip-permissions"}},
+		// A user tier says what the image protects for that harness: Kiro's
+		// and Hermes' hooks are root-owned (cert kiro:KR-F3,
+		// hermes:HERMES-3).
+		{"kiro's tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit"},
+			[]string{"could edit its own hook settings"}},
+		{"hermes' tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "hermes", "Hermes Agent", "user"
+		}, nil,
+			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
+			nil},
+		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -821,6 +858,50 @@ func TestBanner(t *testing.T) {
 		if got := withArticle(name); got != want {
 			t.Errorf("withArticle(%s) = %q", name, got)
 		}
+	}
+}
+
+// An interactive Copilot session is told before it starts that every hook
+// waits out Copilot's 30-second timeout in a sandbox (#966), whatever its
+// credential; a one-prompt run, which is not slowed, is not. The provider's
+// own caveat still follows the harness's.
+func TestBannerCaveats(t *testing.T) {
+	copilot := harness.Copilot.InteractiveCaveat()
+	if !strings.Contains(copilot, "30-second timeout") || !strings.Contains(copilot, "--prompt") {
+		t.Fatalf("Copilot's interactive caveat = %q, want the 30-second hook wait and the --prompt way around it", copilot)
+	}
+	mantle, err := harness.Codex.CredentialProfile(profiles.CodexBedrockMantleID, "")
+	if err != nil || mantle.Caveat == "" {
+		t.Fatalf("Codex Bedrock Mantle profile = %+v, %v; want its caveat", mantle, err)
+	}
+	asCopilot := func(profile string) func(*sandboxapi.Sandbox) {
+		return func(sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.Launch.CredentialProfile = "copilot", "GitHub Copilot CLI", profile
+		}
+	}
+	for _, c := range []struct {
+		name      string
+		edit      func(*sandboxapi.Sandbox)
+		o         RunOptions
+		want, not []string
+	}{
+		{"interactive copilot", asCopilot(profiles.CopilotAnthropicID), RunOptions{}, []string{"⚠ " + copilot}, nil},
+		{"copilot without a credential", asCopilot(""), RunOptions{}, []string{"⚠ " + copilot}, nil},
+		{"copilot with --prompt", asCopilot(profiles.CopilotAnthropicID), RunOptions{Prompt: "hi"}, nil, []string{"⚠ "}},
+		{"copilot in its own prompt mode", asCopilot(profiles.CopilotAnthropicID), RunOptions{Args: []string{"-p", "hi"}}, nil, []string{"⚠ "}},
+		{"codex on Bedrock Mantle", func(sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.Launch.CredentialProfile = "codex", "Codex", profiles.CodexBedrockMantleID
+		}, RunOptions{}, []string{"⚠ " + mantle.Caveat}, []string{copilot}},
+		{"claude code", func(*sandboxapi.Sandbox) {}, RunOptions{}, nil, []string{"⚠ "}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			sb := sampleSandbox("box")
+			c.edit(&sb)
+			ta.banner(&sb, bannerInfo{o: c.o})
+			has(t, ta.output(), c.want...)
+			lacks(t, ta.output(), c.not...)
+		})
 	}
 }
 
@@ -1086,6 +1167,30 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 			want: []string{"Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)"}},
 		{name: "a new image and its first boot", input: "a\n", setup: driver("vm", firstBoot, missing), opts: run,
 			want: []string{"(building its image first, which can take a few minutes; then the first start prepares its MicroVM disk: about a minute)"}},
+		// The disk a first boot prepares needs about the image's size and
+		// headroom where the driver keeps it: short of the floor the run is
+		// refused before anything is copied or created, and short of the
+		// recommended space it is warned about (OC-F1).
+		{name: "a first boot on a full disk", setup: driver("vm", firstBoot, func(ta *testApp) {
+			ta.diskFree, ta.images.sizes = 2<<30, map[string]uint64{"claudecode": 7 << 30}
+		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about 7.0 GiB from its image in "+
+			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 8.0 GiB is needed; free space on that volume first "+
+			"(`defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)")},
+		{name: "a first boot of an image to build on a full disk", setup: driver("vm", firstBoot, missing, func(ta *testApp) { ta.diskFree = 5 << 30 }),
+			do: refused(run, "a disk of about 5.0 GiB from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 6.0 GiB is needed")},
+		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }), opts: run,
+			want: []string{"only 10.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start prepares a MicroVM disk of about 5.0 GiB there " +
+				"(12.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
+			check: func(t *testing.T, ta *testApp) {
+				if ta.creates() != 1 || !strings.HasPrefix(ta.diskProbed, ta.home) {
+					t.Fatalf("creates %d, disk probed at %q", ta.creates(), ta.diskProbed)
+				}
+			}},
+		// A disk prepared already needs no room, and docker prepares none.
+		{name: "no first boot on a full disk", input: "a\n", setup: driver("vm", func(ta *testApp) { ta.diskFree = 1 << 30 }), opts: run,
+			not: []string{"free disk space", "is free in"}},
+		{name: "docker on a full disk", input: "y\n", setup: driver("docker", firstBoot, func(ta *testApp) { ta.diskFree = 1 << 30 }), opts: run,
+			not: []string{"free disk space", "is free in"}},
 		// On docker the mount, --context and the limits go to the daemon.
 		{name: "the docker driver mounts", input: "y\n", setup: driver("docker"),
 			opts: RunOptions{Harness: "claude", Context: []string{"/srv/lib"}, CPU: "2", NoSnapshot: true}, check: func(t *testing.T, ta *testApp) {

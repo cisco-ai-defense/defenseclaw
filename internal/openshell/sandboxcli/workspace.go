@@ -306,6 +306,10 @@ func (a *App) undoApply(ctx context.Context, api API, sb *sandboxapi.Sandbox, o 
 	if len(res.Conflicts) > 0 {
 		return a.undoApplyConflict(res)
 	}
+	if res.Undone {
+		// The undone work is in the sandbox alone again.
+		a.forgetCleanCopy(sb.Name)
+	}
 	if stdout != nil {
 		return writeJSON(stdout, sandboxapi.UndoResponse{Name: sb.Name, Apply: res})
 	}
@@ -543,11 +547,20 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return err
 	}
 	cli := a.cli(gateway)
+	// handedOver is set once nothing of the sandbox's work is left to bring
+	// back; a sandbox this pull started, and stops again, is then marked so
+	// (markCleanCopy), and `delete` of it stopped need not warn.
+	handedOver := false
 	if sb.Phase != "ready" {
 		a.note("starting " + o.Name + " to read its work…")
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
+		defer func() {
+			if handedOver {
+				a.markCleanCopy(sb)
+			}
+		}()
 		// Leave it as it was found.
 		defer func() {
 			if _, err := api.Stop(context.WithoutCancel(ctx), o.Name); err != nil {
@@ -565,10 +578,13 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return fmt.Errorf("%s works on a copy of a folder that is not a git repository, so there is no branch to put its changes on; "+
 			"bring them back with --apply or --patch-out FILE", o.Name)
 	}
+	if res.Empty() && res.Effective != "" && len(res.Blocking) == 0 {
+		handedOver = true
+	}
 	if stdout != nil && modes == 0 {
 		return writeJSON(stdout, res)
 	}
-	a.line(a.bold(o.Name) + ": " + res.Review.SummaryLine())
+	a.line(a.bold(o.Name) + ": " + pullSummary(res))
 	if line := riskLine(&res.Review); line != "" {
 		a.line(a.style(line, ansiYellow))
 	}
@@ -601,14 +617,15 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 		return writeJSON(stdout, &workspace.ApplyResult{Mode: o.applyMode()})
 	}
 	if res.Empty() {
-		a.ok("nothing to bring back")
+		if res.Since != "" {
+			a.ok("nothing new since the last apply to " + a.tildePath(sb.Project))
+		} else {
+			a.ok("nothing to bring back")
+		}
 		return nothing()
 	}
 	if res.Review.Sensitive() && !o.AcceptSensitive {
-		if secrets := res.Review.SecretPaths(); len(secrets) > 0 {
-			a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
-		}
-		yes, err := a.ask("Some changes can run code on this machine or hold a secret. Bring them back anyway?", false, false)
+		yes, err := a.ask(a.bringBackQuestion(&res.Review), false, false)
 		if err != nil {
 			if errors.Is(err, ErrNoTerminal) {
 				return errors.New("some changes can run code on this machine; review them and pass --accept-sensitive")
@@ -624,6 +641,7 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	if err != nil {
 		return err
 	}
+	handedOver = true
 	if stdout != nil {
 		if err := writeJSON(stdout, applied); err != nil {
 			return err
@@ -872,6 +890,20 @@ func mergeFlags(flags []workspace.Flag) []fileFlag {
 		}
 	}
 	return out
+}
+
+// bringBackQuestion warns about what looks like a secret the sandbox
+// wrote and returns the question that confirms bringing sensitive changes
+// back: the same at a session's end and for `sandbox pull`.
+func (a *App) bringBackQuestion(r *workspace.ReviewReport) string {
+	secrets := r.SecretPaths()
+	if len(secrets) > 0 {
+		a.warn("the sandbox wrote what looks like a secret: " + strings.Join(firstN(secrets, 4), ", "))
+		if riskLine(r) == "" {
+			return "Some changes hold what looks like a secret. Bring them back anyway?"
+		}
+	}
+	return "Some changes can run code on this machine. Bring them back anyway?"
 }
 
 // riskLine is the review's warning about changed files that can run code

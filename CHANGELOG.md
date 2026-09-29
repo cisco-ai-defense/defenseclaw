@@ -334,6 +334,104 @@ deleted.
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
   checks. On a Mac still on the Docker driver, a run that fails OpenShell's
   Landlock check names the switch.
+- With OpenShell's release binaries outside Homebrew, a gateway that answers
+  on the vm driver no longer fails the doctor: `vm-driver` passes on the
+  driver it runs (naming the binary when found), and `gateway-service` warns,
+  saying how the gateway runs (a launchd label, or started by hand, which
+  does not start at login) and that DefenseClaw cannot restart it. Its fix
+  is the one setup, which refuses such an OpenShell, gives: stop that
+  gateway and remove that OpenShell, then `sandbox setup
+  --install-openshell` installs the formula; the TUI's machine check says
+  the same instead of "✓ OpenShell". A driver outside the formula's keg that lacks the Hypervisor entitlement
+  gets a fix that names it; `doctor --fix` and setup re-sign only the
+  formula's driver (`brew postinstall` signs no other).
+  The doctor's disk line counts only the MicroVM disks prepared from images,
+  not the driver's overlay templates and bootstrap rootfs.
+- The first start of an image on MicroVMs prepares a disk of about the
+  image's size (about 5 GB): `sandbox run` now refuses it before copying
+  anything when the volume of the driver's image cache has less free space
+  than the image plus 1 GiB (at least the doctor's 6 GiB), warns below twice
+  that (at least 12 GiB), and names `sandbox image prune`; the daemon refuses
+  such a create from any client (`unavailable`), and `image build` warns
+  after a build. Docker-driver runs are not checked.
+- `sandbox image prune` and `sandbox teardown` on a Mac give back the disk
+  of what they remove: the MicroVM disk (about 5 GB) OpenShell prepared from
+  each image ID they removed, in `<state_dir>/images`, and say how much they
+  freed (`--dry-run`: what they would). Only `sandbox-prepared-rootfs-*`
+  directories of IDs Docker no longer has and no sandbox is recorded with are
+  removed, and only while the daemon (or, for teardown, the gateway) listed
+  the sandboxes; OpenShell's other state stays. The doctor's disk fix names
+  prune and `lsof +L1` for space a backup or indexing app still holds.
+- On every driver, a harness image removed from Docker (`docker rmi`) no
+  longer shows as built and hook-verified: `sandbox image list` names it
+  apart from the table (`"missing": true` in JSON), `image prune` says it
+  forgets its record, and the doctor's image check does not count it. That
+  check also lists every harness image built for you, not only the
+  configured harnesses'.
+- Fixes from the macOS connector certification (every driver unless noted):
+  a copy names the secret files it holds back once; a Kiro tool block names
+  DefenseClaw once (host hooks too); the egress counts are destinations
+  everywhere: the session summary reads `N new sites contacted · M sites
+  blocked` with M matching its `✗` lines, `sandbox status` reads
+  `N destinations contacted, M blocked`, and an invalid destination (a host
+  without a dot) counts as blocked like the feed shows it (the status JSON
+  keeps the request count as `egress.blocked_requests`). The banner's
+  `Hooks` line says, per user-tier harness, what the image keeps root-owned
+  and what the agent can still change (it said "the agent could edit its own
+  hook settings" also for Kiro and Hermes, whose hooks are root-owned). The
+  end of a session names `sandbox connect NAME -- <continue args>` last, and
+  not dimmed, for Kiro CLI, Hermes Agent and OpenHands too, and says that the
+  resume line the harness printed (`copilot --resume=…`, `kiro-cli
+  --resume-id …`, `hermes --resume …`, `openhands --resume …`) works only
+  inside the sandbox. After an apply, the next pull or session end of a
+  copy-mode sandbox shows, reviews and merges only what changed since that
+  apply (`… since the last apply`); with nothing new it asks nothing, and
+  `sandbox delete` of the stopped sandbox does not warn about unpulled work.
+  `sandbox pull` asks the same confirmation as a session's end. A new
+  sandbox runs in this machine's time zone (`DEFENSECLAW_HOST_TZ`, exported
+  as `TZ` where the image has the zone's file) instead of UTC. Ctrl-Z in a
+  harness whose own suspend fails (Copilot CLI) is explained at once in the
+  terminal's title, and the notice after it exits (and Hermes' at once) says
+  there is nothing to bring back with `fg`.
+- Harness start-up fixes from the macOS certification, on both drivers: the
+  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
+  the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no
+  longer prints above the TUI at every start.
+- The Kiro image unpacks the embedding model Kiro CLI downloads at its first
+  start (`all-MiniLM-L6-v2`, 79 MiB, each file checked against the SHA-256
+  the pinned `kiro-cli-chat` carries) into the image HOME, so a new Kiro
+  sandbox's first session no longer downloads it. When that download fails
+  or its files do not match, the image builds without the model and Kiro
+  downloads it as before. The Kiro launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so an interactive session runs the root-owned
+  `kiro-cli-chat` rather than the copy Kiro makes in
+  `~/.local/share/kiro-cli/run`.
+- A DefenseClaw block now shows in the Hermes TUI: a root-owned module in the
+  Hermes image prints the block reason under the tool's line
+  (`┊ ✗ terminal blocked by DefenseClaw rule <ID>: …`), where Hermes 0.19
+  printed nothing. The reason the model gets is unchanged.
+- The Hermes image stamps its install the way Hermes' own image does
+  (`.install_method` = `docker`), so Hermes no longer prints "pip installs are
+  no longer an officially supported platform" or asks `pypi.org` for updates
+  at every start, and its managed layer pins `model_catalog.enabled: false`,
+  which stops the start-up fetch from `hermes-agent.nousresearch.com` and
+  `nousresearch.github.io`.
+- An OpenHands sandbox session no longer ends with an
+  `Exception ignored in atexit callback` / `RuntimeError: App is not running`
+  traceback above the session summary: a root-owned module in the OpenHands
+  image runs the `SessionEnd` hooks as before and drops only the display
+  event OpenHands hands to its already stopped TUI. The same module starts a
+  DefenseClaw block's hook line with the block, so the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: …` instead of
+  `Status: BLOCKED - Blocked by DefenseCla...`, and it ignores the
+  `AuthlibDeprecationWarning` an OpenHands dependency printed at every start.
+- Interactive GitHub Copilot CLI sessions wait out Copilot's 30-second hook
+  timeout on every hook in a MicroVM too (#966): OpenShell's seccomp filter
+  refuses `pidfd_open` there as well. The launch banner of an interactive
+  Copilot session now says so, on Linux as well; `--prompt` runs are not
+  slowed. Copilot's HTTP hooks, which would avoid the wait, let a tool call
+  run when the request fails, so the sandbox keeps its fail-closed command
+  hooks.
 
 ### Legacy OpenShell standalone sandbox removed
 

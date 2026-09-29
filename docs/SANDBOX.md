@@ -192,14 +192,28 @@ not the driver's name or `runtime.GOOS`.
   minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
   keyed by image ID and kept by OpenShell); a cached one starts in seconds.
   The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
-  its "about a minute" note. `delete` keeps a sandbox's run image even when
+  its "about a minute" note and a disk check before it stages the copy
+  (`openshell.VMDiskShortage`: refused below the image's size plus 1 GiB,
+  never below the doctor's 6 GiB `VMDiskFailBytes`, warned below twice that,
+  never below 12 GiB; `image build` warns the same after a build). The
+  daemon's create refuses the same shortage (`unavailable`) once it knows the
+  image ID the sandbox boots and finds no disk prepared from it
+  (`Options.VMDiskFree`). `delete` keeps a sandbox's run image even when
   no other sandbox uses it, and `image prune` keeps every run image of an
   overlay image it keeps: the run image adds only its files' few layers to
   Docker, while a rebuilt one gets a new image ID, which the driver
   prepares another rootfs for (another minute and about 5 GB). So each
   posture's run image, and its prepared rootfs of about 5 GB, stays until
-  its overlay image is superseded and pruned; the rootfs stays after that
-  too, in OpenShell's cache, which the doctor's disk check reports.
+  its overlay image is superseded and pruned. Prune and teardown then remove
+  the rootfs of every image ID they removed (`PruneReport.RemovedImageIDs`:
+  no image they keep or leave has it, and `Keep` does not name it), and only
+  when the daemon listed the sandboxes (teardown: after its deletes, none
+  left that could boot it), no sandbox record names the image, and Docker no
+  longer holds the ID at all (`image ls --all`). They remove only
+  `sandbox-prepared-rootfs-*-sha256-<id>` directories (not links) in
+  `<state_dir>/images`, never the driver's other state (overlay templates,
+  the bootstrap rootfs, a preparation under way). A later start of such an
+  image prepares it again.
 - **Stops.** A MicroVM stopped without a flush brings back empty what its
   workload wrote since the last one (OpenShell 0.1.1; `StopFlushes` is off
   for vm). The daemon's stop runs `sync` in the sandbox first. Every gateway
@@ -289,6 +303,15 @@ The harness spec builds the environment passed to `openshell sandbox create
   address. `--env` overrides them. OpenShell's refusal of a lookup of the
   container's own host name (Docker's 12-hex-digit default) is audited but is
   neither a blocked site nor a feed line.
+- `DEFENSECLAW_HOST_TZ` is the IANA time zone of the machine `sandbox run`
+  ran on (`CreateRequest.TimeZone`: `TZ`, else the zone `/etc/localtime`
+  links to, else `/etc/timezone`; `openshell.HostTimeZone`). A second
+  fragment next to the proxy one (`timeZoneScript`) exports `TZ` from it
+  in the launchers, the login-shell profile and the `sandbox exec` wrapper,
+  when `TZ` is not set already and the image has
+  `/usr/share/zoneinfo/<zone>`; without the file libc would show UTC under
+  the zone's name, so the sandbox stays on UTC. Both compute drivers. A
+  sandbox keeps the zone it was created with.
 
 One shell fragment (`egressEnvScript` in
 `internal/openshell/harness/shellenv.go`) exports `HTTPS_PROXY`,
@@ -1230,6 +1253,16 @@ Nothing is applied without a review: a session without a terminal, or with
    `patch` only writes the patch file, so the last two gates do not apply to
    it.
 
+   A 3-way apply that lands (or finds the folder already has the result)
+   sets `refs/defenseclaw/applied` in the copy's `base.git` to the effective
+   result. The next pull starts from it (`PullResult.Since`, kept in
+   `refs/defenseclaw/since`): its changes and review cover what changed in
+   the sandbox since, and its 3-way merge base and patch start there, so
+   work brought back once is not offered again and what the operator took
+   back of it stays taken back. `UndoApply` removes the mark (the next pull
+   starts from the baseline) and drops a kept pull that started from it. A
+   branch or patch does not set it.
+
 Mount plans and copy records supply the sandbox labels
 `io.defenseclaw/project` (the first 128 bits of the SHA-256 of the folder's
 real path, in hex) and `io.defenseclaw/workdir-mode`, so a later run can find
@@ -1857,7 +1890,52 @@ These were measured on the pinned releases inside the community base image
   GitHub login, and `COPILOT_OFFLINE=true` stops every other request. The
   GitHub-token profile's hosts (`api.github.com`, `api.githubcopilot.com` and
   the per-plan Copilot API hosts) come from the CLI, not from a live run: no
-  Copilot-entitled account was available.
+  Copilot-entitled account was available. With the proxy settings, Copilot's
+  Node printed its `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning
+  above the TUI at every start, so the launcher passes
+  `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as it does for Codex.
+  Copilot's tool commands inherit it (a Node older than 20.11 would refuse
+  the flag).
+  In the interactive TUI every hook waits out Copilot's 30-second hook
+  timeout ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)),
+  on the Docker driver and in the macOS MicroVM alike: the sandbox's seccomp
+  filter makes `pidfd_open` fail with ENOSYS (in the MicroVM too, although
+  its 6.12 kernel has the call), so the CLI's native runtime (tokio, in a
+  Node.js addon inside Copilot's process) falls back to a `SIGCHLD` handler
+  to learn that a hook exited, and in the TUI Copilot's Node.js side
+  (libuv) resets `SIGCHLD` to its default after its own child processes.
+  The exited hook stays a zombie until the timeout; its verdict is still
+  applied. Headless runs keep the handler and are not slowed. The launch
+  banner of an interactive Copilot session says so
+  (`harness.Spec.InteractiveCaveat`). The fix is upstream: OpenShell
+  allowing `pidfd_open` in the workload's seccomp filter, or Copilot not
+  relying on `SIGCHLD` alone for its hook processes. What DefenseClaw cannot
+  do about it:
+  - Copilot's HTTP hooks (`"type": "http"`, which start no process) fail
+    open: GitHub's hook reference says a network error, a timeout or a
+    non-2xx status of an HTTP `preToolUse` or `permissionRequest` hook falls
+    through to the normal permission flow (with `--yolo`, an allow). A command
+    hook bounds its own requests and exits 2 on every failure. HTTP hooks
+    also refuse plain `http://` for those two events unless
+    `COPILOT_HOOK_ALLOW_HTTP_AUTH_HOOKS=1`, a variable the workload can drop
+    for a Copilot it starts itself, and expand a header variable
+    (`allowedEnvVars`) only over `https://` or to `localhost` with
+    `COPILOT_HOOK_ALLOW_LOCALHOST=1`; the ingress is plain HTTP at
+    `host.openshell.internal`, and the token's placeholder is scoped to a
+    policy revision, so it cannot be written into the image's policy
+    document either. The ingress route (`/api/v1/copilot/hook`) would also
+    have to answer with Copilot's bare hook output instead of its
+    `action`/`hook_output` envelope.
+  - A shorter `timeoutSec` lets the tool call run: a timed-out command hook
+    fails open, even a policy hook.
+  - The launcher cannot keep a handler in place: a caught signal's handler
+    does not survive `exec`, an inherited `SIG_IGN` lasts only until tokio
+    or libuv installs its own handler (and libuv's reset restores the
+    default, not `SIG_IGN`), and the single-executable CLI ignores
+    `NODE_OPTIONS` (measured with 1.0.86 on macOS: neither an unknown
+    option nor a `--require` preload took effect), so no preload can hold
+    the `SIGCHLD` listener that would keep libuv from resetting it.
+  - The hook cannot reap itself: only Copilot, its parent, can.
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
@@ -1951,7 +2029,41 @@ These were measured on the pinned releases inside the community base image
   `/agent` in an interactive session (it can switch to Kiro's built-in
   agent), project MCP servers, and a nested `kiro-cli-chat` started from a
   tool call, which skips the launcher. A real model through a Kiro Pro `KIRO_API_KEY` or
-  a device-flow login is unverified.
+  a device-flow login is unverified. At its first start Kiro downloads its
+  semantic-search embedding model, `all-MiniLM-L6-v2.zip` (79 MiB, from
+  `desktop-release.q.us-east-1.amazonaws.com/models`), into
+  `~/.semantic_search/models/all-MiniLM-L6-v2`; that was most of a new
+  sandbox's first-session download. `kiro-cli-chat` carries the SHA-256 of
+  both files and checks the ones it finds at every start, downloading again
+  when they differ. The image unpacks those files there at build, each
+  checked against the digests the pinned binary accepts (the URL names no
+  release, so the archive's own bytes are not pinned). The model is only a
+  cache, so a base image without `/usr/bin/python3`, a failed download or an
+  archive that does not hold exactly those files leaves the download to
+  Kiro: the build says so, writes none of it and goes on. Kiro's TUI runtime (`bun`
+  and `tui.js`, about 92 MB) is embedded in `kiro-cli-chat` and extracted into
+  `~/.local/share/kiro-cli` at the first interactive start, without a
+  download. Kiro does not check the extracted files themselves at a later
+  start, and offers no supported way to run the runtime from elsewhere
+  (`KIRO_TEST_TUI_JS_PATH` is a test hook), so it stays in the
+  workload-writable HOME: like Kiro's settings it is the agent's to change,
+  and the launch banner's Hooks line says so. An interactive session also "pins" `kiro-cli-chat`
+  into `~/.local/share/kiro-cli/run` (a hard link, or a copy where the link
+  fails; with `fs.protected_hardlinks`, the usual default, the sandbox user
+  cannot hard-link a root-owned file it cannot write) and runs that path; the
+  launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so Kiro runs the root-owned binary. At every
+  start Kiro also asks `management.<region>.kiro.dev` in four regions
+  (`us-east-1`, `eu-central-1`, `us-gov-east-1`, `us-gov-west-1`) for its
+  governance settings. The Kiro profile's placeholder resolves only on the
+  `us-east-1` host; without a working key Kiro prints `failed to retrieve
+  governance settings — MCP and web tools disabled` (its log:
+  `Failed to get governance config from API`), which is Kiro's account
+  check, not a DefenseClaw policy, and leaves MCP servers and web tools off
+  for that session. With `telemetry.enabled` false Kiro still sends its
+  CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`
+  (`Failed to send cw telemetry event` in its log without a working key); no
+  Kiro setting stops them.
 - **Devin CLI 3000.4.25.** Devin's versioned release manifest publishes
   SHA-256 digests. Hooks come from `~/.config/devin/config.json` (`hooks`) or
   a project `.devin/hooks.v1.json`; there is no system hook tier, so the tier
@@ -2202,7 +2314,8 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Claude Code drops a whole managed-settings drop-in with one invalid field, silently. | The hook-fire probe gates every image. |
 | Claude's bare mode disables hooks. | Managed `env` pins `CLAUDE_CODE_SIMPLE=0`, which restores every hook except `SessionStart` in bare mode, and the probe plants bare mode in hostile settings. |
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
-| Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session with no job-control shell above it, the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started from a `sandbox connect --shell` prompt (where Ctrl-Z suspends it to that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
+| Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session whose foreground process group is the launcher's, also as a foreground job at a `sandbox connect --shell` prompt (whose `fg` resumes with `killpg`, which the filter refuses too), the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. When such a harness takes the terminal back, the supervisor says at once, in the terminal's title (OSC 2, the previous title kept and restored when the harness exits) and as an OSC 9 notification with a bell, that Ctrl-Z cannot suspend it, and after the harness exits prints the same on the screen, answering the harness's own "suspended, use `fg`" line. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started in the background of a `sandbox connect --shell` prompt (the supervisor would take the terminal from that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
+| The same filter refuses a harness that ends a cancelled tool command through the command's process group. Measured with Kiro CLI 2.24.1 (on the vm driver): Ctrl-C during a shell tool call shows `● Cancelled …`, but the command runs to its end and Kiro's `postToolUse` still arrives when it finishes. Kiro's binary puts commands in process groups of their own and signals groups (it calls `setpgid` and `killpg`); a host run of the same release was not compared. | No launcher setting changes how the harness signals, and the supervisor never learns of the cancel. DefenseClaw judged the command before it started; to stop one that keeps running, end it by pid from another terminal (`defenseclaw sandbox connect <name> --shell`, then `pkill -f '<command>'`, which signals each process on its own). |
 
 ### Not measured
 
@@ -2222,6 +2335,7 @@ These were not measured, so the design does not rely on a result for them:
 | `sandbox exec` and `sandbox upload` hang while stdin is an open non-TTY pipe. | Non-interactive invocations read stdin from `/dev/null`. |
 | The first `sandbox exec` after create occasionally returns nothing. | `WaitReady` waits for `Ready` and the `ConfigurationReady` condition. |
 | Ending an exec stream does not stop the command in 0.1.1. | `Exec` wraps commands in `timeout(1)` inside the sandbox and retries only attempts whose stream never opened (plus unanswered attempts of idempotent commands). |
+| While `openshell sandbox exec` or `sandbox connect` holds a session open, the SSH proxy it starts carries that session's credential where other local users of the host can see it. | DefenseClaw starts every session through those two commands and does not handle that credential itself. Closing the exposure is OpenShell's (or means replacing both commands' session set-up); until then it lasts while a session is attached, which matters on a host other users share. |
 | `WatchSandbox` OCSF lines arrive at level `OCSF` with structured fields empty. The cursor looks like `v1:<uuid>:<20-digit sequence>`. A gateway restart drops the in-memory log buffer. | The shorthand text is parsed; an `OUT_OF_RANGE` cursor becomes a gap and a fresh subscription. |
 
 ### macOS and Docker Desktop
@@ -2233,9 +2347,10 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | --- | --- |
 | Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver, and a run that fails the probe there names the switch. |
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
-| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor and teardown name the cache and its size, and DefenseClaw never deletes it. |
+| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
+| Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
-| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, but the doctor's gateway-service check fails and setup offers to install the formula. |
+| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, and setup refuses it (the installer would find that CLI and install nothing): stop that gateway and remove that OpenShell, then `setup --install-openshell` installs the formula. While such a gateway answers, the doctor does not fail it: `vm-driver` passes on the driver the gateway reports (found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`), and `gateway-service` warns, saying how it runs (the launchd label from `launchctl list`, or started by hand) and that DefenseClaw cannot restart it, with setup's way on as its fix; the TUI's machine check refuses it as setup does. With no gateway answering, `gateway-service` fails as not installed, with the same fix, and `vm-driver` checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
 
 ## Supported platforms and versions
 

@@ -195,7 +195,9 @@ defenseclaw sandbox image list
 Builds and hook-checks the images of the named harnesses, or of
 `openshell.harnesses` (then Claude Code and Codex) when you name none. A
 current, checked image is kept unless you pass `--force`. The build log is
-written to `<data_dir>/logs/sandbox-image-<harness>.log`.
+written to `<data_dir>/logs/sandbox-image-<harness>.log`. On a MicroVM gateway
+it warns after a build when the volume of the driver's image cache lacks the
+room the first start of the new image needs (see `sandbox run`).
 
 ```bash
 defenseclaw sandbox image build
@@ -211,7 +213,11 @@ defenseclaw sandbox image build codex --force --verbose
 
 ### `sandbox image list`
 
-Lists the recorded harness images, newest first.
+Lists the recorded harness images, newest first. An image removed from Docker
+(with `docker rmi`, say) is not in the table: a note names it, the next run of
+its harness builds the image again, and `sandbox image prune` forgets its
+record. With `--output json` every recorded image is listed, and one Docker no
+longer has carries `"missing": true`.
 
 ```bash
 defenseclaw sandbox image list --output json
@@ -227,11 +233,17 @@ defenseclaw sandbox image list --output json
 
 Removes superseded harness images. It keeps the current images and the images
 the daemon's sandboxes run, and leaves images that another DefenseClaw data
-directory recorded, or that nothing recorded. On a MicroVM (vm) gateway it
+directory recorded, or that nothing recorded. It forgets, and names, the
+records of images Docker no longer has. On a MicroVM (vm) gateway it
 also removes the run images and aliases of superseded harness images, and only
 while the daemon answers: without its list of sandboxes it leaves them alone.
-OpenShell keeps the MicroVM disk it prepared from a removed image; prune says
-how much space those disks take.
+With that list it also removes the MicroVM disk OpenShell prepared from each
+image it removed (about 5 GB each, in the `images` folder of the MicroVM
+driver's state directory, `~/.local/state/openshell/vm-driver` by default) and
+says how much it freed. It removes a disk only when Docker no longer has its
+image and no sandbox is recorded with that image, and it never removes the
+driver's other state there. `--dry-run` says which disks it would remove. A
+start of an image whose disk is gone prepares it again (about a minute).
 
 ```bash
 defenseclaw sandbox image prune --dry-run
@@ -301,7 +313,9 @@ remaining provider uses: this data directory's ingress profiles, the legacy
 `defenseclaw-ingress` profile, and the shared model-credential and
 `--credential` profiles, including ones another DefenseClaw data directory
 imported. The daemons import them again when they need them. Another daemon's
-ingress profile is never removed. Teardown restores the OpenShell gateway
+ingress profile is never removed. With the images it removes the MicroVM
+disks OpenShell prepared from them, once no sandbox that could boot one is
+left, as `sandbox image prune` does. Teardown restores the OpenShell gateway
 config that setup changed, unless the file changed since. It also removes the
 shell wrappers and sets `openshell.enabled: false`. OpenShell itself stays
 installed. `defenseclaw uninstall` runs teardown for you. It works without a
@@ -364,7 +378,9 @@ stopped first, so nothing it left running changes the folder after the
 review. If the sandbox was stopped, undone or deleted from elsewhere (another
 terminal, the TUI), which ends the harness, the summary starts by saying so.
 You then get a summary line: tool calls and blocks (the blocking rule's
-title and ID), new sites contacted and requests blocked, and files changed,
+title and ID), new sites contacted and sites blocked (destinations, each
+counted once; the blocked ones are the `✗` lines that follow, invalid
+destinations included), and files changed,
 followed by the session's notices. Changes that can run code on your machine
 are called out, and asks still waiting are named. For a mounted folder you
 then keep the changes, undo them, or see the diff first (a letter, then
@@ -387,14 +403,21 @@ the pull or apply failed), so they aren't lost, and the end says so. A pull
 that fails because the disk is full says whose disk: this machine's, or on a
 Mac the MicroVM's own (`overlay_disk_mib`).
 
-A kept sandbox's resume line is followed, for Claude Code, Codex, OpenCode
-and GitHub Copilot CLI, by the command that continues the same conversation
-inside the sandbox, for example
-`defenseclaw sandbox connect myapp-7f3a -- --continue` (Codex:
-`-- resume --last`). A plain `connect` starts a new conversation. The
-`claude --resume <id>` or `codex resume <id>` line the harness itself prints
-runs it on this machine, outside the sandbox, unless the shell wrapper is on
-(`sandbox enable`), which sends it into the folder's sandbox.
+A kept sandbox's resume line is followed, last, by the command that
+continues the same conversation inside the sandbox, for every harness that
+can continue one: `→ continue this conversation: defenseclaw sandbox connect
+myapp-7f3a -- --continue` for Claude Code, OpenCode, GitHub Copilot CLI and
+Hermes Agent, `-- resume --last` for Codex, `-- --resume` for Kiro CLI and
+`-- --resume --last` for OpenHands. A plain `connect` starts a new
+conversation. The resume line the harness itself prints as it exits
+(`claude --resume <id>`, `codex resume <id>`, `copilot --resume=<id>`,
+`kiro-cli --resume-id <id>`, `hermes --resume <id>`, `openhands --resume
+<id>`) works only inside the sandbox, where the conversation is: typed on
+this machine it does not reach it, unless the shell wrapper is on
+(`sandbox enable`) for that command, which sends it into the folder's
+sandbox. DefenseClaw cannot keep that line off the screen, so its own line
+says so. To resume a particular conversation, pass the harness's own flag
+and ID after `--`: `defenseclaw sandbox connect myapp-7f3a -- --resume <id>`.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
@@ -491,6 +514,12 @@ A few rules the flags follow:
   effect: every MicroVM gets the gateway's `vcpus` and `mem_mib`, so an
   organization's limit on the flags is not applied to them. The first start
   of an image the driver has not prepared yet says it takes about a minute.
+  That start prepares a disk of about the image's size in the driver's image
+  cache: before anything is copied, `run` refuses it when the volume has less
+  free space than the image's size plus 1 GiB (at least 6 GiB), and warns
+  below twice that (at least 12 GiB), naming what is free and
+  `sandbox image prune`. The daemon refuses such a create from any client the
+  same way.
 
 {/* AUTOGEN-BEGIN: sandbox-flags run */}
 | Flag | Takes | Default | Description |
@@ -537,8 +566,9 @@ sessions can share a sandbox (a second `claude` in the folder offers to
 resume it): neither one's end stops it, undoes the folder or deletes it
 (`--rm`) under the other, and the one that ends first names the review and
 undo commands for later. To continue the harness's last conversation,
-pass its own flag: `-- --continue` for Claude Code, `-- resume --last` for
-Codex.
+pass its own flag: `-- --continue` for Claude Code, OpenCode, GitHub Copilot
+CLI and Hermes Agent, `-- resume --last` for Codex, `-- --resume` for Kiro CLI
+and `-- --resume --last` for OpenHands.
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a
@@ -626,7 +656,9 @@ the organization policy, and counts. With a name, shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
 policy, hook tamper tier, hook traffic and the last blocked tool call, the
 tool calls that ran without a DefenseClaw verdict (hook tamper), egress
-totals, credential endpoints, the undo point, waiting asks, nested
+totals (destinations contacted and blocked, each counted once, as the
+activity feed names them; the JSON also has `blocked_requests`), credential
+endpoints, the undo point, waiting asks, nested
 repositories, and warnings, including a stopped sandbox the current policy
 would not start.
 
@@ -896,6 +928,17 @@ conflict, or git older than 2.38), it leaves your working tree alone and
 exits `4`: the changes go to `<name>.patch` in your folder and, in a git
 project, to branch `dc/<name>`. Changes that can run code on your machine
 need your confirmation, or `--accept-sensitive` without a terminal.
+
+Once an `--apply` (or the apply at a session's end) has put the work in your
+folder, the next pull, a session's end included, shows only what changed in
+the sandbox since (`2 files changed (+3 −0) since the last apply`), flags and
+asks about only that, and its apply, patch or 3-way merge starts from that
+point, so a change you took back from your folder since stays taken back.
+With nothing new it says so and asks nothing, and `sandbox delete` of the
+stopped sandbox does not warn about work it holds. `sandbox undo` of the
+apply starts the next pull from the uploaded copy again, so the undone work
+is offered anew. A branch or a patch file does not move that point: your
+folder does not have those changes.
 
 ```bash
 defenseclaw sandbox pull fix-tests

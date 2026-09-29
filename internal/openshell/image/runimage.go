@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
@@ -508,15 +509,10 @@ type VMDisk struct {
 	Bytes int64
 }
 
-// preparedDiskPrefix starts the name of each root disk the vm driver
-// prepares from an image. OpenShell 0.1.1 names them
-// sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-501-20-sha256-<image ID>
-// on a gateway that sets sandbox_uid and sandbox_gid, and
-// ...-image-account-sha256-<image ID> on one that does not.
-const preparedDiskPrefix = "sandbox-prepared-rootfs-"
-
 // VMDisks lists the root disks under cacheDir the vm driver prepared from
-// imageID. An unreadable cache holds none.
+// imageID: the directories, not links, named
+// openshell.PreparedDiskPrefix...-sha256-<the ID>. An unreadable cache
+// holds none.
 func VMDisks(cacheDir, imageID string) []VMDisk {
 	id, ok := strings.CutPrefix(imageID, "sha256:")
 	if !ok || !hashRE.MatchString(id) || cacheDir == "" {
@@ -530,7 +526,7 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 	var out []VMDisk
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasPrefix(name, preparedDiskPrefix) || !strings.HasSuffix(name, suffix) {
+		if !e.IsDir() || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !strings.HasSuffix(name, suffix) {
 			continue
 		}
 		d := VMDisk{Path: filepath.Join(cacheDir, name), UID: -1, GID: -1}
@@ -547,6 +543,26 @@ func VMDisks(cacheDir, imageID string) []VMDisk {
 		out = append(out, d)
 	}
 	return out
+}
+
+// RemoveVMDisk removes a root disk VMDisks listed, which must still be a
+// directory (not a link) named as the vm driver names its prepared disks.
+// The driver prepares it again from its image when a sandbox boots one
+// that has none. Nothing else of the driver's state is touched.
+func RemoveVMDisk(d VMDisk) error {
+	name := filepath.Base(d.Path)
+	i := strings.LastIndex(name, "-sha256-")
+	if i < 0 || !strings.HasPrefix(name, openshell.PreparedDiskPrefix) || !hashRE.MatchString(name[i+len("-sha256-"):]) {
+		return fmt.Errorf("openshell image: %s is not a MicroVM disk the vm driver prepared", d.Path)
+	}
+	info, err := os.Lstat(d.Path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("openshell image: %s is not a directory", d.Path)
+	}
+	return os.RemoveAll(d.Path)
 }
 
 // treeBytes is the space the files under root take on disk (sparse root

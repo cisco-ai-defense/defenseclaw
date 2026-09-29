@@ -59,7 +59,10 @@ except (OSError, OverflowError):
 	if err != nil || strings.TrimSpace(string(out)) != "other kills unchanged" {
 		t.Fatalf("shim run = %v, stdout %q, stderr %q", err, out, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox") {
+	// It answers Hermes' own "Run `fg` to bring Hermes Agent back." line
+	// (cert hermes:HERMES-2).
+	if !strings.Contains(stderr.String(), "defenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox") ||
+		!strings.Contains(stderr.String(), "Hermes Agent keeps running, and there is nothing to bring back with fg.") {
 		t.Fatalf("stderr %q lacks the notice", stderr.String())
 	}
 	// The install writes the shim and its .pth into the tool environment.

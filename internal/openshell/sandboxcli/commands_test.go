@@ -65,7 +65,8 @@ func TestListAndStatus(t *testing.T) {
 	ta.ok(t, ta.Status(bg, "", OutputText))
 	has(t, ta.output(), "Sandboxes       on", "openshell 0.1.1", "Organization    openshell.admin is advisory: you own config.yaml")
 	ta.ok(t, ta.fresh().Status(bg, "a-box", OutputText))
-	has(t, ta.output(), "skip-permissions on", "managed tier", "9 requests, 4 tool calls, 1 blocked", "2.0 KiB up, 1.0 MiB down")
+	has(t, ta.output(), "skip-permissions on", "managed tier", "9 requests, 4 tool calls, 1 blocked",
+		"3 destinations contacted, 1 blocked, 2.0 KiB up, 1.0 MiB down")
 	ta.ok(t, ta.fresh().Status(bg, "a-box", OutputJSON))
 	var sb sandboxapi.Sandbox
 	if err := json.Unmarshal(ta.out.Bytes(), &sb); err != nil || sb.Name != "a-box" {
@@ -832,16 +833,25 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 		mode    workspace.ApplyMode
 		applied bool
 		stderr  []string
+		// since is a pull that starts from an earlier apply.
+		since bool
 	}{
-		{"review", PullOptions{}, false, true, "", false, []string{"starting copybox", "Pulling copybox's work"}},
+		{"review", PullOptions{}, false, true, "", false, []string{"starting copybox", "Pulling copybox's work"}, false},
 		{"branch", PullOptions{Branch: true}, false, false, workspace.ApplyBranch, true,
-			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}},
-		{"nothing to bring back", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}},
+			[]string{"Pulling copybox's work", "copybox: ", "M main.go", "the changes are on branch"}, false},
+		{"nothing to bring back", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false, []string{"nothing to bring back"}, false},
+		// What the operator took back of that apply is not in the folder:
+		// only what is known is said.
+		{"nothing new since the last apply", PullOptions{Apply: true}, true, false, workspace.ApplyMerge, false,
+			[]string{"nothing new since the last apply to "}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "", copySandbox("copybox"))
 			if c.empty {
 				ta.copy.pull = &workspace.PullResult{Name: "copybox"}
+				if c.since {
+					ta.copy.pull.Since = strings.Repeat("d", 40)
+				}
 			}
 			o := c.opts
 			o.Name, o.Output = "copybox", OutputJSON
@@ -856,6 +866,7 @@ func TestPullJSONKeepsStdoutParseable(t *testing.T) {
 				t.Fatalf("stdout is not one result (%v):\n%s", err, ta.output())
 			}
 			has(t, ta.err.String(), c.stderr...)
+			lacks(t, ta.err.String(), "has the sandbox's changes")
 			if ta.IO.Out != io.Writer(ta.out) {
 				t.Fatal("stdout was not restored after the command")
 			}

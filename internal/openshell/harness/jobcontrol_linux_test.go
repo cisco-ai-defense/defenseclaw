@@ -550,6 +550,14 @@ func TestLauncherResumesAHarnessWhoseSuspendFailed(t *testing.T) {
 	if code != 5 || resumed < 0 || strings.LastIndex(out, supervisorNotice) < resumed {
 		t.Fatalf("exit %d, want the stub's 5 after a SIGCONT, then the supervisor's notice:\n%s", code, out)
 	}
+	// It is said at once too, in the title (kept, and restored before the
+	// exit's notice), while the TUI owns the screen (cert copilot:F3: only
+	// "kill EPERM" showed until the harness exited).
+	title := strings.Index(out, "\x1b]2;[defenseclaw] Ctrl-Z cannot suspend a harness")
+	if push, pop := strings.Index(out, "\x1b[22;0t"), strings.LastIndex(out, "\x1b[23;0t"); title < resumed || push < 0 || push > title ||
+		pop < title || pop > strings.LastIndex(out, supervisorNotice) {
+		t.Fatalf("title notice at %d (push %d, pop %d), resumed at %d, want it between them:\n%q", title, push, pop, resumed, out)
+	}
 
 	launcher, dir = launcherFixture(t, ClaudeCode, stubShutsDown)
 	r = startPTY(t, dir, nil, launcher)

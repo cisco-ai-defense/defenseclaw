@@ -462,6 +462,43 @@ func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	}
 }
 
+// A create on the vm driver whose image has no prepared disk yet is refused
+// when the volume of the driver's image cache lacks the room to prepare
+// one; one whose disk is prepared, and any on docker, is not (OC-F1).
+func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
+	cache := t.TempDir()
+	free := uint64(2 << 30)
+	disk := func(e *harnessEnv) {
+		e.m.opts.VMDiskFree = func() (string, uint64, error) { return cache, free, nil }
+	}
+	e := newVMEnv(t, nil)
+	disk(e)
+	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-full", Copy: true})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(err.Error(), "not enough free disk space for this sandbox's first start: "+
+		"the MicroVM driver prepares a disk of about 5.0 GiB from its image in "+cache+", where 2.0 GiB is free and at least 6.0 GiB is needed") {
+		t.Fatalf("create on a full disk = %v", err)
+	}
+	if _, err := e.m.Get(t.Context(), "vm-full"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("the refused create left a sandbox: %v", err)
+	}
+
+	free = 40 << 30
+	sb := e.create(sandboxapi.CreateRequest{Name: "vm-room", Copy: true})
+	// Its run image is prepared now: the same posture needs no room.
+	name := "sandbox-prepared-rootfs-ext4-umoci-v3-openshell-0.1.1-configured-1000-1000-sha256-" + strings.TrimPrefix(sb.RunImageID, "sha256:")
+	must(t, os.MkdirAll(filepath.Join(cache, name), 0o755))
+	free = 1 << 30
+	// Explain looks in the same cache (the gateway's state_dir).
+	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || ex.VMFirstBoot {
+		t.Fatalf("Explain of a prepared posture = %+v, %v", ex, err)
+	}
+	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
+
+	d := newEnv(t, nil)
+	disk(d)
+	d.create(sandboxapi.CreateRequest{Name: "dk-full"})
+}
+
 // The pre-create Explain says whether the image a new sandbox would boot
 // has a prepared MicroVM disk yet: never on docker; on vm by the alias's
 // (the overlay image's) ID for a hooks-only harness, and by the run image

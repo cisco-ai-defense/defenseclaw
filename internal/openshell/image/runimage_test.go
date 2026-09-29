@@ -483,8 +483,10 @@ func TestPruneRunImages(t *testing.T) {
 	daemon.tags[RunRepository(testAliasRepo)+":claudecode-lost-u1000"] = oldRuns[0].ImageID
 
 	// Without the driver's repository they are all left alone.
+	// The old overlay image's ID stays, under its alias: no disk of it is
+	// named for removal.
 	rep, err := b.Prune(ctx, PruneOptions{Repository: "e-defenseclaw-sandbox", DryRun: true})
-	if err != nil || len(rep.RunImagesLeft) != 8 || !slices.Equal(rep.Removed, []string{old.Tag}) {
+	if err != nil || len(rep.RunImagesLeft) != 8 || !slices.Equal(rep.Removed, []string{old.Tag}) || len(rep.RemovedImageIDs) != 0 {
 		t.Fatalf("dry prune without the alias repository = %+v, %v", rep, err)
 	}
 
@@ -501,8 +503,10 @@ func TestPruneRunImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if !slices.Equal(rep.Removed, []string{old.Tag, oldRuns[2].Tag, oldAlias.Tag}) || !slices.Equal(rep.RemovedRunImageIDs, []string{oldRuns[2].ImageID}) {
-		t.Fatalf("removed = %v (run image IDs %v)", rep.Removed, rep.RemovedRunImageIDs)
+	// The old overlay image goes with its alias, so its ID does; the run
+	// images kept for sandboxes keep theirs.
+	if !slices.Equal(rep.Removed, []string{old.Tag, oldRuns[2].Tag, oldAlias.Tag}) || !slices.Equal(rep.RemovedImageIDs, []string{old.ImageID, oldRuns[2].ImageID}) {
+		t.Fatalf("removed = %v (image IDs %v)", rep.Removed, rep.RemovedImageIDs)
 	}
 	_, name, _ := strings.Cut(base.Tag, ":")
 	for _, tag := range []string{current.Tag, testAliasRepo + ":" + name, oldRuns[0].Tag, oldRuns[1].Tag} {
@@ -606,5 +610,64 @@ func TestVMDisks(t *testing.T) {
 	}
 	if VMDisks(cache, id) != nil || VMDisks(filepath.Join(cache, "missing"), "sha256:"+id) != nil {
 		t.Fatal("a malformed ID or a missing cache found disks")
+	}
+
+	// A link or a file named like a prepared disk is not one.
+	other := strings.Repeat("ef", 32)
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(cache, "sandbox-prepared-rootfs-ext4-x-sha256-"+other)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "sandbox-prepared-rootfs-ext4-y-sha256-"+other), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := VMDisks(cache, "sha256:"+other); got != nil {
+		t.Fatalf("a link or a file counted as a disk: %+v", got)
+	}
+
+	// RemoveVMDisk removes a prepared disk, and nothing that is not one.
+	for _, d := range disks {
+		if err := RemoveVMDisk(d); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(d.Path); !os.IsNotExist(err) {
+			t.Fatalf("%s is still there: %v", d.Path, err)
+		}
+	}
+	for _, d := range []VMDisk{
+		{Path: filepath.Join(cache, "sandbox-bootstrap-rootfs-ext4-v5-openshell-0.1.1-guest-x-sha256-"+id)},
+		{Path: filepath.Join(cache, "sandbox-prepared-rootfs-ext4-x-sha256-"+other)},
+		{Path: filepath.Join(cache, "sandbox-prepared-rootfs-ext4-y-sha256-"+other)},
+		{Path: filepath.Join(cache, "sandbox-prepared-rootfs-ext4-x-sha256-short")},
+	} {
+		if err := RemoveVMDisk(d); err == nil {
+			t.Fatalf("RemoveVMDisk(%s) removed what is not a prepared disk", d.Path)
+		}
+	}
+	if left, _ := os.ReadDir(cache); len(left) != 4 {
+		t.Fatalf("the cache holds %d entries, want the other image's disk, the bootstrap rootfs, the link and the file", len(left))
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the link's target went: %v", err)
+	}
+}
+
+// GoneIDs names the image IDs Docker holds no image of, untagged ones
+// included; without Docker it names none.
+func TestGoneIDs(t *testing.T) {
+	a, b, c := "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64), "sha256:"+strings.Repeat("c", 64)
+	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+		if strings.Join(args, " ") == "image ls --all --no-trunc --quiet" {
+			return a + "\n" + b + "\n", 0
+		}
+		return "", 1
+	}}
+	gone, err := (&Builder{Docker: docker, Store: testStore(t)}).GoneIDs(context.Background(), []string{a, c, "not-an-id"})
+	if err != nil || len(gone) != 1 || !gone[c] {
+		t.Fatalf("GoneIDs = %v, %v", gone, err)
+	}
+	docker.handler = func([]string, []byte) (string, int) { return "", 1 }
+	if gone, err := (&Builder{Docker: docker, Store: testStore(t)}).GoneIDs(context.Background(), []string{c}); err == nil || gone != nil {
+		t.Fatalf("GoneIDs without Docker = %v, %v", gone, err)
 	}
 }

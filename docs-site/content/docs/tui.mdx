@@ -245,7 +245,9 @@ what needs attention:
 - **hooks unreachable**: the harness's hooks cannot reach DefenseClaw, so they
   block every tool call. Run `defenseclaw sandbox doctor`.
 - **silent**: the harness is active, but no DefenseClaw hook has been heard.
-  A user-tier harness could have edited its own hook settings.
+  In a user-tier harness the agent may have changed what runs the hooks
+  (what it can change differs per harness; the launch banner's `Hooks` line
+  says it).
 - **orphaned**: the sandbox has no DefenseClaw binding, so its hooks cannot
   authenticate. Delete it and run again.
 

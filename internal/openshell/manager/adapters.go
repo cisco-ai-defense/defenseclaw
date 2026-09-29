@@ -211,6 +211,44 @@ func GatewayConfigResources(dir string) func() (packs.Resources, error) {
 	}
 }
 
+// GatewayVMDiskFree is Options.VMDiskFree for the local gateway's
+// configuration in dir (as GatewayConfigResources reads it): the MicroVM
+// driver's image cache, under the state_dir it sets, else under the
+// daemon user's home, and the free space of its volume.
+func GatewayVMDiskFree(dir string) func() (string, uint64, error) {
+	return func() (string, uint64, error) {
+		stateDir := ""
+		if st, err := (&openshell.GatewayConfigurator{Dir: dir}).Read(); err == nil {
+			stateDir = st.VM.StateDir
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = ""
+		}
+		cache := openshell.VMImageCache(stateDir, home)
+		if cache == "" {
+			return "", 0, errors.New("the MicroVM driver's image cache is unknown (no home directory)")
+		}
+		free, err := openshell.FreeUnder(openshell.DiskFree, cache)
+		return cache, free, err
+	}
+}
+
+// imageSizer is an Images that reports the size of an image in Docker
+// (BuilderImages), which the disk the vm driver prepares from it takes
+// about.
+type imageSizer interface {
+	ImageSize(ctx context.Context, ref string) (uint64, error)
+}
+
+// ImageSize implements imageSizer.
+func (b BuilderImages) ImageSize(ctx context.Context, ref string) (uint64, error) {
+	if b.Builder == nil {
+		return 0, errors.New("no image builder configured")
+	}
+	return b.Builder.ImageSize(ctx, ref)
+}
+
 // ProfileImporter imports platform-scoped provider profiles in their YAML
 // form. The SDK's typed profile drops endpoint access and enforcement, so
 // profiles go through the upstream CLI, which the spike validated.
