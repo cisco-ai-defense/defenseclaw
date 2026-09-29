@@ -346,7 +346,11 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 	e.stopBox("vm-yolo")
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowYolo = boolPtr(false) })
 	_, err := e.m.Start(t.Context(), "vm-yolo", sandboxapi.StartRequest{})
-	if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") {
+	// A copy's work is reached only by a start (pull starts it): the
+	// refusal does not send the user to delete before it is pulled.
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") ||
+		!strings.Contains(apiErr.Message, "deleting it discards what was never pulled") || strings.Contains(apiErr.Message, "delete it and run it again") ||
+		!strings.Contains(apiErr.Detail, "start it under the settings it was made with") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox pull vm-yolo`, then") {
 		t.Fatalf("stricter start = %+v", apiErr)
 	}
 }

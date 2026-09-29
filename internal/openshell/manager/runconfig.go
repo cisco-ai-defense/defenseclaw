@@ -747,7 +747,7 @@ func (m *Manager) refreshRunConfig(ctx context.Context, rec record, eff *packs.E
 			want.Imported = rec.MCP.Imported
 		}
 		if runConfigTightened(!rec.Yolo, rec.MCP, !yolo, want) {
-			return nil, nil, nil, errRunConfigStricter(rec.Name, runConfigFixed)
+			return nil, nil, nil, errRunConfigStricter(rec, runConfigFixed)
 		}
 		return rec.MCP, rr, rec.Verify, nil
 	}
@@ -767,14 +767,14 @@ func (m *Manager) refreshRunConfig(ctx context.Context, rec record, eff *packs.E
 			return rec.MCP, rr, rec.Verify, nil
 		}
 		if runConfigTightened(rr.Safe, rec.MCP, !yolo, rc.mcp) {
-			return nil, nil, nil, errRunConfigStricter(rec.Name, runConfigBaked)
+			return nil, nil, nil, errRunConfigStricter(rec, runConfigBaked)
 		}
 		m.logf("sandbox %s: keeps the harness run configuration baked into its image, which is stricter than its policy now asks", rec.Name)
 		return rec.MCP, rr, rec.Verify, nil
 	}
 	if !slices.Equal(rc.paths(), sortedCopy(rr.Files)) {
 		if runConfigTightened(rr.Safe, rec.MCP, !yolo, rc.mcp) {
-			return nil, nil, nil, errRunConfigStricter(rec.Name, runConfigFixed)
+			return nil, nil, nil, errRunConfigStricter(rec, runConfigFixed)
 		}
 		m.logf("sandbox %s: keeps its harness run configuration, which is stricter than its policy now asks", rec.Name)
 		return rec.MCP, rr, rec.Verify, nil
@@ -822,13 +822,24 @@ const (
 	runConfigBaked = "a MicroVM sandbox's harness settings are baked into its image at create"
 )
 
-// errRunConfigStricter refuses a start whose policy wants harness settings
-// the sandbox's run files cannot take, and says why.
-func errRunConfigStricter(name, why string) error {
-	return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
+// errRunConfigStricter refuses a start of rec whose policy wants harness
+// settings its run files cannot take, and says why. A copy's work stays
+// in the sandbox, and only a start reaches it (pull starts a stopped
+// sandbox): deleting it first would discard what was never pulled.
+func errRunConfigStricter(rec record, why string) error {
+	name := rec.Name
+	e := &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
 		Message: "the sandbox policy now runs the harness under stricter settings (safe mode or MCP servers) than sandbox " + name +
 			" was created with, and " + why + "; delete it and run it again",
 		Detail: "`defenseclaw sandbox delete " + name + "`, then `defenseclaw sandbox run` with the same project"}
+	if rec.WorkdirMode == config.OpenShellWorkdirCopy {
+		e.Message = "the sandbox policy now runs the harness under stricter settings (safe mode or MCP servers) than sandbox " + name +
+			" was created with, and " + why + ", so it cannot start; its work stays in it, and deleting it discards what was never pulled"
+		e.Detail = "to bring the work back first, start it under the settings it was made with (undo the change that made the policy stricter, " +
+			"or ask your administrator), `defenseclaw sandbox pull " + name + "`, then `defenseclaw sandbox delete " + name +
+			"` and `defenseclaw sandbox run` with the same project"
+	}
+	return e
 }
 
 func sortedCopy(in []string) []string {

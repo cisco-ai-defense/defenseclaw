@@ -150,7 +150,10 @@ not the driver's name or `runtime.GOOS`.
   built on the verified overlay image. Hooks-only harnesses boot an alias of
   the overlay image (`defenseclaw.invalid/sandbox:…`), which shares its image
   ID. The files cannot change after create: a start whose render is stricter
-  is refused (delete and run again), a looser one keeps the image. A value
+  is refused, a looser one keeps the image. A copy's work stays in the
+  sandbox and only a start reaches it (`pull` starts a stopped sandbox), so
+  that refusal says to pull the work under the settings the sandbox was made
+  with before deleting it and running it again. A value
   of a secret-bearing variable that came from `--env` is refused on vm,
   since it would sit in an image layer and in OpenShell's prepared-rootfs
   cache.
