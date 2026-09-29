@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -38,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -372,18 +374,40 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	useOpenCode(t, e)
 	e.create(sandboxapi.CreateRequest{Name: "restart", Harness: "opencode", Copy: true})
 	e.stopBox("restart")
-	recorded := e.boxOf("restart").rec.Verify
-	// An upgrade that renders the hooks otherwise (here: another ingress port).
+	recorded := *e.boxOf("restart").rec.Verify
+	// The sandbox answers with the files create left in it, whatever the
+	// start expects.
+	created := answerFor(recorded, "restart")
+	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if isWorkloadCheck(call) {
+			return openshelltest.ExecResponse{Stdout: created.stdout()}
+		}
+		return openshelltest.ExecResponse{}
+	})
+	// An upgrade that renders the hooks otherwise (here: another ingress
+	// port), which a check against a fresh render would refuse.
 	e.m.opts.IngressPort++
+	spec, _ := harness.Get("opencode")
+	arts, err := spec.Provider.SandboxArtifacts(connector.SandboxRenderTarget{
+		IngressPort: e.m.opts.IngressPort, AgentVersion: e.images.rec.HarnessVersion, HookContractID: e.images.rec.HookContract})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh := verifyExpectation(e.images.rec, spec, arts); reflect.DeepEqual(fresh.Files, recorded.Files) {
+		t.Fatalf("another ingress port renders the same hooks: %+v", fresh.Files)
+	}
 	e.startBox("restart", sandboxapi.StartRequest{})
-	if calls := e.workloadCheckCalls("restart"); len(calls) != 2 || !slices.Equal(calls[1].Command, verifyArgv(*recorded)) {
+	if calls := e.workloadCheckCalls("restart"); len(calls) != 2 || !slices.Equal(calls[1].Command, verifyArgv(recorded)) {
 		t.Fatalf("workload checks = %+v", calls)
+	}
+	if after := e.boxOf("restart").rec.Verify; after == nil || !reflect.DeepEqual(*after, recorded) {
+		t.Fatalf("the start changed what the check expects: %+v, want %+v", after, recorded)
 	}
 	e.stopBox("restart")
 
 	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("0", 64) }, nil))
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
-	_, err := e.m.Start(t.Context(), "restart", sandboxapi.StartRequest{})
+	_, err = e.m.Start(t.Context(), "restart", sandboxapi.StartRequest{})
 	wantCode(t, err, sandboxapi.CodePolicyRejected)
 	if got, _ := e.client.GetSandbox(t.Context(), "restart"); got.Status.Phase != openshell.PhaseStopped ||
 		e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 {
