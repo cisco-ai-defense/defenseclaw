@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -95,6 +96,11 @@ type storeDoc struct {
 	// removable.
 	Owner  string   `json:"owner,omitempty"`
 	Images []Record `json:"images"`
+	// RunImages are the run images and aliases made from those images for
+	// a driver that is sent its own image names (RunImage). Absent until
+	// the first one is made, so a store on a docker gateway keeps its
+	// shape.
+	RunImages []RunImage `json:"run_images,omitempty"`
 }
 
 // ownerRE is the shape of a store owner.
@@ -244,7 +250,49 @@ func (s *Store) update(tag string, fn func(*Record) error) (Record, error) {
 	return out, err
 }
 
-// Remove deletes the records for tags.
+// RunImages returns every run image and alias record, sorted by tag.
+func (s *Store) RunImages() ([]RunImage, error) {
+	var out []RunImage
+	err := s.locked(func() error {
+		doc, err := s.read()
+		out = doc.RunImages
+		return err
+	})
+	return out, err
+}
+
+// runImage returns the run image or alias record for tag.
+func (s *Store) runImage(tag string) (RunImage, bool, error) {
+	records, err := s.RunImages()
+	if err != nil {
+		return RunImage{}, false, err
+	}
+	for _, r := range records {
+		if r.Tag == tag {
+			return r, true, nil
+		}
+	}
+	return RunImage{}, false, nil
+}
+
+// putRunImage inserts or replaces the run image or alias record with r.Tag.
+func (s *Store) putRunImage(r RunImage) error {
+	if r.Tag == "" {
+		return errors.New("openshell image store: run image record has no tag")
+	}
+	return s.locked(func() error {
+		doc, err := s.read()
+		if err != nil {
+			return err
+		}
+		doc.RunImages = slices.DeleteFunc(doc.RunImages, func(o RunImage) bool { return o.Tag == r.Tag })
+		doc.RunImages = append(doc.RunImages, r)
+		return s.write(doc)
+	})
+}
+
+// Remove deletes the records for tags: overlay images, run images and
+// aliases alike.
 func (s *Store) Remove(tags ...string) error {
 	drop := map[string]bool{}
 	for _, t := range tags {
@@ -262,8 +310,23 @@ func (s *Store) Remove(tags ...string) error {
 			}
 		}
 		doc.Images = kept
+		doc.RunImages = slices.DeleteFunc(doc.RunImages, func(r RunImage) bool { return drop[r.Tag] })
 		return s.write(doc)
 	})
+}
+
+// runImageLock serializes the making and pruning of run images and aliases
+// across processes (the daemon's creates and a CLI prune), apart from the
+// store lock, which a build must not hold while docker runs.
+func (s *Store) runImageLock() (func(), error) {
+	if err := safefile.ProtectDirectory(filepath.Dir(s.path)); err != nil {
+		return nil, fmt.Errorf("openshell image store: %w", err)
+	}
+	unlock, err := lockFile(s.path + ".run.lock")
+	if err != nil {
+		return nil, fmt.Errorf("openshell image store: lock the run images: %w", err)
+	}
+	return unlock, nil
 }
 
 func (s *Store) locked(fn func() error) error {
@@ -304,12 +367,14 @@ func (s *Store) read() (storeDoc, error) {
 		return storeDoc{}, fmt.Errorf("openshell image store: %s has a malformed owner", s.path)
 	}
 	sort.Slice(doc.Images, func(i, j int) bool { return doc.Images[i].Tag < doc.Images[j].Tag })
+	sort.Slice(doc.RunImages, func(i, j int) bool { return doc.RunImages[i].Tag < doc.RunImages[j].Tag })
 	return doc, nil
 }
 
 func (s *Store) write(doc storeDoc) error {
 	doc.Version = storeVersion
 	sort.Slice(doc.Images, func(i, j int) bool { return doc.Images[i].Tag < doc.Images[j].Tag })
+	sort.Slice(doc.RunImages, func(i, j int) bool { return doc.RunImages[i].Tag < doc.RunImages[j].Tag })
 	if doc.Images == nil {
 		doc.Images = []Record{}
 	}

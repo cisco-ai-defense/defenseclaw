@@ -80,7 +80,8 @@ func TestDriverTable(t *testing.T) {
 	}
 	vm, ok := openshell.LookupDriver("vm")
 	if !ok || vm.Name != openshell.DriverVM || vm.HostMounts || vm.SandboxLimits || !vm.RunFilesInImage || !vm.GatewayIdentity ||
-		vm.MountRefusal == "" || !strings.HasPrefix(vm.ImageRepository, "defenseclaw.invalid/") || vm.StopFlushes || vm.SkipWorkloadCheck {
+		vm.MountRefusal == "" || !strings.HasPrefix(vm.ImageRepository, "defenseclaw.invalid/") || vm.StopFlushes || vm.SkipWorkloadCheck ||
+		vm.ImageCache != ".local/state/openshell/vm-driver/images" {
 		t.Fatalf("vm = %+v, %v", vm, ok)
 	}
 	// A record from before drivers were kept was made on docker.

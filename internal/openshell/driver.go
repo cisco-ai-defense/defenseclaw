@@ -88,6 +88,12 @@ type Driver struct {
 	// it is turned on; the vm driver needs it from the start, because the
 	// workload's identity there is the gateway's configuration.
 	SkipWorkloadCheck bool
+	// ImageCache is where the driver keeps what it prepares from each image
+	// it boots, relative to the home of the user the gateway runs as; empty
+	// when it prepares nothing. The vm driver turns an image into a MicroVM
+	// root disk there on its first boot (about a minute and about 5 GB),
+	// one per image ID, and never removes it.
+	ImageCache string
 }
 
 // drivers is the table: what each compute driver DefenseClaw drives can
@@ -97,6 +103,7 @@ var drivers = map[ComputeDriver]Driver{
 	DriverVM: {
 		Name: DriverVM, RunFilesInImage: true, GatewayIdentity: true,
 		ImageRepository: "defenseclaw.invalid/sandbox",
+		ImageCache:      ".local/state/openshell/vm-driver/images",
 		MountRefusal:    "the OpenShell MicroVM (vm) driver mounts no host folders",
 	},
 }

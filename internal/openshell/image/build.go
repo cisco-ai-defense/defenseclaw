@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -77,27 +78,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		}
 	}
 
-	pr, pw := io.Pipe()
-	go func() {
-		pw.CloseWithError(c.WriteTar(pw))
-	}()
-	args := []string{"build", "--pull=false"}
-	labelKeys := make([]string, 0, len(c.Labels))
-	for key := range c.Labels {
-		labelKeys = append(labelKeys, key)
-	}
-	sort.Strings(labelKeys)
-	for _, key := range labelKeys {
-		args = append(args, "--label", key+"="+c.Labels[key])
-	}
-	args = append(args, "-t", c.Tag, "-")
-	logw := b.Log
-	if logw == nil {
-		logw = io.Discard
-	}
-	err = b.Docker.Run(ctx, pr, logw, logw, args...)
-	_ = pr.CloseWithError(io.ErrClosedPipe)
-	if err != nil {
+	if err := buildImage(ctx, b.Docker, c.Files, c.Labels, c.Tag, b.Log); err != nil {
 		return Record{}, fmt.Errorf("openshell image: docker build %s: %w", c.Tag, err)
 	}
 
@@ -233,8 +214,14 @@ type PruneOptions struct {
 	// Repository limits pruning to one image repository (default
 	// DefaultRepository).
 	Repository string
-	// Keep lists tags that must survive in addition to the current image of
-	// every identity.
+	// AliasRepository, when set, also prunes the run images and aliases
+	// made for a driver whose image references use it
+	// (openshell.Driver.ImageRepository): the aliases in it and the run
+	// images in RunRepository(AliasRepository). Unset, they are left alone
+	// and reported in RunImagesLeft.
+	AliasRepository string
+	// Keep lists tags, or image IDs, that must survive in addition to the
+	// current image of every identity: the images sandboxes run.
 	Keep []string
 	// DryRun reports without removing.
 	DryRun bool
@@ -242,9 +229,18 @@ type PruneOptions struct {
 
 // PruneReport lists what Prune did.
 type PruneReport struct {
-	Removed        []string
-	Kept           []string
+	Removed []string
+	Kept    []string
+	// InUse are the kept images Keep names.
+	InUse          []string
 	ForgottenStale []string
+	// RemovedRunImageIDs are the image IDs of the run images removed: the
+	// vm driver keeps the disk it prepared from each (VMDisks), which
+	// DefenseClaw does not remove.
+	RemovedRunImageIDs []string
+	// RunImagesLeft are the recorded run images and aliases a prune
+	// without AliasRepository left alone.
+	RunImagesLeft []string
 	// Unrecorded are images labelled with this store's owner that it holds
 	// no record for (for example after images.json was restored from an
 	// older copy). They are reported, never removed.
@@ -264,6 +260,8 @@ type PruneReport struct {
 // image is reported, never removed, so data dirs sharing a Docker daemon (or
 // a data dir that lost images.json) never delete images another one runs.
 // Images in use by a container are refused by docker itself (no --force).
+// With opts.AliasRepository it prunes that driver's run images and aliases
+// by the same rules (pruneRunImages).
 func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, error) {
 	repo := opts.Repository
 	if repo == "" {
@@ -288,9 +286,9 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	if err != nil {
 		return PruneReport{}, err
 	}
-	keep := map[string]bool{}
-	for _, tag := range opts.Keep {
-		keep[tag] = true
+	keep, inUse := map[string]bool{}, map[string]bool{}
+	for _, ref := range opts.Keep {
+		keep[ref], inUse[ref] = true, true
 	}
 	type identity struct {
 		connector         string
@@ -341,8 +339,11 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Tag < candidates[j].Tag })
 	var removeErrs []error
 	for _, r := range candidates {
-		if keep[r.Tag] {
+		if keep[r.Tag] || keep[r.ImageID] {
 			report.Kept = append(report.Kept, r.Tag)
+			if inUse[r.Tag] || inUse[r.ImageID] {
+				report.InUse = append(report.InUse, r.Tag)
+			}
 			continue
 		}
 		if !opts.DryRun {
@@ -353,6 +354,28 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 		}
 		report.Removed = append(report.Removed, r.Tag)
 	}
+	// A store that never made a run image (a docker gateway's) has none to
+	// prune, and docker is not asked about their repositories.
+	runs, runErr := b.Store.RunImages()
+	switch {
+	case runErr != nil || len(runs) == 0:
+	case opts.AliasRepository != "":
+		gone := map[string]bool{}
+		for _, tag := range append(append([]string(nil), report.Removed...), report.ForgottenStale...) {
+			gone[tag] = true
+		}
+		kept := map[string]bool{}
+		for _, r := range records {
+			if !gone[r.Tag] {
+				kept[r.ImageID] = true
+			}
+		}
+		runErr = b.pruneRunImages(ctx, opts, owner, runs, kept, inUse, &report, &removeErrs)
+	default:
+		for _, r := range runs {
+			report.RunImagesLeft = append(report.RunImagesLeft, r.Tag)
+		}
+	}
 	sort.Strings(report.ForgottenStale)
 	sort.Strings(report.Unrecorded)
 	sort.Strings(report.Foreign)
@@ -361,7 +384,104 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 			return report, err
 		}
 	}
-	return report, errors.Join(removeErrs...)
+	return report, errors.Join(append(removeErrs, runErr)...)
+}
+
+// pruneRunImages is Prune for the run images and aliases (runs, as the
+// store records them) of the driver whose image references use
+// opts.AliasRepository. Only recorded, owned ones are removed, run images
+// before aliases, and only when Keep names
+// neither their tag nor their ID and their overlay image is not kept
+// either (baseKept holds the IDs of the overlay images that stay
+// recorded). A run image of a kept overlay image is what the next sandbox
+// of its posture boots: a rebuilt one would get a new image ID, which the
+// vm driver prepares a new disk for (about a minute and about 5 GB it never
+// removes), while the run image itself only adds its files' few layers.
+// An alias shares its overlay image's ID, so untagging it frees nothing
+// while that image stays.
+func (b *Builder) pruneRunImages(ctx context.Context, opts PruneOptions, owner string, runs []RunImage, baseKept, inUse map[string]bool,
+	report *PruneReport, removeErrs *[]error) error {
+	aliasRepo, runRepo := opts.AliasRepository, RunRepository(opts.AliasRepository)
+	for _, repo := range []string{aliasRepo, runRepo} {
+		if !repositoryRE.MatchString(repo) {
+			return fmt.Errorf("openshell image: invalid repository %q", repo)
+		}
+	}
+	unlock, err := b.Store.runImageLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	present, owned := map[string]bool{}, map[string]bool{}
+	for _, repo := range []string{aliasRepo, runRepo} {
+		p, err := b.listTags(ctx, repo, "label="+LabelSandboxImage+"=1")
+		if err != nil {
+			return err
+		}
+		o, err := b.listTags(ctx, repo, "label="+LabelSandboxImage+"=1", "label="+LabelOwner+"="+owner)
+		if err != nil {
+			return err
+		}
+		maps.Copy(present, p)
+		maps.Copy(owned, o)
+	}
+	recorded := map[string]bool{}
+	var candidates []RunImage
+	for _, r := range runs {
+		repo := runRepo
+		if r.Alias {
+			repo = aliasRepo
+		}
+		if !strings.HasPrefix(r.Tag, repo+":") {
+			continue
+		}
+		recorded[r.Tag] = true
+		switch {
+		case !present[r.Tag]:
+			report.ForgottenStale = append(report.ForgottenStale, r.Tag)
+		case r.Owner != owner || !owned[r.Tag]:
+			report.Foreign = append(report.Foreign, r.Tag)
+		default:
+			candidates = append(candidates, r)
+		}
+	}
+	for tag := range present {
+		switch {
+		case recorded[tag]:
+		case owned[tag]:
+			report.Unrecorded = append(report.Unrecorded, tag)
+		default:
+			report.Foreign = append(report.Foreign, tag)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Alias != candidates[j].Alias {
+			return !candidates[i].Alias
+		}
+		return candidates[i].Tag < candidates[j].Tag
+	})
+	for _, r := range candidates {
+		switch {
+		case inUse[r.Tag] || inUse[r.ImageID]:
+			report.Kept = append(report.Kept, r.Tag)
+			report.InUse = append(report.InUse, r.Tag)
+			continue
+		case baseKept[r.BaseImageID]:
+			report.Kept = append(report.Kept, r.Tag)
+			continue
+		}
+		if !opts.DryRun {
+			if _, err := output(ctx, b.Docker, nil, "image", "rm", r.Tag); err != nil {
+				*removeErrs = append(*removeErrs, fmt.Errorf("remove %s: %w", r.Tag, err))
+				continue
+			}
+		}
+		report.Removed = append(report.Removed, r.Tag)
+		if !r.Alias {
+			report.RemovedRunImageIDs = append(report.RemovedRunImageIDs, r.ImageID)
+		}
+	}
+	return nil
 }
 
 // listTags lists the tags of repo whose images match every docker filter.

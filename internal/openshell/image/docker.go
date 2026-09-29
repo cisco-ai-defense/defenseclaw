@@ -19,10 +19,12 @@ package image
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -94,6 +96,67 @@ func output(ctx context.Context, d Docker, stdin io.Reader, args ...string) (str
 		return stdout.String(), err
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// buildImage streams files as a build context (writeContextTar) to
+// `docker build --pull=false --label k=v ... -t tag -`, the labels sorted,
+// with docker's output going to log.
+func buildImage(ctx context.Context, d Docker, files []ContextFile, labels map[string]string, tag string, log io.Writer) error {
+	pr, pw := io.Pipe()
+	go func() {
+		pw.CloseWithError(writeContextTar(pw, files))
+	}()
+	args := []string{"build", "--pull=false"}
+	keys := make([]string, 0, len(labels))
+	for key := range labels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		args = append(args, "--label", key+"="+labels[key])
+	}
+	args = append(args, "-t", tag, "-")
+	if log == nil {
+		log = io.Discard
+	}
+	err := d.Run(ctx, pr, log, log, args...)
+	_ = pr.CloseWithError(io.ErrClosedPipe)
+	return err
+}
+
+// tagImage gives the image source (an image ID or a name) the name target.
+func tagImage(ctx context.Context, d Docker, source, target string) error {
+	_, err := output(ctx, d, nil, "tag", source, target)
+	return err
+}
+
+// imageFacts is what docker reports of a local image: its ID, the diff IDs
+// of its layers, bottom first, and its labels.
+type imageFacts struct {
+	ID     string
+	Layers []string
+	Labels map[string]string
+}
+
+// inspectImage reports ref's imageFacts.
+func inspectImage(ctx context.Context, d Docker, ref string) (imageFacts, error) {
+	out, err := output(ctx, d, nil, "image", "inspect", "--format", "{{json .}}", ref)
+	if err != nil {
+		return imageFacts{}, fmt.Errorf("openshell image: inspect %s: %w", ref, err)
+	}
+	var doc struct {
+		ID     string `json:"Id"`
+		RootFS struct {
+			Layers []string `json:"Layers"`
+		} `json:"RootFS"`
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil || !imageIDRE.MatchString(doc.ID) {
+		return imageFacts{}, fmt.Errorf("openshell image: inspect %s returned no image", ref)
+	}
+	return imageFacts{ID: doc.ID, Layers: doc.RootFS.Layers, Labels: doc.Config.Labels}, nil
 }
 
 func lastLines(s string, n int) string {
