@@ -153,6 +153,15 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 		"COPILOT_AUTO_UPDATE":    "false",
 		"COPILOT_PKG_CACHE_HOME": CopilotPackageCache,
 	},
+	// #966, measured on the Docker driver and in the macOS MicroVM: the
+	// sandbox's seccomp filter makes pidfd_open fail with ENOSYS, so the
+	// pinned CLI's native runtime watches SIGCHLD for its hook processes,
+	// and in the TUI its Node.js side resets SIGCHLD to the default. Each
+	// finished hook stays a zombie until Copilot's 30-second hook timeout.
+	// Headless runs keep the handler. Copilot's HTTP hooks would start no
+	// process but let the tool call run when the request fails, so the
+	// sandbox keeps the fail-closed command hooks.
+	interactiveCaveat: "each Copilot CLI hook waits out its 30-second timeout in a sandbox, so a tool call takes about a minute and a half; --prompt runs are not affected",
 })
 
 // CopilotLauncherPath is the in-image Copilot launcher.

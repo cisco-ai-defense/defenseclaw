@@ -1303,18 +1303,26 @@ func launchModel(sb *sandboxapi.Sandbox, args []string) string {
 	return model
 }
 
-// launchCaveat is the provider limit an interactive session of sb should
-// know about (harness.CredentialProfile.Caveat); a one-prompt run has none.
-func launchCaveat(sb *sandboxapi.Sandbox, o RunOptions) string {
+// launchCaveats are the limits an interactive session of sb should know
+// about: the harness's own (harness.Spec.InteractiveCaveat), then its
+// provider's (harness.CredentialProfile.Caveat). A one-prompt run has none.
+func launchCaveats(sb *sandboxapi.Sandbox, o RunOptions) []string {
 	spec, ok := harness.Get(sb.Harness)
-	if !ok || sb.Launch.CredentialProfile == "" || o.Prompt != "" || printMode(spec, o.Args) {
-		return ""
+	if !ok || o.Prompt != "" || printMode(spec, o.Args) {
+		return nil
+	}
+	var out []string
+	if caveat := spec.InteractiveCaveat(); caveat != "" {
+		out = append(out, caveat)
+	}
+	if sb.Launch.CredentialProfile == "" {
+		return out
 	}
 	cp, err := spec.CredentialProfile(sb.Launch.CredentialProfile, sb.Launch.BedrockRegion)
-	if err != nil {
-		return ""
+	if err == nil && cp.Caveat != "" {
+		out = append(out, cp.Caveat)
 	}
-	return cp.Caveat
+	return out
 }
 
 func joinNonEmpty(sep string, parts ...string) string {
@@ -1359,7 +1367,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	case model != "":
 		row("Model", model)
 	}
-	if caveat := launchCaveat(sb, b.o); caveat != "" {
+	for _, caveat := range launchCaveats(sb, b.o) {
 		row("", "⚠ "+caveat)
 	}
 	for _, c := range bannerCredentials(sb, b.o) {
