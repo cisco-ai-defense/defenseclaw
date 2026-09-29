@@ -28,11 +28,11 @@ import (
 // the preamble drops a value from the caller's environment.
 func TestLaunchersEndWhatTheHarnessLeaves(t *testing.T) {
 	const keep = "\ndc_keep_leftovers=1\n"
-	if !strings.Contains(launcherPreamble, "\nunset dc_keep_leftovers\n") {
-		t.Error("the preamble does not drop dc_keep_leftovers from the caller's environment")
+	if !strings.Contains(launcherPreamble, "\nunset dc_keep_leftovers dc_say_kept\n") {
+		t.Error("the preamble does not drop dc_keep_leftovers and dc_say_kept from the caller's environment")
 	}
-	if !strings.Contains(launcherJobControl, "${dc_keep_leftovers:+--keep-leftovers} \"$@\"") {
-		t.Error("dc_launch does not pass --keep-leftovers to the supervisor")
+	if !strings.Contains(launcherJobControl, "${dc_keep_leftovers:+--keep-leftovers} ${dc_say_kept:+--say-kept} \"$@\"") {
+		t.Error("dc_launch does not pass --keep-leftovers and --say-kept to the supervisor")
 	}
 	for _, name := range Names() {
 		spec, _ := Get(name)
@@ -52,5 +52,12 @@ func TestLaunchersEndWhatTheHarnessLeaves(t *testing.T) {
 	env := string(shellFile(t, Codex, SandboxEnvPath).Data)
 	if at := strings.LastIndex(env, keep); at < strings.Index(env, launcherPreamble) {
 		t.Error("the sandbox exec wrapper does not keep what its command leaves running")
+	}
+	// Only the wrapper names what it keeps: OmniGent's server is no news.
+	if at := strings.LastIndex(env, "\ndc_say_kept=1\n"); at < strings.Index(env, launcherPreamble) {
+		t.Error("the sandbox exec wrapper does not name what its command leaves running")
+	}
+	if omni := string(OmniGent.Launcher().Data); strings.Contains(omni, "\ndc_say_kept=1\n") {
+		t.Error("the OmniGent launcher names its own server")
 	}
 }

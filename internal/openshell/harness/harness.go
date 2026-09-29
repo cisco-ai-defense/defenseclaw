@@ -164,8 +164,10 @@ export NODE_DISABLE_COMPILE_CACHE
 // and SIGKILL, and the terminal names them. A launcher whose harness keeps
 // a server running between sessions (OmniGent), and the `sandbox exec`
 // wrapper, set dc_keep_leftovers=1 before dc_launch, which passes
-// --keep-leftovers; the preamble unsets it, so the caller's environment
-// cannot.
+// --keep-leftovers; the wrapper also sets dc_say_kept=1 (--say-kept), and
+// the supervisor names what the command left running in the terminal's
+// session, which holds OpenShell's --tty exec open. The preamble unsets
+// both, so the caller's environment cannot set them.
 //
 // Without a terminal dc_launch execs COMMAND directly: headless and detached
 // runs keep the launcher's pid for the harness. Without /proc, or when the
@@ -180,10 +182,10 @@ dc_foreground() {
   read -r rest rest own_pgrp rest rest tpgid rest <<<"${stat##*) }"
   [ "$tpgid" = "$own_pgrp" ]
 }
-unset dc_keep_leftovers
+unset dc_keep_leftovers dc_say_kept
 dc_launch() {
   if [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && dc_foreground && [ -x ` + SupervisorPath + ` ] && [ -x ` + SupervisorInterpreter + ` ]; then
-    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` ${dc_keep_leftovers:+--keep-leftovers} "$@"
+    exec ` + SupervisorInterpreter + ` -I -S ` + SupervisorPath + ` ${dc_keep_leftovers:+--keep-leftovers} ${dc_say_kept:+--say-kept} "$@"
   fi
   exec "$@"
 }

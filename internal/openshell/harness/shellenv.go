@@ -142,8 +142,10 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 ` + launcherPreamble + shimPathScript + `# What a command started through sandbox exec leaves running (a server
-# started on purpose) is its own: the supervisor leaves it.
+# started on purpose) is its own: the supervisor leaves it, and names what
+# of it holds the terminal's session, and so a --tty exec, open.
 dc_keep_leftovers=1
+dc_say_kept=1
 ` + launcherExec(`"$@"`)
 
 // supervisorScript is the Python supervisor that resumes a stopped harness.
@@ -177,11 +179,16 @@ signal.signal(signal.SIGTTOU, signal.SIG_IGN)
 signal.signal(signal.SIGTTIN, signal.SIG_IGN)
 signal.signal(signal.SIGTSTP, signal.SIG_IGN)
 
-# Parse arguments: [--keep-leftovers] command [arg...]. --keep-leftovers
-# leaves what the command started running after it exits (see Leftovers).
+# Parse arguments: [--keep-leftovers [--say-kept]] command [arg...].
+# --keep-leftovers leaves what the command started running after it exits
+# (see Leftovers); --say-kept also names what of it stays in the terminal's
+# session (see Kept).
 args = sys.argv[1:]
 keep_leftovers = args[:1] == ['--keep-leftovers']
 if keep_leftovers:
+    args = args[1:]
+say_kept_on = keep_leftovers and args[:1] == ['--say-kept']
+if say_kept_on:
     args = args[1:]
 if not args:
     sys.exit(2)
@@ -423,6 +430,70 @@ def end_leftovers():
         pass
 
 
+# Kept. What a sandbox exec command leaves running stays (a server started
+# on purpose), but while it runs in the terminal's session OpenShell 0.1.1
+# holds the --tty exec open, for about 30 seconds, and then ends it with
+# status 74 and no word (a nohup'd process: the exit's SIGHUP does not end
+# it). So with --say-kept the supervisor names what of the session still
+# runs once the exit's SIGHUP had KEPT_WAIT seconds to act.
+KEPT_WAIT = 0.5
+
+
+def in_session():
+    """pid -> ppid of what runs in the supervisor's session besides the
+    supervisor and the processes above it (the exec's own shells)."""
+    try:
+        sid = os.getsid(0)
+        entries = os.listdir('/proc')
+    except OSError:
+        return {}
+    info = {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f'/proc/{entry}/stat', 'r') as f:
+                stat = f.read()
+            # After the comm: state, ppid, pgrp, session, ...
+            fields = stat[stat.rindex(')') + 2:].split()
+            info[int(entry)] = (fields[0], int(fields[1]), int(fields[3]))
+        except (OSError, ValueError, IndexError):
+            continue
+    me = os.getpid()
+    above = set()
+    pid = os.getppid()
+    while pid > 1 and pid in info and pid not in above:
+        above.add(pid)
+        pid = info[pid][1]
+    return {pid: ppid for pid, (state, ppid, session) in info.items()
+            if session == sid and pid != me and pid not in above and state not in ('Z', 'X')}
+
+
+def say_kept():
+    """Name what the command left running in the terminal's session."""
+    deadline = time.monotonic() + KEPT_WAIT
+    while True:
+        left = in_session()
+        if not left or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if not left:
+        return
+    roots = sorted(pid for pid, ppid in left.items() if ppid not in left)
+    shown = [command_text(pid) for pid in roots[:3]]
+    if len(roots) > 3:
+        shown.append(f'(+{len(roots) - 3} more)')
+    one = len(roots) == 1
+    text = (f'defenseclaw: the command left {len(roots)} process{"" if one else "es"} running in the sandbox: ' +
+            '; '.join(shown) + f'. {"It keeps" if one else "They keep"} running, and OpenShell keeps this --tty exec '
+            f'open while {"it does" if one else "they do"}, for up to about 30 seconds (then status 74); '
+            'without --tty the exec returns at once.')
+    try:
+        os.write(2, b'\r\n' + text.encode('utf-8', 'replace') + b'\r\n')
+    except OSError:
+        pass
+
+
 if not keep_leftovers:
     subreaper = become_subreaper()
     if subreaper:
@@ -539,6 +610,8 @@ def finish(status):
     send_signal_to_group(child_pgrp, signal.SIGCONT)
     if not keep_leftovers:
         end_leftovers()
+    elif say_kept_on:
+        say_kept()
     # Try to give the terminal back to the supervisor's group.
     try:
         os.tcsetpgrp(0, os.getpgrp())

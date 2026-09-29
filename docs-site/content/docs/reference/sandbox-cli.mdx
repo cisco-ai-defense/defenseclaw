@@ -608,6 +608,12 @@ defenseclaw sandbox exec myapp-7f3a -- npm test
 defenseclaw sandbox exec fix-tests --no-tty -- git status --short
 ```
 
+What the command starts in the background keeps running after it exits.
+With a terminal, OpenShell keeps the exec open while such a process runs
+(a `nohup` server, say), for about 30 seconds, and then ends it with status
+74. DefenseClaw names the process as the command exits. Start a background
+server with `--no-tty` to get the prompt back at once.
+
 {/* AUTOGEN-BEGIN: sandbox-flags exec */}
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |

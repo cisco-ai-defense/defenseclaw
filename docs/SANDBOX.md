@@ -360,6 +360,17 @@ exec's `/proc/<pid>/environ` (Yama `ptrace_scope` 1), while it can read its
 `cmdline` and `status` and signal it. A process that leaves the tree
 (`setsid` and a double fork) keeps running until the sandbox stops.
 
+What the command leaves running when it exits normally is its own (a server
+started on purpose), and `sandbox-env` has the terminal supervisor keep it
+(`--keep-leftovers`). With `--tty`, though, OpenShell 0.1.1 keeps the exec
+open while a process of its terminal's session still runs (a `nohup`'d one,
+which the exit's SIGHUP does not end), for about 30 seconds, and then ends
+it with status 74 and no message (measured with `bash -c 'nohup sleep 304
+>/dev/null 2>&1 & exit'`; the same command with `--no-tty` returns at once).
+So the wrapper also passes `--say-kept`: half a second after the command
+exits, the supervisor names what still runs in its session ("defenseclaw:
+the command left 1 process running in the sandbox: sleep 304. …").
+
 The profile fragment and `sandbox-env` also put
 `/usr/local/lib/defenseclaw/shims` first on `PATH`. It holds a shim named
 after the harness command (`claude`, `codex`, `opencode`, `copilot`, …) that
