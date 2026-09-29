@@ -717,9 +717,13 @@ func (m *Manager) liveGateway(ctx context.Context, gw *Gateway) *Gateway {
 	return gw
 }
 
-// createFailed reports a failed create after its rollback.
+// createFailed reports a failed create after its rollback, with err's
+// errorSummary: the end of a failed docker build's output is in err, which
+// the caller gets, and in the OPENSHELL_IMAGE_BUILD_FAILED line before
+// this, not here.
 func (m *Manager) createFailed(ctx context.Context, b *box, name string, err error) {
-	m.logf("%s: create %s: %v", gatewaylog.ErrCodeOpenShellSandboxFailed, name, err)
+	summary := errorSummary(err)
+	m.logf("%s: create %s: %s", gatewaylog.ErrCodeOpenShellSandboxFailed, name, summary)
 	m.mu.Lock()
 	id := b.identity()
 	emitted := b.phase != ""
@@ -729,7 +733,7 @@ func (m *Manager) createFailed(ctx context.Context, b *box, name string, err err
 	}
 	_ = m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellSandboxFailed),
-		ErrorSummary: truncate(err.Error(), 512), Timestamp: m.now(),
+		ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
 }
 
@@ -875,9 +879,56 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 			"no verified %s sandbox image is built; run `defenseclaw sandbox image build %s`", spec.DisplayName, spec.Name)
 	case err != nil:
 		m.logf("%s: %s: %v", gatewaylog.ErrCodeOpenShellImageBuildFailed, spec.Name, err)
-		return image.Record{}, &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: "the " + spec.DisplayName + " sandbox image is not usable", Detail: err.Error()}
+		return image.Record{}, newImageError("the "+spec.DisplayName+" sandbox image is not usable", err)
 	}
 	return rec, nil
+}
+
+// imageError is the error of a sandbox image that could not be built or
+// made (image_unavailable), after its OPENSHELL_IMAGE_BUILD_FAILED line.
+// The caller gets api, whose Detail is the image error in full: for a
+// failed docker build it ends with the last lines docker printed
+// (image.BuildError). summary is the same without them, for what a failed
+// create logs and records after that line (errorSummary): the output is
+// logged once, and never goes into the exported sandbox-health telemetry.
+type imageError struct {
+	api     *sandboxapi.Error
+	summary string
+}
+
+func newImageError(message string, err error) *imageError {
+	return &imageError{
+		api:     &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: message, Detail: err.Error()},
+		summary: message + ": " + withoutBuildOutput(err),
+	}
+}
+
+func (e *imageError) Error() string { return e.api.Error() }
+func (e *imageError) Unwrap() error { return e.api }
+
+// withoutBuildOutput is err's message with the output of the docker build
+// that failed (image.BuildError.Output) left out, and the build's failure
+// ("docker build exited 1") kept.
+func withoutBuildOutput(err error) string {
+	msg := err.Error()
+	var buildErr *image.BuildError
+	if !errors.As(err, &buildErr) || buildErr.Output == "" {
+		return msg
+	}
+	if full := buildErr.Error(); strings.Contains(msg, full) {
+		return strings.Replace(msg, full, buildErr.Unwrap().Error(), 1)
+	}
+	return buildErr.Unwrap().Error()
+}
+
+// errorSummary is err's message for the log line and the sandbox-health
+// record of a failed create: an image error's summary (imageError).
+func errorSummary(err error) string {
+	var imgErr *imageError
+	if errors.As(err, &imgErr) {
+		return imgErr.summary
+	}
+	return err.Error()
 }
 
 // runAs is the one source of a sandbox's run-as identity: the numeric host

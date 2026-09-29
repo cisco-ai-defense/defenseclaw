@@ -1304,7 +1304,11 @@ returns an `image.BuildError` whose message ends with the last 40 lines (at
 most 8 KiB) docker printed, terminal escapes and control characters removed
 and anything shaped like a credential redacted. It reaches the CLI's error,
 the daemon's create error and its `OPENSHELL_IMAGE_BUILD_FAILED` log line,
-because the daemon builds without a build log.
+because the daemon builds without a build log. The create's
+`OPENSHELL_SANDBOX_FAILED` line and its failed sandbox-health record
+(`error_summary`, which is exported) leave the lines out and end with the
+build's failure (`docker build exited 1`), so the output is logged once and
+never exported.
 
 The tag is `defenseclaw/sandbox:<harness>-<hash>-u<uid>`, where `<hash>` is
 the first 16 hex digits of a content hash over every input: the base digest,
