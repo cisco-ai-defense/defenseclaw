@@ -244,6 +244,19 @@ rest also reach per-user installs.
 
 ### Changed
 
+- **Windows standalone lifecycle events go to a `DefenseClaw` event log
+  that only administrators can write.** Any account can write
+  Application-log entries under any source name, so entries under
+  `DefenseClaw Enterprise` could be forged. Events 100 to 150 now go to the
+  `DefenseClaw` log (source `DefenseClaw Lifecycle`), which only LocalSystem
+  and Administrators can write and the Application log's readers can read;
+  each run that writes an event registers it and a successful uninstall
+  unregisters it. The Application-log copies continue in this release as legacy: move
+  MDM detection rules and SIEM forwarding that query the Application log by
+  source to the `DefenseClaw` log before a later release drops them.
+  `enterprise windows events` now checks the new log, and `--application`
+  the legacy copies. The lifecycle log line's `event.logs` names the logs
+  that took each event (#928).
 - **Plugin teardown without a backup receipt.** Removing the OpenCode or Amp
   connector (or uninstalling) deletes DefenseClaw's plugin file when its
   backup receipt is missing, as long as the file still starts with the

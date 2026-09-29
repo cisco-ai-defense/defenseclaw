@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -30,8 +31,13 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	windowsEnterpriseEventRecordID = func() (string, error) { return "0123456789abcdef0123456789abcdef", nil }
 	var written string
 	var writtenID uint32
-	windowsEnterpriseEventWriter = func(id uint32, _ string, message string) error {
+	var logs []string
+	windowsEnterpriseEventWriter = func(log string, id uint32, _ string, message string) error {
+		if written != "" && message != written {
+			t.Fatalf("the %s log got a different message than the first log", log)
+		}
 		writtenID, written = id, message
+		logs = append(logs, log)
 		return nil
 	}
 
@@ -48,6 +54,11 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	if event.ID != writtenID || event.Record != "0123456789abcdef0123456789abcdef" || event.SHA256 != hex.EncodeToString(digest[:]) {
 		t.Fatalf("event record %+v does not match the written event (id %d)", event, writtenID)
 	}
+	// The event goes to the DefenseClaw log, which only administrators can
+	// write, and its legacy copy to the Application log; the record says so.
+	if strings.Join(logs, ",") != "DefenseClaw,Application" || strings.Join(event.Logs, ",") != "DefenseClaw,Application" {
+		t.Fatalf("event written to %v, record logs %v", logs, event.Logs)
+	}
 
 	directory := t.TempDir()
 	if _, err := writeWindowsEnterpriseLifecycleLog(directory, result, event); err != nil {
@@ -63,7 +74,7 @@ func TestWindowsEnterpriseEventCarriesARecordTheLifecycleLogHolds(t *testing.T) 
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(body))), &line); err != nil {
 		t.Fatal(err)
 	}
-	if line.Event == nil || *line.Event != *event {
+	if line.Event == nil || !reflect.DeepEqual(*line.Event, *event) {
 		t.Fatalf("lifecycle log event = %+v, want %+v", line.Event, event)
 	}
 }
@@ -99,7 +110,7 @@ func TestWindowsEnterpriseEventCheckRejectsAReusedRecord(t *testing.T) {
 		rendered(11, 112, base.Add(time.Minute), success),
 		rendered(12, 112, base.Add(2*time.Minute), "DefenseClaw enterprise ensure (standalone) ok=true exit=0 version=1.0.51"),
 	}
-	report := checkWindowsEnterpriseEvents(entries, lines)
+	report := checkWindowsEnterpriseEvents(entries, lines, windowsEnterpriseApplicationLog)
 	var verdicts []string
 	for _, event := range report.Events {
 		verdicts = append(verdicts, event.Verdict)
@@ -108,12 +119,12 @@ func TestWindowsEnterpriseEventCheckRejectsAReusedRecord(t *testing.T) {
 		t.Fatalf("verdicts = %s (%+v)", got, report.Events)
 	}
 	if !strings.Contains(report.Events[1].Reason, "copy") || report.Newest == nil || report.Newest.Record != recordB ||
-		report.Newest.InApplicationLog || report.OK || len(report.Problems) != 3 {
+		report.Newest.InLog || report.OK || len(report.Problems) != 3 {
 		t.Fatalf("report = %+v", report)
 	}
 
 	entries = append(entries[:1], rendered(13, 130, base.Add(time.Hour-time.Second), failure))
-	if report := checkWindowsEnterpriseEvents(entries, lines); !report.OK || report.FromDefenseClaw != 2 || !report.Newest.InApplicationLog {
+	if report := checkWindowsEnterpriseEvents(entries, lines, windowsEnterpriseApplicationLog); !report.OK || report.FromDefenseClaw != 2 || !report.Newest.InLog {
 		t.Fatalf("genuine entries report = %+v", report)
 	}
 }

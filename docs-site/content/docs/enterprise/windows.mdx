@@ -57,7 +57,7 @@ The lifecycle also registers the deployment with Windows:
 | --- | --- |
 | Deployment marker | `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, with `Profile`, `ProductVersion`, `InstallRoot`, `StateRoot`, `TrustMode`, `UpdatedAt` and `DisableSelfUpdate` |
 | Add/Remove Programs | `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`, shown as "Cisco DefenseClaw Enterprise" |
-| Event source | `DefenseClaw Enterprise`, in the Application log |
+| Event log | The `DefenseClaw` event log, source `DefenseClaw Lifecycle`, which only LocalSystem and Administrators can write. A legacy copy of each event still goes to the Application log, source `DefenseClaw Enterprise` |
 | Self-update policy | `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` = `1`, written only when the value is absent. The lifecycle records that it wrote the value and removes it on uninstall only in that case, so your own Group Policy value is never changed. Set `enterprise.coexistence.disable_self_update: false` to opt out. |
 
 The four services:
@@ -315,7 +315,8 @@ active (connected) session. It retries until the session is active again.
 
 Each elevated lifecycle run appends its result to the lifecycle log. Every
 run except a healthy `status` or `verify` also writes an event (IDs 100 to
-150) to the Application log. The marker key and the Add/Remove Programs entry
+150) to the `DefenseClaw` event log and a legacy copy of it to the
+Application log. The marker key and the Add/Remove Programs entry
 change only after a successful run, and they are for detection only:
 `verify` never trusts them. See [Detection](/docs/enterprise/mdm#detection)
 for the detection rules, [Logs and events](/docs/enterprise/operations#logs-and-events)
@@ -323,16 +324,33 @@ for the event IDs, and
 [Status and verify](/docs/enterprise/operations#status-and-verify) for
 monitoring.
 
-Any account can write Application-log entries under any source name,
-including `DefenseClaw Enterprise`. Each DefenseClaw event therefore ends
-with `record <id>`, and the matching line of `enterprise-lifecycle.log`, which
-only administrators and LocalSystem can write, holds the same id under
-`event.record` with the event ID (`event.id`) and the SHA-256 of the exact
-message (`event.sha256`). Check the entries from any prompt:
+Only LocalSystem and Administrators can write the `DefenseClaw` log (source
+`DefenseClaw Lifecycle`), and the accounts that can read the Application log
+can read it. Each run that writes an event registers the log and resets its
+access. A
+successful uninstall unregisters it, so the uninstall event (110) goes only
+to the Application log; forward the `DefenseClaw` log to your SIEM if you
+need its entries after uninstall.
 
-```powershell title="Check the DefenseClaw Application-log entries"
+Any account can write Application-log entries under any source name,
+including `DefenseClaw Enterprise`, so the Application-log copies are
+legacy, and a later release stops writing them. Point MDM detection rules
+and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
+DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
+source.
+
+Each DefenseClaw event ends with `record <id>`, and the matching line of
+`enterprise-lifecycle.log`, which only administrators and LocalSystem can
+write, holds the same id under `event.record` with the event ID
+(`event.id`), the SHA-256 of the exact message (`event.sha256`) and the
+event logs that took the entry (`event.logs`). Check the entries from any
+prompt:
+
+```powershell title="Check the DefenseClaw event-log entries"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --json
+# The legacy Application-log copies:
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application
 ```
 
 An entry is DefenseClaw's only when all of these hold:
@@ -346,7 +364,8 @@ An entry is DefenseClaw's only when all of these hold:
   record is a copy.
 
 `events` exits 1 and names each entry that fails, and also when the newest
-lifecycle line's record has no DefenseClaw entry in the Application log.
+lifecycle line whose event went to the checked log has no DefenseClaw entry
+there.
 Entries older than the lifecycle log's first event record, such as those an
 earlier release wrote without records, show as unverifiable. Apply the same
 rules in a SIEM: matching a record alone is not enough, because anyone can

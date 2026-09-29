@@ -307,7 +307,7 @@ every user and connector with its state.
 | Lifecycle log | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`: one JSON result per line, kept as 5 files of up to 5 MiB each |
 | Last result | `%WINDIR%\Logs\DefenseClaw\last-result.json` |
 | MDM wrapper log | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` |
-| Event log | Application log, source **DefenseClaw Enterprise** (table below) |
+| Event log | The `DefenseClaw` event log, source **DefenseClaw Lifecycle** (table below). Only SYSTEM and Administrators can write it. A legacy copy of each event goes to the Application log, source **DefenseClaw Enterprise**, where any account can write under any source name; see [Windows](/docs/enterprise/windows#verify-the-install) |
 | Gateway log | `C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log` |
 | Guardian log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` |
 
