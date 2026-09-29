@@ -200,7 +200,9 @@ replaces that list, so name every harness you want:
   shell, and refuses `--agent`, `--v3`, `--agent-engine`, `--cloud` and
   `--repo`: DefenseClaw runs Kiro's local V2 agent engine, whose hooks it
   verified. Kiro has no system settings tier and still loads user and project
-  settings and MCP servers, so the tier is user. Kiro vetoes a tool only on
+  settings and MCP servers, and an interactive session runs the TUI runtime
+  Kiro unpacks into the sandbox home (`~/.local/share/kiro-cli`), which the
+  agent can change for the next session, so the tier is user. Kiro vetoes a tool only on
   exit code 2 from `preToolUse`, so the sandbox hook exits 2 on every failure.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs): Kiro
   starts with `--trust-all-tools`. `--safe`, or the `strict` pack, keeps its

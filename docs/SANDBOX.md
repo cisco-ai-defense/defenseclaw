@@ -2043,10 +2043,11 @@ These were measured on the pinned releases inside the community base image
   Kiro: the build says so, writes none of it and goes on. Kiro's TUI runtime (`bun`
   and `tui.js`, about 92 MB) is embedded in `kiro-cli-chat` and extracted into
   `~/.local/share/kiro-cli` at the first interactive start, without a
-  download. Kiro extracts it again when the `.sha256` file next to it does
-  not match the embedded digest, and offers no supported way to run it from
-  elsewhere (`KIRO_TEST_TUI_JS_PATH` is a test hook), so it stays in the
-  workload-writable HOME. An interactive session also "pins" `kiro-cli-chat`
+  download. Kiro does not check the extracted files themselves at a later
+  start, and offers no supported way to run the runtime from elsewhere
+  (`KIRO_TEST_TUI_JS_PATH` is a test hook), so it stays in the
+  workload-writable HOME: like Kiro's settings it is the agent's to change,
+  and the launch banner's Hooks line says so. An interactive session also "pins" `kiro-cli-chat`
   into `~/.local/share/kiro-cli/run` (a hard link, or a copy where the link
   fails; with `fs.protected_hardlinks`, the usual default, the sandbox user
   cannot hard-link a root-owned file it cannot write) and runs that path; the

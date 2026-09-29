@@ -836,7 +836,7 @@ func TestBanner(t *testing.T) {
 		{"kiro's tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
 			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
 		}, nil,
-			[]string{"Hooks     user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings and MCP servers are the agent's to edit"},
+			[]string{"Hooks     user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit"},
 			[]string{"could edit its own hook settings"}},
 		{"hermes' tier", func(_ *testApp, sb *sandboxapi.Sandbox) {
 			sb.Harness, sb.HarnessName, sb.TamperTier = "hermes", "Hermes Agent", "user"
