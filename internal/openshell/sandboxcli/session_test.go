@@ -382,12 +382,23 @@ func TestSessionSummary(t *testing.T) {
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
-		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{cont +
-			" -- --continue (the `claude --resume …` Claude Code printed would run it on this machine, outside the sandbox)"}},
+		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{"→ " + cont +
+			" -- --continue (the `claude --resume …` Claude Code printed above works only inside the sandbox)"}},
 		{name: "continue claude with the wrapper", opts: claude, setup: continueHint("", true), want: []string{cont +
 			" -- --continue (the `claude --resume …` Claude Code printed resumes it in this sandbox too: the shell wrapper is on)"}},
 		{name: "continue codex", opts: RunOptions{Harness: "codex"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- resume --last (the `codex resume …` Codex printed would run it on this machine, outside the sandbox)"}},
+			want: []string{"-- resume --last (the `codex resume …` Codex printed above works only inside the sandbox)"}},
+		// Every harness that can continue gets the line, after its own
+		// host-useless hint (cert copilot:F7, kiro:KR-F4, hermes:HERMES-4,
+		// openhands:MAC-OSH-OH-7).
+		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
+		{name: "continue kiro", opts: RunOptions{Harness: "kiro"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume (the `kiro-cli --resume-id …` Kiro CLI printed above works only inside the sandbox)"}},
+		{name: "continue hermes", opts: RunOptions{Harness: "hermes"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `hermes --resume …` Hermes Agent printed above works only inside the sandbox)"}},
+		{name: "continue openhands", opts: RunOptions{Harness: "openhands"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume --last (the `openhands --resume …` OpenHands printed above works only inside the sandbox)"}},
 		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
 			ta.IO.TTY = false
 			noChanges(ta)

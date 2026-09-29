@@ -389,14 +389,21 @@ the pull or apply failed), so they aren't lost, and the end says so. A pull
 that fails because the disk is full says whose disk: this machine's, or on a
 Mac the MicroVM's own (`overlay_disk_mib`).
 
-A kept sandbox's resume line is followed, for Claude Code, Codex, OpenCode
-and GitHub Copilot CLI, by the command that continues the same conversation
-inside the sandbox, for example
-`defenseclaw sandbox connect myapp-7f3a -- --continue` (Codex:
-`-- resume --last`). A plain `connect` starts a new conversation. The
-`claude --resume <id>` or `codex resume <id>` line the harness itself prints
-runs it on this machine, outside the sandbox, unless the shell wrapper is on
-(`sandbox enable`), which sends it into the folder's sandbox.
+A kept sandbox's resume line is followed, last, by the command that
+continues the same conversation inside the sandbox, for every harness that
+can continue one: `→ continue this conversation: defenseclaw sandbox connect
+myapp-7f3a -- --continue` for Claude Code, OpenCode, GitHub Copilot CLI and
+Hermes Agent, `-- resume --last` for Codex, `-- --resume` for Kiro CLI and
+`-- --resume --last` for OpenHands. A plain `connect` starts a new
+conversation. The resume line the harness itself prints as it exits
+(`claude --resume <id>`, `codex resume <id>`, `copilot --resume=<id>`,
+`kiro-cli --resume-id <id>`, `hermes --resume <id>`, `openhands --resume
+<id>`) works only inside the sandbox, where the conversation is: typed on
+this machine it does not reach it, unless the shell wrapper is on
+(`sandbox enable`) for that command, which sends it into the folder's
+sandbox. DefenseClaw cannot keep that line off the screen, so its own line
+says so. To resume a particular conversation, pass the harness's own flag
+and ID after `--`: `defenseclaw sandbox connect myapp-7f3a -- --resume <id>`.
 
 When you run interactively without `--name` and this folder already has a
 sandbox of the same harness, `run` offers to resume it; `--new` starts
@@ -539,8 +546,9 @@ sessions can share a sandbox (a second `claude` in the folder offers to
 resume it): neither one's end stops it, undoes the folder or deletes it
 (`--rm`) under the other, and the one that ends first names the review and
 undo commands for later. To continue the harness's last conversation,
-pass its own flag: `-- --continue` for Claude Code, `-- resume --last` for
-Codex.
+pass its own flag: `-- --continue` for Claude Code, OpenCode, GitHub Copilot
+CLI and Hermes Agent, `-- resume --last` for Codex, `-- --resume` for Kiro CLI
+and `-- --resume --last` for OpenHands.
 
 ```bash
 defenseclaw sandbox connect myapp-7f3a

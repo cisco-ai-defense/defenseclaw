@@ -344,7 +344,12 @@ deleted.
   keeps the request count as `egress.blocked_requests`). The banner's
   `Hooks` line says, per user-tier harness, what the image keeps root-owned
   and what the agent can still change (it said "the agent could edit its own
-  hook settings" also for Kiro and Hermes, whose hooks are root-owned).
+  hook settings" also for Kiro and Hermes, whose hooks are root-owned). The
+  end of a session names `sandbox connect NAME -- <continue args>` last, and
+  not dimmed, for Kiro CLI, Hermes Agent and OpenHands too, and says that the
+  resume line the harness printed (`copilot --resume=…`, `kiro-cli
+  --resume-id …`, `hermes --resume …`, `openhands --resume …`) works only
+  inside the sandbox.
 
 ### Legacy OpenShell standalone sandbox removed
 

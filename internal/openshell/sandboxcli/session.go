@@ -834,25 +834,36 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 }
 
 // continueArgs are the harness arguments that continue its latest
-// conversation.
+// conversation in the project folder (all of them take the folder's most
+// recent one, which a sandbox's own folder makes this session's).
 var continueArgs = map[string]string{
 	"claudecode": "--continue",
 	"codex":      "resume --last",
 	"opencode":   "--continue",
 	"copilot":    "--continue",
+	"kiro":       "--resume",
+	"hermes":     "--continue",
+	"openhands":  "--resume --last",
 }
 
-// ownResumeHint is the resume command a harness prints as it exits. Typed
-// on this machine it runs the harness here, outside the sandbox, unless
-// the shell wrapper sends it into the sandbox.
+// ownResumeHint is how the resume command a harness prints as it exits
+// starts ("copilot --resume=<id>", "kiro-cli --resume-id <id>"). Its
+// conversation is in the sandbox, so typed on this machine it does not
+// reach it (the harness starts here, outside the sandbox, if it is
+// installed at all), unless the shell wrapper sends that command into the
+// sandbox. It cannot be kept off the screen: the harness prints it.
 var ownResumeHint = map[string]string{
 	"claudecode": "claude --resume",
 	"codex":      "codex resume",
+	"copilot":    "copilot --resume",
+	"kiro":       "kiro-cli --resume-id",
+	"hermes":     "hermes --resume",
+	"openhands":  "openhands --resume",
 }
 
-// continueHint names the command that continues this conversation inside
-// the sandbox (a plain connect starts a new one), and what the harness's
-// own resume hint does.
+// continueHint names, last and not dimmed, the command that continues this
+// conversation inside the sandbox (a plain connect starts a new one), and
+// what the harness's own resume hint does.
 func (s *session) continueHint() {
 	if s.headless || s.shell || s.spec == nil || !s.sawHooks.Load() {
 		// No conversation to continue: no hook of the session reached
@@ -867,13 +878,14 @@ func (s *session) continueHint() {
 	a := s.app
 	line := "continue this conversation: " + CommandName + " connect " + s.sb.Name + " -- " + args
 	if own, ok := ownResumeHint[s.spec.Name]; ok {
-		if a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name) {
+		wrapped := strings.Fields(own)[0] == s.spec.Command && a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name)
+		if wrapped {
 			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed resumes it in this sandbox too: the shell wrapper is on)"
 		} else {
-			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed would run it on this machine, outside the sandbox)"
+			line += " (the `" + own + " …` " + s.spec.DisplayName + " printed above works only inside the sandbox)"
 		}
 	}
-	a.note(line)
+	a.line(a.style("→", ansiCyan, ansiBold) + " " + line)
 }
 
 // settled reads the sandbox for the session summary once its counts stop
