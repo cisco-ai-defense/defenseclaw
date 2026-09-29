@@ -42,62 +42,6 @@ type CursorUserHookRemoval struct {
 
 var utf8ByteOrderMark = []byte{0xef, 0xbb, 0xbf}
 
-// Match only commands emitted by per-user DefenseClaw. The release branch's
-// older Cursor teardown used a broad native-command suffix check; managed
-// migration must not remove a different product's similarly named hook.
-func cursorOwnedHookCommands(opts SetupOpts) []string {
-	portableScript := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
-	return uniqueNonEmptyStrings(append(
-		[]string{portableScript, hookInvocationCommandFor("windows", "cursor", portableScript)},
-		legacyCursorNativeHookCommands()...,
-	))
-}
-
-func legacyCursorNativeHookCommands() []string {
-	binaries := uniqueNonEmptyStrings([]string{
-		canonicalNativeWindowsHookBinary(),
-		canonicalNativeWindowsInstalledHookBinary(),
-		defenseclawHookBinary(),
-		defenseclawGatewayBinary(),
-		canonicalNativeWindowsInstalledGatewayBinary(),
-		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
-	})
-	commands := make([]string, 0, len(binaries))
-	for _, binary := range binaries {
-		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
-	}
-	return commands
-}
-
-type cursorHookCommandMatcher map[string]struct{}
-
-func newCursorHookCommandMatcher(ownedCommands []string) cursorHookCommandMatcher {
-	matcher := make(cursorHookCommandMatcher, len(ownedCommands)*2)
-	for _, owned := range ownedCommands {
-		owned = strings.TrimSpace(owned)
-		if owned == "" {
-			continue
-		}
-		matcher[owned] = struct{}{}
-		matcher[strings.TrimSpace(shellWord(owned))] = struct{}{}
-	}
-	return matcher
-}
-
-func (matcher cursorHookCommandMatcher) matches(raw interface{}) bool {
-	entry, ok := raw.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	for _, key := range []string{"command", "bash", "powershell"} {
-		command, _ := entry[key].(string)
-		if _, ok := matcher[strings.TrimSpace(command)]; ok && strings.TrimSpace(command) != "" {
-			return true
-		}
-	}
-	return false
-}
-
 // CursorPerUserInstall names the per-user DefenseClaw installation whose
 // Cursor registrations RemoveCursorPerUserHookRegistrations removes.
 type CursorPerUserInstall struct {
