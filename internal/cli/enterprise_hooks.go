@@ -634,6 +634,9 @@ type enterpriseHookStatusReport struct {
 	// in the last guardian reconcile.
 	Enrollment []enterpriseHookEnrollment `json:"enrollment,omitempty"`
 	Errors     []string                   `json:"errors,omitempty"`
+	// Warnings name rows that do not fail the host: those of a deleted
+	// account (enterpriseHookRemovedAccountFailures).
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // enterpriseHookEnrollment is one account's connectors in the last
@@ -765,13 +768,22 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	state, stateExists, stateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
+	removedAccountFailures := 0
 	if stateErr != nil {
 		report.Errors = append(report.Errors, stateErr.Error())
 	} else if !stateExists {
 		report.Errors = append(report.Errors, "hook guardian has not completed a reconcile")
 	} else {
 		report.State = &state
-		report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
+		removedAccountFailures = enterpriseHookRemovedAccountFailures(state)
+		if removedAccountFailures > 0 {
+			for _, issue := range enterpriseHookGuardianFailureIssues(state) {
+				report.Warnings = append(report.Warnings,
+					issue+" (the account was deleted and its profile folder removed; the enumerator drops its rows at its next pass)")
+			}
+		} else {
+			report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
+		}
 		report.Enrollment = enterpriseHookEnrollmentFromRows(state.Results)
 	}
 	authorization, authorizationExists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
@@ -792,12 +804,13 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if stateExists && authorizationExists && activationExists &&
 		stateErr == nil && authorizationErr == nil && activationErr == nil {
-		report.Errors = append(report.Errors, compareEnterpriseHookGuardianRecords(
+		report.Errors = append(report.Errors, compareEnterpriseHookGuardianRecordsExcusing(
 			state,
 			authorization,
 			activation,
 			enterpriseHookManifest,
 			manifestSHA256,
+			removedAccountFailures,
 		)...)
 		// The Guardian is the trusted live verifier on native Windows: it runs
 		// as LocalSystem, reconciles every enabled target, and publishes this
@@ -824,6 +837,9 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	if report.OK {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
 			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount, state.TargetCount)
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("•", "fg=yellow", "bold"), warning)
+		}
 		printEnterpriseHookEnrollment(cmd.OutOrStdout(), report.Enrollment, state.UpdatedAt)
 		return nil
 	}
@@ -844,6 +860,29 @@ func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusR
 		return fmt.Errorf("enterprise hooks status failed")
 	}
 	return err
+}
+
+// enterpriseHookRemovedAccountFailures is the number of failed rows in the
+// last reconcile when every one of them belongs to a deleted account whose
+// profile folder was removed (enterpriseHookRemovedAccountRow), and 0
+// otherwise. The enumerator drops such an account's rows at its next pass;
+// until then status reports them for that account instead of failing the
+// whole host.
+func enterpriseHookRemovedAccountFailures(state enterpriseHookGuardianState) int {
+	failed := 0
+	for _, row := range state.Results {
+		if row.OK || row.Pending {
+			continue
+		}
+		if !enterpriseHookRemovedAccountRow(row) {
+			return 0
+		}
+		failed++
+	}
+	if failed != state.FailureCount {
+		return 0
+	}
+	return failed
 }
 
 func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []string {
@@ -927,6 +966,33 @@ func compareEnterpriseHookGuardianRecords(
 	expectedManifest,
 	expectedManifestSHA256 string,
 ) []string {
+	return compareEnterpriseHookGuardianRecordsExcusing(
+		state, authorization, activation, expectedManifest, expectedManifestSHA256, 0,
+	)
+}
+
+// enterpriseHookGuardianRecordComplete reports whether a guardian record
+// accounts for every target. Its only failures may be the excused ones
+// (enterpriseHookRemovedAccountFailures); the guardian never writes a record
+// with failures OK.
+func enterpriseHookGuardianRecordComplete(ok bool, successes, failures, pending, total, excused int) bool {
+	if excused > 0 {
+		return failures == excused && successes+pending+failures == total
+	}
+	return ok && failures == 0 && successes+pending == total
+}
+
+// compareEnterpriseHookGuardianRecordsExcusing is
+// compareEnterpriseHookGuardianRecords that accepts exactly excused failed
+// rows (enterpriseHookRemovedAccountFailures) in all three records.
+func compareEnterpriseHookGuardianRecordsExcusing(
+	state enterpriseHookGuardianState,
+	authorization enterpriseHookGuardianAuthorization,
+	activation enterpriseHookGuardianActivation,
+	expectedManifest,
+	expectedManifestSHA256 string,
+	excused int,
+) []string {
 	var issues []string
 	now := time.Now()
 	if err := managed.ValidateHookGuardianFreshness(state.UpdatedAt, now); err != nil {
@@ -938,10 +1004,10 @@ func compareEnterpriseHookGuardianRecords(
 	if err := managed.ValidateHookGuardianFreshness(activation.UpdatedAt, now); err != nil {
 		issues = append(issues, fmt.Sprintf("protected guardian activation is not fresh: %v", err))
 	}
-	if !state.OK || state.FailureCount != 0 || state.SuccessCount+state.PendingCount != state.TargetCount {
+	if !enterpriseHookGuardianRecordComplete(state.OK, state.SuccessCount, state.FailureCount, state.PendingCount, state.TargetCount, excused) {
 		issues = append(issues, fmt.Sprintf("last guardian reconcile is incomplete (%d succeeded, %d pending, %d total)", state.SuccessCount, state.PendingCount, state.TargetCount))
 	}
-	if !authorization.OK || authorization.FailureCount != 0 || authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount {
+	if !enterpriseHookGuardianRecordComplete(authorization.OK, authorization.SuccessCount, authorization.FailureCount, authorization.PendingCount, authorization.TargetCount, excused) {
 		issues = append(issues, fmt.Sprintf("protected guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount))
 	}
 	if state.TargetCount != authorization.TargetCount || state.SuccessCount != authorization.SuccessCount ||
@@ -960,8 +1026,7 @@ func compareEnterpriseHookGuardianRecords(
 		activation.UpdatedAt != authorization.UpdatedAt {
 		issues = append(issues, "protected guardian activation does not identify the legacy record pair")
 	}
-	if !activation.OK || activation.FailureCount != 0 ||
-		activation.SuccessCount+activation.PendingCount != activation.TargetCount {
+	if !enterpriseHookGuardianRecordComplete(activation.OK, activation.SuccessCount, activation.FailureCount, activation.PendingCount, activation.TargetCount, excused) {
 		issues = append(issues, fmt.Sprintf(
 			"protected guardian activation is incomplete (%d succeeded, %d pending, %d total)",
 			activation.SuccessCount,
@@ -985,15 +1050,22 @@ func compareEnterpriseHookGuardianRecords(
 	if expected := strings.TrimSpace(expectedManifestSHA256); expected != "" && activation.ManifestSHA256 != expected {
 		issues = append(issues, fmt.Sprintf("guardian activation records manifest SHA-256 %s, expected %s", activation.ManifestSHA256, expected))
 	}
-	if state.OK && authorization.OK {
+	if (state.OK && authorization.OK) || excused > 0 {
 		protectedRows := enterpriseHookProtectedReconcileRows(state.Results)
+		authorizationTargets, activationTargets := authorization.ProtectedTargets, activation.ProtectedTargets
+		if excused > 0 {
+			// Both records carry forward the excused failed targets' prior
+			// rows; every other target must still match exactly.
+			authorizationTargets = enterpriseHookTargetsExceptFailed(authorizationTargets, state.Results)
+			activationTargets = enterpriseHookTargetsExceptFailed(activationTargets, state.Results)
+		}
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(protectedRows, authorization.ProtectedTargets, "authorization")...,
+			compareEnterpriseHookProtectedTargetSets(protectedRows, authorizationTargets, "authorization")...,
 		)
 		issues = append(
 			issues,
-			compareEnterpriseHookProtectedTargetSets(protectedRows, activation.ProtectedTargets, "activation")...,
+			compareEnterpriseHookProtectedTargetSets(protectedRows, activationTargets, "activation")...,
 		)
 	} else {
 		for _, row := range state.Results {
@@ -1023,6 +1095,24 @@ func enterpriseHookProtectedReconcileRows(rows []enterpriseHookReconcileRow) []e
 		}
 	}
 	return protected
+}
+
+// enterpriseHookTargetsExceptFailed is a protected record's targets without
+// those that failed in results.
+func enterpriseHookTargetsExceptFailed(protected, results []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+	failed := map[string]struct{}{}
+	for _, row := range results {
+		if key := enterpriseHookProtectedTargetKey(row); key != "" && !row.OK && !row.Pending {
+			failed[key] = struct{}{}
+		}
+	}
+	kept := make([]enterpriseHookReconcileRow, 0, len(protected))
+	for _, row := range protected {
+		if _, excused := failed[enterpriseHookProtectedTargetKey(row)]; !excused {
+			kept = append(kept, row)
+		}
+	}
+	return kept
 }
 
 // compareEnterpriseHookProtectedTargetSets diffs the reconcile-time target

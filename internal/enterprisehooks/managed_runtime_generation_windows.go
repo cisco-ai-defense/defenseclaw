@@ -307,19 +307,21 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 	}
 
 	for attempt := 0; attempt < windowsManagedRuntimeSelectorReadAttempts; attempt++ {
-		selector, first, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, false)
+		selector, first, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return result, err
 		}
 		if !exists {
-			return result, errors.New(
-				"enterprise hooks: managed runtime generation selector is absent",
+			return result, fmt.Errorf(
+				"enterprise hooks: managed runtime generation selector is absent: %w",
+				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
 		entry, ok := windowsManagedRuntimeSelectorTargetForSID(selector, opts.TargetSID)
 		if !ok {
-			return result, errors.New(
-				"enterprise hooks: registered SID is absent from the managed runtime generation selector",
+			return result, fmt.Errorf(
+				"enterprise hooks: registered SID is absent from the managed runtime generation selector: %w",
+				ErrWindowsManagedRuntimeGenerationPending,
 			)
 		}
 		if err := validateWindowsManagedRuntimeSelectorTargetAgainstResolve(entry, opts); err != nil {
@@ -888,10 +890,11 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 	// target-owned data root independently so that an absent hooks child can be
 	// distinguished from an untrusted data root without weakening the strict
 	// two-root validator used by publication and verification. A standalone
-	// data directory the account created itself before enrollment holds no
-	// managed runtime (it has no hooks child), so with no selected generation
-	// it has nothing to retire, as for an absent one; the guardian adopts it
-	// at enrollment.
+	// data directory the account created itself holds no managed runtime (it
+	// has no hooks child), so it has nothing to retire, as for an absent one:
+	// before enrollment, or after an enrolled account moved DefenseClaw's
+	// folder, and its selected generation with it, away. The guardian adopts
+	// it in the account's session.
 	accountCreated := false
 	if err := validateWindowsUserPathElement(
 		validated.DataDir,
@@ -927,12 +930,6 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		// Re-authenticate DataDir while holding the selector transaction before
 		// using selector absence to authorize the empty pre-activation case.
 		if accountCreated {
-			if selected {
-				return fmt.Errorf(
-					"enterprise hooks: selected managed runtime generation directory is absent: %w",
-					os.ErrNotExist,
-				)
-			}
 			if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
 				return errors.New("enterprise hooks: managed runtime generation directory changed while it was retired")
 			}

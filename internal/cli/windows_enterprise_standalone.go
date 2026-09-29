@@ -411,6 +411,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if message == "" {
 			continue
 		}
+		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if lifecycle {
 			if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
@@ -642,9 +643,54 @@ func applyWindowsEnterpriseGatewayStartFailure(result *enterprisestatus.Result, 
 	message := fmt.Sprintf("the %s service is not running; the last error it logged: %s (log: %s)",
 		report.GatewayService, windowsEnterpriseBoundedDiagnostic(reason), logPath)
 	if strings.Contains(reason, "Access is denied") {
-		message += "; run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+		message += "; " + windowsEnterpriseRepairServiceAccess
 	}
 	result.AddError("gateway_start_failed", message)
+}
+
+// windowsEnterpriseRepairServiceAccess is what restores a DefenseClaw
+// service's access to its folders.
+const windowsEnterpriseRepairServiceAccess = "run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+
+// windowsEnterpriseServiceRightsPattern matches the lifecycle's report that a
+// managed path lacks the rights of a service's virtual account, which it
+// names only by its S-1-5-80 SID.
+var windowsEnterpriseServiceRightsPattern = regexp.MustCompile(
+	`managed path is missing required rights for (S-1-5-80(?:-[0-9]+)+) \(required=([^ )]*) actual=([^)]*)\): (.+)$`)
+
+// windowsEnterpriseServiceSIDName returns the service whose virtual account
+// (NT SERVICE\<name>) sid is, or "" for any other SID; tests replace it.
+var windowsEnterpriseServiceSIDName = func(sid string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || !strings.EqualFold(domain, "NT SERVICE") {
+		return ""
+	}
+	return account
+}
+
+// windowsEnterpriseNameServiceRights rewrites a missing-rights report about a
+// service SID to name the service; with repair it also says what restores
+// the access.
+func windowsEnterpriseNameServiceRights(message string, repair bool) string {
+	match := windowsEnterpriseServiceRightsPattern.FindStringSubmatchIndex(message)
+	if match == nil {
+		return message
+	}
+	sid := message[match[2]:match[3]]
+	name := windowsEnterpriseServiceSIDName(sid)
+	if name == "" {
+		return message
+	}
+	text := fmt.Sprintf("the %s service (NT SERVICE\\%s, %s) is missing required rights on %s (required %s, has %s)",
+		name, name, sid, message[match[8]:match[9]], message[match[4]:match[5]], message[match[6]:match[7]])
+	if repair {
+		text += "; " + windowsEnterpriseRepairServiceAccess
+	}
+	return message[:match[0]] + text
 }
 
 // windowsEnterpriseManifestAccount is one account the installed manifest
@@ -724,12 +770,18 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 		return
 	}
 	for _, account := range accounts {
-		if _, err := os.Lstat(account.Home); err != nil {
-			continue
-		}
 		label := account.SID
 		if strings.TrimSpace(account.User) != "" {
 			label = fmt.Sprintf("%s (%s)", account.User, account.SID)
+		}
+		if _, err := os.Lstat(account.Home); err != nil {
+			if errors.Is(err, os.ErrNotExist) && windowsEnterpriseAccountDeleted(account.SID) {
+				result.AddWarning("deleted_account_rows", fmt.Sprintf(
+					"the account %s no longer exists and its profile folder %s was removed; the enumerator drops its %d enrollment row(s) "+
+						"at its next pass, and until then the guardian reports them for this account only",
+					label, account.Home, account.Rows))
+			}
+			continue
 		}
 		switch {
 		case windowsEnterpriseAccountDeleted(account.SID):
@@ -739,8 +791,9 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				label, account.Home, account.Rows))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
-				"the account %s is not enrolled yet and created %s itself (for example when an agent it ran before enrollment was refused); "+
-					"DefenseClaw takes over that folder when the account next signs in, and repair leaves it alone until then",
+				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+
+					"was refused, or after it moved DefenseClaw's folder away); DefenseClaw takes over that folder when the account next "+
+					"signs in, and repair leaves it alone until then",
 				label, filepath.Join(account.Home, ".defenseclaw")))
 		}
 	}
@@ -834,7 +887,12 @@ func finishWindowsEnterpriseStandalone(
 	}
 	summary := "the standalone enterprise " + result.Action + " failed"
 	if len(result.Errors) != 0 {
-		summary += ": " + result.Errors[0].Message
+		if opts.jsonOutput {
+			summary += ": " + result.Errors[0].Message
+		} else {
+			// The summary above already printed every error in full.
+			summary += ": " + result.Errors[0].Code
+		}
 	}
 	return withExitCode(errors.New(summary), exitCode)
 }
@@ -981,14 +1039,21 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
-	body, err := readWindowsEnterpriseBoundedFile(layout.ManifestPath, 16<<20)
+	return readWindowsEnterpriseStandaloneEnrollmentAt(layout.ManifestPath, layout.DataDir)
+}
+
+// readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets
+// and exempt rows, and as pending the targets the guardian's last reconcile
+// (in runtimeDir) left waiting for their account's session. Every Windows
+// per-user row is written deferred, so that flag does not say which.
+func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string) (enterprisestatus.Enrollment, error) {
+	body, err := readWindowsEnterpriseBoundedFile(manifestPath, 16<<20)
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
 	var manifest struct {
 		Targets []struct {
-			Enabled  bool `yaml:"enabled"`
-			Deferred bool `yaml:"deferred"`
+			Enabled bool `yaml:"enabled"`
 		} `yaml:"targets"`
 	}
 	if err := yaml.Unmarshal(body, &manifest); err != nil {
@@ -996,12 +1061,12 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	}
 	enrollment := enterprisestatus.Enrollment{Targets: len(manifest.Targets)}
 	for _, target := range manifest.Targets {
-		if target.Deferred {
-			enrollment.Pending++
-		}
 		if !target.Enabled {
 			enrollment.Exempt++
 		}
+	}
+	if state, exists, err := loadEnterpriseHookGuardianState(runtimeDir); err == nil && exists {
+		enrollment.Pending = state.PendingCount
 	}
 	return enrollment, nil
 }
