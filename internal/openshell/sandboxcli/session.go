@@ -539,10 +539,16 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 		}
 	}
 	a.note(fmt.Sprintf("Uploading the copy (%s, %s)…", plural(int64(rec.Files), "file", "files"), humanBytes(rec.Bytes)))
-	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t)
+	// The upload goes over the OpenShell CLI's ssh session; t's exec, over
+	// the gateway API in this sandbox, confirms it arrived here.
+	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t, t)
 	if err != nil {
 		report("failed", rec, "upload_failed")
-		return workspaceFailure("upload the project copy", err, a.sandboxDiskHint(ctx, s.api, err))
+		hint := a.sandboxDiskHint(ctx, s.api, err)
+		if errors.Is(err, workspace.ErrUploadNotArrived) {
+			hint = strayUploadHint
+		}
+		return workspaceFailure("upload the project copy", err, hint)
 	}
 	if _, err := a.Workspace.Baseline(ctx, a.dataDir(), s.sb.Name, t); err != nil {
 		report("failed", up, "baseline_failed")
@@ -564,6 +570,10 @@ func (a *App) copyWarnings(rec *workspace.CopyRecord) {
 		a.warn(w)
 	}
 }
+
+// strayUploadHint follows an upload that did not arrive in the sandbox it
+// named (workspace.ErrUploadNotArrived).
+const strayUploadHint = "`" + CommandName + " doctor` checks the ssh connection sharing that can carry an upload into another sandbox"
 
 func firstN(list []string, n int) []string {
 	if len(list) <= n {

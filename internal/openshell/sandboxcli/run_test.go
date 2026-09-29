@@ -582,7 +582,7 @@ func TestRunFailedLaunchDeletesTheSandbox(t *testing.T) {
 
 type failingUpload struct{ *fakeCopy }
 
-func (f *failingUpload) Upload(context.Context, string, string, workspace.Uploader) (*workspace.CopyRecord, error) {
+func (f *failingUpload) Upload(context.Context, string, string, workspace.Uploader, workspace.Execer) (*workspace.CopyRecord, error) {
 	return nil, errors.New("openshell upload failed (exit 1)")
 }
 
@@ -1204,6 +1204,18 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 	})
 }
 
+// An upload that openshell reported done but the sandbox does not have
+// fails the run, naming the doctor check for the ssh connection sharing
+// that can carry it into another sandbox.
+func TestCopyUploadThatDidNotArrive(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Gateway.Driver = "vm"
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, uploadErr: &workspace.UploadNotArrivedError{Sandbox: "strayed", Dir: "/sandbox/work/proj", Missing: true}}
+	wantErr(t, ta.Run(bg, RunOptions{Harness: "claude", Name: "strayed"}),
+		"upload the project copy: the upload to strayed did not arrive: openshell reported it done, but in strayed /sandbox/work/proj is not there; ",
+		"; `defenseclaw sandbox doctor` checks the ssh connection sharing that can carry an upload into another sandbox")
+}
+
 // failingCopy is a fakeCopy whose stage or upload fails with the error set.
 type failingCopy struct {
 	*fakeCopy
@@ -1218,11 +1230,11 @@ func (f *failingCopy) Stage(ctx context.Context, o workspace.StageOptions) (*wor
 	return f.fakeCopy.Stage(ctx, o)
 }
 
-func (f *failingCopy) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader) (*workspace.CopyRecord, error) {
+func (f *failingCopy) Upload(ctx context.Context, dataDir, name string, up workspace.Uploader, ex workspace.Execer) (*workspace.CopyRecord, error) {
 	if f.uploadErr != nil {
 		return nil, f.uploadErr
 	}
-	return f.fakeCopy.Upload(ctx, dataDir, name, up)
+	return f.fakeCopy.Upload(ctx, dataDir, name, up, ex)
 }
 
 // A copy too large to stage names the setting that raises the cap; on the

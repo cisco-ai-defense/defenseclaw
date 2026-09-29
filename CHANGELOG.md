@@ -294,7 +294,15 @@ deleted.
   connection the first one left open, so an upload landed in, and a connect
   could attach to, another sandbox. Your ssh configuration is not changed;
   `sandbox doctor` gains an `ssh-connection-sharing` check that names the
-  risk for `openshell` commands you run yourself.
+  risk for `openshell` commands you run yourself. That ssh is used only once
+  it has been seen to run from where it was put (a `/tmp` mounted `noexec`
+  would have let your own ssh run instead, and moves it under the data
+  directory), and not from a folder other users can change, macOS ACLs
+  included. An `ssh` wrapper first on `PATH` that turns sharing back on
+  with its own `ControlMaster`, `ControlPath`, `-S` or `-M` is refused, as
+  `ssh -G sandbox` shows it, with the wrapper named; the doctor fails too.
+  Each copy-mode upload is also checked to have arrived in the sandbox it
+  named, and a baseline failure names the missing path.
 - Fixes that also apply outside sandboxes:
   - The Claude Code and Codex hook scripts treated an `alert` verdict (flag
     without blocking) as an invalid reply, so a fail-closed install blocked

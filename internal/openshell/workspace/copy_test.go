@@ -43,7 +43,7 @@ func launchCopy(t *testing.T, e *env, name string, mutate func(*StageOptions)) (
 	if _, err := Stage(bg, opts); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Upload(bg, e.data, name, fs); err != nil {
+	if _, err := Upload(bg, e.data, name, fs, fs); err != nil {
 		t.Fatal(err)
 	}
 	rec, err := EstablishBaseline(bg, e.data, name, fs)
@@ -1106,5 +1106,41 @@ func TestReplaceDirKeepsOneLiveDirectory(t *testing.T) {
 	// A failed move puts the live directory back.
 	if _, err := replaceDir(filepath.Join(root, "missing"), live, noExchange); err == nil || readFile(t, live, "copy.json") != "three" {
 		t.Fatalf("failed install = %v, or it lost the live directory", err)
+	}
+}
+
+// quietExec answers every command with exit 1 and no output.
+type quietExec struct{}
+
+func (quietExec) Exec(context.Context, string, ExecRequest) (*ExecResult, error) {
+	return &ExecResult{ExitCode: 1}, nil
+}
+
+// Setting the baseline says which part of the copy is missing in the
+// sandbox. It used to fail with an empty reason ("set the baseline in the
+// sandbox (exit 1): ") when the upload had not arrived there.
+func TestBaselineSaysWhatIsMissing(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	// The fake sandbox runs the script with its paths rewritten.
+	repo := fs.rewrite(remoteRepo)
+	if err := os.RemoveAll(fs.local(remoteRepo + "/.git")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, "c1", fs); err == nil ||
+		err.Error() != "workspace: set the baseline in the sandbox (exit 1): "+repo+"/.git is missing: the copy has no git directory" {
+		t.Fatalf("baseline without the git directory = %v", err)
+	}
+	if err := os.RemoveAll(fs.local(remoteRepo)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, "c1", fs); err == nil ||
+		err.Error() != "workspace: set the baseline in the sandbox (exit 1): "+repo+" is missing: the copy is not in the sandbox" {
+		t.Fatalf("baseline without the copy = %v", err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, "c1", quietExec{}); err == nil ||
+		err.Error() != "workspace: set the baseline in the sandbox (exit 1): it printed no error" {
+		t.Fatalf("baseline that fails silently = %v", err)
 	}
 }

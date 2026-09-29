@@ -420,7 +420,11 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	a.note("refreshing the project copy in " + s.sb.Name + "…")
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
-		return workspaceFailure("refresh the copy", err, a.diskFullHint(err))
+		hint := a.diskFullHint(err)
+		if errors.Is(err, workspace.ErrUploadNotArrived) {
+			hint = strayUploadHint
+		}
+		return workspaceFailure("refresh the copy", err, hint)
 	}
 	files, b := int64(rec.Files), rec.Bytes
 	_ = s.api.ReportWorkspace(ctx, s.sb.Name, sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: "completed", FileCount: &files, ByteCount: &b})

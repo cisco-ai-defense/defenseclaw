@@ -29,7 +29,8 @@ import (
 
 // SSHRecorder is a recording ssh first on PATH and a stand-in openshell
 // CLI that runs `ssh` from PATH with its own arguments, as the real CLI
-// does for sandbox connect, transfers and forwards.
+// does for sandbox connect, transfers and forwards. The recording ssh
+// answers -G as OpenSSH would (SSHDashG) and records every other run.
 type SSHRecorder struct {
 	// SSH is the recording ssh: the real one a shim must run.
 	SSH string
@@ -47,6 +48,39 @@ type SSHCall struct {
 	// Args are what the recording ssh received.
 	Args []string
 }
+
+// SSHDashG starts a stand-in ssh script (after its #! line): given -G, it
+// prints the controlmaster and controlpath lines OpenSSH would for its
+// command line, and exits. As in OpenSSH, the first -o value of an option
+// wins, and -S and -M win wherever they are; unset, ControlMaster is no
+// and ControlPath none (no line). DefenseClaw's ssh shim is refused unless
+// `ssh -G sandbox` through it shows connection sharing off.
+const SSHDashG = `for _dc_a in "$@"; do [ "$_dc_a" = -G ] && _dc_g=1; done
+if [ -n "${_dc_g-}" ]; then
+  _dc_cm= _dc_cp= _dc_s= _dc_m=
+  while [ $# -gt 0 ]; do
+    _dc_o=
+    case $1 in
+    -o) [ $# -gt 1 ] && { shift; _dc_o=$1; } ;;
+    -o?*) _dc_o=${1#-o} ;;
+    -S) [ $# -gt 1 ] && { shift; _dc_s=$1; } ;;
+    -S?*) _dc_s=${1#-S} ;;
+    -M) _dc_m=1 ;;
+    esac
+    case $_dc_o in
+    [Cc]ontrol[Mm]aster=*) [ -n "$_dc_cm" ] || _dc_cm=${_dc_o#*=} ;;
+    [Cc]ontrol[Pp]ath=*) [ -n "$_dc_cp" ] || _dc_cp=${_dc_o#*=} ;;
+    esac
+    shift
+  done
+  [ -z "$_dc_s" ] || _dc_cp=$_dc_s
+  [ -z "$_dc_m" ] || _dc_cm=yes
+  case ${_dc_cm:-no} in no) _dc_cm=false ;; yes) _dc_cm=true ;; esac
+  printf 'hostname sandbox\ncontrolmaster %s\n' "$_dc_cm"
+  case ${_dc_cp:-none} in none) ;; *) printf 'controlpath %s\n' "$_dc_cp" ;; esac
+  exit 0
+fi
+`
 
 // NewSSHRecorder puts the recording ssh first on PATH for the rest of t.
 func NewSSHRecorder(t *testing.T) *SSHRecorder {
@@ -66,7 +100,7 @@ func NewSSHRecorder(t *testing.T) *SSHRecorder {
 			t.Fatal(err)
 		}
 	}
-	write(r.SSH, `{ printf 'args'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> `+log+"\n")
+	write(r.SSH, SSHDashG+`{ printf 'args'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> `+log+"\n")
 	write(r.OpenShell, `printf 'via %s\n' "$(command -v ssh)" >> `+log+`
 printf 'path %s\n' "${PATH%%:*}" >> `+log+`
 ssh "$@"

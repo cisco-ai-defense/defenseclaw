@@ -19,6 +19,8 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1014,15 +1016,16 @@ func treeSize(dir string) (int64, error) {
 	return total, err
 }
 
-// Upload sends the staged copy into the sandbox, then keeps the staged git
+// Upload sends the staged copy into the sandbox, confirms over ex (in the
+// sandbox by name) that it arrived there, then keeps the staged git
 // history (base.git) for verifying pulls and discards the staged files.
-func Upload(ctx context.Context, dataDir, name string, up Uploader) (*CopyRecord, error) {
+func Upload(ctx context.Context, dataDir, name string, up Uploader, ex Execer) (*CopyRecord, error) {
 	rec, err := LoadCopy(dataDir, name)
 	if err != nil {
 		return nil, err
 	}
 	lay, _ := newLayout(dataDir)
-	if err := uploadStaged(ctx, lay.copyDir(name), rec, up); err != nil {
+	if err := uploadStaged(ctx, lay.copyDir(name), rec, up, ex); err != nil {
 		return nil, err
 	}
 	if err := saveCopy(dataDir, rec); err != nil {
@@ -1031,22 +1034,22 @@ func Upload(ctx context.Context, dataDir, name string, up Uploader) (*CopyRecord
 	return rec, nil
 }
 
-// uploadStaged sends rec's staged copy into the sandbox, moves the staged
-// git dir to dir/base.git and discards the staged files. It updates rec
-// but does not save it.
-func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader) error {
+// uploadStaged sends rec's staged copy into the sandbox and confirms it
+// arrived, moves the staged git dir to dir/base.git and discards the
+// staged files. It updates rec but does not save it.
+func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader, ex Execer) error {
 	if rec.Stage == "" || !pathExists(rec.Stage) {
 		return fmt.Errorf("workspace: copy %s has nothing staged to upload", rec.Name)
 	}
 	remoteRoot := path.Dir(rec.RemoteDir)
-	if err := up.Upload(ctx, rec.Name, rec.Stage, remoteRoot); err != nil {
+	if err := uploadChecked(ctx, up, ex, rec.Name, rec.Stage, remoteRoot); err != nil {
 		return err
 	}
 	stageRoot := filepath.Dir(rec.Stage)
 	var localGit string
 	if rec.Kind == CopyPlain {
 		localGit = filepath.Join(stageRoot, ".dc", "git")
-		if err := up.Upload(ctx, rec.Name, localGit, remoteStateDir); err != nil {
+		if err := uploadChecked(ctx, up, ex, rec.Name, localGit, remoteStateDir); err != nil {
 			return err
 		}
 	} else {
@@ -1074,6 +1077,81 @@ func uploadStaged(ctx context.Context, dir string, rec *CopyRecord, up Uploader)
 	// The sandbox copy is this one now.
 	rec.Replaced = nil
 	return nil
+}
+
+// uploadMarkerPrefix starts the name of the file each copy upload carries,
+// which uploadChecked then looks for in the sandbox.
+const uploadMarkerPrefix = ".defenseclaw-upload-"
+
+// remoteUploadReceipts is where uploadChecked moves the marker of an
+// upload it confirmed, so that the check, run again after an attempt that
+// answered nothing, answers the same.
+var remoteUploadReceipts = path.Join(remoteStateDir, "uploads")
+
+// uploadChecked uploads the directory localDir into remoteDir of sandbox,
+// then confirms over ex that it arrived there. The upload runs over the
+// OpenShell CLI's ssh session, the check over the exec API, which names
+// the sandbox: an upload that ssh connection sharing carried into another
+// sandbox reports success, and only the check sees it is missing. The
+// upload carries a file named for a fresh nonce, which is taken out of
+// localDir afterwards and, by the check, out of the upload in the sandbox
+// (to a receipt in DefenseClaw's state directory, replacing older ones).
+func uploadChecked(ctx context.Context, up Uploader, ex Execer, sandbox, localDir, remoteDir string) error {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Errorf("workspace: %w", err)
+	}
+	nonce := hex.EncodeToString(b[:])
+	marker := uploadMarkerPrefix + nonce
+	local := filepath.Join(localDir, marker)
+	if err := os.WriteFile(local, []byte(nonce+"\n"), 0o600); err != nil {
+		return fmt.Errorf("workspace: %w", err)
+	}
+	err := up.Upload(ctx, sandbox, localDir, remoteDir)
+	if rerr := os.Remove(local); err == nil && rerr != nil {
+		err = fmt.Errorf("workspace: %w", rerr)
+	}
+	if err != nil {
+		return err
+	}
+	dir := path.Join(remoteDir, filepath.Base(localDir))
+	script := strings.Join([]string{
+		"set -eu",
+		"d=" + shellQuote(dir),
+		"f=" + shellQuote(path.Join(dir, marker)),
+		"r=" + shellQuote(path.Join(remoteUploadReceipts, marker)),
+		`if [ -f "$f" ] && [ "$(cat -- "$f")" = ` + shellQuote(nonce) + ` ]; then mkdir -p "${r%/*}" && mv -f -- "$f" "$r"; fi`,
+		`if [ -f "$r" ]; then`,
+		`  for o in "${r%/*}"/` + uploadMarkerPrefix + `*; do [ "$o" = "$r" ] || rm -f -- "$o"; done`,
+		`  echo upload=arrived`,
+		`elif [ -d "$d" ]; then echo upload=missing; else echo upload=nodir; fi`,
+	}, "\n")
+	// Idempotent: a second run finds the receipt the first one left. It is
+	// also the first exec after the upload, the one OpenShell 0.1.1
+	// sometimes leaves hanging.
+	res, err := ex.Exec(ctx, sandbox, ExecRequest{Argv: []string{"sh", "-c", script}, Timeout: 2 * time.Minute, Idempotent: true})
+	if err != nil {
+		return fmt.Errorf("workspace: confirm the upload to %s arrived: %w", sandbox, err)
+	}
+	switch got := parseKV(res.Stdout)["upload"]; {
+	case res.ExitCode != 0:
+		return fmt.Errorf("workspace: confirm the upload to %s arrived (exit %d): %s", sandbox, res.ExitCode, stderrReason(res.Stderr))
+	case got == "arrived":
+		return nil
+	case got == "missing", got == "nodir":
+		return &UploadNotArrivedError{Sandbox: sandbox, Dir: dir, Marker: marker, Missing: got == "nodir"}
+	default:
+		return fmt.Errorf("workspace: confirm the upload to %s arrived: the sandbox answered %q", sandbox, lastLines(res.Stdout, 3))
+	}
+}
+
+// stderrReason is what a failed sandbox script said on stderr, for an
+// error message.
+func stderrReason(stderr []byte) string {
+	if reason := lastLines(stderr, 5); reason != "" {
+		return reason
+	}
+	return "it printed no error"
 }
 
 // remoteGitPrelude is the shell prologue every in-sandbox git script uses:
@@ -1121,7 +1199,9 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 		return fmt.Errorf("workspace: copy %s was not uploaded", name)
 	}
 	script := remoteGitPrelude(rec) + "\n" + strings.Join([]string{
-		`test -d "$W"`,
+		// Say which: set -e would end the script without a word.
+		`test -d "$W" || { echo "$W is missing: the copy is not in the sandbox" >&2; exit 1; }`,
+		`test -d "$G" || { echo "$G is missing: the copy has no git directory" >&2; exit 1; }`,
 		`mkdir -p "$D"`,
 		`g update-ref ` + baselineRef + ` ` + rec.Baseline,
 		`b=$(g rev-parse -q --verify '` + baselineRef + `^{commit}')`,
@@ -1136,7 +1216,7 @@ func establishBaseline(ctx context.Context, rec *CopyRecord, ex Execer) error {
 		return err
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("workspace: set the baseline in the sandbox (exit %d): %s", res.ExitCode, lastLines(res.Stderr, 5))
+		return fmt.Errorf("workspace: set the baseline in the sandbox (exit %d): %s", res.ExitCode, stderrReason(res.Stderr))
 	}
 	kv := parseKV(res.Stdout)
 	if kv["baseline"] != rec.Baseline {

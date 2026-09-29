@@ -18,7 +18,9 @@ package openshell
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -36,6 +38,11 @@ type sshSharing struct {
 // shares reports whether ssh would use, or leave, a control socket: a
 // ControlPath alone makes ssh ride a master someone else opened.
 func (s sshSharing) shares() bool { return s.path != "" && s.path != "none" }
+
+// off reports whether ssh would neither open a master connection nor use
+// a control socket: ControlMaster no ("false" in `ssh -G`), ControlPath
+// none.
+func (s sshSharing) off() bool { return (s.master == "false" || s.master == "no") && !s.shares() }
 
 // parseSSHSharing reads `ssh -G` output (lower-case "key value" lines; no
 // controlpath line means none).
@@ -82,11 +89,17 @@ func (r *doctorRun) checkSSHSharing(ctx context.Context) {
 	c := Check{ID: CheckIDSSHSharing, Title: "SSH connection sharing"}
 	defer func() { r.add(c) }()
 	shim, err := r.SSHShim()
+	var sharing *SSHSharingError
 	switch {
+	case errors.As(err, &sharing):
+		c.Status = StatusFail
+		c.Detail = "DefenseClaw refuses to start sandbox sessions: " + sharing.Cause()
+		c.Fix = &Fix{Summary: sharing.Fix()}
+		return
 	case err != nil:
 		c.Status = StatusFail
 		c.Detail = "DefenseClaw cannot give the OpenShell CLI an ssh with connection sharing off, so it refuses to start sandbox sessions: " + err.Error()
-		c.Fix = &Fix{Summary: "set TMPDIR to a directory only you can write: DefenseClaw makes a private folder there for each OpenShell command"}
+		c.Fix = &Fix{Summary: "set TMPDIR to a directory only you can write, on a filesystem not mounted noexec: DefenseClaw makes a private folder there for each OpenShell command"}
 		return
 	case shim == nil:
 		c.Status = StatusWarn
@@ -101,13 +114,18 @@ func (r *doctorRun) checkSSHSharing(ctx context.Context) {
 		c.Status = StatusWarn
 		c.Detail = "could not confirm that the ssh DefenseClaw runs the OpenShell CLI with shares no connections: " + err.Error()
 		return
-	case ours.shares():
-		c.Status = StatusWarn
-		c.Detail = fmt.Sprintf("the ssh DefenseClaw runs the OpenShell CLI with still shares connections (ControlMaster %s, ControlPath %s): one sandbox's session could reach another sandbox", ours.master, ours.path)
+	case !ours.off():
+		sharing := newSSHSharingError(shim.Real, sshPathWithoutShims(shim.pathEnv), ours, nil)
+		c.Status = StatusFail
+		c.Detail = sharing.Cause()
+		c.Fix = &Fix{Summary: sharing.Fix()}
 		return
 	}
 	c.Status = StatusPass
 	c.Detail = "off for the OpenShell sessions DefenseClaw runs (ssh " + strings.Join(SSHNoSharingOptions(), " ") + ")"
+	if shim.Fallback != "" {
+		c.Detail += "; its ssh is under " + filepath.Dir(shim.Dir) + ", not the temporary directory: " + shim.Fallback
+	}
 	theirs, err := r.sshConfigFor(ctx, shim.Real)
 	switch {
 	case err != nil:

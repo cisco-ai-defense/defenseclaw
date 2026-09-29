@@ -18,14 +18,19 @@ package openshell
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -46,6 +51,21 @@ import (
 // holding an `ssh` shim that runs the real ssh with SSHNoSharingOptions
 // before the CLI's own arguments. Options on the ssh command line win over
 // every ssh_config file.
+//
+// A PATH search passes over a file it cannot execute and runs the next
+// `ssh` on PATH, the user's own, with its connection sharing: a shim on a
+// filesystem mounted noexec (/tmp on hardened Linux hosts) would be put in
+// place and never run. So a shim counts only once a PATH search of the
+// child's PATH has found it and it has run; when the temporary directory
+// cannot hold one that does, the shim goes under DefenseClaw's data
+// directory, and when that cannot either the command is refused.
+//
+// The options win over ssh_config, not over an ssh wrapper first on PATH
+// that puts its own ControlMaster or ControlPath options before its
+// arguments (ssh keeps the first value it gets) or passes -S or -M (which
+// win wherever they are). So the shim also counts only once `ssh -G
+// sandbox` through it, which prints the configuration without connecting,
+// shows connection sharing off; otherwise the command is refused.
 
 // sshNoSharingOptions turn OpenSSH connection sharing off: no master
 // connection, no control socket to reuse, nothing kept open afterwards.
@@ -61,13 +81,24 @@ const (
 	// sshShimMarker is the shim's second line. An ssh on PATH with it near
 	// the top is another DefenseClaw process's shim, never the real ssh.
 	sshShimMarker = "# defenseclaw: the ssh the OpenShell CLI runs, without connection sharing"
-	// maxSSHShimBytes bounds what Verify reads back.
-	maxSSHShimBytes = 4096
+	// sshShimProbeEnv, set, makes a shim print its value and exit without
+	// running ssh: the run that proves the shim executes. Environ keeps it
+	// from the OpenShell CLI.
+	sshShimProbeEnv = "DEFENSECLAW_SSH_SHIM_PROBE"
+	// sshShimFallbackName is the directory under DefenseClaw's data
+	// directory that holds shims when the temporary directory cannot.
+	sshShimFallbackName = "openshell-ssh"
+	// sshShimProbeTimeout bounds the probe run.
+	sshShimProbeTimeout = 10 * time.Second
 )
 
-// sshShimBase is where shim directories are made; empty means
+// sshShimBase is where shim directories are made first; empty means
 // os.TempDir(). Tests point it at their own directory.
 var sshShimBase = ""
+
+// sshShimFallback is where shim directories are made when sshShimBase
+// cannot hold one that runs; empty means nowhere. Tests replace it.
+var sshShimFallback = defaultSSHShimFallback
 
 // sshShimOwned judges the shim and its directory, sshShimTrusted the
 // directories above it (the caller's or root's). Tests replace them.
@@ -75,6 +106,50 @@ var (
 	sshShimOwned   = ownedByCaller
 	sshShimTrusted = ownedByCallerOrRoot
 )
+
+// sshShimNoexec reports whether a directory's filesystem is mounted
+// noexec; sshShimMode is the mode the shim is written with. Tests replace
+// them to stand for a filesystem the shim cannot run from.
+var (
+	sshShimNoexec             = mountedNoexec
+	sshShimMode   fs.FileMode = 0o700
+)
+
+// sshShimDataDir is DefenseClaw's data directory, as SetSSHShimDataDir
+// named it.
+var sshShimDataDir struct {
+	sync.Mutex
+	dir string
+}
+
+// SetSSHShimDataDir names DefenseClaw's data directory. Its openshell-ssh
+// folder holds the ssh shims when the temporary directory cannot hold one
+// that runs. Unset, it is $DEFENSECLAW_HOME, else ~/.defenseclaw.
+func SetSSHShimDataDir(dir string) {
+	sshShimDataDir.Lock()
+	defer sshShimDataDir.Unlock()
+	sshShimDataDir.dir = dir
+}
+
+// defaultSSHShimFallback is the openshell-ssh folder of DefenseClaw's data
+// directory, or empty when there is none to use.
+func defaultSSHShimFallback() string {
+	sshShimDataDir.Lock()
+	dir := sshShimDataDir.dir
+	sshShimDataDir.Unlock()
+	if dir == "" {
+		dir = os.Getenv("DEFENSECLAW_HOME")
+	}
+	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			dir = filepath.Join(home, ".defenseclaw")
+		}
+	}
+	if dir == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	return filepath.Join(dir, sshShimFallbackName)
+}
 
 // SSHShim is a private directory holding an `ssh` that runs the real ssh
 // with connection sharing off.
@@ -86,20 +161,111 @@ type SSHShim struct {
 	// Real is the ssh the shim runs: the first ssh on the PATH it was made
 	// for, as an absolute path.
 	Real string
+	// Fallback, when set, says why the temporary directory could not hold
+	// the shim, which is then under DefenseClaw's data directory.
+	Fallback string
 
+	// pathEnv is the PATH the shim was made for.
+	pathEnv string
 	// made marks a shim NewSSHShim wrote, whose directory Remove deletes.
 	made   bool
 	remove sync.Once
 }
 
+// errSSHShimUnsafe marks a directory another user could replace a shim
+// in.
+var errSSHShimUnsafe = errors.New("another user could replace the ssh DefenseClaw gives the OpenShell CLI there")
+
+// SSHSharingError is NewSSHShim's refusal of an ssh that does not keep
+// connection sharing off with the shim's options first on its command
+// line, or whose settings `ssh -G` through the shim could not show.
+type SSHSharingError struct {
+	// SSH is the ssh the shim runs, the first on PATH: typically a wrapper
+	// that adds options of its own.
+	SSH string
+	// Next is the ssh after it on PATH, if any: the one to put first.
+	Next string
+	// Master and Path are the ControlMaster and ControlPath that `ssh -G`
+	// reported (Path empty for none).
+	Master, Path string
+	// Err, when set, is why `ssh -G` reported no settings.
+	Err error
+}
+
+func (e *SSHSharingError) Error() string { return "ssh shim: " + e.Cause() + "; " + e.Fix() }
+
+func (e *SSHSharingError) Unwrap() error { return e.Err }
+
+// Cause says what DefenseClaw found.
+func (e *SSHSharingError) Cause() string {
+	opts := strings.Join(sshNoSharingOptions[:], " ")
+	if e.Err != nil {
+		return fmt.Sprintf("DefenseClaw could not confirm that %s, the first ssh on PATH, keeps connection sharing off when run with %s first: %v", e.SSH, opts, e.Err)
+	}
+	path := e.Path
+	if path == "" {
+		path = "none"
+	}
+	return fmt.Sprintf("%s, the first ssh on PATH, does not keep connection sharing off when run with %s first "+
+		"(`ssh -G %s` through DefenseClaw's shim reports ControlMaster %s, ControlPath %s), so one sandbox's session could reach another sandbox: "+
+		"an ssh wrapper that puts its own ControlMaster or ControlPath options before its arguments, or passes -S or -M, wins over DefenseClaw's",
+		e.SSH, opts, SSHSandboxHost, e.Master, path)
+}
+
+// Fix says what the user can change.
+func (e *SSHSharingError) Fix() string {
+	fix := "make " + e.SSH + " pass its arguments on to OpenSSH's ssh without ControlMaster, ControlPath or ControlPersist options, -S or -M of its own, or put "
+	if e.Next == "" {
+		return fix + "OpenSSH's ssh (such as /usr/bin/ssh) first on PATH"
+	}
+	return fix + filepath.Dir(e.Next) + " before " + filepath.Dir(e.SSH) + " on PATH, so the OpenShell CLI runs " + e.Next
+}
+
+// newSSHSharingError is the refusal of realSSH, found on pathEnv, for
+// sharing or err.
+func newSSHSharingError(realSSH, pathEnv string, sharing sshSharing, err error) *SSHSharingError {
+	return &SSHSharingError{SSH: realSSH, Next: sshAfter(realSSH, pathEnv), Master: sharing.master, Path: sharing.path, Err: err}
+}
+
+// sshAfter is the ssh findRealSSH finds on pathEnv after the directory of
+// realSSH, or empty.
+func sshAfter(realSSH, pathEnv string) string {
+	dirs := filepath.SplitList(pathEnv)
+	for i, dir := range dirs {
+		if dir == "" || !filepath.IsAbs(dir) || filepath.Join(dir, "ssh") != realSSH {
+			continue
+		}
+		var rest []string
+		for _, d := range dirs[i+1:] {
+			if d != "" && filepath.Join(d, "ssh") != realSSH {
+				rest = append(rest, d)
+			}
+		}
+		next, _ := findRealSSH(strings.Join(rest, string(os.PathListSeparator)))
+		return next
+	}
+	return ""
+}
+
+// sshShimNoSharingPassed maps the ssh a shim runs and the PATH it runs it
+// with to the files every ssh on that PATH was (sshStamps) when `ssh -G`
+// through a shim last showed sharing off. The check costs a run of ssh
+// (about 0.1 s on a Mac); the commands of one sandbox run then pay for it
+// once, and a change to any ssh on PATH, the wrapper or the ssh it runs,
+// is checked again. One entry per ssh and PATH keeps it bounded.
+var sshShimNoSharingPassed sync.Map // string -> string
+
 // NewSSHShim finds the ssh that pathEnv (a PATH value) resolves and writes
-// a shim for it in a new private directory under the temporary directory.
-// It returns nil and no error when pathEnv has no ssh, which leaves the
-// OpenShell CLI none to share connections with either, and on Windows,
-// where OpenShell sandboxes do not run and Win32-OpenSSH has no connection
-// sharing. It refuses a temporary directory that another user could
-// replace the shim in. The caller removes the shim once the command it
-// was made for has exited.
+// a shim for it in a new private directory under the temporary directory,
+// or, when no shim there would run (or the directory is not safe), under
+// DefenseClaw's data directory. It returns nil and no error when pathEnv
+// has no ssh, which leaves the OpenShell CLI none to share connections
+// with either, and on Windows, where OpenShell sandboxes do not run and
+// Win32-OpenSSH has no connection sharing. It refuses when neither
+// directory can hold a shim that runs and that no other user could
+// replace, and, with an *SSHSharingError, when `ssh -G` through the shim
+// does not show connection sharing off. The caller removes the shim once
+// the command it was made for has exited.
 func NewSSHShim(pathEnv string) (*SSHShim, error) {
 	if runtime.GOOS == "windows" {
 		return nil, nil
@@ -108,29 +274,67 @@ func NewSSHShim(pathEnv string) (*SSHShim, error) {
 	if !ok {
 		return nil, nil
 	}
-	return newSSHShimIn(sshShimBase, realSSH)
-}
-
-func newSSHShimIn(base, realSSH string) (*SSHShim, error) {
-	if base == "" {
-		base = os.TempDir()
-	}
 	if strings.ContainsAny(realSSH, "\x00\n\r") || !filepath.IsAbs(realSSH) {
 		return nil, fmt.Errorf("ssh shim: unusable ssh path %q", realSSH)
 	}
+	base := sshShimBase
+	if base == "" {
+		base = os.TempDir()
+	}
+	s, err := newSSHShimIn(base, realSSH, pathEnv, false)
+	if err != nil {
+		reasons := []string{err.Error()}
+		if fallback := sshShimFallback(); fallback != "" && filepath.Clean(fallback) != filepath.Clean(base) {
+			var ferr error
+			if s, ferr = newSSHShimIn(fallback, realSSH, pathEnv, true); ferr == nil {
+				s.Fallback = err.Error()
+			} else {
+				reasons = append(reasons, ferr.Error())
+			}
+		}
+		if s == nil {
+			return nil, fmt.Errorf("ssh shim: DefenseClaw found no directory for an ssh with connection sharing off that the OpenShell CLI would run (%s); "+
+				"set TMPDIR to a directory only you can write, on a filesystem not mounted noexec", strings.Join(reasons, "; "))
+		}
+	}
+	if err := s.checkNoSharing(); err != nil {
+		_ = s.Remove()
+		return nil, err
+	}
+	return s, nil
+}
+
+// newSSHShimIn makes a shim in a new directory under base, which create
+// makes when it is missing, and proves that it runs.
+func newSSHShimIn(base, realSSH, pathEnv string, create bool) (*SSHShim, error) {
+	if create {
+		if err := os.MkdirAll(base, 0o700); err != nil {
+			return nil, err
+		}
+	}
 	resolved, err := filepath.EvalSymlinks(base)
 	if err != nil {
-		return nil, fmt.Errorf("ssh shim: temporary directory %s: %w", base, err)
+		return nil, err
 	}
 	if err := checkSSHShimAncestors(resolved); err != nil {
 		return nil, err
 	}
+	switch noexec, err := sshShimNoexec(resolved); {
+	case err != nil:
+		return nil, fmt.Errorf("%s: %w", resolved, err)
+	case noexec:
+		return nil, fmt.Errorf("%s is on a filesystem mounted noexec", resolved)
+	}
 	dir, err := os.MkdirTemp(resolved, sshShimPrefix+"*")
 	if err != nil {
-		return nil, fmt.Errorf("ssh shim: %w", err)
+		return nil, err
 	}
-	s := &SSHShim{Dir: dir, Path: filepath.Join(dir, "ssh"), Real: realSSH, made: true}
+	s := &SSHShim{Dir: dir, Path: filepath.Join(dir, "ssh"), Real: realSSH, pathEnv: pathEnv, made: true}
 	if err := s.write(); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	if err := s.probe(); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
@@ -140,64 +344,189 @@ func newSSHShimIn(base, realSSH string) (*SSHShim, error) {
 // write puts the shim in place atomically (a temporary file renamed over
 // Path) and reads it back.
 func (s *SSHShim) write() error {
-	if err := checkSSHShimDir(s.Dir); err != nil {
+	if _, err := checkSSHShimDir(s.Dir); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(s.Dir, ".ssh-*")
 	if err != nil {
-		return fmt.Errorf("ssh shim: %w", err)
+		return err
 	}
 	tmp := f.Name()
 	defer func() { _ = os.Remove(tmp) }()
-	_, werr := f.Write(sshShimScript(s.Real))
+	_, werr := f.Write(s.script())
 	if werr == nil {
-		werr = f.Chmod(0o700)
+		werr = f.Chmod(sshShimMode)
 	}
 	if cerr := f.Close(); werr == nil {
 		werr = cerr
 	}
 	if werr != nil {
-		return fmt.Errorf("ssh shim: write %s: %w", tmp, werr)
+		return fmt.Errorf("write %s: %w", tmp, werr)
 	}
 	if err := os.Rename(tmp, s.Path); err != nil {
-		return fmt.Errorf("ssh shim: %w", err)
-	}
-	return s.Verify()
-}
-
-// Verify checks that the shim is still exactly what NewSSHShim wrote, a
-// regular file of the user's, in a directory only the user can write.
-func (s *SSHShim) Verify() error {
-	if err := checkSSHShimDir(s.Dir); err != nil {
 		return err
 	}
-	info, err := os.Lstat(s.Path)
-	if err != nil {
-		return fmt.Errorf("ssh shim: %w", err)
+	return s.verify()
+}
+
+// probe runs the shim once the way the OpenShell CLI will: found by a PATH
+// search of the child's PATH, then executed. With sshShimProbeEnv set it
+// answers without running ssh. A shim the search passes over (not
+// executable, on a filesystem mounted noexec) or that the system refuses
+// to run fails the probe: the CLI would run the user's own ssh instead.
+func (s *SSHShim) probe() error {
+	childPath := s.Dir
+	if s.pathEnv != "" {
+		childPath += string(os.PathListSeparator) + s.pathEnv
 	}
-	if !info.Mode().IsRegular() || !sshShimOwned(info) || info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("ssh shim: %s is not a private file of yours (mode %v)", s.Path, info.Mode())
+	if found := lookPathIn("ssh", childPath); found != s.Path {
+		if found == "" {
+			found = "no ssh"
+		}
+		return fmt.Errorf("a PATH search passes over the shim in %s, which it cannot execute, and finds %s", s.Dir, found)
 	}
-	data, err := safefile.ReadRegularFileBounded(s.Path, maxSSHShimBytes)
-	if err != nil {
-		return fmt.Errorf("ssh shim: %w", err)
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
 	}
-	if !bytes.Equal(data, sshShimScript(s.Real)) {
-		return fmt.Errorf("ssh shim: %s is not the shim DefenseClaw wrote", s.Path)
+	want := hex.EncodeToString(nonce[:])
+	ctx, cancel := context.WithTimeout(context.Background(), sshShimProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.Path)
+	cmd.Env = []string{"PATH=" + childPath, sshShimProbeEnv + "=" + want}
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	switch {
+	case err != nil:
+		return fmt.Errorf("the shim in %s does not run: %v", s.Dir, err)
+	case strings.TrimSpace(string(out)) != want:
+		return fmt.Errorf("the shim in %s answered %q when run, not what DefenseClaw wrote in it", s.Dir, bytes.TrimSpace(out))
 	}
 	return nil
 }
 
-// Environ returns env with Dir first on PATH.
+// sshShimMaxGOutput bounds what the `ssh -G` check reads of each stream.
+const sshShimMaxGOutput = 64 << 10
+
+// checkNoSharing runs `<shim> -G sandbox`, which prints the configuration
+// the real ssh would connect with and does not connect, and refuses with
+// an *SSHSharingError unless it shows ControlMaster no and ControlPath
+// none. A pass stands while every ssh on the PATH is the same file.
+func (s *SSHShim) checkNoSharing() error {
+	pathEnv := sshPathWithoutShims(s.pathEnv)
+	key, stamps := s.Real+"\x00"+pathEnv, sshStamps(pathEnv)
+	if prev, ok := sshShimNoSharingPassed.Load(key); ok && prev.(string) == stamps {
+		return nil
+	}
+	sharing, err := s.sharing()
+	if err != nil || !sharing.off() {
+		return newSSHSharingError(s.Real, pathEnv, sharing, err)
+	}
+	sshShimNoSharingPassed.Store(key, stamps)
+	return nil
+}
+
+// sharing is what `ssh -G sandbox` through the shim reports, run with the
+// environment the OpenShell CLI gives it.
+func (s *SSHShim) sharing() (sshSharing, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sshShimProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.Path, "-G", SSHSandboxHost)
+	env := os.Environ()
+	cmd.Env = s.Environ(append(env[:len(env):len(env)], "PATH="+s.pathEnv))
+	stdout, stderr := &cappedBuffer{limit: sshShimMaxGOutput}, &cappedBuffer{limit: sshShimMaxGOutput}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = time.Second
+	what := fmt.Sprintf("`ssh -G %s` through DefenseClaw's shim", SSHSandboxHost)
+	if err := cmd.Run(); err != nil {
+		if line := lastLine(stderr.Bytes()); line != "" {
+			err = fmt.Errorf("%w: %s", err, line)
+		}
+		return sshSharing{}, fmt.Errorf("%s: %w", what, err)
+	}
+	sharing, ok := parseSSHSharing(stdout.Bytes())
+	if !ok {
+		return sshSharing{}, fmt.Errorf("%s printed no controlmaster setting", what)
+	}
+	return sharing, nil
+}
+
+// sshStamps identifies the file at each ssh a PATH search of pathEnv
+// could reach (device, inode, size and modification time), or its
+// absence: what a wrapper that runs "the next ssh" on PATH could run.
+func sshStamps(pathEnv string) string {
+	var b strings.Builder
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" || !filepath.IsAbs(dir) {
+			continue
+		}
+		p := filepath.Join(dir, "ssh")
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintf(&b, "%q -\n", p)
+			continue
+		}
+		dev, ino := fileID(info)
+		fmt.Fprintf(&b, "%q %d:%d %d %d\n", p, dev, ino, info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String()
+}
+
+// Verify checks that the shim is still exactly what NewSSHShim wrote, a
+// regular file of the user's, in a directory only the user can write, and
+// that no macOS ACL on either lets another user write them.
+func (s *SSHShim) Verify() error {
+	if err := s.verify(); err != nil {
+		return fmt.Errorf("ssh shim: %w", err)
+	}
+	return nil
+}
+
+func (s *SSHShim) verify() error {
+	dirInfo, err := checkSSHShimDir(s.Dir)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(s.Path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || !sshShimOwned(info) || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s is not a private file of yours (mode %v)", s.Path, info.Mode())
+	}
+	// What the mode bits do not show: an ACL entry, inherited from the
+	// directory or added since, that lets another user rewrite the shim.
+	if err := checkSSHShimACL(s.Dir, dirInfo, false); err != nil {
+		return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
+	}
+	if err := checkSSHShimACL(s.Path, info, false); err != nil {
+		return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
+	}
+	want := s.script()
+	data, err := safefile.ReadRegularFileBounded(s.Path, int64(len(want))+1)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(data, want) {
+		return fmt.Errorf("%s is not the shim DefenseClaw wrote", s.Path)
+	}
+	return nil
+}
+
+// Environ returns env with Dir first on PATH, and without the variable
+// that makes the shim answer a probe instead of running ssh.
 func (s *SSHShim) Environ(env []string) []string {
 	out := make([]string, 0, len(env)+1)
 	path := s.Dir
 	for _, kv := range env {
 		name, value, _ := strings.Cut(kv, "=")
-		if name == "PATH" {
+		switch name {
+		case "PATH":
 			if value != "" {
 				path = s.Dir + string(os.PathListSeparator) + value
 			}
+			continue
+		case sshShimProbeEnv:
 			continue
 		}
 		out = append(out, kv)
@@ -216,9 +545,31 @@ func (s *SSHShim) Remove() error {
 	return err
 }
 
-// sshShimScript is the shim that runs realSSH.
-func sshShimScript(realSSH string) []byte {
-	return []byte("#!/bin/sh\n" + sshShimMarker + "\nexec " + shellQuote(realSSH) + " " + strings.Join(sshNoSharingOptions[:], " ") + " \"$@\"\n")
+// script is the shim s runs as.
+func (s *SSHShim) script() []byte { return sshShimScript(s.Real, sshPathWithoutShims(s.pathEnv)) }
+
+// sshShimScript is the shim that runs realSSH with PATH set to pathEnv:
+// the PATH the shim was made for, without the shim's own directory, so a
+// real ssh that is itself a wrapper looking for "the next ssh" on PATH
+// (ssh-ident as ~/bin/ssh) finds the one after it, not the shim again.
+func sshShimScript(realSSH, pathEnv string) []byte {
+	return []byte("#!/bin/sh\n" + sshShimMarker + "\n" +
+		"if [ -n \"${" + sshShimProbeEnv + "+x}\" ]; then printf '%s\\n' \"$" + sshShimProbeEnv + "\"; exit 0; fi\n" +
+		"PATH=" + shellQuote(pathEnv) + "\nexport PATH\n" +
+		"exec " + shellQuote(realSSH) + " " + strings.Join(sshNoSharingOptions[:], " ") + " \"$@\"\n")
+}
+
+// sshPathWithoutShims is pathEnv without DefenseClaw's shim directories,
+// its own and any another DefenseClaw process left on it.
+func sshPathWithoutShims(pathEnv string) string {
+	dirs := filepath.SplitList(pathEnv)
+	kept := dirs[:0]
+	for _, dir := range dirs {
+		if !strings.HasPrefix(filepath.Base(dir), sshShimPrefix) {
+			kept = append(kept, dir)
+		}
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
 }
 
 // findRealSSH is the ssh a command-name lookup of pathEnv finds, skipping
@@ -241,6 +592,21 @@ func findRealSSH(pathEnv string) (string, bool) {
 	return "", false
 }
 
+// lookPathIn is the file a PATH search for name finds in pathEnv, as
+// exec.LookPath does it: the first regular file the caller may execute.
+// Relative entries are skipped.
+func lookPathIn(name, pathEnv string) string {
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" || !filepath.IsAbs(dir) {
+			continue
+		}
+		if p := filepath.Join(dir, name); executableFile(p) {
+			return p
+		}
+	}
+	return ""
+}
+
 // isSSHShim reports whether the executable at p is a DefenseClaw shim.
 func isSSHShim(p string) bool {
 	f, err := os.Open(p)
@@ -254,44 +620,45 @@ func isSSHShim(p string) bool {
 }
 
 // checkSSHShimDir refuses a shim directory that is not a directory of the
-// user's, or that other users can write.
-func checkSSHShimDir(dir string) error {
+// user's, or that other users can write by its mode bits, and returns
+// what it found.
+func checkSSHShimDir(dir string) (fs.FileInfo, error) {
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("ssh shim: %w", err)
+		return nil, err
 	}
 	switch {
 	case !info.IsDir():
-		return fmt.Errorf("ssh shim: %s is not a directory", dir)
+		return nil, fmt.Errorf("%s is not a directory", dir)
 	case !sshShimOwned(info):
-		return fmt.Errorf("ssh shim: %s is not owned by you", dir)
+		return nil, fmt.Errorf("%s is not owned by you", dir)
 	case info.Mode().Perm()&0o022 != 0:
-		return fmt.Errorf("ssh shim: %s is writable by other users (mode %04o)", dir, info.Mode().Perm())
+		return nil, fmt.Errorf("%s is writable by other users (mode %04o)", dir, info.Mode().Perm())
 	}
-	return nil
+	return info, nil
 }
 
-// errSSHShimUnsafe marks a temporary directory another user could replace
-// a shim in.
-var errSSHShimUnsafe = errors.New("another user could replace the ssh DefenseClaw gives the OpenShell CLI there; set TMPDIR to a directory only you can write")
-
-// checkSSHShimAncestors refuses a temporary directory (already free of
-// symbolic links) that, or any directory above it, belongs to another user
-// than the caller or root, or that other users can write without the
-// sticky bit that stops them renaming what is inside (as in /tmp).
+// checkSSHShimAncestors refuses a directory (already free of symbolic
+// links) that, or any directory above it, belongs to another user than
+// the caller or root, that other users can write without the sticky bit
+// that stops them renaming what is inside (as in /tmp), or whose macOS
+// ACL grants a write-capable right, inheritable or not.
 func checkSSHShimAncestors(dir string) error {
 	for p := dir; ; {
 		info, err := os.Lstat(p)
 		if err != nil {
-			return fmt.Errorf("ssh shim: %w", err)
+			return err
 		}
 		switch {
 		case !info.IsDir():
-			return fmt.Errorf("ssh shim: %s is not a directory", p)
+			return fmt.Errorf("%s is not a directory", p)
 		case !sshShimTrusted(info):
-			return fmt.Errorf("ssh shim: %s belongs to another user: %w", p, errSSHShimUnsafe)
+			return fmt.Errorf("%s belongs to another user: %w", p, errSSHShimUnsafe)
 		case info.Mode().Perm()&0o022 != 0 && info.Mode()&fs.ModeSticky == 0:
-			return fmt.Errorf("ssh shim: %s is writable by other users (mode %04o): %w", p, info.Mode().Perm(), errSSHShimUnsafe)
+			return fmt.Errorf("%s is writable by other users (mode %04o): %w", p, info.Mode().Perm(), errSSHShimUnsafe)
+		}
+		if err := checkSSHShimACL(p, info, true); err != nil {
+			return fmt.Errorf("%v: %w", err, errSSHShimUnsafe)
 		}
 		parent := filepath.Dir(p)
 		if parent == p {
