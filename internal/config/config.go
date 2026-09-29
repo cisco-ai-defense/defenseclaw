@@ -2382,8 +2382,11 @@ type GatewayConfig struct {
 	// gatewayShouldConnectForConfiguredConnector. Three values:
 	//
 	//   "" / "auto"   — derive from connector + host. openclaw/zeptoclaw
-	//                   always dial; codex/claudecode dial only if
-	//                   gateway.host is non-loopback.
+	//                   dial; codex/claudecode dial only if
+	//                   gateway.host is non-loopback. An openclaw
+	//                   connector implied only by claw.mode, on a
+	//                   loopback host, does not dial when OpenClaw is
+	//                   not installed (no openclaw.json, no binary).
 	//   "enabled"     — always dial regardless of connector/host. Use
 	//                   when running a local OpenClaw daemon on
 	//                   127.0.0.1 alongside a codex/claudecode connector

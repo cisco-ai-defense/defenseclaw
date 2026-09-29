@@ -114,6 +114,16 @@ On a Mac the gateway is the `nvidia/openshell` Homebrew service (launchd),
 and each sandbox is a MicroVM (libkrun on Apple's Hypervisor) instead of a
 container; the rest of the picture is the same.
 
+A sandbox-only install needs no agent connector on the host, so its config
+often names no connector and keeps `claw.mode`'s `openclaw` default. With
+`gateway.host` on loopback, `gateway.fleet_mode` unset or `auto`, and no
+OpenClaw installed (no `openclaw.json`, no `openclaw` binary), the daemon does
+not dial the OpenClaw gateway (18789): its Gateway subsystem is `disabled`
+with `OpenClaw gateway off (OpenClaw is not installed)`, which
+`defenseclaw-gateway status`, doctor, the TUI and the Mac app show. The
+daemon decides when it starts (`gatewayShouldConnectForConfiguredConnector`,
+`internal/gateway/fleet_openclaw_presence.go`).
+
 ## Compute drivers
 
 One OpenShell gateway runs one compute driver. DefenseClaw drives two:

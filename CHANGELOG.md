@@ -191,6 +191,24 @@ rest also reach per-user installs.
   OpenClaw is an enabled active connector, the rule doctor already used; a
   config that cannot be read keeps the row
   ([#881](https://github.com/cisco-ai-defense/defenseclaw/issues/881)).
+- **The OpenClaw gateway reads "off (OpenClaw is not installed)" instead of
+  reconnecting forever.** `claw.mode` defaults to `openclaw`, so an install
+  that never picked a connector (every sandbox-only install, for example)
+  dialed `127.0.0.1:18789` for the life of the gateway, showed the Gateway
+  subsystem `RECONNECTING`, logged a connect failure per attempt and asked
+  for `OPENCLAW_GATEWAY_TOKEN`. When only `claw.mode` names OpenClaw,
+  `gateway.host` is loopback, `gateway.fleet_mode` is unset or `auto`, and
+  there is no `openclaw.json` (at `claw.config_file` or in `claw.home_dir`)
+  and no `openclaw` binary, the gateway no longer dials: the Gateway
+  subsystem is `disabled` with `OpenClaw gateway off (OpenClaw is not
+  installed)` in `defenseclaw-gateway status`, the TUI and the Mac app,
+  doctor reports `OpenClaw gateway: off (OpenClaw is not installed)`, the
+  token is not required, the watchdog stops reporting the fleet down, and
+  the Secure Client service status reads ready instead of degraded. An installed or configured OpenClaw, an explicit
+  `openclaw` connector, a non-loopback host or `fleet_mode: enabled` keeps
+  the dial. The gateway decides when it starts; restart it after installing
+  OpenClaw
+  ([#958](https://github.com/cisco-ai-defense/defenseclaw/issues/958)).
 
 ### Added
 
