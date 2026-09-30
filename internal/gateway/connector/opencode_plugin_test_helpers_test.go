@@ -88,6 +88,11 @@ func openCodePluginTestData(t *testing.T, server *httptest.Server) templateData 
 	}
 }
 
+// nodeHarnessTimeout bounds one node run of a plugin harness. It covers
+// node's start, which on a busy Windows runner can take many seconds when
+// it is the job's first node process.
+const nodeHarnessTimeout = 60 * time.Second
+
 // nodeForTest returns the node binary, or skips the test when there is none.
 func nodeForTest(t *testing.T) string {
 	t.Helper()
@@ -103,7 +108,7 @@ func nodeForTest(t *testing.T) string {
 func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 	t.Helper()
 	node := nodeForTest(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nodeHarnessTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, node, append([]string{"--input-type=module", "-e", harness}, args...)...)
 	var stderr strings.Builder
