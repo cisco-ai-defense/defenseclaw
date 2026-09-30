@@ -40,6 +40,12 @@ func runRunScript(t *testing.T, script string, args ...string) string {
 	return string(out)
 }
 
+// markInterrupted is the mark the daemon's stop writes before it ends the
+// harness (the manager's endHarnessScript).
+const markInterrupted = `d=$1
+[ -s "$d/latest.exit" ] || printf 'interrupted\n' > "$d/latest.exit"
+`
+
 // A detached run a stop ended read "exited with status 143" once the
 // sandbox started again (the live CLI test): the stop lets the harness exit
 // on SIGTERM before the sandbox goes, and the run's runner wrote that
@@ -90,7 +96,7 @@ func TestDetachedRunKeepsTheStopsInterruptedMark(t *testing.T) {
 					t.Fatalf("the started run reads %+v", got)
 				}
 				if c.mark {
-					runRunScript(t, runMarkScript, dir)
+					runRunScript(t, markInterrupted, dir)
 				}
 				// What the daemon's stop does before the sandbox goes.
 				if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {

@@ -1439,9 +1439,10 @@ func TestTeardownDryRunListsEveryStep(t *testing.T) {
 	}
 }
 
-// The daemon's delete leaves the CLI's own state of a sandbox (the run log
-// kept at a stop, the accepted undo point) under its data directory, which
-// `sandbox delete` removes after it: teardown removes it too.
+// The daemon's delete leaves the CLI's own state of a sandbox (the run's
+// options, a copy's hand-over, and what an earlier CLI kept there: a run
+// log, the accepted undo point) under its data directory, which `sandbox
+// delete` removes after it: teardown removes it too.
 func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")

@@ -41,13 +41,15 @@ import (
 // inside the sandbox (session.detach): its output goes to RunDir/<start>.log,
 // which latest.log links to, its runner's pid to latest.pid, its start (epoch
 // seconds) to latest.started and its exit status to latest.exit once it
-// ends. A stop through DefenseClaw writes "interrupted" there first (this
-// CLI before it asks for the stop, the daemon before it lets the harness
-// exit), and the runner keeps that mark rather than the status the stop's
-// SIGTERM gave the harness; a run the sandbox stopped under without one
-// never writes latest.exit, its process being gone. When DefenseClaw stops
-// a sandbox it keeps the run's log on this machine (cliStateDir), and
-// `sandbox logs` reads it there.
+// ends. Every stop through the daemon, whoever asks for it (this CLI, the
+// TUI, the macOS app, undo, a tamper stop), writes "interrupted" there
+// before it lets the harness exit, and the runner keeps that mark rather
+// than the status the stop's SIGTERM gave the harness; a run the sandbox
+// stopped under without one never writes latest.exit, its process being
+// gone. The daemon's stop also keeps the end of the run's log on this
+// machine, and `sandbox logs` of a stopped sandbox reads it from there
+// (sandboxapi.RunLog). The CLI only asks first on a terminal when `sandbox
+// stop` would end a run that is still going.
 
 // runState is the state of a sandbox's latest detached run.
 type runState string
@@ -123,18 +125,6 @@ wait "$t" 2>/dev/null
 exit 0
 `
 
-// runMarkScript records that the latest run is interrupted (the sandbox is
-// about to stop) unless it ended meanwhile, and prints the tail of its log
-// for the copy this machine keeps.
-const runMarkScript = `d=$1
-` + runAlive + `if alive && [ ! -s "$d/latest.exit" ]; then printf 'interrupted\n' > "$d/latest.exit"; fi
-tail -c 1048576 "$d/latest.log" 2>/dev/null
-exit 0
-`
-
-// maxSavedRunLog bounds the run log DefenseClaw keeps on this machine.
-const maxSavedRunLog = 1 << 20
-
 func parseDetachedRun(out string) detachedRun {
 	run := detachedRun{State: runNone}
 	for _, line := range strings.Split(out, "\n") {
@@ -174,12 +164,11 @@ func (a *App) detachedRun(ctx context.Context, cli openshell.CLI, sb *sandboxapi
 	return parseDetachedRun(out.String()), nil
 }
 
-// beforeStop runs before DefenseClaw stops a running sandbox (`sandbox
-// stop`, undo): a detached run still going is confirmed on a terminal
-// (unless yes) and said otherwise, marked interrupted, and its log kept on
-// this machine; a finished run's log is kept too. It returns false when the
-// user keeps the run going, and whether no detached run is known to be
-// going (idle).
+// beforeStop runs before `sandbox stop` asks the daemon to stop a running
+// sandbox: a detached run still going is confirmed on a terminal (unless
+// yes) and said otherwise. The daemon's stop marks it interrupted and keeps
+// its log. It returns false when the user keeps the run going, and whether
+// no detached run is known to be going (idle).
 func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, yes bool) (ok, idle bool, err error) {
 	if sb.Phase != "ready" {
 		return true, true, nil
@@ -204,31 +193,7 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 			a.warn(what)
 		}
 	}
-	a.keepRunLog(ctx, cli, sb, run)
 	return true, run.State != runRunning, nil
-}
-
-// keepRunLog marks a detached run the coming stop ends as interrupted and
-// keeps the run's log on this machine (best effort: the stop goes ahead).
-func (a *App) keepRunLog(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox, run detachedRun) {
-	if run.State == runNone {
-		return
-	}
-	inv, err := cli.Exec(sb.Name, []string{"sh", "-c", runMarkScript, "sh", RunDir}, openshell.CLIExecOptions{Timeout: time.Minute})
-	if err != nil {
-		return
-	}
-	var log limitedBuffer
-	log.max = maxSavedRunLog
-	if code, err := a.Streamer.Stream(ctx, inv, &log, io.Discard); err != nil || code != 0 {
-		return
-	}
-	if run.State == runRunning {
-		run = detachedRun{State: runInterrupted, Started: run.Started}
-	}
-	if err := a.saveRunLog(sb, run, log.Bytes()); err != nil {
-		a.warn("could not keep " + sb.Name + "'s run log on this machine: " + err.Error())
-	}
 }
 
 func (a *App) startedText(started int64) string {
@@ -238,9 +203,11 @@ func (a *App) startedText(started int64) string {
 	return " (started " + a.clock(time.Unix(started, 0)) + ")"
 }
 
-// savedRun is a detached run's log DefenseClaw kept on this machine when it
-// stopped the sandbox.
-type savedRun struct {
+// legacyRun is a detached run's log an earlier CLI kept on this machine as
+// it stopped the sandbox (cli/run.json and cli/run.log), before the daemon
+// kept them: `sandbox logs` of a stopped sandbox the daemon kept none for
+// still shows it.
+type legacyRun struct {
 	detachedRun
 	// SandboxID ties the log to the sandbox: a later sandbox of the same
 	// name does not show it.
@@ -250,9 +217,10 @@ type savedRun struct {
 }
 
 // cliStateDir is where the CLI keeps what it remembers of a sandbox: the
-// run log it kept at a stop, the undo point the user accepted (M2), the
-// run's options and where a copy's work went (runstate.go). The daemon
-// never reads it; `sandbox delete` removes it.
+// run's options and where a copy's work went (runstate.go), and what an
+// earlier CLI kept there before the daemon did (a run log, the undo point
+// the user accepted). The daemon never reads it; `sandbox delete` removes
+// it.
 func (a *App) cliStateDir(name string) (string, error) {
 	if !openshell.ValidSandboxName(name) {
 		return "", fmt.Errorf("%w: sandbox %q", openshell.ErrInvalidName, name)
@@ -260,23 +228,9 @@ func (a *App) cliStateDir(name string) (string, error) {
 	return filepath.Join(a.dataDir(), "sandboxes", name, "cli"), nil
 }
 
-func (a *App) saveRunLog(sb *sandboxapi.Sandbox, run detachedRun, log []byte) error {
-	dir, err := a.cliStateDir(sb.Name)
-	if err != nil {
-		return err
-	}
-	meta, err := json.Marshal(savedRun{detachedRun: run, SandboxID: sb.ID, Name: sb.Name, SavedAt: a.Now().UTC()})
-	if err != nil {
-		return err
-	}
-	if err := safefile.WritePrivate(filepath.Join(dir, "run.log"), log); err != nil {
-		return err
-	}
-	return safefile.WritePrivate(filepath.Join(dir, "run.json"), meta)
-}
-
-// savedRunLog returns the log kept for this sandbox, if any.
-func (a *App) savedRunLog(sb *sandboxapi.Sandbox) (*savedRun, []byte, error) {
+// legacyRunLog returns the log an earlier CLI kept for this sandbox, if
+// any.
+func (a *App) legacyRunLog(sb *sandboxapi.Sandbox) (*legacyRun, []byte, error) {
 	dir, err := a.cliStateDir(sb.Name)
 	if err != nil {
 		return nil, nil, err
@@ -288,14 +242,14 @@ func (a *App) savedRunLog(sb *sandboxapi.Sandbox) (*savedRun, []byte, error) {
 		}
 		return nil, nil, err
 	}
-	var meta savedRun
+	var meta legacyRun
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return nil, nil, fmt.Errorf("read the kept run log of %s: %w", sb.Name, err)
 	}
 	if meta.SandboxID != sb.ID {
 		return nil, nil, nil
 	}
-	log, err := safefile.ReadRegularFileBounded(filepath.Join(dir, "run.log"), maxSavedRunLog+1)
+	log, err := safefile.ReadRegularFileBounded(filepath.Join(dir, "run.log"), sandboxapi.MaxRunLogBytes+1)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -327,19 +281,6 @@ func lastLines(data []byte, n int) []byte {
 		}
 	}
 	return append(data[:len(data):len(data)], '\n')
-}
-
-// limitedBuffer keeps the first max bytes written to it.
-type limitedBuffer struct {
-	bytes.Buffer
-	max int
-}
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if room := b.max - b.Len(); room > 0 {
-		_, _ = b.Buffer.Write(p[:min(len(p), room)])
-	}
-	return len(p), nil
 }
 
 // Claude Code prints nothing in -p mode until it finishes, so a detached run

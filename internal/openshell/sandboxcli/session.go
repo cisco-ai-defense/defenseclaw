@@ -732,8 +732,9 @@ func (s *session) end(ctx context.Context) error {
 	case !changed:
 	case accepted && reviewed && stopped:
 		// The next session starts from here: its undo point replaces this
-		// one. Changes nobody could review never become the base.
-		a.acceptUndoPoint(after)
+		// one, whoever starts it. Changes nobody could review never become
+		// the base.
+		a.acceptChanges(ctx, s.api, after)
 		a.ok("kept: the changes stay in the folder, and the next session takes a new undo point")
 	case accepted && reviewed:
 		// The sandbox keeps running: what it changes after this review was
