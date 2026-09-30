@@ -241,6 +241,18 @@ const (
 	ActionInspectToolBlock            Action = "inspect-tool-block"
 	ActionInspectToolAlert            Action = "inspect-tool-alert"
 	ActionInspectToolAllow            Action = "inspect-tool-allow"
+	ActionInspectRequestConfirm       Action = "inspect-request-confirm"
+	ActionInspectRequestBlock         Action = "inspect-request-block"
+	ActionInspectRequestAlert         Action = "inspect-request-alert"
+	ActionInspectRequestAllow         Action = "inspect-request-allow"
+	ActionInspectResponseConfirm      Action = "inspect-response-confirm"
+	ActionInspectResponseBlock        Action = "inspect-response-block"
+	ActionInspectResponseAlert        Action = "inspect-response-alert"
+	ActionInspectResponseAllow        Action = "inspect-response-allow"
+	ActionInspectToolResponseConfirm  Action = "inspect-tool-response-confirm"
+	ActionInspectToolResponseBlock    Action = "inspect-tool-response-block"
+	ActionInspectToolResponseAlert    Action = "inspect-tool-response-alert"
+	ActionInspectToolResponseAllow    Action = "inspect-tool-response-allow"
 	ActionInspectReveal               Action = "inspect-reveal"
 
 	// Setup, operator, API, and sink instrumentation. These actions
@@ -449,6 +461,18 @@ func AllActions() []Action {
 		ActionInspectToolBlock,
 		ActionInspectToolAlert,
 		ActionInspectToolAllow,
+		ActionInspectRequestConfirm,
+		ActionInspectRequestBlock,
+		ActionInspectRequestAlert,
+		ActionInspectRequestAllow,
+		ActionInspectResponseConfirm,
+		ActionInspectResponseBlock,
+		ActionInspectResponseAlert,
+		ActionInspectResponseAllow,
+		ActionInspectToolResponseConfirm,
+		ActionInspectToolResponseBlock,
+		ActionInspectToolResponseAlert,
+		ActionInspectToolResponseAllow,
 		ActionInspectReveal,
 		ActionAPIAuthFailure,
 		ActionAPIConfigPatch,

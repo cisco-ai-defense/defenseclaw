@@ -1549,24 +1549,30 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
 
-// inspectToolAuditEvent is the inspect-tool-* audit row. It names the
-// connector the request was authenticated for (the configured connector when
-// the request carries none), the route, and the caller, so an administrator
-// can attribute direct inspect calls to the account that made them.
+// inspectToolAuditEvent is the inspect-tool-* audit row.
 func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
+	return a.inspectAuditEvent(r, "/api/v1/inspect/tool", action, tool, details)
+}
+
+// inspectAuditEvent is the audit row of a direct /api/v1/inspect/* call. It
+// names the connector the request was authenticated for (the configured
+// connector when the request carries none), the route, and the verified
+// caller, so an administrator can attribute direct inspect calls to the
+// account that made them.
+func (a *APIServer) inspectAuditEvent(r *http.Request, route, action, target, details string) audit.Event {
 	ctx := r.Context()
 	connectorName := authenticatedInspectConnector(ctx)
 	if connectorName == "" {
 		connectorName = a.connectorName()
 	}
-	structured := map[string]any{"route": "/api/v1/inspect/tool"}
+	structured := map[string]any{"route": route}
 	if connectorName != "" {
 		structured["connector"] = connectorName
 	}
 	auditCallerIdentity(ctx).addTo(structured)
 	return audit.Event{
 		Action:     action,
-		Target:     tool,
+		Target:     target,
 		Details:    details,
 		Severity:   "INFO",
 		Connector:  connectorName,

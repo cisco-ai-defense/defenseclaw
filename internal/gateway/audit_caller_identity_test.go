@@ -34,13 +34,14 @@ func TestAuditCallerIdentityTrustsOnlyVerifiedCallersOnAStandaloneGateway(t *tes
 
 func TestAuthenticationFailureFactsNameOnlyAVerifiedCaller(t *testing.T) {
 	claimed := ContextWithAgentIdentity(context.Background(), AgentIdentity{UserID: "1001", UserName: "claimed"})
-	if facts := apiAuthenticationFailureFactsFor(claimed, "/api/v1/inspect/tool", ""); facts.Principal != "" || facts.AuthnMethod != "" {
+	if facts := apiAuthenticationFailureFactsFor(claimed, "/api/v1/inspect/tool", ""); facts.Principal != "" || facts.AuthnMethod != "" || facts.Caller.ID != "" {
 		t.Fatalf("an unauthenticated request's claimed identity was recorded: %+v", facts)
 	}
 	bound := context.WithValue(context.Background(), verifiedUserScopedIdentityContextKey{}, "1001")
 	bound = withAuthenticatedInspectConnector(bound, "amp")
 	facts := apiAuthenticationFailureFactsFor(bound, "/api/v1/inspect/tool", "")
-	if facts.Principal != "uid:1001" || facts.AuthnMethod != "user_scoped_credential" || facts.connector() != "amp" {
+	if facts.Principal != "uid:1001" || facts.AuthnMethod != "user_scoped_credential" || facts.connector() != "amp" ||
+		facts.Caller.ID != "1001" {
 		t.Fatalf("per-user credential refusal facts = %+v", facts)
 	}
 	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002})
