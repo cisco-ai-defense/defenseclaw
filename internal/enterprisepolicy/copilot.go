@@ -237,6 +237,9 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		}
 		state.Changed = changed
 	}
+	if err := vscodeDevicePolicy(opts, &state, policy.Ownership == config.MachinePolicyOwnershipMerge); err != nil {
+		return state, err
+	}
 	if err := inspectCopilot(opts, &state); err != nil {
 		return state, err
 	}
@@ -261,6 +264,9 @@ func (t copilotTarget) Verify(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
+	if err := vscodeDevicePolicy(opts, &state, false); err != nil {
+		return state, err
+	}
 	if err := inspectCopilot(opts, &state); err != nil {
 		return state, err
 	}
@@ -275,7 +281,7 @@ func (t copilotTarget) RemoveOwned(opts Options) (State, error) {
 	}
 	state := State{Connector: copilotConnector, Route: RouteMachinePolicy, Paths: paths}
 	err = restoreOrStrip(opts, copilotConnector, paths[0], copilotStrip(opts), true, &state)
-	return state, err
+	return state, errors.Join(err, removeVSCodeDevicePolicy(opts, &state))
 }
 
 // copilotStrip treats a drop-in carrying a DefenseClaw policy hook as

@@ -245,6 +245,65 @@ audit, alert, webhook, and configured export destinations.
 GitHub's Copilot CLI 1.0.76 release notes state that per-path sandbox denials cannot be enforced on Windows. Hook enforcement remains event-specific; do not treat Copilot's Windows sandbox as per-path filesystem containment.
 </Callout>
 
+## GitHub Copilot in VS Code
+
+VS Code runs Copilot agent sessions on one of two harnesses. The Copilot SDK
+harness reads the same `policy.d` hooks as Copilot CLI, so the enterprise
+drop-in covers it. The default Local harness does not read `policy.d`. It
+reads hook files from `.github/hooks/*.json` and `~/.copilot/hooks/*.json` in
+its own format: PascalCase event names (`PreToolUse`, `UserPromptSubmit`,
+`Stop`, and others), snake_case stdin fields (`tool_name`, `tool_input`,
+`tool_use_id`), and a `hookSpecificOutput.permissionDecision` of `allow`,
+`deny` or `ask`. Sources:
+[Agent hooks](https://code.visualstudio.com/docs/copilot/customization/hooks),
+[Hooks reference](https://code.visualstudio.com/docs/agents/reference/hooks-reference),
+[Enterprise policies](https://code.visualstudio.com/docs/enterprise/policies).
+
+**Local harness dialect.** A hook command bound with
+`defenseclaw hook --connector copilot --event PreToolUse --hook-surface vscode-local`
+speaks the Local format. The gateway rejects a body whose `hook_event_name`
+differs from the bound event. It maps the Local tool names DefenseClaw has
+reviewed (`run_in_terminal`, `read_file`, `list_dir`, `create_file`,
+`replace_string_in_file`, `insert_edit_into_file`, `fetch_webpage`) to
+canonical actions, and passes any other tool or argument through in its
+native form. A block on `PreToolUse` is a structured `deny`, a confirm is a
+native `ask`, and an allow prints nothing, because a Local `allow`
+auto-approves the call. A fail-closed `PreToolUse` or `UserPromptSubmit`
+denies with exit code 0; `Stop` never fails closed. Without the flag, a
+Copilot hook keeps the Copilot CLI contract.
+
+**Device policies (enterprise, standalone profile).** With
+`ownership: merge`, the Copilot machine policy also enables the VS Code
+policies `ChatHooks` (a user cannot turn hooks off with `chat.useHooks`) and
+`ChatEditorPreferCopilotHarness` (VS Code 1.134 and later open new editor
+chats on the SDK harness):
+
+| Platform | Where | How |
+| --- | --- | --- |
+| Windows | `HKLM\Software\Policies\Microsoft\VSCode` | `REG_DWORD` value `1` |
+| Linux | `/etc/vscode/policy.json` | JSON `true` (Devin Desktop reads the same file) |
+| macOS | Configuration profile | Not written; deploy both values through MDM |
+
+DefenseClaw adds a value only when it is absent, keeps any value the
+administrator set (and reports one that is not enabled), and records the
+values it added. Uninstall removes only those, and only while they still
+hold DefenseClaw's value. `ownership: verify_only` reports missing values
+without writing them.
+
+**Not covered yet.**
+
+- DefenseClaw does not yet place a Local hook file (`~/.copilot/hooks/defenseclaw-vscode.json`)
+  per user, so a chat moved back to the Local harness is ungoverned unless
+  you bind the hook yourself. Copilot CLI also reads `~/.copilot/hooks`, so
+  such a file is evaluated by both clients.
+- Per-user Copilot hook files written in the Copilot CLI format are not
+  decoded correctly when the Local harness runs them.
+- The managed plugin route, the Local harness lock with version gating, a
+  retire mode, macOS profile export, foreign-hook guard sources for Local
+  hook files, and VS Code version discovery in status.
+- VS Code publishes no list of built-in tool names. The mapped names above
+  follow the current tool set and are confirmed live with an audit-only hook.
+
 ## In an OpenShell sandbox
 
 `defenseclaw sandbox run copilot` runs GitHub Copilot CLI in an NVIDIA

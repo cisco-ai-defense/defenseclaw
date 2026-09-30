@@ -87,6 +87,19 @@ const HookDialectHeader = "X-DefenseClaw-Hook-Dialect"
 // left unmarked, so v2 is never rendered.
 var hookDialects = map[string][]string{
 	"kiro": {"v3"},
+	// The VS Code Local harness reads the Copilot hook directories but
+	// speaks its own PascalCase, snake_case dialect
+	// (connector.CopilotHookSurfaceVSCodeLocal).
+	"copilot": {copilotVSCodeLocalSurface},
+}
+
+// copilotVSCodeLocalSurface is connector.CopilotHookSurfaceVSCodeLocal.
+const copilotVSCodeLocalSurface = "vscode-local"
+
+// copilotVSCodeLocal reports a hook command registered for the VS Code Local
+// harness rather than the Copilot CLI.
+func copilotVSCodeLocal(opts Options) bool {
+	return opts.Connector == "copilot" && hookDialect(opts) == copilotVSCodeLocalSurface
 }
 
 // HookSurfaceAllowed reports whether connector lists surface as a
@@ -231,6 +244,9 @@ func Run(ctx context.Context, opts Options) int {
 	opts = withDefaults(opts)
 
 	sp, ok := specFor(opts.Connector)
+	if ok && copilotVSCodeLocal(opts) {
+		sp = copilotVSCodeLocalSpec
+	}
 	if !ok {
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
@@ -317,7 +333,7 @@ func Run(ctx context.Context, opts Options) int {
 	} else {
 		opts.Event = resolveHookEvent(opts.Event, payload)
 	}
-	if opts.Connector == "copilot" && !validCopilotEvent(opts.Event) {
+	if opts.Connector == "copilot" && !validCopilotEventForOptions(opts) {
 		// Copilot's official camelCase stdin bodies do not identify the
 		// event. Setup supplies the reviewed event through an exact --event
 		// binding; never infer it from a body field or forward an untrusted
@@ -589,7 +605,7 @@ func sendHookRequest(
 		// gateway can decode the body without rewriting it here.
 		req.Header.Set("X-DefenseClaw-Antigravity-Event", opts.Event)
 	}
-	if opts.Connector == "copilot" && validCopilotEvent(opts.Event) {
+	if opts.Connector == "copilot" && validCopilotEventForOptions(opts) {
 		// Native camelCase Copilot bodies likewise omit event identity. Keep
 		// the official stdin bytes intact and forward only the reviewed
 		// event-specific registration argument through an authenticated
@@ -677,6 +693,21 @@ func validAntigravityEvent(event string) bool {
 	}
 }
 
+// validCopilotEventForOptions checks the bound event against the dialect of
+// the invoking hook command: the VS Code Local harness names its events in
+// PascalCase, the Copilot CLI in lowerCamel.
+func validCopilotEventForOptions(opts Options) bool {
+	if copilotVSCodeLocal(opts) {
+		switch strings.TrimSpace(opts.Event) {
+		case "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+			"PreCompact", "SubagentStart", "SubagentStop", "Stop":
+			return true
+		}
+		return false
+	}
+	return validCopilotEvent(opts.Event)
+}
+
 func validCopilotEvent(event string) bool {
 	switch strings.TrimSpace(event) {
 	case "sessionStart", "sessionEnd", "userPromptSubmitted", "userPromptTransformed",
@@ -757,6 +788,13 @@ func (sp spec) decide(opts Options, body []byte) int {
 	case styleHookEcho:
 		if output != "" {
 			fmt.Fprintln(opts.Stdout, output)
+		} else if sp.dialect == copilotVSCodeLocalSurface && (action == "block" || action == "confirm") {
+			if reason == "" {
+				reason = sp.defaultBlockReason
+			}
+			if body := copilotVSCodeLocalOutput(opts.Event, action, reason); body != "" {
+				fmt.Fprintln(opts.Stdout, body)
+			}
 		} else if sp.connector == "cursor" && (action == "block" || action == "confirm") {
 			if reason == "" {
 				reason = sp.defaultBlockReason
@@ -1065,7 +1103,12 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	case "permissionRequest":
 		body = `{"behavior":"deny","message":` + message + `}`
 	default:
-		return 0, false
+		if sp.dialect != copilotVSCodeLocalSurface {
+			return 0, false
+		}
+		if body = copilotVSCodeLocalOutput(opts.Event, "block", managedCopilotDenyMessage(reason)); body == "" {
+			return 0, false
+		}
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, body)
@@ -1175,7 +1218,9 @@ func foreignHookStopEvent(connector, event string) bool {
 		}
 	case "copilot":
 		switch event {
-		case "agentStop", "subagentStop", "sessionEnd":
+		case "agentStop", "subagentStop", "sessionEnd",
+			// VS Code Local harness (--hook-surface vscode-local).
+			"Stop", "SubagentStop":
 			return true
 		}
 	}
@@ -1349,6 +1394,9 @@ func emitHookResult(opts Options, sp spec, result failResult) int {
 			result.body,
 		))
 		return result.exit
+	}
+	if sp.dialect == copilotVSCodeLocalSurface {
+		return emitCopilotVSCodeLocalResult(opts, sp, result)
 	}
 	if sp.connector != "antigravity" {
 		return emit(opts.Stdout, result)
@@ -1836,4 +1884,45 @@ func mustJSONString(s string) string {
 		return `""`
 	}
 	return string(b)
+}
+
+// copilotVSCodeLocalOutput is the VS Code Local harness body for a block or
+// confirm on an event that has one (connector.CopilotVSCodeLocalHookOutput),
+// or "". The harness reads stdout only on exit 0.
+func copilotVSCodeLocalOutput(event, action, reason string) string {
+	message := mustJSONString(reason)
+	switch strings.TrimSpace(event) {
+	case "PreToolUse":
+		decision := "deny"
+		if action == "confirm" {
+			decision = "ask"
+		}
+		return `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"` + decision +
+			`","permissionDecisionReason":` + message + `}}`
+	case "UserPromptSubmit":
+		if action == "block" {
+			return `{"continue":false,"stopReason":` + message + `}`
+		}
+	}
+	return ""
+}
+
+// emitCopilotVSCodeLocalResult delivers a local failure result to the VS
+// Code Local harness. A closed result denies the tool call or stops the
+// prompt with the structured body and exit 0, which does not depend on the
+// Windows PowerShell wrapper preserving exit 2. Every other event cannot be
+// denied, and a non-zero exit there only surfaces a warning, so it gets no
+// output and exit 0.
+func emitCopilotVSCodeLocalResult(opts Options, sp spec, result failResult) int {
+	if !(result.closed || result.exit != 0) {
+		return emit(opts.Stdout, result)
+	}
+	reason := strings.TrimSpace(result.body)
+	if reason == "" {
+		reason = failedClosed
+	}
+	if body := copilotVSCodeLocalOutput(opts.Event, "block", reason); body != "" {
+		fmt.Fprintln(opts.Stdout, body)
+	}
+	return 0
 }
