@@ -374,8 +374,8 @@ For the standalone profile, see [Machine policy](/docs/enterprise/machine-policy
 ## macOS LaunchDaemon layout
 
 On macOS the Secure Client module runs as root LaunchDaemons, because the
-machine-identity provider needs root to read its credential store. There is no
-service account. The standalone macOS package is different (it runs the
+machine-identity provider needs root to read its credential store.
+There is no dedicated `defenseclaw` service user on macOS. The standalone macOS package is different (it runs the
 gateway as `_defenseclaw` under `/opt/cisco/defenseclaw`); see
 [macOS standalone deployment](/docs/enterprise/macos).
 
@@ -387,11 +387,14 @@ gateway as `_defenseclaw` under `/opt/cisco/defenseclaw`); see
 
 | Path | Owner | Mode |
 | --- | --- | --- |
+| `/opt/cisco/secureclient/defenseclaw` | `root:wheel` | `0755` |
 | `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway` | `root:wheel` | `0755` |
+| `/opt/cisco/secureclient/defenseclaw/etc` | `root:wheel` | `0755` |
 | `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` | `root:wheel` | `0640` |
-| `/opt/cisco/secureclient/defenseclaw/runtime` (`data_dir`) | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/runtime` | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian` | `root:wheel` | `0750` |
 | `/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml` | `root:wheel` | `0640` |
-| `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` (authorization ledger) | `root:wheel` | `0750` |
+| `/opt/cisco/secureclient/defenseclaw/hook-guardian-state` | `root:wheel` | `0750` |
 | `/Library/Logs/Cisco/SecureClient/DefenseClaw` | `root:wheel` | `0750` |
 | `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist` | `root:wheel` | `0644` |
 
@@ -409,9 +412,13 @@ sudo ./packaging/launchd/install-enterprise.sh \
 ```
 
 It is idempotent, refuses symlinked sources and destinations, checks the
-root-owned path chain, keeps runtime state across reinstalls, and restores the
-previous files and jobs if a step fails. `--no-start` installs without loading
-the jobs.
+root-owned path chain, keeps runtime state across reinstalls, and verifies
+the owners and modes above before launchd starts a job. The runtime directory is
+the config's `data_dir`, and `hook-guardian-state` holds the authorization
+ledger. Before replacing files it snapshots the deployment and records which
+jobs are loaded. A failure after jobs are stopped restores the previous binary, config, manifest, and plists,
+then re-bootstraps only the jobs that were loaded before. `--no-start` installs
+without loading the jobs.
 
 launchd has no equivalent of the Linux systemd sandbox. Protect the module with
 code-signing and notarization policy, MDM file ownership, Endpoint Security or
