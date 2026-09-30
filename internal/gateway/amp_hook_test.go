@@ -256,8 +256,13 @@ func TestAMPFiveEventCanonicalObservability(t *testing.T) {
 			for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
 				eventCounts[logStringAttribute(record.Attributes, "defenseclaw.event.name")]++
 			}
+			// Wait for every span the assertions below count: the second
+			// agent-invoke span could still be in flight once the tool and
+			// model spans were in (seen on the Windows CI runner).
 			if familyCounts[observability.TelemetryFamilyToolExecute] == 1 &&
 				familyCounts[observability.TelemetryFamilyModelChat] == 1 &&
+				familyCounts[observability.TelemetryFamilyAgentInvoke] == 2 &&
+				familyCounts[observability.TelemetryFamilyAgentTransition] == 3 &&
 				eventCounts[observability.TelemetryEventModelResponse] == 1 {
 				break
 			}
