@@ -2010,6 +2010,13 @@ class PerConnectorGuardrailConfig:
     # are retained so re-enable restores it with no re-prompt. Resolved via
     # :meth:`GuardrailConfig.effective_enabled`; never read directly.
     enabled: bool | None = None
+    # Tool-call block and alert levels for this connector (``CRITICAL`` |
+    # ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty inherits the global
+    # ``guardrail.block_at`` / ``alert_at``, then the rule pack's profile.
+    # Resolved via :meth:`GuardrailConfig.effective_block_at` /
+    # :meth:`GuardrailConfig.effective_alert_at`.
+    block_at: str = ""
+    alert_at: str = ""
 
 
 @dataclass
@@ -2052,6 +2059,14 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
+    # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
+    # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
+    # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
+    # otherwise CRITICAL / MEDIUM). A connector's own value in
+    # ``connectors`` wins over these. Mirrors ``GuardrailConfig.BlockAt`` /
+    # ``AlertAt`` in internal/config/config.go.
+    block_at: str = ""
+    alert_at: str = ""
     connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``hook_fail_mode`` is the operator-chosen failure behavior for every
@@ -2193,20 +2208,49 @@ class GuardrailConfig:
             return pc.rule_pack_dir
         return self.rule_pack_dir
 
+    def effective_block_at(self, connector: str = "") -> str:
+        """Tool-call block level: connector value > global value > "".
+
+        Returns the canonical uppercase level, or "" when neither is set
+        (the gateway then uses the rule pack's profile level). Mirrors
+        ``GuardrailConfig.EffectiveBlockAt`` in Go.
+        """
+        return self._effective_level("block_at", connector)
+
+    def effective_alert_at(self, connector: str = "") -> str:
+        """Tool-call alert level, resolved like :meth:`effective_block_at`.
+
+        The gateway never alerts above the block level (anything that blocks
+        also alerts); that clamp is applied where the levels are combined
+        (``policy_catalog.resolve_levels``), not here.
+        """
+        return self._effective_level("alert_at", connector)
+
+    def _effective_level(self, field_name: str, connector: str) -> str:
+        pc = self._connector_override(connector)
+        if pc is not None:
+            own = normalize_guardrail_level(getattr(pc, field_name, ""))
+            if own in GUARDRAIL_LEVELS:
+                return own
+        value = normalize_guardrail_level(getattr(self, field_name, ""))
+        return value if value in GUARDRAIL_LEVELS else ""
+
     def validate(self) -> None:
-        """Validate per-connector guardrail VALUE invariants only.
+        """Validate guardrail VALUE invariants (connectors map + the level fields).
 
         Leaf check mirroring ``GuardrailConfig.Validate`` in Go over the
         NEW ``guardrail.connectors`` map: inspects each override's enum
-        values (mode, hook_fail_mode, hilt.min_severity) and rejects empty
-        connector names. It deliberately does NOT re-validate the global
-        guardrail fields — those predate multi-connector support and were
-        never gated by ``load()``, so checking them here could reject
-        configs that load fine today. Never touches the connector
-        registry; the hook-membership guard lives in the gateway boot
-        loop. Raises :class:`ValueError` with a named message on the
-        first violation.
+        values (mode, hook_fail_mode, hilt.min_severity, block_at,
+        alert_at) and rejects empty connector names. Of the global fields it
+        checks only ``block_at`` / ``alert_at``, which are new; the rest
+        predate multi-connector support and were never gated by ``load()``,
+        so checking them here could reject configs that load fine today.
+        Never touches the connector registry; the hook-membership guard
+        lives in the gateway boot loop. Raises :class:`ValueError` with a
+        named message on the first violation.
         """
+        _validate_guardrail_level("guardrail.block_at", self.block_at)
+        _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
@@ -2230,8 +2274,33 @@ class GuardrailConfig:
                 _validate_guardrail_hook_fail_mode(pc.hook_fail_mode)
                 if pc.hilt is not None:
                     _validate_guardrail_min_severity(pc.hilt.min_severity)
+                _validate_guardrail_level("block_at", pc.block_at)
+                _validate_guardrail_level("alert_at", pc.alert_at)
             except ValueError as exc:
                 raise ValueError(f"guardrail.connectors[{name!r}]: {exc}") from exc
+
+
+#: Values of ``guardrail.block_at`` / ``alert_at`` (global or per connector),
+#: strongest first. Empty (or absent) inherits.
+GUARDRAIL_LEVELS = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+
+
+def normalize_guardrail_level(value: Any) -> str:
+    """A ``block_at`` / ``alert_at`` value as stored: uppercase, "" = inherit.
+
+    Any case is accepted on read. Unknown text is kept (stripped, as
+    written) so :meth:`GuardrailConfig.validate` can name it.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text.upper() if text.upper() in GUARDRAIL_LEVELS else text
+
+
+def _validate_guardrail_level(name: str, value: Any) -> None:
+    level = normalize_guardrail_level(value)
+    if level and level not in GUARDRAIL_LEVELS:
+        raise ValueError(f"{name}: must be one of {', '.join(GUARDRAIL_LEVELS)} (got {level!r})")
 
 
 def _validate_guardrail_mode(mode: str) -> None:
@@ -2586,6 +2655,7 @@ class ApplicationProtectionConfig:
             _validate_asset_policy_mode(self.asset_policy.mode)
         except ValueError as exc:
             raise ValueError(f"application_protection: {exc}") from exc
+        _reject_guardrail_level_overlay("application_protection.guardrail", self.guardrail)
         seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
@@ -2611,6 +2681,23 @@ class ApplicationProtectionConfig:
                 _validate_asset_policy_mode(pc.asset_policy.mode)
             except ValueError as exc:
                 raise ValueError(f"application_protection.connectors[{name!r}]: {exc}") from exc
+            _reject_guardrail_level_overlay(f"application_protection.connectors[{name!r}].guardrail", pc.guardrail)
+
+
+def _reject_guardrail_level_overlay(path: str, overlay: PerConnectorGuardrailConfig) -> None:
+    """Refuse ``block_at`` / ``alert_at`` in an application_protection overlay.
+
+    The overlay shares :class:`PerConnectorGuardrailConfig` with
+    ``guardrail.connectors``, but the gateway reads tool-call levels only
+    from ``guardrail`` and ``guardrail.connectors``, so accepting them here
+    would silently do nothing. Mirrors Go ``rejectGuardrailLevelOverlay``.
+    """
+    for key in ("block_at", "alert_at"):
+        if str(getattr(overlay, key, "") or "").strip():
+            raise ValueError(
+                f"{path}: {key} is not supported in application_protection; the gateway reads it only "
+                f"from guardrail.{key} and guardrail.connectors.<name>.{key}"
+            )
 
 
 def _validate_confidence(path: str, value: float) -> None:
@@ -3353,6 +3440,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     guardrail = d.get("guardrail") or {}
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
+    _strip_unset_levels(guardrail)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
@@ -3396,6 +3484,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                     entry.pop("enabled", None)
                 if entry.get("hilt") is None:
                     entry.pop("hilt", None)
+                _strip_unset_levels(entry)
     # The compatibility dataclass can preview a retired ``splunk:`` source for
     # upgrade/credential recovery, but exact-v8 serialization must never write
     # it. Splunk forwarding is a canonical observability destination.
@@ -3443,6 +3532,20 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _serialize_openshell(d)
     _serialize_routing(d)
     return d
+
+
+def _strip_unset_levels(block: Any) -> None:
+    """Drop an unset ``block_at`` / ``alert_at`` (Go ``yaml:",omitempty"``).
+
+    Inheriting is spelled by leaving the key out, so configs that never set
+    a level stay byte-identical after a load/save round-trip and clearing
+    one removes it from disk through the v8 structural delta.
+    """
+    if not isinstance(block, dict):
+        return
+    for key in ("block_at", "alert_at"):
+        if not block.get(key):
+            block.pop(key, None)
 
 
 def _serialize_routing(d: dict[str, Any]) -> None:
@@ -3943,6 +4046,7 @@ def _serialize_application_protection(cfg: Config, block: Any) -> None:
             guard.pop("enabled", None)
         if guard.get("hilt") is None:
             guard.pop("hilt", None)
+        _strip_unset_levels(guard)
         if guard == {"mode": "observe"}:
             block.pop("guardrail", None)
         elif not any(guard.values()):
@@ -3977,6 +4081,7 @@ def _serialize_application_protection(cfg: Config, block: Any) -> None:
                     guard.pop("enabled", None)
                 if guard.get("hilt") is None:
                     guard.pop("hilt", None)
+                _strip_unset_levels(guard)
                 if not any(guard.values()):
                     entry.pop("guardrail", None)
             asset = entry.get("asset_policy")
@@ -4538,6 +4643,8 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
+        block_at=normalize_guardrail_level(raw.get("block_at")),
+        alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
         hilt=_merge_hilt(hilt_raw),
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
@@ -4578,6 +4685,8 @@ def _merge_guardrail_connectors(
             block_message=entry.get("block_message", ""),
             rule_pack_dir=entry.get("rule_pack_dir", ""),
             enabled=enabled,
+            block_at=normalize_guardrail_level(entry.get("block_at")),
+            alert_at=normalize_guardrail_level(entry.get("alert_at")),
         )
     return out
 
@@ -5590,6 +5699,8 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
         block_message=str(raw.get("block_message", "") or ""),
         rule_pack_dir=str(raw.get("rule_pack_dir", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
+        block_at=normalize_guardrail_level(raw.get("block_at")),
+        alert_at=normalize_guardrail_level(raw.get("alert_at")),
     )
 
 

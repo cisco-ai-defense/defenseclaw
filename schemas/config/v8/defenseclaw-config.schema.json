@@ -1125,6 +1125,11 @@
         "action"
       ]
     },
+    "guardrailLevelOrInherit": {
+      "type": "string",
+      "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+      "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
+    },
     "detectionStrategy": {
       "type": "string",
       "enum": [
@@ -1259,6 +1264,12 @@
         "rule_pack_dir": {
           "$ref": "#/$defs/boundedString"
         },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
         "enabled": {
           "type": "boolean"
         }
@@ -1343,6 +1354,12 @@
         },
         "hilt": {
           "$ref": "#/$defs/hilt"
+        },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
         },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"

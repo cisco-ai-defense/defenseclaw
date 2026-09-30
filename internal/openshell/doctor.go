@@ -65,12 +65,17 @@ const (
 	CheckIDUser              = "user"
 	CheckIDLandlock          = "landlock"
 	CheckIDDocker            = "docker"
+	CheckIDDockerBuildKit    = "docker-buildkit"
 	CheckIDDockerHostNetwork = "docker-host-network"
 	CheckIDDockerFileSharing = "docker-file-sharing"
+	CheckIDVMDriver          = "vm-driver"
+	CheckIDVMIdentity        = "vm-identity"
+	CheckIDVMResources       = "vm-resources"
 	CheckIDDisk              = "disk"
 	CheckIDLinger            = "linger"
 	CheckIDGatewayService    = "gateway-service"
 	CheckIDCLI               = "openshell-cli"
+	CheckIDSSHSharing        = "ssh-connection-sharing"
 	CheckIDRegistration      = "gateway-registration"
 	CheckIDMTLS              = "mtls-permissions"
 	CheckIDGatewayVersion    = "gateway-version"
@@ -105,6 +110,10 @@ type Fix struct {
 	Sudo bool `json:"sudo,omitempty"`
 	// Automatic reports whether Apply is available.
 	Automatic bool `json:"automatic"`
+	// RestartsGateway marks an Apply that restarts the OpenShell gateway,
+	// which stops every sandbox running on it (their disks flushed first
+	// where the driver's stop would not keep what they wrote).
+	RestartsGateway bool `json:"restarts_gateway,omitempty"`
 	// Apply performs the fix as the current user; nil when the operator
 	// must act. Callers ask for consent first (ApplyFixes does).
 	Apply func(ctx context.Context) error `json:"-"`
@@ -130,6 +139,16 @@ type DoctorReport struct {
 	DockerRootDir  string        `json:"docker_root_dir,omitempty"`
 	// Service is the gateway service as its manager reports it.
 	Service *ServiceState `json:"service,omitempty"`
+	// Driver is the compute driver sandboxes run on: the one the gateway
+	// reports when it answers, else ConfiguredDriver. ConfiguredDriver is
+	// the one the gateway's configuration selects (docker when it names
+	// none); when the two differ, the gateway has not been restarted on
+	// its configuration.
+	Driver           ComputeDriver `json:"driver,omitempty"`
+	ConfiguredDriver ComputeDriver `json:"configured_driver,omitempty"`
+	// MicroVM is what OpenShell's MicroVM driver needs on this Mac (nil
+	// off macOS).
+	MicroVM *MicroVMHost `json:"microvm,omitempty"`
 }
 
 // OK reports whether no check failed.
@@ -141,6 +160,20 @@ func (r *DoctorReport) OK() bool {
 	}
 	return true
 }
+
+// OpenShellOutsideFormula reports a Mac whose OpenShell CLI was installed
+// another way than the Homebrew formula DefenseClaw runs the gateway
+// through: setup refuses it (the installer would find the CLI and install
+// nothing), and OpenShellOutsideFormulaFix is the way on.
+func (r *DoctorReport) OpenShellOutsideFormula() bool {
+	cli := r.Get(CheckIDCLI)
+	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "brew" && !r.Service.Installed
+}
+
+// OpenShellOutsideFormulaFix is what to do about OpenShellOutsideFormula,
+// before installOpenShellCommand.
+const OpenShellOutsideFormulaFix = "on macOS DefenseClaw starts and restarts the gateway through the " + GatewayFormula +
+	" Homebrew formula's service: stop that gateway and remove the OpenShell installed another way, then install the formula"
 
 // Get returns the check with id, or nil.
 func (r *DoctorReport) Get(id string) *Check {
@@ -254,24 +287,48 @@ type Doctor struct {
 	// BindMountsOptional downgrades disabled bind mounts to a warning
 	// (copy-only workdir mode).
 	BindMountsOptional bool
+	// MaxCPUMillis and MaxMemoryBytes are openshell.admin.max_resources (0:
+	// no maximum). The MicroVM driver gives every sandbox the gateway-wide
+	// vcpus and mem_mib, which must not exceed them.
+	MaxCPUMillis, MaxMemoryBytes int64
 
 	LandlockABI func() (int, error)
-	// VMLandlockABI asks, off Linux, the kernel of the VM Docker runs
+	// DockerVMLandlockABI asks, off Linux, the kernel of the VM Docker runs
 	// containers in for its Landlock ABI and release (dockerVMLandlock by
 	// default); ErrNoProbeImage when no image to ask in is local.
-	VMLandlockABI func(ctx context.Context) (abi int, kernel string, err error)
-	// ProbeImages are local images VMLandlockABI may run in after
-	// DefaultBaseImage (the overlay images DefenseClaw built on it).
-	ProbeImages   []string
-	DiskFree      func(path string) (uint64, error)
-	Listen        func(network, address string) (net.Listener, error)
-	Geteuid       func() int
+	DockerVMLandlockABI func(ctx context.Context) (abi int, kernel string, err error)
+	// ProbeImages are local images DockerVMLandlockABI may run in after
+	// DefaultBaseImage (the overlay images DefenseClaw built on it). On
+	// the MicroVM driver their architecture is checked too.
+	ProbeImages []string
+	// E2fsprogsDirs are where the MicroVM driver looks for e2fsprogs'
+	// mke2fs and debugfs, which Homebrew installs keg-only, off PATH
+	// (default the kegs the driver knows).
+	E2fsprogsDirs []string
+	// HostMemory is this machine's memory in bytes (0: unknown), which
+	// the recommended MicroVM memory is sized from.
+	HostMemory func() uint64
+	DiskFree   func(path string) (uint64, error)
+	Listen     func(network, address string) (net.Listener, error)
+	Geteuid    func() int
+	// Getegid is the user's group, which with Geteuid the MicroVM driver
+	// must run sandboxes as (DefenseClaw's images are built for them).
+	Getegid       func() int
 	Username      func() (string, error)
 	HomeDir       func() (string, error)
 	DockerDesktop func() (*DockerDesktop, error)
+	// TempDir is the system temp directory (default os.TempDir), where
+	// the hook-fire probe of an image build writes what it mounts into its
+	// containers (image.Builder.TempDir).
+	TempDir func() string
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
 	DockerGroup func() (member, inSession bool, err error)
+	// SSHShim makes the ssh the OpenShell CLI runs with (NewSSHShim over
+	// PATH by default); the check removes it afterwards.
+	SSHShim func() (*SSHShim, error)
+	// Getenv reads the environment docker runs in (DOCKER_BUILDKIT).
+	Getenv func(string) string
 }
 
 func (d *Doctor) defaults() {
@@ -299,10 +356,16 @@ func (d *Doctor) defaults() {
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI
 	}
-	if d.VMLandlockABI == nil {
-		d.VMLandlockABI = func(ctx context.Context) (int, string, error) {
+	if d.DockerVMLandlockABI == nil {
+		d.DockerVMLandlockABI = func(ctx context.Context) (int, string, error) {
 			return dockerVMLandlock(ctx, d.Runner, append([]string{DefaultBaseImage}, d.ProbeImages...))
 		}
+	}
+	if d.E2fsprogsDirs == nil {
+		d.E2fsprogsDirs = e2fsprogsDirs
+	}
+	if d.HostMemory == nil {
+		d.HostMemory = hostMemory
 	}
 	if d.DiskFree == nil {
 		d.DiskFree = diskFree
@@ -312,6 +375,9 @@ func (d *Doctor) defaults() {
 	}
 	if d.Geteuid == nil {
 		d.Geteuid = os.Geteuid
+	}
+	if d.Getegid == nil {
+		d.Getegid = os.Getegid
 	}
 	if d.Username == nil {
 		d.Username = func() (string, error) {
@@ -328,8 +394,17 @@ func (d *Doctor) defaults() {
 	if d.DockerDesktop == nil {
 		d.DockerDesktop = func() (*DockerDesktop, error) { return readDockerDesktop(d.GOOS, d.HomeDir) }
 	}
+	if d.TempDir == nil {
+		d.TempDir = os.TempDir
+	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership
+	}
+	if d.SSHShim == nil {
+		d.SSHShim = func() (*SSHShim, error) { return NewSSHShim(os.Getenv("PATH")) }
+	}
+	if d.Getenv == nil {
+		d.Getenv = os.Getenv
 	}
 }
 
@@ -345,15 +420,60 @@ type doctorRun struct {
 	cli     Version
 	gateway *GatewayHealth
 	service *ServiceState
+
+	// config is the gateway configuration read up front (nil when it
+	// cannot be read; checkGatewayConfig says why), configured the compute
+	// driver it selects.
+	config     *GatewayConfigState
+	configured ComputeDriver
+	// running is the compute driver the answering gateway reports, once
+	// checkGateway has asked (zero Name until then, or when it reports one
+	// DefenseClaw does not drive: driverErr).
+	running   Driver
+	driverErr error
+	// Off Linux the machine checks depend on the compute driver: they are
+	// made once it is known (macChecks) and inserted at machineAt, after
+	// the user check. dockerFound, dockerRoot and buildKit are the Docker
+	// checks made on the way; landlock is the Landlock verdict.
+	machineAt   int
+	machineDone bool
+	dockerFound Check
+	dockerRoot  string
+	buildKit    Check
+	landlock    CheckStatus
+	micro       *MicroVMHost
+	// procs are this user's processes, once a Mac's check has listed them
+	// (processes).
+	procs     []process
+	procsDone bool
+	// started is when the running gateway started, once gatewayStartedAt
+	// has asked (startedDone).
+	started     time.Time
+	startedDone bool
+	// startedApprox is set when started came from ps (to the second).
+	startedApprox bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
+
+// driver is the compute driver sandboxes run on: the one the gateway
+// reports once checkGateway has asked it, else the configured one.
+func (r *doctorRun) driver() ComputeDriver {
+	if r.running.Name != "" {
+		return r.running.Name
+	}
+	return r.configured
+}
+
+// traits is driver's row of the driver table; known is false for a
+// driver DefenseClaw does not drive.
+func (r *doctorRun) traits() (d Driver, known bool) { return LookupDriver(string(r.driver())) }
 
 // Run executes every check. It never returns an error: problems are
 // checks.
 func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	d.defaults()
-	r := &doctorRun{Doctor: d, report: &DoctorReport{}}
+	r := &doctorRun{Doctor: d, report: &DoctorReport{}, configured: DriverDocker}
 	defer func() {
 		if r.client != nil {
 			_ = r.client.Close()
@@ -362,24 +482,36 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	if !r.checkPlatform() {
 		return r.report
 	}
+	if st, err := r.Gateway.Read(); err == nil {
+		r.config = st
+		if st.ComputeDriver != "" {
+			r.configured = st.ComputeDriver
+		}
+	}
+	r.report.ConfiguredDriver, r.report.Driver = r.configured, r.configured
 	r.checkUser()
 	if r.GOOS == "linux" {
 		r.checkLandlock()
 		r.checkDocker(ctx)
 	} else {
-		// Sandboxes run on the kernel of the VM Docker runs in, which is
-		// asked once Docker answers; the check keeps its place.
-		at := len(r.report.Checks)
-		r.checkDocker(ctx)
-		r.report.Checks = slices.Insert(r.report.Checks, at, r.vmLandlockCheck(ctx))
+		// Where sandboxes run, and so what the machine needs, is the
+		// compute driver's, which an answering gateway names only in
+		// checkGateway: those checks keep their place (macChecks).
+		r.machineAt = len(r.report.Checks)
+		r.dockerFound, r.dockerRoot = r.dockerCheck(ctx)
+		r.buildKit = r.buildKitCheck(ctx)
 	}
 	r.checkLinger(ctx)
 	r.checkService(ctx)
 	r.checkCLI(ctx)
+	r.checkSSHSharing(ctx)
 	r.checkRegistration()
 	r.checkGateway(ctx)
+	r.macChecks(ctx)
+	r.unmanagedService(ctx)
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
+	r.report.Driver = r.driver()
 	return r.report
 }
 
@@ -390,10 +522,13 @@ func (r *doctorRun) checkPlatform() bool {
 		c.Status = StatusPass
 	case r.GOOS == "darwin" && r.GOARCH == "arm64":
 		c.Status = StatusWarn
-		c.Detail += ": macOS sandboxes run on Docker Desktop and are a preview"
+		c.Detail += ": macOS sandboxes run in OpenShell MicroVMs (the vm driver, experimental upstream)"
 	case r.GOOS == "darwin":
 		c.Status = StatusFail
-		c.Detail += ": OpenShell publishes no Intel macOS release"
+		c.Detail += ": the OpenShell MicroVM driver runs on Apple silicon only"
+		if translated(r.GOOS, r.GOARCH) {
+			c.Detail += "; this is the Intel build of DefenseClaw running under Rosetta: install the arm64 build"
+		}
 	case r.GOOS == "linux":
 		c.Status = StatusFail
 		c.Detail += ": OpenShell supports amd64 and arm64 only"
@@ -413,7 +548,10 @@ func (r *doctorRun) checkUser() {
 	switch {
 	case uid == 0:
 		c.Status = StatusFail
-		c.Detail = "running as root: OpenShell's gateway is a per-user service and sandboxes mount your files as your uid"
+		c.Detail = "running as root: OpenShell's gateway is a per-user service"
+		if d, _ := LookupDriver(string(r.configured)); d.HostMounts {
+			c.Detail += " and sandboxes mount your files as your uid"
+		}
 		c.Fix = &Fix{Summary: "run DefenseClaw and OpenShell as your own user, not root or a service account"}
 	case r.DaemonUID != nil && *r.DaemonUID != uid:
 		c.Status = StatusFail
@@ -459,14 +597,25 @@ type dockerInfo struct {
 func (r *doctorRun) checkDocker(ctx context.Context) {
 	c, root := r.dockerCheck(ctx)
 	r.add(c)
+	r.add(r.buildKitCheck(ctx))
+	hostNet, sharing, disk := r.dockerDriverChecks(root)
+	r.add(hostNet)
+	r.add(sharing)
+	r.add(disk)
+}
+
+// dockerDriverChecks are the checks of what the docker driver needs of
+// the Docker daemon: host networking, file sharing and disk space under
+// its root.
+func (r *doctorRun) dockerDriverChecks(root string) (hostNet, sharing, disk Check) {
 	if !r.docker {
-		for _, id := range []string{CheckIDDockerHostNetwork, CheckIDDockerFileSharing, CheckIDDisk} {
-			r.add(Check{ID: id, Title: checkTitles[id], Status: StatusSkip, Detail: "the Docker daemon is not available"})
+		skip := func(id string) Check {
+			return Check{ID: id, Title: checkTitles[id], Status: StatusSkip, Detail: "the Docker daemon is not available"}
 		}
-		return
+		return skip(CheckIDDockerHostNetwork), skip(CheckIDDockerFileSharing), skip(CheckIDDisk)
 	}
-	r.checkDockerDesktop()
-	r.checkDisk(root)
+	hostNet, sharing = r.dockerDesktopChecks()
+	return hostNet, sharing, r.diskCheck(root)
 }
 
 // dockerCheck probes the Docker daemon and returns its root directory.
@@ -515,6 +664,26 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 	return c, info.DockerRootDir
 }
 
+// buildKitCheck checks that `docker build` would use BuildKit, which the
+// sandbox image Dockerfiles need (BuildKitProblem).
+func (r *doctorRun) buildKitCheck(ctx context.Context) Check {
+	c := Check{ID: CheckIDDockerBuildKit, Title: "Docker BuildKit"}
+	if !r.docker {
+		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
+		return c
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "docker", Args: BuildKitArgs, Timeout: 30 * time.Second})
+	if problem, fix := BuildKitProblem(r.GOOS, r.Getenv("DOCKER_BUILDKIT"), out, err); problem != "" {
+		c.Status, c.Detail, c.Fix = StatusFail, problem, &Fix{Summary: fix}
+		return c
+	}
+	c.Status, c.Detail = StatusPass, "docker build uses BuildKit"
+	if v := BuildKitVersion(out); v != "" {
+		c.Detail += " (buildx " + v + ")"
+	}
+	return c
+}
+
 func firstJSONLine(out []byte) []byte {
 	for _, line := range strings.Split(string(out), "\n") {
 		if line = strings.TrimSpace(line); strings.HasPrefix(line, "{") {
@@ -548,14 +717,13 @@ var checkTitles = map[string]string{
 	CheckIDDisk:              "Disk space",
 }
 
-func (r *doctorRun) checkDockerDesktop() {
-	hostNet := Check{ID: CheckIDDockerHostNetwork, Title: checkTitles[CheckIDDockerHostNetwork]}
-	sharing := Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
-	defer func() { r.add(hostNet); r.add(sharing) }()
+func (r *doctorRun) dockerDesktopChecks() (hostNet, sharing Check) {
+	hostNet = Check{ID: CheckIDDockerHostNetwork, Title: checkTitles[CheckIDDockerHostNetwork]}
+	sharing = Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
 	if !r.desktop {
 		hostNet.Status, hostNet.Detail = StatusPass, "Docker Engine shares the host network"
 		sharing.Status, sharing.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
-		return
+		return hostNet, sharing
 	}
 	dd, err := r.DockerDesktop()
 	if err != nil || dd == nil {
@@ -588,6 +756,7 @@ func (r *doctorRun) checkDockerDesktop() {
 		sharing.Status, sharing.Detail = StatusFail, home+" is not shared with Docker Desktop, so project folders cannot be mounted"
 		sharing.Fix = &Fix{Summary: "add your home directory in Docker Desktop → Settings → Resources → File sharing"}
 	}
+	return hostNet, sharing
 }
 
 func sharedDir(shared []string, path string) bool {
@@ -600,21 +769,20 @@ func sharedDir(shared []string, path string) bool {
 	return false
 }
 
-func (r *doctorRun) checkDisk(root string) {
+func (r *doctorRun) diskCheck(root string) Check {
 	c := Check{ID: CheckIDDisk, Title: checkTitles[CheckIDDisk]}
-	defer func() { r.add(c) }()
 	if r.desktop {
 		c.Status, c.Detail = StatusSkip, "images live in the Docker Desktop VM disk"
-		return
+		return c
 	}
 	if root == "" {
 		c.Status, c.Detail = StatusWarn, "docker did not report its root directory"
-		return
+		return c
 	}
 	free, err := r.DiskFree(root)
 	if err != nil {
 		c.Status, c.Detail = StatusWarn, fmt.Sprintf("could not measure free space under %s: %v", root, err)
-		return
+		return c
 	}
 	c.Detail = fmt.Sprintf("%s free under %s", humanBytes(free), root)
 	// DefenseClaw's own prune first: on a shared machine `docker system
@@ -623,7 +791,7 @@ func (r *doctorRun) checkDisk(root string) {
 	prune := &Fix{
 		Summary: "remove DefenseClaw's unused sandbox images (rather than `docker system prune`, which also removes " +
 			"every stopped container, unused network and build cache on this machine, other users' too)",
-		Command: "defenseclaw sandbox image prune",
+		Command: pruneCommand,
 	}
 	switch {
 	case free < DiskFailBytes:
@@ -635,6 +803,7 @@ func (r *doctorRun) checkDisk(root string) {
 	default:
 		c.Status = StatusPass
 	}
+	return c
 }
 
 func humanBytes(n uint64) string {
@@ -729,7 +898,7 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 // (starting it again would do nothing) and starts one that is stopped.
 func (r *doctorRun) gatewayRecoveryFix() *Fix {
 	if r.service != nil && r.service.Active {
-		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	}
 	start := r.startCommand()
 	return &Fix{Summary: "start the gateway", Command: start.String(), Automatic: true, Apply: r.runAndWait(start, true)}
@@ -932,20 +1101,13 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	}
 
 	info, err := client.GatewayInfo(ctx)
-	switch {
-	case err != nil:
-		driver.Status, driver.Detail = StatusWarn, "gateway info: "+err.Error()
-	case hasDockerDriver(info):
-		driver.Status, driver.Detail = StatusPass, "docker"
-	default:
-		var names []string
-		for _, d := range info.ComputeDrivers {
-			names = append(names, d.Name)
-		}
-		driver.Status = StatusFail
-		driver.Detail = fmt.Sprintf("the gateway runs %s; DefenseClaw drives the docker driver only", strings.Join(names, ", "))
-		driver.Fix = &Fix{Summary: "run the local gateway with the docker compute driver (OPENSHELL_COMPUTE_DRIVER=docker in gateway.env)"}
+	if err == nil {
+		r.running, r.driverErr = GatewayDriver(info)
 	}
+	// The Landlock verdict, which the driver check follows off Linux,
+	// depends on the driver just learned.
+	r.macChecks(ctx)
+	driver = r.driverCheck(err)
 
 	rev, err := client.GlobalPolicy(ctx)
 	switch {
@@ -960,16 +1122,44 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	}
 }
 
-func hasDockerDriver(info *GatewayInfo) bool {
-	if info == nil {
-		return false
-	}
-	for _, d := range info.ComputeDrivers {
-		if d.Name == "docker" || d.DriverName == "docker" {
-			return true
+// driverCheck judges the compute driver the gateway reports (infoErr:
+// GetGatewayInfo failed). On a Mac sandboxes run in MicroVMs: the docker
+// driver passes only on a Docker VM whose kernel has Landlock, and
+// otherwise the fix switches the gateway to vm.
+func (r *doctorRun) driverCheck(infoErr error) Check {
+	c := Check{ID: CheckIDGatewayDriver, Title: "Gateway compute driver"}
+	mac := r.GOOS == "darwin"
+	switch {
+	case infoErr != nil:
+		c.Status, c.Detail = StatusWarn, "gateway info: "+infoErr.Error()
+	case r.driverErr != nil:
+		c.Status, c.Detail = StatusFail, strings.TrimPrefix(r.driverErr.Error(), "openshell: ")
+		c.Fix = &Fix{Summary: "run the local gateway with the docker compute driver (OPENSHELL_COMPUTE_DRIVER=docker in gateway.env)"}
+		if mac {
+			c.Fix = r.microVMFix()
 		}
+	case r.running.Name == DriverVM && !mac:
+		c.Status, c.Detail = StatusWarn, "vm (OpenShell MicroVM): not certified by DefenseClaw off macOS"
+	case r.running.Name == DriverVM:
+		c.Status, c.Detail = StatusPass, "vm (OpenShell MicroVM; experimental upstream)"
+	case r.configured == DriverVM:
+		// The configuration selects MicroVMs; the gateway still runs on
+		// what it started with.
+		c.Status = StatusWarn
+		c.Detail = fmt.Sprintf("%s, but its configuration selects vm (OpenShell MicroVM): the gateway has not been restarted since", r.running.Name)
+		c.Fix = &Fix{Summary: "restart the gateway to run sandboxes in MicroVMs", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+	case mac && r.landlock == StatusFail:
+		c.Status = StatusFail
+		c.Detail = fmt.Sprintf("%s: the Linux VM Docker runs in has no usable Landlock, so no sandbox can start on it", r.running.Name)
+		c.Fix = r.microVMFix()
+	case mac && r.landlock != StatusPass:
+		c.Status = StatusWarn
+		c.Detail = fmt.Sprintf("%s: whether the Linux VM Docker runs in has Landlock is not known, and macOS sandboxes run in OpenShell MicroVMs", r.running.Name)
+		c.Fix = r.microVMFix()
+	default:
+		c.Status, c.Detail = StatusPass, string(r.running.Name)
 	}
-	return false
+	return c
 }
 
 func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
@@ -983,7 +1173,14 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
-	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, Apply: r.Gateway.Restart}
+	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+	if d, known := r.traits(); known && !d.HostMounts {
+		// Nothing to enable, and no reason to edit docker settings or
+		// restart the gateway for them.
+		mounts.Status, mounts.Detail = StatusSkip, d.MountRefusal+": every run works on a copy"
+		r.telemetryCheck(&tele, st, envErr)
+		return
+	}
 	// Bind mounts reach any host path through the gateway's root Docker
 	// daemon: they are only for a gateway nobody else can drive.
 	blocked, unverified := r.bindMountSafety(ctx, st, env, envErr)
@@ -1008,15 +1205,15 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		switch why := errors.Join(blocked, unverified); {
 		case why == nil:
 			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
-				Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
+				RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
 		default:
 			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
-	case restartPending(st, r.service):
+	case r.restartPending(ctx, st):
 		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
-		if r.service == nil || r.service.StartedAt.IsZero() {
-			// Homebrew reports no start time: DefenseClaw's mark says only
-			// that no restart of its own followed its change.
+		if r.gatewayStartedAt(ctx).IsZero() {
+			// No start time known: DefenseClaw's mark says only that no
+			// restart of its own followed its change.
 			mounts.Detail = "enabled in " + st.TOMLPath + "; restart the gateway if you have not since gateway.toml changed"
 		}
 	case unverified != nil && r.gateway != nil && r.gateway.Healthy:
@@ -1024,7 +1221,12 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	default:
 		mounts.Status, mounts.Detail = StatusPass, "enabled for the docker driver"
 	}
+	r.telemetryCheck(&tele, st, envErr)
+}
 
+// telemetryCheck compares OpenShell's usage telemetry with
+// openshell.upstream_telemetry.
+func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr error) {
 	on := st.TelemetryEnabled()
 	state := map[bool]string{true: "on", false: "off"}[on]
 	switch {
@@ -1040,7 +1242,7 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		tele.Status = StatusWarn
 		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
 		tele.Fix = &Fix{Summary: "set " + EnvTelemetryEnabled + "=" + want + " in gateway.env and restart the gateway", Automatic: true,
-			Apply: r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}})}
+			RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}})}
 	default:
 		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
 	}
@@ -1080,22 +1282,97 @@ func (r *doctorRun) bindMountSafety(ctx context.Context, st *GatewayConfigState,
 	return nil, nil
 }
 
-// restartPending reports configuration the running gateway has not
-// loaded: DefenseClaw's pending-restart mark from before the service last
-// started (or on Homebrew, which reports no start time), or a file changed
-// after the start. systemd reports the start to the microsecond.
-func restartPending(st *GatewayConfigState, svc *ServiceState) bool {
-	var started time.Time
-	if svc != nil {
-		started = svc.StartedAt
-	}
+// restartPending is restartPending for the running gateway. The start is
+// read first: it also says whether it came from ps (startedApprox).
+func (r *doctorRun) restartPending(ctx context.Context, st *GatewayConfigState) bool {
+	started := r.gatewayStartedAt(ctx)
+	return restartPending(st, started, r.startedApprox)
+}
+
+// restartPending reports configuration the gateway that started at
+// started has not loaded: DefenseClaw's pending-restart mark from before
+// that start (or any mark when the start is unknown), or a file changed
+// after it. systemd reports the start to the microsecond, ps on a Mac to
+// the second (gatewayStartedAt; approx).
+func restartPending(st *GatewayConfigState, started time.Time, approx bool) bool {
 	if !st.RestartPendingSince.IsZero() && (started.IsZero() || !started.After(st.RestartPendingSince)) {
 		return true
 	}
 	if started.IsZero() {
 		return false
 	}
+	if approx {
+		// The start comes from ps's elapsed time (whole seconds, taken a
+		// second early), so a file written just before the gateway started,
+		// in its second, would look newer than it: setup writes the
+		// configuration and then starts the gateway. A change counts from
+		// psStartSlack after that start.
+		started = started.Add(psStartSlack)
+	}
 	return st.TOMLModTime.Truncate(time.Microsecond).After(started) || st.EnvModTime.Truncate(time.Microsecond).After(started)
+}
+
+// psStartSlack is how much later than a start taken from ps a gateway's
+// configuration may be written and still count as loaded.
+const psStartSlack = 2 * time.Second
+
+// gatewayStartedAt is when the running gateway started, to tell what
+// configuration it loaded: the service's start (systemd), else on a Mac the
+// start of the openshell-gateway process ps lists, which Homebrew's
+// service does not report and a gateway run another way has no service
+// for. It is zero when neither is known.
+func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
+	if r.service != nil && !r.service.StartedAt.IsZero() {
+		return r.service.StartedAt
+	}
+	if r.GOOS != "darwin" {
+		return time.Time{}
+	}
+	if r.startedDone {
+		return r.started
+	}
+	r.startedDone = true
+	gw := r.gatewayProcess(ctx)
+	if gw == nil {
+		return time.Time{}
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-o", "etime=", "-p", strconv.Itoa(gw.pid)}, Timeout: 10 * time.Second})
+	if err != nil {
+		return time.Time{}
+	}
+	up, ok := parseElapsed(strings.TrimSpace(string(out)))
+	if !ok {
+		return time.Time{}
+	}
+	// ps counts whole seconds: the start is taken a second early, so a
+	// mark written in the second the gateway started stays pending.
+	r.started, r.startedApprox = time.Now().Add(-up-time.Second), true
+	return r.started
+}
+
+// parseElapsed reads ps's etime, "[[dd-]hh:]mm:ss".
+func parseElapsed(s string) (time.Duration, bool) {
+	var days int
+	if d, rest, ok := strings.Cut(s, "-"); ok {
+		n, err := strconv.Atoi(d)
+		if err != nil || n < 0 {
+			return 0, false
+		}
+		days, s = n, rest
+	}
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+	total := 0
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || len(p) == 0 {
+			return 0, false
+		}
+		total = total*60 + n
+	}
+	return time.Duration(days)*24*time.Hour + time.Duration(total)*time.Second, true
 }
 
 func (c serviceCommand) String() string { return strings.Join(c.argv(), " ") }

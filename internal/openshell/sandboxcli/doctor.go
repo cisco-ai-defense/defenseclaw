@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -57,6 +59,15 @@ func (a *App) defaultDoctor() *openshell.Doctor {
 		want := o.UpstreamTelemetry
 		d.WantTelemetry = &want
 		d.BindMountsOptional = o.Workdir.Mode == config.OpenShellWorkdirCopy
+		// Every MicroVM gets the gateway-wide resources, which an
+		// organization's maximum must allow. The resolver refuses a
+		// malformed one on its own.
+		if n, err := config.ParseOpenShellCPU(o.Admin.MaxResources.CPU); err == nil {
+			d.MaxCPUMillis = n
+		}
+		if n, err := config.ParseOpenShellMemory(o.Admin.MaxResources.Memory); err == nil {
+			d.MaxMemoryBytes = n
+		}
 		d.Ports = []openshell.PortRequirement{
 			{Name: "ingress", Port: a.Cfg.OpenShellIngressPort()},
 			{Name: "egress", Port: a.Cfg.OpenShellEgressPort()},
@@ -93,7 +104,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
 		}
-		rep.Checks = append(rep.Checks, a.imagesCheck(), a.wrappersCheck(), a.adminCheck())
+		d, _ := openshell.LookupDriver(string(rep.Driver))
+		rep.Checks = append(rep.Checks, a.imagesCheck(ctx, image.MicroVMTarget(d)), a.wrappersCheck(), a.adminCheck())
 	}
 	return rep
 }
@@ -181,10 +193,23 @@ func gatewayText(g *sandboxapi.Gateway) string {
 	if g == nil {
 		return "the OpenShell gateway"
 	}
+	if g.Driver == string(openshell.DriverVM) {
+		return "OpenShell " + g.Version + " gateway " + g.Name + " (MicroVM driver)"
+	}
 	return "OpenShell " + g.Version + " gateway " + g.Name
 }
 
-func (a *App) imagesCheck() openshell.Check {
+// imagesCheck reports the hook-verified harness images a sandbox can start
+// from on the driver the gateway runs: the MicroVM ones (microVM) on the vm
+// driver, which boots no other, else the docker ones. It covers the
+// configured harnesses' (openshell.harnesses, else defaultHarnesses), which
+// it warns about when one is not built, and every other harness built for
+// this user and DefenseClaw (`sandbox run kiro` builds one without
+// configuring it). An image Docker no longer has does not count, whatever
+// its record says; a MicroVM image whose MicroVM check refused it, or
+// settled nothing yet, is named apart with the command that checks it
+// again.
+func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	c := openshell.Check{ID: CheckIDImages, Title: "Harness images"}
 	specs, err := a.harnesses(nil)
 	if err != nil {
@@ -201,28 +226,77 @@ func (a *App) imagesCheck() openshell.Check {
 		c.Status, c.Detail = openshell.StatusWarn, err.Error()
 		return c
 	}
-	var ready, missing []string
-	for _, spec := range specs {
-		found := false
-		for _, r := range recs {
-			if r.Connector == spec.Name && r.HookFireVerified && r.UID == os.Getuid() &&
-				r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
-				found = true
-				ready = append(ready, spec.Name+" "+r.HarnessVersion)
-				break
+	// Docker unreachable: the Docker check says so, and the records stand.
+	gone, _ := a.Images.Gone(ctx, recs)
+	newest := map[string]image.Record{}
+	for _, r := range recs {
+		if r.HookFireVerified && r.MicroVM == microVM && r.UID == os.Getuid() && !gone[r.Tag] &&
+			r.DefenseClawVersion == manager.ImageVersion() && (a.Cfg == nil || r.IngressPort == a.Cfg.OpenShellIngressPort()) {
+			if cur, ok := newest[r.Connector]; !ok || r.BuiltAt.After(cur.BuiltAt) {
+				newest[r.Connector] = r
 			}
 		}
-		if !found {
+	}
+	var ready, missing, unchecked, refused []string
+	// verdict files the harness name's newest image by its MicroVM check.
+	verdict := func(name string) {
+		r := newest[name]
+		switch {
+		case r.MicroVMProblem != "":
+			// Every run of it on the MicroVM driver is refused.
+			refused = append(refused, name)
+		case r.MicroVMUnchecked():
+			// Its next run checks it again first, which takes a while.
+			unchecked = append(unchecked, name)
+		default:
+			ready = append(ready, name+" "+r.HarnessVersion)
+		}
+	}
+	covered := map[string]bool{}
+	for _, spec := range specs {
+		covered[spec.Name] = true
+		if _, ok := newest[spec.Name]; ok {
+			verdict(spec.Name)
+		} else {
 			missing = append(missing, spec.Name)
 		}
 	}
+	var others []*harness.Spec
+	for name := range newest {
+		if spec, ok := harness.Get(name); ok && !covered[name] {
+			others = append(others, spec)
+		}
+	}
+	others, _ = a.allowedHarnesses(others)
+	sort.Slice(others, func(i, j int) bool { return others[i].Name < others[j].Name })
+	for _, spec := range others {
+		verdict(spec.Name)
+	}
+	var notes []string
+	if len(missing) > 0 {
+		notes = append(notes, "not built yet: "+strings.Join(missing, ", ")+" (the first run builds it, which takes a while)")
+	}
+	if len(refused) > 0 {
+		notes = append(notes, "cannot start in an OpenShell MicroVM: "+strings.Join(refused, ", ")+
+			" (the image build's MicroVM check says why; a gateway on the docker driver runs it)")
+	}
+	if len(unchecked) > 0 {
+		notes = append(notes, "not checked for an OpenShell MicroVM yet: "+strings.Join(unchecked, ", ")+
+			" (the next run checks it first, which takes a while)")
+	}
+	if len(notes) > 0 && len(ready) > 0 {
+		notes = append(notes, "hook-verified: "+strings.Join(ready, ", "))
+	}
 	switch {
-	case len(missing) == 0:
+	case len(notes) == 0:
 		c.Status, c.Detail = openshell.StatusPass, "hook-verified: "+strings.Join(ready, ", ")
-	default:
-		c.Status = openshell.StatusWarn
-		c.Detail = "not built yet: " + strings.Join(missing, ", ") + " (the first run builds it, which takes a while)"
+	case len(missing) > 0:
+		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
 		c.Fix = &openshell.Fix{Summary: "build the images now", Command: CommandName + " image build " + strings.Join(missing, " ")}
+	default:
+		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
+		recheck := append(append([]string{}, refused...), unchecked...)
+		c.Fix = &openshell.Fix{Summary: "check them again", Command: CommandName + " image build " + strings.Join(recheck, " ") + " --force"}
 	}
 	if forbidden != "" {
 		c.Detail += "; " + forbidden
@@ -339,10 +413,26 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 	rep := a.runDoctor(ctx)
 	if o.Fix {
 		outcomes, err := rep.ApplyFixes(ctx, func(c openshell.Check) (bool, error) {
-			if o.Output == OutputJSON {
-				return o.Yes, nil
+			// A fix that restarts the gateway stops every sandbox running
+			// on it, of every owner. Where the driver's stop keeps only
+			// what was flushed (MicroVMs), with any running (or none
+			// known) it is a no by default, and --yes takes that default.
+			def := true
+			if d, _ := openshell.LookupDriver(string(rep.Driver)); c.Fix.RestartsGateway && !d.StopFlushes {
+				if why := a.restartStops(ctx); why != "" {
+					def = false
+					if o.Output != OutputJSON {
+						a.warn(c.Title + ": " + why)
+						if o.Yes {
+							a.note("not fixed with --yes while sandboxes run on the gateway; stop them, or run `" + CommandName + " doctor --fix` on a terminal")
+						}
+					}
+				}
 			}
-			return a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), true, o.Yes)
+			if o.Output == OutputJSON {
+				return o.Yes && def, nil
+			}
+			return a.ask(fmt.Sprintf("Fix %q: %s?", c.Title, c.Fix.Summary), def, o.Yes)
 		})
 		if err != nil {
 			return err

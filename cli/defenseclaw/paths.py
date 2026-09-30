@@ -148,6 +148,30 @@ def bundled_guardrail_profiles_dir() -> Path | None:
     return None
 
 
+def bundled_guardrail_use_cases_dir() -> Path | None:
+    """Opt-in guardrail protection packs (``guardrail-use-cases/<name>/``)."""
+    candidates = [
+        _DATA_DIR / "policies" / "guardrail-use-cases",
+        _REPO_ROOT / "policies" / "guardrail-use-cases",
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def bundled_tool_chains_file() -> Path | None:
+    """Catalog of the fixed bounded tool-call chains, generated from Go."""
+    candidates = [
+        _DATA_DIR / "policies" / "guardrail" / "tool-chains.json",
+        _REPO_ROOT / "policies" / "guardrail" / "tool-chains.json",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
 def bundled_mcp_yara_rules_dir() -> Path | None:
     """DefenseClaw's supplemental MCP tool-description YARA rules."""
     candidates = [

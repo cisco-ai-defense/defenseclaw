@@ -33,6 +33,8 @@ nobody reintroduces them.
 - **The Tools panel is unreachable.** `ToolsPanelModel`, `#tools-controls` and a
   hint branch exist, but `tools` is not in `PANELS`. Don't "fix" hints or tests
   for it as if users could see it, and don't assume a `T` shortcut exists.
+- **An `Input` consumes Enter.** In a modal whose filter box has focus the
+  screen's `enter` binding never fires; handle `Input.Submitted` too.
 
 ## Config and Setup
 
@@ -50,6 +52,9 @@ nobody reintroduces them.
 - **`_body_text` re-renders every 2 s** (`set_interval(2.0, self._periodic_refresh)`).
   Any I/O there stalls the UI and hammers the disk. Anything stateful there
   (resetting a cursor, clearing a message) fires over and over.
+- **Setup task badges clear by command family.** A finished run of any family in
+  `WIZARD_COMMAND_FAMILIES` calls `mark_wizard_complete`; a new task that runs a
+  new first argv word must land there, or its row spins "running" forever.
 
 ## Secrets and commands
 
@@ -94,6 +99,18 @@ nobody reintroduces them.
 - **Don't stack confirmations.** A picker plus a consequence modal that shows the
   exact command is enough; run the command after that confirm (as the Policies
   flows and destructive intents do) instead of adding the generic preview too.
+
+- **Use `MeasuredDataTable`, not `DataTable`** (`widgets/data_table.py`). A plain
+  DataTable measures auto widths on idle but reuses cells drawn before that, so
+  a rebuild painted early (a burst of keys in the palette, a Windows repaint)
+  kept header-width columns: "guardra  [inf", "Confi".
+- **A Button's label change only repaints.** A longer label keeps the old width
+  and is cut ("Turn off" showed "Turn"); call `button.refresh(layout=True)`.
+- **Modals need a max size.** A fixed `width: 92` or `height: 32` dialog runs off
+  an 80x24 screen and hides its buttons; add `max-width: 96%` / `max-height:
+  100%` and let a list or table take `1fr`.
+- **Short terminals get `Screen.-short`** (`VERTICAL_BREAKPOINTS`, up to 30
+  rows). Put 80x24-only spacing tweaks under it, not in the base CSS.
 
 ## Tests and tooling
 

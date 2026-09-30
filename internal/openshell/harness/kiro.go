@@ -17,7 +17,9 @@
 package harness
 
 import (
+	"encoding/base64"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -39,11 +41,102 @@ var kiroPin = tarballPin{
 	DigestSource: "Kiro release manifest (stable channel)",
 }
 
+// kiroModel is the sentence-embedding model (all-MiniLM-L6-v2) Kiro CLI
+// 2.24.1 downloads at its first start for its semantic search: a 79 MiB zip
+// from desktop-release.q.us-east-1.amazonaws.com, unpacked into
+// ~/.semantic_search/models/all-MiniLM-L6-v2, which was most of what a new
+// sandbox's first session downloaded. kiro-cli-chat carries the sha256 of
+// both files and checks the ones it finds at every start (it downloads again
+// when they do not match), so the image unpacks those same files into the
+// image HOME and a new sandbox starts with them. The URL names no release;
+// the build checks every file against the digests the pinned binary
+// accepts, not the archive's bytes.
+var kiroModel = zipModelPin{
+	URL: "https://desktop-release.q.us-east-1.amazonaws.com/models/all-MiniLM-L6-v2.zip",
+	Dir: connector.SandboxHomeDir + "/.semantic_search/models/all-MiniLM-L6-v2",
+	Files: []zipModelFile{
+		{Name: "model.safetensors", Size: 90868376, SHA256: "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"},
+		{Name: "tokenizer.json", Size: 466247, SHA256: "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"},
+	},
+}
+
+// zipModelPin is a vendor model archive whose files, not the archive, are
+// pinned: the build downloads it, refuses any other member list, size or
+// digest, and writes exactly the pinned files into Dir.
+type zipModelPin struct {
+	URL   string
+	Dir   string
+	Files []zipModelFile
+}
+
+// zipModelFile is one pinned member of a zipModelPin.
+type zipModelFile struct {
+	Name   string
+	Size   int64
+	SHA256 string
+}
+
+// zipModelUnpack is the Python the model step runs (unzip is not in every
+// base image): it reads only the pinned members, checks the member list, each
+// size before reading and each sha256, and only when every file matches
+// creates the target directory and writes them there. argv: archive,
+// directory, then name=size=sha256 per file.
+const zipModelUnpack = `import hashlib, os, sys, zipfile
+archive, dest = sys.argv[1], sys.argv[2]
+want = {}
+for arg in sys.argv[3:]:
+    name, size, digest = arg.split("=")
+    want[name] = (int(size), digest)
+files = {}
+with zipfile.ZipFile(archive) as z:
+    members = {i.filename: i for i in z.infolist() if not i.is_dir()}
+    if sorted(members) != sorted(want):
+        sys.exit("model archive holds %s, not %s" % (sorted(members), sorted(want)))
+    for name, (size, digest) in sorted(want.items()):
+        if members[name].file_size != size:
+            sys.exit("%s is %d bytes, not the pinned %d" % (name, members[name].file_size, size))
+        data = z.read(name)
+        got = hashlib.sha256(data).hexdigest()
+        if got != digest:
+            sys.exit("%s sha256 %s is not the pinned %s" % (name, got, digest))
+        files[name] = data
+os.makedirs(dest, exist_ok=True)
+os.chmod(dest, 0o755)
+for name, data in sorted(files.items()):
+    path = os.path.join(dest, name)
+    with open(path + ".part", "wb") as f:
+        f.write(data)
+    os.chmod(path + ".part", 0o644)
+    os.replace(path + ".part", path)
+`
+
+// installRun returns the RUN body that downloads the archive and writes its
+// pinned files into dir with python (the interpreter's path). The model is
+// only a cache the harness downloads at its first start, so without that
+// interpreter, when the download fails or when the archive does not hold
+// exactly the pinned files, the step says so, writes nothing and the build
+// goes on.
+func (m zipModelPin) installRun(dir, python string) string {
+	var pins []string
+	for _, f := range m.Files {
+		pins = append(pins, shellQuote(f.Name+"="+strconv.FormatInt(f.Size, 10)+"="+f.SHA256))
+	}
+	return `set -eu; dir=` + shellQuote(dir) + `; url=` + shellQuote(m.URL) + `; ` +
+		`skip() { echo "$url is not pre-seeded: $1 (the harness downloads it at its first start)" >&2; exit 0; }; ` +
+		`if [ ! -x ` + shellQuote(python) + ` ]; then skip ` + shellQuote("the base image has no "+python+" to unpack it") + `; fi; ` +
+		`tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT; ` +
+		`curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$tmp/model.zip" "$url" || skip "the download failed"; ` +
+		`printf '%s' ` + shellQuote(base64.StdEncoding.EncodeToString([]byte(zipModelUnpack))) + ` | base64 -d >"$tmp/unpack.py"; ` +
+		shellQuote(python) + ` -I -S "$tmp/unpack.py" "$tmp/model.zip" "$dir" ` + strings.Join(pins, " ") + ` || skip "the archive does not hold the pinned files"`
+}
+
 // Kiro is the Kiro CLI harness. Its hooks live in the DefenseClaw agent,
 // alone in a root-owned agents directory the launcher forces
 // KIRO_AGENT_CONFIG_DIR to, so no agent file in HOME or the project can take
 // its place; Kiro has no system settings tier and still reads user and
-// project settings and MCP servers (tamper tier user).
+// project settings and MCP servers, and an interactive session runs the TUI
+// runtime (bun and tui.js) Kiro unpacks into the workload-writable HOME
+// (tamper tier user).
 var Kiro = register(&Spec{
 	Name:        "kiro",
 	DisplayName: "Kiro CLI",
@@ -53,6 +146,7 @@ var Kiro = register(&Spec{
 	DefaultVersion: kiroPin.Version,
 	Provider:       connector.NewKiroConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
+	TamperNote:     "the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit (Kiro has no system settings tier)",
 	verification: Verification{
 		Status: VerifiedLive,
 		Note:   "hook-fire probe (host and relay network modes) with Kiro's own scripted-response mode (KIRO_MOCK_CHAT_RESPONSE and a placeholder KIRO_API_KEY, no network): the agent hooks userPromptSubmit, preToolUse, postToolUse and stop reach the ingress with the sandbox token and an idempotency key, a BLOCKME shell call is denied (exit 2 from preToolUse; Kiro reports the tool as failed) and an allowed one runs, also with hookless agents named defenseclaw in ~/.kiro/agents (defenseclaw.json and a.json, which sorts first) and in the project (defenseclaw.json and project.json), the user settings' default agent switched to Kiro's built-in one, hookless agents behind KIRO_HOME, KIRO_AGENT_CONFIG_DIR and KIRO_TEST_AGENTS_DIR, a planted KIRO_CHAT_SHELL and AMAZON_Q_CHAT_SHELL, BASH_ENV and ENV files and a PATH of planted tools; live OpenShell 0.1.1 run (TestLiveSandboxHookOnlyHarness, scripted mode) with the DefenseClaw ingress and egress proxy: every hook reaches the ingress authenticated and keyed, an allowed tool call runs, with the shell tool on DefenseClaw's block list the DCBLOCK call gets the real gateway's block verdict and never runs, a tool call's plain curl reaches example.org through the proxy the launcher exports, the proxy blocks webhook.site, a connection around the proxy is refused; a model through KIRO_API_KEY (Kiro Pro) or an in-sandbox login is unverified (no Kiro account)",
@@ -77,6 +171,9 @@ readlink -f /usr/local/bin/kiro-cli`,
 		return []InstallStep{{
 			Comment: "Install Kiro CLI " + version + " from its release archive into a root-owned prefix (vendor sha256 checked)",
 			Run:     run + "; " + link,
+		}, {
+			Comment: "Pre-seed the embedding model Kiro CLI " + version + " downloads at its first start (the files Kiro's own sha256 pins accept)",
+			Run:     kiroModel.installRun(kiroModel.Dir, SupervisorInterpreter),
 		}}, nil
 	},
 	launcher: kiroLauncher,
@@ -123,6 +220,7 @@ readlink -f /usr/local/bin/kiro-cli`,
 	preseedRefresh: []string{
 		"force " + connector.KiroSandboxAgentDirEnv + " to the root-owned " + connector.KiroSandboxAgentDir + ", which holds only the DefenseClaw agent (Kiro picks an agent by the name inside any file of ~/.kiro/agents or the project's .kiro/agents, and reads neither with the variable set), and refuse to start when the agent is missing",
 		"pin HOME and drop every KIRO_*, Q_*, AMAZON_Q_*, ASBX_KIRO_* and KAS_* variable but KIRO_API_KEY and KIRO_MOCK_CHAT_RESPONSE (they relocate the agents, settings and data and replace the shell tool's shell), and select the DefenseClaw agent with --agent (a caller --agent is refused)",
+		"set " + kiroSkipBinaryPinningEnv + "=1, so an interactive session runs the root-owned kiro-cli-chat rather than a copy Kiro would make in ~/.local/share/kiro-cli/run",
 		"select the local V2 agent engine with --v2, whose agent hooks the image verifies, and refuse --v3, --agent-engine, --cloud and --repo (the V3 engine replays no scripted response and was not measured; a cloud session runs outside the sandbox)",
 	},
 })
@@ -143,6 +241,15 @@ var kiroLauncherKeptEnv = []string{"KIRO_API_KEY", "KIRO_MOCK_CHAT_RESPONSE"}
 // The binary also reads settings, data, recording, engine and agent-server
 // paths from KIRO_*, Q_*, AMAZON_Q_*, ASBX_KIRO_* and KAS_* variables.
 var kiroLauncherDroppedEnv = []string{"KIRO_*", "Q_*", "AMAZON_Q_*", "ASBX_KIRO_*", "KAS_*"}
+
+// kiroSkipBinaryPinningEnv, set by the launcher, makes Kiro run the binary
+// it was started as ("binary pinning disabled via KIRO_SKIP_BINARY_PINNING;
+// using install path directly"). Otherwise an interactive session of Kiro
+// CLI 2.24.1 "pins" kiro-cli-chat into its data directory's run/ (a hard
+// link, or a copy where the link fails, which fs.protected_hardlinks makes
+// it do for a root-owned binary) and hands that path to its TUI: a file in
+// the workload-writable HOME that the next session would start.
+const kiroSkipBinaryPinningEnv = "KIRO_SKIP_BINARY_PINNING"
 
 // KiroLoginCommand, as the launcher's first argument, runs the Kiro login
 // (the kiro-cli front end) with the caller's other arguments instead of a
@@ -170,6 +277,11 @@ for name in $(compgen -e); do
     ` + strings.Join(kiroLauncherDroppedEnv, "|") + `) unset -v "$name" ;;
   esac
 done
+# An interactive Kiro session runs its chat binary from a "pinned" copy in
+# the workload-writable ~/.local/share/kiro-cli/run (a link, or a copy where
+# the root-owned binary cannot be linked); this keeps it on the pinned one.
+` + kiroSkipBinaryPinningEnv + `=1
+export ` + kiroSkipBinaryPinningEnv + `
 HOME=` + connector.SandboxHomeDir + `
 export HOME
 if [ "${1:-}" = ` + KiroLoginCommand + ` ]; then

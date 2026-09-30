@@ -22,7 +22,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from defenseclaw.tui.command_line import ParsedCommand, infer_command_risk
+from defenseclaw.tui.command_line import ParsedCommand, display_argv, infer_command_risk
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 SECRET_FLAG_FRAGMENTS = ("key", "token", "secret", "password", "credential")
@@ -49,7 +49,7 @@ class CommandPreview:
 
     @property
     def masked_display(self) -> str:
-        return " ".join(self.masked_argv)
+        return display_argv(self.masked_argv)
 
 
 def build_command_preview(command: ParsedCommand) -> CommandPreview:

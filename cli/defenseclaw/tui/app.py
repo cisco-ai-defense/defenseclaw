@@ -56,7 +56,7 @@ from defenseclaw.tui.executor import (
     resolve_subprocess_argv,
 )
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
-from defenseclaw.tui.panels import setup_catalog, setup_keys
+from defenseclaw.tui.panels import setup_catalog, setup_center, setup_keys
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
 from defenseclaw.tui.panels.alerts import AlertPanelAction, AlertsPanelModel
@@ -84,11 +84,12 @@ from defenseclaw.tui.panels.overview import (
     string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
-from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_posture_text
+from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_keymap_rows, policy_posture_text
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
+    WIZARD_COMMAND_FAMILIES,
     WIZARD_DESCRIPTIONS,
     SetupPanelAction,
     SetupPanelModel,
@@ -168,6 +169,16 @@ from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
+from defenseclaw.tui.widgets.panel_split import (
+    ASIDE_MIN_WIDTH,
+    NAV_MIN_WIDTH,
+    NavItem,
+    NavSwitcher,
+    PanelNav,
+    nav_switcher,
+    split_aside,
+    split_layout,
+)
 from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.tab_fit import fit_tab_labels
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
@@ -504,6 +515,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     is driven by the migration ledger and the design spec.
     """
 
+    # Screen gets "-short" up to 30 rows (see the #body-panel CSS).
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (31, "-tall")]
+
     CSS = TEXTUAL_CSS + """
     Screen {
         background: TOKEN_SURFACE_BASE;
@@ -552,6 +566,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         padding: 1 2;
         border: none;
         background: TOKEN_SURFACE_BASE;
+    }
+
+    /* On a short terminal (80x24) the blank rows above the body go to content. */
+    Screen.-short #body-panel {
+        margin: 0 1;
+        padding: 0 2 1 2;
     }
 
     #body {
@@ -687,6 +707,63 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         display: none;
     }
 
+    /* Shared split layout (widgets/panel_split.py). #panel-split fills the
+       body under the header and button bar; the nav list and the aside size
+       to their content, up to its height. It is hidden on the Overview and
+       the help sheet, whose #body fills the panel instead. #panel-nav is
+       NAV_WIDTH columns wide. */
+    #panel-split {
+        height: 1fr;
+    }
+
+    #panel-main {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #panel-nav {
+        width: 30;
+        height: auto;
+        max-height: 100%;
+        margin: 0 1 0 0;
+        padding: 0 1;
+        border: round TOKEN_BORDER_MUTED;
+        background: TOKEN_SURFACE_BASE;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #panel-aside {
+        width: 38%;
+        height: auto;
+        max-height: 100%;
+        margin: 0 0 0 1;
+        padding: 0 1;
+        border: round TOKEN_BORDER_ACTIVE;
+        border-title-color: TOKEN_ACCENT_VIOLET;
+        border-title-style: bold;
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    /* With a nav list the table gets a box titled with the active item,
+       sized to its rows (it scrolls past the split's height, or past 60%
+       when the aside sits below it). */
+    #panel-split.with-nav #panel-table {
+        height: auto;
+        max-height: 100%;
+        border: round TOKEN_BORDER_MUTED;
+        border-title-color: TOKEN_ACCENT_CYAN;
+        border-title-style: bold;
+    }
+
+    #panel-split.with-nav.aside-below #panel-table {
+        max-height: 60%;
+    }
+
+    #panel-split.with-nav #panel-table:focus {
+        border: round TOKEN_BORDER_ACTIVE;
+    }
+
     #ai-model-table-label,
     #ai-product-table-label {
         height: 1;
@@ -735,6 +812,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         margin-top: 1;
         padding: 1 2;
         border: round TOKEN_BORDER_ACTIVE;
+        border-title-color: TOKEN_ACCENT_VIOLET;
+        border-title-style: bold;
         background: TOKEN_SURFACE_RAISED;
         color: TOKEN_TEXT_PRIMARY;
         overflow-y: auto;
@@ -751,6 +830,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         max-height: 7;
         margin-top: 0;
         padding: 0 2;
+    }
+
+    /* An aside moved below the table keeps the table's first rows on a
+       short terminal; it scrolls. */
+    #detail-panel.compact.aside-below {
+        max-height: 5;
     }
 
     #detail-panel-body {
@@ -929,7 +1014,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         "TOKEN_ACCENT_BLUE", TOKENS.accent_blue
     ).replace(
         "TOKEN_ACCENT_AMBER", TOKENS.accent_amber
-    )
+    ).replace("TOKEN_ACCENT_VIOLET", TOKENS.accent_violet)
 
     # Textual >=8.2.0: enable cross-container drag-selection with
     # auto-scroll. Operators routinely want to copy log lines, activity
@@ -1042,6 +1127,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # intentionally not a launch preference.
             self.active_panel = "overview"
         self.help_open = False
+        # Where the panel was scrolled when the help opened (the help shares
+        # the panel's scroller).
+        self._help_return_scroll = 0.0
         self.activity_lines: list[str] = []
         self.body_text = ""
         # E1: per-render map of clickable connector-chip segments,
@@ -1050,6 +1138,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # :meth:`_connector_chip_text` and consumed by
         # :meth:`_handle_body_chip_click`; empty when no chip is shown.
         self._chip_click_segments: list[tuple[int, int, str]] = []
+        # Shared split layout: the body's one-line nav switcher (panel, body
+        # line, click targets), the aside shown below the table on a narrow
+        # terminal, and the last aside drawn on the right.
+        self._nav_switcher_hit: tuple[str, int, NavSwitcher] | None = None
+        self._panel_aside_below: RenderableType | None = None
+        self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
         self.hint_text = ""
@@ -1392,14 +1486,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     yield Button("Remove", id="registries-remove-source", compact=True, variant="error")
                 with Horizontal(id="setup-controls", classes="panel-controls hidden"):
                     yield Button("Wizards", id="setup-mode-wizards", compact=True)
-                    yield Button("Config", id="setup-mode-config", compact=True)
-                    yield Button("Open", id="setup-open", compact=True)
                     yield Button("Edit list", id="setup-edit-list", compact=True)
                     yield Button("Save", id="setup-save", compact=True)
                     yield Button("Revert", id="setup-revert", compact=True)
                     yield Button("Restart", id="setup-restart", compact=True)
                     yield Button("Clear restart", id="setup-clear-restart", compact=True)
-                    yield Button("Refresh keys", id="setup-refresh-credentials", compact=True)
                 with Horizontal(id="setup-wizard-controls", classes="panel-controls hidden"):
                     # Wizard-form sub-bar. Shows only while a wizard form
                     # is open (`setup_model.form_active`). Buttons route
@@ -1535,8 +1626,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         ("sandboxes-new", "New run", "Start a harness in a new sandbox; it gets this terminal (n)"),
                         ("sandboxes-connect", "Connect", "Resume the sandbox and attach the harness (c)"),
                         ("sandboxes-stop", "Stop", "Stop the sandbox (asks first); it is kept for connect (s)"),
-                        ("sandboxes-undo", "Undo", "Put the project folder back to its snapshot (U)"),
+                        (
+                            "sandboxes-undo",
+                            "Undo",
+                            "Put the project folder back to its snapshot, or revert a copy's last pull --apply (U)",
+                        ),
                         ("sandboxes-review", "Review", "Review changed files that can run code here (R)"),
+                        ("sandboxes-pull", "Pull", "Bring a copy's work back: show it, apply it or branch it (P)"),
                         ("sandboxes-delete", "Delete", "Delete the sandbox (d)"),
                         ("sandboxes-unblock", "Unblock", "Unblock the blocked destination (u)"),
                         ("sandboxes-approve", "Approve", "Approve the selected ask (a)"),
@@ -1547,15 +1643,29 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         ("sandboxes-refresh", "Refresh", "Re-read the sandboxes now"),
                     ):
                         yield Button(label, id=button_id, compact=True, tooltip=tip)
+                # Actions only: the views are switched from the navigation
+                # list (or the one-line switcher and 1-7 on narrow screens).
                 with Horizontal(id="policies-controls", classes="panel-controls hidden"):
                     for button_id, label, tip in (
-                        ("policies-view-policies", "Policies", "Named security policies (1)"),
-                        ("policies-view-packs", "Packs", "Guardrail rule pack per connector (2)"),
-                        ("policies-view-sandbox", "Sandbox", "Sandbox policy packs, read-only (3)"),
+                        ("policies-mode", "Mode", "Switch the scope between observe and action (m)"),
+                        (
+                            "policies-block",
+                            "Block at",
+                            "Pick the block level: the scope's tool calls, or the policy's LLM traffic (b)",
+                        ),
+                        (
+                            "policies-alert",
+                            "Alert at",
+                            "Pick the alert level: the scope's tool calls, or the policy's LLM traffic (a)",
+                        ),
+                        ("policies-approval", "Approval", "Pick when the scope asks a human first (h)"),
+                        ("policies-rule-pack", "Rule pack", "Switch the scope's rule pack (p)"),
+                        ("policies-toggle", "Turn on", "Turn the opt-in pack on or off for the scope (Space)"),
+                        ("policies-scope", "Next scope", "Show the next scope: global, then each connector (s)"),
                         ("policies-activate", "Activate", "Pick a policy, preview what changes, activate it (Enter)"),
                         ("policies-change-pack", "Change pack", "Switch the rule pack for all connectors or one (Enter)"),
                         ("policies-details", "Details", "Show the highlighted row (i)"),
-                        ("policies-refresh", "Refresh", "Re-read policies and packs (r)"),
+                        ("policies-refresh", "Refresh", "Re-read policies, packs and postures (r)"),
                     ):
                         yield Button(label, id=button_id, compact=True, tooltip=tip)
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
@@ -1753,33 +1863,41 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         compact=True,
                         tooltip="Open the per-row action menu (o)",
                     )
-                yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
-                yield MeasuredDataTable(
-                    id="ai-model-table",
-                    classes="hidden",
-                    show_row_labels=False,
-                    show_cursor=True,
-                    cursor_type="row",
-                    zebra_stripes=True,
-                )
-                yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
-                yield MeasuredDataTable(
-                    id="panel-table",
-                    classes="hidden",
-                    show_row_labels=False,
-                    show_cursor=True,
-                    cursor_type="row",
-                    zebra_stripes=True,
-                )
-                # Scroll container so long alert / audit / log details
-                # are fully reachable. A bare ``Static`` is not
-                # scrollable in Textual (``is_scrollable`` needs a
-                # layout or child nodes), so its ``max-height`` silently
-                # clipped any detail past ~10 lines — the rich gateway
-                # finding + history blocks never showed. The inner
-                # ``Static`` carries the renderable; the wrapper scrolls.
-                with VerticalScroll(id="detail-panel", classes="hidden"):
-                    yield Static("", id="detail-panel-body")
+                # Shared table area (widgets/panel_split.py): an optional
+                # navigation list, the table + detail, and an optional aside.
+                # Panels opt in through _panel_nav / _panel_aside; with
+                # neither, #panel-main lays out exactly as before.
+                with Horizontal(id="panel-split"):
+                    yield PanelNav(id="panel-nav", classes="hidden")
+                    with Vertical(id="panel-main"):
+                        yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
+                        yield MeasuredDataTable(
+                            id="ai-model-table",
+                            classes="hidden",
+                            show_row_labels=False,
+                            show_cursor=True,
+                            cursor_type="row",
+                            zebra_stripes=True,
+                        )
+                        yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
+                        yield MeasuredDataTable(
+                            id="panel-table",
+                            classes="hidden",
+                            show_row_labels=False,
+                            show_cursor=True,
+                            cursor_type="row",
+                            zebra_stripes=True,
+                        )
+                        # Scroll container so long alert / audit / log details
+                        # are fully reachable. A bare ``Static`` is not
+                        # scrollable in Textual (``is_scrollable`` needs a
+                        # layout or child nodes), so its ``max-height`` silently
+                        # clipped any detail past ~10 lines — the rich gateway
+                        # finding + history blocks never showed. The inner
+                        # ``Static`` carries the renderable; the wrapper scrolls.
+                        with VerticalScroll(id="detail-panel", classes="hidden"):
+                            yield Static("", id="detail-panel-body")
+                    yield Static("", id="panel-aside", classes="hidden")
             yield Input(
                 placeholder="Type defenseclaw version, doctor, or a TUI alias",
                 id="command-input",
@@ -2091,6 +2209,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if command.has_class("open") or self.focused is command:
             if self._handle_command_palette_key(event):
                 event.stop()
+            return
+
+        if self.help_open and event.key == "escape":
+            # The help's footer promises that Esc closes it.
+            self._close_help()
+            event.stop()
+            event.prevent_default()
             return
 
         table = self.query_one("#panel-table", DataTable)
@@ -2418,6 +2543,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_tab_labels()
+        # The nav list and aside appear and disappear at width thresholds.
+        if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
+            panel = self.active_panel
+            if self._panel_nav(panel) or self._panel_aside(panel) is not None:
+                self.call_after_refresh(self._render_chrome)
 
     def action_switch_panel(self, panel: str) -> None:
         if panel not in PANEL_NAMES:
@@ -2622,6 +2752,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         else:
             table.add_class("hidden")
         detail.add_class("hidden")
+        self._hide_panel_split_parts(panel)
 
         if not overview_visible:
             self._set_overview_metrics_visible(False)
@@ -3174,6 +3305,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         self.detail_text = detail
+        panel.border_title = None
+        panel.remove_class("aside-below")
         if not detail:
             panel.add_class("hidden")
             self._last_detail_signature = None
@@ -3300,13 +3433,29 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.push_screen(ThemePickerScreen(current_theme=current), _on_dismiss)
 
     def action_toggle_help(self) -> None:
-        self.help_open = not self.help_open
-        self._render_chrome()
         if self.help_open:
-            try:
-                self.query_one("#body-scroll", VerticalScroll).scroll_home(animate=False)
-            except NoMatches:
-                pass
+            self._close_help()
+            return
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            scroller = None
+        self._help_return_scroll = scroller.scroll_y if scroller is not None else 0.0
+        self.help_open = True
+        self._render_chrome()
+        if scroller is not None:
+            scroller.scroll_home(animate=False)
+
+    def _close_help(self) -> None:
+        self.help_open = False
+        self._render_chrome()
+        # Scrolling the help moved the shared scroller; put the panel back
+        # where it was once its content is laid out again.
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return
+        self.call_after_refresh(scroller.scroll_to, y=self._help_return_scroll, animate=False)
 
     @on(Tabs.TabActivated, "#tabs")
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
@@ -3412,8 +3561,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._set_status("Command drawer closed.")
             return
         if self.help_open:
-            self.help_open = False
-            self._render_chrome()
+            self._close_help()
             return
         # `q` doubles as the strip's keyboard dismiss. We intentionally
         # never auto-hide on success per UX decision, so this is the
@@ -3775,13 +3923,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._sync_sandbox_controls()
         elif self.active_panel == "policies":
             self.policy_model.cursor = event.cursor_row
-            self._update_body_only()
+            if self.policy_model.cursor != event.cursor_row:
+                # A chain group header: the model moved on to a chain row,
+                # so put the table cursor there too.
+                self._render_chrome()
+            else:
+                self._update_body_only()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
-            # The body names the selected task, and a group header row
-            # hands the cursor on to the nearest task.
+            # The detail follows the selected task.
             self._update_body_only()
             if self._setup_cursor() != event.cursor_row:
                 with self._programmatic_table_update():
@@ -3883,9 +4035,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else:
                 self._update_body_only()
         elif self.active_panel == "setup":
-            on_header = self._setup_view() == "wizards" and setup_catalog.wizard_at(event.cursor_row) is None
             self._set_setup_cursor(event.cursor_row)
-            if repeated_click and not on_header:
+            if repeated_click:
                 self._apply_setup_action(self._handle_setup_key("enter"))
             else:
                 self._update_body_only()
@@ -4026,7 +4177,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     )
                     if event.exit_code == 0 and not event.cancelled:
                         await self._handle_successful_command(binary, args)
-                    elif binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+                    elif binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                         # A setup-family run failed (non-zero exit). Clear the
                         # "running..." badge so the Setup panel reflects the
                         # actual outcome and the user can retry without first
@@ -4058,7 +4209,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             # The submit code optimistically flagged the wizard row as
             # "running..." before the executor rejected the new run; clear
             # it so the panel doesn't show two spinning wizards forever.
-            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+            if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
         except Exception as exc:  # noqa: BLE001
@@ -4079,7 +4230,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._strip_label = label
             self._strip_last_output = str(exc)
             self._strip_finished(exit_code=1, duration=0.0)
-            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+            if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
             return None
@@ -4217,6 +4368,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._render_native_widgets()
         self._render_panel_controls()
         self._render_panel_table()
+        self._render_panel_split()
         self._render_detail_panel()
         # The strip's visibility depends on active_panel (it stays hidden
         # on Activity since the live stream is right there), so any panel
@@ -4297,11 +4449,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 0 A V N R", "Switch panel (panels that use digits keep them; use Tab or Ctrl+P there)"),
+            ("1-9 0 A V N R P", "Switch panel (Tab / Ctrl+P where digits are taken)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
-            ("?", "Toggle this help overlay (j/k or PgUp/PgDn scroll it)"),
+            ("?", "Toggle this help (j/k or PgUp/PgDn scroll it)"),
             ("Ctrl+\\", "Pick a colour theme"),
             ("Y / Ctrl+S", "Copy / save the last command's output"),
             ("D", "Run doctor in the background"),
@@ -4318,7 +4470,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
                 ("m", "Switch connector mode"),
-                ("i / l", "Jump to Inventory / Logs"),
+                ("i / l / p", "Jump to Inventory / Logs / Policies"),
                 ("N", "Turn notifications on or off"),
                 ("u / X", "Upgrade / uninstall (both preview first)"),
             ],
@@ -4427,6 +4579,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("c / n", "Connect / new run (the harness gets the terminal)"),
                 ("s / d", "Stop / delete the sandbox (both ask first)"),
                 ("U / R", "Undo the session / review its changes"),
+                ("P", "Pull a copy's work back (show, apply or branch); U then reverts the last apply"),
                 ("w", "Sandboxed on/off for claude and codex (shell wrapper)"),
                 ("r", "Refresh"),
             ],
@@ -4441,12 +4594,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("r", "Refresh"),
             ],
             "policies": [
-                ("1 / 2 / 3", "Policies / rule packs / sandbox packs"),
-                ("j/k or Up/Down", "Navigate the selected view"),
-                ("Enter", "Policies: pick and activate a policy (preview, confirm)"),
-                ("Enter", "Rule packs: switch the pack for all connectors or one"),
-                ("i", "Details of the highlighted row"),
-                ("r", "Refresh"),
+                *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
+                ("A", "Activity panel (a is the alert level on Posture and Policies)"),
                 ("p (Overview)", "Opens this panel; Runtime keeps p for its planes"),
             ],
             "setup": setup_keys.help_rows(self._setup_view(), setup_keys.setup_conditions(self.setup_model)),
@@ -4514,6 +4663,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # E1: clear last render's chip click-map; panels that draw the chip
         # repopulate it via :meth:`_connector_chip_text`.
         self._chip_click_segments = []
+        # Same for a one-line nav switcher (_body_nav_switcher).
+        self._nav_switcher_hit = None
         if self.help_open:
             self.body_text = self._render_help_body()
             return self.body_text
@@ -4586,9 +4737,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.body_text = self._sandbox_body_text()
             return self.body_text
         if self.active_panel == "policies":
-            width = int(getattr(self.size, "width", 0) or 0)
-            self._table_columns = self.policy_model.data_table_columns(width)
-            self._table_rows = self.policy_model.data_table_rows(width)
+            self._table_columns, self._table_rows = self.policy_model.table(self._policy_table_width())
             self.body_text = self._policies_body_text()
             return self.body_text
         if self.active_panel == "setup":
@@ -5025,7 +5174,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """Setup buttons the current Setup view uses (from its keymap)."""
 
         view = self._setup_view()
-        return setup_keys.visible_buttons(view, setup_keys.setup_conditions(self.setup_model))
+        visible = setup_keys.visible_buttons(view, setup_keys.setup_conditions(self.setup_model))
+        if self._setup_nav_shown():
+            # The nav list's "‹ Setup tasks" does what Wizards does.
+            visible = visible - {"setup-mode-wizards"}
+        return visible
 
     def _sync_setup_controls(self) -> None:
         # Each Setup view shows only the buttons its keymap names; buttons
@@ -5515,11 +5668,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _handle_setup_control(self, button_id: str) -> None:
         if button_id == "setup-mode-wizards":
             self.setup_model.mode = "wizards"
-            self._render_chrome()
-            return
-        if button_id == "setup-mode-config":
-            self.setup_model.mode = "config"
-            self.setup_model.active_line = self.setup_model.first_editable_line()
             self._render_chrome()
             return
         # Wizard-form buttons share the keystroke handler so we get
@@ -7293,6 +7441,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         segment (the trailing hint) opens the filter picker as a fallback.
         """
 
+        if self._handle_nav_switcher_click(x, y):
+            return True
         if self._handle_setup_section_nav_click(x, y):
             return True
         segments = self._chip_click_segments
@@ -8252,8 +8402,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         services_table = Table.grid(padding=(0, 1), expand=True)
         services_table.add_column(no_wrap=True, width=2)
         services_table.add_column(no_wrap=True, width=12)
-        services_table.add_column(no_wrap=True, width=10)
-        services_table.add_column(overflow="fold")
+        # Below 100 columns the card is too narrow for a detail column (it
+        # folded "canonical destination plan loading" four letters a line),
+        # so the detail goes under the state instead.
+        narrow_services = self.size.width < 100
+        if narrow_services:
+            services_table.add_column()
+        else:
+            services_table.add_column(no_wrap=True, width=10)
+            services_table.add_column(overflow="fold")
         services_layout = (
             ("Gateway", "gateway"),
             ("Agent", "agent"),
@@ -8271,6 +8428,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             normalized = (state or "").strip().lower()
             dot = "●" if normalized in {"running", "active", "enabled", "clean", "allowed"} else "○"
             detail = detail_by_key.get(key, "") or ""
+            if narrow_services:
+                state_cell = Text(state or "unknown", style=color)
+                if detail:
+                    state_cell.append("\n" + detail, style=TOKENS.text_secondary)
+                services_table.add_row(
+                    Text(dot, style=color), Text(display_name, style=TOKENS.text_primary), state_cell
+                )
+                continue
             services_table.add_row(
                 Text(dot, style=color),
                 Text(display_name, style=TOKENS.text_primary),
@@ -9811,6 +9976,27 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             version=__version__,
         )
 
+    def _panel_table_shape(self) -> object:
+        """What besides its columns identifies the shared table's layout.
+
+        A change rebuilds the table instead of patching its rows. Setup's
+        task groups (and config sections) share one column set, and patching
+        rows kept the previous group's column widths painted on a real
+        terminal, cutting off a longer task name.
+        """
+
+        if self.active_panel != "setup":
+            return False
+        model = self.setup_model
+        if model.form_active:
+            return True
+        view = self._setup_view()
+        if view == "wizards":
+            return (view, setup_center.active_group(model))
+        if view == "config":
+            return (view, model.active_section)
+        return view
+
     def _render_panel_table(self) -> None:
         table = self.query_one("#panel-table", DataTable)
         if not self._table_columns:
@@ -9835,7 +10021,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._table_columns,
             self._table_rows,
             cursor_row,
-            self.active_panel == "setup" and self.setup_model.form_active,
+            self._panel_table_shape(),
         )
         if signature == self._last_table_signature:
             table.remove_class("hidden")
@@ -10029,18 +10215,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self.set_focus(None)
         elif self.focused is None:
             table.focus()
-        if (
-            self.active_panel == "setup"
-            and self._setup_view() == "wizards"
-            and cursor_row > 0
-            and setup_catalog.wizard_at(cursor_row - 1) is None
-        ):
-            # Keep a group's header row in view above its first task.
-            self.call_after_refresh(self._reveal_table_row, table, cursor_row - 1)
-
-    def _reveal_table_row(self, table: DataTable[Any], row: int) -> None:
-        if table.scroll_y > row:
-            table.scroll_to(y=row, animate=False)
 
     def _append_panel_table_row(
         self,
@@ -10136,18 +10310,183 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._append_panel_table_row(table, row)
         return True
 
+    # --- shared split layout (widgets/panel_split.py) ------------------------
+    #
+    # Three hooks, if-chains like the rest of the panel touchpoints. They run
+    # on every render (the 2 s refresh too), so they must be pure and cheap.
+
+    def _panel_nav(self, panel: str) -> tuple[NavItem, ...]:
+        """The navigation list for ``panel``; empty when it has none.
+
+        Shown left of the table from ``NAV_MIN_WIDTH`` columns. Narrower
+        terminals rely on the panel's own one-line switcher in ``#body``
+        (``_body_nav_switcher`` draws one from the same items).
+        """
+
+        if panel == "setup":
+            return self._setup_panel_nav()
+        if panel == "policies":
+            return self._policy_panel_nav()
+        return ()
+
+    def _panel_aside(self, panel: str) -> RenderableType | None:
+        """Detail for the selected row of ``panel``; None when it has none.
+
+        Shown right of the table from ``ASIDE_MIN_WIDTH`` columns, otherwise
+        in ``#detail-panel`` below the table when ``_detail_text()`` is
+        empty. Return ``Aside(title, body)`` to title the pane.
+        """
+
+        if panel == "setup":
+            return self._setup_panel_aside()
+        if panel == "policies":
+            return self._policy_panel_aside()
+        return None
+
+    def _select_panel_nav(self, panel: str, key: str) -> bool:
+        """Choose the nav item whose ``NavItem.key`` is ``key``.
+
+        Called for a click on the nav list or the body switcher; panels call
+        it from their own keys too. Return True when something changed (the
+        caller re-renders).
+        """
+
+        if panel == "setup":
+            return self._select_setup_nav(key)
+        if panel == "policies":
+            return self._select_policy_nav(key)
+        return False
+
+    def _body_nav_switcher(self, items: tuple[NavItem, ...], line: int) -> str:
+        """One-line switcher markup for body line ``line``; clicks select items."""
+
+        switcher = nav_switcher(items, max(20, self._body_width()))
+        self._nav_switcher_hit = (self.active_panel, line, switcher)
+        return switcher.markup
+
+    def _body_width(self) -> int:
+        # #body-panel has a 1-column margin and 2 columns of padding per side.
+        width = int(getattr(self.size, "width", 0) or 0)
+        return (width if width > 0 else 80) - 6
+
+    def _handle_nav_switcher_click(self, x: int, y: int) -> bool:
+        hit = self._nav_switcher_hit
+        if hit is None or self.help_open:
+            return False
+        panel, line, switcher = hit
+        if panel != self.active_panel or y != line:
+            return False
+        key = switcher.key_at(x)
+        if key is None:
+            return False
+        if self._select_panel_nav(panel, key):
+            self._render_chrome()
+        return True
+
+    @on(PanelNav.Selected)
+    def _on_panel_nav_selected(self, event: PanelNav.Selected) -> None:
+        event.stop()
+        if len(self.screen_stack) > 1 or self.help_open:
+            return
+        if self._select_panel_nav(self.active_panel, event.key):
+            self._render_chrome()
+
+    def _render_panel_split(self) -> None:
+        """Show the active panel's nav list and aside where the width allows."""
+
+        self._panel_aside_below = None
+        try:
+            split = self.query_one("#panel-split", Horizontal)
+            nav = self.query_one("#panel-nav", PanelNav)
+            aside_widget = self.query_one("#panel-aside", Static)
+            table = self.query_one("#panel-table", DataTable)
+        except NoMatches:
+            return
+        panel = self.active_panel
+        # The Overview and the help sheet fill the panel with #body instead.
+        idle = self.help_open or panel == "overview"
+        split.set_class(idle, "hidden")
+        items = () if idle else tuple(self._panel_nav(panel))
+        aside = None if idle else self._panel_aside(panel)
+        width = int(getattr(self.size, "width", 0) or 0)
+        layout = split_layout(width, has_nav=bool(items), has_aside=aside is not None)
+        split.set_class(layout.nav, "with-nav")
+        split.set_class(layout.aside_below, "aside-below")
+        nav.set_class(not layout.nav, "hidden")
+        table_title = ""
+        if layout.nav:
+            nav.show_items(items)
+            current = next((item for item in items if item.active), None)
+            table_title = rich_escape(current.label) if current is not None else ""
+        else:
+            nav.clear_items()
+        if (table.border_title or "") != table_title:
+            table.border_title = table_title or None
+        aside_widget.set_class(not layout.aside, "hidden")
+        if layout.aside and aside is not None:
+            title, body = split_aside(aside)
+            signature = (panel, title, body)
+            if signature != self._last_aside_signature:
+                aside_widget.border_title = rich_escape(title) if title else None
+                aside_widget.update(self._safe_body_renderable(body) if isinstance(body, str) else body)
+                self._last_aside_signature = signature
+        elif self._last_aside_signature is not None:
+            aside_widget.border_title = None
+            aside_widget.update("")
+            self._last_aside_signature = None
+        if layout.aside_below:
+            self._panel_aside_below = aside
+
+    def _hide_panel_split_parts(self, panel: str) -> None:
+        """Panel switch: drop the previous panel's nav, aside and titles."""
+
+        self._panel_aside_below = None
+        self._last_aside_signature = None
+        try:
+            split = self.query_one("#panel-split", Horizontal)
+            nav = self.query_one("#panel-nav", PanelNav)
+            aside_widget = self.query_one("#panel-aside", Static)
+            table = self.query_one("#panel-table", DataTable)
+            detail = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return
+        split.set_class(panel == "overview" or self.help_open, "hidden")
+        split.remove_class("with-nav", "aside-below")
+        nav.add_class("hidden")
+        nav.clear_items()
+        aside_widget.add_class("hidden")
+        aside_widget.border_title = None
+        table.border_title = None
+        detail.border_title = None
+        detail.remove_class("aside-below")
+
     def _render_detail_panel(self) -> None:
         panel = self.query_one("#detail-panel", VerticalScroll)
         body = self.query_one("#detail-panel-body", Static)
         detail = self._detail_text()
         self.detail_text = detail
-        if not detail:
+        # A panel's own detail wins; otherwise a narrow terminal shows the
+        # aside here (see _render_panel_split).
+        below = None if detail else self._panel_aside_below
+        panel.set_class(below is not None, "aside-below")
+        if not detail and below is None:
             if not panel.has_class("hidden"):
                 panel.add_class("hidden")
                 body.update("")
+            panel.border_title = None
             self._last_detail_signature = None
             return
         panel.remove_class("hidden")
+        if below is not None:
+            title, content = split_aside(below)
+            signature = (self.active_panel, "aside", title, content)
+            if signature != self._last_detail_signature:
+                panel.border_title = rich_escape(title) if title else None
+                body.update(self._safe_body_renderable(content) if isinstance(content, str) else content)
+                panel.scroll_home(animate=False)
+                self._last_detail_signature = signature
+            return
+        panel.border_title = None
         # Same idempotence guard as the body widget. Detail panes are
         # rendered identically every tick when nothing changed (e.g.
         # an alert row is selected and Activity is streaming); the
@@ -10174,11 +10513,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.active_panel == "alerts":
             return self.alerts_model.detail_text()
         if self.active_panel == "policies":
-            detail = self.policy_model.detail_text()
-            if not detail:
-                return ""
-            title, _, rest = detail.partition("\n")
-            return f"[bold #A78BFA]{rich_escape(title)}[/]\n{rich_escape(rest)}"
+            # The aside hook carries the Policies detail (right of the table,
+            # or below it once opened with i on a narrow terminal).
+            return ""
         if self.active_panel == "registries" and self.registries_model.detail_open:
             detail = self.registries_model.selected_detail_info()
             if detail is None:
@@ -10242,6 +10579,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 body_widget.update(self._safe_body_renderable(text))
                 self._last_body_signature = body_signature
         self._render_panel_controls()
+        self._render_panel_split()
         self._render_detail_panel()
 
     def _active_table_cursor(self) -> int:
@@ -10818,10 +11156,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
             )
         if self.setup_model.goal_active:
-            return (
-                ("Goal", "What it does"),
-                tuple((goal.label, goal.summary) for goal in self.setup_model.goals),
-            )
+            columns = ("Goal", "What it does")
+            labels = [goal.label for goal in self.setup_model.goals]
+            # On a narrow terminal long goal names ("Set up a proxy connector
+            # with the local stack") wrap too, so the description keeps room
+            # to be read in full.
+            width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+            if width and width - max(map(len, labels), default=0) - 12 < 36:
+                labels = ["\n".join(textwrap.wrap(label, 30)) if len(label) > 30 else label for label in labels]
+            rows = tuple(zip(labels, (goal.summary for goal in self.setup_model.goals), strict=True))
+            return columns, self._wrap_last_table_column(columns, rows)
         if self.setup_model.form_active:
             columns = ("Field", "Value", "Kind", "Hint")
             rows = tuple(
@@ -10838,11 +11182,28 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if not self.setup_model.sections:
                 return ("Field", "Value", "Hint"), ()
             section = self.setup_model.sections[self.setup_model.active_section]
+            if self._setup_nav_shown():
+                # Next to the section nav the focused field's hint is in the
+                # body (or the aside), so the table keeps Field and Value room.
+                return (
+                    ("Field", "Value", "Validation"),
+                    tuple(
+                        (
+                            _truncate_ellipsis(field.label, 34),
+                            _config_display_value(field),
+                            _truncate_ellipsis(_validation_label(field), 30),
+                        )
+                        for field in section.fields
+                    ),
+                )
+            # Long group headers (".. PLUGIN ACTIONS (severity -> …) ..") would
+            # size the Field column and push values off an 80-column screen;
+            # the focused field's full label is in the body line above.
             return (
                 ("Field", "Value", "Validation", "Hint"),
                 tuple(
                     (
-                        field.label,
+                        _truncate_ellipsis(field.label, 34),
                         _config_display_value(field),
                         _validation_label(field),
                         field.hint,
@@ -10850,32 +11211,52 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     for field in section.fields
                 ),
             )
-        # Wizard list: group header rows, then the group's tasks. The
-        # Description column needs >= 100 columns, Command >= 120, so at
-        # 80x24 the task names stay readable.
-        width = self._setup_width()
-        show_description = width >= 100
-        show_command = width >= 120
-        infos = {info.wizard: info for info in self.setup_model.wizard_infos()}
-        columns: list[str] = ["Task", "Status"]
-        if show_command:
-            columns.append("Command")
-        if show_description:
-            columns.append("Description")
-        rows: list[tuple[str, ...]] = []
-        for display in setup_catalog.display_rows():
-            if display.wizard is None:
-                cells: list[str] = [f"── {display.label}", ""]
-                cells.extend("" for _ in range(len(columns) - 2))
-            else:
-                info = infos[display.wizard]
-                cells = [f"  {display.label}", info.status]
-                if show_command:
-                    cells.append("defenseclaw " + " ".join(info.command))
-                if show_description:
-                    cells.append(info.description)
-            rows.append(tuple(cells))
-        return tuple(columns), tuple(rows)
+        # Task list: the selected group's tasks (the nav or the body switcher
+        # picks the group). What a task runs is in its detail.
+        return ("Task", "Status"), setup_center.task_rows(self.setup_model, self._setup_task_statuses())
+
+    def _setup_panel_nav(self) -> tuple[NavItem, ...]:
+        """Setup's side of ``_panel_nav``: task groups, or config sections."""
+
+        if self.first_run_model.active:
+            return ()
+        view = self._setup_view()
+        if view == "config":
+            return setup_center.config_nav(self.setup_model)
+        if view in {"wizards", "goals"}:
+            return setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+        return ()
+
+    def _setup_nav_shown(self) -> bool:
+        """True when the nav list is on screen (it replaces the body switcher)."""
+
+        if self._setup_width() < NAV_MIN_WIDTH or self.first_run_model.active:
+            return False
+        return self._setup_view() in {"wizards", "goals", "config"}
+
+    def _setup_panel_aside(self) -> RenderableType | None:
+        """Setup's side of ``_panel_aside``.
+
+        The task list always has a detail (below the table when narrow). The
+        config editor's body already describes the focused field, so it only
+        uses the pane on the right; the goal menu's table needs the width.
+        """
+
+        if self.first_run_model.active:
+            return None
+        view = self._setup_view()
+        if view == "wizards":
+            return setup_center.task_aside(self.setup_model, self._setup_task_statuses())
+        if view == "config" and self._setup_width() >= ASIDE_MIN_WIDTH:
+            return setup_center.config_aside(self.setup_model)
+        return None
+
+    def _select_setup_nav(self, key: str) -> bool:
+        """Setup's side of ``_select_panel_nav`` (a nav or switcher click)."""
+
+        if self.first_run_model.active:
+            return False
+        return setup_center.select_nav(self.setup_model, key)
 
     def _setup_width(self) -> int:
         width = int(getattr(self.size, "width", 0) or 0)
@@ -10888,16 +11269,31 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         escaped = rich_escape(plain)
         return "[" + style + "]" + escaped + "[/]" if style else escaped
 
-    def _setup_readiness_summary(self) -> str:
-        checks = self.setup_model.readiness_checks
-        ok = sum(1 for check in checks if check.status == "pass")
-        attention = len(checks) - ok
-        parts = [f"{ok} ok"]
+    def _setup_task_statuses(self) -> dict[SetupWizard, setup_catalog.TaskStatus]:
+        return setup_center.task_statuses(self.setup_model)
+
+    def _setup_header(self) -> str:
+        """``Setup · 19 ok · 1 needs attention — i readiness details``.
+
+        Tasks by status (see setup_catalog.task_status), then the ``i`` hint
+        when it fits.
+        """
+
+        statuses = self._setup_task_statuses()
+        ok, attention = setup_center.header_counts(statuses)
+        parts = [(f"{ok} ok", TOKENS.accent_green)]
         if attention:
-            parts.append(f"{attention} need{'s' if attention == 1 else ''} attention")
+            parts.append((f"{attention} need{'s' if attention == 1 else ''} attention", TOKENS.accent_amber))
         if self.setup_model.restart_queue.pending:
-            parts.append("gateway restart queued")
-        return " · ".join(parts)
+            parts.append(("gateway restart queued", TOKENS.accent_amber))
+        room = self._body_width() - len("Setup · ")
+        plain = " · ".join(text for text, _style in parts)
+        tail = next(
+            (tail for tail in (" — i readiness details", " — i details", "") if len(plain) + len(tail) <= room),
+            "",
+        )
+        counts = " · ".join("[" + style + "]" + rich_escape(text) + "[/]" for text, style in parts)
+        return f"[bold {TOKENS.accent_cyan}]Setup[/] · {counts}" + (f"[{TOKENS.text_muted}]{tail}[/]" if tail else "")
 
     def _setup_body_text(self) -> str:
         self._chip_click_segments = []
@@ -10945,18 +11341,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return f"{head}\n{will_run}\n{third}"
         if model.mode == "config":
             return self._setup_config_body_text()
-        info = model.active_wizard_info()
-        label = setup_catalog.wizard_label(info.wizard)
-        if info.status == "unsupported":
-            second = f"{label}: {model.wizard_unavailable_reason(info.wizard)}"
-        else:
-            second = f"{label} — {info.description}"
-        return (
-            "[bold #22D3EE]Setup[/] · "
-            + self._setup_line(f"{self._setup_readiness_summary()} — i details", indent=15)
-            + "\n"
-            + self._setup_line(second, style=TOKENS.text_secondary)
-        )
+        head = self._setup_header()
+        if self._setup_nav_shown():
+            return head
+        # No room for the nav list: a one-line group switcher instead.
+        return head + "\n" + self._body_nav_switcher(self._setup_panel_nav(), 1)
 
     def _setup_config_body_text(self) -> str:
         model = self.setup_model
@@ -10964,14 +11353,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if section is None:
             return "[bold #22D3EE]Config[/] · no sections"
         hints = model.save_restart_hints()
-        position, total = setup_catalog.section_position(model.sections, model.active_section)
         blocking = len(getattr(hints, "blocking_errors", hints.validation_errors))
-        crumb = f"{section.name} ({position}/{total}) · {hints.changes} changed · {blocking} blocking"
-        head = (
-            "[bold #22D3EE]Config[/] · "
-            + self._setup_line(crumb, indent=7 + 9 + len(_SETUP_SECTION_NAV) + 3)
-            + f"   [{TOKENS.accent_cyan}]{rich_escape(_SETUP_SECTION_NAV)}[/]"
-        )
+        counts = f"{hints.changes} changed · {blocking} blocking"
+        if self._setup_nav_shown():
+            # The nav list names the open section; no breadcrumb needed.
+            head = "[bold #22D3EE]Config[/] · " + self._setup_line(counts, indent=16)
+        else:
+            position, total = setup_catalog.section_position(model.sections, model.active_section)
+            crumb = f"{section.name} ({position}/{total}) · {counts}"
+            head = (
+                "[bold #22D3EE]Config[/] · "
+                + self._setup_line(crumb, indent=7 + 9 + len(_SETUP_SECTION_NAV) + 3)
+                + f"   [{TOKENS.accent_cyan}]{rich_escape(_SETUP_SECTION_NAV)}[/]"
+            )
         focused = model.focused_row_metadata()
         name = f"{focused.label} ({focused.key})" if focused.key else focused.label
         if focused.validation.severity == "error" and focused.validation.message:
@@ -10986,7 +11380,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             facts.append(f"Gateway restart queued: {hints.restart_reason}" if hints.restart_reason else "Gateway restart queued")
         if hints.saved_hint:
             facts.append(hints.saved_hint)
-        lines = [head, second]
+        # From the aside width up, the aside describes the focused field.
+        lines = [head] if self._setup_width() >= ASIDE_MIN_WIDTH else [head, second]
         if facts:
             lines.append(self._setup_line(" · ".join(facts), style="#FBBF24"))
         return "\n".join(lines)
@@ -11000,7 +11395,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return getattr(self.setup_model, "form_cursor", 0)
         if self.setup_model.mode == "config":
             return self.setup_model.active_line
-        return setup_catalog.row_for(self.setup_model.active_wizard)
+        return setup_catalog.task_row(self.setup_model.active_wizard)
 
     def _set_setup_cursor(self, row: int) -> None:
         if row < 0:
@@ -11016,10 +11411,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 section = self.setup_model.sections[self.setup_model.active_section]
                 self.setup_model.active_line = min(row, max(0, len(section.fields) - 1))
         else:
-            # A group header row isn't a task: land on the nearest task in
-            # the direction the cursor was moving.
-            current = setup_catalog.row_for(self.setup_model.active_wizard)
-            self.setup_model.active_wizard = setup_catalog.nearest_wizard(row, prefer_down=row >= current)
+            wizard = setup_catalog.task_at(setup_center.active_group(self.setup_model), row)
+            if wizard is not None:
+                self.setup_model.active_wizard = wizard
 
     def _move_setup_form_cursor(self, delta: int) -> None:
         fields = self.setup_model.form_fields
@@ -11097,17 +11491,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return section.fields[self.setup_model.active_line]
 
     def _active_overlay_blocks_table(self) -> bool:
+        """True when ↑/↓ on the focused table belong to the panel handler."""
+
         if self.active_panel == "setup":
-            return self.setup_model.form_active or self.setup_model.goal_active
+            # The goal menu and form skip rows; the task list walks on into
+            # the next group, past the end of the table.
+            return self.setup_model.form_active or self.setup_model.goal_active or self._setup_view() == "wizards"
         return False
 
     def _handle_setup_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
         """Route a Setup key. ``character`` is the raw printable character
         (case and spaces intact) when the key typed one."""
 
-        # ``?`` is the global help overlay in every Setup view; it never
-        # types into a field.
-        if key == "?":
+        # ``?`` (help) and ``:`` (command palette) are global in every Setup
+        # view; they never type into a field.
+        if key in {"?", ":"}:
             return SetupPanelAction(False)
         if self.setup_model.goal_active:
             return self._handle_setup_goal_key(key)
@@ -11132,8 +11530,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return self._handle_setup_wizard_key(key)
 
     def _handle_setup_wizard_key(self, key: str) -> SetupPanelAction:
-        # Movement follows the grouped display order; group headers are
-        # skipped. Digits are left alone so they always switch panels.
+        # Up/down walk the tasks in display order and carry on into the next
+        # or previous group; left/right switch group. Digits are left alone
+        # so they always switch panels.
         if key in {"up", "k"}:
             self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, -1)
             return SetupPanelAction(True)
@@ -11141,10 +11540,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
         if key in {"left", "["}:
-            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, -1, wrap=True)
+            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, -1)
             return SetupPanelAction(True)
         if key in {"right", "]"}:
-            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1, wrap=True)
+            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
         if key == "i":
             return SetupPanelAction(True, open_picker="detail")
@@ -11576,7 +11975,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # by _derive_command_label, e.g. "defenseclaw setup claudecode".
         if cancelled_label.startswith("defenseclaw "):
             argv = tuple(cancelled_label.split()[1:])
-            if argv and argv[0] in {"setup", "sandbox", "registry", "keys"}:
+            if argv and argv[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(argv, success=False)
         self._refresh_hint()
 
@@ -11584,6 +11983,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if binary != "defenseclaw" or not args:
             return
         command = args[0]
+        if command in WIZARD_COMMAND_FAMILIES:
+            # Every family a Setup task runs, guardrail / agent / acp too:
+            # those tasks' rows otherwise kept spinning "running".
+            self.setup_model.mark_wizard_complete(args, success=True)
         if command == "init":
             self.first_run_model.active = False
             self.active_panel = "overview"
@@ -11591,17 +11994,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         elif command == "setup":
             self._refresh_cached_config()
             self.setup_model.clear_restart_queue()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "keys":
             await self._load_setup_credentials()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command in {"sandbox", "registry"}:
             self._refresh_cached_config()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "doctor":
             self._load_doctor_cache()
         elif command == "policy" or (
-            command == "guardrail" and len(args) > 1 and args[1] in {"use-pack", "enable", "disable"}
+            command == "guardrail"
+            and len(args) > 1
+            and args[1] in {"use-pack", "enable", "disable", "mode", "block-at", "alert-at", "hilt", "protection"}
         ):
             if command == "guardrail":
                 self._refresh_cached_config()
@@ -11817,6 +12219,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)
         self.policy_model.set_config(new_cfg)
+        if self.policy_model.loaded:
+            # Scope postures (mode, approval, packs) come from config.yaml.
+            self._schedule_policy_load()
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
         if (
@@ -14367,14 +14772,11 @@ _SETUP_VIEW_TITLES = {
 # Tab exactly; test_setup_keys.py checks these against the Setup keymaps.
 _SETUP_BUTTON_KEYS = {
     "setup-mode-wizards": "w",
-    "setup-mode-config": "c",
-    "setup-open": "enter",
     "setup-edit-list": "E",
     "setup-save": "S",
     "setup-revert": "R",
     "setup-restart": "G",
     "setup-clear-restart": "C",
-    "setup-refresh-credentials": "r",
     "setup-wizard-run": "ctrl+r",
     "setup-wizard-cancel": "esc",
     "setup-wizard-prev": "shift+tab",
@@ -14425,6 +14827,12 @@ def _styled_cell(column: str, value: str) -> Text:
     text = Text(value)
     normalized = value.strip().lower()
     column_key = column.strip().lower()
+    if column_key == "status" and (glyph_style := setup_center.glyph_style(value)):
+        # Setup task states: ✓ set up, ! needs attention, ○ not set up, – n/a.
+        text.stylize(glyph_style)
+        if value.startswith("!"):
+            text.stylize("bold")
+        return text
     if column_key in {"state", "status", "active", "enabled"} or normalized in {
         "active",
         "allowed",

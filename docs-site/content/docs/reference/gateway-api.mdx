@@ -602,7 +602,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway`, `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, and `daemon_uid` (the uid the daemon runs as; absent on Windows). |
+| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, and `daemon_uid` (the uid the daemon runs as; absent on Windows). |
 | `GET` | `/api/v1/sandbox/sandboxes` | — | `{"sandboxes": [Sandbox]}` |
 | `POST` | `/api/v1/sandbox/sandboxes` | `CreateRequest` | `Sandbox` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
@@ -644,7 +644,9 @@ A `Sandbox` carries its `name` and OpenShell `id`, the `harness`, its
 `phase` (lowercase OpenShell phase such as `ready` or `stopped`, or `missing`
 when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
 `profile`, `network_mode`, `approvals`, and `yolo`. It also carries
-`workdir_mode` (`mount` or `copy`), `project`, and `workdir`, the image and
+`workdir_mode` (`mount` or `copy`), `project`, and `workdir`, the image
+(`image`, `image_id`, and on a MicroVM gateway the `run_image` and
+`run_image_id` it boots, which carries its run's harness settings) and
 `tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
 plain reason, tamper counts, and whether hooks are `silent` or
 `unreachable`), `endpoints` (the last result of each credentialed endpoint),
@@ -687,11 +689,27 @@ with, against the current config) or the run options `harness`, `pack`,
 `profile`, `project`, `copy`, `safe`, `yolo`, and `unmask` (repeatable).
 The `Explain` response has the `pack`, `pack_source`, and `pack_digest`, the
 `profile`, `network_mode`, and `approvals`, the `admin` status, `settings`,
-and `violations`.
+and `violations`. Before a create on a MicroVM gateway, `vm_first_boot` says
+the image the sandbox would boot has no prepared MicroVM disk yet, so its
+first start takes about a minute.
+
+For a harness whose run files depend on the create request (Claude Code,
+Codex), `run=true` describes that request with the following parameters:
+- `run_env=KEY=VALUE` (repeatable): the `env` variables the run files read.
+- `run_env_withheld=KEY` (repeatable): such a variable whose value is not
+  sent because it may be a secret. The answer then counts as a first boot.
+- `run_credential=NAME` (repeatable): the credential names, never their
+  values.
+- `run_llm_profile` and `run_bedrock_region`: the model profile and region.
+
+Without `run`, the daemon uses the newest sandbox of the harness.
 
 Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `admin`,
-or `default`), `origin` (such as `openshell.admin.min_profile`), and, for a
-clamped setting, the value `requested`. `admin` has `configured`,
+`gateway`, or `default`), `origin` (such as `openshell.admin.min_profile`),
+and, for a clamped setting, the value `requested`. `gateway` is the compute
+driver of the OpenShell gateway (origin `openshell.gateway.compute_driver`):
+OpenShell's MicroVM driver mounts no host folders, so it runs every project
+on a copy. `admin` has `configured`,
 `authority` (`authoritative` in `managed_enterprise`, otherwise `advisory`),
 and `detail`.
 
@@ -745,12 +763,12 @@ starts with "blocked by your organization's DefenseClaw policy".
 | 403 | `policy_violation` | The pack, the profile, or a DefenseClaw invariant refused it. |
 | 404 | `not_found` | No such sandbox, approval, or route. |
 | 409 | `conflict` | The sandbox exists already or is in the wrong phase, another sandbox already mounts the folder (or one inside or around it) live, or an undo would revert a folder another running sandbox mounts. |
-| 409 | `needs_copy` | The project cannot be mounted live (a linked worktree, `.git` as a symbolic link, or a git directory outside the folder); `detail` says why. `sandbox run` then creates the sandbox in copy mode. |
+| 409 | `needs_copy` | The project cannot be mounted live (a linked worktree, `.git` as a symbolic link, a git directory outside the folder, or a gateway whose compute driver mounts no host folders, when the request staged no copy); `detail` says why. `sandbox run` then creates the sandbox in copy mode. |
 | 409 | `image_unavailable` | No hook-checked harness image, and building one was refused or failed. |
-| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration. |
+| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration, or the sandbox it made does not run as DefenseClaw prepared it (the check after ready on the MicroVM driver: the identity the workload runs as, its capabilities, and DefenseClaw's hook and settings files). The sandbox is deleted, or stopped again after a start. |
 | 429 | `unavailable` | Too many activity streams are open. |
 | 502 | `upstream_error` | An OpenShell call failed. |
-| 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available. |
+| 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available, or (MicroVM driver) the volume of its image cache lacks the room to prepare the disk of an image the sandbox is the first to boot: the message names what is free and what is needed. |
 | 504 | `unavailable` | The request was cancelled or timed out. |
 | 500 | `internal` | Anything else. |
 

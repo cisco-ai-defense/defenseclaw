@@ -21,6 +21,8 @@ import (
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
 // sandboxClient decorates the SDK fake's sandbox store with error
@@ -34,6 +36,9 @@ var _ v1.SandboxInterface = (*sandboxClient)(nil)
 
 func (s *sandboxClient) Create(ctx context.Context, workspace, name string, spec *types.SandboxSpec, labels map[string]string, opts ...types.CreateOptions) (*types.Sandbox, error) {
 	if err := s.f.enter(MethodCreateSandbox); err != nil {
+		return nil, err
+	}
+	if err := s.f.checkDriverConfig(spec); err != nil {
 		return nil, err
 	}
 	sb, err := s.inner.Create(ctx, workspace, name, spec, labels, opts...)
@@ -53,6 +58,34 @@ func (s *sandboxClient) Create(ctx context.Context, workspace, name string, spec
 		}}
 	}
 	return sb, nil
+}
+
+// checkDriverConfig refuses a template driver_config the gateway's compute
+// driver does not accept. The vm driver's schema holds only
+// gpu_device_ids, and it rejects unknown fields, so a docker mount request
+// never reaches a MicroVM. The docker driver's is not modelled.
+func (f *Fake) checkDriverConfig(spec *types.SandboxSpec) error {
+	f.mu.Lock()
+	info := f.gatewayInfo
+	f.mu.Unlock()
+	if d, err := openshell.GatewayDriver(&info); err != nil || d.Name != openshell.DriverVM || spec == nil || spec.Template == nil {
+		return nil
+	}
+	for key, value := range spec.Template.DriverConfig {
+		if key != string(openshell.DriverVM) {
+			return statusErr(types.ErrorInvalidArgument, "driver_config: unknown driver key %q (this gateway runs the vm driver)", key)
+		}
+		cfg, ok := value.(map[string]any)
+		if !ok && value != nil {
+			return statusErr(types.ErrorInvalidArgument, "driver_config.vm: expected an object")
+		}
+		for field := range cfg {
+			if field != "gpu_device_ids" {
+				return statusErr(types.ErrorInvalidArgument, "driver_config.vm: unknown field %q", field)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *sandboxClient) Get(ctx context.Context, workspace, name string) (*types.Sandbox, error) {

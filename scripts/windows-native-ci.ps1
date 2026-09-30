@@ -1611,6 +1611,8 @@ function Stage-PackageData(
     foreach ($name in @('default', 'strict', 'permissive')) {
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
     }
+    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\guardrail\tool-chains.json') -Destination (Join-Path $data 'policies\guardrail') -Force
+    Copy-Tree (Join-Path $WorkspaceRoot 'policies\guardrail-use-cases') (Join-Path $data 'policies\guardrail-use-cases')
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
     $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
     $targetRegistry = Join-Path $data 'envvars\registry.json'
@@ -1846,6 +1848,13 @@ function Invoke-BuildArtifacts {
             'defenseclaw/_data/plugin/extension-runtime-fingerprint.json',
             'defenseclaw/_data/skills/codeguard/SKILL.md',
             'defenseclaw/_data/llm/model_catalog.json',
+            'defenseclaw/_data/policies/guardrail/tool-chains.json',
+            'defenseclaw/_data/policies/guardrail-use-cases/cloud-production-protection/rules/cloud-production.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/database-destruction-protection/rules/database-destruction.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/infrastructure-destruction-protection/rules/infrastructure-destruction.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/kubernetes-production-protection/rules/kubernetes-production.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/privacy-high-assurance/rules/enterprise-data.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/ssh-authorized-keys-protection/README.md',
             'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',
             'defenseclaw/_data/config/v8/observability.yaml',
             'defenseclaw/_data/config/v8/observability.md',

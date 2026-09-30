@@ -82,7 +82,7 @@ from defenseclaw.tui.services.cli_choices import (
 from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
-from defenseclaw.tui.services.sandbox_state import DEFAULT_SANDBOX_HARNESSES, SANDBOX_HARNESS_SPECS
+from defenseclaw.tui.services.sandbox_state import DEFAULT_SANDBOX_HARNESSES, SANDBOX_HARNESS_SPECS, compute_driver
 from defenseclaw.tui.services.setup_state import (
     OPENSHELL_INHERIT_CHOICE,
     ConfigDiffEntry,
@@ -211,6 +211,27 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.REDACTION: ("setup", "redaction"),
     SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
+
+# First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
+# …): a finished or failed command of one of these clears a task's
+# "running" badge (``mark_wizard_complete``).
+WIZARD_COMMAND_FAMILIES: frozenset[str] = frozenset(command[0] for command in WIZARD_COMMANDS.values() if command)
+
+
+def _wizard_action_family(wizard: SetupWizard) -> tuple[str, ...]:
+    """The argv prefix a wizard's sibling actions share (``()``: no fallback).
+
+    Its WIZARD_COMMANDS entry without the action word: ``agent discovery``
+    for ``agent discovery enable``, ``guardrail`` for ``guardrail status``.
+    A bare ``setup`` family is shared by most tasks, so it never matches, and
+    the Sandbox task finishes only on its own setup and doctor runs.
+    """
+
+    command = WIZARD_COMMANDS.get(wizard, ())
+    family = command[:-1] if len(command) >= 2 else command
+    if wizard == SetupWizard.SANDBOX or family in {(), ("setup",)}:
+        return ()
+    return family
 
 # The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
 ADMIN_POLICY_MESSAGE = "blocked by your organization's DefenseClaw policy"
@@ -615,6 +636,8 @@ class SetupPanelModel:
         external: bool = False,
     ) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
+        active_field = self.current_field()
+        active_key = active_field.key if active_field is not None else ""
         preserve_config_draft = external and self.mode == "config" and self.has_changes()
         preserve_wizard_draft = external and self.form_active
         self.config = cfg
@@ -628,7 +651,9 @@ class SetupPanelModel:
                         self.active_section = index
                         break
             self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
-            self.active_line = self.first_editable_line()
+            # Keep the cursor on the field just saved rather than jumping to
+            # the top of the section.
+            self.active_line = self._line_for_key(active_key)
             self.config_scroll = 0
         self.disk_change_pending = preserve_config_draft or preserve_wizard_draft
         # Readiness rows depend on cfg.gateway / cfg.guardrail / cfg.audit /
@@ -1107,6 +1132,14 @@ class SetupPanelModel:
                 for section in self.sections
             )
 
+    def _line_for_key(self, key: str) -> int:
+        section = self.current_section()
+        if key and section is not None:
+            for index, field in enumerate(section.fields):
+                if field.kind != "header" and field.key == key:
+                    return index
+        return self.first_editable_line()
+
     def first_editable_line(self) -> int:
         if not self.sections:
             return 0
@@ -1405,8 +1438,10 @@ class SetupPanelModel:
         except Exception:  # noqa: BLE001
             command = WIZARD_COMMANDS.get(self.active_wizard, ())
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
+        from defenseclaw.tui.command_line import display_argv  # the CLI tree; keep it off the model import
+
         masked = mask_wizard_secret_values(self.form_fields, args)
-        return "defenseclaw " + " ".join(masked) if masked else "defenseclaw"
+        return "defenseclaw " + display_argv(masked) if masked else "defenseclaw"
 
     def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
@@ -1447,6 +1482,21 @@ class SetupPanelModel:
             # The Sandbox wizard's doctor action; other sandbox commands
             # (enable, disable, ...) never mark the wizard.
             best = SetupWizard.SANDBOX
+        # A wizard with several actions runs sibling commands its
+        # WIZARD_COMMANDS prefix doesn't cover (Guardrail actions runs
+        # guardrail block-message / hilt / fail-mode, AI discovery runs
+        # disable, Splunk dashboards runs destroy): the one running wizard
+        # whose action family matches more of the argv than any prefix did
+        # finishes, or its row spins forever.
+        running = [
+            (wizard, len(family))
+            for wizard, status in self.wizard_status.items()
+            if status == "running..."
+            and (family := _wizard_action_family(wizard))
+            and tuple(args[: len(family)]) == family
+        ]
+        if len(running) == 1 and running[0][1] > best_len:
+            best = running[0][0]
         if best is None:
             return
         if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
@@ -4633,6 +4683,9 @@ class SandboxMachineCheck:
     openshell_needed: bool = False
     openshell_detail: str = ""
     error: str = ""
+    # On macOS, an OpenShell installed another way than the Homebrew
+    # formula, which setup refuses (it would install nothing over it).
+    openshell_refused: bool = False
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
@@ -4643,7 +4696,14 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
 
     OpenShell counts as needed exactly when ``sandbox setup`` would install
     it: the CLI is missing or unsupported, or the gateway service or its
-    version check failed (sandboxcli/setup.go).
+    version check failed (sandboxcli/setup.go). On a MicroVM (vm) gateway,
+    or a Mac whose docker driver has no Landlock (which setup switches to
+    MicroVMs), a failed ``vm-driver`` check counts too: setup installs
+    e2fsprogs or has the driver signed with the same consent. A MicroVM
+    mounts no host folders, so the bind-mount check is left out there. On
+    macOS an OpenShell installed another way than the Homebrew formula is
+    refused, as setup refuses it (it would install nothing over it), and a
+    gateway service that warns is shown with its detail.
     """
 
     if not isinstance(report, Mapping):
@@ -4660,6 +4720,16 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     def detail(check_id: str) -> str:
         return str((checks.get(check_id) or {}).get("detail") or "").strip()
 
+    # The driver the gateway runs, else the one its files configure
+    # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
+    # one). On a Mac whose docker driver has no Landlock (Docker Desktop's
+    # VM) setup switches the gateway to MicroVMs, which is its default
+    # (sandboxcli/setup.go): the MicroVM driver's needs count then, and no
+    # bind mounts do.
+    driver = str(report.get("driver") or report.get("configured_driver") or "").strip()
+    on_microvm = not compute_driver(driver).host_mounts
+    mac = detail("platform").startswith("darwin/")
+    microvm = on_microvm or (mac and status("landlock") != "pass")
     parts: list[str] = []
     docker = status("docker")
     if docker:
@@ -4667,15 +4737,35 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         text = f"Docker {version}".strip() if docker == "pass" else f"Docker: {detail('docker') or docker}"
         parts.append(f"{_DOCTOR_GLYPHS.get(docker, '·')} {text}")
     landlock = status("landlock")
-    if landlock in _DOCTOR_GLYPHS:
+    if landlock in _DOCTOR_GLYPHS and on_microvm:
+        # The MicroVM's own kernel enforces it (sandboxcli.machineLine).
+        parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock (MicroVM)")
+    elif landlock in _DOCTOR_GLYPHS:
         parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock" + (f" {detail('landlock')}" if landlock == "pass" else ""))
     cli = status("openshell-cli")
-    needed = cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
-    if not needed:
-        version = str(report.get("cli_version") or "").strip()
-        name = f"OpenShell {version}" if version else "OpenShell"
+    service = report.get("service")
+    service = service if isinstance(service, Mapping) else {}
+    # On macOS setup refuses an OpenShell installed another way than the
+    # Homebrew formula whose service runs the gateway
+    # (DoctorReport.OpenShellOutsideFormula): it would install nothing.
+    refused = cli not in {"", "fail"} and service.get("manager") == "brew" and not service.get("installed")
+    needed = not refused and (
+        cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
+    )
+    version = str(report.get("cli_version") or "").strip()
+    name = f"OpenShell {version}" if version else "OpenShell"
+    if refused:
+        openshell = (
+            f"{name} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
+            "whose service DefenseClaw runs the gateway through: stop its gateway and remove it, then install OpenShell here"
+        )
+        parts.append(f"✗ {name} is not from Homebrew's nvidia/openshell formula")
+    elif not needed:
         openshell = f"{name} is installed"
-        parts.append(f"✓ {name}")
+        if status("gateway-service") == "warn":
+            parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
+        else:
+            parts.append(f"✓ {name}")
     elif cli in {"", "fail"} and "not on PATH" in detail("openshell-cli"):
         openshell = "OpenShell is not installed"
         parts.append("✗ OpenShell not installed")
@@ -4686,7 +4776,15 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         failed = "gateway-service" if status("gateway-service") == "fail" else "gateway-version"
         openshell = f"the OpenShell gateway needs attention: {detail(failed) or 'not running'}"
         parts.append("✗ OpenShell gateway " + ("not running" if failed == "gateway-service" else "needs an update"))
-    mounts = status("bind-mounts")
+    vm_driver = status("vm-driver") if microvm else ""
+    if vm_driver == "pass":
+        parts.append("✓ MicroVM driver")
+    elif vm_driver in {"warn", "fail"}:
+        parts.append(f"{_DOCTOR_GLYPHS[vm_driver]} MicroVM driver: {detail('vm-driver') or vm_driver}")
+    if vm_driver == "fail" and not needed and not refused:
+        needed = True
+        openshell = f"the MicroVM driver needs attention: {detail('vm-driver') or 'not ready'}"
+    mounts = "" if microvm else status("bind-mounts")
     if mounts == "pass":
         parts.append("✓ bind mounts")
     elif mounts in {"warn", "fail"}:
@@ -4694,7 +4792,9 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
     # One check per line: joined on one line, the checks after the first
     # few were cut off at 80 columns.
-    return SandboxMachineCheck(summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell)
+    return SandboxMachineCheck(
+        summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell, openshell_refused=refused
+    )
 
 
 def _sandbox_allowed_harnesses(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -4716,7 +4816,9 @@ def sandbox_wizard_fields(
     the answers are the consent. ``machine`` is the doctor's check of this
     machine; until it answers, Install OpenShell stays off. On macOS there is
     no telemetry question: the Homebrew gateway does not read gateway.env,
-    so setup cannot turn OpenShell's telemetry off there.
+    so setup cannot turn OpenShell's telemetry off there. Nor is there a
+    mounts question: setup runs macOS sandboxes in OpenShell MicroVMs, which
+    mount no host folders, so every run there works on a copy.
     """
 
     configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
@@ -4768,12 +4870,18 @@ def sandbox_wizard_fields(
         if macos
         else "(uses sudo; the terminal asks for your password)"
     )
+    # On macOS setup installs e2fsprogs, which the MicroVM driver formats
+    # its disks with, under the same consent as OpenShell (sandboxcli/setup.go).
+    e2fsprogs = " Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
     if machine is None:
         machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
         install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
     elif machine.error:
         machine_line = machine.summary
         install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_refused:
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}."
     elif machine.openshell_needed:
         machine_line = machine.summary
         install = "yes"
@@ -4781,6 +4889,8 @@ def sandbox_wizard_fields(
     else:
         machine_line = machine.summary
         install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
+    if macos:
+        install_hint += e2fsprogs
     fields += [
         WizardFormField("Credentials", "section", hint=_sandbox_credential_summary(), visible_when=is_setup),
         WizardFormField(
@@ -4800,20 +4910,36 @@ def sandbox_wizard_fields(
             hint=install_hint,
             visible_when=is_setup,
         ),
-        WizardFormField(
-            "Mount Project Folder",
-            "bool",
-            no_flag="--no-mounts",
-            value="yes",
-            default="yes",
-            hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
-            "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
-            "Turning bind mounts on " + _GATEWAY_RESTART_NOTE,
-            visible_when=is_setup,
-        ),
     ]
-    if not macos:
+    if macos:
+        # Setup on macOS asks no mounts question: it runs sandboxes in
+        # MicroVMs, which mount no host folders (--no-mounts would do nothing).
         fields.append(
+            WizardFormField(
+                "MicroVMs",
+                "section",
+                value="every run works on a copy",
+                hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
+                'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream) and restarts it '
+                "once. MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
+                "and 5 GB).",
+                visible_when=is_setup,
+            )
+        )
+    else:
+        fields += [
+            WizardFormField(
+                "Mount Project Folder",
+                "bool",
+                no_flag="--no-mounts",
+                value="yes",
+                default="yes",
+                hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
+                "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
+                "Turning bind mounts on " + _GATEWAY_RESTART_NOTE,
+                visible_when=is_setup,
+            ),
             WizardFormField(
                 "Disable OpenShell Telemetry",
                 "bool",
@@ -4822,8 +4948,8 @@ def sandbox_wizard_fields(
                 default="yes",
                 hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + _GATEWAY_RESTART_NOTE,
                 visible_when=is_setup,
-            )
-        )
+            ),
+        ]
     fields += [
         WizardFormField(
             "Shell Wrappers",
@@ -7142,6 +7268,22 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "Tool-call override; blank=inherit.",
         ),
         _field(cfg, "Rule Pack Dir", "guardrail.rule_pack_dir", hint="Path to active rule pack."),
+        _field(
+            cfg,
+            "Tool Calls Block At",
+            "guardrail.block_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity a tool call blocks at; blank=the rule pack's level.",
+        ),
+        _field(
+            cfg,
+            "Tool Calls Alert At",
+            "guardrail.alert_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity a tool call alerts at; blank=the rule pack's level.",
+        ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),
         _field(cfg, "Judge Enabled", "guardrail.judge.enabled", "bool", hint="Enable LLM-as-judge scanner."),
@@ -7507,7 +7649,7 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             + (f" Your organization requires at least {min_profile}." if min_profile else ""),
         ),
         field("Skip-permissions (yolo)", "openshell.yolo", "choice", inherit_bool, hint="--dangerously-skip-permissions by default."),
-        field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder; copy: untrusted repos."),
+        field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder (Docker driver); copy: untrusted repos, and every run on a MicroVM (vm) gateway."),
         field("Secret Masks", "openshell.workdir.masks", hint="Extra secret-file globs, comma-separated."),
         field("Unmask", "openshell.workdir.unmask", hint="Masked paths to share, comma-separated."),
         field("Max Upload MB", "openshell.workdir.max_upload_mb", "int", hint="Copy-mode upload cap; 0 inherits."),

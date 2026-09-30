@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Setup wizard groups, the table row mapping and the config navigators."""
+"""Setup task groups, the group table row mapping and the config navigators."""
 
 from __future__ import annotations
 
@@ -22,11 +22,13 @@ from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection
 
 
 def test_every_wizard_appears_exactly_once() -> None:
-    shown = Counter(row.wizard for row in setup_catalog.display_rows() if row.wizard is not None)
+    shown = Counter(wizard for group in setup_catalog.GROUP_TITLES for wizard in setup_catalog.group_tasks(group))
 
     assert set(shown) == set(SetupWizard)
     assert all(count == 1 for count in shown.values())
-    assert set(setup_catalog.display_order()) == set(SetupWizard)
+    assert setup_catalog.display_order() == tuple(
+        wizard for group in setup_catalog.GROUP_TITLES for wizard in setup_catalog.group_tasks(group)
+    )
 
 
 def test_enum_values_are_unchanged() -> None:
@@ -38,34 +40,30 @@ def test_enum_values_are_unchanged() -> None:
 
 
 @pytest.mark.parametrize("wizard", list(SetupWizard))
-def test_row_mapping_round_trips(wizard: SetupWizard) -> None:
-    assert setup_catalog.wizard_at(setup_catalog.row_for(wizard)) is wizard
+def test_group_row_mapping_round_trips(wizard: SetupWizard) -> None:
+    group = setup_catalog.wizard_group(wizard)
+
+    assert setup_catalog.task_at(group, setup_catalog.task_row(wizard)) is wizard
 
 
-def test_group_headers_are_not_selectable() -> None:
-    rows = setup_catalog.display_rows()
-    headers = [index for index, row in enumerate(rows) if row.kind == "header"]
+def test_task_at_is_none_off_the_end_of_a_group() -> None:
+    group = setup_catalog.GROUP_TITLES[0]
 
-    assert rows[0].kind == "header"
-    assert len(headers) == len(setup_catalog.WIZARD_GROUPS)
-    for index in headers:
-        assert not rows[index].selectable
-        assert setup_catalog.wizard_at(index) is None
-        # Landing on a header moves on to a task instead.
-        assert setup_catalog.nearest_wizard(index) is not None
+    assert setup_catalog.task_at(group, len(setup_catalog.group_tasks(group))) is None
+    assert setup_catalog.task_at(group, -1) is None
+    assert setup_catalog.task_at("No such group", 0) is None
 
 
-def test_nearest_wizard_follows_the_direction_of_travel() -> None:
-    rows = setup_catalog.display_rows()
-    header = next(index for index, row in enumerate(rows) if row.kind == "header" and index > 0)
+def test_step_group_lands_on_the_first_task_and_wraps() -> None:
+    first, second = setup_catalog.GROUP_TITLES[:2]
+    last = setup_catalog.GROUP_TITLES[-1]
+    somewhere = setup_catalog.group_tasks(first)[-1]
 
-    assert setup_catalog.nearest_wizard(header, prefer_down=True) is rows[header + 1].wizard
-    assert setup_catalog.nearest_wizard(header, prefer_down=False) is rows[header - 1].wizard
-    # The first header has nothing above it, so it falls forward.
-    assert setup_catalog.nearest_wizard(0, prefer_down=False) is rows[1].wizard
+    assert setup_catalog.step_group(somewhere, 1) is setup_catalog.group_tasks(second)[0]
+    assert setup_catalog.step_group(somewhere, -1) is setup_catalog.group_tasks(last)[0]
 
 
-def test_step_wizard_skips_headers_and_clamps_or_wraps() -> None:
+def test_step_wizard_crosses_groups_and_clamps_or_wraps() -> None:
     order = setup_catalog.display_order()
 
     assert setup_catalog.step_wizard(order[2], 1) is order[3]  # crosses a group boundary

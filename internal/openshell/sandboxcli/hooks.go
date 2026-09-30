@@ -251,8 +251,15 @@ func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool)
 	a := s.app
 	if code := s.harnessCode; code != 0 && !after.Hooks.Unreachable {
 		if !endedElsewhere && code != exitInterrupted {
-			a.println(a.style(fmt.Sprintf("✗ %s exited with status %d before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)",
-				s.harnessName(), code), ansiRed, ansiBold))
+			why := "the harness itself failed (its output is above)"
+			if s.startWhy != "" {
+				why = s.startWhy
+			}
+			a.println(a.style(fmt.Sprintf("✗ %s exited with status %d before any of its hooks reached DefenseClaw: %s",
+				s.harnessName(), code, why), ansiRed, ansiBold))
+			if s.startDo != "" {
+				a.line("→ " + s.startDo)
+			}
 		}
 		return
 	}

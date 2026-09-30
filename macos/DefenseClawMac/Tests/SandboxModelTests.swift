@@ -34,6 +34,8 @@ struct SandboxModelTests {
         decodesSandboxAPIErrorBodies()
         adminLocksMirrorThePythonEditor()
         decodingToleratesOmittedFields()
+        theStatusNamesTheGatewaysComputeDriver()
+        copyRowsPullAndUndoTheLastApply()
         unreachableHooksAreAnAlertAndANotification()
         failedHookCallsAreAnAlert()
         unblockedDestinationsAreNoLongerOffered()
@@ -411,5 +413,46 @@ struct SandboxModelTests {
         expect(SandboxDecoding.activity(from: ["events": [["seq": 1]]]).isEmpty, "event without a kind")
         let row = SandboxDecoding.sandbox(["name": "bare"])!
         expect(row.harnessLabel == "—" && row.policyLabel == "—" && !row.undoAvailable, "bare row")
+        expect(row.runImage.isEmpty && !row.copyMode && !row.undoOffered, "a bare row has no run image and no undo")
+        // A daemon older than gateway.driver drove docker only.
+        let older = SandboxDecoding.status(from: ["gateway": ["name": "openshell", "version": "0.1.1"]])
+        expect(older.driver.isEmpty && older.copyOnlyNote.isEmpty, "no driver: docker, mount mode possible")
+        expect(older.gateway == "OpenShell 0.1.1 gateway openshell", "no driver suffix: \(older.gateway)")
+    }
+
+    private static func theStatusNamesTheGatewaysComputeDriver() {
+        func status(_ gateway: [String: Any]) -> SandboxStatus {
+            SandboxDecoding.status(from: ["enabled": true, "available": true,
+                                          "gateway": ["name": "openshell", "version": "0.1.1"].merging(gateway) { $1 }])
+        }
+        let vm = status(["driver": "vm", "healthy": true])
+        expect(vm.driver == "vm" && vm.gateway == "OpenShell 0.1.1 gateway openshell (MicroVM)", "vm gateway: \(vm.gateway)")
+        expect(vm.copyOnlyNote == "MicroVM sandboxes work on a copy; pull brings the changes back.",
+               "vm copy note: \(vm.copyOnlyNote)")
+        let sick = status(["driver": "vm", "healthy": false])
+        expect(sick.gateway.hasSuffix("(MicroVM, unhealthy)"), "unhealthy vm gateway: \(sick.gateway)")
+        let docker = status(["driver": "docker", "healthy": true])
+        expect(docker.gateway.hasSuffix("(docker)") && docker.copyOnlyNote.isEmpty, "docker gateway: \(docker.gateway)")
+        var snapshot = SandboxSnapshot()
+        snapshot.apply(status: vm, sandboxes: [], asks: [])
+        expect(snapshot.headline.contains("gateway openshell (MicroVM)"), "headline: \(snapshot.headline)")
+        // As in Go, a driver the table does not know mounts nothing.
+        expect(SandboxDriver.lookup("").hostMounts && !SandboxDriver.lookup("vm").hostMounts
+               && !SandboxDriver.lookup("podman").hostMounts, "the driver table")
+    }
+
+    private static func copyRowsPullAndUndoTheLastApply() {
+        let image = "defenseclaw.invalid/sandbox-run:claudecode-0123456789ab-ba9876543210-u501"
+        var raw = stopped
+        raw["run_image"] = image
+        let copy = SandboxDecoding.sandbox(raw)!
+        expect(copy.copyMode && copy.runImage == image, "a copy row with its run image")
+        // A copy's undo reverts the last pull --apply: no snapshot needed.
+        expect(copy.undoOffered && !copy.undoAvailable, "undo is offered for a copy")
+        expect(copy.undoLabel == "reverts the last pull --apply", "copy undo label: \(copy.undoLabel)")
+        expect(copy.pullCommand == "defenseclaw sandbox pull docs", "pull command: \(copy.pullCommand)")
+        expect(copy.pullToBranchArguments == ["sandbox", "pull", "docs", "--branch"], "pull to branch argv")
+        let mounted = SandboxDecoding.sandbox(running)!
+        expect(!mounted.copyMode && mounted.undoOffered && mounted.undoLabel == "available", "a mounted row")
     }
 }

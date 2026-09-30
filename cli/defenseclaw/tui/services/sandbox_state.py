@@ -34,7 +34,38 @@ SANDBOX_VIEWS: tuple[str, ...] = ("sandboxes", "activity", "asks")
 VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
 # Keys that act on the selected row in every view (a, A and x act on the
 # selected ask in the Asks view).
-_SELECTION_KEYS = frozenset({"u", "U", "R", "s", "d", "c"})
+_SELECTION_KEYS = frozenset({"u", "U", "R", "P", "s", "d", "c"})
+
+
+@dataclass(frozen=True)
+class ComputeDriver:
+    """The OpenShell compute driver a gateway runs, as far as the panel needs it.
+
+    A port of the table in internal/openshell/driver.go: ``label`` is what
+    the status line calls it, and a driver without ``host_mounts`` runs
+    every sandbox on a copy (pull brings the work back).
+    """
+
+    name: str
+    label: str
+    host_mounts: bool
+
+
+COMPUTE_DRIVERS: dict[str, ComputeDriver] = {
+    "docker": ComputeDriver("docker", "docker", True),
+    "vm": ComputeDriver("vm", "MicroVM", False),
+}
+
+
+def compute_driver(name: str) -> ComputeDriver:
+    """The driver ``gateway.driver`` names (openshell.LookupDriver).
+
+    Empty is docker: a daemon older than the field drove docker only. A
+    driver the table does not know mounts nothing, as in Go.
+    """
+    name = name.strip()
+    return COMPUTE_DRIVERS.get(name or "docker") or ComputeDriver(name, name, False)
+
 
 # The feed keeps this many events; the daemon's own buffer is the history.
 FEED_LIMIT = 500
@@ -177,13 +208,16 @@ def harness_command(name: str) -> str:
     return _HARNESS_COMMANDS.get(name, name)
 
 
-def sandbox_keys_hint(view: str, *, unblock: bool = True, always: bool = True, has_rows: bool = True) -> str:
+def sandbox_keys_hint(
+    view: str, *, unblock: bool = True, always: bool = True, has_rows: bool = True, copy: bool = False
+) -> str:
     """The hint bar's keys for a Sandboxes view (one line at 80 columns).
 
     ``unblock`` and ``always`` are False when the selected feed row or ask
     does not take ``u`` or ``A``, which the line then leaves out. With no
     sandbox rows the row keys (connect, stop, delete...) can only answer
-    "Select a sandbox first", so the hint lists what does work.
+    "Select a sandbox first", so the hint lists what does work. ``copy``
+    (the selected sandbox works on a copy) offers pull instead of review.
     """
     if view == "sandboxes" and not has_rows:
         return "KEYS  t view | n new run | w sandboxed on/off | r refresh"
@@ -195,7 +229,8 @@ def sandbox_keys_hint(view: str, *, unblock: bool = True, always: bool = True, h
             + ("u unblock | " if unblock else "")
             + "n new run | w sandboxed | r refresh"
         )
-    return "KEYS  t view | c connect | s stop | d delete | U undo | R review | u unblock"
+    workspace = "P pull" if copy else "R review"
+    return f"KEYS  t view | c connect | s stop | d delete | U undo | {workspace} | u unblock"
 
 
 def _text(value: Any) -> str:
@@ -334,10 +369,18 @@ class SandboxRow:
     nested_repos: tuple[NestedRepoRow, ...] = ()
     warnings: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
+    # The image the sandbox runs when it is not the harness image: on the
+    # MicroVM (vm) driver, the image its per-run harness files are baked into.
+    run_image: str = ""
 
     @property
     def running(self) -> bool:
         return self.phase.lower() in _RUNNING_PHASES
+
+    @property
+    def copy_mode(self) -> bool:
+        """The sandbox works on a copy: pull brings its work back, and undo reverts the last ``pull --apply``."""
+        return self.workdir_mode == "copy"
 
     @property
     def harness_label(self) -> str:
@@ -464,6 +507,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         nested_repos=nested,
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
+        run_image=_text(item.get("run_image")),
     )
 
 
@@ -748,6 +792,16 @@ class SandboxStatus:
     sandboxes: int = 0
     running: int = 0
     pending_approvals: int = 0
+    # gateway.driver: the compute driver the gateway runs ("docker", "vm");
+    # empty from a daemon older than the field, or before a gateway answered.
+    driver: str = ""
+
+    @property
+    def copy_only_note(self) -> str:
+        """Why every new run works on a copy (the gateway's driver mounts no host folders), or ""."""
+        if not self.driver or compute_driver(self.driver).host_mounts:
+            return ""
+        return f"{compute_driver(self.driver).label} sandboxes work on a copy; pull (P) brings the changes back."
 
 
 def decode_status(raw: Any) -> SandboxStatus:
@@ -755,17 +809,22 @@ def decode_status(raw: Any) -> SandboxStatus:
     gateway = _dict(item.get("gateway"))
     admin = _dict(item.get("admin"))
     gateway_text = ""
+    driver = _text(gateway.get("driver")).strip()
     if gateway:
         version = _text(gateway.get("version"))
         gateway_text = "OpenShell" + (f" {version}" if version else "") + f" gateway {_text(gateway.get('name'))}"
+        notes = [compute_driver(driver).label] if driver else []
         if gateway.get("healthy") is False:
-            gateway_text += " (unhealthy)"
+            notes.append("unhealthy")
+        if notes:
+            gateway_text += f" ({', '.join(notes)})"
     return SandboxStatus(
         loaded=True,
         enabled=bool(item.get("enabled")),
         available=bool(item.get("available")),
         reason=_text(item.get("reason")),
         gateway=gateway_text.strip(),
+        driver=driver,
         ingress_addr=_text(item.get("ingress_addr")),
         egress_addr=_text(item.get("egress_addr")),
         pack=_text(item.get("pack")),
@@ -820,7 +879,7 @@ class SandboxPanelAction:
     """What a keypress asked the panel to do.
 
     ``kind`` is one of: none, refresh, view, detail, unblock, approve, reject,
-    undo, review, stop, delete, connect, new_run, wrappers, hint.
+    undo, review, pull, stop, delete, connect, new_run, wrappers, hint.
     """
 
     kind: str = "none"
@@ -1255,7 +1314,7 @@ class SandboxesPanelModel:
             return SandboxPanelAction("new_run")
         if key == "w":
             return SandboxPanelAction("wrappers")
-        if key in {"U", "R", "s", "d", "c"}:
+        if key in {"U", "R", "P", "s", "d", "c"}:
             return self._sandbox_action(key)
         return SandboxPanelAction()
 
@@ -1345,13 +1404,21 @@ class SandboxesPanelModel:
         row = self.selected_sandbox()
         if row is None:
             return SandboxPanelAction("hint", hint="Select a sandbox first (t switches to the Sandboxes view).")
-        kind = {"U": "undo", "R": "review", "s": "stop", "d": "delete", "c": "connect"}[key]
-        if kind in {"undo", "review"} and row.workdir_mode == "copy":
+        kind = {"U": "undo", "R": "review", "P": "pull", "s": "stop", "d": "delete", "c": "connect"}[key]
+        if kind == "review" and row.copy_mode:
             return SandboxPanelAction(
                 "hint",
-                hint=f"{row.name} works on a copy; bring its work back with: defenseclaw sandbox pull {row.name}",
+                hint=f"{row.name} works on a copy; P brings its work back after showing it "
+                f"(defenseclaw sandbox pull {row.name}).",
             )
-        if kind == "undo" and not row.undo_available:
+        if kind == "pull" and not row.copy_mode:
+            # sandboxcli.Pull refuses a mounted project the same way.
+            return SandboxPanelAction(
+                "hint", hint=f"{row.name} works on your folder directly; R reviews its changes and U undoes them."
+            )
+        # A copy's undo reverts its last `pull --apply` (the command line says
+        # when there is none), so it needs no snapshot.
+        if kind == "undo" and not row.copy_mode and not row.undo_available:
             return SandboxPanelAction("hint", hint=f"{row.name} has no snapshot to undo to.")
         if kind == "stop" and not row.running:
             return SandboxPanelAction("hint", hint=f"{row.name} is not running.")
@@ -1389,6 +1456,12 @@ class SandboxesPanelModel:
             full = f"{line} · {self.status.gateway}"
             if not max_width or len(full) <= max_width:
                 return full
+            # Short of room, a gateway whose driver mounts no host folders
+            # still says which it is: every run on it works on a copy.
+            if self.status.copy_only_note:
+                short = f"{line} · {compute_driver(self.status.driver).label} gateway"
+                if len(short) <= max_width:
+                    return short
         return line
 
     def stale_note(self, now: datetime | None = None) -> str:
@@ -1411,7 +1484,8 @@ class SandboxesPanelModel:
             return sandbox_keys_hint(self.view, unblock=self.unblock_offered())
         if self.view == "asks":
             return sandbox_keys_hint(self.view, always=self.selected_ask() is None or self.always_offered())
-        return sandbox_keys_hint(self.view, has_rows=bool(self.rows))
+        selected = self.selected_sandbox()
+        return sandbox_keys_hint(self.view, has_rows=bool(self.rows), copy=selected is not None and selected.copy_mode)
 
     def data_table_columns(self, compact: bool = False) -> tuple[str, ...]:
         """``compact`` (a narrow terminal) leaves out what the Enter detail shows."""
@@ -1636,7 +1710,13 @@ class SandboxesPanelModel:
             pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:
             pairs.append(("Asks waiting", str(row.pending_approvals)))
-        pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))
+        if row.run_image:
+            pairs.append(("Run image", row.run_image))
+        if row.copy_mode:
+            pairs.append(("Pull", "P brings the work back: it shows the changes, then applies them or makes a branch"))
+            pairs.append(("Undo", "reverts the last pull --apply (U)"))
+        else:
+            pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))
         for alert in row.alerts:
             pairs.append(("Alert", alert))
         for violation in row.violations:

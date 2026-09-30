@@ -62,11 +62,19 @@ type runFlags struct {
 	Context   []string `json:"context,omitempty"`
 }
 
-func (f runFlags) packs(harness, project string, gatewayPort int) packs.Flags {
+// gatewayFacts are what the gateway a sandbox runs on adds to its policy
+// resolution: its port, reserved like DefenseClaw's own listeners, and its
+// compute driver, which may be unable to mount the project.
+type gatewayFacts struct {
+	Port   int
+	Driver openshell.Driver
+}
+
+func (f runFlags) packs(harness, project string, gw gatewayFacts) packs.Flags {
 	return packs.Flags{
 		Pack: f.Pack, Harness: harness, Project: project, Profile: f.Profile, Copy: f.Copy, Safe: f.Safe,
 		Yolo: f.Yolo, Unmask: f.Unmask, HostPorts: f.HostPorts, NoMCP: f.NoMCP, Learn: f.Learn,
-		CPU: f.CPU, Memory: f.Memory, OpenShellGatewayPort: gatewayPort,
+		CPU: f.CPU, Memory: f.Memory, OpenShellGatewayPort: gw.Port, MountUnsupported: gw.Driver.MountRefusal,
 	}
 }
 
@@ -100,6 +108,25 @@ type record struct {
 	HarnessVersion string `json:"harness_version,omitempty"`
 	HookContract   string `json:"hook_contract,omitempty"`
 	TamperTier     string `json:"tamper_tier,omitempty"`
+
+	// Driver is the compute driver of the gateway the sandbox was created
+	// on (openshell.ComputeDriver). Empty in records from before it was
+	// kept, which were all made on docker (openshell.LookupDriver).
+	Driver string `json:"driver,omitempty"`
+	// RunImage and RunImageID are the image the sandbox's template names
+	// when that is not Image: on a driver that bakes the per-run files into
+	// an image (openshell.Driver.RunFilesInImage), the run image, or an
+	// alias of Image, under the driver's ImageRepository.
+	RunImage   string `json:"run_image,omitempty"`
+	RunImageID string `json:"run_image_id,omitempty"`
+	// Hostname is the sandbox's own hostname, as the workload check after
+	// ready read it: connections to it are the sandbox's own.
+	Hostname string `json:"hostname,omitempty"`
+	// Verify is what the workload check after ready expects of the
+	// sandbox, recorded once at create from what the create delivered.
+	// A start compares with it, never with a fresh render, so an upgrade
+	// that changes a hook does not refuse the sandboxes made before it.
+	Verify *verifyRecord `json:"verify,omitempty"`
 
 	// TokenDelivery is how the sandbox received its ingress token
 	// (openshell.token_delivery at create; empty in older records, see
@@ -183,6 +210,33 @@ type record struct {
 	// or outside DefenseClaw) whose record is kept only for its
 	// pre-session snapshot: undo, review and delete still reach it.
 	Retained bool `json:"retained,omitempty"`
+}
+
+// verifyRecord is what the workload check after ready expects to find in a
+// sandbox: the identity the workload runs as, and each file DefenseClaw
+// delivered that the agent must not be able to change (the hook
+// entrypoints, the per-run files). It is replaced, never changed in place.
+type verifyRecord struct {
+	UID   int          `json:"uid"`
+	GID   int          `json:"gid"`
+	Files []verifyFile `json:"files,omitempty"`
+}
+
+// verifyFile is one file the workload check proves unchanged.
+type verifyFile struct {
+	// Path is the file's absolute path in the sandbox.
+	Path string `json:"path"`
+	// SHA256 is the hex digest of its content.
+	SHA256 string `json:"sha256"`
+	// UID and GID own it, and Mode holds its permission bits (0o644).
+	UID  int    `json:"uid"`
+	GID  int    `json:"gid"`
+	Mode uint32 `json:"mode"`
+	// ReadOnlyMount marks a file bind-mounted read-only from the host (a
+	// docker run file). The host user who wrote it owns it, and that is
+	// the workload's uid, so the read-only mount, not its owner, keeps the
+	// agent from changing it.
+	ReadOnlyMount bool `json:"read_only_mount,omitempty"`
 }
 
 type recordStore struct {
@@ -319,6 +373,10 @@ type RecordedSandbox struct {
 	// Retained marks a sandbox that is gone, whose record keeps only its
 	// pre-session snapshot.
 	Retained bool
+	// Images are the images it was created from, by tag and by ID: its
+	// overlay image and, on a driver sent its own image names, the run
+	// image or alias it boots. Empty ones are left out.
+	Images []string
 }
 
 // RecordedSandboxes lists the sandboxes recorded under dataDir, for sandbox
@@ -328,7 +386,13 @@ func RecordedSandboxes(dataDir string) []RecordedSandbox {
 	recs, _ := newRecordStore(dataDir).loadAll()
 	out := make([]RecordedSandbox, 0, len(recs))
 	for _, r := range recs {
-		out = append(out, RecordedSandbox{Name: r.Name, Retained: r.Retained})
+		rs := RecordedSandbox{Name: r.Name, Retained: r.Retained}
+		for _, ref := range []string{r.Image, r.ImageID, r.RunImage, r.RunImageID} {
+			if ref != "" {
+				rs.Images = append(rs.Images, ref)
+			}
+		}
+		out = append(out, rs)
 	}
 	return out
 }

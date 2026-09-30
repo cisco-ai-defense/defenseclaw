@@ -1662,6 +1662,20 @@ type GuardrailConfig struct {
 	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
 	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
+	// BlockAt and AlertAt replace the block and alert levels the rule
+	// pack's profile implies (strict / default / permissive) when the
+	// gateway maps a finding's severity to an action: BlockAt is the
+	// lowest severity that blocks, AlertAt the lowest that alerts.
+	// Values are CRITICAL, HIGH, MEDIUM or LOW in any case; empty (the
+	// default) keeps the pack's level. A guardrail.connectors entry's own
+	// value wins over these. They never reach OPA, so the named policy's
+	// thresholds for LLM traffic through the guardrail proxy are
+	// unaffected. Resolve through EffectiveBlockAt / EffectiveAlertAt,
+	// never by reading the fields. Hook decisions read the start-time
+	// config, so guardrailNeedsRestart restarts on a change to either.
+	BlockAt string `mapstructure:"block_at" yaml:"block_at,omitempty"`
+	AlertAt string `mapstructure:"alert_at" yaml:"alert_at,omitempty"`
+
 	// Detection strategy: "regex_only", "regex_judge" (default), "judge_first".
 	// Per-direction overrides take precedence over the global setting.
 	DetectionStrategy           string `mapstructure:"detection_strategy"            yaml:"detection_strategy,omitempty"`
@@ -1798,6 +1812,15 @@ type PerConnectorGuardrailConfig struct {
 	HookFailMode string      `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
 	BlockMessage string      `mapstructure:"block_message"  yaml:"block_message,omitempty"`
 	RulePackDir  string      `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+
+	// BlockAt / AlertAt set this connector's block and alert levels,
+	// winning over guardrail.block_at / alert_at and over the levels of
+	// the connector's rule pack (see GuardrailConfig.BlockAt for values
+	// and meaning). This struct also types the application_protection
+	// guardrail overlays, which do not support these two keys:
+	// ApplicationProtectionConfig.Validate rejects them there.
+	BlockAt string `mapstructure:"block_at" yaml:"block_at,omitempty"`
+	AlertAt string `mapstructure:"alert_at" yaml:"alert_at,omitempty"`
 
 	// Enabled is the per-connector on/off switch toggled by
 	// `defenseclaw guardrail disable --connector X` (and its enable
@@ -1963,18 +1986,83 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 	return g.RulePackDir
 }
 
+// EffectiveBlockAt returns the lowest severity that blocks for the named
+// connector: its guardrail.connectors block_at when set, else the global
+// guardrail.block_at, as a canonical uppercase level (CRITICAL, HIGH,
+// MEDIUM, LOW). "" means neither is set, so the connector's rule pack
+// profile decides. A value Validate would reject counts as unset, so a
+// config that skipped Validate can never produce an out-of-range level.
+// Pure lookup — never errors, never mutates, never touches I/O.
+func (g *GuardrailConfig) EffectiveBlockAt(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if level := canonicalGuardrailLevel(pc.BlockAt); level != "" {
+			return level
+		}
+	}
+	return canonicalGuardrailLevel(g.BlockAt)
+}
+
+// EffectiveAlertAt is EffectiveBlockAt for the lowest severity that
+// alerts (per-connector alert_at, else global alert_at, else ""). It does
+// not clamp the alert level to the block level: the gateway does that
+// after resolving both against the connector's rule pack. Pure lookup.
+func (g *GuardrailConfig) EffectiveAlertAt(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if level := canonicalGuardrailLevel(pc.AlertAt); level != "" {
+			return level
+		}
+	}
+	return canonicalGuardrailLevel(g.AlertAt)
+}
+
+// canonicalGuardrailLevel trims and uppercases a block_at / alert_at value
+// and returns it when it is CRITICAL, HIGH, MEDIUM or LOW, else "".
+func canonicalGuardrailLevel(value string) string {
+	level := strings.ToUpper(strings.TrimSpace(value))
+	switch level {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+		return level
+	default:
+		return ""
+	}
+}
+
+// validateGuardrailLevel accepts "" (inherit) and the four levels in any
+// case. field names the key in the error, e.g. "guardrail.block_at".
+func validateGuardrailLevel(field, value string) error {
+	if strings.TrimSpace(value) == "" || canonicalGuardrailLevel(value) != "" {
+		return nil
+	}
+	return fmt.Errorf("%s: must be one of CRITICAL, HIGH, MEDIUM, LOW (got %q)", field, value)
+}
+
 // Validate checks per-connector guardrail VALUE invariants only — the
 // NEW guardrail.connectors map. For each override it inspects enum
-// values (mode, hook_fail_mode, hilt.min_severity) and rejects empty
-// connector names. It deliberately does NOT re-validate the global
-// guardrail fields: those predate multi-connector support and were
-// never gated by Load(), so validating them here could reject configs
-// that load fine today. It never imports the connector registry — the
-// "entries must be hook connectors" guard lives in the gateway boot
-// loop, where the registry is in hand. Wired into Load().
+// values (mode, hook_fail_mode, hilt.min_severity, block_at, alert_at)
+// and rejects empty connector names. It deliberately does NOT
+// re-validate the older global guardrail fields: those predate
+// multi-connector support and were never gated by Load(), so validating
+// them here could reject configs that load fine today. The exception is
+// the global block_at / alert_at pair: it is new, so no existing config
+// can carry a bad value, and it is checked like its per-connector
+// counterpart. It never imports the connector registry — the "entries
+// must be hook connectors" guard lives in the gateway boot loop, where
+// the registry is in hand. Wired into Load().
 func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
+	}
+	if err := validateGuardrailLevel("guardrail.block_at", g.BlockAt); err != nil {
+		return err
+	}
+	if err := validateGuardrailLevel("guardrail.alert_at", g.AlertAt); err != nil {
+		return err
 	}
 	// Per-connector overrides, in sorted order for deterministic errors.
 	names := make([]string, 0, len(g.Connectors))
@@ -2013,6 +2101,12 @@ func (g *GuardrailConfig) Validate() error {
 			if err := validateGuardrailMinSeverity(pc.HILT.MinSeverity); err != nil {
 				return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
 			}
+		}
+		if err := validateGuardrailLevel("block_at", pc.BlockAt); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+		}
+		if err := validateGuardrailLevel("alert_at", pc.AlertAt); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
 		}
 	}
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {

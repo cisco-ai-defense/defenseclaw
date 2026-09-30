@@ -43,7 +43,7 @@ func launchCopy(t *testing.T, e *env, name string, mutate func(*StageOptions)) (
 	if _, err := Stage(bg, opts); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Upload(bg, e.data, name, fs); err != nil {
+	if _, err := Upload(bg, e.data, name, fs, fs); err != nil {
 		t.Fatal(err)
 	}
 	rec, err := EstablishBaseline(bg, e.data, name, fs)
@@ -124,6 +124,13 @@ func TestStageGitProjectIsSanitized(t *testing.T) {
 	}
 	if strings.Join(rec.HeldBack, ",") != "certs/dev.pem,config/server.key" {
 		t.Fatalf("held back = %v", rec.HeldBack)
+	}
+	// The held-back list is reported from HeldBack alone, not again among
+	// the warnings (the run printed it twice).
+	for _, w := range rec.Warnings {
+		if strings.Contains(w, "certs/dev.pem") {
+			t.Fatalf("a warning repeats the held-back list: %q", w)
+		}
 	}
 	stage := rec.Stage
 	sg := func(args ...string) string { return runGit(t, e.home, stage, args...) }
@@ -207,9 +214,12 @@ func TestCopyReapplyKeepsThePreApplyState(t *testing.T) {
 		}
 	}
 
-	pull(t, e, fs, "c1")
-	if again, err := apply(e, "c1", ApplyMerge, nil); err != nil || again.Applied || !again.UpToDate || len(again.Changes) != 0 {
-		t.Fatalf("second apply = %+v, %v; want up to date", again, err)
+	// A second pull of the same work has nothing new: the folder has it.
+	if again := pull(t, e, fs, "c1"); !again.Empty() || again.Since == "" {
+		t.Fatalf("second pull = %+v; want nothing new since the apply", again)
+	}
+	if again, err := apply(e, "c1", ApplyMerge, nil); !errors.Is(err, ErrNoChanges) {
+		t.Fatalf("second apply = %+v, %v; want nothing to apply", again, err)
 	}
 	unmoved("a second apply of the same work")
 	if got := e.git(e.project, "show", first.PreApplyRef+":README.md"); got != "hello" {
@@ -246,6 +256,105 @@ func TestCopyReapplyKeepsThePreApplyState(t *testing.T) {
 	}
 	must(t, DeleteCopy(e.data, "c1"))
 	wantFiles(t, e.project, "c1.patch", present, "c1-2.patch", present)
+}
+
+// TestCopyPullStartsFromTheLastApply: once an apply put the sandbox's work
+// in the folder, the next pull (a session end, `sandbox pull`) shows only
+// what changed since, flags only that, and its apply merges only that, so
+// what the operator took back of the earlier work stays taken back. An
+// undo of the apply starts the next pull from the baseline again (cert
+// hermes:HERMES-5, openhands:MAC-OSH-OH-2: a second session with no edits
+// offered the same three files, the Makefile warning and two questions,
+// then said "nothing to apply").
+func TestCopyPullStartsFromTheLastApply(t *testing.T) {
+	testPullStartsFromTheLastApply(t, newEnv(t))
+}
+
+// TestCopyPullStartsFromTheLastApplyOnGit239: git 2.38 and 2.39 have
+// merge-tree --write-tree but not --merge-base; the apply still merges
+// from where the pull's review started, so work the operator took back
+// after an earlier apply does not come back unreviewed.
+func TestCopyPullStartsFromTheLastApplyOnGit239(t *testing.T) {
+	e := newSerialEnv(t)
+	pinHostGit(t, gitVersion{2, 39, 5})
+	testPullStartsFromTheLastApply(t, e)
+}
+
+// pinHostGit makes the package see host git v for the rest of a serial
+// test.
+func pinHostGit(t *testing.T, v gitVersion) {
+	t.Helper()
+	hostGit.mu.Lock()
+	savedV, savedOK := hostGit.v, hostGit.ok
+	hostGit.v, hostGit.ok = v, true
+	hostGit.mu.Unlock()
+	t.Cleanup(func() {
+		hostGit.mu.Lock()
+		hostGit.v, hostGit.ok = savedV, savedOK
+		hostGit.mu.Unlock()
+	})
+}
+
+func testPullStartsFromTheLastApply(t *testing.T, e *env) {
+	t.Helper()
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	fs.write(remoteRepo+"/Makefile", "all:\n\techo hi\n")
+	fs.write(remoteRepo+"/README.md", "agent version\n")
+	first := pull(t, e, fs, "c1")
+	if first.Since != "" || changePaths(first.Changes) != "A:Makefile M:README.md" || !first.Review.Sensitive() && riskFlags(first) == "" {
+		t.Fatalf("first pull: since %q, changes %s, flags %s", first.Since, changePaths(first.Changes), riskFlags(first))
+	}
+	if _, err := apply(e, "c1", ApplyMerge, func(o *ApplyOptions) { o.AcceptSensitive = true }); err != nil {
+		t.Fatal(err)
+	}
+
+	// A session that changed nothing: nothing to review or bring back.
+	if again := pull(t, e, fs, "c1"); !again.Empty() || again.Since != first.Effective || len(again.Review.Flags) != 0 {
+		t.Fatalf("pull after the apply: since %q (want %q), changes %s, flags %s", again.Since, first.Effective, changePaths(again.Changes), riskFlags(again))
+	}
+	if pr, err := LoadPull(e.data, "c1"); err != nil || !pr.handedOver() {
+		t.Fatalf("an empty pull after an apply is not handed over: %+v, %v", pr, err)
+	}
+
+	// The operator takes back the README; the agent adds a file.
+	writeFile(t, e.project, "README.md", "hello\n")
+	fs.write(remoteRepo+"/NEW.md", "new\n")
+	next := pull(t, e, fs, "c1")
+	if changePaths(next.Changes) != "A:NEW.md" || len(next.Review.Flags) != 0 {
+		t.Fatalf("pull of new work: changes %s, flags %s; want only NEW.md", changePaths(next.Changes), riskFlags(next))
+	}
+	if res := mustApply(t, e, "c1"); changePaths(res.Changes) != "A:NEW.md" {
+		t.Fatalf("apply of new work changed %s", changePaths(res.Changes))
+	}
+	wantFiles(t, e.project, "README.md", "hello\n", "NEW.md", "new\n", "Makefile", "all:\n\techo hi\n")
+	// A patch holds only what is new too.
+	fs.write(remoteRepo+"/LATER.md", "later\n")
+	pull(t, e, fs, "c1")
+	patch := filepath.Join(e.home, "later.patch")
+	if _, err := apply(e, "c1", ApplyPatch, func(o *ApplyOptions) { o.PatchPath = patch }); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, e.home, "later.patch"); !strings.Contains(got, "+later") || strings.Contains(got, "NEW.md") || strings.Contains(got, "Makefile") {
+		t.Fatalf("patch:\n%s", got)
+	}
+
+	// Undoing the apply: the next pull offers the undone work again.
+	if res, err := undoApply(e, "c1", false); err != nil || !res.Undone {
+		t.Fatalf("undo: %+v, %v", res, err)
+	}
+	if again := pull(t, e, fs, "c1"); again.Since != "" || !strings.Contains(changePaths(again.Changes), "A:NEW.md") {
+		t.Fatalf("pull after the undo: since %q, changes %s; want it from the baseline", again.Since, changePaths(again.Changes))
+	}
+}
+
+// riskFlags lists a pull's review flags, for failure messages.
+func riskFlags(pr *PullResult) string {
+	var out []string
+	for _, f := range pr.Review.Flags {
+		out = append(out, f.Path+":"+string(f.Kind))
+	}
+	return strings.Join(out, " ")
 }
 
 func undoApply(e *env, name string, preview bool) (*UndoApplyResult, error) {
@@ -506,7 +615,8 @@ func TestCopyKeepsHeldBackSecretsOutOfHistory(t *testing.T) {
 	fs.write(remoteRepo+"/ok.txt", "fine\n")
 	check := func(step string) {
 		t.Helper()
-		if pr := pull(t, e, fs, "c1"); strings.Join(pr.Dropped, ",") != "certs/dev.pem,config/server.key" || changePaths(pr.Changes) != "A:ok.txt M:src/app.go" {
+		// src/app.go came back with the apply above: only ok.txt is new.
+		if pr := pull(t, e, fs, "c1"); strings.Join(pr.Dropped, ",") != "certs/dev.pem,config/server.key" || changePaths(pr.Changes) != "A:ok.txt" {
 			t.Fatalf("%s: dropped = %v changes = %s", step, pr.Dropped, changePaths(pr.Changes))
 		}
 	}
@@ -996,5 +1106,41 @@ func TestReplaceDirKeepsOneLiveDirectory(t *testing.T) {
 	// A failed move puts the live directory back.
 	if _, err := replaceDir(filepath.Join(root, "missing"), live, noExchange); err == nil || readFile(t, live, "copy.json") != "three" {
 		t.Fatalf("failed install = %v, or it lost the live directory", err)
+	}
+}
+
+// quietExec answers every command with exit 1 and no output.
+type quietExec struct{}
+
+func (quietExec) Exec(context.Context, string, ExecRequest) (*ExecResult, error) {
+	return &ExecResult{ExitCode: 1}, nil
+}
+
+// Setting the baseline says which part of the copy is missing in the
+// sandbox. It used to fail with an empty reason ("set the baseline in the
+// sandbox (exit 1): ") when the upload had not arrived there.
+func TestBaselineSaysWhatIsMissing(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	_, fs := launchCopy(t, e, "c1", nil)
+	// The fake sandbox runs the script with its paths rewritten.
+	repo := fs.rewrite(remoteRepo)
+	if err := os.RemoveAll(fs.local(remoteRepo + "/.git")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, "c1", fs); err == nil ||
+		err.Error() != "workspace: set the baseline in the sandbox (exit 1): "+repo+"/.git is missing: the copy has no git directory" {
+		t.Fatalf("baseline without the git directory = %v", err)
+	}
+	if err := os.RemoveAll(fs.local(remoteRepo)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, "c1", fs); err == nil ||
+		err.Error() != "workspace: set the baseline in the sandbox (exit 1): "+repo+" is missing: the copy is not in the sandbox" {
+		t.Fatalf("baseline without the copy = %v", err)
+	}
+	if _, err := EstablishBaseline(bg, e.data, "c1", quietExec{}); err == nil ||
+		err.Error() != "workspace: set the baseline in the sandbox (exit 1): it printed no error" {
+		t.Fatalf("baseline that fails silently = %v", err)
 	}
 }

@@ -168,6 +168,26 @@ exist only in the image; nothing on your host changes.
 - **Launch environment.** The launcher drops every `PYTHON*` variable, so a
   `PYTHONPATH` exported from a shell start-up file cannot load code into
   OpenHands.
+- **Session end.** OpenHands 1.16 closes the conversation after its TUI has
+  stopped and then hands the `SessionEnd` hook results to that TUI, which
+  printed `Exception ignored in atexit callback` and a
+  `RuntimeError: App is not running` traceback above DefenseClaw's session
+  summary at every exit. A root-owned module in the image runs the
+  `SessionEnd` hooks as before and drops only that display event, so the
+  session ends cleanly and DefenseClaw still gets the hook. The module also
+  ignores the `AuthlibDeprecationWarning` (`authlib.jose module is
+  deprecated`) an OpenHands dependency printed at every start.
+- **Blocks on screen.** OpenHands shows a hook result as a collapsed line cut
+  at 70 characters, which left `Status: BLOCKED - Blocked by DefenseCla...`.
+  The same module starts a DefenseClaw block's rendering with the block, so
+  the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: <title>...`; Ctrl+O still expands it to
+  the full reason and OpenHands' own details. The reason the model gets is
+  unchanged.
+- **Screen updates.** OpenHands 1.16 sometimes does not scroll to a new
+  turn: the token counter moves but the view stays on the previous turn, and
+  PageDown does nothing. Pressing Ctrl+O twice redraws it. This is OpenHands'
+  own TUI, not DefenseClaw.
 - **Known gaps.** The agent can edit `~/.openhands/hooks.json`, or start a
   second OpenHands with another `HOME`, from a tool call. DefenseClaw sees that
   tool call first, and hook-silence detection is the backstop. Command rules

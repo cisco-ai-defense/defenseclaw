@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -333,17 +334,50 @@ func (r ExplainRequest) Query() url.Values {
 	for _, u := range r.Unmask {
 		q.Add("unmask", u)
 	}
+	if run := r.Run; run != nil {
+		q.Set("run", "true")
+		keys := make([]string, 0, len(run.Env))
+		for k := range run.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			q.Add("run_env", k+"="+run.Env[k])
+		}
+		for _, k := range run.EnvWithheld {
+			q.Add("run_env_withheld", k)
+		}
+		for _, name := range run.Credentials {
+			q.Add("run_credential", name)
+		}
+		set("run_llm_profile", run.LLMProfile)
+		set("run_bedrock_region", run.BedrockRegion)
+	}
 	return q
 }
 
 // ParseExplainQuery is the inverse of ExplainRequest.Query.
 func ParseExplainQuery(q url.Values) ExplainRequest {
 	b := func(k string) bool { v, _ := strconv.ParseBool(q.Get(k)); return v }
-	return ExplainRequest{
+	req := ExplainRequest{
 		Sandbox: q.Get("sandbox"), Harness: q.Get("harness"), Pack: q.Get("pack"),
 		Profile: q.Get("profile"), Project: q.Get("project"),
 		Copy: b("copy"), Safe: b("safe"), Yolo: b("yolo"), Unmask: q["unmask"],
 	}
+	if b("run") {
+		run := &ExplainRun{EnvWithheld: q["run_env_withheld"], Credentials: q["run_credential"],
+			LLMProfile: q.Get("run_llm_profile"), BedrockRegion: q.Get("run_bedrock_region")}
+		for _, kv := range q["run_env"] {
+			if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+				if run.Env == nil {
+					run.Env = map[string]string{}
+				}
+				run.Env[k] = v
+			}
+		}
+		req.Run = run
+	}
+	return req
 }
 
 // Query encodes the activity query.

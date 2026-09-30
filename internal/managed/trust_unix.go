@@ -23,6 +23,16 @@ import (
 	"syscall"
 )
 
+// ValidatePathACL rejects an access control list on path that lets other
+// principals change it beyond what its owner, group and mode bits say: on
+// macOS any allow entry with a write-capable right (write, append,
+// add_file, add_subdirectory, delete, delete_child, writeattr,
+// writeextattr, writesecurity, chown), which macOS grants without
+// changing the mode bits; on Linux a named POSIX ACL entry with effective
+// write. Code outside this package that trusts a path's mode bits checks
+// its ACL with this, as the trust checks here do.
+func ValidatePathACL(path string) error { return validateTrustedPathACL(path) }
+
 // ValidateTrustedConfigPath rejects managed_enterprise config paths that a
 // standard user could replace or edit. The managed service may run as a
 // dedicated non-root user, but the authoritative config must stay admin-owned.

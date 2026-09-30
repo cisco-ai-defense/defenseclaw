@@ -124,10 +124,17 @@ type App struct {
 	Executable func() (string, error)
 	Now        func() time.Time
 	GOOS       string
+	// GOARCH is the machine's architecture: a Mac runs sandboxes on Apple
+	// silicon only.
+	GOARCH string
 	// WSL reports a Linux kernel running under Windows (WSL2).
 	WSL func() bool
 	// Geteuid is the effective uid (sandboxes refuse root).
 	Geteuid func() int
+	// DiskFree is the free space of the file system holding a path
+	// (openshell.DiskFree): the MicroVM driver prepares a disk of about an
+	// image's size from each image a sandbox first boots.
+	DiskFree func(path string) (uint64, error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// HookWindow is how long a harness session may run before its first
@@ -242,6 +249,9 @@ func (a *App) defaults() {
 		if a.GOOS == "" {
 			a.GOOS = runtime.GOOS
 		}
+		if a.GOARCH == "" {
+			a.GOARCH = runtime.GOARCH
+		}
 		if a.Sleep == nil {
 			a.Sleep = sleepCtx
 		}
@@ -250,6 +260,9 @@ func (a *App) defaults() {
 		}
 		if a.Geteuid == nil {
 			a.Geteuid = os.Geteuid
+		}
+		if a.DiskFree == nil {
+			a.DiskFree = openshell.DiskFree
 		}
 		if a.ConfigPath == "" && a.Cfg != nil {
 			a.ConfigPath = strings.TrimSpace(a.Cfg.ConfigFilePath)
@@ -279,6 +292,10 @@ func (a *App) defaults() {
 			a.GitConfig = a.hostGitConfig
 		}
 		a.reader = bufio.NewReader(a.IO.In)
+		// The ssh shim every openshell invocation runs with falls back to
+		// this data directory when the temporary directory cannot hold one
+		// that runs.
+		openshell.SetSSHShimDataDir(a.dataDir())
 	})
 }
 
@@ -339,11 +356,15 @@ func (a *App) CheckSupported() error {
 	if err := openshell.CheckPlatform(a.GOOS); err != nil || (a.GOOS == "linux" && a.WSL()) {
 		return fmt.Errorf("%w: OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported", ErrUnsupported)
 	}
+	if err := openshell.CheckHost(a.GOOS, a.GOARCH); err != nil {
+		// A Mac that is not Apple silicon.
+		return fmt.Errorf("%w: %s", ErrUnsupported, strings.TrimPrefix(err.Error(), "openshell: "))
+	}
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
 		return fmt.Errorf("%w: sandboxes are not supported in managed_enterprise deployments yet", ErrUnsupported)
 	}
 	if a.Geteuid() == 0 {
-		return fmt.Errorf("%w: run sandboxes as your own user, not root (they run as your uid)", ErrUnsupported)
+		return fmt.Errorf("%w: run sandboxes as your own user, not root: the OpenShell gateway is a per-user service", ErrUnsupported)
 	}
 	return nil
 }

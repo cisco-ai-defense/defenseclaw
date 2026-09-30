@@ -225,6 +225,24 @@ func TestCreateCopyModeAndStrict(t *testing.T) {
 	}
 }
 
+// The run's time zone reaches the sandbox as DefenseClaw's own variable,
+// which the in-image shells turn into TZ; a value that is not a zone name
+// is refused (cert copilot:F10: the harness showed UTC times).
+func TestCreateGivesTheHostTimeZone(t *testing.T) {
+	e := newEnv(t, nil)
+	sb := e.create(sandboxapi.CreateRequest{Name: "tzbox", Copy: true, TimeZone: "America/New_York"})
+	got, _ := e.client.GetSandbox(t.Context(), sb.Name)
+	if tz := got.Spec.Environment[openshell.EnvHostTimeZone]; tz != "America/New_York" {
+		t.Fatalf("%s = %q", openshell.EnvHostTimeZone, tz)
+	}
+	if _, bad := got.Spec.Environment["TZ"]; bad {
+		t.Fatal("TZ was set at create, where the image's zone file is not checked")
+	}
+	if _, err := e.tryCreate(sandboxapi.CreateRequest{Name: "tzbad", Copy: true, TimeZone: "../../etc/passwd"}); !sandboxapi.IsCode(err, sandboxapi.CodeInvalid) {
+		t.Fatalf("a path as the time zone: %v", err)
+	}
+}
+
 // With token_delivery: env the token is a plain variable, and the policy
 // opens the ingress itself (no ingress provider carries its rule); it keeps
 // authenticating after a restart, whatever the setting says by then.

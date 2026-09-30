@@ -2911,3 +2911,23 @@ def test_per_connector_asset_policy_field_writes_typed_override() -> None:
 
     apply_config_field(cfg, "asset_policy.connectors.hermes.mcp.registry_required", "")
     assert entry.mcp.registry_required is None
+
+
+def test_multi_action_wizards_clear_their_running_badge() -> None:
+    # Their commands aren't covered by the wizard's WIZARD_COMMANDS prefix.
+    cases = (
+        (SetupWizard.GUARDRAIL_ACTIONS, ("guardrail", "block-message", "Blocked here", "--yes")),
+        (SetupWizard.AI_DISCOVERY, ("agent", "discovery", "disable")),
+        (SetupWizard.SPLUNK_DASHBOARDS, ("setup", "splunk", "dashboards", "destroy")),
+    )
+    for wizard, args in cases:
+        model = SetupPanelModel({}, os_name="linux")
+        model.wizard_status[wizard] = "running..."
+        model.mark_wizard_complete(args, success=True)
+        assert model.wizard_status[wizard] == "done", wizard
+
+    # An unrelated command of the shared setup family leaves a running task alone.
+    model = SetupPanelModel({}, os_name="linux")
+    model.wizard_status[SetupWizard.LLM] = "running..."
+    model.mark_wizard_complete(("setup", "splunk", "dashboards", "destroy"), success=True)
+    assert model.wizard_status[SetupWizard.LLM] == "running..."

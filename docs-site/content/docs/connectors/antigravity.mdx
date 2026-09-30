@@ -301,7 +301,12 @@ exist only in the image; nothing on your host changes.
   still load alongside DefenseClaw's.
 - **Fail closed.** agy enforces only a synchronous PreToolUse
   `{"decision":"deny"}`. The sandbox hook prints that deny on every
-  PreToolUse failure: missing token, ingress down, or a bad reply.
+  PreToolUse failure: missing token, ingress down, or a bad reply. Its
+  reason says which: "DefenseClaw policy service is unavailable." only when
+  DefenseClaw cannot be reached or answers with a server error, "DefenseClaw
+  hook request was refused (HTTP 400), so the tool call is blocked." for a
+  refused request (such as a malformed hook input), and a reply without a
+  verdict or a missing binding token are named as such.
 - **Known gaps.** The agent can edit `~/.gemini/config/hooks.json`, or start
   a second agy with another `HOME`, from a tool call. DefenseClaw sees that
   tool call first, and hook-silence detection is the backstop. Command rules

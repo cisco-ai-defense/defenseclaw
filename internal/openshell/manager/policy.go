@@ -73,7 +73,7 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		return nil, nil, err
 	}
 	cfg := m.config()
-	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort()))
+	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec)))
 	if err == nil {
 		err = m.checkPolicySources(rec.WorkdirMode, rec.Project, eff)
 	}
@@ -230,8 +230,10 @@ func (m *Manager) orgPolicy(b *box) (*packs.Effective, error) {
 // checkStart refuses to start a sandbox the current policy would not let
 // the user create: a harness, a live mount or learn mode the organization
 // disallowed since. Skip-permissions mode is not refused; the launch
-// settings follow the re-resolved policy (see launchYolo).
-func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effective, violations []packs.Violation) error {
+// settings follow the re-resolved policy (see launchYolo). A sandbox created
+// on another compute driver than gw runs is refused before it
+// (driverStartRefusal).
+func (m *Manager) checkStart(ctx context.Context, gw *Gateway, rec record, eff *packs.Effective, violations []packs.Violation) error {
 	if v := packs.FirstFatal(violations); v != nil {
 		return m.violationError(ctx, v, rec.Name)
 	}
@@ -250,7 +252,13 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 			return m.violationError(ctx, err, rec.Name)
 		}
 	}
-	if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
+	if gw.Driver.SandboxLimits {
+		if v := resourceViolation(rec.Resources, m.config().OpenShell.Admin.MaxResources); v != nil {
+			return m.violationError(ctx, v, rec.Name)
+		}
+	} else if _, v := m.driverResources(gw.Driver, packs.Resources{}); v != nil {
+		// What every sandbox of the driver gets now, not what it got at
+		// create: the gateway-wide values may have changed since.
 		return m.violationError(ctx, v, rec.Name)
 	}
 	// What the --llm and --credential providers open around the egress
@@ -273,6 +281,27 @@ func (m *Manager) checkStart(ctx context.Context, rec record, eff *packs.Effecti
 		}
 		return &sandboxapi.Error{Code: sandboxapi.CodePolicyViolation,
 			Message: "the sandbox policy now runs this project in copy mode; delete the sandbox and run it again"}
+	}
+	return nil
+}
+
+// driverStartRefusal refuses to start a sandbox on a gateway that runs
+// another compute driver than the one it was created on: one gateway runs
+// one driver, and the sandbox (a container, or a MicroVM and its disk)
+// belongs to the other one. A pull starts the sandbox, so its work is
+// reachable only on a gateway that runs that driver again. A live mount is
+// refused on a driver that mounts no host folders, too.
+func driverStartRefusal(gw *Gateway, rec record) error {
+	if created := recordDriver(rec); created != gw.Driver.Name {
+		return sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"sandbox %[1]s was created on the %[2]s driver; this gateway now runs %[3]s, and one gateway runs one driver. "+
+				"Its work can be pulled only on a %[2]s gateway (switch back with `defenseclaw sandbox setup`), "+
+				"or drop it with `defenseclaw sandbox delete %[1]s`", rec.Name, created, gw.Driver.Name)
+	}
+	if rec.WorkdirMode == config.OpenShellWorkdirMount && !gw.Driver.HostMounts {
+		return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+			Message: "sandbox " + rec.Name + " mounts its project live, which this gateway's compute driver cannot; delete it and run it again",
+			Detail:  gw.Driver.MountRefusal}
 	}
 	return nil
 }
@@ -632,6 +661,28 @@ func (m *Manager) gatewayPort() int {
 	return int(m.gwPort.Load())
 }
 
+// gatewayDriver is the compute driver of the gateway last connected. Until
+// one answered it is docker's: an Explain before any create then describes
+// the docker posture, and the create, which holds a connection, decides
+// with the driver the gateway reports.
+func (m *Manager) gatewayDriver() openshell.Driver {
+	if d := m.gwDriver.Load(); d != nil {
+		return *d
+	}
+	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
+	return d
+}
+
+// recordFacts are the gateway facts a sandbox's policy is re-resolved with:
+// the connected gateway's port, and the driver the sandbox was created on,
+// not the connected gateway's: a sandbox made on docker keeps its mount
+// mode after the gateway switched drivers, instead of being re-resolved to
+// a copy it never had.
+func (m *Manager) recordFacts(rec record) gatewayFacts {
+	d, _ := openshell.LookupDriver(rec.Driver)
+	return gatewayFacts{Port: m.gatewayPort(), Driver: d}
+}
+
 // policyGatewayPort is the OpenShell gateway port a sandbox policy
 // reserves: the registration's, else the local gateway's default, the
 // same fallback packs.Resolve applies to Flags.OpenShellGatewayPort
@@ -730,7 +781,7 @@ func wireAdmin(a packs.AdminStatus) sandboxapi.AdminStatus {
 }
 
 // Explain resolves a sandbox posture with provenance.
-func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
+func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
 	cfg := m.config()
 	var flags packs.Flags
 	if req.Sandbox != "" {
@@ -741,7 +792,7 @@ func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sa
 		m.mu.Lock()
 		rec := b.rec
 		m.mu.Unlock()
-		flags = rec.Flags.packs(rec.Harness, rec.Project, m.gatewayPort())
+		flags = rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec))
 	} else {
 		project := req.Project
 		if project != "" {
@@ -755,6 +806,7 @@ func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sa
 		flags = packs.Flags{
 			Harness: config.NormalizeConnectorName(req.Harness), Pack: req.Pack, Profile: req.Profile, Project: project,
 			Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo, Unmask: req.Unmask, OpenShellGatewayPort: m.gatewayPort(),
+			MountUnsupported: m.gatewayDriver().MountRefusal,
 		}
 	}
 	eff, violations, err := m.resolve(cfg, flags)
@@ -772,6 +824,10 @@ func (m *Manager) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sa
 		out.Settings = append(out.Settings, sandboxapi.Setting{
 			Key: s.Key, Value: s.Value, Source: string(s.Source), Origin: s.Origin, Requested: s.Requested,
 		})
+	}
+	if req.Sandbox == "" {
+		// Only the daemon knows the image a new sandbox would boot.
+		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff, req.Run)
 	}
 	return out, nil
 }

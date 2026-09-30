@@ -86,13 +86,15 @@ async def test_setup_views_keep_primary_content_on_screen_at_80x24(hermetic) -> 
         app.action_switch_panel("setup")
         await pilot.pause()
         await pilot.pause()
-        first_task = setup_catalog.display_rows()[1].label
+        first_task = setup_catalog.wizard_label(setup_catalog.display_order()[0])
         _assert_on_screen(app, first_task, max_body_lines=2)
 
         await pilot.press("enter")  # goal menu
         await pilot.pause()
         assert app.setup_model.goal_active
         _assert_on_screen(app, app.setup_model.goals[0].label, max_body_lines=2)
+        # Goal descriptions wrap instead of being cut at the screen edge.
+        assert app.setup_model.goals[0].summary.split()[-1] in screen_text(app)
 
         await pilot.press("enter")  # form
         await pilot.pause()

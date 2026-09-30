@@ -121,10 +121,11 @@ which ones are interactive and which ones are designed for scripts.
 
 ### OpenShell sandbox
 
-`defenseclaw sandbox setup` prepares a Linux machine to run Claude Code and
-Codex inside NVIDIA OpenShell 0.1 sandboxes, and
+`defenseclaw sandbox setup` prepares a Linux machine or an Apple-silicon Mac
+to run Claude Code and Codex inside NVIDIA OpenShell 0.1 sandboxes, and
 `defenseclaw sandbox run claude` starts one on the current project folder.
-Sandboxes cannot run on macOS yet (see [macOS](/docs/setup/sandbox#macos)).
+On a Mac, sandboxes are OpenShell MicroVMs and every run works on a copy (see
+[macOS](/docs/setup/sandbox#macos)).
 The same setup is the Sandbox wizard in the TUI (Setup, slot 13) and the
 macOS app; the TUI Sandboxes panel (key 7) shows live activity. Run
 `defenseclaw sandbox --help` for every command.
@@ -174,7 +175,7 @@ below is the canonical mapping for their interactive and scripted forms.
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
 | `setup redaction` | yes (bare command) | subcommands + flags | Simple choices lead into **Show advanced settings?** for all 14 buckets, custom profiles, destinations, and ordered routes. Mutations support `--dry-run`, `--json`, `--yes`, and optional restart. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
-| `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux (sandboxes cannot run on macOS yet). Run it again at any time; the [sandbox guide](/docs/setup/sandbox) covers the other `sandbox` commands. |
+| `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon (OpenShell MicroVMs). Run it again at any time; the [sandbox guide](/docs/setup/sandbox) covers the other `sandbox` commands. |
 | `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. |
 
 <Callout title="Redaction is a v8 policy editor, not an on/off toggle">

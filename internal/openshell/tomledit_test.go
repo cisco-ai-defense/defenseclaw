@@ -20,6 +20,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	toml "github.com/pelletier/go-toml/v2"
 )
 
 // bindMountTables are the tables editTOML appends to a document that has
@@ -185,6 +187,36 @@ func TestEditEnvFile(t *testing.T) {
 	} {
 		if _, _, err := editEnvFile(nil, tc.set, tc.unset); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// TestEditTOMLWritesStringsAndIntegers: the compute driver is a TOML
+// string, and the MicroVM settings are int64, as TOML decodes integers:
+// with them an edit round-trips and an unchanged key compares equal.
+func TestEditTOMLWritesStringsAndIntegers(t *testing.T) {
+	settings := []tomlSetting{
+		{Table: gatewayTable, Key: "compute_driver", Value: "vm"},
+		{Table: vmDriverTable, Key: "sandbox_uid", Value: int64(501)},
+		{Table: vmDriverTable, Key: "note", Value: "a \"quoted\" \\ path\x01"},
+	}
+	in := "[openshell]\nversion = 2\n\n[openshell.gateway]\ncompute_driver = \"docker\" # was\n"
+	want := "[openshell]\nversion = 2\n\n[openshell.gateway]\ncompute_driver = \"vm\" # was\n\n[openshell.drivers.vm]\nsandbox_uid = 501\n" +
+		`note = "a \"quoted\" \\ path\u0001"` + "\n"
+	got, err := editTOML([]byte(in), settings)
+	if err != nil || string(got) != want {
+		t.Fatalf("editTOML = %v:\n%s\nwant:\n%s", err, got, want)
+	}
+	if again, err := editTOML(got, settings); err != nil || string(again) != string(got) {
+		t.Fatalf("not idempotent: %v\n%s", err, again)
+	}
+	var doc map[string]any
+	if err := toml.Unmarshal(got, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range settings {
+		if v, ok := lookupTOML(doc, s.Table, s.Key); !ok || v != s.Value {
+			t.Fatalf("%s decodes as %#v, not %#v", s, v, s.Value)
 		}
 	}
 }

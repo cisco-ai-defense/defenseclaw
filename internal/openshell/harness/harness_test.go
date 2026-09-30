@@ -100,6 +100,10 @@ func TestRegistry(t *testing.T) {
 			artifactsFor(t, spec).TamperTier != spec.TamperTier {
 			t.Fatalf("%s tamper tier %q does not match its artifacts", name, spec.TamperTier)
 		}
+		// The launch banner says what a user tier leaves open, per harness.
+		if (spec.TamperTier == connector.SandboxTamperTierUser) != (spec.TamperNote != "") {
+			t.Fatalf("%s: tamper tier %q with note %q; every user-tier harness, and only one, says what its tier leaves open", name, spec.TamperTier, spec.TamperNote)
+		}
 		if v := spec.Verification(); v.Status != VerifiedLive && v.Status != Unverified || strings.TrimSpace(v.Note) == "" {
 			t.Fatalf("%s verification %#v carries no status, evidence or reason", name, v)
 		}
@@ -191,6 +195,9 @@ func TestInstallStepsPinContract(t *testing.T) {
 		{"antigravity-pin", Antigravity, "", []string{"sha512sum -c", "1.2.12-5784551402897408", "aarch64)", "x86_64)", "is not the pinned"}, nil},
 		{"antigravity-below-contract", Antigravity, "1.1.7", nil, ErrUnknownContract},
 		{"antigravity-unpinned-build", Antigravity, "1.2.13", nil, nil},
+		// Inside the host contract (>=0.7.0), but its image never fires
+		// AfterAgentResponse (RT-A-2).
+		{"omnigent-below-sandbox-floor", OmniGent, "0.12.0", nil, ErrUnknownContract},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steps, err := tc.spec.InstallSteps(tc.version)
@@ -498,6 +505,24 @@ func TestLaunchArgv(t *testing.T) {
 			[]string{OmniGentLauncherPath, "run", "--model=openai.gpt-oss-120b"}},
 		{"omnigent-openai-model", OmniGent, LaunchOptions{Mode: Interactive, CredentialProfile: profiles.OpenAIID, Args: []string{"--model", "gpt-5-mini"}},
 			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
+		// `sandbox connect NAME -- --continue` continues the sandbox agent's
+		// latest conversation (OG-U2).
+		{"omnigent-continue", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "--continue"}},
+			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", "--continue"}},
+		// The shell wrapper forwards `omnigent run …` as typed, OmniGent's
+		// own resume hint among them, after the sandbox's stored arguments
+		// on a resume: the subcommand is dropped, not taken for the agent.
+		{"omnigent-wrapped-run", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"run", "--model", "gpt-5-mini"}},
+			[]string{OmniGentLauncherPath, "run", "--model", "gpt-5-mini"}},
+		{"omnigent-wrapped-resume", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--model", "mock-model", "run",
+			connector.SandboxCanonicalDir("omnigent") + "/agent", "--model", "mock-model", "--resume", "b2b58f42"}},
+			[]string{OmniGentLauncherPath, "run", "--model", "mock-model", connector.SandboxCanonicalDir("omnigent") + "/agent",
+				"--model", "mock-model", "--resume", "b2b58f42"}},
+		// An option's value, the agent, and anything after it stay.
+		{"omnigent-run-as-values", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
+			[]string{OmniGentLauncherPath, "run", "-p", "run", "--resume", "run", "--tools", "run", "./agent", "run"}},
+		{"omnigent-resume-picker", OmniGent, LaunchOptions{Mode: Interactive, Args: []string{"--resume", "--model=m", "run"}},
+			[]string{OmniGentLauncherPath, "run", "--resume", "--model=m"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := tc.spec.LaunchArgv(tc.opts)

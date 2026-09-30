@@ -187,6 +187,11 @@ func TestSandboxRunHelpNamesEveryHarness(t *testing.T) {
 			t.Errorf("run %s resolves to %v, %v; want %s", name, got, err, spec.Name)
 		}
 	}
+	// Certification AG-MAC-F8: Antigravity is named as image build names
+	// it, and the help says its command works too.
+	if !strings.Contains(long, "omnigent or antigravity (its command, agy, works too;") {
+		t.Errorf("run --help does not name antigravity with agy:\n%s", long)
+	}
 	if stub := pythonStubLong(t, "run"); stub != long {
 		t.Errorf("the Python stub's run help differs from the Go one:\n stub: %s\n   go: %s", stub, long)
 	}
@@ -216,6 +221,10 @@ func pythonStubLong(t *testing.T, path string) string {
 		if line == ")," {
 			break
 		}
+		if len(line) >= 2 && line[0] == '\'' && line[len(line)-1] == '\'' {
+			// A Python single-quoted string: the same text in Go quotes.
+			line = strconv.Quote(strings.ReplaceAll(line[1:len(line)-1], `\'`, `'`))
+		}
 		s, err := strconv.Unquote(line)
 		if err != nil {
 			t.Fatalf("the %s stub's help line %q is not a plain string literal: %v", path, line, err)
@@ -223,6 +232,59 @@ func pythonStubLong(t *testing.T, path string) string {
 		b.WriteString(s)
 	}
 	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// The Python stubs of the commands whose help says how a Mac differs (every
+// run works on a copy, which review previews and --yes leaves in the
+// sandbox; setup and doctor handle the MicroVM driver) carry the Go help.
+func TestSandboxStubHelpIsTheGoHelp(t *testing.T) {
+	for _, path := range []string{"setup", "doctor", "run", "review"} {
+		cmd, _, err := sandboxCmd.Find([]string{path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stub, long := pythonStubLong(t, path), strings.Join(strings.Fields(cmd.Long), " "); stub != long {
+			t.Errorf("the Python stub's %s help differs from the Go one:\n stub: %s\n   go: %s", path, stub, long)
+		}
+	}
+	for _, path := range []string{"run", "connect"} {
+		cmd, _, _ := sandboxCmd.Find([]string{path})
+		if usage := cmd.Flags().Lookup("yes").Usage; !strings.Contains(usage, "copy: leave them in the sandbox for pull") {
+			t.Errorf("sandbox %s --yes: %q does not say what a copy's end does", path, usage)
+		}
+	}
+}
+
+// sandboxPreRun refuses, before any command runs, a machine sandboxes do
+// not run on: Windows, and a Mac without Apple silicon, where OpenShell's
+// MicroVM driver does not run. Teardown still runs on such a Mac: it
+// removes what an earlier setup left there.
+func TestSandboxHostRefusal(t *testing.T) {
+	const windows = "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"
+	for _, c := range []struct {
+		goos, goarch string
+		cleanup      bool
+		want         string
+	}{
+		{"linux", "amd64", false, ""}, {"linux", "arm64", false, ""}, {"darwin", "arm64", false, ""},
+		{"darwin", "amd64", false, "OpenShell sandboxes do not run on this machine: "},
+		{"darwin", "amd64", true, ""},
+		{"windows", "amd64", false, windows}, {"windows", "amd64", true, windows},
+	} {
+		err := sandboxHostRefusal(c.goos, c.goarch, c.cleanup)
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s/%s: %v", c.goos, c.goarch, err)
+		case c.want != "" && (err == nil || !strings.HasPrefix(err.Error(), c.want)):
+			t.Errorf("%s/%s: %v, want %q", c.goos, c.goarch, err, c.want)
+		case c.goos == "darwin" && err != nil && (!strings.Contains(err.Error(), "Apple silicon") || strings.Contains(err.Error(), "openshell: ") ||
+			!strings.Contains(err.Error(), "`defenseclaw sandbox teardown` still removes")):
+			t.Errorf("%s/%s: %v does not say why and what still runs", c.goos, c.goarch, err)
+		}
+	}
+	if teardown, _, _ := sandboxCmd.Find([]string{"teardown"}); teardown.Annotations[sandboxConfigOptional] != "true" {
+		t.Fatal("sandbox teardown is no longer the command a Mac without Apple silicon still runs")
+	}
 }
 
 // Every command that can ask a question takes --yes, the answer the

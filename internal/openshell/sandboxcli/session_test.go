@@ -131,6 +131,54 @@ func TestSessionEnd(t *testing.T) {
 	})
 }
 
+// A copy-mode session whose changes nobody brings back (no terminal to ask
+// on, --yes, a skip, a declined secret) ends saying how many files changed
+// and that nothing was applied, with the pull that brings them back; its
+// sandbox is stopped and kept, and a --rm dropped for that is said. On the
+// MicroVM driver, where every run works on a copy, this is how an
+// unattended run ends: nothing is applied without a review.
+func TestCopySessionLeavesUnpulledWorkInTheSandbox(t *testing.T) {
+	const name = "copybox"
+	left := "1 file changed; nothing was applied: the changes are kept in the sandbox for `defenseclaw sandbox pull " + name +
+		" --apply` (or --branch or --patch-out FILE)"
+	kept := name + " is not deleted (--rm): its work was not brought back; delete it once it is: `defenseclaw sandbox delete " + name + "`"
+	keptStopped := func(t *testing.T, ta *testApp) {
+		t.Helper()
+		if stops, deletes, applies := ta.calls("POST", name+"/stop"), ta.calls("DELETE", name), len(ta.copy.apply); stops != 1 || deletes != 0 || applies != 0 {
+			t.Fatalf("stop %d, delete %d, apply %d calls; want the sandbox stopped and kept with its work", stops, deletes, applies)
+		}
+	}
+	headless := func(ta *testApp) { ta.IO.TTY = false }
+	vm := func(ta *testApp) {
+		ta.IO.TTY = false
+		ta.daemon.status.Gateway.Driver = "vm"
+	}
+	secret := func(ta *testApp) {
+		ta.copy.pull = &workspace.PullResult{Name: name, Kind: workspace.CopyGit,
+			Changes: []workspace.TreeChange{{Path: "config/keys.txt", Status: "A", Added: 1}},
+			Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 1, Findings: []workspace.ScanFinding{
+				{Path: "config/keys.txt", Scanner: "clawshield-secrets", RuleID: "CS-SEC-MARKER", Severity: "CRITICAL", Title: "marker secret"}}}}
+	}
+	copyRun := RunOptions{Harness: "claude", Copy: true, Name: name}
+	with := func(f func(*RunOptions)) RunOptions {
+		o := copyRun
+		f(&o)
+		return o
+	}
+	runCases(t, []runCase{
+		{name: "no terminal, --rm", setup: headless, opts: with(func(o *RunOptions) { o.Prompt, o.Rm = "fix it", true }),
+			want: []string{left, kept}, check: keptStopped},
+		{name: "--yes on a terminal", opts: with(func(o *RunOptions) { o.Yes = true }), want: []string{left},
+			not: []string{kept, "Bring the changes back?"}, check: keptStopped},
+		{name: "a skip, --rm", input: "s\n", opts: with(func(o *RunOptions) { o.Rm = true }), want: []string{"Bring the changes back?", left, kept},
+			check: keptStopped},
+		{name: "a declined secret, --rm", input: "a\n\n", setup: secret, opts: with(func(o *RunOptions) { o.Rm = true }), want: []string{kept},
+			check: keptStopped},
+		{name: "the MicroVM driver without a terminal", setup: vm, opts: RunOptions{Harness: "claude", Name: name, Prompt: "fix it"},
+			want: []string{left}, not: []string{kept}, check: keptStopped},
+	})
+}
+
 // A headless session (--prompt) on a terminal still asks "Keep changes?"
 // at its end, and keeping them makes them the next session's base; only a
 // session with no terminal to ask on leaves its changes unaccepted, so the
@@ -264,6 +312,33 @@ func TestDaemonOutageIsAnnouncedLive(t *testing.T) {
 	has(t, ta.output(), "⚠ the DefenseClaw daemon was not reachable from ", "the hooks failed closed meanwhile")
 }
 
+// agyFailure is how Antigravity CLI 1.2.12 failed in an OpenShell 0.1.1
+// MicroVM.
+const agyFailure = "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"
+
+// failsAtStart makes the session's harness exit 1 before any hook (headless,
+// printing output) and the sandbox answer the localhost check with state.
+func failsAtStart(output, state string) func(*testApp) {
+	return func(ta *testApp) {
+		noChanges(ta)
+		ta.term.hooks, ta.term.code = nil, 1
+		ta.stream.hooks = nil
+		ta.stream.answer = func(argv []string) (int, string) {
+			switch {
+			case runsHarness(argv):
+				ta.IO.TTY = false
+				return 1, output + "\n"
+			case strings.Contains(strings.Join(argv, " "), "::localhost="):
+				return 0, "::localhost=" + state + "\n"
+			}
+			return 0, ""
+		}
+		if output != "" {
+			ta.IO.TTY = false
+		}
+	}
+}
+
 // What the end of a session says, and its exit status (manual R2-2, R2-6,
 // R2-66, R2-78, L3): late denials count, a harness that failed early is not
 // blamed on the hooks, the continue hint follows a conversation only, and
@@ -289,15 +364,24 @@ func TestSessionSummary(t *testing.T) {
 		return func(ta *testApp) {
 			noChanges(ta)
 			ta.env["OPENAI_API_KEY"] = env
+			ta.daemon.toolCalls = 1
 			if wrapped {
 				ta.Cfg.OpenShell.Wrappers = []string{"claudecode"}
 			}
 		}
 	}
+	// A session without a turn: the harness printed no resume line of its
+	// own (Copilot CLI prints one only after a prompt; retest RT-C2-1).
+	noTurn := func(env string, wrapped bool) func(*testApp) {
+		return func(ta *testApp) {
+			continueHint(env, wrapped)(ta)
+			ta.daemon.toolCalls = 0
+		}
+	}
 	const cont = "continue this conversation: defenseclaw sandbox connect " + sbName
 	evil := "notes\x1b[2J\x1b]0;DCMARKER\x07\rx\u202etxt.sh"
 	runCases(t, []runCase{
-		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted (2 requests blocked)"}, setup: func(ta *testApp) {
+		{name: "late denials count", opts: claude, want: []string{"0 new sites contacted · 2 sites blocked"}, setup: func(ta *testApp) {
 			noChanges(ta)
 			var armed atomic.Bool
 			var late atomic.Int32
@@ -328,18 +412,75 @@ func TestSessionSummary(t *testing.T) {
 			ta.term.hooks, ta.term.code = nil, 1
 		}, want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"},
 			not: []string{"hooks are not reaching", "continue this conversation"}},
+		// AG-MAC-F3: a harness that failed at start because localhost does
+		// not resolve is told apart, with what to do; the pull of a copy
+		// still runs, without its progress line.
+		{name: "localhost does not resolve in the sandbox", opts: claude, exit: 1, setup: failsAtStart("", "unresolved unlisted"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: localhost does not resolve in " + sbName +
+				": its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves",
+				"→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete " + sbName + "`) and run it again (`defenseclaw sandbox run claudecode`)"},
+			not: []string{"the harness itself failed"}},
+		{name: "a headless harness that looks localhost up itself", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
+			setup: failsAtStart(agyFailure, "resolves unlisted"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: it could not resolve localhost (\"" + agyFailure +
+				"\"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and Claude Code does not use the system resolver, which answers localhost here",
+				"→ Claude Code cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it"}},
+		{name: "a headless harness whose sandbox resolves localhost", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
+			setup: failsAtStart("Error: invalid API key", "resolves listed"),
+			want:  []string{"before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"}, not: []string{"localhost", "a new sandbox"}},
+		{name: "a copy whose harness failed at start", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"}, exit: 1,
+			setup: failsAtStart("", "unresolved unlisted"), want: []string{"localhost does not resolve in copybox", "run it again", "Bring the changes back?"},
+			not: []string{"Pulling copybox's work"}, check: func(t *testing.T, ta *testApp) {
+				// What the harness wrote before it failed still comes back.
+				if !slices.Contains(ta.copy.steps, "pull copybox") {
+					t.Fatalf("copy steps = %v", ta.copy.steps)
+				}
+			}},
+		{name: "a copy whose harness ran", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"},
+			want: []string{"Pulling copybox's work"}, not: []string{"localhost"}},
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
-		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{cont +
-			" -- --continue (the `claude --resume …` Claude Code printed would run it on this machine, outside the sandbox)"}},
+		{name: "continue claude", opts: claude, setup: continueHint("", false), want: []string{"→ " + cont +
+			" -- --continue (the `claude --resume …` Claude Code printed above works only inside the sandbox)"}},
 		{name: "continue claude with the wrapper", opts: claude, setup: continueHint("", true), want: []string{cont +
 			" -- --continue (the `claude --resume …` Claude Code printed resumes it in this sandbox too: the shell wrapper is on)"}},
 		{name: "continue codex", opts: RunOptions{Harness: "codex"}, setup: continueHint("sk-mock", false),
-			want: []string{"-- resume --last (the `codex resume …` Codex printed would run it on this machine, outside the sandbox)"}},
+			want: []string{"-- resume --last (the `codex resume …` Codex printed above works only inside the sandbox)"}},
+		// Every harness that can continue gets the line, after its own
+		// host-useless hint (cert copilot:F7, kiro:KR-F4, hermes:HERMES-4,
+		// openhands:MAC-OSH-OH-7).
+		// OpenCode's exit screen shows "Continue  opencode -s ses_<id>"
+		// (OC-7, FIN-B-3).
+		{name: "continue opencode", opts: RunOptions{Harness: "opencode"}, setup: continueHint("sk-mock", false),
+			want: []string{"→ " + cont + " -- --continue (the `opencode -s …` OpenCode printed above works only inside the sandbox)"}},
+		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
+		{name: "continue copilot without a turn", opts: RunOptions{Harness: "copilot"}, setup: noTurn("sk-mock", false),
+			want: []string{"-- --continue (a `copilot --resume …` line of GitHub Copilot CLI works only inside the sandbox)"},
+			not:  []string{"printed above"}},
+		{name: "continue claude with the wrapper without a turn", opts: claude, setup: noTurn("", true), want: []string{cont +
+			" -- --continue (a `claude --resume …` line of Claude Code resumes it in this sandbox too: the shell wrapper is on)"},
+			not: []string{"printed"}},
+		{name: "continue kiro", opts: RunOptions{Harness: "kiro"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume (the `kiro-cli --resume-id …` Kiro CLI printed above works only inside the sandbox)"}},
+		{name: "continue hermes", opts: RunOptions{Harness: "hermes"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --continue (the `hermes --resume …` Hermes Agent printed above works only inside the sandbox)"}},
+		{name: "continue openhands", opts: RunOptions{Harness: "openhands"}, setup: continueHint("sk-mock", false),
+			want: []string{"-- --resume --last (the `openhands --resume …` OpenHands printed above works only inside the sandbox)"}},
+		// OmniGent prints `Resume: omnigent run <agent> --model <m> --resume
+		// <id>` at /quit, and a plain connect started a new conversation
+		// (OG-U2).
+		{name: "continue omnigent", opts: RunOptions{Harness: "omnigent", Args: []string{"--model", "gpt-5-mini"}}, setup: continueHint("sk-mock", false),
+			want: []string{cont + " -- --continue (the `omnigent run …` OmniGent printed above works only inside the sandbox)"}},
+		// agy prints "Resume with -c (or command below): agy
+		// --conversation=<id>" at /quit, and nothing named the sandbox's
+		// continue (AG-RT-1).
+		{name: "continue antigravity", opts: RunOptions{Harness: "antigravity"}, setup: continueHint("", false),
+			want: []string{"→ " + cont + " -- -c (the `agy --conversation …` Antigravity printed above works only inside the sandbox)"}},
 		{name: "no continue after one prompt", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, setup: func(ta *testApp) {
 			ta.IO.TTY = false
 			noChanges(ta)
@@ -1031,6 +1172,72 @@ func TestLaunchOptionsKeepOptionsNotPrompts(t *testing.T) {
 	}
 }
 
+// Certification OG-M1: a first word that is not an option is a prompt or a
+// one-off subcommand for most harnesses, but launch configuration for
+// some, and the options after it were lost with it (OmniGent's documented
+// `-- <agent path> --model <m>` kept nothing). Every harness that takes
+// such a word is here.
+func TestLaunchOptionsKeepALeadingLaunchOperand(t *testing.T) {
+	agent := "/usr/local/lib/defenseclaw/omnigent/agent"
+	for _, c := range []struct {
+		harness string
+		args    []string
+		want    []string
+	}{
+		// OmniGent's run takes the agent as its one operand, options on
+		// either side, and no prompt word: everything is kept, in order.
+		{"omnigent", []string{agent, "--model", "mock-model"}, []string{agent, "--model", "mock-model"}},
+		{"omnigent", []string{"--model", "mock-model", agent, "--system-prompt", "be terse"}, []string{"--model", "mock-model", agent, "--system-prompt", "be terse"}},
+		{"omnigent", []string{agent, "-p", "fix it"}, nil},
+		// OpenCode's project directory, when it reads as a path.
+		{"opencode", []string{"./web", "-m", "anthropic/claude-sonnet-5"}, []string{"./web", "-m", "anthropic/claude-sonnet-5"}},
+		{"opencode", []string{"-m", "anthropic/claude-sonnet-5", "."}, []string{"-m", "anthropic/claude-sonnet-5", "."}},
+		{"opencode", []string{"session", "list"}, nil},
+		{"opencode", []string{"run", "fix it"}, nil},
+		// Hermes's chat is the interactive session a bare hermes starts.
+		{"hermes", []string{"chat", "-m", "gpt-5-mini", "--provider", "defenseclaw"}, []string{"chat", "-m", "gpt-5-mini", "--provider", "defenseclaw"}},
+		{"hermes", []string{"sessions", "list"}, nil},
+		// A prompt word, or a subcommand of its own.
+		{"claudecode", []string{"fix it", "--model", "sonnet"}, nil},
+		{"cursor", []string{"fix it", "--model", "gpt-5"}, nil},
+		{"kiro", []string{"fix it", "--model", "claude-sonnet-4"}, nil},
+		{"codex", []string{"fix it", "-m", "mock-model"}, nil},
+		{"amp", []string{"threads", "continue", "T-1"}, nil},
+		{"openhands", []string{"mcp", "list"}, nil},
+		{"devin", []string{"src", "--model", "swe-1"}, nil},
+	} {
+		if got := launchOptions(harnessSpec(t, c.harness), c.args); !slices.Equal(got, c.want) {
+			t.Errorf("%s: launchOptions(%q) = %q, want %q", c.harness, c.args, got, c.want)
+		}
+	}
+}
+
+// Certification OG-M1 end to end: `connect` after an OmniGent run with the
+// agent path first starts OmniGent with the agent and model again, in the
+// run's order, before the arguments given now.
+func TestConnectKeepsOmniGentsAgentAndModel(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["OPENAI_API_KEY"] = "sk-mock"
+	noChanges(ta)
+	agent := "/usr/local/lib/defenseclaw/omnigent/agent"
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "omnigent", Name: "og", LLM: "none", Credentials: []string{"OPENAI_API_KEY=host.openshell.internal:38937"},
+		Env: []string{"OPENAI_BASE_URL=http://host.openshell.internal:38937/v1"}, Args: []string{agent, "--model", "mock-model"}}))
+	if len(ta.term.runs) != 1 || !strings.HasSuffix(strings.Join(ta.term.runs[0], " "), " run "+agent+" --model mock-model") {
+		t.Fatalf("run argv = %q", ta.term.runs)
+	}
+	ta.term.runs = nil
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "og"}))
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "og", Args: []string{"--resume", "conv_abc123"}}))
+	if len(ta.term.runs) != 2 {
+		t.Fatalf("terminal runs = %q", ta.term.runs)
+	}
+	for i, want := range []string{" run " + agent + " --model mock-model", " run " + agent + " --model mock-model --resume conv_abc123"} {
+		if got := strings.Join(ta.term.runs[i], " "); !strings.HasSuffix(got, want) {
+			t.Errorf("connect %d argv = %q, want it to end %q", i, got, want)
+		}
+	}
+}
+
 // Manual R2-21 and R2-7: `connect` after a run gives the harness the run's
 // options again (a Codex endpoint override), before the ones given now,
 // and its banner has the run's Model and Secret lines.
@@ -1090,6 +1297,49 @@ func TestRunLaunchIsTiedToTheSandbox(t *testing.T) {
 	if ta.runLaunchOf(&other) != nil {
 		t.Fatal("a later sandbox of the name inherited the record")
 	}
+}
+
+// A session after an apply compares with what the apply brought: with
+// nothing new it asks nothing and says so, and `delete` of the sandbox it
+// stopped does not warn about unpulled work; the same after an apply at
+// the session's end (cert hermes:HERMES-5, hermes:HERMES-6,
+// openhands:MAC-OSH-OH-2).
+func TestCopySessionAfterAnApply(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40), Since: strings.Repeat("d", 40)}
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	has(t, ta.output(), "0 files changed (+0 −0) since the last apply", "nothing new since the last apply to ~/proj")
+	lacks(t, ta.output(), "Bring the changes back?", "Bring them back anyway?", "the sandbox changed nothing", "has the sandbox's changes")
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	lacks(t, ta.output(), "may hold work")
+
+	// Applied at the session's end: nothing is left to bring back either.
+	ta = newTestApp(t, "a\n")
+	ta.env["ANTHROPIC_API_KEY"] = "sk-mock"
+	ta.copy.pendingStopped = map[string]workspace.CopyWork{"copybox": workspace.CopyWorkUnknown}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
+	has(t, ta.output(), "applied 1 change to ~/proj")
+	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}, Yes: true}))
+	lacks(t, ta.output(), "may hold work")
+}
+
+// `sandbox pull` and a session's end ask the same question before bringing
+// back changes that can run code on this machine (cert
+// openhands:MAC-OSH-OH-2: pull asked "…or hold a secret").
+func TestPullAsksLikeTheSessionEnd(t *testing.T) {
+	ta := newTestApp(t, "n\n")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Project: ta.project, Effective: strings.Repeat("e", 40),
+		Changes: []workspace.TreeChange{{Path: "Makefile", Status: "M"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "Makefile", Label: "Makefile", Kind: workspace.RiskExecutable,
+			Severity: workspace.SeverityHigh, Detail: "build file"}}}}
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?")
+	lacks(t, ta.output(), "or hold a secret")
 }
 
 // Manual R2-43: a copy-mode session that found nothing to bring back lets

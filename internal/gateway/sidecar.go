@@ -2054,9 +2054,13 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
+	// Hook tool-call decisions read the API server's start-time config, so a
+	// hot reload can't move the global guardrail.block_at / alert_at: they
+	// restart like the per-connector levels, which live in Connectors.
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
 	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
 		oldG.Connector != newG.Connector ||
+		oldG.BlockAt != newG.BlockAt || oldG.AlertAt != newG.AlertAt ||
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||

@@ -225,6 +225,17 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
+# Kiro shows the veto's stderr after "PreToolHook blocked the tool
+# execution:". DefenseClaw's own reasons name it already ("Blocked by
+# DefenseClaw rule ..."); any other reason gets the prefix, so the user
+# knows what blocked the tool.
+kiro_block_reason() {
+  case "$1" in
+    *[Dd][Ee][Ff][Ee][Nn][Ss][Ee][Cc][Ll][Aa][Ww]*) printf '%s\n' "$1" >&2 ;;
+    *) printf 'defenseclaw: %s\n' "$1" >&2 ;;
+  esac
+}
+
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
@@ -248,7 +259,7 @@ if [ "$ACTION" = "block" ] || [ "$DECISION" = "deny" ] || [ "$DECISION" = "block
   if [ -z "$REASON" ]; then
     REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
   fi
-  printf 'defenseclaw: %s\n' "${REASON:-Blocked by DefenseClaw Kiro policy.}" >&2
+  kiro_block_reason "${REASON:-Blocked by DefenseClaw Kiro policy.}"
   exit 2
 fi
 exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
@@ -256,7 +267,7 @@ exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   REASON=$(echo "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null || true)
   if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
     if [ -n "$REASON" ]; then
-      echo "defenseclaw: $REASON" >&2
+      kiro_block_reason "$REASON"
     fi
     exit 2
   fi

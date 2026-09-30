@@ -777,18 +777,24 @@ enum TUIWizards {
     )
 
     /// OpenShell sandbox setup (TUI Setup slot 13). The argv mirrors the TUI's
-    /// `_build_sandbox_args` byte for byte. The OpenShell install runs in a
-    /// terminal (on a Mac it installs NVIDIA's Homebrew formula); the app
-    /// never passes --install-openshell. Like the TUI on macOS it has no
-    /// telemetry question: the Homebrew gateway does not read gateway.env,
-    /// so setup cannot turn OpenShell's telemetry off.
+    /// `_build_sandbox_args` on macOS byte for byte. The OpenShell install
+    /// runs in a terminal (on a Mac it installs NVIDIA's Homebrew formula,
+    /// and e2fsprogs under the same consent); the app never passes
+    /// --install-openshell. Like the TUI on macOS it has no telemetry
+    /// question (the Homebrew gateway does not read gateway.env, so setup
+    /// cannot turn OpenShell's telemetry off) and no mounts question: setup
+    /// runs macOS sandboxes in OpenShell MicroVMs, which mount no host folders.
     private static let sandbox = WizardDefinition(
         id: "sandbox", title: "Sandbox", icon: "cube.transparent",
         blurb: "Run Claude Code and Codex in NVIDIA OpenShell sandboxes that see only your project folder. "
-            + "Sandboxes cannot run on a Mac yet: OpenShell needs Landlock, and Docker Desktop's Linux VM "
-            + "kernel has none (the doctor action checks this). "
-            + "If OpenShell is missing, run `defenseclaw sandbox setup --install-openshell` "
-            + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula).",
+            + "On a Mac they run in OpenShell MicroVMs (its vm driver: Apple silicon only, experimental "
+            + "upstream), because Docker Desktop's Linux kernel has no Landlock: setup sets "
+            + "compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway once. "
+            + "A MicroVM mounts no host folders, so every run works on a copy and "
+            + "`defenseclaw sandbox pull` brings the changes back. The first run of each image prepares "
+            + "its MicroVM disk (about a minute and 5 GB). "
+            + "If OpenShell or e2fsprogs is missing, run `defenseclaw sandbox setup --install-openshell` "
+            + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula and e2fsprogs).",
         baseArgs: ["sandbox", "setup"],
         commandBuilder: sandboxCommands,
         validation: sandboxValidation,
@@ -803,10 +809,6 @@ enum TUIWizards {
             WizardField(key: "harness-codex", label: "Codex", kind: .bool, defaultValue: "yes",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         help: "Run `codex` in a sandbox (--harness codex)."),
-            WizardField(key: "mounts", label: "Mount the project folder", kind: .bool, defaultValue: "yes",
-                        visibleWhen: (key: "action", equals: ["setup"]),
-                        help: "Enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts "
-                            + "the folder you launch from. Off: every run works on a copy."),
             WizardField(key: "wrappers", label: "Shell wrappers", kind: .bool, defaultValue: "no",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         help: "Make `claude` and `codex` run sandboxed when you type them "
@@ -824,7 +826,6 @@ enum TUIWizards {
         for harness in ["claudecode", "codex"] where on("harness-\(harness)", "yes") {
             args += ["--harness", harness]
         }
-        if !on("mounts", "yes") { args.append("--no-mounts") }
         args.append(on("wrappers", "no") ? "--wrappers" : "--no-wrappers")
         if !on("build-images", "yes") { args.append("--skip-images") }
         return [args]

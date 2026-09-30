@@ -300,3 +300,19 @@ async def test_read_only_palette_command_runs_without_preview(tmp_path) -> None:
         await _settle(pilot, app)
         assert len(app.screen_stack) == 1
         assert [(binary, args) for binary, args, _kw in runner.calls] == [("defenseclaw", ("policy", "list"))]
+
+
+@pytest.mark.parametrize("close", ["escape", "question_mark", "q"])
+async def test_closing_help_returns_to_the_panel_where_it_was(tmp_path, close: str) -> None:
+    from textual.containers import VerticalScroll
+
+    app = fixtures.snapshot_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.press("question_mark")
+        await pilot.press("pagedown")
+        await pilot.pause()
+        await pilot.press(close)
+        await pilot.pause()
+        await pilot.pause()
+        assert app.help_open is False
+        assert app.query_one("#body-scroll", VerticalScroll).scroll_y == 0

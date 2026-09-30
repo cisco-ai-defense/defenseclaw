@@ -8,30 +8,43 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""How the Setup panel groups and names its wizards and config sections.
+"""How the Setup panel groups, names and rates its tasks and config sections.
 
 ``SetupWizard`` values are stable ids (tests, intents and saved state use
-them), so the display order lives here instead: ``display_rows()`` lists
-group header rows and wizard rows in the order the table shows them, and
-``row_for`` / ``wizard_at`` map between table rows and wizards.
+them), so the display order lives here instead: ``WIZARD_GROUPS`` lists the
+task groups the nav shows, each with its tasks in table order.
+``group_tasks`` / ``task_row`` map between a group's table rows and tasks.
+
+``task_status`` rates one task from the config and the readiness checks
+(the Status column), and ``task_problems`` picks the readiness checks a
+task's detail should mention.
 
 The config editor's sections get the same treatment: ``section_groups``
-sorts them into a handful of groups for the ``g`` section list, and
-``field_entries`` / ``filter_field_entries`` back the ``/`` field finder.
-All of this is pure so it is unit-tested without Textual.
+sorts them into a handful of groups for the nav and the ``g`` section list,
+and ``field_entries`` / ``filter_field_entries`` back the ``/`` field
+finder. All of this is pure so it is unit-tested without Textual.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard
-from defenseclaw.tui.services.setup_state import ConfigSection, validate_config_field
+from defenseclaw.tui.services.setup_state import (
+    ConfigSection,
+    ReadinessCheck,
+    get_config_value,
+    validate_config_field,
+)
+from defenseclaw.tui.services.setup_state import (
+    _active_connector_names as active_connector_names,
+)
 
 # (group title, ((wizard, friendly label), ...)). Every SetupWizard member
-# appears exactly once; test_setup_catalog.py enforces it.
+# appears exactly once; test_setup_catalog.py enforces it. Labels are read
+# under their group's title, so they can stay short.
 WIZARD_GROUPS: tuple[tuple[str, tuple[tuple[SetupWizard, str], ...]], ...] = (
     (
         "Get protected",
@@ -45,9 +58,9 @@ WIZARD_GROUPS: tuple[tuple[str, tuple[tuple[SetupWizard, str], ...]], ...] = (
         "Guardrail & scanning",
         (
             (SetupWizard.GUARDRAIL, "Guardrail"),
-            (SetupWizard.GUARDRAIL_ACTIONS, "Guardrail on/off, fail mode, approvals"),
-            (SetupWizard.SKILL_SCANNER, "Skill Scanner"),
-            (SetupWizard.MCP_SCANNER, "MCP Scanner"),
+            (SetupWizard.GUARDRAIL_ACTIONS, "On/off, fail mode, approvals"),
+            (SetupWizard.SKILL_SCANNER, "Skill scanner"),
+            (SetupWizard.MCP_SCANNER, "MCP scanner"),
             (SetupWizard.REDACTION, "Redaction"),
             (SetupWizard.TRUSTED_PATHS, "Trusted agent binaries"),
             (SetupWizard.REGISTRIES, "Approved catalogs"),
@@ -62,7 +75,7 @@ WIZARD_GROUPS: tuple[tuple[str, tuple[tuple[SetupWizard, str], ...]], ...] = (
             (SetupWizard.WEBHOOKS, "Chat & paging webhooks"),
             (SetupWizard.OBSERVABILITY, "Export telemetry"),
             (SetupWizard.SPLUNK, "Splunk"),
-            (SetupWizard.SPLUNK_DASHBOARDS, "Splunk Dashboards"),
+            (SetupWizard.SPLUNK_DASHBOARDS, "Splunk dashboards"),
             (SetupWizard.LOCAL_OBSERVABILITY, "Local observability stack"),
         ),
     ),
@@ -77,8 +90,13 @@ WIZARD_GROUPS: tuple[tuple[str, tuple[tuple[SetupWizard, str], ...]], ...] = (
     ),
 )
 
+GROUP_TITLES: tuple[str, ...] = tuple(title for title, _items in WIZARD_GROUPS)
 _LABELS: dict[SetupWizard, str] = {wizard: label for _title, items in WIZARD_GROUPS for wizard, label in items}
 _GROUP_OF: dict[SetupWizard, str] = {wizard: title for title, items in WIZARD_GROUPS for wizard, _label in items}
+_TASKS: dict[str, tuple[SetupWizard, ...]] = {
+    title: tuple(wizard for wizard, _label in items) for title, items in WIZARD_GROUPS
+}
+_ORDER: tuple[SetupWizard, ...] = tuple(wizard for title in GROUP_TITLES for wizard in _TASKS[title])
 
 
 def wizard_label(wizard: SetupWizard | int) -> str:
@@ -92,88 +110,379 @@ def wizard_group(wizard: SetupWizard | int) -> str:
     return _GROUP_OF.get(SetupWizard(wizard), "")
 
 
-RowKind = Literal["header", "wizard"]
-
-
-@dataclass(frozen=True)
-class SetupDisplayRow:
-    kind: RowKind
-    label: str
-    group: str
-    wizard: SetupWizard | None = None
-
-    @property
-    def selectable(self) -> bool:
-        return self.kind == "wizard"
-
-
-def _build_rows() -> tuple[SetupDisplayRow, ...]:
-    rows: list[SetupDisplayRow] = []
-    for title, items in WIZARD_GROUPS:
-        rows.append(SetupDisplayRow("header", title, title))
-        rows.extend(SetupDisplayRow("wizard", label, title, wizard) for wizard, label in items)
-    return tuple(rows)
-
-
-_ROWS = _build_rows()
-_ROW_OF: dict[SetupWizard, int] = {row.wizard: index for index, row in enumerate(_ROWS) if row.wizard is not None}
-_ORDER: tuple[SetupWizard, ...] = tuple(row.wizard for row in _ROWS if row.wizard is not None)
-
-
-def display_rows() -> tuple[SetupDisplayRow, ...]:
-    """Header and wizard rows in table order."""
-
-    return _ROWS
-
-
 def display_order() -> tuple[SetupWizard, ...]:
-    """Wizards in the order the table shows them."""
+    """Every task, group by group, in table order."""
 
     return _ORDER
 
 
-def row_for(wizard: SetupWizard | int) -> int:
-    """Table row that shows ``wizard``."""
+def group_tasks(group: str) -> tuple[SetupWizard, ...]:
+    """The tasks of ``group`` in table order (empty for an unknown group)."""
 
-    return _ROW_OF[SetupWizard(wizard)]
-
-
-def wizard_at(row: int) -> SetupWizard | None:
-    """Wizard shown on table ``row``; None for a group header or out of range."""
-
-    if 0 <= row < len(_ROWS):
-        return _ROWS[row].wizard
-    return None
+    return _TASKS.get(group, ())
 
 
-def nearest_wizard(row: int, *, prefer_down: bool = True) -> SetupWizard:
-    """Wizard on ``row``, or the closest one when ``row`` is a group header.
+def task_row(wizard: SetupWizard | int) -> int:
+    """Row of ``wizard`` in its group's table."""
 
-    Used when the table cursor lands on a header (mouse click, DataTable
-    arrow keys): it moves on in the direction of travel, or back when there
-    is nothing further that way.
-    """
+    wizard = SetupWizard(wizard)
+    return _TASKS[_GROUP_OF[wizard]].index(wizard)
 
-    row = max(0, min(row, len(_ROWS) - 1))
-    if (wizard := wizard_at(row)) is not None:
-        return wizard
-    steps = (1, -1) if prefer_down else (-1, 1)
-    for step in steps:
-        index = row + step
-        while 0 <= index < len(_ROWS):
-            if (wizard := wizard_at(index)) is not None:
-                return wizard
-            index += step
-    return _ORDER[0]
+
+def task_at(group: str, row: int) -> SetupWizard | None:
+    """Task on ``row`` of ``group``'s table; None when out of range."""
+
+    tasks = group_tasks(group)
+    return tasks[row] if 0 <= row < len(tasks) else None
 
 
 def step_wizard(wizard: SetupWizard | int, delta: int, *, wrap: bool = False) -> SetupWizard:
-    """Next/previous wizard in display order (headers are skipped)."""
+    """Next/previous task in display order, across group boundaries."""
 
     index = _ORDER.index(SetupWizard(wizard)) + delta
     if wrap:
         return _ORDER[index % len(_ORDER)]
     return _ORDER[max(0, min(index, len(_ORDER) - 1))]
+
+
+def step_group(wizard: SetupWizard | int, delta: int) -> SetupWizard:
+    """First task of the group ``delta`` groups away (wrapping)."""
+
+    index = GROUP_TITLES.index(wizard_group(wizard)) + delta
+    return _TASKS[GROUP_TITLES[index % len(GROUP_TITLES)]][0]
+
+
+# --- task status ----------------------------------------------------------
+
+TaskState = Literal["ok", "attention", "off", "na"]
+TASK_GLYPHS: dict[str, str] = {"ok": "✓", "attention": "!", "off": "○", "na": "–"}
+_DEFAULT_TEXT: dict[str, str] = {"ok": "set up", "attention": "needs attention", "off": "not set up", "na": "n/a"}
+
+
+@dataclass(frozen=True)
+class TaskStatus:
+    """One task's Status cell: ✓ set up, ! needs attention, ○ not set up, – n/a.
+
+    ``text`` is a short state such as ``on · observe`` or ``2 missing``.
+    """
+
+    state: TaskState
+    text: str = ""
+
+    @property
+    def glyph(self) -> str:
+        return TASK_GLYPHS[self.state]
+
+    @property
+    def label(self) -> str:
+        return f"{self.glyph} {self.text or _DEFAULT_TEXT[self.state]}"
+
+
+@dataclass(frozen=True)
+class TaskProblem:
+    """A readiness check that needs attention, as one task's detail tells it.
+
+    ``owned`` checks decide the task's own status; the others are about
+    something the task depends on (``why`` says what).
+    """
+
+    check: ReadinessCheck
+    owned: bool = True
+    why: str = ""
+
+    @property
+    def fix(self) -> str:
+        fix = self.check.fix
+        if fix is None:
+            return ""
+        return " ".join((fix.binary, *fix.args))
+
+
+def _check_name(check: ReadinessCheck) -> str:
+    # "Active Connector: codex" is one row per connector.
+    return check.title.split(":", 1)[0].strip()
+
+
+# Which task owns each readiness check (its fix belongs to that task).
+_READINESS_OWNERS: dict[str, tuple[SetupWizard, ...]] = {
+    "Active Connector": (SetupWizard.CONNECTOR_SETUP,),
+    "Gateway / API Health": (SetupWizard.GATEWAY,),
+    "Guardrail": (SetupWizard.GUARDRAIL,),
+    "Required Credentials": (SetupWizard.CREDENTIALS,),
+    "LLM Config": (SetupWizard.LLM,),
+    "Regional Provider": (SetupWizard.LLM,),
+    "Custom-provider Overlay": (SetupWizard.CUSTOM_PROVIDERS,),
+    "Scanner Availability": (SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER),
+    "Observability v8": (SetupWizard.OBSERVABILITY,),
+    "Registry / Asset Policy": (SetupWizard.REGISTRIES,),
+    "Restart Pending": (SetupWizard.GATEWAY,),
+}
+# Checks a task depends on without owning them: (check, task) -> why.
+_READINESS_RELATED: dict[tuple[str, SetupWizard], str] = {
+    ("LLM Config", SetupWizard.GUARDRAIL): "the judge uses it",
+    ("Regional Provider", SetupWizard.GUARDRAIL): "the judge uses it",
+    ("LLM Config", SetupWizard.SKILL_SCANNER): "LLM analysis uses it",
+    ("Required Credentials", SetupWizard.LLM): "the model needs its API key",
+    ("Gateway / API Health", SetupWizard.GUARDRAIL): "the guardrail runs in the gateway",
+    ("Gateway / API Health", SetupWizard.GUARDRAIL_ACTIONS): "the guardrail runs in the gateway",
+}
+
+
+def _related_applies(name: str, wizard: SetupWizard, cfg: object | Mapping[str, Any] | None) -> bool:
+    if wizard == SetupWizard.GUARDRAIL and name in {"LLM Config", "Regional Provider"}:
+        strategy = _text(cfg, "guardrail.detection_strategy") or "regex_judge"
+        return _flag(cfg, "guardrail.enabled") and (strategy != "regex_only" or _flag(cfg, "guardrail.judge.enabled"))
+    if wizard == SetupWizard.SKILL_SCANNER:
+        return _flag(cfg, "scanners.skill_scanner.use_llm")
+    if wizard in {SetupWizard.GUARDRAIL, SetupWizard.GUARDRAIL_ACTIONS}:
+        return _flag(cfg, "guardrail.enabled")
+    return True
+
+
+def task_problems(
+    wizard: SetupWizard | int,
+    readiness: Sequence[ReadinessCheck] = (),
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[TaskProblem, ...]:
+    """Readiness checks that need attention and matter to ``wizard``.
+
+    The task's own checks come first, then the ones it depends on.
+    """
+
+    wizard = SetupWizard(wizard)
+    owned: list[TaskProblem] = []
+    related: list[TaskProblem] = []
+    for check in readiness:
+        if check.status == "pass":
+            continue
+        name = _check_name(check)
+        if wizard in _READINESS_OWNERS.get(name, ()):
+            owned.append(TaskProblem(check))
+        elif (why := _READINESS_RELATED.get((name, wizard))) and _related_applies(name, wizard, cfg):
+            related.append(TaskProblem(check, owned=False, why=why))
+    return (*owned, *related)
+
+
+def _value(cfg: object | Mapping[str, Any] | None, path: str, default: Any = None) -> Any:
+    try:
+        return get_config_value(cfg, path, default)
+    except Exception:  # noqa: BLE001 - a config quirk must not break the Status column.
+        return default
+
+
+def _text(cfg: object | Mapping[str, Any] | None, path: str) -> str:
+    value = _value(cfg, path, "")
+    return str(value).strip() if value is not None else ""
+
+
+def _flag(cfg: object | Mapping[str, Any] | None, path: str, default: bool = False) -> bool:
+    value = _value(cfg, path, default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _items(cfg: object | Mapping[str, Any] | None, path: str) -> list[Any]:
+    value = _value(cfg, path, None)
+    if isinstance(value, Mapping):
+        return list(value.values())
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _enabled(entry: Any, default: bool = True) -> bool:
+    value = entry.get("enabled", default) if isinstance(entry, Mapping) else getattr(entry, "enabled", default)
+    return default if value is None else bool(value)
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _short(value: str, width: int = 20) -> str:
+    return value if len(value) <= width else value[: width - 1] + "…"
+
+
+def _destinations(observability: Any) -> list[Any] | None:
+    """Enabled destinations the operator added; None when the plan isn't known."""
+
+    if observability is None:
+        return None
+    return [
+        destination
+        for destination in getattr(observability, "destinations", ()) or ()
+        if getattr(destination, "enabled", False) and not getattr(destination, "generated", False)
+    ]
+
+
+def _connector_status(cfg: Any, owned: bool) -> TaskStatus:
+    names = active_connector_names(cfg)
+    if not names:
+        return TaskStatus("attention" if owned else "off", "no agent yet")
+    return TaskStatus("ok", names[0] if len(names) == 1 else _plural(len(names), "agent"))
+
+
+def _credentials_status(credentials: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
+    rows = tuple(getattr(credentials, "rows", ()) or ())
+    if getattr(credentials, "error", ""):
+        return TaskStatus("attention", "couldn't list keys")
+    missing = getattr(credentials, "missing_required", ()) if rows else ()
+    if missing:
+        return TaskStatus("attention", f"{len(missing)} missing")
+    if problems:
+        return TaskStatus("attention", "keys missing")
+    if rows:
+        return TaskStatus("ok", "none missing")
+    return TaskStatus("off", "not checked yet")
+
+
+def _llm_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
+    provider = _text(cfg, "llm.provider")
+    model = _text(cfg, "llm.model")
+    instance = _text(cfg, "llm.instance_name")
+    if problems:
+        return TaskStatus("attention", "no region" if provider and (model or instance) else "not set")
+    if not provider and not model:
+        return TaskStatus("off", "not set")
+    if model and "/" not in model and provider:
+        model = f"{provider}/{model}"
+    return TaskStatus("ok", _short(model or f"{provider} via {instance}"))
+
+
+def _gateway_status(cfg: Any, problems: Sequence[TaskProblem]) -> TaskStatus:
+    names = {_check_name(problem.check) for problem in problems}
+    if "Gateway / API Health" in names:
+        return TaskStatus("attention", "not running")
+    if "Restart Pending" in names:
+        return TaskStatus("attention", "restart queued")
+    host = _text(cfg, "gateway.host") or "127.0.0.1"
+    port = _text(cfg, "gateway.port")
+    return TaskStatus("ok", _short(f"{host}:{port}" if port else host))
+
+
+def _observability_status(observability: Any, error: str) -> TaskStatus:
+    destinations = _destinations(observability)
+    if destinations is None:
+        if error:
+            return TaskStatus("attention", "config unreadable")
+        return TaskStatus("off", "local only")
+    if not destinations:
+        return TaskStatus("off", "local only")
+    return TaskStatus("ok", _plural(len(destinations), "destination"))
+
+
+def _splunk_status(cfg: Any, observability: Any) -> TaskStatus:
+    destinations = _destinations(observability)
+    if destinations is not None:
+        splunk = [
+            d
+            for d in destinations
+            if getattr(d, "kind", "") == "splunk_hec" or str(getattr(d, "preset", "")).startswith("splunk")
+        ]
+        return TaskStatus("ok", _plural(len(splunk), "destination")) if splunk else TaskStatus("off")
+    return TaskStatus("ok", "HEC on") if _flag(cfg, "splunk.enabled") else TaskStatus("off")
+
+
+def _has_preset(observability: Any, preset: str) -> bool:
+    return any(str(getattr(d, "preset", "")) == preset for d in _destinations(observability) or ())
+
+
+def task_status(
+    wizard: SetupWizard | int,
+    cfg: object | Mapping[str, Any] | None,
+    readiness: Sequence[ReadinessCheck] = (),
+    *,
+    credentials: Any = None,
+    observability: Any = None,
+    observability_error: str = "",
+    available: bool = True,
+) -> TaskStatus:
+    """Rate one Setup task for the Status column.
+
+    ``cfg`` is the loaded config (a ``Config``, a mapping, or None);
+    ``readiness`` the Setup readiness checks; a failing check the task owns
+    makes it need attention. ``credentials`` is the ``keys list`` snapshot,
+    ``observability`` the canonical plan status (both optional), and
+    ``available`` False for a task this OS can't run.
+    """
+
+    wizard = SetupWizard(wizard)
+    if not available:
+        return TaskStatus("na", "not on this OS")
+    problems = tuple(problem for problem in task_problems(wizard, readiness, cfg) if problem.owned)
+    guardrail_on = _flag(cfg, "guardrail.enabled")
+    if wizard == SetupWizard.CONNECTOR_SETUP:
+        return _connector_status(cfg, bool(problems))
+    if wizard == SetupWizard.CREDENTIALS:
+        return _credentials_status(credentials, problems)
+    if wizard == SetupWizard.LLM:
+        return _llm_status(cfg, problems)
+    if wizard == SetupWizard.GUARDRAIL:
+        if not guardrail_on:
+            return TaskStatus("attention" if problems else "off", "off")
+        return TaskStatus("ok", f"on · {_text(cfg, 'guardrail.mode') or 'observe'}")
+    if wizard == SetupWizard.GUARDRAIL_ACTIONS:
+        if not guardrail_on:
+            return TaskStatus("off", "guardrail off")
+        return TaskStatus("ok", f"fail {_text(cfg, 'guardrail.hook_fail_mode') or 'closed'}")
+    if wizard in {SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER}:
+        scanner = "skill_scanner" if wizard == SetupWizard.SKILL_SCANNER else "mcp_scanner"
+        if problems:
+            return TaskStatus("attention", "not configured")
+        if not _text(cfg, f"scanners.{scanner}.binary"):
+            return TaskStatus("off")
+        if wizard == SetupWizard.SKILL_SCANNER:
+            policy = _text(cfg, "scanners.skill_scanner.policy") or "permissive"
+            return TaskStatus("ok", f"{policy} · LLM" if _flag(cfg, "scanners.skill_scanner.use_llm") else policy)
+        return TaskStatus("ok", _short(f"{_text(cfg, 'scanners.mcp_scanner.analyzers') or 'auto'} analyzers"))
+    if wizard == SetupWizard.REDACTION:
+        if _flag(cfg, "privacy.disable_redaction"):
+            return TaskStatus("attention", "turned off")
+        return TaskStatus("ok", "on")
+    if wizard == SetupWizard.TRUSTED_PATHS:
+        added = len(_items(cfg, "ai_discovery.trusted_binary_prefixes"))
+        return TaskStatus("ok", f"defaults + {added}" if added else "defaults")
+    if wizard == SetupWizard.REGISTRIES:
+        if problems:
+            return TaskStatus("attention", "catalog required")
+        sources = [source for source in _items(cfg, "registries.sources") if _enabled(source)]
+        return TaskStatus("ok", _plural(len(sources), "catalog")) if sources else TaskStatus("off", "none added")
+    if wizard == SetupWizard.ACP_GUARD:
+        if not _flag(cfg, "acp.enabled"):
+            return TaskStatus("off")
+        return TaskStatus("ok", f"on · {_text(cfg, 'acp.mode') or 'observe'}")
+    if wizard == SetupWizard.SANDBOX:
+        if not _flag(cfg, "openshell.enabled"):
+            return TaskStatus("off")
+        return TaskStatus("ok", _short(f"on · {_text(cfg, 'openshell.profile') or 'pack default'}"))
+    if wizard == SetupWizard.NOTIFICATIONS_ROUTING:
+        return TaskStatus("ok", "on") if _flag(cfg, "notifications.enabled") else TaskStatus("off", "off")
+    if wizard == SetupWizard.WEBHOOKS:
+        hooks = [hook for hook in _items(cfg, "webhooks") if _enabled(hook, default=False)]
+        return TaskStatus("ok", _plural(len(hooks), "webhook")) if hooks else TaskStatus("off", "none")
+    if wizard == SetupWizard.OBSERVABILITY:
+        return _observability_status(observability, observability_error)
+    if wizard == SetupWizard.SPLUNK:
+        return _splunk_status(cfg, observability)
+    if wizard == SetupWizard.SPLUNK_DASHBOARDS:
+        if _has_preset(observability, "splunk-o11y"):
+            return TaskStatus("na", "on demand")
+        return TaskStatus("off", "needs Splunk O11y")
+    if wizard == SetupWizard.LOCAL_OBSERVABILITY:
+        return TaskStatus("ok", "wired up") if _has_preset(observability, "local-otlp") else TaskStatus("off")
+    if wizard == SetupWizard.GATEWAY:
+        return _gateway_status(cfg, problems)
+    if wizard == SetupWizard.TOKEN_ROTATION:
+        return TaskStatus("na", "on demand")
+    if wizard == SetupWizard.CUSTOM_PROVIDERS:
+        instance = _text(cfg, "llm.instance_name")
+        return TaskStatus("ok", _short(f"using {instance}")) if instance else TaskStatus("off", "none")
+    if wizard == SetupWizard.AI_DISCOVERY:
+        if not _flag(cfg, "ai_discovery.enabled"):
+            return TaskStatus("off", "off")
+        return TaskStatus("ok", f"on · {_text(cfg, 'ai_discovery.mode') or 'enhanced'}")
+    return TaskStatus("na")
 
 
 def setup_detail_pairs(model: object) -> tuple[tuple[str, str], ...]:
@@ -410,28 +719,33 @@ def field_picker_rows(entries: Sequence[FieldEntry]) -> tuple[PickerRow, ...]:
 
 
 __all__ = [
+    "GROUP_TITLES",
     "SECTION_GROUPS",
+    "TASK_GLYPHS",
     "WIZARD_GROUPS",
     "FieldEntry",
     "PickerRow",
     "SectionCounts",
-    "SetupDisplayRow",
+    "TaskProblem",
+    "TaskStatus",
     "display_order",
-    "display_rows",
     "field_entries",
     "field_picker_rows",
     "filter_field_entries",
-    "nearest_wizard",
-    "row_for",
+    "group_tasks",
     "section_counts",
     "section_group",
     "section_order",
     "section_picker_rows",
     "section_position",
     "setup_detail_pairs",
+    "step_group",
     "step_section",
     "step_wizard",
-    "wizard_at",
+    "task_at",
+    "task_problems",
+    "task_row",
+    "task_status",
     "wizard_group",
     "wizard_label",
 ]

@@ -15,12 +15,13 @@ panel's I/O: the periodic REST refresh of ``/api/v1/sandbox/{status,
 sandboxes,approvals}`` (keeping the last good snapshot), the live activity
 feed (server-sent events on a background thread, resumed by sequence number),
 toasts for blocked destinations and new asks, and the actions (unblock,
-approve/reject, undo, review, stop, delete). Connect and new runs hand the
-terminal to ``defenseclaw-gateway sandbox`` through ``App.suspend`` so the
-harness owns it, exactly as on the command line. So do stop, delete and the
-undo of a running sandbox: the command line does work on this machine before
-it calls the daemon (a detached run's log, copy-mode work never pulled back,
-its own state for a deleted sandbox) and asks about it.
+approve/reject, undo, review, pull, stop, delete). Connect and new runs hand
+the terminal to ``defenseclaw-gateway sandbox`` through ``App.suspend`` so the
+harness owns it, exactly as on the command line. So do stop, delete, pull and
+the undo of a running or copy-mode sandbox: the command line does work on this
+machine before it calls the daemon (a detached run's log, copy-mode work never
+pulled back, the git work of a pull and of its revert, its own state for a
+deleted sandbox) and asks about it.
 
 The pure state lives in :mod:`defenseclaw.tui.services.sandbox_state`.
 """
@@ -87,6 +88,7 @@ SANDBOX_BUTTON_KEYS: dict[str, str] = {
     "sandboxes-delete": "d",
     "sandboxes-undo": "U",
     "sandboxes-review": "R",
+    "sandboxes-pull": "P",
     "sandboxes-unblock": "u",
     "sandboxes-approve": "a",
     "sandboxes-always": "A",
@@ -101,6 +103,11 @@ _DETAIL_KEYS: dict[str, tuple[tuple[str, ...], str]] = {
     "sandboxes": (
         ("c", "s", "d", "U", "R", "u"),
         "Keys: c connect · s stop · d delete · U undo · R review · u unblock · Esc close",
+    ),
+    # A sandbox that works on a copy: pull brings its work back.
+    "copy": (
+        ("c", "s", "d", "U", "P", "u"),
+        "Keys: c connect · s stop · d delete · U undo · P pull · u unblock · Esc close",
     ),
     "activity": (("u",), "Keys: u unblock · Esc close"),
     "asks": (("a", "A", "x"), "Keys: a approve · A always approve · x reject · Esc close"),
@@ -570,8 +577,10 @@ class SandboxPanelMixin:
             "sandboxes-connect": row,
             "sandboxes-stop": row and selected.running,
             "sandboxes-delete": row,
-            "sandboxes-undo": row and selected.undo_available,
-            "sandboxes-review": row and selected.workdir_mode != "copy",
+            # A copy's undo reverts its last pull --apply: it needs no snapshot.
+            "sandboxes-undo": row and (selected.undo_available or selected.copy_mode),
+            "sandboxes-review": row and not selected.copy_mode,
+            "sandboxes-pull": row and selected.copy_mode,
             "sandboxes-unblock": ready and self._sandbox_can_unblock(),
             "sandboxes-approve": ready and view == "asks" and model.selected_ask() is not None,
             # Private, IP-literal and host-local asks open for one sandbox only.
@@ -642,6 +651,7 @@ class SandboxPanelMixin:
             "reject": lambda: self._sandbox_decide(action, approve=False),
             "undo": lambda: self._sandbox_undo(action.sandbox),
             "review": lambda: self._sandbox_review(action.sandbox),
+            "pull": lambda: self._sandbox_pull(action.sandbox),
             "stop": lambda: self._sandbox_stop(action.sandbox),
             "delete": lambda: self._sandbox_delete(action.sandbox),
         }
@@ -693,6 +703,9 @@ class SandboxPanelMixin:
         """The keys the detail window offers for the selected row."""
         model = self.sandbox_model
         keys, keys_hint = _DETAIL_KEYS.get(model.view, ((), ""))
+        selected = model.selected_sandbox()
+        if model.view == "sandboxes" and selected is not None and selected.copy_mode:
+            keys, keys_hint = _DETAIL_KEYS["copy"]
         if model.view == "activity" and not model.unblock_offered():
             # A tool block, an allowed or lifted destination: u does nothing here.
             return (), "Keys: Esc close"
@@ -817,6 +830,12 @@ class SandboxPanelMixin:
 
     async def _sandbox_undo(self, name: str) -> None:
         row = next((row for row in self.sandbox_model.rows if row.name == name), None)
+        if row is not None and row.copy_mode:
+            # A copy's undo reverts its last `pull --apply` with git in the
+            # project folder, on this machine: the command line previews the
+            # revert and asks, or says there is none to revert.
+            self._run_sandbox_cli("undo", name)
+            return
         if row is not None and row.running:
             # Undo stops the sandbox first: the command line previews, says
             # what the stop ends (a detached run too) and asks.
@@ -879,6 +898,46 @@ class SandboxPanelMixin:
                 keys_hint="Up/Down and PageUp/PageDown scroll · Esc close",
             )
         )
+
+    async def _sandbox_pull(self, name: str) -> None:
+        """Bring a copy-mode sandbox's work back through ``defenseclaw sandbox pull``.
+
+        The command line reads the work, scans it (secrets, changes that can
+        run code on this machine) and prints it before it applies anything,
+        and asks before it brings back what can run code here. A stopped
+        sandbox is started to read its work and stopped again.
+        """
+        row = next((row for row in self.sandbox_model.rows if row.name == name), None)
+        project = row.project if row is not None and row.project else "your project folder"
+        choice = await self.push_screen_wait(  # type: ignore[attr-defined]
+            ActionMenuScreen(
+                f"Pull {name}'s work",
+                (
+                    MenuAction("review", "Show what comes back", f"Changes nothing: defenseclaw sandbox pull {name}"),
+                    MenuAction(
+                        "apply",
+                        "Apply it to the project folder",
+                        "Merges it into your working tree (3-way; a conflict leaves the tree alone), "
+                        f"and U reverts it: defenseclaw sandbox pull {name} --apply",
+                    ),
+                    MenuAction(
+                        "branch",
+                        f"Put it on branch dc/{name}",
+                        f"Your working tree stays as it is: defenseclaw sandbox pull {name} --branch",
+                    ),
+                    MenuAction("cancel", "Cancel"),
+                ),
+                # The menu shows the subtitle as plain text: the path needs no escaping.
+                subtitle=f"{name} works on a copy of {project}. Pull shows the changes first, and asks before "
+                "it brings back a change that can run code on this machine.",
+                show_descriptions=True,
+            )
+        )
+        flags = {"review": (), "apply": ("--apply",), "branch": ("--branch",)}.get(choice or "")
+        if flags is None:
+            self._set_status("Pull cancelled; nothing changed.")  # type: ignore[attr-defined]
+            return
+        self._run_sandbox_cli("pull", name, *flags)
 
     async def _sandbox_stop(self, name: str) -> None:
         confirmed = await self._confirm(
@@ -953,7 +1012,7 @@ class SandboxPanelMixin:
             self.notify_toast("warn", f"No harness may run: {ADMIN_MESSAGE}.")  # type: ignore[attr-defined]
             return
         launch = await self.push_screen_wait(  # type: ignore[attr-defined]
-            SandboxLaunchScreen(choices, folder=self._sandbox_default_folder())
+            SandboxLaunchScreen(choices, folder=self._sandbox_default_folder(), copy_only=model.status.copy_only_note)
         )
         if launch is None:
             self._set_status("New run cancelled.")  # type: ignore[attr-defined]

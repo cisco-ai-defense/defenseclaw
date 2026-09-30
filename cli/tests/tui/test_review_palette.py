@@ -37,3 +37,19 @@ async def test_palette_risk_column_is_not_blank(tmp_path) -> None:
         palette = app.query_one("#command-palette", DataTable)
         assert palette.row_count > 0
         assert "/read-only]" in screen_text(app)
+
+
+async def test_typing_a_burst_keeps_the_palette_columns_readable(tmp_path) -> None:
+    from textual import events
+
+    app = snapshot_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.press(":")
+        await pilot.pause()
+        # A terminal delivers pasted or fast typing as one burst of keys.
+        for character in "guardrail":
+            app.post_message(events.Key(character, character))
+        await pilot.pause()
+        await pilot.pause()
+        text = screen_text(app)
+        assert "guardrail mode" in text and "[policy/mutation]" in text

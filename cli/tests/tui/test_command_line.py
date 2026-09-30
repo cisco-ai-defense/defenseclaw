@@ -211,3 +211,13 @@ def test_dry_run_of_a_destructive_verb_gets_a_normal_preview() -> None:
 
     assert infer_command_risk("other", ("uninstall", "--dry-run")) == "setup"
     assert infer_command_risk("other", ("uninstall",)) == "destructive"
+
+
+def test_display_argv_quotes_an_argument_with_spaces() -> None:
+    from defenseclaw.tui.command_line import display_argv
+
+    assert display_argv(("guardrail", "block-message", "Blocked here", "--yes")) == (
+        "guardrail block-message 'Blocked here' --yes"
+    )
+    assert display_argv(("keys", "set", "NAME", "--value-stdin")) == "keys set NAME --value-stdin"
+    assert display_argv(("setup", "guardrail", "--block-message", "")) == "setup guardrail --block-message ''"

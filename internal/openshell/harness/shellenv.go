@@ -84,6 +84,25 @@ case "${` + openshell.EnvEgressURL + `:-}" in
 esac
 `
 
+// timeZoneScript exports TZ from openshell.EnvHostTimeZone, the zone of
+// the machine the sandbox was created from, when TZ is not set already and
+// the image has that zone's file (without it, libc would show UTC under
+// the zone's name). A sandbox otherwise runs on UTC, and a harness's
+// clock disagrees with the host's. POSIX sh, like egressEnvScript.
+const timeZoneScript = `# The host's time zone, where the image has its zone file.
+if [ -z "${TZ:-}" ]; then
+  case "${` + openshell.EnvHostTimeZone + `:-}" in
+    ""|/*|*..*|*[!A-Za-z0-9_+/-]*) ;;
+    *)
+      if [ -f "/usr/share/zoneinfo/$` + openshell.EnvHostTimeZone + `" ]; then
+        TZ="$` + openshell.EnvHostTimeZone + `"
+        export TZ
+      fi
+      ;;
+  esac
+fi
+`
+
 // shimPathScript puts ShimDir first on PATH, once.
 const shimPathScript = `case ":${PATH:-}:" in
   *:` + ShimDir + `:*) ;;
@@ -100,9 +119,10 @@ esac
 func (s *Spec) profile() string {
 	return `# defenseclaw-sandbox-profile v1
 # DefenseClaw sandbox shell environment (OpenShell sandbox images,
-# root-owned). Login shells get the egress proxy settings every harness
-# launcher exports, and the harness command starts its launcher.
-` + egressEnvScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
+# root-owned). Login shells get the egress proxy settings and the time zone
+# every harness launcher exports, and the harness command starts its
+# launcher.
+` + egressEnvScript + timeZoneScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
   eval '` + s.Command + `() { ` + s.ShimPath() + ` "$@"; }; export -f ` + s.Command + `' 2>/dev/null || true
 fi
 `
@@ -121,7 +141,12 @@ if [ "$#" -eq 0 ]; then
   echo "usage: sandbox-env COMMAND [ARGUMENT]..." >&2
   exit 2
 fi
-` + launcherPreamble + shimPathScript + launcherExec(`"$@"`)
+` + launcherPreamble + shimPathScript + `# What a command started through sandbox exec leaves running (a server
+# started on purpose) is its own: the supervisor leaves it, and names what
+# of it holds the terminal's session, and so a --tty exec, open.
+dc_keep_leftovers=1
+dc_say_kept=1
+` + launcherExec(`"$@"`)
 
 // supervisorScript is the Python supervisor that resumes a stopped harness.
 // See launcherJobControl for when it runs.
@@ -134,7 +159,8 @@ Ctrl-Z cannot stop, and a job-control shell in the sandbox cannot resume a
 stopped job (its fg uses killpg). This supervisor forks the harness into its
 own process group, makes it the terminal's foreground group, and resumes it
 when it stops or when its suspend failed, and tells the user that
-suspending is not available.
+suspending is not available. When the harness exits, it ends what the
+harness left running (see Leftovers).
 
 This supervisor is invoked only when stdin/stdout/stderr are a terminal whose
 foreground process group is the launcher's (checked in the launcher shell
@@ -153,11 +179,21 @@ signal.signal(signal.SIGTTOU, signal.SIG_IGN)
 signal.signal(signal.SIGTTIN, signal.SIG_IGN)
 signal.signal(signal.SIGTSTP, signal.SIG_IGN)
 
-# Parse arguments: command and its args.
-if len(sys.argv) < 2:
+# Parse arguments: [--keep-leftovers [--say-kept]] command [arg...].
+# --keep-leftovers leaves what the command started running after it exits
+# (see Leftovers); --say-kept also names what of it stays in the terminal's
+# session (see Kept).
+args = sys.argv[1:]
+keep_leftovers = args[:1] == ['--keep-leftovers']
+if keep_leftovers:
+    args = args[1:]
+say_kept_on = keep_leftovers and args[:1] == ['--say-kept']
+if say_kept_on:
+    args = args[1:]
+if not args:
     sys.exit(2)
 
-command = sys.argv[1:]
+command = args
 child_pid = None
 child_pgrp = None
 
@@ -213,6 +249,255 @@ def forward_signal(signum, frame):
 
 signal.signal(signal.SIGHUP, forward_signal)
 signal.signal(signal.SIGTERM, forward_signal)
+
+# Leftovers. A harness that exits while a command it started still runs
+# (OpenCode quitting in the middle of a tool call, a background job) would
+# leave that command changing the sandbox after the session ended, while
+# DefenseClaw pulls or reviews its work. The supervisor is a child subreaper
+# (prctl), so whatever the harness started whose parent exits is re-parented
+# to the supervisor, not to the sandbox's init: once the harness is gone,
+# what still runs below the supervisor is the session's own (and the
+# supervisor collects what of it ends meanwhile, on SIGCHLD). Where prctl is
+# refused, the supervisor records what runs below the harness every
+# SCAN_EVERY seconds instead (pid and start time, so a reused pid is not
+# taken for it). When the harness exits, the leftovers get LEFTOVER_GRACE
+# seconds to end on their own (a hook sending its last event and its one
+# retry), then SIGTERM, and SIGKILL LEFTOVER_TERM seconds later, each pid
+# signalled on its own; the terminal says what was ended. Nothing outside
+# the harness's tree is signalled: the sandbox's supervisor and other
+# sessions are not below it.
+PR_SET_CHILD_SUBREAPER = 36
+SCAN_EVERY = 1.0
+LEFTOVER_GRACE = 2.0
+LEFTOVER_TERM = 2.0
+LEFTOVER_KILL = 1.0
+
+subreaper = False
+# adopted_ended: a child ended (SIGCHLD), maybe one the supervisor adopted.
+adopted_ended = False
+# tracked: pid -> start time of what ran below the harness (no subreaper).
+tracked = {}
+
+
+def become_subreaper():
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
+    except Exception:
+        return False
+
+
+def child_ended(signum, frame):
+    global adopted_ended
+    adopted_ended = True
+
+
+def process_table():
+    """pid -> (state, ppid, start time) of every process /proc lists."""
+    table = {}
+    try:
+        entries = os.listdir('/proc')
+    except OSError:
+        return table
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f'/proc/{entry}/stat', 'r') as f:
+                stat = f.read()
+            # After the comm: state, ppid, ...; the start time is field 22.
+            fields = stat[stat.rindex(')') + 2:].split()
+            table[int(entry)] = (fields[0], int(fields[1]), fields[19])
+        except (OSError, ValueError, IndexError):
+            continue
+    return table
+
+
+def below(table, roots):
+    """The processes in table that descend from any of roots."""
+    children = {}
+    for pid, (_, ppid, _) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    found = set()
+    todo = list(roots)
+    while todo:
+        for pid in children.get(todo.pop(), ()):
+            if pid not in found:
+                found.add(pid)
+                todo.append(pid)
+    return found
+
+
+def scan():
+    """While the harness runs: collect adopted leftovers that ended, or
+    without the subreaper, record what runs below the harness."""
+    table = process_table()
+    if subreaper:
+        me = os.getpid()
+        for pid, (state, ppid, _) in table.items():
+            if ppid == me and pid != child_pid and state == 'Z':
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except OSError:
+                    pass
+        return
+    for pid, start in list(tracked.items()):
+        if table.get(pid, (None, None, None))[2] != start:
+            del tracked[pid]
+    for pid in below(table, [child_pid]):
+        tracked[pid] = table[pid][2]
+
+
+def leftovers():
+    """pid -> ppid of what the harness left running."""
+    table = process_table()
+    me = os.getpid()
+    roots = {pid for pid, start in tracked.items() if table.get(pid, (None, None, None))[2] == start}
+    found = (below(table, roots | {me}) | roots) - {me}
+    return {pid: table[pid][1] for pid in found if table[pid][0] not in ('Z', 'X')}
+
+
+def reap():
+    """Collect the supervisor's children that ended (the harness is gone)."""
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except OSError:
+            return
+        if pid == 0:
+            return
+
+
+def settle(seconds):
+    """Wait up to seconds for the leftovers to end; what still runs."""
+    deadline = time.monotonic() + seconds
+    while True:
+        reap()
+        left = leftovers()
+        if not left or time.monotonic() >= deadline:
+            return left
+        time.sleep(0.1)
+
+
+def command_text(pid):
+    """A leftover as the notice names it: a shell's -c script, else its
+    command line, with every unprintable character shown as '?'."""
+    try:
+        with open(f'/proc/{pid}/cmdline', 'rb') as f:
+            argv = f.read().split(b'\0')
+    except OSError:
+        argv = []
+    while argv and argv[-1] == b'':
+        argv.pop()
+    if len(argv) >= 3 and argv[1] == b'-c' and os.path.basename(argv[0]) in (b'sh', b'bash', b'dash', b'zsh'):
+        argv = [argv[2]]
+    text = ''.join(c if c.isprintable() else '?' for c in b' '.join(argv).decode('utf-8', 'replace'))
+    if not text:
+        text = f'pid {pid}'
+    return text if len(text) <= 60 else text[:59] + '…'
+
+
+def end_leftovers():
+    """End what the harness left running (see Leftovers) and say so."""
+    left = settle(LEFTOVER_GRACE)
+    if not left:
+        return
+    roots = sorted(pid for pid, ppid in left.items() if ppid not in left)
+    shown = [command_text(pid) for pid in roots[:3]]
+    if len(roots) > 3:
+        shown.append(f'(+{len(roots) - 3} more)')
+    for sig, wait in ((signal.SIGTERM, LEFTOVER_TERM), (signal.SIGKILL, LEFTOVER_KILL)):
+        for pid in left:
+            try:
+                os.kill(pid, sig)
+                if sig == signal.SIGTERM:
+                    os.kill(pid, signal.SIGCONT)
+            except OSError:
+                pass
+        left = settle(wait)
+        if not left:
+            break
+    one = len(roots) == 1
+    text = f'defenseclaw: the harness exited with {len(roots)} command{"" if one else "s"} still running in the sandbox; '
+    if left:
+        text += f'{"it" if one else "not all of them"} could not be ended, so the session\'s work may still change: '
+    else:
+        text += f'ended {"it" if one else "them"}, so the session\'s work is final: '
+    try:
+        os.write(2, b'\r\n' + (text + '; '.join(shown)).encode('utf-8', 'replace') + b'\r\n')
+    except OSError:
+        pass
+
+
+# Kept. What a sandbox exec command leaves running stays (a server started
+# on purpose), but while it runs in the terminal's session OpenShell 0.1.1
+# holds the --tty exec open, for about 30 seconds, and then ends it with
+# status 74 and no word (a nohup'd process: the exit's SIGHUP does not end
+# it). So with --say-kept the supervisor names what of the session still
+# runs once the exit's SIGHUP had KEPT_WAIT seconds to act.
+KEPT_WAIT = 0.5
+
+
+def in_session():
+    """pid -> ppid of what runs in the supervisor's session besides the
+    supervisor and the processes above it (the exec's own shells)."""
+    try:
+        sid = os.getsid(0)
+        entries = os.listdir('/proc')
+    except OSError:
+        return {}
+    info = {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f'/proc/{entry}/stat', 'r') as f:
+                stat = f.read()
+            # After the comm: state, ppid, pgrp, session, ...
+            fields = stat[stat.rindex(')') + 2:].split()
+            info[int(entry)] = (fields[0], int(fields[1]), int(fields[3]))
+        except (OSError, ValueError, IndexError):
+            continue
+    me = os.getpid()
+    above = set()
+    pid = os.getppid()
+    while pid > 1 and pid in info and pid not in above:
+        above.add(pid)
+        pid = info[pid][1]
+    return {pid: ppid for pid, (state, ppid, session) in info.items()
+            if session == sid and pid != me and pid not in above and state not in ('Z', 'X')}
+
+
+def say_kept():
+    """Name what the command left running in the terminal's session."""
+    deadline = time.monotonic() + KEPT_WAIT
+    while True:
+        left = in_session()
+        if not left or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if not left:
+        return
+    roots = sorted(pid for pid, ppid in left.items() if ppid not in left)
+    shown = [command_text(pid) for pid in roots[:3]]
+    if len(roots) > 3:
+        shown.append(f'(+{len(roots) - 3} more)')
+    one = len(roots) == 1
+    text = (f'defenseclaw: the command left {len(roots)} process{"" if one else "es"} running in the sandbox: ' +
+            '; '.join(shown) + f'. {"It keeps" if one else "They keep"} running, and OpenShell keeps this --tty exec '
+            f'open while {"it does" if one else "they do"}, for up to about 30 seconds (then status 74); '
+            'without --tty the exec returns at once.')
+    try:
+        os.write(2, b'\r\n' + text.encode('utf-8', 'replace') + b'\r\n')
+    except OSError:
+        pass
+
+
+if not keep_leftovers:
+    subreaper = become_subreaper()
+    if subreaper:
+        signal.signal(signal.SIGCHLD, child_ended)
 
 # Fork the harness.
 child_pid = os.fork()
@@ -275,20 +560,44 @@ def harness_owns_terminal():
 
 
 # NOTICE is what the terminal shows when a suspend was turned into a resume.
+# It answers the harness's own "suspended, use fg" line, which the harness
+# prints itself.
 NOTICE = (b"\r\ndefenseclaw: Ctrl-Z cannot suspend a harness in an OpenShell sandbox "
-          b"(the sandbox refuses the signal); it keeps running.\r\n")
+          b"(the sandbox refuses the signal): it keeps running, and there is nothing "
+          b"to bring back with fg.\r\n")
+
+# TITLE says the same at once, while the harness's TUI owns the screen: in
+# the terminal's title and as a desktop notification (OSC 9, where the
+# terminal has them), which leave the screen alone. The title the session
+# had comes back when the harness exits.
+TITLE = b"[defenseclaw] Ctrl-Z cannot suspend a harness in an OpenShell sandbox: it keeps running"
 
 # explain_at_exit: a harness whose own suspend failed took the terminal back
 # after the supervisor's SIGCONT, so it had been waiting to be resumed; the
-# notice follows its exit, when its TUI no longer owns the screen. A TUI
-# that restores the terminal only to shut down never takes it back, and
-# gets no notice.
+# title says so at once and the notice follows its exit, when its TUI no
+# longer owns the screen. A TUI that restores the terminal only to shut
+# down never takes it back, and gets neither.
 explain_at_exit = False
+titled = False
 
 
 def notice():
     try:
         os.write(2, NOTICE)
+    except OSError:
+        pass
+
+
+def notice_now():
+    """Say it in the title (kept to restore at exit) and as a notification,
+    and ring the bell (the harness may take the title back at once), as a
+    DefenseClaw session's own notices do."""
+    global titled
+    seq = b"" if titled else b"\x1b[22;0t"
+    seq += b"\x1b]2;" + TITLE + b"\x07\x1b]9;DefenseClaw: " + TITLE[len(b"[defenseclaw] "):] + b"\x07\x07"
+    try:
+        os.write(2, seq)
+        titled = True
     except OSError:
         pass
 
@@ -299,11 +608,20 @@ def finish(status):
     # would send its foreground group.
     send_signal_to_group(child_pgrp, signal.SIGHUP)
     send_signal_to_group(child_pgrp, signal.SIGCONT)
+    if not keep_leftovers:
+        end_leftovers()
+    elif say_kept_on:
+        say_kept()
     # Try to give the terminal back to the supervisor's group.
     try:
         os.tcsetpgrp(0, os.getpgrp())
     except OSError:
         pass
+    if titled:
+        try:
+            os.write(2, b"\x1b[23;0t")
+        except OSError:
+            pass
     if explain_at_exit:
         notice()
     if os.WIFEXITED(status):
@@ -314,6 +632,7 @@ def finish(status):
 armed = False       # the harness had the terminal in raw mode
 cooked_since = None  # when it went back to canonical mode
 woken = False        # a SIGCONT went to a harness that seemed suspended
+next_scan = 0.0      # when scan() runs next
 
 # Main loop: wait for the child to stop or exit, and watch the terminal.
 while True:
@@ -344,6 +663,7 @@ while True:
     if canonical is False and harness_owns_terminal():
         if woken:
             explain_at_exit, woken = True, False
+            notice_now()
         armed, cooked_since = True, None
     elif canonical and armed and harness_owns_terminal():
         now = time.monotonic()
@@ -352,6 +672,12 @@ while True:
         elif now - cooked_since >= SUSPEND_WAIT:
             send_signal_to_group(child_pgrp, signal.SIGCONT)
             armed, cooked_since, woken = False, None, True
+    if subreaper and adopted_ended:
+        adopted_ended = False
+        scan()
+    elif not subreaper and not keep_leftovers and time.monotonic() >= next_scan:
+        next_scan = time.monotonic() + SCAN_EVERY
+        scan()
     time.sleep(POLL)
 `
 

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -59,9 +60,10 @@ var sandboxCmd = &cobra.Command{
 	Use:   "sandbox",
 	Short: "Run coding agents in NVIDIA OpenShell sandboxes",
 	Long: `Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA OpenShell
-sandbox: the agent sees only your project folder (live, with secret files masked,
-git internals read-only and a snapshot for undo), reaches the web through
-DefenseClaw's egress proxy, and every tool call still goes through DefenseClaw.
+sandbox: the agent sees only your project folder (on Linux live, with secret files
+masked, git internals read-only and a snapshot for undo; on macOS, where sandboxes
+are OpenShell MicroVMs, a copy you pull the changes back from), reaches the web
+through DefenseClaw's egress proxy, and every tool call still goes through DefenseClaw.
 
 Start with "defenseclaw sandbox setup", then run "defenseclaw sandbox run claude"
 in a project folder.`,
@@ -72,8 +74,8 @@ in a project folder.`,
 }
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
-	if err := openshell.CheckPlatform(runtime.GOOS); err != nil {
-		return withExitCode(errors.New("OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"), 3)
+	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
+		return withExitCode(err, 3)
 	}
 	// A nested `sandbox run` inside a sandbox runs the harness natively and
 	// needs no configuration (there is none inside the sandbox).
@@ -92,6 +94,22 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		return err
+	}
+	return nil
+}
+
+// sandboxHostRefusal refuses, before any sandbox command runs, a machine
+// sandboxes do not run on: an operating system other than Linux and macOS,
+// and a Mac that is not Apple silicon, where OpenShell's MicroVM driver
+// does not run. cleanup marks teardown, which only removes what an earlier
+// setup left, and still runs on such a Mac.
+func sandboxHostRefusal(goos, goarch string, cleanup bool) error {
+	if err := openshell.CheckPlatform(goos); err != nil {
+		return errors.New("OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported")
+	}
+	if err := openshell.CheckHost(goos, goarch); err != nil && !cleanup {
+		return fmt.Errorf("OpenShell sandboxes do not run on this machine: %s; `defenseclaw sandbox teardown` still removes what an earlier setup left",
+			strings.TrimPrefix(err.Error(), "openshell: "))
 	}
 	return nil
 }
@@ -138,10 +156,11 @@ func newSandboxSetupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "One-time setup: OpenShell, bind mounts, telemetry, harnesses, wrappers, images",
-		Long: `Checks this machine, installs OpenShell with NVIDIA's installer when you agree,
-enables project-folder bind mounts on your local OpenShell gateway (backed up and
-restored by "sandbox teardown"), turns OpenShell's upstream telemetry off unless you
-keep it, records the harnesses, offers shell wrappers and builds the harness images.`,
+		Long: `Checks this machine, installs OpenShell with NVIDIA's installer when you agree and
+configures your local OpenShell gateway (backed up and restored by "sandbox teardown"):
+on Linux it enables project-folder bind mounts and turns OpenShell's upstream telemetry
+off unless you keep it; on a Mac it switches the gateway to OpenShell's MicroVM driver.
+Then it records the harnesses, offers shell wrappers and builds the harness images.`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, _ []string) error {
 			return app.Setup(ctx, o)
@@ -149,7 +168,7 @@ keep it, records the harnesses, offers shell wrappers and builds the harness ima
 	}
 	f := cmd.Flags()
 	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)")
-	f.BoolVar(&o.NoMounts, "no-mounts", false, "leave bind mounts off; every run then works on a copy")
+	f.BoolVar(&o.NoMounts, "no-mounts", false, "leave bind mounts off (Linux); every run then works on a copy")
 	f.BoolVar(&o.Wrappers, "wrappers", false, "make the harness commands run sandboxed without asking")
 	f.BoolVar(&o.NoWrappers, "no-wrappers", false, "do not offer the shell wrappers")
 	f.BoolVar(&o.NonInteractive, "non-interactive", false, "never prompt: take the defaults and skip steps that need consent")
@@ -167,10 +186,12 @@ func newSandboxDoctorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check that this machine can run sandboxes",
-		Long: `Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration and
-version, bind mounts, telemetry, ports, the DefenseClaw daemon, harness images, shell
-wrappers and the organization policy. Exits 1 when a check fails (with --output json
-the result is printed and the exit status is 0; read "ok").`,
+		Long: `Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration,
+version and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,
+the sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw
+daemon, harness images, shell wrappers and the organization policy. Exits 1 when a
+check fails (with --output json the result is printed and the exit status is 0; read
+"ok").`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
@@ -196,13 +217,16 @@ func newSandboxRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <harness> [flags] [-- harness-args...]",
 		Short: "Run a harness in a sandbox on this folder",
-		Long: `Runs the harness in a new sandbox on the current folder: live-mounted by default
-with a pre-session snapshot, or a copy with --copy. The harness is claude, codex,
-copilot, opencode, kiro, hermes, openhands, omnigent or agy (amp, cursor-agent and devin
-are not verified yet, so they do not run). Skip-permissions mode is on by default;
+		Long: `Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)
+live-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS
+(the MicroVM driver) every run works on a copy. The harness is claude, codex,
+copilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy,
+works too; amp, cursor-agent and devin are not verified yet, so they do not run).
+Skip-permissions mode is on by default;
 --safe keeps the harness's own prompts. The harness gets your terminal; when it exits
 you get a summary, a review of changed files that can run code on your machine, and
-the choice to keep or undo the changes. Arguments after -- go to the harness.`,
+the choice to keep or undo the changes (from a copy: to bring them back, or leave them
+in the sandbox for pull). Arguments after -- go to the harness.`,
 		Example: `  defenseclaw sandbox run claude
   defenseclaw sandbox run codex --copy --name fix-tests
   defenseclaw sandbox run claude --detach --prompt "fix the failing tests"
@@ -235,7 +259,7 @@ the choice to keep or undo the changes. Arguments after -- go to the harness.`,
 	f.BoolVar(&o.Safe, "safe", false, "keep the harness's own permission prompts (skip-permissions off)")
 	f.StringVar(&o.Pack, "pack", "", "sandbox policy pack (open, balanced, strict, or a custom pack)")
 	f.StringVar(&o.Profile, "profile", "", "network profile: open, balanced or strict")
-	f.StringArrayVar(&o.Context, "context", nil, "extra folder mounted read-only (repeatable)")
+	f.StringArrayVar(&o.Context, "context", nil, "extra folder mounted read-only (repeatable; mount mode only)")
 	f.StringArrayVar(&o.Unmask, "unmask", nil, "share a masked secret file or glob with the sandbox (repeatable)")
 	f.IntSliceVar(&o.HostPorts, "host-port", nil, "open this localhost port on your machine to the sandbox (repeatable)")
 	f.StringArrayVar(&o.Credentials, "credential", nil, "NAME=host[:port]: give the sandbox a placeholder for $NAME that works only against that host (repeatable)")
@@ -253,9 +277,13 @@ the choice to keep or undo the changes. Arguments after -- go to the harness.`,
 	f.BoolVar(&o.Refresh, "refresh", false, "when resuming a copy-mode sandbox, copy the folder again")
 	f.StringVar(&o.CPU, "cpu", "", "CPU limit, for example 2 or 500m")
 	f.StringVar(&o.Memory, "memory", "", "memory limit, for example 4Gi")
-	f.BoolVarP(&o.Yes, "yes", "y", false, "take the defaults at the end of the session (keep the changes)")
+	f.BoolVarP(&o.Yes, "yes", "y", false, sessionYesUsage)
 	return cmd
 }
+
+// sessionYesUsage is the --yes of run and connect: a mount's changes are
+// kept, a copy's stay in the sandbox (nothing comes back unreviewed).
+const sessionYesUsage = "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull)"
 
 func nameArg(what string) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {
@@ -335,7 +363,7 @@ reviewed at its end like a harness session.`,
 	cmd.Flags().BoolVar(&o.Shell, "shell", false, "open a shell in the sandbox instead of the harness")
 	cmd.Flags().BoolVar(&o.Refresh, "refresh", false, "copy-mode: copy the folder into the sandbox again first")
 	cmd.Flags().BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")
-	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "take the defaults at the end of the session (keep the changes)")
+	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, sessionYesUsage)
 	cmd.Flags().StringVarP(&o.Prompt, "prompt", "p", "", "run the harness headless with this prompt")
 	return cmd
 }
@@ -463,7 +491,8 @@ func newSandboxUndoCmd() *cobra.Command {
 		Long: "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git ignores\n" +
 			"(dependency directories, build output) have no copy in the snapshot: undo deletes what the session\n" +
 			"wrote to Python bytecode caches and names the rest, with what to do about them.\n\n" +
-			"For a copy-mode sandbox, undo reverts its last `pull --apply` instead; edits you made since stay.",
+			"For a copy-mode sandbox (every sandbox on macOS), undo reverts its last `pull --apply` instead; edits you\n" +
+			"made since stay.",
 		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
@@ -487,7 +516,11 @@ func newSandboxReviewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "review <name>",
 		Short: "Review the session's changes, flagging files that can run code on this machine",
-		Args:  nameArg("sandbox"),
+		Long: `Reviews what changed in a mounted project since its pre-session snapshot, flagging
+files that can run code on this machine. For a copy-mode sandbox (every sandbox on
+macOS) it previews what "sandbox pull" would bring back and applies nothing; with
+--output json it prints the pull's result.`,
+		Args: nameArg("sandbox"),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
@@ -733,12 +766,12 @@ func newSandboxImageCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List the harness images",
 		Args:  cobra.NoArgs,
-		RunE: sandboxRunE(func(_ context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
 				return err
 			}
-			return app.ImageList(out)
+			return app.ImageList(ctx, out)
 		}),
 	}
 	outputFlag(list)

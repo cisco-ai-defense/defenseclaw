@@ -73,14 +73,17 @@ _RESTART = (
 )
 
 SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
+    # The task list has no button bar: the nav list (or the one-line group
+    # switcher) and a double-click on a task do what its buttons did.
     "wizards": (
-        KeySpec("↑/↓", "choose", "Move between setup tasks", None, ("up", "down", "j", "k")),
-        KeySpec("Enter", "open", "Open the selected task", "setup-open", ("enter",)),
+        KeySpec("↑/↓", "choose", "Move between setup tasks (on into the next group)", None, ("up", "down", "j", "k")),
+        KeySpec("←/→", "group", "Previous / next task group (also [ and ])", None, ("left", "right", "[", "]")),
+        KeySpec("Enter", "open", "Open the selected task", None, ("enter",)),
         KeySpec("i", "details", "Readiness checks and what the selected task runs", None, ("i",)),
-        KeySpec("c", "config editor", "Edit config.yaml fields directly", "setup-mode-config", ("c",)),
+        KeySpec("c", "config editor", "Edit config.yaml fields directly", None, ("c",)),
         KeySpec("f", "fill missing keys", "Prompt for every missing required key", None, ("f",), when="credentials"),
         KeySpec("s", "set a key", "Set one API key", None, ("s",), when="credentials"),
-        KeySpec("r", "refresh keys", "Reload the list of API keys", "setup-refresh-credentials", ("r",)),
+        KeySpec("r", "refresh keys", "Reload the list of API keys", None, ("r",)),
         *_RESTART,
     ),
     "goals": (
@@ -135,14 +138,11 @@ SETUP_KEYMAPS: dict[SetupView, tuple[KeySpec, ...]] = {
 # Every button in the Setup bars, so views can hide the ones they don't use.
 SETUP_BUTTON_IDS: tuple[str, ...] = (
     "setup-mode-wizards",
-    "setup-mode-config",
-    "setup-open",
     "setup-edit-list",
     "setup-save",
     "setup-revert",
     "setup-restart",
     "setup-clear-restart",
-    "setup-refresh-credentials",
 )
 SETUP_WIZARD_BUTTON_IDS: tuple[str, ...] = (
     "setup-wizard-run",

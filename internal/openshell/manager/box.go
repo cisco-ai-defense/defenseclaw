@@ -80,9 +80,11 @@ type box struct {
 	retained bool
 	// elsewhere says where a sandbox missing from the connected gateway
 	// was created, while that is another gateway or workspace
-	// (gatewayElsewhere): it is not released then.
-	elsewhere string
-	started   time.Time
+	// (gatewayElsewhere): it is not released then. otherDriver says the
+	// gateway is its own but runs another compute driver now.
+	elsewhere   string
+	otherDriver bool
+	started     time.Time
 
 	watchCancel context.CancelFunc
 	watchDone   chan struct{}
@@ -110,7 +112,11 @@ type box struct {
 	// closedPorts are the undeclared host ports whose denial the feed
 	// explained this session (hostPortDenied).
 	closedPorts map[int]bool
-	blocked     int
+	// blockedRequests counts the connections OpenShell refused (the
+	// DefenseClaw proxy counts its own refusals), and blockedHosts the
+	// destinations they were to, as the feed names them (noteBlocked).
+	blockedRequests int
+	blockedHosts    map[string]struct{}
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// triageBusy is set while a triageNow poll runs; triageAgain asks it
@@ -186,6 +192,9 @@ type hookStats struct {
 	// refused.
 	ingressRefused     int64
 	lastIngressRefused time.Time
+	// refusedByMapping is set when the last refusal was a transparent
+	// mapping denial nothing answered (confirmMappingDenialLocked).
+	refusedByMapping bool
 	// failed counts the hook posts the ingress answered with an error;
 	// lastFailure says how the last one was answered. failureNoticeAt is
 	// when the feed last reported failures, unnoticed how many came since.
@@ -202,12 +211,21 @@ var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // Manager.mu.
 func (b *box) identity() audit.SandboxIdentity {
 	id := audit.SandboxIdentity{
-		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness,
-		Runtime: audit.SandboxRuntimeOpenShell, Driver: audit.SandboxDriverDocker,
+		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness, Runtime: audit.SandboxRuntimeOpenShell,
 		Profile: b.rec.Profile, Pack: b.rec.Pack, Phase: b.phase, WorkdirMode: b.rec.WorkdirMode,
 	}
-	if imageDigestPattern.MatchString(b.rec.ImageID) {
-		id.ImageDigest = b.rec.ImageID
+	// Telemetry names the driver as OpenShell does (audit.SandboxDriverVM is
+	// "vm"); one this build does not know is left out, not guessed.
+	if d, ok := openshell.LookupDriver(b.rec.Driver); ok {
+		id.Driver = string(d.Name)
+	}
+	// The image that runs: the run image when the driver runs one.
+	digest := b.rec.ImageID
+	if b.rec.RunImageID != "" {
+		digest = b.rec.RunImageID
+	}
+	if imageDigestPattern.MatchString(digest) {
+		id.ImageDigest = digest
 	}
 	if b.sb != nil {
 		id.PolicyVersion = b.sb.Status.CurrentPolicyVersion
@@ -401,23 +419,135 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	v := m.view(b)
 	proxy := m.proxy
 	bindingID := b.rec.BindingID
+	shared := sharedLimitsOf(b)
+	blocked := b.blockedHostList()
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID)
-	return v
+	m.decorate(&v, proxy, bindingID, blocked)
+	views := []sandboxapi.Sandbox{v}
+	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
+	return views[0]
+}
+
+// sharedLimitsOf is the driver of a box judged by the cpu and memory
+// every sandbox of it gets (a driver without per-sandbox limits); ""
+// for the others and for a deleted one. Callers hold Manager.mu.
+func sharedLimitsOf(b *box) openshell.ComputeDriver {
+	if d, _ := openshell.LookupDriver(b.rec.Driver); !d.SandboxLimits && !b.retained {
+		return d.Name
+	}
+	return ""
+}
+
+// sharedLimitsWarnings warns on each view whose driver (drivers[i]) has
+// no per-sandbox limits when the cpu and memory every sandbox of it gets
+// now exceed the organization's openshell.admin.max_resources: the start
+// judges those values (checkStart), not what the record kept at create,
+// and a new sandbox would get them too, so the fix is to lower them.
+// Callers must not hold Manager.mu (the values are read from the
+// gateway's configuration).
+func (m *Manager) sharedLimitsWarnings(views []sandboxapi.Sandbox, drivers []openshell.ComputeDriver) {
+	max := m.config().OpenShell.Admin.MaxResources
+	if strings.TrimSpace(max.CPU) == "" && strings.TrimSpace(max.Memory) == "" {
+		return
+	}
+	warnings := map[openshell.ComputeDriver]string{}
+	for i := range views {
+		name := drivers[i]
+		if name == "" {
+			continue
+		}
+		w, ok := warnings[name]
+		if !ok {
+			d, _ := openshell.LookupDriver(string(name))
+			w = m.sharedLimitsWarning(d, max)
+			warnings[name] = w
+		}
+		if w != "" {
+			views[i].Warnings = append(slices.Clip(views[i].Warnings), w)
+		}
+	}
+}
+
+// sharedLimitsWarning is sharedLimitsWarnings' text for driver d; "" when
+// what its sandboxes get fits the maximum.
+func (m *Manager) sharedLimitsWarning(d openshell.Driver, max config.OpenShellResourcesConfig) string {
+	var shared *packs.Resources
+	if m.opts.GatewayResources != nil {
+		if res, err := m.opts.GatewayResources(); err == nil {
+			shared = &res
+		}
+	}
+	v := sharedResourcesViolation(d, shared, max)
+	switch {
+	case v == nil:
+		return ""
+	case shared == nil:
+		return v.Message + ", so it cannot start"
+	}
+	return v.Message + ", so it cannot start until that is lowered (`defenseclaw sandbox doctor --fix`)"
+}
+
+// maxBlockedHosts bounds the destinations a box remembers OpenShell
+// refused.
+const maxBlockedHosts = 4096
+
+// noteBlocked counts a connection OpenShell refused, to host (the name the
+// feed shows it blocked). Callers hold Manager.mu.
+func (b *box) noteBlocked(host string) {
+	b.blockedRequests++
+	b.noteBlockedHost(host)
+}
+
+// noteBlockedHost counts host among the destinations OpenShell refused.
+// Callers hold Manager.mu.
+func (b *box) noteBlockedHost(host string) {
+	if host = strings.ToLower(host); host == "" {
+		return
+	}
+	if b.blockedHosts == nil {
+		b.blockedHosts = map[string]struct{}{}
+	}
+	if len(b.blockedHosts) < maxBlockedHosts {
+		b.blockedHosts[host] = struct{}{}
+	}
+}
+
+// blockedHostList is what decorate needs of noteBlocked's destinations.
+// Callers hold Manager.mu.
+func (b *box) blockedHostList() []string {
+	out := make([]string, 0, len(b.blockedHosts))
+	for h := range b.blockedHosts {
+		out = append(out, h)
+	}
+	return out
 }
 
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's byte counts and the snapshot. Callers must not hold
-// Manager.mu.
-func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string) {
+// the proxy's counts and the snapshot. The egress counts are destinations:
+// Destinations those the sandbox reached, Blocked those refused at least
+// once (by the DefenseClaw proxy or by OpenShell, whose refused
+// destinations openshellBlocked lists), the way the feed and a session's
+// ✗ lines name them; BlockedRequests counts the refused requests. Callers
+// must not hold Manager.mu.
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string) {
+	blocked := make(map[string]struct{}, len(openshellBlocked))
+	for _, h := range openshellBlocked {
+		blocked[h] = struct{}{}
+	}
 	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
 		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
-			v.Egress.Destinations++
+			if d.Contacted {
+				v.Egress.Destinations++
+			}
 			v.Egress.BytesUp += d.BytesUp
 			v.Egress.BytesDown += d.BytesDown
-			v.Egress.Blocked += int(d.Blocked)
+			v.Egress.BlockedRequests += int(d.Blocked)
+			if d.Blocked > 0 {
+				blocked[strings.ToLower(d.Host)] = struct{}{}
+			}
 		}
 	}
+	v.Egress.Blocked = len(blocked)
 	if snap, err := m.ws.LoadSnapshot(m.opts.DataDir, v.Name); err == nil && snap != nil {
 		info := &sandboxapi.SnapshotInfo{Kind: string(snap.Kind), CreatedAt: snap.CreatedAt}
 		if snap.Git != nil {
@@ -438,6 +568,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
 		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: launchYolo(b),
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
+		RunImage: r.RunImage, RunImageID: r.RunImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
@@ -493,7 +624,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.PendingApprovals++
 		}
 	}
-	v.Egress.Blocked = b.blocked
+	v.Egress.BlockedRequests = b.blockedRequests
 	running := b.phase == audit.SandboxPhaseReady && !b.started.IsZero()
 	if running {
 		v.SessionYolo = launchYolo(b)
@@ -517,11 +648,19 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.Warnings = append(v.Warnings, sessionDrift(r, e, v.SessionYolo, v.Yolo)...)
 		}
 	}
-	if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
-		v.Warnings = append(slices.Clip(v.Warnings), res.Message+
-			" (it keeps its current limits until it stops, and cannot start again)")
+	// A driver without per-sandbox limits (vm) is judged by what every
+	// sandbox of it gets now, which needs I/O (sharedLimitsWarnings).
+	if d, _ := openshell.LookupDriver(r.Driver); d.SandboxLimits {
+		if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
+			v.Warnings = append(slices.Clip(v.Warnings), res.Message+
+				" (it keeps its current limits until it stops, and cannot start again)")
+		}
 	}
-	if b.elsewhere != "" {
+	if created := recordDriver(r); b.elsewhere != "" && b.otherDriver {
+		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on the "+string(created)+
+			" compute driver, which the gateway no longer runs; it cannot start, or be pulled, until the gateway runs "+string(created)+
+			" again (`defenseclaw sandbox setup`), and deleting it releases DefenseClaw's side only")
+	} else if b.elsewhere != "" {
 		v.Warnings = append(slices.Clip(v.Warnings), "this sandbox was created on "+b.elsewhere+
 			", not the gateway DefenseClaw is connected to; DefenseClaw keeps it until it connects there again (openshell.gateway), "+
 			"or until you delete it, which releases DefenseClaw's side only")

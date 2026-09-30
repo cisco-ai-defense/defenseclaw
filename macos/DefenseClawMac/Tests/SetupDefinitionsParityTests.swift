@@ -687,7 +687,15 @@ struct SetupDefinitionsParityTests {
                "the app never runs the sudo installer (it needs a terminal)")
         expect(wizard?.fields.contains { $0.key.contains("telemetry") || $0.label.contains("telemetry") } == false,
                "no telemetry question: the Homebrew gateway does not read gateway.env")
-        // The same literal the TUI test pins (test_sandbox_setup_wizard.py).
+        expect(wizard?.fields.contains { $0.key.contains("mount") || $0.label.lowercased().contains("mount") } == false,
+               "no mounts question: setup runs macOS sandboxes in MicroVMs, which mount no host folders")
+        let blurb = wizard?.blurb ?? ""
+        for fact in ["MicroVM", "Apple silicon", "compute_driver = \"vm\"", "every run works on a copy",
+                     "defenseclaw sandbox pull", "e2fsprogs"] {
+            expect(blurb.contains(fact), "the Sandbox wizard's blurb names \(fact)")
+        }
+        expect(!blurb.contains("cannot run on a Mac"), "the blurb no longer says sandboxes cannot run on a Mac")
+        // The same literal the TUI test pins for macOS (test_sandbox_setup_wizard.py).
         let defaults = Dictionary(uniqueKeysWithValues: (wizard?.fields ?? []).map { ($0.key, $0.defaultValue) })
         expect(TUIWizards.sandboxCommands(defaults, false) == [[
             "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--harness", "codex", "--no-wrappers",
@@ -695,9 +703,8 @@ struct SetupDefinitionsParityTests {
         expect(TUIWizards.sandboxCommands([
             "harness-codex": "no", "mounts": "no", "wrappers": "yes", "build-images": "no",
         ], false) == [[
-            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--no-mounts",
-            "--wrappers", "--skip-images",
-        ]], "every consent flag")
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--wrappers", "--skip-images",
+        ]], "every consent flag, and never --no-mounts")
         expect(TUIWizards.sandboxCommands(["action": "doctor"], false) == [["sandbox", "doctor"]], "doctor action")
         expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil,
                "a harness is required")
@@ -706,8 +713,8 @@ struct SetupDefinitionsParityTests {
                "configured harnesses seed the toggles")
 
         // Every flag the TUI builder can emit is one the app emits too, except
-        // the sudo installer and the telemetry opt-in the TUI offers only off
-        // macOS.
+        // the sudo installer, and the telemetry opt-in and the mounts question
+        // the TUI offers only off macOS.
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let python = (try? String(
             contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/panels/setup.py"),
@@ -726,9 +733,9 @@ struct SetupDefinitionsParityTests {
             Range(match.range(at: 1), in: body).map { String(body[$0]) }
         })
         let swiftFlags: Set<String> = [
-            "--non-interactive", "--harness", "--no-mounts", "--wrappers", "--no-wrappers", "--skip-images",
+            "--non-interactive", "--harness", "--wrappers", "--no-wrappers", "--skip-images",
         ]
-        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--upstream-telemetry"]),
+        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--upstream-telemetry", "--no-mounts"]),
                "TUI sandbox flags \(tuiFlags.sorted()) differ from the app's")
     }
 

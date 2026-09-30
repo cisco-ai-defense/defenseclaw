@@ -249,7 +249,7 @@ enum ConfigEditorCatalog {
             .init(label: "Skip-permissions (yolo)", key: "openshell.yolo", kind: .choice, options: inheritBool,
                   hint: "--dangerously-skip-permissions by default."),
             .init(label: "Workdir Mode", key: "openshell.workdir.mode", kind: .choice, options: ["", "mount", "copy"],
-                  hint: "mount: live folder; copy: untrusted repos."),
+                  hint: "mount: live folder (Docker driver); copy: untrusted repos, and every run on a MicroVM (vm) gateway."),
             .init(label: "Secret Masks", key: "openshell.workdir.masks", hint: "Extra secret-file globs, comma-separated."),
             .init(label: "Unmask", key: "openshell.workdir.unmask", hint: "Masked paths to share, comma-separated."),
             .init(label: "Max Upload MB", key: "openshell.workdir.max_upload_mb", kind: .int, hint: "Copy-mode upload cap; 0 inherits."),

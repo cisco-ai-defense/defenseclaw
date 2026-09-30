@@ -28,8 +28,10 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -59,6 +61,19 @@ type Images interface {
 	// verification) and otherwise returns ErrImageMissing. An unverified
 	// image is never returned.
 	Resolve(ctx context.Context, spec image.BuildSpec, build bool) (image.Record, error)
+	// RunImage returns the run image that bakes a sandbox's per-run files
+	// into the verified image base, named in the run repository of repo
+	// (openshell.Driver.ImageRepository), for a driver that cannot mount
+	// them: the recorded one for the same files, else a new build
+	// (image.Builder.RunImage).
+	RunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, error)
+	// AliasImage returns base under repo, the name a sandbox without run
+	// files is sent on such a driver. It is base's image ID.
+	AliasImage(ctx context.Context, base image.Record, repo string) (image.RunImage, error)
+	// RecordedRunImage returns, without building or tagging anything, the
+	// run image RunImage would return for files (the alias for none) when
+	// it is recorded and present, and false otherwise.
+	RecordedRunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, bool, error)
 }
 
 // BuilderImages implements Images with the overlay image builder.
@@ -75,7 +90,10 @@ func (b BuilderImages) Resolve(ctx context.Context, spec image.BuildSpec, build 
 	}
 	if rec, ok, err := b.Builder.Current(spec); err != nil {
 		return image.Record{}, err
-	} else if ok && rec.HookFireVerified {
+	} else if ok && rec.HookFireVerified && (!build || !rec.MicroVMUnchecked()) {
+		// An image for the MicroVM driver whose last MicroVM check settled
+		// nothing is checked again by the build below; without one, create
+		// refuses it with the command that checks it (microVMRefusal).
 		return rec, nil
 	}
 	if !build {
@@ -91,6 +109,30 @@ func (b BuilderImages) Resolve(ctx context.Context, spec image.BuildSpec, build 
 		return image.Record{}, fmt.Errorf("overlay image %s was built but its hooks are not verified", rec.Tag)
 	}
 	return rec, nil
+}
+
+// RunImage implements Images.
+func (b BuilderImages) RunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, error) {
+	if b.Builder == nil {
+		return image.RunImage{}, errors.New("no image builder configured")
+	}
+	return b.Builder.RunImage(ctx, base, files, repo)
+}
+
+// AliasImage implements Images.
+func (b BuilderImages) AliasImage(ctx context.Context, base image.Record, repo string) (image.RunImage, error) {
+	if b.Builder == nil {
+		return image.RunImage{}, errors.New("no image builder configured")
+	}
+	return b.Builder.AliasImage(ctx, base, repo)
+}
+
+// RecordedRunImage implements Images.
+func (b BuilderImages) RecordedRunImage(ctx context.Context, base image.Record, files []connector.SandboxFile, repo string) (image.RunImage, bool, error) {
+	if b.Builder == nil {
+		return image.RunImage{}, false, errors.New("no image builder configured")
+	}
+	return b.Builder.RecordedRunImage(ctx, base, files, repo)
 }
 
 // Workspace is the project-folder surface the manager uses. It is a thin
@@ -150,6 +192,64 @@ func (DefaultWorkspace) ReviewDiff(ctx context.Context, dataDir, name string) ([
 
 func (DefaultWorkspace) DeleteCopy(dataDir, name string) error {
 	return workspace.DeleteCopy(dataDir, name)
+}
+
+// GatewayConfigResources is Options.GatewayResources read from the local
+// gateway's configuration in dir ("" is OpenShell's user configuration
+// directory, openshell.GatewayConfigurator.Dir): the vm driver's
+// [openshell.drivers.vm] vcpus and mem_mib, the gateway.env variables that
+// override them, and the driver's defaults for what neither sets. The
+// daemon runs as the user whose gateway it drives, so these are that
+// gateway's files.
+func GatewayConfigResources(dir string) func() (packs.Resources, error) {
+	return func() (packs.Resources, error) {
+		// A configurator per read: Read fills in its defaults, and
+		// creates and starts read concurrently.
+		st, err := (&openshell.GatewayConfigurator{Dir: dir}).Read()
+		if err != nil {
+			return packs.Resources{}, err
+		}
+		r := st.VM.Resources()
+		return packs.Resources{CPU: strconv.FormatInt(r.VCPUs, 10), Memory: strconv.FormatInt(r.MemMiB, 10) + "Mi"}, nil
+	}
+}
+
+// GatewayVMDiskFree is Options.VMDiskFree for the local gateway's
+// configuration in dir (as GatewayConfigResources reads it): the MicroVM
+// driver's image cache, under the state_dir it sets, else under the
+// daemon user's home, and the free space of its volume.
+func GatewayVMDiskFree(dir string) func() (string, uint64, error) {
+	return func() (string, uint64, error) {
+		stateDir := ""
+		if st, err := (&openshell.GatewayConfigurator{Dir: dir}).Read(); err == nil {
+			stateDir = st.VM.StateDir
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = ""
+		}
+		cache := openshell.VMImageCache(stateDir, home)
+		if cache == "" {
+			return "", 0, errors.New("the MicroVM driver's image cache is unknown (no home directory)")
+		}
+		free, err := openshell.FreeUnder(openshell.DiskFree, cache)
+		return cache, free, err
+	}
+}
+
+// imageSizer is an Images that reports the size of an image in Docker
+// (BuilderImages), which the disk the vm driver prepares from it takes
+// about.
+type imageSizer interface {
+	ImageSize(ctx context.Context, ref string) (uint64, error)
+}
+
+// ImageSize implements imageSizer.
+func (b BuilderImages) ImageSize(ctx context.Context, ref string) (uint64, error) {
+	if b.Builder == nil {
+		return 0, errors.New("no image builder configured")
+	}
+	return b.Builder.ImageSize(ctx, ref)
 }
 
 // ProfileImporter imports platform-scoped provider profiles in their YAML
@@ -243,6 +343,11 @@ type Gateway struct {
 	// Port is the gateway's own port, which sandboxes must never reach.
 	Port    int
 	Version string
+	// Driver is the compute driver the gateway runs (GetGatewayInfo): what
+	// DefenseClaw does differently per driver comes from it. The zero
+	// Driver has no capability, so a Gateway built without one fails
+	// closed (it mounts nothing).
+	Driver openshell.Driver
 	// Close releases the connection.
 	Close func() error
 }
@@ -251,7 +356,8 @@ type Gateway struct {
 type Connector func(ctx context.Context) (*Gateway, error)
 
 // DiscoverConnector connects to the registration Discover selects, refusing
-// gateways outside the supported version window.
+// gateways outside the supported version window and gateways that run no
+// compute driver DefenseClaw drives (connectedDriver).
 func DiscoverConnector(discover openshell.DiscoverOptions, client openshell.ClientOptions) Connector {
 	return func(ctx context.Context) (*Gateway, error) {
 		reg, err := openshell.Discover(discover)
@@ -271,6 +377,11 @@ func DiscoverConnector(discover openshell.DiscoverOptions, client openshell.Clie
 			_ = c.Close()
 			return nil, err
 		}
+		driver, err := connectedDriver(ctx, c)
+		if err != nil {
+			_ = c.Close()
+			return nil, err
+		}
 		conn, err := reg.DialGRPC()
 		if err != nil {
 			_ = c.Close()
@@ -278,12 +389,24 @@ func DiscoverConnector(discover openshell.DiscoverOptions, client openshell.Clie
 		}
 		return &Gateway{
 			Client: c, Conn: conn, Name: reg.Name, Endpoint: reg.Endpoint, Port: registrationPort(reg),
-			Version: health.RawVersion,
+			Version: health.RawVersion, Driver: driver,
 			Close: func() error {
 				return errors.Join(c.Close(), conn.Close())
 			},
 		}, nil
 	}
+}
+
+// connectedDriver asks the gateway which compute driver it runs. A gateway
+// that does not say, or runs one DefenseClaw does not drive, is refused
+// rather than driven as docker: what a sandbox is sent, and what keeps it
+// contained, depends on the driver (openshell.GatewayDriver).
+func connectedDriver(ctx context.Context, c openshell.Client) (openshell.Driver, error) {
+	info, err := c.GatewayInfo(ctx)
+	if err != nil {
+		return openshell.Driver{}, fmt.Errorf("ask the OpenShell gateway which compute driver it runs: %w", err)
+	}
+	return openshell.GatewayDriver(info)
 }
 
 func registrationPort(reg *openshell.Registration) int {

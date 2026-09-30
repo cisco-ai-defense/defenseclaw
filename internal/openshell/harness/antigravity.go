@@ -61,6 +61,7 @@ var Antigravity = register(&Spec{
 	DefaultVersion: "1.2.12",
 	Provider:       connector.NewAntigravityConnector(),
 	TamperTier:     connector.SandboxTamperTierUser,
+	TamperNote:     "the hook scripts are root-owned; ~/.gemini/config/hooks.json, which registers them, is the agent's to edit and is restored at every start",
 	verification: Verification{Status: VerifiedLive,
 		Note: "test/e2e/openshell TestSandboxHookOnlyHarness (DEFENSECLAW_E2E_HARNESS=antigravity, Gemini-API mock through GEMINI_API_KEY): hooks at the ingress with the model key substituted, a DefenseClaw-blocked command denied with the rule's reason, egress through the proxy with the blocklist and a sandbox unblock; hook-fire probe with a replaced user hooks.json and a hooks path replaced by a directory (refused). Verified with the Gemini-API mock only: the defenseclaw-gemini profile has not carried a real Gemini key (no account), and Google sign-in inside a sandbox is untested"},
 	probe: ProbeSpec{

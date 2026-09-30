@@ -60,6 +60,9 @@ type gatewayFixture struct {
 	// probe answers ProbeClientAuth; probes counts the calls.
 	probe  func() error
 	probes int
+	// flush answers FlushSandboxes; flushes counts the calls.
+	flush   error
+	flushes int
 }
 
 // systemdUnit renders `systemctl --user show openshell-gateway` output
@@ -108,9 +111,11 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 	f.cfg = &openshell.GatewayConfigurator{
 		Dir:             f.dir,
 		GOOS:            "linux",
+		BrewPrefix:      filepath.Join(filepath.Dir(f.dir), "homebrew"),
 		Runner:          f.runner,
 		VerifyGateway:   func(context.Context) error { f.verified++; return f.verify },
 		ProbeClientAuth: func(context.Context, *openshell.Registration) error { f.probes++; return f.probe() },
+		FlushSandboxes:  func(context.Context) error { f.flushes++; return f.flush },
 		Now:             func() time.Time { return time.Date(2026, 9, 26, 19, 0, 0, 0, time.UTC) },
 	}
 	return f

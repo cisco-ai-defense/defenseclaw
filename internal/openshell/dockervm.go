@@ -115,21 +115,24 @@ func lastLine(out []byte) string {
 	return strings.TrimSpace(lines[len(lines)-1])
 }
 
-// vmLandlockCheck checks Landlock where sandboxes run off Linux: in the
-// kernel of the Linux VM Docker runs containers in, once Docker answers.
-func (r *doctorRun) vmLandlockCheck(ctx context.Context) Check {
+// dockerVMLandlockCheck checks Landlock where the docker driver runs
+// sandboxes off Linux: in the kernel of the Linux VM Docker runs
+// containers in, once Docker answers.
+func (r *doctorRun) dockerVMLandlockCheck(ctx context.Context) Check {
 	c := Check{ID: CheckIDLandlock, Title: "Landlock"}
 	if !r.docker {
 		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
 		return c
 	}
 	vm := "the Linux VM Docker runs in"
-	unsupported := &Fix{Summary: fmt.Sprintf("run Docker in a Linux VM whose kernel enables Landlock ABI %d or newer", MinLandlockABI), Command: TroubleshootingURL}
+	unsupported := &Fix{Summary: fmt.Sprintf("run sandboxes in OpenShell MicroVMs, which have their own kernel (`defenseclaw sandbox setup` switches the gateway to them), "+
+		"or run Docker in a Linux VM whose kernel enables Landlock ABI %d or newer", MinLandlockABI), Command: TroubleshootingURL}
 	if r.desktop {
 		vm = "Docker Desktop's Linux VM"
-		unsupported = &Fix{Summary: "macOS sandboxes cannot run on Docker Desktop today (details in the sandbox guide)", Command: TroubleshootingURL}
+		unsupported = &Fix{Summary: "macOS sandboxes cannot run on Docker Desktop's kernel: run them in OpenShell MicroVMs, which have their own " +
+			"(`defenseclaw sandbox setup` switches the gateway to them; details in the sandbox guide)", Command: TroubleshootingURL}
 	}
-	abi, kernel, err := r.VMLandlockABI(ctx)
+	abi, kernel, err := r.DockerVMLandlockABI(ctx)
 	named := vm
 	if kernel != "" {
 		named += " (kernel " + kernel + ")"

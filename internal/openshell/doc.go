@@ -23,9 +23,16 @@
 // talks to the local OpenShell gateway through the Go SDK, and uses the
 // upstream `openshell` CLI only where the SDK has no transport (terminal
 // attach, file transfer, port forwarding, gateway registration, install).
+// The CLI's sandbox sessions run over ssh, which DefenseClaw gives it with
+// connection sharing turned off (SSHShim), whatever the user's ssh_config
+// says.
 //
-// Sandboxed harnesses reach DefenseClaw at host.openshell.internal, which the
-// docker driver maps to host loopback: hooks land on a dedicated sandbox
+// A gateway runs one compute driver: docker, or vm, OpenShell's MicroVM
+// driver, which a Mac runs sandboxes with. What DefenseClaw does
+// differently per driver lives in one table (Driver, GatewayDriver).
+//
+// Sandboxed harnesses reach DefenseClaw at host.openshell.internal, which
+// either driver maps to host loopback: hooks land on a dedicated sandbox
 // ingress listener, and web egress leaves through the DefenseClaw egress
 // proxy. Neither path is ever the main API port.
 package openshell

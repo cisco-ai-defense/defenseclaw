@@ -254,7 +254,7 @@ func TestLaunchersScrubTheEnvironment(t *testing.T) {
 				}
 				want := maps.Clone(v.want)
 				switch {
-				case v.name == "node" && name == "codex":
+				case v.name == "node" && (name == "codex" || name == "copilot"):
 					// Its own fixed NODE_OPTIONS silences the proxy agent's warning.
 					want["NODE_OPTIONS"] = "--disable-warning=UNDICI-EHPA"
 				case v.name == "egress" && name == "omnigent":
@@ -304,9 +304,9 @@ func TestLaunchersPinTheirEnvironment(t *testing.T) {
 			map[string]string{"OPENCODE_PURE": unset, "OPENCODE_TEST_MANAGED_CONFIG_DIR": unset, "OPENCODE_TEST_HOME": unset,
 				"OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_CONFIG_CONTENT": "{}"}},
 		{"copilot", Copilot, []string{"COPILOT_AUTO_UPDATE=true", "COPILOT_PKG_CACHE_HOME=/sandbox/.cache", "COPILOT_CLI_DIST_DIR=/tmp/dist",
-			"COPILOT_CLI_VERSION=9.9.9", "COPILOT_CACHE_HOME=/tmp/c"}, []string{"-p", "hi", "--yolo"},
+			"COPILOT_CLI_VERSION=9.9.9", "COPILOT_CACHE_HOME=/tmp/c", "NODE_OPTIONS=--require=/tmp/preload.js"}, []string{"-p", "hi", "--yolo"},
 			map[string]string{"COPILOT_AUTO_UPDATE": "false", "COPILOT_PKG_CACHE_HOME": CopilotPackageCache, "COPILOT_CLI_DIST_DIR": unset,
-				"COPILOT_CLI_VERSION": unset, "COPILOT_CACHE_HOME": unset}},
+				"COPILOT_CLI_VERSION": unset, "COPILOT_CACHE_HOME": unset, "NODE_OPTIONS": "--disable-warning=UNDICI-EHPA"}},
 		{"amp", Amp, []string{"HOME=/tmp/elsewhere", "XDG_CONFIG_HOME=/tmp/x", "AMP_DISABLE_PLUGINS=1", "AMP_PLUGIN_URI=file:///tmp/p.ts",
 			"AMP_PLUGIN_SOURCE_BASE64=eA==", "AMP_SETTINGS_FILE=/tmp/s.json"}, []string{"--dangerously-allow-all", "-x", "hi"},
 			map[string]string{"HOME": "{dir}", "XDG_CONFIG_HOME": unset, "AMP_DISABLE_PLUGINS": unset, "AMP_PLUGIN_URI": unset,
@@ -330,7 +330,7 @@ func TestLaunchersPinTheirEnvironment(t *testing.T) {
 		{"omnigent", OmniGent, []string{"DEFENSECLAW_EGRESS_URL=http://10.200.0.1:28772", "DEFENSECLAW_SANDBOX_TOKEN=" + omnigentToken,
 			"OMNIGENT_CONFIG=/tmp/elsewhere.yaml", "OMNIGENT_RUNNER_ENV_PASSTHROUGH=MY_TOOL_VAR"}, []string{"run", "-p", "hi"},
 			map[string]string{"OMNIGENT_CONFIG": unset, "OMNIGENT_CONFIG_HOME": connector.OmnigentSandboxConfigHome, "OMNIGENT_NO_UPDATE_CHECK": "1",
-				"OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN": omnigentToken, "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_TOOL_VAR," + omnigentRunnerProxyPassthrough,
+				"OMNIGENT_DISABLE_TELEMETRY": "1", "OMNIGENT_DEFENSECLAW_SANDBOX_TOKEN": omnigentToken, "OMNIGENT_RUNNER_ENV_PASSTHROUGH": "MY_TOOL_VAR," + omnigentRunnerProxyPassthrough,
 				"HTTPS_PROXY": "http://10.200.0.1:28772", "NO_PROXY": loopback, "no_proxy": loopback}},
 		// Without the egress proxy nothing extra is passed through, and a
 		// token that is not placeholder-shaped is not copied.

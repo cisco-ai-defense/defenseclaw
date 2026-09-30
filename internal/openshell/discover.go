@@ -48,9 +48,10 @@ var (
 	ErrUnsupportedAuthMode = errors.New("openshell: unsupported gateway auth mode")
 	// ErrUnauthenticatedGateway means the registration reaches the gateway
 	// without a client certificate (auth mode plaintext or none). Anyone
-	// who can reach such a gateway's port can create sandboxes with host
-	// bind mounts through its root Docker daemon, so DefenseClaw drives
-	// only mTLS gateways.
+	// who can reach such a gateway's port can drive its sandboxes and the
+	// credentials DefenseClaw hands them, and on the docker driver create
+	// sandboxes with host bind mounts through its root Docker daemon, so
+	// DefenseClaw drives only mTLS gateways.
 	ErrUnauthenticatedGateway = errors.New("openshell: gateway accepts unauthenticated calls")
 	// ErrInsecureCredentials means the mTLS material is readable or
 	// writable by other users, or is not a plain file owned by the caller.
@@ -214,6 +215,34 @@ func CheckPlatform(goos string) error {
 	}
 }
 
+// CheckHost is CheckPlatform for a machine: it also refuses a Mac that is
+// not Apple silicon, where OpenShell's MicroVM driver, which a Mac runs
+// sandboxes with, does not run. An Intel build of DefenseClaw that
+// Rosetta runs on Apple silicon is told to install the arm64 build.
+func CheckHost(goos, goarch string) error {
+	if err := CheckPlatform(goos); err != nil {
+		return err
+	}
+	if goos == "darwin" && goarch != "arm64" {
+		if translated(goos, goarch) {
+			return fmt.Errorf("%w (this is the Intel build of DefenseClaw running under Rosetta on Apple silicon: install the arm64 build)", ErrUnsupportedPlatform)
+		}
+		return fmt.Errorf("%w (on a Mac, Apple silicon only: OpenShell's MicroVM driver does not run on %s/%s)", ErrUnsupportedPlatform, goos, goarch)
+	}
+	return nil
+}
+
+// processTranslated reports whether goos/goarch is this process running
+// under Rosetta (tests replace it).
+var processTranslated = func(goos, goarch string) bool {
+	return goos == runtime.GOOS && goarch == runtime.GOARCH && rosetta()
+}
+
+// translated reports an Intel macOS build running on Apple silicon.
+func translated(goos, goarch string) bool {
+	return goos == "darwin" && goarch == "amd64" && processTranslated(goos, goarch)
+}
+
 // Discover resolves a gateway registration and validates it for use by
 // DefenseClaw: its files must be the caller's (CheckRegistrationFiles),
 // the gateway must be local and use mtls, and its private key must be
@@ -223,7 +252,7 @@ func CheckPlatform(goos string) error {
 // When the registration exists but is unusable, Discover returns it
 // together with the error, so doctor can report what it found.
 func Discover(opts DiscoverOptions) (*Registration, error) {
-	if err := CheckPlatform(runtime.GOOS); err != nil {
+	if err := CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
 		return nil, err
 	}
 	userDir := opts.ConfigDir
