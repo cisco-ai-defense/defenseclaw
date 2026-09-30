@@ -7437,6 +7437,50 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
 # ---------------------------------------------------------------------------
 
 
+class _VerifiedGatewayRecorder:
+    """Doctor's canonical recorder: only the verified gateway gets the token.
+
+    The action fact authenticates with the gateway token. The generic CLI
+    recorder dialed whatever listened on the API port, so another account's
+    process there received the token although Doctor's own probes refused
+    it (#642). This one sends the fact over a connection the verified gateway
+    accepted, or not at all.
+    """
+
+    def __init__(self, cfg) -> None:
+        self._cfg = cfg
+
+    def emit_cli_observability(self, payload) -> None:
+        from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+
+        token, _token_env, _token_source = _daemon_effective_gateway_token(self._cfg)
+        if not token:
+            raise CanonicalObservabilityUnavailableError("gateway authentication is unavailable")
+        trust = _trusted_gateway_listener(self._cfg)
+        if not trust.trusted:
+            raise CanonicalObservabilityUnavailableError(trust.detail + _GATEWAY_TOKEN_REFUSED)
+        code, detail = _gateway_peer_bound_request(
+            _gateway_api_url(self._cfg, "/api/v1/observability/cli"),
+            trust,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-DC-Auth": f"Bearer {token}",
+                "X-DefenseClaw-Client": "python-cli",
+                "Content-Type": "application/json",
+            },
+            body=json.dumps(dict(payload)).encode("utf-8"),
+            timeout=10.0,
+        )
+        if code != 204:
+            raise CanonicalObservabilityError(
+                f"canonical observability admission was not acknowledged: {code or detail}"
+            )
+
+    def close(self) -> None:
+        return
+
+
 def _record_doctor_action(app: AppContext, cfg, r: _DoctorResult, mode: str) -> None:
     """Emit one canonical action fact unless the operator requested passivity."""
 
@@ -7452,7 +7496,7 @@ def _record_doctor_action(app: AppContext, cfg, r: _DoctorResult, mode: str) -> 
             # Main deliberately avoids Store.init() for Doctor so inspection
             # cannot create a missing database. The canonical recorder is lazy
             # and needs no Store, network, or secret lookup at construction.
-            logger = Logger.from_config(cfg)
+            logger = Logger(_VerifiedGatewayRecorder(cfg))
             app.logger = logger
         if logger is None:
             return

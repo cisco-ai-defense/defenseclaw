@@ -71,6 +71,13 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Doctor's own audit record no longer goes to another account's
+  listener.** Doctor's checks refused to send the gateway token to a process
+  that is not the verified gateway, but the action record it writes at the
+  end still did: with another account's process on the API port, that
+  process received the token on every `defenseclaw doctor` run. The record
+  now goes only over a connection the verified gateway accepted, and is
+  skipped otherwise.
 - **`rotate-credentials` says what it did.** On the enterprise standalone
   profile on Linux and macOS, a successful rotation printed only `done`. It
   now lists the committed and the previous key by SHA-256 prefix, how many
