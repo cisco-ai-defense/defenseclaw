@@ -714,7 +714,8 @@ deleted.
   asked. The pack key `egress.block_large_uploads`,
   `openshell.egress.block_large_uploads: true` (every sandbox; `false`, the
   default, follows the pack) and `openshell.admin.block_large_uploads: true`
-  (every sandbox, and a pack's `large_upload_mb: 0` gets 25 MiB) turn it on;
+  (every sandbox; a pack's `large_upload_mb: 0` gets 25 MiB, and a higher
+  threshold is lowered to 25 MiB or the required pack's own) turn it on;
   each sandbox's proxy credential carries its own, and a configuration change
   reaches running sandboxes, whose feed says so. The upload is stopped before
   the chunk that crosses the threshold, and later requests to that host, or to
@@ -725,7 +726,9 @@ deleted.
   the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
   egress audit records the cut as blocked (`SANDBOX_EGRESS_LARGE_UPLOAD`).
   Unblocked hosts and those on an allow list the user or the administrator
-  wrote are only reported; an unblock lifts the block. `sandbox policy
+  wrote are only reported; an unblock lifts the block. With a threshold of 0
+  there is nothing to cut, so the block is off, and `sandbox policy explain`
+  says so. `sandbox policy
   explain` shows `egress.block_large_uploads` and where it came from, and
   `policy show` the threshold. In the Python config, the v8 schema, and the
   TUI and macOS app config editors, which show the key read-only under the

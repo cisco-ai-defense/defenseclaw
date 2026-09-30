@@ -354,7 +354,7 @@ added. Copy the registry and source hosts you need from
 | `egress.allow` | No | `[]` | Host patterns, but never one that covers a whole top-level domain such as `*.com` or `*.co.uk`, or an address range wider than `/8` (IPv4) or `/16` (IPv6). At most 1024. |
 | `egress.ports` | No | `[80, 443]` | Ports 1–65535; duplicates are dropped. At least one unless `network.mode` is `deny`; a `deny` pack that lists none gets 80 and 443 when a profile turns the proxy on. At most 64. |
 | `egress.large_upload_mb` | No | `25` | 0–1048576; `0` turns the report off. |
-| `egress.block_large_uploads` | No | `false` | `true` also cuts the upload that crosses `large_upload_mb` and refuses later requests to that host until it is unblocked. |
+| `egress.block_large_uploads` | No | `false` | `true` also cuts the upload that crosses `large_upload_mb` and refuses later requests to that host until it is unblocked. With `large_upload_mb: 0` there is no report to act on, so the block is off. |
 | `workspace.mode` | Yes | | `mount` or `copy`. |
 | `workspace.masks` | No | `[]` | Project globs. At most 1024. |
 | `workspace.unmask` | No | `[]` | Project globs. At most 1024. |
@@ -840,7 +840,10 @@ whatever its pack and the user's `openshell.egress.block_large_uploads` say:
 an upload of more than the sandbox's threshold to a host it hadn't contacted
 before is cut, and later requests there are refused. It also keeps the report
 the block acts on: a pack with `large_upload_mb: 0` gets the default 25 MiB
-threshold, and a user who chose that pack is told. Users can still lift the
+threshold, a threshold above 25 MiB (a pack's or the user's
+`openshell.egress.large_upload_mb`) is lowered to 25 MiB, or to the
+`required_pack`'s own threshold when that is higher, and a user who chose
+such a pack or value is told. Users can still lift the
 block for one host with `defenseclaw sandbox unblock`, unless
 `allow_unblock` is `false`. Hosts on `egress_allow_only` are exempt. `false`,
 or leaving it out, adds no limit.

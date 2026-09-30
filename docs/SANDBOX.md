@@ -972,7 +972,12 @@ entry or the administrator names are exempt: their uploads are only
 reported, so `defenseclaw sandbox unblock HOST --sandbox NAME` lifts a block
 (unless `openshell.admin.allow_unblock` is `false`). The administrator's key
 also keeps the report on: a pack whose `large_upload_mb` is `0` gets the
-default 25 MiB, and `sandbox policy explain` shows it as the administrator's.
+default 25 MiB, a higher threshold (a pack's or
+`openshell.egress.large_upload_mb`) is lowered to 25 MiB, or to the required
+pack's own when that is higher, and `sandbox policy explain` shows it as the
+administrator's. Without the administrator's key the block acts on the
+report as it is: with a threshold of `0` it is off (nothing would be cut),
+and `sandbox policy explain` says so to whoever turned it on.
 
 A cut shows in the activity feed as an `egress.blocked` event of category
 `large_upload` whose reason names the threshold ("✗ files.example.net (large
@@ -2653,7 +2658,8 @@ posture becomes a floor) and `required_pack_digest`, `min_profile`,
 `allow_learn_mode`, `allowed_harnesses`, `egress_block` (cannot be unblocked;
 a host name also covers its subdomains),
 `egress_allow_only` (forces an allowlist profile), `block_large_uploads`
-(turns the large-upload block on for every sandbox and keeps its report on),
+(turns the large-upload block on for every sandbox and keeps its report on,
+at most 25 MiB or the required pack's threshold),
 `require_copy_for`, `max_resources`, and `locked` (keys run inputs may not loosen). In a
 `managed_enterprise` install the administrator owns `config.yaml`, so the
 constraints are authoritative and a custom required pack must be an

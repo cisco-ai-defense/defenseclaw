@@ -206,6 +206,12 @@ func TestResolveLargeUploadBlock(t *testing.T) {
 		"network: {mode: open}\negress: {large_upload_mb: 5, block_large_uploads: true}", 1))
 	writePack(t, root, "silent", strings.Replace(customPack("silent"), "network: {mode: open}",
 		"network: {mode: open}\negress: {large_upload_mb: 0}", 1))
+	writePack(t, root, "blind", strings.Replace(customPack("blind"), "network: {mode: open}",
+		"network: {mode: open}\negress: {large_upload_mb: 0, block_large_uploads: true}", 1))
+	writePack(t, root, "huge", strings.Replace(customPack("huge"), "network: {mode: open}",
+		"network: {mode: open}\negress: {large_upload_mb: 1048576}", 1))
+	writePack(t, root, "roomy", strings.Replace(customPack("roomy"), "network: {mode: open}",
+		"network: {mode: open}\negress: {large_upload_mb: 100}", 1))
 	for _, tc := range []struct {
 		name          string
 		edit          func(*config.OpenShellConfig)
@@ -231,6 +237,39 @@ func TestResolveLargeUploadBlock(t *testing.T) {
 			Constraint: "openshell.admin.block_large_uploads", Detail: "the large-upload report stays on",
 		}},
 		{"pack without the report", func(o *config.OpenShellConfig) { o.Pack = "silent" }, false, SourcePack, "pack silent", 0, nil},
+		// The block acts on the report: without one it cuts nothing, so it
+		// is off, and whoever asked for it is told.
+		{"user over a pack without the report", func(o *config.OpenShellConfig) {
+			o.Pack, o.Egress.BlockLargeUploads = "silent", true
+		}, false, SourceUser, "openshell.egress.block_large_uploads", 0, &Violation{
+			Key: "egress.block_large_uploads", Source: SourceUser, Attempted: "true", Enforced: "false",
+			Constraint: "egress.large_upload_mb", Detail: "above 0",
+		}},
+		{"pack blocking without the report", func(o *config.OpenShellConfig) { o.Pack = "blind" }, false, SourcePack, "pack blind", 0,
+			&Violation{Key: "egress.block_large_uploads", Source: SourcePack, Attempted: "true", Enforced: "false"}},
+		// Under the administrator's block a raised threshold is as good as
+		// no report: it is at most the default, or the required pack's.
+		{"admin over a pack's raised threshold", func(o *config.OpenShellConfig) {
+			o.Pack, o.Admin.BlockLargeUploads = "huge", true
+		}, true, SourceAdmin, "openshell.admin.block_large_uploads", 25, &Violation{
+			Key: "egress.large_upload_mb", Source: SourcePack, Attempted: "1048576", Enforced: "25",
+			Constraint: "openshell.admin.block_large_uploads", Detail: "at most 25 MiB",
+		}},
+		{"admin over the user's raised threshold", func(o *config.OpenShellConfig) {
+			o.Egress.LargeUploadMB, o.Admin.BlockLargeUploads = 1048576, true
+		}, true, SourceAdmin, "openshell.admin.block_large_uploads", 25, &Violation{
+			Key: "egress.large_upload_mb", Source: SourceUser, Attempted: "1048576", Enforced: "25",
+			Constraint: "openshell.admin.block_large_uploads",
+		}},
+		{"admin keeps the user's lower threshold", func(o *config.OpenShellConfig) {
+			o.Egress.LargeUploadMB, o.Admin.BlockLargeUploads = 10, true
+		}, true, SourceAdmin, "openshell.admin.block_large_uploads", 10, nil},
+		{"admin over a required pack's higher threshold", func(o *config.OpenShellConfig) {
+			o.Admin.RequiredPack, o.Egress.LargeUploadMB, o.Admin.BlockLargeUploads = "roomy", 200, true
+		}, true, SourceAdmin, "openshell.admin.block_large_uploads", 100, &Violation{
+			Key: "egress.large_upload_mb", Source: SourceUser, Attempted: "200", Enforced: "100",
+			Constraint: "openshell.admin.block_large_uploads", Detail: "at most 100 MiB",
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eff, violations := mustResolve(t, testConfig(func(o *config.OpenShellConfig) {
@@ -248,8 +287,8 @@ func TestResolveLargeUploadBlock(t *testing.T) {
 				t.Fatalf("egress = %+v, want block %v at %d MiB", eff.Egress, tc.block, tc.largeUploadMB)
 			}
 			wantSetting(t, eff, "egress.block_large_uploads", strconv.FormatBool(tc.block), tc.source, tc.origin)
-			if tc.violation != nil {
-				wantSetting(t, eff, "egress.large_upload_mb", "25", SourceAdmin, "openshell.admin.block_large_uploads")
+			if tc.violation != nil && tc.violation.Key == "egress.large_upload_mb" {
+				wantSetting(t, eff, "egress.large_upload_mb", strconv.Itoa(tc.largeUploadMB), SourceAdmin, "openshell.admin.block_large_uploads")
 			}
 		})
 	}
