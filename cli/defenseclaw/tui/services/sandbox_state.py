@@ -1132,9 +1132,9 @@ class SandboxesPanelModel:
             self._toasted[key] = clock
             why = f" ({row.category or row.reason})" if (row.category or row.reason) else ""
             where = f" in {row.sandbox}" if row.sandbox else ""
-            return SandboxNotice(
-                "warn", f"✗ {host_port(row.host, row.port)} blocked{where}{why}. Sandboxes panel (7): u to unblock"
-            )
+            # An unblockable block holds the host on every port: the port of
+            # the first request would say it stops there.
+            return SandboxNotice("warn", f"✗ {row.host} blocked{where}{why}. Sandboxes panel (7): u to unblock")
         if row.kind == "approval.requested":
             where = f"{row.sandbox}: " if row.sandbox else ""
             return SandboxNotice("warn", f"? {where}{row.summary}. Sandboxes panel (7): press a to review")

@@ -368,6 +368,14 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		{Seq: 10, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "HTTPBIN.io", Port: 443, BytesUp: 1<<20 + 9, Threshold: 1 << 20},
 		// A port the proxy does not carry is what is blocked: it shows.
 		{Seq: 11, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "example.org", Port: 8443, Category: "port_not_allowed"},
+		// So does a closed port on this machine, whose alias keeps its
+		// other ports, and an OpenShell denial, which is per host and port:
+		// the notice said "blocked host.openshell.internal", and a second
+		// closed port went unannounced (PR 1022 review of fix 4).
+		{Seq: 12, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 5432, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 13, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 6379, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 14, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "db.example.net", Port: 6379, Source: sandboxapi.SourceOpenShell,
+			Reason: "transparent_tcp_mapping_denied"},
 	}
 	large := "⚠ large upload to httpbin.io (more than 1 MiB)"
 	port := "✗ DefenseClaw blocked example.org:8443 (port not allowed)"
@@ -377,10 +385,15 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
 		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "example.org") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "db.example.net") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
+	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379"} {
+		if !strings.Contains(live, "✗ DefenseClaw blocked "+where) {
+			t.Errorf("no notice names %s:\n%q", where, live)
+		}
+	}
 	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") ||
 		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") ||
 		strings.Count(live, "\x1b]9;DefenseClaw: "+port+"\a") != 1 {
@@ -1802,5 +1815,25 @@ func TestWhatRunsInASandboxDropsItsStopMark(t *testing.T) {
 	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"true"}}))
 	if ta.cleanCopy(&stopped) {
 		t.Fatal("the mark outlived a command in the sandbox")
+	}
+}
+
+// An ask is for one host and port, 443 included; an IPv6 literal is
+// bracketed, or its port read as part of another address (PR 1022 review
+// of fix 3).
+func TestAskDestination(t *testing.T) {
+	for _, tc := range []struct {
+		ev   sandboxapi.ActivityEvent
+		want string
+	}{
+		{sandboxapi.ActivityEvent{Host: "api.example.com", Port: 443}, "api.example.com:443"},
+		{sandboxapi.ActivityEvent{Host: "fd00:ec2::254", Port: 80}, "[fd00:ec2::254]:80"},
+		{sandboxapi.ActivityEvent{Host: "[fd00:ec2::254]", Port: 80}, "[fd00:ec2::254]:80"},
+		{sandboxapi.ActivityEvent{Host: "host.openshell.internal"}, "host.openshell.internal"},
+		{sandboxapi.ActivityEvent{}, ""},
+	} {
+		if got := askDestination(tc.ev); got != tc.want {
+			t.Errorf("askDestination(%+v) = %q, want %q", tc.ev, got, tc.want)
+		}
 	}
 }

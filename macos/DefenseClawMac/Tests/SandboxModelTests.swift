@@ -126,6 +126,14 @@ struct SandboxModelTests {
         expect(notes.map(\.kind) == [.blocked, .ask], "one block and one ask notification")
         expect(notes[0].host == "webhook.site" && notes[0].sandbox == "myapp-claude-7f3a", "block target")
         expect(notes[0].title == "Blocked webhook.site", "block title \(notes[0].title)")
+        // An unblockable block holds the host on every port, and the
+        // notification is once per host: the first request's ":80" would
+        // say the block stops there.
+        var plain = SandboxSnapshot()
+        var http = blocked
+        http["port"] = 80
+        let first = plain.merge(events: SandboxDecoding.activity(from: ["events": [http]]), notify: true, now: start)
+        expect(first.first?.title == "Blocked webhook.site", "block title without the port \(first.first?.title ?? "")")
         expect(notes[1].approvalID == "a1", "ask id")
         expect(snapshot.lastSeq == 7, "last seq")
         expect(snapshot.merge(events: events, notify: true, now: start).isEmpty, "a replay adds nothing")

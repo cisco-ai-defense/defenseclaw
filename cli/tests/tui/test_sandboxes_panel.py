@@ -318,6 +318,17 @@ def test_admin_status_line() -> None:
 # --- the live feed -------------------------------------------------------------
 
 
+def test_a_block_toast_names_the_host_without_the_first_requests_port() -> None:
+    # An unblockable block holds the host on every port, and the toast is
+    # once per host: ":80" of a plain-HTTP request that came first said the
+    # block stopped there (PR 1022 review of fix 4).
+    model = _model()
+    notices = model.add_events([{**BLOCKED, "port": 80}], now=100.0)
+    assert [n.message for n in notices] == [
+        "✗ webhook.site blocked in myapp-claude-7f3a (exfil destination). Sandboxes panel (7): u to unblock"
+    ]
+
+
 def test_events_are_deduplicated_by_sequence_and_toast_once() -> None:
     model = _model()
     notices = model.add_events([ALLOWED, BLOCKED, PRIVATE], now=100.0)

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"slices"
 	"strconv"
@@ -386,9 +387,21 @@ func askDestination(ev sandboxapi.ActivityEvent) string {
 		return ""
 	}
 	if ev.Port != 0 {
-		return ev.Host + ":" + strconv.Itoa(ev.Port)
+		// An ask is for one host and port, 443 included; an IPv6 literal
+		// is bracketed, or its port reads as part of the address.
+		return net.JoinHostPort(strings.Trim(ev.Host, "[]"), strconv.Itoa(ev.Port))
 	}
 	return ev.Host
+}
+
+// portBlock reports a block of one port rather than of the host: a port the
+// egress proxy does not carry, a port on this machine the sandbox may not
+// reach (host.openshell.internal, whose hook ingress and approved ports stay
+// open), and OpenShell's own denials, which its rules make per host and
+// port.
+func portBlock(ev sandboxapi.ActivityEvent) bool {
+	return ev.Category == string(egress.CategoryPortNotAllowed) || ev.Reason == sandboxapi.ReasonHostPortClosed ||
+		ev.Source == sandboxapi.SourceOpenShell
 }
 
 // askText is an ask of sandbox name for the live notice: the destination
@@ -433,17 +446,18 @@ func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
 // with the command that lifts the block when one does. What the harness
 // fetches on its own and does without (a startup tip) is not announced.
 //
-// A block holds the host on every port, so the notice names the host
-// alone: the port of whichever request came first ("webhook.site:80")
-// would say the block stops there, though HTTPS is blocked too. The feed
-// keeps the port, which tells its request lines apart. A port the proxy
-// does not carry is what is blocked, so that one shows, once per port.
+// A block of the egress proxy holds the host on every port, so the notice
+// names the host alone: the port of whichever request came first
+// ("webhook.site:80") would say the block stops there, though HTTPS is
+// blocked too. The feed keeps the port, which tells its request lines
+// apart. Where the port is what is blocked (portBlock), it shows, once per
+// port.
 func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	if ev.Host == "" || ev.Reason == harnessFetchReason {
 		return
 	}
 	where, key := ev.Host, "block "+ev.Host
-	if ev.Category == string(egress.CategoryPortNotAllowed) {
+	if portBlock(ev) {
 		where = hostPort(ev)
 		key = "block " + where
 	}

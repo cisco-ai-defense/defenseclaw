@@ -721,9 +721,11 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff
 The network counts are sites (destinations): the new ones the sandbox
 reached, and the ones blocked during the session, each counted once however
 often it was tried and listed below with `✗`. A blocked site is named without
-a port, since the block holds it on every port; only a port the egress proxy
-doesn't carry is named with it (`✗ DefenseClaw blocked example.org:8443 (port
-not allowed)`). A site you unblocked for the
+a port, since the block holds it on every port. A block of one port is named
+with it: a port the egress proxy doesn't carry (`✗ DefenseClaw blocked
+example.org:8443 (port not allowed)`), a port on this machine the sandbox may
+not reach (`host.openshell.internal:5432`), and a connection OpenShell itself
+denied, whose rules are per host and port. A site you unblocked for the
 sandbox later in the session is listed without the unblock command
 (``✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked
 since``). An invalid destination (a
