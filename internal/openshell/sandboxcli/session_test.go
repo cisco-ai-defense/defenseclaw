@@ -783,8 +783,46 @@ func TestSessionHookWarnings(t *testing.T) {
 			not:  []string{"hooks are not reaching"}, notLive: []string{"hooks are not reaching"}},
 		{name: "kiro the daemon found unreachable", opts: kiro, setup: quiet(0), exit: ExitHooksUnreachable,
 			during: unreachable("r2c1-kiro", "no hook request")},
+		// PR 1022 review of N1: a daemon restart during the session left
+		// the new daemon's counters at zero, and the session said none of
+		// its hooks reached DefenseClaw (Copilot CLI, after 7 allowed tool
+		// calls, without the continue line; Claude Code with
+		// ExitHooksUnreachable). That cannot be told.
+		{name: "a copilot session across a daemon restart", opts: RunOptions{Harness: "copilot"}, setup: func(ta *testApp) {
+			quiet(time.Hour)(ta)
+			ta.env["OPENAI_API_KEY"] = "sk-mock"
+		}, during: restartedAt(5 * time.Minute),
+			want: []string{"Session ended · 0 tool calls since the daemon restarted at " + restartClock, restartNote, "continue this conversation"},
+			not:  []string{"no hook of this session reached", "not reaching"}},
+		{name: "a claude session across a daemon restart", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			quiet(10 * time.Millisecond)(ta)
+			restartedAt(5*time.Minute)(t, ta) // before the hook window ends
+		}, during: func(*testing.T, *testApp) { time.Sleep(50 * time.Millisecond) }, // past the window
+			want: []string{restartNote, "continue this conversation"}, not: []string{"not reaching"}, notLive: []string{"not reaching"}},
+		// The new daemon's own verdict still counts.
+		{name: "a daemon restart and the new daemon's verdict", opts: RunOptions{Harness: "claude"}, setup: quiet(time.Hour), exit: ExitHooksUnreachable,
+			during: func(t *testing.T, ta *testApp) {
+				restartedAt(5*time.Minute)(t, ta)
+				unreachable(sbName, "the hook token was refused")(t, ta)
+			}, want: []string{"✗ " + hooksWarningText("the hook token was refused")}, not: []string{"cannot tell"}},
 	})
 }
+
+// restartedAt makes the fake daemon one that started that long after the
+// session did (at 12:00): it restarted during the session.
+func restartedAt(after time.Duration) func(*testing.T, *testApp) {
+	return func(_ *testing.T, ta *testApp) {
+		ta.daemon.mu.Lock()
+		ta.daemon.status.StartedAt = ta.Now().Add(after)
+		ta.daemon.mu.Unlock()
+	}
+}
+
+var (
+	restartClock = time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04")
+	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and keeps no hook counts across a restart, " +
+		"so DefenseClaw cannot tell whether this session's hooks reached it"
+)
 
 // Manual R2-11: Ctrl-C at the keep/undo question does not end the process
 // silently: it says the changes stay and undo still reverts them, stops

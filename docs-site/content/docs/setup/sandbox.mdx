@@ -633,6 +633,15 @@ run tells you three times:
 - in the exit status: 69 when not one hook got through, unless the harness
   exited with its own error.
 
+The daemon keeps no hook counts across a restart. When it restarted during
+the session and no hook reached it since, the run can't tell whether the
+session's hooks got through before, so it says that instead, with no warning
+and no exit status 69:
+`the DefenseClaw daemon restarted during the session (at 11:05) and keeps no
+hook counts across a restart, so DefenseClaw cannot tell whether this
+session's hooks reached it`. A warning the restarted daemon raises itself
+still counts.
+
 ### Tamper alerts
 
 DefenseClaw tracks each tool call from its "before" hook to its result. A

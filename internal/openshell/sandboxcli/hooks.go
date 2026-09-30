@@ -218,6 +218,14 @@ func (s *session) checkHooksAfter(ctx context.Context, window time.Duration) {
 		// watch.
 		return
 	}
+	if !sb.Hooks.Unreachable {
+		// A daemon that restarted during the window counts from zero: no
+		// hook since then says nothing of the hooks before (the summary
+		// says it cannot tell).
+		if st, err := s.api.Status(ctx); err == nil && s.startedBefore(st.StartedAt) {
+			return
+		}
+	}
 	s.warnHooksOnce("⚠ " + hooksWarningText(firstNonEmpty(sb.Hooks.UnreachableReason,
 		"not one hook request reached DefenseClaw in the session's first "+window.Round(time.Second).String())))
 }
@@ -241,6 +249,25 @@ func (s *session) hooksReached(after *sandboxapi.Sandbox) bool {
 	return reached
 }
 
+// hookReachUnknown reports that the daemon restarted during the session,
+// which started its hook counters again, and has no verdict of its own on
+// the session's hooks: a hook that reached the daemon before the restart
+// left no trace, so DefenseClaw cannot tell whether one did (PR 1022: a
+// Copilot CLI session of 7 allowed tool calls and a restart ended with "no
+// hook of this session reached DefenseClaw"). A daemon that does not say
+// when it started gives its restart away by hook counters below the
+// session's start.
+func (s *session) hookReachUnknown(after *sandboxapi.Sandbox) bool {
+	if after.Hooks.Unreachable {
+		return false
+	}
+	before := s.before
+	if before == nil {
+		before = s.sb
+	}
+	return s.restartedDuring() || after.Hooks.HookRequests < before.Hooks.HookRequests
+}
+
 // telemetryReached reports whether an authenticated OTLP request of the
 // session reached DefenseClaw by the time after was read: the ingress
 // answers and the sandbox token arrives, so a harness that fires its first
@@ -262,11 +289,26 @@ func (s *session) telemetryReached(after *sandboxapi.Sandbox) bool {
 // shell fires none. A session whose authenticated telemetry got through
 // proved the path, as the live check counts it, unless the daemon says
 // otherwise.
+//
+// After a daemon restart during the session, with no verdict of the new
+// daemon's, whether a hook reached DefenseClaw is unknown (hookReachUnknown):
+// the session says so, and neither says its hooks did not reach it nor
+// ends with ExitHooksUnreachable.
 func (s *session) printHookReach(after *sandboxapi.Sandbox, endedElsewhere bool) {
 	if s.shell || s.hooksReached(after) || (s.telemetryReached(after) && !after.Hooks.Unreachable) {
 		return
 	}
 	a := s.app
+	if s.hookReachUnknown(after) {
+		s.hooksUnknown = true
+		at := ""
+		if s.restartedDuring() {
+			at = " (at " + a.clock(s.daemonStarted) + ")"
+		}
+		a.note("the DefenseClaw daemon restarted during the session" + at + " and keeps no hook counts across a restart, " +
+			"so DefenseClaw cannot tell whether this session's hooks reached it")
+		return
+	}
 	if code := s.harnessCode; code != 0 && !after.Hooks.Unreachable {
 		if !endedElsewhere && code != exitInterrupted {
 			why := "the harness itself failed (its output is above)"

@@ -118,6 +118,10 @@ type session struct {
 	hooksWarned bool
 	noHooks     bool
 	sawHooks    atomic.Bool
+	// hooksUnknown is set once the summary said a daemon restart during
+	// the session left it unable to tell whether a hook reached DefenseClaw
+	// (hookReachUnknown).
+	hooksUnknown bool
 	// hadTurn is set by the summary when the session made a tool call:
 	// the harness had a turn, so the resume line it prints as it exits is
 	// on the screen (Copilot CLI prints none without a prompt).
@@ -1001,10 +1005,11 @@ var ownResumeHint = map[string]string{
 // what the harness's own resume hint does: the one it printed above after
 // a session with a turn, else one it may print.
 func (s *session) continueHint() {
-	if s.headless || s.shell || s.spec == nil || !s.sawHooks.Load() {
+	if s.headless || s.shell || s.spec == nil || (!s.sawHooks.Load() && !s.hooksUnknown) {
 		// No conversation to continue: no hook of the session reached
 		// DefenseClaw (a harness that failed to start, one nobody
-		// prompted).
+		// prompted). After a daemon restart that cannot be told, and the
+		// conversation may be there.
 		return
 	}
 	args, ok := continueArgs[s.spec.Name]
@@ -1153,7 +1158,13 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 // "0 tool calls · 0 new sites contacted" after 7 tool calls and two
 // restarts, which left no counter below the session's start).
 func (s *session) restartedDuring() bool {
-	return !s.daemonStarted.IsZero() && !s.startedAt.IsZero() && s.daemonStarted.After(s.startedAt)
+	return s.startedBefore(s.daemonStarted)
+}
+
+// startedBefore reports that the session started before a daemon that
+// started at daemonStarted (zero: it does not say).
+func (s *session) startedBefore(daemonStarted time.Time) bool {
+	return !daemonStarted.IsZero() && !s.startedAt.IsZero() && daemonStarted.After(s.startedAt)
 }
 
 // blockedReason is a blocked tool call's reason as the summary names it:
