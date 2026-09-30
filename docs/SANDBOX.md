@@ -658,6 +658,50 @@ Hook handlers then treat a sandbox request differently from a host request
   webhook.site, which the user unblocked …`), `rule_ids` stay as the
   verdict had them, and `extra.sandbox_egress_unblocked` lists the unblocks
   (`webhook.site:sandbox` or `webhook.site:always`).
+- The post-tool hook of a shell or fetch tool call tells the agent what the
+  sandbox's egress proxy just refused
+  (`internal/gateway/sandbox_egress_refusals.go`,
+  `internal/openshell/manager/egress_refusals.go`, #954). The body of a
+  refused CONNECT never reaches the agent, which sees only a connection
+  error. The manager keeps each binding's CONNECT refusals from the proxy's
+  events, before the telemetry's folding and pacing, keyed by the binding of
+  the proxy credential that made the request. Plain-HTTP refusals (their
+  403 body reaches the client), rate limits and invalid targets are not
+  kept. It holds at most 8 destinations per binding and 256 bindings, for
+  two minutes after each one's last refusal. `Manager.EgressRefusals` hands
+  out the ones the agent has not been told of, once, through
+  `SandboxIngressConfig.EgressRefusals`. It leaves out a host the sandbox
+  now reaches because of an unblock (`Manager.EgressUnblock`, so the
+  scoping above applies). It offers the unblock command only while the
+  sandbox's policy honors unblocks, and otherwise says who can allow the
+  host. A pre-tool hook, a block or ask, a tool that reaches no network
+  (Read, Edit) and a host request ask for nothing, so the refusals wait for
+  the next call. The note goes into each harness's model-facing post-tool
+  context:
+  - Claude Code: `hookSpecificOutput.additionalContext` on `PostToolUse` and
+    `PostToolUseFailure`;
+  - Codex: the same on `PostToolUse`;
+  - Copilot CLI: `additionalContext` on `postToolUse` and
+    `postToolUseFailure`;
+  - Cursor: `additional_context` on `postToolUse`;
+  - Devin: `hookSpecificOutput.additionalContext` on `PostToolUse`.
+
+  Shell tools are the connector's (`connector.IsShellTool`). Fetch tools are
+  names such as `WebFetch`, `web_fetch` and an MCP server's `fetch`. The
+  note names up to three destinations (the rest are counted), each with its
+  category and who can allow it. An unblockable one gets `defenseclaw
+  sandbox unblock HOST --sandbox NAME`. The note also tells the agent not to
+  try to reach the destination another way:
+
+  ```text
+  DefenseClaw's egress policy just blocked this sandbox's HTTPS connection to webhook.site (webhook catcher); a tool sees only a connection error, not the reason. The user can allow it for this sandbox with `defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a`. Tell the user if the task needs it, and do not try to reach it another way.
+  ```
+
+  The audit row's `extra.sandbox_egress_refused` lists what was told
+  (`webhook.site:webhook_catcher`). Hermes, Kiro, OpenCode, OpenHands, Amp,
+  Antigravity and OmniGent have no model-facing post-tool context field, so
+  their agents are not told; the terminal's live notice still tells the
+  user.
 
 ## Sandbox bindings and tokens
 
@@ -790,7 +834,10 @@ the policy resolves again.
 
 Blocked requests get a JSON 403 body that the agent can read: the host, the
 category, a reason, whether it can be unblocked, and how to ask. Limits get a
-429.
+429. A refused CONNECT gets the same body, but clients show only that the
+tunnel failed (`curl: (56) CONNECT tunnel failed, response 403`), so the
+hooks carry the reason to the agent instead (see
+[Hook ingress](#hook-ingress)).
 
 ### Decision order
 

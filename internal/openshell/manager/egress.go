@@ -499,6 +499,9 @@ func newEgressSink(m *Manager) *egressSink {
 func (s *egressSink) EgressEvent(e egress.Event) {
 	it := sinkItem{ev: e}
 	if e.Kind == egress.EventBlocked {
+		// Every refusal, before the telemetry's folding and pacing: the
+		// agent is told of what its own calls hit (EgressRefusals).
+		s.m.refusals.note(e, s.m.now())
 		ok, repeats := s.admitBlocked(e)
 		if !ok {
 			return

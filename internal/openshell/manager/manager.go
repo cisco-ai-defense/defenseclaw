@@ -221,7 +221,10 @@ type Manager struct {
 	unblocks   *egress.MemoryUnblocks
 	batcher    *triage.Batcher
 	sink       *egressSink
-	toolCalls  *hookTamperTracker
+	// refusals keeps each binding's recent CONNECT refusals for its agent
+	// (EgressRefusals).
+	refusals  *refusalMemory
+	toolCalls *hookTamperTracker
 	// tamperStops tracks the stops hook tamper started.
 	tamperStops sync.WaitGroup
 
@@ -341,6 +344,7 @@ func New(opts Options) (*Manager, error) {
 		egressFeed: newRateGate(feedBurst, feedRate),
 		creds:      egress.NewCredentialStore(),
 		unblocks:   unblocks,
+		refusals:   newRefusalMemory(),
 		toolCalls:  newHookTamperTracker(),
 		boxes:      map[string]*box{},
 		approvals:  map[string]*approval{},

@@ -952,6 +952,12 @@ call that names a subdomain you did not unblock, that another rule flags
 too, or that Cisco AI Defense or the LLM judge flags or blocks (even without
 naming a rule), keeps its verdict.
 
+The agent learns the command from DefenseClaw too. When the proxy refuses an
+HTTPS destination, the hook of the next shell or web-fetch tool call tells
+the agent the destination, why it is blocked, and the `sandbox unblock`
+command for you to run (Claude Code, Codex, Copilot CLI, Cursor and Devin).
+Once you unblock the host, the agent is no longer told of that block.
+
 ```bash
 defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 defenseclaw sandbox unblock docs.example.com --always

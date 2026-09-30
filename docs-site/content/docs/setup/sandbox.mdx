@@ -514,6 +514,15 @@ A blocked request gets an HTTP 403 with a JSON body written for the agent:
 it says what was blocked, how you can unblock it, and not to try another
 way, so the agent can adapt or tell you.
 
+For HTTPS, tools show only that the connection failed (`curl: (56) CONNECT
+tunnel failed, response 403`), so DefenseClaw also tells the agent in its
+hooks. After a shell or web-fetch tool call, the next hook answer names each
+destination the proxy just refused, why, and the `sandbox unblock` command
+you can run. Claude Code, Codex, Copilot CLI, Cursor and Devin read this
+note; the other harnesses have no place for it, and there only your
+terminal's notice reports the block. Each block is told once, and only in
+the sandbox that hit it.
+
 The proxy address the sandbox gets (`HTTPS_PROXY` and `HTTP_PROXY`) holds a
 user name and password of its own, so a verbose tool such as `curl -v`
 prints a `Proxy-Authorization: Basic …` header, and the agent may warn you
