@@ -497,7 +497,9 @@ deleted.
   every open or balanced sandbox now sets `NODE_NO_WARNINGS=1` with its proxy
   settings, so the `node`, `npm` and `npx` commands the agent runs no longer
   print it into their output either. That hides Node's other warnings as
-  well; create a sandbox with `--env NODE_NO_WARNINGS=0` to keep them. Both
+  well, including the one that says `NODE_TLS_REJECT_UNAUTHORIZED=0` turned
+  TLS certificate checks off; create a sandbox with `--env
+  NODE_NO_WARNINGS=0` to keep them. Both
   drivers; the images rebuild.
 - A new Antigravity sandbox starts at agy's prompt: the image completes
   agy 1.2.12's onboarding, so it no longer asks for a colour scheme, the

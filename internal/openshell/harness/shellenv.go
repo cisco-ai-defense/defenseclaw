@@ -76,10 +76,12 @@ const (
 // agent runs) prints "[UNDICI-EHPA] Warning: EnvHttpProxyAgent is
 // experimental" at every start, into the harness's terminal and into tool
 // output (#951). NODE_NO_WARNINGS=1 silences it (and every other Node
-// warning) on every Node release; NODE_OPTIONS=--disable-warning would
-// silence only that one, but a project's Node older than 20.11 refuses to
-// start with it. A NODE_NO_WARNINGS the caller sets (sandbox run --env
-// NODE_NO_WARNINGS=0) is kept.
+// warning, the NODE_TLS_REJECT_UNAUTHORIZED=0 one that says certificate
+// checks are off included, as the docs say) on every Node release;
+// NODE_OPTIONS=--disable-warning would silence only that one, but a
+// project's Node older than 20.11 refuses to start with it. A
+// NODE_NO_WARNINGS the caller sets (sandbox run --env NODE_NO_WARNINGS=0)
+// is kept.
 const egressEnvScript = `# OpenShell drops the standard proxy variables passed at sandbox creation;
 # DefenseClaw passes them under its own names. Node warns at every start that
 # the proxy support NODE_USE_ENV_PROXY turns on is experimental.

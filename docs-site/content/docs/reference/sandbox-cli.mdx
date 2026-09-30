@@ -542,8 +542,10 @@ A few rules the flags follow:
 - A sandbox with the egress proxy sets `NODE_NO_WARNINGS=1`, so Node's
   `[UNDICI-EHPA] EnvHttpProxyAgent is experimental` warning, which the proxy
   settings trigger, does not print above the harness or in the agent's
-  `node` and `npm` output. It hides Node's other warnings too; pass
-  `--env NODE_NO_WARNINGS=0` to a new sandbox to keep them.
+  `node` and `npm` output. It hides Node's other warnings too, including
+  the one that says TLS certificate checks are off
+  (`NODE_TLS_REJECT_UNAUTHORIZED=0`); pass `--env NODE_NO_WARNINGS=0` to a
+  new sandbox to keep them.
 - Hermes Agent's managed `defenseclaw` provider reads an OpenAI-compatible
   endpoint from `HERMES_DEFENSECLAW_BASE_URL` and its key from
   `HERMES_DEFENSECLAW_API_KEY`: for your own endpoint, run
