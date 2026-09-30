@@ -99,6 +99,7 @@ from defenseclaw.connector_contracts import (
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
+    UnsafePathError,
     atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
@@ -117,6 +118,7 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_extensions_dir, bundled_splunk_bridge_dir, splunk_bridge_bin
+from defenseclaw.pinned_exec import run_pinned_executable
 from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
@@ -13821,7 +13823,8 @@ def _restart_defense_gateway(
     cmd = [executable, "restart"] if was_running else [executable, "start"]
     generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
-        result = subprocess.run(
+        # Run the object that passed custody, not whatever the path names now.
+        result = run_pinned_executable(
             cmd,
             capture_output=True,
             text=True,
@@ -13845,6 +13848,9 @@ def _restart_defense_gateway(
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
+        return False
+    except UnsafePathError:
+        click.echo(" ✗ (binary is not a verified executable file)")
         return False
     except FileNotFoundError:
         click.echo(" ✗ (binary not found)")
@@ -14102,7 +14108,7 @@ def _gateway_lifecycle_status(
     child_env: dict[str, str] | None = None,
 ) -> bool:
     try:
-        result = subprocess.run(
+        result = run_pinned_executable(
             [executable, "status"],
             capture_output=True,
             text=True,
@@ -14122,7 +14128,7 @@ def _cleanup_timed_out_gateway_start(
     child_env: dict[str, str] | None = None,
 ) -> None:
     try:
-        subprocess.run(
+        run_pinned_executable(
             [executable, "stop"],
             capture_output=True,
             text=True,

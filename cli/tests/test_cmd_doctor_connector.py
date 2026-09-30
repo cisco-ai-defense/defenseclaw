@@ -96,6 +96,14 @@ from defenseclaw.file_permissions import (
 
 
 class TestCodexOtelAlignment(unittest.TestCase):
+    def setUp(self) -> None:
+        trusted = patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     def _cfg(self, environment: str = "windows") -> MagicMock:
         cfg = MagicMock()
         cfg.environment = environment
@@ -943,7 +951,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired):
             _run_cursor_windows_runtime_process(
-                ["powershell.exe"],
+                [sys.executable],
                 env={},
                 timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
             )
@@ -991,7 +999,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         job.terminate_sync.side_effect = terminate_sync
 
         result = _run_cursor_windows_runtime_process(
-            ["powershell.exe"],
+            [sys.executable],
             env={},
             timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )

@@ -400,12 +400,17 @@ def open_regular_file_no_follow(
     *,
     expected_stat: os.stat_result | None = None,
     _deny_write_sharing: bool = False,
+    _deny_delete_sharing: bool = False,
 ) -> int:
     """Open one regular file without following a swapped symlink/reparse point.
 
     ``expected_stat`` lets a caller bind this open to an identity it inspected
     before entering the shared reader. This closes an A→B→A pathname swap in
     callers that perform custody checks before reading the file.
+
+    On Windows ``_deny_delete_sharing`` also withholds delete sharing, so while
+    the descriptor is open NTFS refuses to rename or replace the file or any
+    directory above it.
     """
     target = os.path.abspath(os.fspath(path))
     _reject_reparse_chain(os.path.dirname(target) or os.curdir)
@@ -425,8 +430,8 @@ def open_regular_file_no_follow(
     # the exact bytes on disk. Callers that bind security evidence to the
     # opened file size must therefore always receive a binary descriptor.
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    if os.name == "nt" and _deny_write_sharing:
-        fd = _open_windows_stable_read_fd(target)
+    if os.name == "nt" and (_deny_write_sharing or _deny_delete_sharing):
+        fd = _open_windows_stable_read_fd(target, share_delete=not _deny_delete_sharing)
     else:
         fd = os.open(target, flags)
     try:
@@ -447,7 +452,7 @@ def open_regular_file_no_follow(
     return fd
 
 
-def _open_windows_stable_read_fd(path: str) -> int:
+def _open_windows_stable_read_fd(path: str, *, share_delete: bool = True) -> int:
     """Open a binary CRT reader backed by an NT handle that denies writers."""
     import ctypes
     import msvcrt
@@ -479,7 +484,7 @@ def _open_windows_stable_read_fd(path: str) -> int:
     handle = create_file(
         _windows_extended_path(path),
         generic_read,
-        file_share_read | file_share_delete,
+        file_share_read | (file_share_delete if share_delete else 0),
         None,
         open_existing,
         file_flag_open_reparse_point,

@@ -26,6 +26,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import http.client
 import io
 import ipaddress
 import json
@@ -34,6 +35,7 @@ import queue
 import re
 import shlex
 import shutil
+import socket
 import ssl
 import stat
 import subprocess
@@ -101,6 +103,7 @@ from defenseclaw.doctor_gateway import (
     pid_file_fingerprint,
     pid_file_fingerprint_from_fd,
     read_pid_record,
+    trusted_lsof_path,
 )
 from defenseclaw.doctor_hooks import (
     WindowsHookCheck,
@@ -128,6 +131,7 @@ from defenseclaw.file_permissions import (
 )
 from defenseclaw.gateway import gateway_api_client_host
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
+from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import resolve_scanner_binary
@@ -706,6 +710,7 @@ def _http_probe(
     response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
     allow_truncation: bool = True,
     bypass_proxy: bool = False,
+    bound_peer: _GatewayTrust | None = None,
 ) -> tuple[int, str]:
     """Run one HTTP probe with a portable total wall-clock deadline.
 
@@ -714,6 +719,10 @@ def _http_probe(
     every read timeout.  A daemon worker bounds the entire open/read sequence
     on Linux, macOS, and Windows.  A timed-out worker owns no mutable Doctor
     state and cannot delay process exit.
+
+    Pass ``bound_peer`` (a trusted gateway listener) for any request that
+    carries the gateway token: the request is then written only on a
+    connection whose accepting process is that verified gateway.
     """
 
     if timeout <= 0:
@@ -722,17 +731,29 @@ def _http_probe(
 
     def _run() -> None:
         try:
-            value = _http_probe_once(
-                url,
-                method=method,
-                headers=headers,
-                body=body,
-                timeout=timeout,
-                verify_tls=verify_tls,
-                response_limit=response_limit,
-                allow_truncation=allow_truncation,
-                bypass_proxy=bypass_proxy,
-            )
+            if bound_peer is not None:
+                value = _gateway_peer_bound_request(
+                    url,
+                    bound_peer,
+                    method=method,
+                    headers=headers,
+                    body=body,
+                    timeout=timeout,
+                    response_limit=response_limit,
+                    allow_truncation=allow_truncation,
+                )
+            else:
+                value = _http_probe_once(
+                    url,
+                    method=method,
+                    headers=headers,
+                    body=body,
+                    timeout=timeout,
+                    verify_tls=verify_tls,
+                    response_limit=response_limit,
+                    allow_truncation=allow_truncation,
+                    bypass_proxy=bypass_proxy,
+                )
         except Exception as exc:  # noqa: BLE001 - redact arbitrary transport detail.
             value = (0, f"{type(exc).__name__}: probe failed")
         try:
@@ -829,6 +850,104 @@ def _http_probe_once(
         return 0, str(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return 0, str(exc)
+
+
+# Upper bound for the accepted server socket to show up in the verified
+# gateway's descriptors. Go's accept loop takes microseconds; this only covers
+# a loaded host.
+_GATEWAY_PEER_BIND_SECONDS = 2.0
+_GATEWAY_TOKEN_REFUSED = "; refusing to send the gateway token"
+
+
+class _PeerBoundHTTPConnection(http.client.HTTPConnection):
+    """HTTP on one socket that is already connected and peer-verified."""
+
+    def __init__(self, host: str, port: int, sock: socket.socket, timeout: float) -> None:
+        super().__init__(host, port, timeout=timeout)
+        self._verified_sock: socket.socket | None = sock
+
+    def connect(self) -> None:
+        # Never dial again: a new connection could reach a different listener.
+        if self._verified_sock is None:
+            raise http.client.NotConnected("the verified gateway connection is closed")
+        self.sock, self._verified_sock = self._verified_sock, None
+
+
+def _gateway_peer_bound_request(
+    url: str,
+    bound_peer: _GatewayTrust,
+    *,
+    method: str = "GET",
+    headers: dict | None = None,
+    body: bytes | None = None,
+    timeout: float = 3.0,
+    response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
+    allow_truncation: bool = True,
+    evidence: GatewayEvidence | None = None,
+) -> tuple[int, str]:
+    """Send one token-bearing request only over a connection the gateway accepted.
+
+    Listener inspection says which process owned the endpoint a moment ago,
+    but the request needs its own connection, and the endpoint can change
+    hands in between. So connect first, require the kernel to attribute the
+    accepted server socket to the verified gateway PID, confirm that PID is
+    still the same process generation, and only then write the request on
+    that same socket. A listener that took the endpoint over in between gets
+    a connection and no bytes.
+    """
+    refused = _GATEWAY_TOKEN_REFUSED
+    parts = urllib.parse.urlsplit(url)
+    try:
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        host, port = None, None
+    if parts.scheme != "http" or not host or not port:
+        return 0, "a gateway token request needs a local http endpoint" + refused
+    process = bound_peer.process
+    if not bound_peer.trusted or process is None or process.status != "ok" or not process.start_identity:
+        return 0, "the verified gateway process identity is unavailable" + refused
+    evidence = evidence or GatewayEvidence()
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError as exc:
+        return 0, str(exc)
+    try:
+        client, server = sock.getsockname(), sock.getpeername()
+        deadline = time.monotonic() + min(timeout, _GATEWAY_PEER_BIND_SECONDS)
+        owner = evidence.connection_owner(bound_peer.pid, client, server)
+        while owner.status == "missing" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            owner = evidence.connection_owner(bound_peer.pid, client, server)
+        if owner.status != "ok" or owner.pid != bound_peer.pid:
+            return 0, "the connected gateway endpoint is not served by the verified gateway process" + refused
+        current = evidence.process(bound_peer.pid)
+        if (
+            current.status != "ok"
+            or current.start_identity != process.start_identity
+            or current.executable != process.executable
+        ):
+            return 0, "the verified gateway process changed while the connection was checked" + refused
+        connection = _PeerBoundHTTPConnection(host, port, sock, timeout)
+        sock = None
+        try:
+            target = parts.path or "/"
+            if parts.query:
+                target = f"{target}?{parts.query}"
+            connection.request(method, target, body=body, headers=headers or {})
+            response = connection.getresponse()
+            if 300 <= response.status < 400:
+                return 0, f"refused to follow a gateway redirect (HTTP {response.status})"
+            raw = response.read(response_limit + 1)
+            if len(raw) > response_limit and not allow_truncation:
+                return response.status, f"response exceeds {response_limit}-byte limit"
+            return response.status, raw[:response_limit].decode("utf-8", errors="replace")
+        finally:
+            connection.close()
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        return 0, str(exc)
+    finally:
+        if sock is not None:
+            sock.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1936,6 +2055,7 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=trust,
     )
     if code == 200:
         runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
@@ -1958,7 +2078,9 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         _emit(
             "fail",
             "Gateway authentication",
-            "gateway authentication could not be verified because the trusted status endpoint was unreachable",
+            body
+            if body.endswith(_GATEWAY_TOKEN_REFUSED)
+            else "gateway authentication could not be verified because the trusted status endpoint was unreachable",
             r=r,
         )
     else:
@@ -2467,6 +2589,7 @@ def _authenticated_origin_main_gateway_lifecycle_trust(
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=endpoint_trust,
     )
     if code != 200:
         detail = "transport failure" if code == 0 else f"HTTP {code}"
@@ -2792,6 +2915,7 @@ def _check_windows_gateway_diagnostics(
             response_limit=64 * 1024,
             allow_truncation=False,
             bypass_proxy=True,
+            bound_peer=trust,
         )
         status_error = ""
 
@@ -2844,7 +2968,9 @@ def _check_windows_gateway_diagnostics(
         _emit(
             "fail",
             "Gateway token drift",
-            "gateway authentication could not be verified because the trusted status endpoint was unreachable",
+            status_body
+            if status_body.endswith(_GATEWAY_TOKEN_REFUSED)
+            else "gateway authentication could not be verified because the trusted status endpoint was unreachable",
             r=r,
         )
     elif status_code != 200:
@@ -3183,10 +3309,7 @@ def _gateway_listener_pid(port: int, *, host: str = "") -> int:
 
 def _trusted_lsof_path() -> str:
     """Return a fixed system lsof path, never a PATH-resolved executable."""
-    for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof"):
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return ""
+    return trusted_lsof_path()
 
 
 def _lsof_listener_address_matches(endpoint: str, host: str, port: int) -> bool:
@@ -3681,13 +3804,24 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             r=r,
         )
         return
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit(
+            "skip",
+            "Codex OTel runtime",
+            f"authenticated runtime telemetry status is unavailable: {trust.detail}",
+            r=r,
+        )
+        return
 
     code, body = _http_probe(
-        f"http://127.0.0.1:{api_port}/status",
+        _gateway_api_url(cfg, "/status"),
         headers={"Authorization": f"Bearer {token}"},
         timeout=3.0,
         response_limit=64 * 1024,
         allow_truncation=False,
+        bypass_proxy=True,
+        bound_peer=trust,
     )
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
@@ -4023,6 +4157,7 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=trust,
     )
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
@@ -4164,15 +4299,18 @@ def _run_cursor_windows_runtime_process(
     from defenseclaw.tui.windows_process import WindowsJob
 
     creationflags |= getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
-    process = subprocess.Popen(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        env=env,
-        creationflags=creationflags,
-    )
+    # Hold the custody-checked PowerShell image open without write or delete
+    # sharing until the process exists, so it is the file that was checked.
+    with pinned_executable(argv[0]) as pinned:
+        process = pinned.popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            creationflags=creationflags,
+        )
     job = None
     try:
         try:
@@ -8389,10 +8527,11 @@ def _plan_watchdog_runtime(cfg) -> RepairDecision:
 
     repair, detail = _watchdog_repair_posture(cfg)
     if repair:
-        if not shutil.which("defenseclaw-gateway"):
+        if not _watchdog_lifecycle_executable():
             return RepairDecision(
                 "manual",
-                f"{detail}; defenseclaw-gateway is not on PATH, so no supported repair is available",
+                f"{detail}; no verified defenseclaw-gateway executable is installed, so no supported "
+                "repair is available",
                 effects=_WATCHDOG_REPAIR_EFFECTS,
                 blockers=("verified watchdog lifecycle executable is unavailable",),
             )
@@ -10610,17 +10749,24 @@ def _watchdog_repair_posture(
     return (False, f"watchdog lifecycle cannot be inspected safely: {detail}")
 
 
+def _watchdog_lifecycle_executable() -> str | None:
+    """Resolve the custody-checked gateway controller, as other lifecycle repairs do."""
+    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
+
+    return _gateway_lifecycle_executable(native=True)
+
+
 def _preview_watchdog_runtime_fix(cfg) -> tuple[str, str]:
     repair, detail = _watchdog_repair_posture(cfg)
     if not repair:
         tag = "warn" if detail.startswith(("refusing", "watchdog lifecycle cannot")) else "skip"
         return (tag, f"{detail} (dry-run; no changes made)")
-    gw_binary = shutil.which("defenseclaw-gateway")
+    gw_binary = _watchdog_lifecycle_executable()
     if not gw_binary:
         return (
             "warn",
-            f"{detail}; defenseclaw-gateway is not on PATH, so no supported repair is available "
-            "(dry-run; no changes made)",
+            f"{detail}; no verified defenseclaw-gateway executable is installed, so no supported "
+            "repair is available (dry-run; no changes made)",
         )
     return (
         "skip",
@@ -10636,19 +10782,21 @@ def _fix_watchdog_runtime(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if not repair:
         tag = "warn" if detail.startswith(("refusing", "watchdog lifecycle cannot")) else "skip"
         return (tag, detail)
-    gw_binary = shutil.which("defenseclaw-gateway")
+    gw_binary = _watchdog_lifecycle_executable()
     if not gw_binary:
-        return ("warn", f"{detail}; defenseclaw-gateway is not on PATH")
+        return ("warn", f"{detail}; no verified defenseclaw-gateway executable is installed")
     if not assume_yes and not click.confirm(
         "    Start the enabled stopped watchdog through the guarded gateway lifecycle?",
         default=True,
     ):
         return ("skip", "declined by user")
     try:
-        result = subprocess.run(
+        result = run_pinned_executable(
             [gw_binary, "watchdog", "start"],
             capture_output=True,
             text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
             timeout=30,
             check=False,
         )
@@ -10919,6 +11067,7 @@ def _fix_gateway_token_drift(
             response_limit=64 * 1024,
             allow_truncation=False,
             bypass_proxy=True,
+            bound_peer=trust,
         )
         if code == 200:
             runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
@@ -10997,6 +11146,7 @@ def _fix_gateway_token_drift(
         response_limit=64 * 1024,
         allow_truncation=False,
         bypass_proxy=True,
+        bound_peer=replacement_trust,
     )
     if code != 200:
         return ("fail", f"gateway restarted but still rejects configured authentication (HTTP {code})")

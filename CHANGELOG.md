@@ -289,6 +289,22 @@ rest also reach per-user installs.
   Devin backup captured while the config already held DefenseClaw's
   `devin-hook.sh` hooks restored them at teardown. Teardown now removes
   DefenseClaw's hooks from the restored config.
+- **`defenseclaw doctor` sends the gateway token only to the gateway it
+  checked.** Doctor verified which process owned the API port, then opened a
+  new connection for its authenticated requests, so a process that took the
+  port over in between could receive the token. Doctor now requires the
+  verified gateway process to have accepted that same connection before it
+  writes the request, and otherwise reports `the connected gateway endpoint is
+  not served by the verified gateway process`. The Codex telemetry runtime
+  check, which sent the token without checking the listener, does the same.
+- **Doctor and setup run the gateway controller they checked.** Starting,
+  restarting and stopping the gateway ran `defenseclaw-gateway` by path after
+  checking who can write it, so the path could name another file by the time
+  it ran. Linux now runs the checked file itself, Windows keeps it locked
+  against replacement until the command finishes, and macOS stops the launch if
+  the file or a directory above it changed. The Windows Cursor runtime probe
+  does the same for PowerShell, and the Windows watchdog repair uses the
+  verified gateway executable instead of the first one on `PATH`.
 
 ### Added
 
