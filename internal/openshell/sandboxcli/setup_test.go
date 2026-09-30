@@ -583,6 +583,39 @@ func macReport(driver openshell.ComputeDriver, edit func(*openshell.DoctorReport
 	})
 }
 
+// TestSetupFoldsTheMicroVMDriverIntoOpenShell: on a Mac without OpenShell
+// the machine line said "✗ MicroVM driver  ✗ OpenShell not installed",
+// two marks for one cause, as the formula installs the driver. The driver
+// keeps a mark of its own when it is there, or OpenShell is.
+func TestSetupFoldsTheMicroVMDriverIntoOpenShell(t *testing.T) {
+	noOpenShell := func(driverThere bool) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+		return macReport(openshell.DriverVM, func(r *openshell.DoctorReport) {
+			r.CLIVersion = ""
+			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+			r.MicroVM.E2fsprogs = ""
+			if !driverThere {
+				r.MicroVM.DriverBinary = ""
+			}
+			c := r.Get(openshell.CheckIDVMDriver)
+			c.Status, c.Detail = openshell.StatusFail, strings.Join(r.MicroVM.Problems(), "; ")
+		})
+	}
+	for _, tc := range []struct {
+		driverThere bool
+		line        string
+	}{
+		{false, "Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed\n"},
+		{true, "Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ MicroVM driver  ✗ OpenShell not installed\n"},
+	} {
+		ta := setupApp(t, "", "", false)
+		ta.IO.TTY = false
+		ta.GOOS = "darwin"
+		ta.HostDoctor = noOpenShell(tc.driverThere)
+		wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true}), "--install-openshell")
+		has(t, ta.output(), tc.line)
+	}
+}
+
 // emptyPlans is a gateway whose configuration already holds every change
 // asked for.
 type emptyPlans struct{ *fakeGateway }

@@ -754,10 +754,16 @@ func failed(rep *openshell.DoctorReport, id string) bool {
 
 // machineLine is "✓ linux/arm64  ✓ Landlock …  ✓ Docker 29.4  ✗ OpenShell not installed".
 func (a *App) machineLine(rep *openshell.DoctorReport) string {
+	// On a Mac without OpenShell the MicroVM driver is missing for the same
+	// reason, and the formula the install brings it with: one mark, not
+	// "✗ MicroVM driver  ✗ OpenShell not installed".
+	cli, driver := rep.Get(openshell.CheckIDCLI), rep.Get(openshell.CheckIDVMDriver)
+	withoutDriver := cli != nil && cli.Status == openshell.StatusFail && rep.CLIVersion == "" && driver != nil && driver.Status == openshell.StatusFail &&
+		rep.MicroVM != nil && rep.MicroVM.DriverBinary == "" && !rep.MicroVM.DriverRunning
 	var parts []string
 	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDLandlock, openshell.CheckIDDocker, openshell.CheckIDVMDriver, openshell.CheckIDCLI} {
 		c := rep.Get(id)
-		if c == nil || c.Status == openshell.StatusSkip {
+		if c == nil || c.Status == openshell.StatusSkip || (id == openshell.CheckIDVMDriver && withoutDriver) {
 			continue
 		}
 		label, mark := c.Title, a.mark(c.Status != openshell.StatusFail)
@@ -786,6 +792,8 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 					label += " " + rep.CLIVersion
 				}
 				label += " is not from Homebrew's nvidia/openshell formula"
+			case withoutDriver:
+				label = "OpenShell and its MicroVM driver not installed"
 			case c.Status == openshell.StatusFail:
 				label = "OpenShell not installed"
 				if rep.CLIVersion != "" {
