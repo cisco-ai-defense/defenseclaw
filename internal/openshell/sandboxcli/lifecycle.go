@@ -653,6 +653,10 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 	for _, name := range o.Names {
 		question := "Delete sandbox " + name + " (its providers, credentials and, unless --keep-snapshot, its undo point)?"
 		if sb, err := api.Get(ctx, name); err == nil {
+			if sb.WorkdirMode == config.OpenShellWorkdirCopy {
+				// A copy has no undo point: the folder was never mounted.
+				question = "Delete sandbox " + name + " (its providers and credentials)?"
+			}
 			if lost := a.unhandedWork(ctx, sb); lost != "" {
 				question = "Sandbox " + name + " " + lost + ". Delete it and discard that work?"
 				if o.Yes {

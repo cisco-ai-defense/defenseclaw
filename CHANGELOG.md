@@ -370,13 +370,23 @@ deleted.
   model's context. It names each destination the proxy refused in the last
   two minutes and why, and gives the user's `sandbox unblock HOST --sandbox
   NAME` command when an unblock lifts the refusal, or says who can allow
-  it. The note tells the agent not to try another way. The harness hooks
+  it. The note tells the agent not to try another way. An upload the
+  large-upload block cut on an HTTPS tunnel, which the tool sees only as a
+  broken connection (`curl: (56) Failure when receiving data from the
+  peer`), is told the same way, once and in the same window: `DefenseClaw's
+  egress policy cut this sandbox's upload to HOST after 996 KiB, because it
+  is a destination this sandbox had not contacted before (the large-upload
+  block); the upload did not complete, …`, with the unblock command when an
+  unblock lifts it (a live test's agent had answered "Uploaded the file.").
+  The harness hooks
   that carry it are Claude Code `PostToolUse`/`PostToolUseFailure`, Codex
   `PostToolUse`, Copilot CLI `postToolUse`/`postToolUseFailure`, Cursor
   `postToolUse` and Devin `PostToolUse`. Each refusal is told once, and only
   to the sandbox whose proxy credential made the request. A host unblocked
-  since is left out. The audit row's `extra.sandbox_egress_refused` names
-  what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
+  since is left out; so is the unblock command from the end-of-session
+  summary of a host unblocked later in that session (`✗ DefenseClaw
+  blocked webhook.site (webhook catcher); unblocked since`). The audit
+  row's `extra.sandbox_egress_refused` names what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
   OmniGent have no post-tool context field, so there only the terminal's
   live notice reports the block. Both drivers.
 
@@ -429,11 +439,34 @@ deleted.
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,
   saying how the gateway runs (a launchd label, or started by hand, which
-  does not start at login) and that DefenseClaw cannot restart it. Its fix
-  is the one setup, which refuses such an OpenShell, gives: stop that
-  gateway and remove that OpenShell, then `sandbox setup
-  --install-openshell` installs the formula; the TUI's machine check says
-  the same instead of "✓ OpenShell". A driver outside the formula's keg that lacks the Hypervisor entitlement
+  does not start at login) and that DefenseClaw cannot restart it. Setup
+  uses such a gateway too, as the doctor does, on a Mac and on Linux with
+  an OpenShell that came without the `openshell-gateway` user unit (whose
+  gateway-service check now warns the same way): its machine line marks
+  `⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula` (or
+  `has no openshell-gateway user service`), it warns that DefenseClaw
+  cannot start or restart that gateway, and it goes on. A gateway change
+  it needs (MicroVM sandbox user or resources, bind mounts, telemetry) is
+  asked about as `Write this change? DefenseClaw cannot restart this
+  gateway: …`, written without a restart, and ends with `restart the
+  OpenShell gateway yourself, the way you started it, so it runs on the
+  change above`, adding that the restart stops every sandbox on the
+  gateway and, on the MicroVM driver, to first stop the running ones it
+  names with `defenseclaw sandbox stop NAME`, which flushes their disks
+  (DefenseClaw cannot flush them before a restart it does not make);
+  teardown restores those files the same way. Until that
+  restart the doctor's bind-mounts, telemetry and vm-identity checks warn
+  that the gateway has not been restarted since the change (on Linux the
+  gateway's start comes from `pgrep` and `ps`, as no unit reports it), and
+  with no gateway process found they warn that DefenseClaw cannot tell
+  whether it was, instead of reporting the change loaded. Setup stops
+  only where it would have to start that gateway (none answers), with the
+  doctor's fix: start it yourself, or, for a gateway DefenseClaw starts
+  and restarts, remove that OpenShell and run `sandbox setup
+  --install-openshell`. Before, setup refused such an OpenShell up front
+  (`✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`,
+  exit 1) while the doctor said `✓ ready for sandboxes`. The TUI's
+  machine check says what setup says. A driver outside the formula's keg that lacks the Hypervisor entitlement
   gets a fix that names it; `doctor --fix` and setup re-sign only the
   formula's driver (`brew postinstall` signs no other).
   The doctor's disk line counts only the MicroVM disks prepared from images,
@@ -503,7 +536,10 @@ deleted.
   sandbox, `delete` of the stopped one no longer warns that it "may hold work
   … it was not checked". A later pull of a state that went to a branch or
   patch file counts as brought back too. Every driver, Linux `--copy`
-  included.
+  included. Its question no longer names an undo point a copy does not
+  have: `Delete sandbox fix-tests (its providers and credentials)?`, where
+  a mount-mode sandbox's still adds `unless --keep-snapshot, its undo
+  point`.
 - `sandbox pull --branch`, `--branch-name` and `--patch-out FILE` are checked
   before the sandbox is started: a branch that holds other work, a patch
   file that exists and a branch for a folder without git are refused before
@@ -726,7 +762,10 @@ deleted.
   reaches running sandboxes, whose feed says so. The upload is stopped before
   the chunk that crosses the threshold, and later requests to that host, or to
   other new hosts under its domain or at its address, get a 403 of category
-  `large_upload`. The feed shows a ✗ with the threshold and the unblock
+  `large_upload`, whose reason says why the destination is blocked rather
+  than repeat the upload (`This destination is blocked since this sandbox
+  tried to send more than 10 MiB to it, …`; a `GET` sends nothing), as the
+  run's live notice of it does (`✗ DefenseClaw blocked HOST (…)`). The feed shows a ✗ with the threshold and the unblock
   command (`✗ files.example.net (large upload blocked: this sandbox tried to
   send more than 10 MiB to a destination it had not contacted before)`) instead of
   the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
@@ -734,7 +773,10 @@ deleted.
   Unblocked hosts and those on an allow list the user or the administrator
   wrote are only reported; an unblock lifts the block. With a threshold of 0
   there is nothing to cut, so the block is off, and `sandbox policy explain`
-  says so. `sandbox policy
+  says so. The ⚠ report without the block, made as the upload crosses the
+  threshold, now says `more than` it (`⚠ large upload to files.example.net
+  (more than 25 MiB)`, with `threshold` on the event) instead of the bytes
+  sent by then, which read `(1.0 MiB)` for a 1.9 MiB upload. `sandbox policy
   explain` shows `egress.block_large_uploads` and where it came from, and
   `policy show` the threshold. In the Python config, the v8 schema, and the
   TUI and macOS app config editors, which show the key read-only under the

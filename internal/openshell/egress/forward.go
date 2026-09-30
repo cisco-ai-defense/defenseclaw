@@ -469,7 +469,7 @@ func (p *Proxy) forwardError(w http.ResponseWriter, r *http.Request, err error) 
 	}
 	d := t.policy().d
 	if t.cut.Load() {
-		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(t.principal, d, dec, ""), t.started)
+		p.refuseForward(w, t.principal, t.method, p.largeUploadRefusal(t.principal, d, dec, "", true), t.started)
 		return
 	}
 	var de *dialError

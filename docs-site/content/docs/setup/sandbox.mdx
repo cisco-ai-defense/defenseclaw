@@ -528,7 +528,12 @@ destination the proxy just refused, why, and the `sandbox unblock` command
 you can run. Claude Code, Codex, Copilot CLI, Cursor and Devin read this
 note; the other harnesses have no place for it, and there only your
 terminal's notice reports the block. Each block is told once, and only in
-the sandbox that hit it.
+the sandbox that hit it. An upload that
+[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+cuts ends the same way for the tool (`curl: (56) Failure when receiving data
+from the peer`), so the agent is told of it too: that the upload to the host
+was cut after how much, because the sandbox had not contacted it before, and
+the unblock command.
 
 The proxy address the sandbox gets (`HTTPS_PROXY` and `HTTP_PROXY`) holds a
 user name and password of its own, so a verbose tool such as `curl -v`
@@ -705,7 +710,10 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff
 
 The network counts are sites (destinations): the new ones the sandbox
 reached, and the ones blocked during the session, each counted once however
-often it was tried and listed below with `✗`. An invalid destination (a
+often it was tried and listed below with `✗`. A site you unblocked for the
+sandbox later in the session is listed without the unblock command
+(``✗ DefenseClaw blocked webhook.site:443 (webhook catcher); unblocked
+since``). An invalid destination (a
 host name without a dot, such as a mistyped `curl echo`) counts as blocked
 too. The counts cover everything in the sandbox while the session ran,
 `sandbox exec` commands from another terminal included. `sandbox status NAME`
@@ -1283,7 +1291,13 @@ Teardown takes these steps, in order:
 6. **gateway config**: restores the OpenShell gateway configuration setup
    changed, from the backup setup kept, and restarts the gateway. A file
    someone changed since is left alone with a warning. `nothing to restore`
-   means setup never changed it.
+   means setup never changed it. For a gateway no gateway service runs
+   (started by hand), DefenseClaw restores the files but cannot restart it:
+   the plan says ``then you restart the OpenShell gateway yourself, the way
+   you started it, so it loads them``, that restarting it stops every
+   sandbox on it, and on the MicroVM driver to first stop the sandboxes
+   still running on it (named) with `defenseclaw sandbox stop NAME`, which
+   flushes their disks, or what they wrote since their last sync is lost.
 7. **shell wrappers**: removes them from every shell's rc file.
 8. **config**: turns `openshell.enabled` off in `config.yaml`.
 
@@ -1371,15 +1385,18 @@ MicroVM sandbox user or resources): with no gateway running, the check says
 the setting takes effect once the gateway is installed and started, and for
 a gateway you run another way, to restart it the way you started it.
 `--install-openshell` installs nothing where a supported OpenShell CLI is
-already installed. So on Linux, when OpenShell was installed another way (from the
-release binaries, say) and came without the user unit, the **Gateway** and
-**Gateway service** checks name that CLI instead
-(``The OpenShell 0.1.1 at <path> was installed another way``) and give the
-way on: stop its gateway if one runs and remove that OpenShell, then run
-`defenseclaw sandbox setup --install-openshell`, which installs OpenShell
-with NVIDIA's installer and sets the unit up. Setup refuses such an
-OpenShell, on Linux as on a Mac (see [Troubleshooting](#troubleshooting)):
-it changes the gateway's settings and restarts it through the unit.
+already installed. So when OpenShell was installed another way (from the
+release binaries, say), without the formula on a Mac or the user unit on
+Linux, the **Gateway** and **Gateway service** checks name that CLI instead
+(``the OpenShell 0.1.1 at <path> was installed another way``). While its
+gateway answers, **Gateway service** only warns, and setup uses that
+gateway: DefenseClaw cannot start or restart it, so after a gateway change
+you restart it yourself, the way you started it. With no gateway answering,
+the way on is to start it yourself, or, for a gateway DefenseClaw starts and
+restarts, to stop it, remove that OpenShell and run
+`defenseclaw sandbox setup --install-openshell`, which installs the formula
+or runs NVIDIA's installer, which sets the unit up (see
+[Troubleshooting](#troubleshooting)).
 Setup offers the install only where it runs NVIDIA's installer: with no
 OpenShell CLI, or one older than 0.1.1, which it upgrades. It does not
 downgrade a CLI newer than DefenseClaw drives, whose **OpenShell CLI** fix
@@ -1459,8 +1476,8 @@ section, and skips them while `openshell.enabled` is off.
 | ``stage the project copy: the copy (files and history) is …, above the … limit`` | Raise `openshell.workdir.max_upload_mb` in `config.yaml`, or make the project smaller (a shallower history: `openshell.workdir.git_depth`). On a Mac a copy is the only way the project runs. |
 | ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …`` | Free space in the sandbox (`defenseclaw sandbox exec <name> -- df -h` shows it), or raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes: `defenseclaw sandbox doctor` shows the value and where it is set. |
 | The doctor's **vm-identity** check fails, or a create on a Mac says the MicroVM driver runs sandboxes as another uid | The gateway's `sandbox_uid` and `sandbox_gid` are not your uid and gid, so the harness images DefenseClaw built for you would not match. Run `defenseclaw sandbox doctor --fix`, which sets them and restarts the gateway. |
-| On macOS, with OpenShell installed outside Homebrew (for example from NVIDIA's release binaries), the doctor's **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, and setup marks it ``✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` on its machine line, as the TUI does, and stops with ``the nvidia/openshell/openshell Homebrew formula is not installed`` | On macOS DefenseClaw starts and restarts only the gateway of NVIDIA's `nvidia/openshell` Homebrew formula, with `brew services`, so setup does not use an OpenShell installed another way (DefenseClaw's install step would find its CLI and not run NVIDIA's installer, which installs the formula). While such a gateway answers, the doctor does not fail it: the **MicroVM driver** check passes on the driver the gateway runs (naming the binary when it finds it), and the **Gateway service** check warns and says how the gateway runs: under launchd (a LaunchAgent of your own), or started by hand, which does not start again at login. With no gateway answering, **Gateway service** fails as not installed, and **MicroVM driver** checks the `openshell-driver-vm` it finds, such as the one next to the `openshell-gateway` on your `PATH` (with none, it fails as not installed). Setup names where that OpenShell is (``The OpenShell 0.1.1 at <path> was installed another way``). To set up DefenseClaw, first stop that gateway and remove that OpenShell; then run `defenseclaw sandbox setup --install-openshell`, which installs the formula. |
-| On Linux, with OpenShell installed without NVIDIA's installer (for example from its release binaries in `~/.local/bin`), setup marks it ``✗ OpenShell 0.1.1 has no openshell-gateway user service`` on its machine line, as the TUI does, and stops with ``the openshell-gateway user service is not installed`` | On Linux DefenseClaw starts and restarts the gateway, and changes its settings, through the `openshell-gateway` user unit that NVIDIA's installer sets up, so setup does not use an OpenShell that came without it, even with its gateway started by hand (DefenseClaw's install step would find its CLI and not run NVIDIA's installer). Setup names where that OpenShell is (``The OpenShell 0.1.1 at <path> was installed another way``). To set up DefenseClaw, first stop its gateway if one runs and remove that OpenShell; then run `defenseclaw sandbox setup --install-openshell`, which runs NVIDIA's installer and sets up the service. |
+| On macOS, with OpenShell installed outside Homebrew (for example from NVIDIA's release binaries), the doctor's **Gateway service** check says ``not Homebrew's nvidia/openshell/openshell service … DefenseClaw cannot restart it``, and setup marks it ``⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`` on its machine line, as the TUI does, then ``⚠ Gateway service: …`` and ``→ setup uses this gateway as it runs: after a gateway change, restart it yourself, the way you started it`` | On macOS DefenseClaw starts and restarts only the gateway of NVIDIA's `nvidia/openshell` Homebrew formula, with `brew services`. A gateway run another way is used as it runs: the **MicroVM driver** check passes on the driver the gateway runs (naming the binary when it finds it), the **Gateway service** check warns and says how the gateway runs (under launchd, a LaunchAgent of your own, or started by hand, which does not start again at login), and setup goes on. A gateway change setup needs (the MicroVM sandbox user or resources) is shown, asked about with ``Write this change? DefenseClaw cannot restart this gateway: …``, and written without a restart; setup then ends with ``restart the OpenShell gateway yourself, the way you started it, so it runs on the change above``. The plan and that line also say that restarting the gateway stops every sandbox on it: DefenseClaw cannot flush the MicroVM sandboxes before a restart it does not make, so first stop the ones running on it (the line names them) with `defenseclaw sandbox stop NAME`, which flushes their disks, or what they wrote since their last sync is lost. Answer no and nothing is written, so a restart alone changes nothing: setup lists the change as skipped and, where the gateway still runs the docker driver on a Docker VM without Landlock, ends with ``not ready for sandboxes yet: the gateway change was not written, … Rerun `defenseclaw sandbox setup` and let it write the change, then restart the OpenShell gateway yourself``. With no gateway answering, **Gateway service** and **Gateway** fail, **MicroVM driver** checks the `openshell-driver-vm` it finds (such as the one next to the `openshell-gateway` on your `PATH`), and setup stops (``the OpenShell gateway is not usable yet (Gateway)``) with the fix: start that gateway yourself, the way you started it before. For a gateway DefenseClaw starts and restarts instead, stop it and remove that OpenShell (DefenseClaw's install step would find its CLI and install nothing), then run `defenseclaw sandbox setup --install-openshell`, which installs the formula. |
+| On Linux, with OpenShell installed without NVIDIA's installer (for example from its release binaries in `~/.local/bin`), setup marks it ``⚠ OpenShell 0.1.1 has no openshell-gateway user service`` on its machine line, as the TUI does, then ``⚠ Gateway service: openshell-gateway is not installed; the gateway that answers runs another way, so DefenseClaw cannot start or restart it`` | On Linux DefenseClaw starts and restarts the gateway through the `openshell-gateway` user unit that NVIDIA's installer sets up. A gateway started by hand is used as it runs, as on a Mac: setup asks about bind mounts and telemetry, writes the change to `gateway.toml` and `gateway.env` without a restart (bind mounts only once the gateway that answers refuses a client without a certificate and `gateway.toml` keeps it on loopback; with no unit to read its environment from, the port it was started on, `OPENSHELL_SERVER_PORT=8080` say, is taken from the registration rather than compared with the default), and tells you to restart the gateway yourself; a gateway you start by hand reads `gateway.env` only if you give it that environment. The doctor then compares those files with the start of your `openshell-gateway` process (found with `pgrep`, its age read with `ps`): until you restart the gateway, **Project bind mounts** and **OpenShell telemetry** warn ``… but the gateway has not been restarted since it changed``, and where it finds no such process they warn ``… but DefenseClaw cannot tell whether the gateway was restarted on it`` rather than report the change loaded. With no gateway answering, setup stops with the doctor's fix: start it yourself, or stop it, remove that OpenShell and run `defenseclaw sandbox setup --install-openshell`, which runs NVIDIA's installer and sets up the service. |
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |

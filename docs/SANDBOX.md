@@ -700,8 +700,20 @@ Hook handlers then treat a sandbox request differently from a host request
   DefenseClaw's egress policy just blocked this sandbox's HTTPS connection to webhook.site (webhook catcher); a tool sees only a connection error, not the reason. The user can allow it for this sandbox with `defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a`. Tell the user if the task needs it, and do not try to reach it another way.
   ```
 
+  An upload the large-upload block cut on a CONNECT tunnel it had let
+  through ends the same way for the client (`curl: (56) Failure when
+  receiving data from the peer`), so the manager keeps the cut
+  (`egress.large_upload` with `terminated`) with the refusals, told once in
+  the same window. A refusal of the host after the cut is that news, not a
+  second note. The note says what went up and that the upload did not
+  complete:
+
+  ```text
+  DefenseClaw's egress policy cut this sandbox's upload to httpbin.org after 996 KiB, because it is a destination this sandbox had not contacted before (the large-upload block); the upload did not complete, and a tool sees only a connection error, not the reason. The user can allow it for this sandbox with `defenseclaw sandbox unblock httpbin.org --sandbox myapp-7f3a`. Tell the user if the task needs it, and do not try to reach it another way.
+  ```
+
   The audit row's `extra.sandbox_egress_refused` lists what was told
-  (`webhook.site:webhook_catcher`). Hermes, Kiro, OpenCode, OpenHands, Amp,
+  (`webhook.site:webhook_catcher`, `httpbin.org:large_upload`). Hermes, Kiro, OpenCode, OpenHands, Amp,
   Antigravity and OmniGent have no model-facing post-tool context field, so
   their agents are not told; the terminal's live notice still tells the
   user.
@@ -989,8 +1001,18 @@ it had not contacted before) → unblock: …"; the block stopped the upload
 before it crossed, so the sentence says what was tried), and in telemetry as a HIGH
 `sandbox.large_upload` finding and a blocked egress record
 (`SANDBOX_EGRESS_LARGE_UPLOAD`). Each later refusal is an ordinary blocked
-egress event with the same category. Without the block, a large upload stays
-a MEDIUM finding and a ⚠ `egress.large_upload` feed event.
+egress event with the same category, whose reason says why the destination
+is blocked rather than repeat the upload, for a request that may send nothing
+("This destination is blocked since this sandbox tried to send more than 10
+MiB to it, a destination it had not contacted before."; with the domain or
+address total, "… to destinations under example.net it had not contacted
+before."); the run's live notice of such a refusal says "✗ DefenseClaw
+blocked HOST (…)", not "a large upload to", which only a cut, whose event
+counts `bytes_up`, says. Without the block, a large upload stays
+a MEDIUM finding and a ⚠ `egress.large_upload` feed event. The proxy reports
+it as the upload crosses the threshold, before it ends, so the event carries
+the `threshold` and says `more than` it; `bytes_up` is only what had gone up
+then (a 1.9 MiB upload over a 1 MiB threshold read `(1.0 MiB)`).
 
 The counts live in the daemon, so each destination is first-seen to a
 sandbox until the sandbox first contacts it in this daemon's lifetime. With
@@ -2803,6 +2825,11 @@ The manager (`watch.go`) turns the records into the feed and the counts:
 - The end-of-session summary reads the sandbox until its counts stop moving
   (at most three more reads, a second apart), because OpenShell reports the
   last denials a moment after the session ends.
+- The summary repeats a block with its unblock command only while the host
+  stays blocked: an `egress.unblocked` event of the sandbox on the feed
+  (a `sandbox unblock HOST --sandbox NAME`, `--always` with it) after the
+  block drops the command (`…; unblocked since`), and a block after the
+  unblock brings it back.
 
 ## Platform behaviours to design around
 
@@ -2888,7 +2915,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost. With only a loopback interface `nss-myhostname` does not answer `_gateway` and `_outbound`, so they go on to DNS; in a real MicroVM the `127.0.0.53` relay answers them, like every name but localhost and even nonexistent ones, with a synthetic `198.18.x.x` address (`_gateway` `198.18.0.3`, `_outbound` `198.18.0.4`, `nonexistent-zz9.invalid` `198.18.0.6`), and the egress proxy refuses a connection to one as an invalid destination. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
-| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw manages only the Homebrew service. It finds an `openshell` installed another way on `PATH`, and setup refuses it (the installer would find that CLI and install nothing): stop that gateway and remove that OpenShell, then `setup --install-openshell` installs the formula. While such a gateway answers, the doctor does not fail it: `vm-driver` passes on the driver the gateway reports (found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`), and `gateway-service` warns, saying how it runs (the launchd label from `launchctl list`, or started by hand) and that DefenseClaw cannot restart it, with setup's way on as its fix; the TUI's machine check refuses it as setup does. With no gateway answering, `gateway-service` fails as not installed, with the same fix, and `vm-driver` checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
+| The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw starts and restarts only the Homebrew service's gateway. It finds an `openshell` installed another way on `PATH` (`DoctorReport.GatewayUnmanaged`; on Linux, one without the `openshell-gateway` user unit) and uses its gateway while it answers: the doctor does not fail it (`vm-driver` passes on the driver the gateway reports, found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`; `gateway-service` warns, saying how it runs, from the launchd label in `launchctl list` or started by hand, and that DefenseClaw cannot restart it), and setup goes on, marking it `⚠` and writing any gateway change it needs with `GatewayConfigurator.Write` (no flush, no restart, no pending-restart mark) for the user to restart the gateway on. As nothing flushes the MicroVM sandboxes before that restart, the `Manual` plan text and setup's last line say that it stops every sandbox on the gateway and, on the vm driver, to stop the running ones first with `defenseclaw sandbox stop NAME` (the daemon's graceful stop runs `sync`), naming them when the gateway lists them; teardown's plan says the same for the files it restores. Whether that gateway loaded them is judged from the start of the user's `openshell-gateway` process, which no service reports (`gatewayStartedAt`: on macOS the process `ps` lists, on Linux the first `pgrep -u <euid> -f '^([^ ]*/)?openshell-gateway( |$)'` finds, whose age `ps -o etime=` gives), against the files' mtimes; with no such process, `bind-mounts`, `telemetry` and `vm-identity` warn that DefenseClaw cannot tell whether the gateway was restarted on them rather than pass. Teardown's `Rollback` restores those files and returns `ErrNoGatewayService` rather than restart. With no gateway answering, `gateway-service` and `gateway` fail and setup stops on their fix: start that gateway yourself, or stop it and remove that OpenShell (the installer would find that CLI and install nothing), then `setup --install-openshell` installs the formula. `vm-driver` then checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The TUI's machine check follows setup. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
 | `docker build` uses BuildKit only through the buildx CLI plugin, which docker looks for in the `cli-plugins` directory of its config (`DOCKER_CONFIG`, else `~/.docker`), where Docker Desktop links it: a `HOME` or `DOCKER_CONFIG` without that directory hides it. Without it, or with `DOCKER_BUILDKIT=0`, docker falls back to the legacy builder with only a deprecation notice; it runs every step before the first `COPY --chmod` and then fails with `the --chmod option requires BuildKit`, and a caller that discards docker's output sees `docker build exited 1` and nothing else. The same holds for Docker Engine on Linux without the `docker-buildx-plugin` package. | Every image build checks `docker buildx version` and `DOCKER_BUILDKIT` first and refuses with the fix, before `docker build` runs; the doctor's `docker-buildkit` check reports the same, and a failed build's error carries the last lines docker printed. The daemon builds in the environment it started with. |
 
 ## Supported platforms and versions

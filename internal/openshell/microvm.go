@@ -500,6 +500,9 @@ func (r *doctorRun) vmIdentityCheck(ctx context.Context) Check {
 			c.Detail = fmt.Sprintf("%s in %s; restart the gateway if you have not since it changed", want, r.config.TOMLPath)
 		}
 		c.Fix = r.gatewayChangeFix("", "to load its changed configuration", nil)
+	case r.startUnknown(ctx):
+		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s, %s", want, r.config.TOMLPath, restartUnknown)
+		c.Fix = r.gatewayChangeFix("", "if you have not since it changed", nil)
 	default:
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("sandboxes run as %s, your user", want)
 	}

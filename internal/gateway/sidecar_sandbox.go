@@ -241,7 +241,8 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 			}
 			out := make([]SandboxEgressRefusal, 0, len(refused))
 			for _, r := range refused {
-				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy})
+				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
+					Cut: r.Cut, Sent: r.Sent})
 			}
 			return out
 		},

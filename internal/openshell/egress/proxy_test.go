@@ -822,8 +822,11 @@ func TestProxyLargeUploadBlockPerSandbox(t *testing.T) {
 		!strings.Contains(e.Reason, "tried to send more than 1024 bytes") || strings.Contains(e.Reason, "was sent") {
 		t.Errorf("large_upload event of the blocking sandbox = %+v", e)
 	}
+	// A later request sends nothing of the kind: its refusal says why the
+	// destination is blocked (RT U5: it repeated "tried to send more
+	// than", for a GET that sent nothing).
 	if resp, b := h.refused(blocking, "example.com:443"); resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload ||
-		!strings.Contains(b.Reason, "tried to send more than 1024 bytes") {
+		b.Reason != "This destination is blocked since this sandbox tried to send more than 1024 bytes to it, a destination it had not contacted before." {
 		t.Fatalf("tunnel after the block = %d %+v", resp.status, b)
 	}
 
@@ -887,7 +890,8 @@ func TestProxyLargeUploadBlockAtFlaggedAddress(t *testing.T) {
 	for _, host := range []string{"known.example", "fresh.example"} {
 		resp, b := h.refused(h.cred, host+":443")
 		if resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload || !b.Unblockable ||
-			!strings.Contains(b.Reason, "destinations at "+publicV4) || !strings.Contains(b.HowToUnblock, "sandbox unblock "+host) {
+			b.Reason != "This destination is blocked since this sandbox tried to send more than 1024 bytes to destinations at "+publicV4+" it had not contacted before." ||
+			!strings.Contains(b.HowToUnblock, "sandbox unblock "+host) {
 			t.Errorf("CONNECT %s after the address total crossed = %d %+v", host, resp.status, b)
 		}
 	}
@@ -916,11 +920,23 @@ func TestProxyLargeUploadBlockAbsoluteForm(t *testing.T) {
 	must(t, err)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryLargeUpload {
+	// The answer to the upload the block cut says what it tried.
+	if b := decodeBlock(t, body); resp.StatusCode != http.StatusForbidden || b.Category != CategoryLargeUpload ||
+		b.Reason != "This sandbox tried to send more than 1024 bytes to a destination it had not contacted before." {
 		t.Fatalf("large POST = %d %s", resp.StatusCode, body)
 	}
 	if got.Load() > 1024 {
 		t.Errorf("upstream received %d bytes", got.Load())
+	}
+	// A GET after it sent nothing: the destination is blocked because of
+	// the POST.
+	resp, err = h.clientFor(h.cred, nil).Get("http://example.com/status")
+	must(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if b := decodeBlock(t, body); resp.StatusCode != http.StatusForbidden ||
+		b.Reason != "This destination is blocked since this sandbox tried to send more than 1024 bytes to it, a destination it had not contacted before." {
+		t.Fatalf("GET after the cut = %d %s", resp.StatusCode, body)
 	}
 }
 

@@ -671,10 +671,12 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	if status != http.StatusForbidden || body.Category != egress.CategoryLargeUpload || !body.Unblockable {
 		t.Fatalf("CONNECT after the cut = %d %+v", status, body)
 	}
+	// The refusal says why the host is blocked: the CONNECT sent nothing.
 	eventually(t, "the refusal in the feed", func() bool {
 		for _, got := range e.events("upbox", sandboxapi.ActivityEgressBlocked, "") {
-			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" &&
-				strings.Contains(got.Message, "(large upload blocked: this sandbox tried to send more than 1 MiB") {
+			if got.Category == string(egress.CategoryLargeUpload) && got.Severity == "" && got.BytesUp == 0 &&
+				got.Message == "✗ example.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB "+
+					"to it, a destination it had not contacted before)" {
 				return true
 			}
 		}
@@ -738,7 +740,7 @@ func TestEgressSinkMapping(t *testing.T) {
 	blocked := mk(egress.EventBlocked, "webhook.site")
 	blocked.Category, blocked.Source, blocked.Entry, blocked.Reason, blocked.Unblockable = "webhook_catcher", egress.SourceFeed, "webhook.site", "exfil destination", true
 	upload := mk(egress.EventLargeUpload, "files.example.net")
-	upload.BytesUp = 30 << 20
+	upload.BytesUp, upload.Threshold = 25<<20+4096, 25<<20
 	for _, ev := range []egress.Event{first, again, blocked, upload, {Kind: egress.EventAllowed, SandboxName: "unknown-box", Host: "x.example"}} {
 		sink.EgressEvent(ev)
 	}
@@ -755,7 +757,10 @@ func TestEgressSinkMapping(t *testing.T) {
 	if b := recs[2]; !b.Blocked || b.DecisionCode != "SANDBOX_EGRESS_WEBHOOK_CATCHER" || !strings.Contains(b.PolicyOutcome, "feed") {
 		t.Fatalf("blocked = %+v", b)
 	}
-	if finding.Severity != "MEDIUM" || finding.TargetRef != "files.example.net" {
+	// Reported as it crossed the threshold, before it ended: "more than"
+	// the threshold, not the bytes sent then (RT U4).
+	if finding.Severity != "MEDIUM" || finding.TargetRef != "files.example.net" ||
+		finding.Description != "sinkbox sent more than 25 MiB to files.example.net, which it had not contacted before (26218496 bytes as it crossed the threshold)." {
 		t.Fatalf("finding = %+v", finding)
 	}
 	// The feed shows first contact and blocks, not every tunnel.
@@ -766,7 +771,8 @@ func TestEgressSinkMapping(t *testing.T) {
 		}
 	}
 	if len(feed) != 3 || feed[0].Kind != sandboxapi.ActivityEgressAllowed || feed[1].Kind != sandboxapi.ActivityEgressBlocked ||
-		!feed[1].Unblockable || !strings.Contains(feed[1].Message, "webhook.site") || feed[2].Kind != sandboxapi.ActivityEgressLargeUpload {
+		!feed[1].Unblockable || !strings.Contains(feed[1].Message, "webhook.site") || feed[2].Kind != sandboxapi.ActivityEgressLargeUpload ||
+		feed[2].Threshold != 25<<20 || feed[2].BytesUp != 25<<20+4096 || feed[2].Message != "⚠ large upload to first-seen files.example.net (more than 25 MiB)" {
 		t.Fatalf("feed = %+v", feed)
 	}
 }

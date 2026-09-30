@@ -72,12 +72,16 @@ type teardownPlan struct {
 	recorded map[string]manager.RecordedSandbox
 	// stale are recorded sandboxes the gateway no longer has: a kept
 	// snapshot, or a delete the daemon never saw.
-	stale    []string
-	gateway  []receiptFile
-	changed  []receiptFile
-	wrappers []wrapper.Installed
-	gwErr    error
-	client   openshell.Client
+	stale   []string
+	gateway []receiptFile
+	// manualRestart is set when no gateway service runs the gateway those
+	// files are for: its user restarts it on them, and this says what that
+	// restart stops (manualRestartStops).
+	manualRestart string
+	changed       []receiptFile
+	wrappers      []wrapper.Installed
+	gwErr         error
+	client        openshell.Client
 	// disable is set when config.yaml turns sandboxes on
 	// (openshell.enabled), which teardown turns off last.
 	disable bool
@@ -245,6 +249,11 @@ func (a *App) planTeardown(ctx context.Context, o TeardownOptions) (*teardownPla
 			}
 		}
 	}
+	if len(p.gateway) > 0 && a.Gateway.NoService(ctx) {
+		// Teardown deletes this install's sandboxes before it restores the
+		// files: the restart stops the others.
+		p.manualRestart = a.manualRestartStops(ctx, !a.gatewayDriverNow(ctx).StopFlushes, p.sandboxes)
+	}
 	p.wrappers = a.wrapperFiles()
 	p.disable = a.sandboxesOn()
 	return p, nil
@@ -359,6 +368,9 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		row("gateway config", a.tildePath(f.Path)+": "+how)
 	}
 	switch {
+	case len(p.gateway) > 0 && p.manualRestart != "":
+		// A gateway run another way, which DefenseClaw cannot restart.
+		row("", "then you restart the OpenShell gateway yourself, the way you started it, so it loads them (DefenseClaw cannot restart it); "+p.manualRestart)
 	case len(p.gateway) > 0:
 		row("", "then restart the OpenShell gateway, which drops the connections of every sandbox on it")
 	case len(p.changed) == 0 && full:
@@ -598,10 +610,17 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		for _, f := range p.gateway {
 			res.Files = append(res.Files, openshell.AppliedFile{Path: f.Path, Backup: f.Backup})
 		}
-		if err := a.Gateway.Rollback(ctx, res); err != nil {
+		err := a.Gateway.Rollback(ctx, res)
+		switch {
+		case errors.Is(err, openshell.ErrNoGatewayService):
+			// A gateway run another way, which DefenseClaw cannot restart.
+			a.ok("restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
+		case err != nil:
 			fail("restore the gateway configuration", err)
-		} else {
+		default:
 			a.ok("restored the OpenShell gateway configuration and restarted it")
+		}
+		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) {
 			if r, err := a.loadReceipt(); err == nil {
 				r.GatewayFiles = nil
 				_ = a.saveReceipt(r)

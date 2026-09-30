@@ -516,9 +516,10 @@ func TestDoctorChecks(t *testing.T) {
 			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
 			f.found["openshell"] = false
 		}, want: []checkWant{{"gateway-service", fail, "not installed"}}, fix: &fixWant{command: install, manual: true, text: "install OpenShell"}},
+		// A gateway run another way answers: setup uses it (RT U1).
 		{name: "service not installed, OpenShell there", setup: service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil),
-			want: []checkWant{{"gateway-service", fail, "not installed"}},
-			fix:  &fixWant{command: install, manual: true, text: "The OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
+			want: []checkWant{{"gateway-service", warn, "not installed; the gateway that answers runs another way"}},
+			fix:  &fixWant{command: install, manual: true, text: "the OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
 		{name: "service not enabled", setup: service("LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\n", nil),
 			want: []checkWant{{"gateway-service", warn, "does not start at login"}}},
 		// `systemctl --user link` without enable: nothing starts it at login.
@@ -587,7 +588,9 @@ func TestDoctorChecks(t *testing.T) {
 			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
 			health(errors.New("connection refused"))(f)
 		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
-			fix: &fixWant{command: install, manual: true, text: "The OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
+			fix: &fixWant{command: install, manual: true, text: "start that OpenShell's gateway yourself, the way you started it before. " +
+				"DefenseClaw starts and restarts the gateway only through the openshell-gateway user service, which NVIDIA's installer sets up, " +
+				"and the OpenShell 0.1.1 at /usr/bin/openshell was installed another way"}},
 		{name: "macOS gateway down without OpenShell", setup: func(f *doctorFixture) {
 			f.onBrew()
 			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
@@ -789,10 +792,12 @@ func TestDoctorChecks(t *testing.T) {
 // defenseclaw sandbox setup --install-openshell". That command found the
 // supported CLI and installed nothing ("✓ OpenShell 0.1.1 is already
 // installed"), then stopped on the same fix. The Gateway and Gateway
-// service checks name that OpenShell and the way on (remove it, then the
-// install; not "start and restart its gateway yourself", after which setup
-// refuses it too), and `--fix` runs nothing; an OpenShell the install
-// would upgrade, and a host with the unit, keep their fixes.
+// service checks name that OpenShell and the way on: start its gateway
+// yourself (setup uses a gateway run by hand), or remove it, then the
+// install. `--fix` runs nothing. A gateway started by hand only warns, as
+// on a Mac (RT U1: the Mac's doctor said ready while setup refused it). An
+// OpenShell the install would upgrade, and a host with the unit, keep
+// their fixes.
 func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 	const (
 		notFound = "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
@@ -822,11 +827,15 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 		})
 		return f, cli
 	}
-	outside := func(cli string) string {
-		return "on Linux DefenseClaw starts and restarts the gateway through the openshell-gateway user service, which NVIDIA's installer sets up. " +
-			"The OpenShell 0.1.1 at " + cli + " was installed another way, without that service, and DefenseClaw's install step finds it and installs nothing: " +
-			"stop its gateway if one runs and remove that OpenShell, then install OpenShell with NVIDIA's installer"
+	outside := func(first, cli string) string {
+		return first + ". DefenseClaw starts and restarts the gateway only through the openshell-gateway user service, which NVIDIA's installer sets up, " +
+			"and the OpenShell 0.1.1 at " + cli + " was installed another way. For a gateway DefenseClaw starts and restarts, stop that one and remove that OpenShell " +
+			"(DefenseClaw's install step would find it and install nothing), then install OpenShell with NVIDIA's installer"
 	}
+	const (
+		start   = "start that OpenShell's gateway yourself, the way you started it before"
+		restart = "after a gateway change, restart this gateway yourself, the way you started it"
+	)
 	wantFix := func(t *testing.T, c *openshell.Check, summary string) {
 		t.Helper()
 		if c.Fix == nil || c.Fix.Summary != summary || c.Fix.Command != install || c.Fix.Automatic || c.Fix.Apply != nil {
@@ -839,8 +848,8 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDCLI, openshell.StatusPass, "0.1.1 at "+cli)
-		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(cli))
-		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"), outside(cli))
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(start, cli))
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "the gateway is not answering"), outside(start, cli))
 		outcomes, err := r.ApplyFixes(context.Background(), func(openshell.Check) (bool, error) { return true, nil })
 		for _, o := range outcomes {
 			if o.ID == openshell.CheckIDGatewayService || o.ID == openshell.CheckIDGatewayVersion || o.Error != "" {
@@ -848,13 +857,113 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 			}
 		}
 	})
-	// A gateway started by hand answers: sandboxes run on it, and only the
-	// Gateway service check's fix changes.
+	// A gateway started by hand answers: sandboxes run on it and setup uses
+	// it, so the Gateway service check warns, as on a Mac. The gateway
+	// changes are the user's to restart the gateway on: bind mounts are
+	// probed against the gateway that answers and named for setup to write.
 	t.Run("gateway run by hand", func(t *testing.T) {
 		f, cli := release(t, "0.1.1")
+		f.writeTOML(disabledTOML, f.started.Add(-time.Minute))
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusPass, "0.1.1 healthy")
-		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusFail, "openshell-gateway is not installed"), outside(cli))
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusWarn,
+			"openshell-gateway is not installed; the gateway that answers runs another way, so DefenseClaw cannot start or restart it"), outside(restart, cli))
+		c := expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled in ")
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.RestartsGateway || !strings.HasPrefix(c.Fix.Summary, "let sandboxes mount the project folder: `defenseclaw sandbox setup` enables bind mounts in ") ||
+			!strings.HasSuffix(c.Fix.Summary, ", then restart the gateway the way you started it; DefenseClaw restarts it only through the openshell-gateway service, which is not installed") {
+			t.Fatalf("bind-mounts fix = %+v", c.Fix)
+		}
+		if f.probes == 0 {
+			t.Fatal("bind mounts were not probed against the gateway that answers")
+		}
+	})
+	// Setup writes a change for a gateway run by hand, without a restart
+	// or a pending-restart mark (GatewayConfigurator.Write): the doctor
+	// said "✓ Project bind mounts: enabled for the docker driver" and
+	// "OpenShell usage telemetry is off" before any restart, as systemd
+	// reports no start without the unit (fu2 review 1). The start of the
+	// openshell-gateway that pgrep finds says whether the gateway loaded
+	// the files; without one, the doctor cannot tell.
+	t.Run("change written for a gateway run by hand", func(t *testing.T) {
+		const pgrep = "pgrep -u 1000 -f ^([^ ]*/)?openshell-gateway( |$)"
+		for _, tc := range []struct {
+			name string
+			// written is how long ago setup wrote the files; the gateway
+			// started an hour ago.
+			written time.Duration
+			noPID   bool
+			status  openshell.CheckStatus
+			mounts  string
+			tele    string
+		}{
+			{name: "written after the start", written: time.Minute, status: openshell.StatusWarn,
+				mounts: "gateway.toml, but the gateway has not been restarted since it changed",
+				tele:   "/gateway.env, but the gateway has not been restarted since it changed"},
+			{name: "restarted since", written: 2 * time.Hour, status: openshell.StatusPass,
+				mounts: "enabled for the docker driver", tele: "OpenShell usage telemetry is off"},
+			{name: "no gateway process found", written: 2 * time.Hour, noPID: true, status: openshell.StatusWarn,
+				mounts: "gateway.toml, but DefenseClaw cannot tell whether the gateway was restarted on it: it found no start time for that gateway, which runs another way",
+				tele:   "/gateway.env, but DefenseClaw cannot tell whether the gateway was restarted on it"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f, _ := release(t, "0.1.1")
+				off := false
+				f.doctor.WantTelemetry = &off
+				at := time.Now().Add(-tc.written)
+				f.writeTOML(enabledTOML, at)
+				env := filepath.Join(f.dir, "gateway.env")
+				writeFile(t, env, "OPENSHELL_TELEMETRY_ENABLED=false\n", 0o600)
+				if err := os.Chtimes(env, at, at); err != nil {
+					t.Fatal(err)
+				}
+				if tc.noPID {
+					f.runner.On(pgrep, "", errors.New("exit status 1"))
+				} else {
+					f.runner.On(pgrep, "4242\n4250\n", nil)
+					f.runner.On("ps -o etime= -p 4242", "    01:00:00\n", nil)
+				}
+				r := f.run()
+				c := expectCheck(t, r, openshell.CheckIDBindMounts, tc.status, tc.mounts)
+				tele := expectCheck(t, r, openshell.CheckIDTelemetry, tc.status, tc.tele)
+				if tc.status != openshell.StatusPass && !strings.HasPrefix(tele.Detail, "OpenShell usage telemetry is off in ") {
+					t.Fatalf("telemetry detail %q", tele.Detail)
+				}
+				if !f.runner.Called(pgrep) {
+					t.Fatalf("pgrep not asked: %v", f.runner.Calls())
+				}
+				if tc.status == openshell.StatusPass {
+					if c.Fix != nil || tele.Fix != nil {
+						t.Fatalf("fixes %+v, %+v", c.Fix, tele.Fix)
+					}
+					return
+				}
+				for _, fix := range []*openshell.Fix{c.Fix, tele.Fix} {
+					if fix == nil || fix.Automatic || fix.RestartsGateway || !strings.HasPrefix(fix.Summary, "restart the gateway the way you started it, ") {
+						t.Fatalf("fix = %+v", fix)
+					}
+				}
+				if f.runner.Called("systemctl --user restart") {
+					t.Fatal("restarted through the unit that is not there")
+				}
+			})
+		}
+	})
+	// A private gateway run by hand on another port than the default
+	// (OPENSHELL_SERVER_PORT=8080) failed "…but the openshell-gateway
+	// service listens on port 17670": without the unit its environment is
+	// unknown, and the probe of the gateway the registration reaches
+	// decides (fu2 review 3).
+	t.Run("gateway run by hand on another port", func(t *testing.T) {
+		f, _ := release(t, "0.1.1")
+		f.addRegistration("openshell", map[string]any{"name": "openshell", "gateway_endpoint": "https://127.0.0.1:8080", "auth_mode": "mtls"})
+		f.runner.On("pgrep -u 1000 -f", "4242\n", nil)
+		f.runner.On("ps -o etime= -p 4242", "01:00:00\n", nil)
+		r := f.run()
+		expectCheck(t, r, openshell.CheckIDRegistration, openshell.StatusPass, "https://127.0.0.1:8080")
+		expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusPass, "enabled for the docker driver")
+		if f.probes == 0 {
+			t.Fatal("the gateway was not probed")
+		}
 	})
 	// NVIDIA's installer runs for a CLI it upgrades, and sets the unit up.
 	t.Run("OpenShell the install upgrades", func(t *testing.T) {
@@ -887,7 +996,8 @@ func TestDoctorOnLinuxWithoutTheUserUnit(t *testing.T) {
 		f, cli := release(t, "0.1.1")
 		f.fake.SetHealth(true, "0.0.40")
 		r := f.run()
-		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1"), outside(cli))
+		wantFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, openshell.StatusFail, "older than 0.1.1"), outside("the gateway that answers runs OpenShell 0.0.40, not the OpenShell 0.1.1 installed here, so installing OpenShell would change nothing: "+
+			"stop that gateway, then start the OpenShell 0.1.1 one yourself", cli))
 	})
 }
 

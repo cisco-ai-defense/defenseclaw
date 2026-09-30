@@ -542,6 +542,10 @@ address, so rotating names doesn't get around it). The activity feed shows a
 ✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)  → unblock: defenseclaw sandbox unblock files.example.net --sandbox myapp-claude-7f3a
 ```
 
+A later request there, which may send nothing (a `GET`), is refused with
+``this destination is blocked since this sandbox tried to send more than 10
+MiB to it, a destination it had not contacted before``.
+
 The finding is HIGH, and the egress audit records the cut as blocked
 (`SANDBOX_EGRESS_LARGE_UPLOAD`). Hosts you unblocked, hosts on an allow list
 you or your administrator wrote (`openshell.egress.allow`, a custom pack's

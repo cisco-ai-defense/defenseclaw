@@ -385,7 +385,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, "e2fsprogs in "+f.e2fsprogs+"; "+driver+" signed for Apple's Hypervisor")
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
-		wantOutsideFormulaFix(t, c)
+		wantUnmanagedFix(t, c, restartYourself)
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
@@ -400,7 +400,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" runs under launchd (com.example.openshell-gateway), not Homebrew's nvidia/openshell/openshell service, so DefenseClaw cannot restart it")
-		wantOutsideFormulaFix(t, c)
+		wantUnmanagedFix(t, c, restartYourself)
 		if !r.OK() || !r.OpenShellOutsideFormula() {
 			t.Fatalf("outside the formula %v\n%s", r.OpenShellOutsideFormula(), r)
 		}
@@ -453,7 +453,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		}
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, filepath.Join(prefix, "libexec", "openshell-driver-vm")+" signed for Apple's Hypervisor")
-		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"))
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"), restartYourself)
 	})
 	// ps lists nothing: the answering gateway still runs the driver.
 	t.Run("driver not found", func(t *testing.T) {
@@ -512,6 +512,21 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			})
 		}
 	})
+	// Setup writes a change for a gateway run by hand without a
+	// pending-restart mark: with no start to compare gateway.toml with,
+	// the doctor cannot say the gateway loaded it (fu2 review 1).
+	t.Run("no start known and no mark", func(t *testing.T) {
+		f, prefix := release(t)
+		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
+		f.runner.On("ps -o etime= -p 7976", "", errors.New("exit status 1"))
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDVMIdentity, warn, "gateway.toml, but DefenseClaw cannot tell whether the gateway was restarted on it: "+
+			"it found no start time for that gateway, which runs another way")
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.RestartsGateway || c.Fix.Summary != "restart the gateway the way you started it, if you have not since it changed; "+
+			"DefenseClaw restarts it only through the nvidia/openshell/openshell service, which is not installed" {
+			t.Fatalf("fix = %+v", c.Fix)
+		}
+	})
 	// The start ps reports is only good to the second: a gateway.toml
 	// written just before the gateway started, in its second, is loaded
 	// (it warned on this Mac, gateway.toml at 04:37:34.4 under a gateway
@@ -549,19 +564,33 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		f.fake.FailNext(openshelltest.MethodHealth, errors.New("connection refused"))
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, fail, "openshell-driver-vm is not installed")
-		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"))
+		// The user starts it: setup stops here, where it would have to.
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"), startYourself)
 		// Not `brew services start` of the formula that is not installed.
-		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"))
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"), startYourself)
+		if r.OK() {
+			t.Fatalf("a Mac whose gateway does not answer is ready:\n%s", r)
+		}
 	})
 }
 
-// wantOutsideFormulaFix wants the gateway service fix setup gives for an
-// OpenShell installed another way than the Homebrew formula (setup refuses
-// it before it reads --install-openshell).
-func wantOutsideFormulaFix(t *testing.T, c *openshell.Check) {
+// unmanagedFix's first steps (doctor.go).
+const (
+	restartYourself = "after a gateway change, restart this gateway yourself, the way you started it"
+	startYourself   = "start that OpenShell's gateway yourself, the way you started it before"
+)
+
+// wantUnmanagedFix wants the fix of an OpenShell installed another way than
+// the Homebrew formula, which setup uses while its gateway answers: first,
+// the user's step with that gateway, then the way to a gateway DefenseClaw
+// starts and restarts. doctor --fix takes neither.
+func wantUnmanagedFix(t *testing.T, c *openshell.Check, first string) {
 	t.Helper()
-	if c.Fix == nil || c.Fix.Automatic || c.Fix.Summary != openshell.OpenShellOutsideFormulaFix || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" {
-		t.Fatalf("service fix = %+v", c.Fix)
+	if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" ||
+		!strings.HasPrefix(c.Fix.Summary, first+". DefenseClaw starts and restarts the gateway only through Homebrew's nvidia/openshell/openshell service, and the OpenShell 0.1.1") ||
+		!strings.HasSuffix(c.Fix.Summary, "was installed another way. For a gateway DefenseClaw starts and restarts, stop that one and remove that OpenShell "+
+			"(DefenseClaw's install step would find it and install nothing), then install the formula") {
+		t.Fatalf("%s fix = %+v", c.ID, c.Fix)
 	}
 }
 

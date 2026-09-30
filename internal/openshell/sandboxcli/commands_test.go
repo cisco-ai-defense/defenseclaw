@@ -154,7 +154,11 @@ func TestActivityRendering(t *testing.T) {
 		// The large-upload block names the threshold the upload crossed.
 		{Seq: 13, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "files.example.net", Category: sandboxapi.CategoryLargeUpload,
 			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true},
+		// Reported as it crossed the threshold (RT U4: the line gave the
+		// bytes sent then, 1.0 MiB of an upload of 1.9 MiB); an older
+		// daemon's report names no threshold.
 		{Seq: 14, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "drop.example.net", BytesUp: 30 << 20},
+		{Seq: 15, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "httpbin.io", BytesUp: 1<<20 + 512, Threshold: 1 << 20},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -174,6 +178,7 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)" +
 			"  → unblock: defenseclaw sandbox unblock files.example.net --sandbox box",
 		"12:01:02 ⚠ large upload to drop.example.net (30.0 MiB)",
+		"12:01:02 ⚠ large upload to httpbin.io (more than 1 MiB)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -449,6 +454,8 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta.copy.pending = map[string]workspace.CopyWork{"live": workspace.CopyWorkUnpulled}
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"live"}}))
 	lacks(t, ta.output(), "never pulled")
+	// Its undo point goes with it unless kept; a copy has none to name.
+	has(t, ta.output(), "Delete sandbox live (its providers, credentials and, unless --keep-snapshot, its undo point)? [y/N]")
 	// Teardown lists it in its plan (a dry run changes nothing).
 	ta = newTestApp(t, "", copySandbox("fix-tests"))
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
