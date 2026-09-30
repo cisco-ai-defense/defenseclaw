@@ -561,9 +561,14 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		bearer := strings.TrimPrefix(auth, "Bearer ")
+		// Accept gateway token via Authorization: Bearer (model_providers auth command path).
+		if c.gatewayToken != "" && SecureTokenMatch(bearer, c.gatewayToken) {
+			return true
+		}
+		if c.masterKey != "" && SecureTokenMatch(bearer, c.masterKey) {
 			return true
 		}
 	}
@@ -1499,20 +1504,47 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		}
 
 		if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
-			// Route Codex LLM traffic through the DefenseClaw proxy for
-			// semantic routing, model selection, and/or full inspection.
-			// No /v1 suffix — Codex appends its own path structure directly
-			// (e.g. /responses, /chat/completions). The proxy strips /c/codex
-			// and joins the remainder with the configured upstream base_url.
-			cfg["openai_base_url"] = "http://" + opts.ProxyAddr + "/c/codex"
-		} else if v, ok := cfg["openai_base_url"].(string); ok && isDefenseClawCodexProxyRedirect(v) {
-			// Heal legacy installs that injected a DefenseClaw LLM-proxy
-			// redirect at the top-level `openai_base_url`. The proxy listener
-			// no longer binds (the value points at a closed loopback port), so
-			// leaving the key in place causes every Codex turn to fail with
-			// "stream disconnected before completion" against the dead
-			// 127.0.0.1:<port>/c/codex endpoint.
+			// Route Codex LLM traffic through the DefenseClaw proxy using
+			// the model_providers extension mechanism (same as OpenRouter).
+			// The gateway manages all upstream credentials; Codex authenticates
+			// with the gateway token via the auth command.
+			cfg["model_provider"] = "defenseclaw"
 			delete(cfg, "openai_base_url")
+
+			providers, _ := cfg["model_providers"].(map[string]interface{})
+			if providers == nil {
+				providers = map[string]interface{}{}
+			}
+			gwToken := c.gatewayToken
+			authBlock := map[string]interface{}{
+				"command": "sh",
+				"args":    []interface{}{"-c", "echo $DEFENSECLAW_GATEWAY_TOKEN"},
+			}
+			if gwToken != "" {
+				authBlock = map[string]interface{}{
+					"command": "sh",
+					"args":    []interface{}{"-c", "echo " + gwToken},
+				}
+			}
+			providers["defenseclaw"] = map[string]interface{}{
+				"name":     "defenseclaw",
+				"base_url": "http://" + opts.ProxyAddr + "/c/codex",
+				"auth":     authBlock,
+			}
+			cfg["model_providers"] = providers
+		} else {
+			if v, ok := cfg["openai_base_url"].(string); ok && isDefenseClawCodexProxyRedirect(v) {
+				delete(cfg, "openai_base_url")
+			}
+			if mp, ok := cfg["model_provider"].(string); ok && mp == "defenseclaw" {
+				delete(cfg, "model_provider")
+				if providers, ok := cfg["model_providers"].(map[string]interface{}); ok {
+					delete(providers, "defenseclaw")
+					if len(providers) == 0 {
+						delete(cfg, "model_providers")
+					}
+				}
+			}
 		}
 
 		backup := codexConfigBackup{}

@@ -973,29 +973,29 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			requestModel = bedrockModelFromPath(r.URL.Path)
 		}
 		var decision *ModelRouterDecision
+		routerInput := &ModelRouterInput{
+			Model:        requestModel,
+			RequestModel: requestModel,
+			Messages:     routePartial.Messages,
+			Stream:       routePartial.Stream,
+			Metadata: map[string]interface{}{
+				"defenseclaw.connector": p.connectorName(),
+			},
+		}
+		startedRoute := time.Now()
+		var routeOutcome SemanticRouteOutcome
 		if detailed, ok := p.modelRouter.(detailedModelRouter); ok {
-			outcome := detailed.RouteDetailed(r.Context(), &ModelRouterInput{
-				Model:        requestModel,
-				RequestModel: requestModel,
-				Messages:     routePartial.Messages,
-				Stream:       routePartial.Stream,
-				Metadata: map[string]interface{}{
-					"defenseclaw.connector": p.connectorName(),
-				},
-			})
-			decision = outcome.Decision
+			routeOutcome = detailed.RouteDetailed(r.Context(), routerInput)
+			decision = routeOutcome.Decision
 			if decision != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: semantic-router override decision=%s model=%q base=%s\n",
-					outcome.Result, decision.Model, scrubURLSecrets(decision.TargetURL))
+					routeOutcome.Result, decision.Model, scrubURLSecrets(decision.TargetURL))
 			}
 		} else {
-			decision = p.modelRouter.Route(r.Context(), &ModelRouterInput{
-				Model:        requestModel,
-				RequestModel: requestModel,
-				Messages:     routePartial.Messages,
-				Stream:       routePartial.Stream,
-			})
+			decision = p.modelRouter.Route(r.Context(), routerInput)
+			routeOutcome = outcomeFromDecision(routerInput, decision, time.Since(startedRoute))
 		}
+		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
 		if decision != nil {
 			routerDecision = decision
 			if decision.TargetURLOverride && decision.TargetURL != "" {
@@ -1024,7 +1024,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				// client's original model choice alongside their credentials.
 				body = patchModelInBody(body, decision.Model)
 			}
-				bodyModified = true
 			// Strip Codex-specific input items (additional_tools, etc.)
 			// when routing to non-ChatGPT backends that don't understand them.
 			if decision.TargetURLOverride && decision.TargetURL != "" &&
@@ -1463,7 +1462,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// back to chunked encoding. Needed because notification injection
 	// can change the body length; without this, some upstream providers
 	// (notably Anthropic) reject the request with 400 "unexpected EOF".
-	upstreamReq.ContentLength = int64(len(body))
+	upstreamReq.ContentLength = int64(len(forwardBody))
 
 	// Forward inbound headers to the upstream provider, minus a
 	// hardened blocklist (proxy-hop, auth, framework-internal,
@@ -2273,6 +2272,8 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback: synthetic OpenAI-compatible model list.
+	// When a model router is configured, include all routing models
+	// so Codex's model picker shows them as first-class options.
 	p.rtMu.RLock()
 	modelName := p.cfg.ModelName
 	if modelName == "" {
@@ -2280,15 +2281,31 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	p.rtMu.RUnlock()
 
+	models := []map[string]interface{}{}
+	if p.modelRouter != nil {
+		if lister, ok := p.modelRouter.(interface{ Models() []string }); ok {
+			for _, m := range lister.Models() {
+				models = append(models, map[string]interface{}{
+					"id":                 m,
+					"object":             "model",
+					"owned_by":           "defenseclaw",
+					"prefer_websockets":  false,
+				})
+			}
+		}
+	}
+	if len(models) == 0 {
+		models = append(models, map[string]interface{}{
+			"id":                modelName,
+			"object":            "model",
+			"owned_by":          "defenseclaw",
+			"prefer_websockets": false,
+		})
+	}
+
 	resp := map[string]interface{}{
 		"object": "list",
-		"data": []map[string]interface{}{
-			{
-				"id":       modelName,
-				"object":   "model",
-				"owned_by": "defenseclaw",
-			},
-		},
+		"data":   models,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

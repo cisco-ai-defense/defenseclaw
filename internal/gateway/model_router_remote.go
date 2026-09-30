@@ -468,3 +468,14 @@ func (c *RemoteRouterClient) Healthy(ctx context.Context) bool {
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
+
+func (c *RemoteRouterClient) Models() []string {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.backends))
+	for name := range c.backends {
+		names = append(names, name)
+	}
+	return names
+}
