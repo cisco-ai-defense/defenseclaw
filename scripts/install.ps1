@@ -96,7 +96,7 @@ $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copil
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.
 $RunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0 }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -1112,8 +1112,11 @@ function Invoke-FirstInstallExtras {
         } else {
             $quickstartArgs = @("quickstart", "--non-interactive", "--yes", "--connector", $Connector)
             if ($QuickstartMode) { $quickstartArgs += @("--mode", $QuickstartMode) }
-            if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs) -ne 0) {
-                Write-Warn "Quickstart reported problems; run 'defenseclaw doctor'"
+            $quickstartRc = Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs
+            if ($quickstartRc -ne 0) {
+                # The install stays; the summary names the failure and the re-run.
+                $Run.QuickstartRc = $quickstartRc
+                $Run.QuickstartRerun = "defenseclaw " + ($quickstartArgs -join " ")
             }
         }
     } elseif ($Connector -and $Connector -ne "none") {
@@ -1145,6 +1148,11 @@ Options:
   -NoPersistPath        Do not change the user PATH in the registry
   -CosignPath FILE      cosign to check the release signature with (default: cosign on PATH)
   -Help                 Show this help
+
+Exit codes (run as a file):
+  0  Installed        1  Not installed (a previous install is restored)
+  3  Installed; a connector needs attention before it is guarded again
+  4  Installed; the first-run quickstart failed (re-run it as shown)
 
 Environment:
   DEFENSECLAW_HOME      Data directory (default: %USERPROFILE%\.defenseclaw)
@@ -1477,6 +1485,13 @@ function Invoke-Install {
         Write-Host "  Open a new terminal to use defenseclaw."
     }
     Write-Host ""
+    if ($Run.QuickstartRerun) {
+        Write-Err "Quickstart failed (exit $($Run.QuickstartRc)): DefenseClaw $Ver is installed, but $Connector is not set up yet"
+        Write-Host "  Fix what quickstart reported above ('defenseclaw doctor' helps), then run:"
+        Write-Host "    $($Run.QuickstartRerun)" -ForegroundColor Cyan
+        Write-Host ""
+        return 4
+    }
     return $startRc
 }
 
@@ -1511,6 +1526,7 @@ try {
 }
 Wait-BeforeClose
 if ($RunAsFile) { exit $code }
+if ($code -eq 4) { throw "DefenseClaw is installed, but quickstart failed; see above" }
 if ($code -ne 0 -and $code -ne 3) { throw "DefenseClaw was not installed" }
 }
 # DefenseClaw Windows installer complete v2
