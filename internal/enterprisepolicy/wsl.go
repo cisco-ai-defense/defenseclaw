@@ -480,6 +480,18 @@ func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.Ent
 			if mine {
 				state.OwnedEntries++
 				state.detail("%s=true (DefenseClaw) keeps Claude Desktop WSL sessions off", path)
+				// The conditions DefenseClaw wrote the gate under can stop
+				// holding (the organization's own values removed, HKCU
+				// policy or local configuration added). The gate stays,
+				// since removing it turns WSL sessions back on, but the
+				// row is not covered while it overrides account policy.
+				refusal, err := claudeDesktopGateRefusal(reg, policy, withoutRegValue(values, ClaudeDesktopWSLValue), keyExists)
+				if err != nil {
+					return true, err
+				}
+				if refusal != "" {
+					state.conflict("DefenseClaw's %s no longer meets its write conditions: %s", path, refusal)
+				}
 			} else {
 				state.detail("administrator policy %s=%s keeps Claude Desktop WSL sessions off", path, describeRegValue(*current))
 			}
@@ -512,6 +524,17 @@ func reconcileClaudeDesktopGate(opts Options, reg WSLRegistry, policy config.Ent
 	state.OwnedEntries++
 	state.detail("wrote %s=true: Claude Desktop WSL sessions are off", path)
 	return true, nil
+}
+
+// withoutRegValue is values without the value named name.
+func withoutRegValue(values []RegValue, name string) []RegValue {
+	out := make([]RegValue, 0, len(values))
+	for _, value := range values {
+		if !strings.EqualFold(value.Name, name) {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 // claudeDesktopGateRefusal says why DefenseClaw must not add

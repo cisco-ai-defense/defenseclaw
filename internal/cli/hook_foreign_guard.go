@@ -108,10 +108,10 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	name := strings.ToLower(strings.TrimSpace(opts.Connector))
 	// A standalone host: the managed hook tags the audit with the agent's
 	// host process, so Devin Local under Devin Desktop is told apart from
-	// the Devin CLI.
-	host := hookAgentHost()
+	// the Devin CLI. The lookup (a process snapshot on Windows) runs only
+	// when its result is used.
 	if opts.ManagedEnterprise {
-		opts.AgentHost = host
+		opts.AgentHost = hookAgentHost()
 	}
 	policy, ok := summary.Connectors[name]
 	if !ok || !policy.Guard {
@@ -130,7 +130,13 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	}
 	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, deadline)
 	if decision.Deny {
-		decision.Reason = withDesktopRestartNote(name, host, decision.Reason)
+		if name == "devin" {
+			host := opts.AgentHost
+			if host == "" {
+				host = hookAgentHost()
+			}
+			decision.Reason = withDesktopRestartNote(name, host, decision.Reason)
+		}
 		opts.ManagedEnterprise = true
 		opts.ManagedRuntimeFailure = decision.Reason
 		// The block never reaches the gateway, and the managed hook's own

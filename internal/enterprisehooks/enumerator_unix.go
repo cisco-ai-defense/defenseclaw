@@ -140,6 +140,10 @@ type UnixEnumerateOptions struct {
 	Logger         EnumerationLogger
 	// CheckHome classifies a candidate's home; nil uses CheckUnixTargetHome.
 	CheckHome func(home string, uid int) HomeCheck
+	// PreviousRefusedSurfaces are the refusals the last cycle published. A
+	// user whose surface discovery fails or cannot run keeps them, so a
+	// failed worker never lifts a refusal.
+	PreviousRefusedSurfaces []UnixRefusedSurface
 }
 
 // UnixEnumerationReport summarizes a cycle for logs and JSON output.
@@ -497,12 +501,14 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		var versions, reasons map[string]string
 		var surfaces map[string][]connector.AgentSurface
+		surfacesKnown := false
 		if check.State == HomeAvailable && opts.DiscoverSurfaces != nil {
 			found, err := opts.DiscoverSurfaces(ctx, account, append(append([]string{}, perUser...), surfaceOnly...))
 			if err != nil {
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+			surfacesKnown = err == nil
 		} else if check.State == HomeAvailable && opts.Discover != nil {
 			var err error
 			versions, reasons, err = opts.Discover(ctx, account, perUser)
@@ -512,6 +518,14 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)
 		for _, conn := range surfaceOnly {
+			if !surfacesKnown && opts.DiscoverSurfaces != nil {
+				// Discovery failed or the home is unavailable: keep the last
+				// cycle's refusal instead of publishing none.
+				if previouslyRefusedSurface(opts.PreviousRefusedSurfaces, name, account.UID, conn) {
+					report.RefusedSurfaces = append(report.RefusedSurfaces, UnixRefusedSurface{User: name, UID: intPointer(account.UID), Connector: conn})
+				}
+				continue
+			}
 			unprotected, refused := unixSurfaceOnlyRefusals(account, conn, versions[conn], surfaces[conn], enrollment.UnverifiedVersionsFor(conn))
 			report.Unprotected = append(report.Unprotected, unprotected...)
 			if refused {
@@ -1056,6 +1070,17 @@ func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, 
 // installs are refused surfaces: the gateway then refuses the user's hook
 // calls for the connector. A user with an admitted install keeps being
 // inspected, so a refused surface next to it is not refused.
+// previouslyRefusedSurface reports whether the last cycle refused
+// (user, connector) for this uid.
+func previouslyRefusedSurface(previous []UnixRefusedSurface, user string, uid int, conn string) bool {
+	for _, entry := range previous {
+		if entry.User == user && entry.Connector == conn && (entry.UID == nil || *entry.UID == uid) {
+			return true
+		}
+	}
+	return false
+}
+
 func unixSurfaceOnlyRefusals(account unixidentity.Account, conn, cliVersion string, surfaces []connector.AgentSurface, policy string) ([]UnprotectedAgent, bool) {
 	admission := admitSurfaces(conn, policy, surfaces)
 	if len(admission.rejected) == 0 {

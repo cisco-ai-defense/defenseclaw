@@ -156,7 +156,11 @@ func DiscoverUnixAgentSurfaces(ctx context.Context, home, connectorName string, 
 				continue
 			}
 			surface := connector.AgentSurface{Surface: connector.HostSurfaceExtension, Host: root.host, Path: dir}
-			if version, ok := readUnixPackageVersion(filepath.Join(dir, "package.json"), "", false); ok {
+			pkg := filepath.Join(dir, "package.json")
+			if !unixDiscoveryCandidateTrusted(home, pkg) {
+				continue
+			}
+			if version, ok := readUnixPackageVersion(pkg, "", false); ok {
 				surface.HostVersion = version
 				if probe.extensionEngineIsHost {
 					surface.EngineVersion = version

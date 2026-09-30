@@ -1210,3 +1210,38 @@ func TestRevokeGoneUnixTargetsKeepsRowsItCannotProveDeleted(t *testing.T) {
 		t.Fatalf("only the deleted account may be revoked: %v (report %+v)", users, report)
 	}
 }
+
+// A user whose surface discovery fails keeps the last cycle's refusal, so a
+// failed worker never lifts a surface_unverified refusal.
+func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	opts := UnixEnumerateOptions{
+		Resolver: &fakeResolver{
+			accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+			listed:   []string{"alice"},
+		},
+		HomeRoots:               []string{homes},
+		UIDMin:                  uid,
+		UIDMax:                  uid + 1,
+		MachinePolicyConnectors: []string{"claudecode"},
+		DiscoverSurfaces: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			return UnixDiscovery{}, errors.New("worker failed")
+		},
+		PreviousRefusedSurfaces: []UnixRefusedSurface{{User: "alice", UID: intPointer(uid), Connector: "claudecode"}},
+	}
+	cfg := enumeratorConfig("claudecode")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.RefusedSurfaces) != 1 || report.RefusedSurfaces[0].User != "alice" || report.RefusedSurfaces[0].Connector != "claudecode" {
+		t.Fatalf("a failed discovery must keep the previous refusal: %+v", report.RefusedSurfaces)
+	}
+}

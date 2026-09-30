@@ -86,6 +86,13 @@ func TestWindowsWSLClaudeDesktopGate(t *testing.T) {
 		if verify, err := VerifyWindowsWSL(opts, nil); err != nil || !verify.Covered {
 			t.Fatalf("verify after publish: %+v %v", verify, err)
 		}
+		// Once DefenseClaw's gate is the only machine policy it overrides
+		// account policy: kept, but not covered.
+		reg.machine[ClaudeDesktopPolicyKey] = []RegValue{*claudeGate(reg)}
+		if verify, _ := VerifyWindowsWSL(opts, nil); verify.Covered || claudeGate(reg) == nil {
+			t.Fatalf("a gate that is the only machine policy must be a conflict: %+v", verify)
+		}
+		reg.machine[ClaudeDesktopPolicyKey] = append(reg.machine[ClaudeDesktopPolicyKey], adminPolicy)
 		if _, err := RemoveWindowsWSL(opts); err != nil {
 			t.Fatal(err)
 		}

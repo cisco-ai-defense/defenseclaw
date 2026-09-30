@@ -170,6 +170,15 @@ func (w *devinPluginWalk) recorded(path string) []Finding {
 	sort.Strings(paths)
 	var findings []Finding
 	for _, value := range paths {
+		// Every probed path counts against the scan budget and the
+		// deadline, including missing and in-store ones.
+		if err := s.check(); err != nil {
+			return append(findings, s.unreadable(source, err))
+		}
+		if s.references++; s.references > guardScanReferenceLimit {
+			s.exceeded = fmt.Errorf("the hook scan checked more than %d referenced paths", guardScanReferenceLimit)
+			return append(findings, s.unreadable(source, s.exceeded))
+		}
 		info, err := os.Stat(value)
 		if err != nil || !info.IsDir() {
 			// A recorded path that is gone, or names a file, holds no plugin.
