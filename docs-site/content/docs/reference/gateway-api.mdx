@@ -611,7 +611,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool, "new_snapshot": bool}`; `409 conflict` when the sandbox is already running | `Sandbox` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/undo` | Optional `{"preview", "keep_refs", "stop", "restart"}` (all bool) | `UndoResponse`: the workspace `result`, whether it `stopped` and `restarted` the sandbox, a `summary`, and a `review` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, and the `diff` when asked |
-| `POST` | `/api/v1/sandbox/sandboxes/{name}/accept` | Optional `{"snapshot_created_at": time}`; `409 conflict` when the sandbox is running, its undo point was undone, or it is another one than `snapshot_created_at` names; `400 invalid_request` for a copy-mode sandbox; `404 not_found` without an undo point | `Sandbox`, whose `snapshot` carries `accepted_at` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/accept` | Optional `{"snapshot_created_at": time, "session": int}`; `409 conflict` when the sandbox is running, its undo point was undone, it is another one than `snapshot_created_at` names, or the sandbox was started again since the `session` named; `400 invalid_request` for a copy-mode sandbox; `404 not_found` without an undo point | `Sandbox`, whose `snapshot` carries `accepted_at` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}/logs` | Query `lines` (optional, 0 or absent for all of it); `404 not_found` when no log was kept | `RunLog`: `name`, `state` (`exited` or `interrupted`), `exit`, `started_at`, `kept_at`, `log` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
 | `GET` | `/api/v1/sandbox/approvals` | Query `sandbox` (optional) | `{"approvals": [Approval]}` |
@@ -655,7 +655,8 @@ harness's own event names in `events`, at most 48 names with the rest in
 `other_events`, and whether hooks are `silent` or `unreachable`),
 `endpoints` (the last result of each credentialed endpoint),
 `egress` totals, `pending_approvals`, the
-`workspace` and `mcp` banner views, `snapshot`, `violations` (settings the
+`workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
+up each time the daemon sees the sandbox become ready), `violations` (settings the
 policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
 nested-repository guard found in a mounted project). `launch` holds what the
 CLI needs to start the harness. `credentials` lists the sandbox's
@@ -672,7 +673,8 @@ undid or accepted, which keeps the undo point so `undo` still reverts them,
 whoever starts the sandbox. `POST …/{name}/accept` records the acceptance of
 a stopped sandbox's changes (the CLI sends it when the user keeps them at the
 end of a session, with the `created_at` of the snapshot it reviewed them
-against); the next start then takes a fresh snapshot and drops the
+against and the sandbox's `session` then, so an accept after another start,
+whose changes nobody reviewed, is refused); the next start then takes a fresh snapshot and drops the
 acceptance, and so does a start with `no_snapshot`. `new_snapshot` on a start
 accepts the changes too.
 

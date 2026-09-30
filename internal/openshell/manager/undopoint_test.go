@@ -102,4 +102,36 @@ func TestAcceptRefusals(t *testing.T) {
 	wantCode(t, acceptErr(e.m.Accept(t.Context(), "nobox", sandboxapi.AcceptRequest{})), sandboxapi.CodeNotFound)
 }
 
+// A keep answers the review of one session. A sandbox started again since
+// (from the TUI, the macOS app or a detached run while the question was
+// open) keeps the same undo point, with changes nobody reviewed on top: an
+// accept that names the reviewed session is refused, so undo still reverts
+// them. The count survives a daemon restart.
+func TestAcceptRefusesASessionStartedSinceTheReview(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "raced"})
+	stopped, err := e.m.Stop(t.Context(), "raced")
+	must(t, err)
+	reviewed, snap := stopped.Session, e.ws.snapshots["raced"]
+	if reviewed == 0 {
+		t.Fatal("the sandbox counts no session")
+	}
+	e.startBox("raced", sandboxapi.StartRequest{})
+	e.stopBox("raced")
+	if e.ws.snapshots["raced"] != snap {
+		t.Fatal("the start took a new undo point over changes nobody accepted")
+	}
+	wantCode(t, acceptErr(e.m.Accept(t.Context(), "raced", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt, Session: reviewed})),
+		sandboxapi.CodeConflict)
+	e.restartDaemon()
+	now := e.get("raced").Session
+	if now != reviewed+1 {
+		t.Fatalf("session = %d after a restart, want %d", now, reviewed+1)
+	}
+	if sb, err := e.m.Accept(t.Context(), "raced", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt, Session: now}); err != nil ||
+		sb.Snapshot == nil || sb.Snapshot.AcceptedAt.IsZero() {
+		t.Fatalf("accept of the session it names = %+v, %v", sb, err)
+	}
+}
+
 func acceptErr(_ *sandboxapi.Sandbox, err error) error { return err }

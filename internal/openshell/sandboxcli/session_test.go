@@ -20,6 +20,7 @@ package sandboxcli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -613,6 +614,18 @@ func TestSessionSummary(t *testing.T) {
 			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
 		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
 			not: []string{"the next session takes a new undo point"}},
+		// The accept names the snapshot and the session it reviewed: the
+		// daemon refuses it once another start came in between.
+		{name: "keeping names the reviewed session", input: "y\n", opts: claude, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"},
+			check: func(t *testing.T, ta *testApp) {
+				var req sandboxapi.AcceptRequest
+				calls := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes+"/"+sbName+"/accept")
+				if len(calls) != 1 || json.Unmarshal(calls[0].Body, &req) != nil || req.Session != 1 || req.Snapshot.IsZero() {
+					t.Fatalf("accept = %+v, want the reviewed snapshot and session 1", req)
+				}
+			}},
 		{name: "connect --shell", input: "y\n", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "r2c1-cp", Shell: true}) },
 			setup: func(ta *testApp) {
 				ta.term.hooks = nil

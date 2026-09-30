@@ -817,15 +817,22 @@ class OrchestratorClient:
         )
         return self._sandbox_object(result, "review")
 
-    def accept_sandbox_changes(self, name: str, *, snapshot_created_at: str = "") -> dict[str, Any]:
+    def accept_sandbox_changes(
+        self, name: str, *, snapshot_created_at: str = "", session: int = 0
+    ) -> dict[str, Any]:
         """Record that the user kept the changes on top of a stopped mounted sandbox's undo point.
 
         Its next start takes a new undo point, whoever starts it.
         ``snapshot_created_at`` names the undo point the changes were
         reviewed against (the sandbox's ``snapshot.created_at``); the daemon
         refuses with ``conflict`` when the sandbox has another one by now.
+        ``session`` is the sandbox's ``session`` when they were reviewed; the
+        daemon refuses with ``conflict`` when the sandbox was started again
+        since.
         """
-        body = {"snapshot_created_at": snapshot_created_at} if snapshot_created_at else {}
+        body: dict[str, Any] = {"snapshot_created_at": snapshot_created_at} if snapshot_created_at else {}
+        if session:
+            body["session"] = session
         result = self._sandbox_call(
             "POST", self._sandbox_path(name, "accept"), body=body, timeout=SANDBOX_LIFECYCLE_TIMEOUT
         )

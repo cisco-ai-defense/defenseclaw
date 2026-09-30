@@ -198,7 +198,7 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
     client.start_sandbox(name, new_snapshot=True)
     client.undo_sandbox(name, preview=True, stop=True)
     client.review_sandbox(name, diff=True)
-    client.accept_sandbox_changes(name, snapshot_created_at="2026-09-30T10:00:00Z")
+    client.accept_sandbox_changes(name, snapshot_created_at="2026-09-30T10:00:00Z", session=2)
     client.accept_sandbox_changes(name)
     assert client.delete_sandbox(name, keep_snapshot=True)["deleted"] is True
     assert client.decide_sandbox_approval("ask/1", approve=True, always=True, reason="ok")["message"] == "queued"
@@ -213,7 +213,7 @@ def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaem
         ("POST", f"{escaped}/start", {"new_snapshot": True}),
         ("POST", f"{escaped}/undo", {"preview": True, "stop": True}),
         ("POST", f"{escaped}/review", {"diff": True}),
-        ("POST", f"{escaped}/accept", {"snapshot_created_at": "2026-09-30T10:00:00Z"}),
+        ("POST", f"{escaped}/accept", {"snapshot_created_at": "2026-09-30T10:00:00Z", "session": 2}),
         ("POST", f"{escaped}/accept", {}),
         ("DELETE", escaped, {"keep_snapshot": True}),
         ("POST", "/api/v1/sandbox/approvals/ask%2F1", {"decision": "approve", "always": True, "reason": "ok"}),

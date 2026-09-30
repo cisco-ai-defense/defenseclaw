@@ -173,6 +173,11 @@ type record struct {
 	// ReadyAt was launched with (launchYolo then); nil while the sandbox
 	// is not ready, and in records from before it was kept.
 	SessionYolo *bool `json:"session_yolo,omitempty"`
+	// Sessions counts the transitions to ready DefenseClaw saw (a create,
+	// every start, one outside DefenseClaw a restarted daemon finds): an
+	// accept names the session it reviewed (Manager.Accept). A restarted
+	// daemon that finds the sandbox still ready counts nothing.
+	Sessions int `json:"sessions,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
 	// HostAlias is what OpenShell last reported of host.openshell.internal

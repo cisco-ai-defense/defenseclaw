@@ -246,7 +246,7 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"POST", sandboxapi.PathSandboxes + "/box/start", `{}`, 200, "start box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/undo", `{"stop":true}`, 200, "undo box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/review", "", 200, "review box"},
-		{"POST", sandboxapi.PathSandboxes + "/box/accept", `{"snapshot_created_at":"2026-09-30T10:00:00Z"}`, 200, "accept box"},
+		{"POST", sandboxapi.PathSandboxes + "/box/accept", `{"snapshot_created_at":"2026-09-30T10:00:00Z","session":3}`, 200, "accept box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/accept", `{"surprise":1}`, 400, ""},
 		{"GET", sandboxapi.PathSandboxes + "/box/logs?lines=5", "", 200, "logs box"},
 		{"GET", sandboxapi.PathSandboxes + "/box/logs?lines=-1", "", 400, ""},
@@ -275,7 +275,7 @@ func TestSandboxAPIRoutes(t *testing.T) {
 	}
 	if ctl.createReq.Name != "box" || len(ctl.createReq.HostPorts) != 1 || !ctl.decision.Always || ctl.unblock.Host != "webhook.site" ||
 		ctl.explain.Harness != "codex" || !ctl.explain.Copy || !ctl.undo.Stop ||
-		!ctl.accept.Snapshot.Equal(time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)) || ctl.lines != 5 {
+		!ctl.accept.Snapshot.Equal(time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)) || ctl.accept.Session != 3 || ctl.lines != 5 {
 		t.Fatalf("decoded requests: create %+v decision %+v unblock %+v explain %+v undo %+v accept %+v lines %d",
 			ctl.createReq, ctl.decision, ctl.unblock, ctl.explain, ctl.undo, ctl.accept, ctl.lines)
 	}

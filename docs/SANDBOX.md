@@ -1308,10 +1308,13 @@ The manager decides for every start, whoever asks for it (the CLI, the TUI,
 the macOS app, `undo --restart`). The user accepts the changes by keeping
 them at the end of a session ("Keep changes?" answered yes, `--yes`, or
 `on_exit: keep`), which the CLI reports to the manager (`Accept`, `POST
-…/accept`, with the snapshot it reviewed them against) once the session
-stopped the sandbox; the record keeps the acceptance (`record.Accepted`),
-and the next start takes a fresh snapshot and drops it, as a `--no-snapshot`
-start does. `sandbox start --new-snapshot` accepts the changes and takes a
+…/accept`, with the snapshot it reviewed them against and the sandbox's
+session count, `record.Sessions`, which every transition to ready raises)
+once the session stopped the sandbox. The manager refuses an accept after
+another start: that session's changes sit on the same snapshot, and nobody
+reviewed them. Otherwise the record keeps the acceptance
+(`record.Accepted`), and the next start takes a fresh snapshot and drops it,
+as a `--no-snapshot` start does. `sandbox start --new-snapshot` accepts the changes and takes a
 fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
 earlier CLI recorded in `cli/accepted.json` is honoured once, as
 `--new-snapshot`.

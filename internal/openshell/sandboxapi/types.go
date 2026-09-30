@@ -215,9 +215,13 @@ type Sandbox struct {
 	TamperTier     string    `json:"tamper_tier,omitempty"`
 	CreatedAt      time.Time `json:"created_at,omitzero"`
 	// StartedAt is the last transition to ready seen by this daemon.
-	StartedAt     time.Time `json:"started_at,omitzero"`
-	UptimeSeconds int64     `json:"uptime_seconds,omitempty"`
-	ExitCode      *int32    `json:"exit_code,omitempty"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	// Session counts the sandbox's sessions: it goes up each time
+	// DefenseClaw sees the sandbox become ready. An accept names the session
+	// whose changes were reviewed (AcceptRequest.Session).
+	Session       int    `json:"session,omitempty"`
+	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
+	ExitCode      *int32 `json:"exit_code,omitempty"`
 	// Launch is what the CLI needs to start the harness in the sandbox.
 	Launch Launch `json:"launch"`
 	// Credentials are the sandbox's --credential bindings (--github-write's
@@ -457,6 +461,11 @@ type AcceptRequest struct {
 	// against: the daemon refuses with 409 conflict when the sandbox's
 	// snapshot is another one by now. Zero accepts the current one.
 	Snapshot time.Time `json:"snapshot_created_at,omitzero"`
+	// Session is the sandbox's Session when the changes were reviewed: the
+	// daemon refuses with 409 conflict when the sandbox was started again
+	// since, which keeps the snapshot with that session's unreviewed
+	// changes on top. Zero skips the check.
+	Session int `json:"session,omitempty"`
 }
 
 // Detached-run states of a kept run log (RunLog.State).

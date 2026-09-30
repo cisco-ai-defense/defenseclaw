@@ -694,7 +694,9 @@ deleted.
   `cli/accepted.json` (one an earlier CLI wrote is honoured once), so the
   next start takes a new undo point whoever starts the sandbox, and the
   sandbox's snapshot carries `accepted_at` (the TUI and the macOS app say
-  so). A start with `--no-snapshot` now uses the acceptance up, so that
+  so). The accept names the snapshot and the sandbox's `session` (a count of
+  its starts) it reviewed, so a keep answered after another start, whose
+  changes nobody reviewed, is refused. A start with `--no-snapshot` now uses the acceptance up, so that
   session's changes keep the undo point at the next start. The CLI still
   asks before `sandbox stop` ends a run, and reads the same from the user's
   side. The Python client has `sandbox_run_log` and

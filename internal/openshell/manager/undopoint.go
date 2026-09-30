@@ -55,7 +55,9 @@ func (a *acceptedSnapshot) acceptedFor(snap *workspace.SnapshotRecord) bool {
 // fresh snapshot instead of keeping this one. A running sandbox is refused:
 // what it changes after the review would be accepted unreviewed. With
 // req.Snapshot set, a sandbox whose snapshot is another one by now is
-// refused too.
+// refused too, and with req.Session set, one started again since the review
+// (a start keeps the snapshot while changes nobody accepted sit on it, so
+// that session's changes would be accepted unreviewed).
 func (m *Manager) Accept(ctx context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error) {
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
@@ -82,11 +84,18 @@ func (m *Manager) Accept(ctx context.Context, name string, req sandboxapi.Accept
 		return nil, err
 	}
 	m.mu.Lock()
-	sb := b.sb
+	sb, sessions := b.sb, b.rec.Sessions
 	m.mu.Unlock()
 	if !stoppedPhase(sb.Status.Phase) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
 			"sandbox %s is running; stop it before accepting its changes, or what it changes after the review is accepted too", name)
+	}
+	if req.Session != 0 && req.Session != sessions {
+		// Started again since the review (the TUI, the app, a detached
+		// run): that session's changes sit on the same snapshot, and
+		// nobody reviewed them.
+		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"sandbox %s was started again since its changes were reviewed, so what that session changed was not reviewed; review them again", name)
 	}
 	snap, err := m.ws.LoadSnapshot(m.opts.DataDir, name)
 	switch {

@@ -333,7 +333,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		sb := &sandboxapi.Sandbox{Name: name, ID: "sb-" + name, Harness: req.Harness, HarnessName: harnessName(req.Harness),
 			Phase: "ready", Profile: "open", NetworkMode: "open", Yolo: !req.Safe, WorkdirMode: mode, Project: req.Project,
-			Workdir: workdir, Launch: sandboxapi.Launch{Yolo: !req.Safe}, TamperTier: "managed", CreatedAt: time.Now()}
+			Workdir: workdir, Launch: sandboxapi.Launch{Yolo: !req.Safe}, TamperTier: "managed", CreatedAt: time.Now(), Session: 1}
 		if req.LLM != nil {
 			sb.Launch.CredentialProfile = req.LLM.Profile
 		}
@@ -389,6 +389,9 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		case verb == "start":
 			var req sandboxapi.StartRequest
 			_ = json.Unmarshal(body, &req)
+			if sb.Phase != "ready" {
+				sb.Session++
+			}
 			sb.Phase = "ready"
 			if sb.WorkdirMode == "mount" && sb.Snapshot != nil {
 				// Like the manager: a start takes a new snapshot unless
@@ -417,6 +420,9 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			case !req.Snapshot.IsZero() && !req.Snapshot.Equal(sb.Snapshot.CreatedAt):
 				fail(sandboxapi.CodeConflict, "sandbox "+name+" has another undo point by now")
+				return
+			case req.Session != 0 && req.Session != sb.Session:
+				fail(sandboxapi.CodeConflict, "sandbox "+name+" was started again since its changes were reviewed")
 				return
 			}
 			snap := *sb.Snapshot
