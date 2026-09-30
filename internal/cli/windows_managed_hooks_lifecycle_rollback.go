@@ -7,6 +7,7 @@ package cli
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -59,10 +60,21 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 	if err != nil {
 		note("the agent configurations of the enrolled accounts, which could not be listed: %v", err)
 	}
+	accountKey := func(target enterprisehooks.ManifestTarget) string {
+		return strings.ToUpper(strings.TrimSpace(target.SID)) + "\x00" + strings.ToLower(strings.TrimSpace(target.DataDir))
+	}
+	// Each leftover names the account and the connectors enrolled for it.
+	connectors := map[string][]string{}
+	for _, target := range manifest.Targets {
+		key := accountKey(target)
+		if name := strings.TrimSpace(target.Connector); name != "" && !slices.Contains(connectors[key], name) {
+			connectors[key] = append(connectors[key], name)
+		}
+	}
 	seen := map[string]bool{}
 	for _, target := range manifest.Targets {
 		sid, home := strings.TrimSpace(target.SID), strings.TrimSpace(target.UserHome)
-		key := strings.ToUpper(sid) + "\x00" + strings.ToLower(strings.TrimSpace(target.DataDir))
+		key := accountKey(target)
 		if sid == "" || home == "" || seen[key] {
 			continue
 		}
@@ -70,6 +82,9 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		account := sid
 		if user := strings.TrimSpace(target.User); user != "" {
 			account = user + " (" + sid + ")"
+		}
+		if names := connectors[key]; len(names) > 0 {
+			account += " [" + strings.Join(names, ", ") + "]"
 		}
 		_, kept, err := windowsFirstInstallRollbackUserConfigRestorer(home, sid, target.DataDir)
 		for _, path := range kept {

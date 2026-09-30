@@ -38,22 +38,31 @@ func stageEnsureManifestForEnrollmentTest(t *testing.T, enrollment config.Enterp
 		return standaloneWindowsEnrollmentConfig(enrollment), nil
 	}
 	calls := 0
-	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, options enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
 		calls++
+		options.Logger("S-1-5-18", "not an interactive-user SID")
 		return enterprisehooks.Manifest{}, errors.New("enumeration stopped by the test")
 	}
 	windowsEnterpriseProgramDataResolver = func() (string, error) {
 		return programData, nil
 	}
 	cmd := &cobra.Command{}
-	cmd.SetErr(new(bytes.Buffer))
+	stderr := new(bytes.Buffer)
+	cmd.SetErr(stderr)
+	opts := &windowsEnterpriseLifecycleOptions{jsonOutput: true}
 	_, cleanup, err := stageWindowsEnterpriseEnsureManifest(
 		context.Background(),
-		cmd,
+		windowsEnterpriseEnsureEnumerationLogger(cmd, opts),
 		filepath.Join(t.TempDir(), "config.yaml"),
 	)
 	if cleanup != nil {
 		cleanup()
+	}
+	// A JSON ensure keeps the enumerator's lines for the lifecycle log, off
+	// the output an MDM parses.
+	if calls != 0 && (stderr.Len() != 0 || len(opts.diagnostics) != 1 ||
+		opts.diagnostics[0] != "[hook-enumerator] skipped S-1-5-18: not an interactive-user SID") {
+		t.Fatalf("JSON ensure printed %q and kept %q", stderr.String(), opts.diagnostics)
 	}
 	// The config was loaded with data_dir on the protected staging directory,
 	// and every failed staging removed it.

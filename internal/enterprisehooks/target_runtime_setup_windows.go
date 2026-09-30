@@ -143,6 +143,12 @@ const (
 	// LocalSystem and Administrators only. The canonical file DACL is also
 	// accepted, for a lock a later pass canonicalized.
 	windowsManagedRuntimeCleanupOwnedLockFile
+	// windowsManagedRuntimeCleanupConnectorBackupFile is a connector backup
+	// record (connector.writeManagedFileBackup, as the account): owned by the
+	// account, with a protected DACL of full control for the account and
+	// LocalSystem only. The canonical file DACL is also accepted, for a
+	// record the guardian hardened after a successful setup.
+	windowsManagedRuntimeCleanupConnectorBackupFile
 )
 
 // windowsManagedRuntimeCleanupOwnedLocks are the root leaves the connector
@@ -522,7 +528,7 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			}
 			backups := make(map[string]windowsManagedRuntimeCleanupFileContract, len(files.backups))
 			for _, leaf := range files.backups {
-				backups[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+				backups[leaf] = windowsManagedRuntimeCleanupConnectorBackupFile
 			}
 			spec.backupFiles[name] = backups
 		}
@@ -1722,6 +1728,9 @@ type windowsManagedRuntimePinnedCleanupDir struct {
 	id     string
 	names  map[string]struct{}
 	files  []*windowsManagedRuntimePinnedCleanupFile
+	// connectorBackup marks connector_backups and its connector folders,
+	// which may keep their connector setup descriptor.
+	connectorBackup bool
 }
 
 type windowsManagedRuntimePinnedCleanupTree struct {
@@ -1806,7 +1815,7 @@ func removeWindowsManagedRuntimeRootContents(
 		return fmt.Errorf("enterprise hooks: managed runtime cleanup root changed after preflight: %w", err)
 	}
 	for _, dir := range tree.dirs {
-		if err := validateWindowsTargetOwnedDirectoryHandle(dir.handle, dir.path, target.sid); err != nil {
+		if err := validateWindowsManagedRuntimeCleanupSubdirectoryHandle(dir.handle, dir.path, target.sid, dir.connectorBackup); err != nil {
 			return fmt.Errorf("enterprise hooks: %s changed after preflight: %w", dir.label, err)
 		}
 		if identity, err := windowsManagedRuntimeHandleIdentity(dir.handle, true); err != nil || identity != dir.id {
@@ -1888,14 +1897,14 @@ func pinWindowsManagedRuntimeCleanupTree(
 	}
 	// pinDir pins one subdirectory and records its names; the caller then
 	// admits each name.
-	pinDir := func(parent windows.Handle, name, path, label string) (*windowsManagedRuntimePinnedCleanupDir, []string, error) {
+	pinDir := func(parent windows.Handle, name, path, label string, connectorBackup bool) (*windowsManagedRuntimePinnedCleanupDir, []string, error) {
 		handle, err := openWindowsManagedRuntimeCleanupChild(parent, name, true)
 		if err != nil {
 			return nil, nil, fmt.Errorf("enterprise hooks: pin %s: %w", label, err)
 		}
-		dir := &windowsManagedRuntimePinnedCleanupDir{parent: parent, name: name, path: path, label: label, handle: handle, names: make(map[string]struct{})}
+		dir := &windowsManagedRuntimePinnedCleanupDir{parent: parent, name: name, path: path, label: label, handle: handle, names: make(map[string]struct{}), connectorBackup: connectorBackup}
 		tree.dirs = append(tree.dirs, dir)
-		if err := validateWindowsTargetOwnedDirectoryHandle(handle, path, target.sid); err != nil {
+		if err := validateWindowsManagedRuntimeCleanupSubdirectoryHandle(handle, path, target.sid, connectorBackup); err != nil {
 			return nil, nil, err
 		}
 		if dir.id, err = windowsManagedRuntimeHandleIdentity(handle, true); err != nil {
@@ -1928,13 +1937,13 @@ func pinWindowsManagedRuntimeCleanupTree(
 		tree.rootNames[name] = struct{}{}
 		switch {
 		case name == "hooks":
-			hookDir, hooks, err = pinDir(root, name, filepath.Join(target.data, name), "managed hooks directory")
+			hookDir, hooks, err = pinDir(root, name, filepath.Join(target.data, name), "managed hooks directory", false)
 			if err != nil {
 				return fail(err)
 			}
 			continue
 		case name == windowsManagedRuntimeCleanupBackupDir && len(spec.backupFiles) > 0:
-			backupDir, backups, err = pinDir(root, name, filepath.Join(target.data, name), "managed connector backup directory")
+			backupDir, backups, err = pinDir(root, name, filepath.Join(target.data, name), "managed connector backup directory", true)
 			if err != nil {
 				return fail(err)
 			}
@@ -1973,7 +1982,7 @@ func pinWindowsManagedRuntimeCleanupTree(
 		if !allowed {
 			return fail(fmt.Errorf("enterprise hooks: refuse managed connector backup cleanup with unexpected entry %q", connectorName))
 		}
-		dir, leaves, err := pinDir(backupDir.handle, connectorName, filepath.Join(backupDir.path, connectorName), "managed "+connectorName+" backup directory")
+		dir, leaves, err := pinDir(backupDir.handle, connectorName, filepath.Join(backupDir.path, connectorName), "managed "+connectorName+" backup directory", true)
 		if err != nil {
 			return fail(err)
 		}
@@ -2076,6 +2085,27 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
+	case windowsManagedRuntimeCleanupConnectorBackupFile:
+		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
+			return "", fmt.Errorf("enterprise hooks: connector backup cleanup file owner or DACL provenance is invalid")
+		}
+		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
+			system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+			if err != nil {
+				return "", err
+			}
+			if err := validateWindowsManagedRuntimeExactFileACL(label, "connector backup", descriptor, dacl, []*windows.SID{target.sid, system}); err != nil {
+				return "", err
+			}
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: connector backup cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
 	case windowsManagedRuntimeCleanupGatewayFile:
 		administrators, administratorsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 		if administratorsErr != nil || ownerDefaulted || (!owner.Equals(target.sid) && !owner.Equals(administrators)) {
@@ -2100,13 +2130,6 @@ func validateWindowsManagedRuntimeOwnedLockACL(
 	dacl *windows.ACL,
 	target *windows.SID,
 ) error {
-	control, _, err := descriptor.Control()
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect owned lock DACL control for %s: %w", label, err)
-	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		return fmt.Errorf("enterprise hooks: owned lock DACL is not protected on %s", label)
-	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		return err
@@ -2115,10 +2138,28 @@ func validateWindowsManagedRuntimeOwnedLockACL(
 	if err != nil {
 		return err
 	}
-	expected := []*windows.SID{target, system, administrators}
+	return validateWindowsManagedRuntimeExactFileACL(label, "owned lock", descriptor, dacl, []*windows.SID{target, system, administrators})
+}
+
+// validateWindowsManagedRuntimeExactFileACL requires a protected DACL of
+// exactly one non-inherited full-control ACE for each expected principal.
+func validateWindowsManagedRuntimeExactFileACL(
+	label, kind string,
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	expected []*windows.SID,
+) error {
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect %s DACL control for %s: %w", kind, label, err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("enterprise hooks: %s DACL is not protected on %s", kind, label)
+	}
 	if int(dacl.AceCount) != len(expected) {
 		return fmt.Errorf(
-			"enterprise hooks: owned lock DACL on %s has %d ACEs, expected %d",
+			"enterprise hooks: %s DACL on %s has %d ACEs, expected %d",
+			kind,
 			label,
 			dacl.AceCount,
 			len(expected),
@@ -2128,11 +2169,11 @@ func validateWindowsManagedRuntimeOwnedLockACL(
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return fmt.Errorf("enterprise hooks: inspect owned lock ACE %d for %s: %w", index, label, err)
+			return fmt.Errorf("enterprise hooks: inspect %s ACE %d for %s: %w", kind, index, label, err)
 		}
 		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
 			mapWindowsUserPathGenericMask(ace.Mask) != windows.ACCESS_MASK(0x001f01ff) {
-			return fmt.Errorf("enterprise hooks: owned lock DACL on %s contains a non-canonical ACE at index %d", label, index)
+			return fmt.Errorf("enterprise hooks: %s DACL on %s contains a non-canonical ACE at index %d", kind, label, index)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		match := -1
@@ -2144,12 +2185,47 @@ func validateWindowsManagedRuntimeOwnedLockACL(
 		}
 		if match < 0 {
 			return fmt.Errorf(
-				"enterprise hooks: owned lock DACL on %s contains unexpected or duplicate ACE for principal %s",
+				"enterprise hooks: %s DACL on %s contains unexpected or duplicate ACE for principal %s",
+				kind,
 				label,
 				windowsSIDString(sid),
 			)
 		}
 		seen[match] = true
+	}
+	return nil
+}
+
+// validateWindowsManagedRuntimeCleanupSubdirectoryHandle requires the
+// canonical target-owned directory DACL. connector_backups and its connector folders
+// may instead keep the descriptor per-user connector setup creates them with
+// (safefile.ProtectDirectory as the account: owned by the account, LocalSystem
+// and OWNER RIGHTS full control, inherited). The guardian never hardens them.
+func validateWindowsManagedRuntimeCleanupSubdirectoryHandle(
+	handle windows.Handle,
+	path string,
+	target *windows.SID,
+	connectorBackup bool,
+) error {
+	canonicalErr := validateWindowsTargetOwnedDirectoryHandle(handle, path, target)
+	if canonicalErr == nil || !connectorBackup {
+		return canonicalErr
+	}
+	if err := validateWindowsGuardianACLHandle(handle, target, true, true, false); err != nil {
+		return err
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	if setup, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil {
+		return err
+	} else if !setup {
+		return canonicalErr
 	}
 	return nil
 }

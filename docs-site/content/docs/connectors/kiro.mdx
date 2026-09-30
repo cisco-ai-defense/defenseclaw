@@ -104,7 +104,9 @@ to fix that.
 
 On Windows, Kiro runs DefenseClaw's native hook binary instead of
 `kiro-hook.sh`. Both hook configs hold the same kind of command: the system
-Windows PowerShell with `-EncodedCommand`, whose script starts
+`cmd.exe /d /c`, which runs the system Windows PowerShell with
+`-EncodedCommand`, then `exit $LASTEXITCODE` on a second line. The script
+starts
 `defenseclaw-hook.exe hook --connector kiro --hook-surface v3` (the
 `.kiro/hooks` config) or `defenseclaw-hook.exe hook --connector kiro` (the CLI
 2.x agent) with .NET `Process.Start`, passes the hook's stderr through, waits
@@ -119,15 +121,19 @@ output to `Out-Host`, which makes PowerShell wait for it and keep its exit
 status.
 
 Kiro proceeds past any exit status other than 0 and 2, so a block has to reach
-Kiro as exit 2:
+Kiro as exit 2. It does in every way Kiro can start the command:
 
-| How Kiro starts the command | Exit status Kiro sees for a block |
-| --- | --- |
-| `cmd.exe /c` (what Node's `shell: true` and `cmd /C` do), or directly | 2 |
-| `powershell -Command` or `pwsh -Command` | 1: PowerShell reports any native exit status other than 0 as 1, and no command that also works in `cmd.exe` can change that |
+- `pwsh -Command` or `powershell -Command` (Kiro CLI 2.24 starts every hook as
+  `"pwsh" -Command "<command>"`). PowerShell reports a native exit status other
+  than 0 as 1 unless the command exits with it; the second line,
+  `exit $LASTEXITCODE`, does that.
+- `cmd.exe /c` (what Node's `shell: true` and `cmd /C` do), or a direct start.
+  `cmd.exe` stops reading the command at the line break, so it never runs the
+  second line.
 
-Kiro does not document which shell runs hook commands on Windows; confirm it
-on your Kiro build before relying on Windows hook enforcement.
+Commands written by earlier builds were the PowerShell command alone, which a
+PowerShell host reported as 1 for a block; run `defenseclaw setup kiro` again
+to replace them.
 
 A hook that fails closed (an administrator-managed hook, or fail mode `closed`
 from the hook sidecar, `--fail-mode` or `DEFENSECLAW_FAIL_MODE`) also exits 2

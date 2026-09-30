@@ -47,6 +47,47 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 	return windowsEnterpriseAccountDeleted(row.SID)
 }
 
+// enterpriseHookSignedOutAccount names, on a standalone deployment only, the
+// account of a guardian row that failed only because the account is signed
+// out ("user (SID)"), or returns "" for any other row. Tests replace it.
+var enterpriseHookSignedOutAccount = func(row enterpriseHookReconcileRow) string {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !enterpriseHookSessionUnavailable(row.Error) ||
+		enterpriseHookRemovedAccountRow(row) {
+		return ""
+	}
+	return enterpriseHookWindowsAccountLabel(row)
+}
+
+// enterpriseHookSessionUnavailable matches the two errors a protected
+// target records while its account has no active Windows session.
+func enterpriseHookSessionUnavailable(message string) bool {
+	return strings.Contains(message, "exact active Windows session is unavailable") ||
+		strings.Contains(message, "no active interactive session token matches")
+}
+
+// enterpriseHookWindowsAccountLabel is "user (SID)", looking the account up
+// when the row carries only its SID.
+func enterpriseHookWindowsAccountLabel(row enterpriseHookReconcileRow) string {
+	user, sid := strings.TrimSpace(row.User), strings.TrimSpace(row.SID)
+	if user == "" && sid != "" {
+		if parsed, err := windows.StringToSid(sid); err == nil {
+			if account, domain, _, err := parsed.LookupAccount(""); err == nil {
+				user = account
+				if domain != "" {
+					user = domain + `\` + account
+				}
+			}
+		}
+	}
+	switch {
+	case user == "":
+		return sid
+	case sid == "":
+		return user
+	}
+	return user + " (" + sid + ")"
+}
+
 // enterpriseHookManifestCatchUpAllowed reports a standalone deployment,
 // whose status waits for the guardian to activate a targets.yaml the
 // enumerator just republished (enterpriseHookManifestActivationIssue).
