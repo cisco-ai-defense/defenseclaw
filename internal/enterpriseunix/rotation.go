@@ -72,14 +72,20 @@ import (
 //     names only B (A's credentials are refused from then on), clear the
 //     intent.
 //
-// A failure before the commit removes B, waits until only A is live and
-// reconciles every user back to A. Credentials derive from the key, so
-// restoring A restores each user's A credentials exactly. A run that is
-// interrupted is settled by the next lifecycle run
+// A failure before the commit moves B aside as the retiring key
+// (connector.RetiringUserScopedTokenKeyPath), which the gateway still
+// accepts but the guardian no longer renders from, reconciles every user
+// back to A, then removes B and waits until only A is live. Users already on
+// B are therefore not refused while they move back. Credentials derive from
+// the key, so restoring A restores each user's A credentials exactly. An
+// interrupt (Ctrl+C, SIGTERM) cancels the run's context, which takes the
+// same rollback. A run that is killed is settled by the next lifecycle run
 // (recoverInterruptedRotation): the rename is the commit point, so a
 // committed key equal to B completes the rotation and anything else restores
-// A. Keys leave this process only as files with the committed key's custody,
-// and results name them only by fingerprint.
+// A. Until then the gateway and the guardian honor a staged or retiring key
+// only for connector.RotationKeyMaxAge, so a killed rotation stops widening
+// the accepted keys on its own. Keys leave this process only as files with
+// the committed key's custody, and results name them only by fingerprint.
 
 // ActionRotateCredentials rotates the per-user credential key.
 const ActionRotateCredentials = "rotate-credentials"
@@ -127,6 +133,11 @@ func (e *Env) committedUserKeyPath() string {
 
 func (e *Env) stagedUserKeyPath() string {
 	path, _ := connector.PendingUserScopedTokenKeyPath(e.P(e.Layout.DataDir))
+	return path
+}
+
+func (e *Env) retiringUserKeyPath() string {
+	path, _ := connector.RetiringUserScopedTokenKeyPath(e.P(e.Layout.DataDir))
 	return path
 }
 
@@ -238,9 +249,22 @@ func (e *Env) withReconcileLock(ctx context.Context, fn func() error) error {
 	return fn()
 }
 
-// removeStagedKey removes a staged key (a no-op when there is none).
-func (e *Env) removeStagedKey() error {
-	err := removeFile(e.stagedUserKeyPath())
+// removeRotationKeys removes a staged and a retiring key (a no-op when
+// there are none).
+func (e *Env) removeRotationKeys() error {
+	err := errors.Join(removeFile(e.stagedUserKeyPath()), removeFile(e.retiringUserKeyPath()))
+	syncDir(filepath.Dir(e.stagedUserKeyPath()))
+	return err
+}
+
+// retireStagedKey moves a staged key aside as the retiring key: the gateway
+// keeps accepting its credentials while the guardian renders from the
+// committed key again. Without a staged key it is a no-op.
+func (e *Env) retireStagedKey() error {
+	err := os.Rename(e.stagedUserKeyPath(), e.retiringUserKeyPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	syncDir(filepath.Dir(e.stagedUserKeyPath()))
 	return err
 }
@@ -577,7 +601,8 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 		r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
 		return 0
 	}
-	defer l.describe(ctx, record, false)
+	// An interrupt cancels ctx; the result still describes the host.
+	defer l.describe(context.WithoutCancel(ctx), record, false)
 	refuse := func(format string, args ...any) int {
 		r.AddError(codeRotation, fmt.Sprintf(format, args...)+"; nothing was changed")
 		return 0
@@ -593,10 +618,10 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	case !present:
 		return refuse("there is no per-user credential key to rotate yet; the hook guardian creates it when it enrolls the first user")
 	}
-	if exists(env.stagedUserKeyPath()) {
+	if exists(env.stagedUserKeyPath()) || exists(env.retiringUserKeyPath()) {
 		// No rotation owns it (recoverInterruptedRotation settled any
 		// recorded one), so nothing authorized it: remove it.
-		if err := env.withReconcileLock(ctx, env.removeStagedKey); err != nil {
+		if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
 			return refuse("an unrecorded staged key could not be removed: %v", err)
 		}
 		r.AddWarning(codeRotationRecovered, "removed a staged per-user credential key that no rotation recorded")
@@ -681,6 +706,10 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 			}
 		}
 	}()
+	if prepareErr == nil && ctx.Err() != nil {
+		// An interrupt rolls back even when every user is ready to commit.
+		prepareErr = errors.New("the run was interrupted")
+	}
 	if prepareErr != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 		if err := l.abortRotation(ctx, gateway, record, keyA, selected, preflight.ManifestSHA256); err != nil {
@@ -720,7 +749,9 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	}
 	r.Changes = append(r.Changes,
 		"agents that were already running send telemetry with the old key's credentials, which the gateway now refuses; ask users to restart their agents")
-	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idB}); err != nil {
+	// An interrupt after the commit does not cut this wait short: the
+	// rotation is done, and the result should say whether A is retired.
+	if err := l.waitGatewayKeys(context.WithoutCancel(ctx), gateway, record.ServiceUID, []string{idB}); err != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s committed key %s, but the gateway has not retired key %s: %v; run verify", operation, shortKeyID(idB), shortKeyID(idA), err))
 	}
 	if err := env.clearRotationIntent(); err != nil {
@@ -729,20 +760,20 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	return 0
 }
 
-// abortRotation restores key A: it removes the staged key, waits until the
-// gateway accepts only A and reconciles every user back to A.
+// abortRotation restores key A: it retires the staged key, reconciles every
+// user back to A while the gateway still accepts both keys, then removes the
+// new key and waits until the gateway accepts only A.
 func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Deployment, keyA string, selected map[string]enterprisehooks.CredentialAttestationTarget, manifestSHA256 string) error {
 	env := l.env
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rotationRollbackTimeout)
 	defer cancel()
-	if err := env.withReconcileLock(ctx, env.removeStagedKey); err != nil {
-		return fmt.Errorf("the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
+	if err := env.withReconcileLock(ctx, env.retireStagedKey); err != nil {
+		if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
+			return fmt.Errorf("the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
+		}
 	}
 	var problems []string
 	idA := connector.UserScopedTokenKeyFingerprint(keyA)
-	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idA}); err != nil {
-		problems = append(problems, err.Error())
-	}
 	restored := false
 	lastID := env.attestationID()
 	for attempt := 0; attempt < rotationAttempts && !restored; attempt++ {
@@ -758,6 +789,14 @@ func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Dep
 			break
 		}
 		restored = done
+	}
+	// Every user is back on A, or the attempts ran out: the new key goes
+	// either way, so the rollback never leaves both keys accepted.
+	if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
+		return fmt.Errorf("rollback: the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
+	}
+	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idA}); err != nil {
+		problems = append(problems, err.Error())
 	}
 	if err := env.clearRotationIntent(); err != nil {
 		problems = append(problems, "the rotation record could not be removed: "+err.Error())
@@ -792,7 +831,13 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 		r.AddWarning(codeRotationRecovered, fmt.Sprintf("completed an interrupted credential rotation that had committed key %s", shortKeyID(committedID)))
 		return
 	}
-	if err := env.withReconcileLock(ctx, env.removeStagedKey); err != nil {
+	// Users the interrupted run had already moved go back to the committed
+	// key on this reconcile, while the gateway still accepts the retired
+	// key; it goes once they are back.
+	if err := env.withReconcileLock(ctx, env.retireStagedKey); err == nil {
+		_ = l.triggerGuardianReconcile(ctx)
+	}
+	if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
 		r.AddWarning(codeRotationRecovered, fmt.Sprintf("an interrupted credential rotation could not be rolled back yet: %v", err))
 		return
 	}
@@ -800,9 +845,6 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 		r.AddWarning(codeRotationRecovered, "the interrupted rotation's record could not be removed: "+err.Error())
 		return
 	}
-	// Users the interrupted run had already moved go back to the committed
-	// key on this reconcile.
-	_ = l.triggerGuardianReconcile(ctx)
 	kept := "the committed key"
 	if committedID != "" {
 		kept = "key " + shortKeyID(committedID)

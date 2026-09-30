@@ -1633,6 +1633,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	_ = env.clearPending()
+	// An interrupted credential rotation ends here too: the services are
+	// stopped, so its staged key would otherwise outlive the deployment and
+	// be accepted again by a reinstall until a lifecycle run settled it.
+	// The committed key stays with the retained state.
+	if err := env.removeRotationKeys(); err != nil {
+		errs = append(errs, err)
+	} else if err := env.clearRotationIntent(); err != nil {
+		errs = append(errs, err)
+	}
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
 	_ = removeFile(env.rejectedConfigPath())
