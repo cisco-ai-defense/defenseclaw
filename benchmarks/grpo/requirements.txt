@@ -1,0 +1,8 @@
+trl>=0.15.0
+unsloth
+transformers>=4.50.0
+datasets
+torch>=2.5.0
+matplotlib
+numpy
+psutil

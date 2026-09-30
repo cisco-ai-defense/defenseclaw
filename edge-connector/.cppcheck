@@ -1,0 +1,24 @@
+# cppcheck configuration for DefenseClaw Lite
+# Run: cppcheck --project=.cppcheck src/ include/
+
+# Enable all checks
+--enable=all
+
+# Suppress style-only findings for generated code
+--suppress=unusedFunction:generated/*
+
+# Include paths
+-I include/
+-I build/include/
+-I generated/
+
+# Platform: 32-bit ARM (conservative)
+--platform=unix32
+
+# Standards
+--std=c11
+
+# Banned functions check (REQ-51)
+# These will be caught as errors:
+# strcpy, sprintf, sscanf, gets, strcat
+--suppress=missingIncludeSystem
