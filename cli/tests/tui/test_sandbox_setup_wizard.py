@@ -472,6 +472,14 @@ def test_a_stopped_gateway_is_not_an_install(openshell_install) -> None:
     assert "--install-openshell" not in model.wizard_command_preview()
 
 
+def test_a_stopped_service_while_a_gateway_answers() -> None:
+    # Something else runs the gateway that answers: it is the service that
+    # is stopped, not the gateway.
+    check = sandbox_machine_check(_stopped(openshell_install=False, gateway_version="0.1.1"))
+    assert "✗ OpenShell gateway service stopped" in check.summary.split("\n")
+    assert "✗ OpenShell gateway not running" not in check.summary.split("\n")
+
+
 def test_the_install_follows_the_doctors_openshell_install() -> None:
     # The Go doctor says when setup's install step runs NVIDIA's installer
     # (DoctorReport.OpenShellInstallNeeded): a CLI newer than supported is
@@ -682,15 +690,15 @@ def _lines(report) -> list[str]:
 def test_a_microvm_gateway_skips_bind_mounts_and_checks_its_driver() -> None:
     check = sandbox_machine_check(MAC_MICROVM)
     assert check.summary.split("\n") == MAC_MICROVM_LINES
-    # With OpenShell installed its install would change nothing: the hint
-    # is the doctor's fix, and a yes is what has setup install e2fsprogs.
+    # With OpenShell installed the hint is the doctor's fix, and a yes is
+    # what has setup install e2fsprogs: the only way from the wizard.
     assert check.openshell_needed is False and check.openshell_attention == "vm-driver"
     assert check.openshell_detail == "the MicroVM driver needs attention: e2fsprogs is not installed"
     install = _install_field(check, "darwin")
     assert install.value == "no"
     assert install.hint == (
-        "the MicroVM driver needs attention: e2fsprogs is not installed; installing OpenShell would change nothing. "
-        "Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
+        "the MicroVM driver needs attention: e2fsprogs is not installed; OpenShell is installed, and yes lets setup "
+        "install e2fsprogs (brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
     )
     fix = {"summary": "install what the MicroVM driver needs with Homebrew", "command": "brew install e2fsprogs"}
     fixed = {**MAC_MICROVM, "checks": [*MAC_MICROVM["checks"][:5], {**MAC_MICROVM["checks"][5], "fix": fix}]}

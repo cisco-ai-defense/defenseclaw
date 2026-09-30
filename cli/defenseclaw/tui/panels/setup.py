@@ -4862,7 +4862,9 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         if attention == "gateway-version" and gateway and gateway != version:
             parts.append(f"✗ {name}, but the gateway runs {gateway}")
         elif status("gateway-service") == "fail":
-            parts.append("✗ OpenShell gateway not running")
+            # A gateway that answers while the service is stopped is run
+            # by something else.
+            parts.append("✗ OpenShell gateway service stopped" if gateway else "✗ OpenShell gateway not running")
         else:
             parts.append("✗ OpenShell gateway needs attention")
     elif not needed:
@@ -4992,6 +4994,15 @@ def sandbox_wizard_fields(
         machine_line = machine.summary
         install = "yes"
         install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_attention == "vm-driver":
+        # Under the install's consent setup installs e2fsprogs and signs
+        # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
+        machine_line = machine.summary
+        install = "no"
+        install_hint = (
+            f"{machine.openshell_detail}; OpenShell is installed, and yes lets setup install e2fsprogs "
+            "(brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
+        )
     elif machine.openshell_attention:
         # The doctor's fix: installing OpenShell would change nothing.
         machine_line = machine.summary
@@ -5001,7 +5012,7 @@ def sandbox_wizard_fields(
         install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
     # Setup gets to e2fsprogs only past the OpenShell and gateway checks: not
     # where it refuses the OpenShell or stops on a gateway fix.
-    stops = machine is not None and (machine.openshell_refused or machine.openshell_attention not in {"", "vm-driver"})
+    stops = machine is not None and (machine.openshell_refused or machine.openshell_attention != "")
     if macos and not stops:
         install_hint += e2fsprogs
     fields += [
