@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Per-user AI discovery on macOS no longer reads `partial` with no
+  cause.** The package manifest scan counted each folder macOS privacy
+  protection keeps from the guardian's per-user worker (such as `~/.Trash`)
+  as an error, and only the process and model file scans named themselves,
+  so every scan ended `partial scan: `. That scan now skips those folders as
+  the model file scan does, and every failing scan is named.
 - **Kiro's hook file goes when its version key is gone.** Teardown still
   left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
   file had lost its `version` key (as `uninstall --purge` on macOS found in

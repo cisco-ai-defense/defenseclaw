@@ -1141,6 +1141,26 @@ func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {
 	t.Fatalf("signals = %+v, want the account's own process", report.Signals)
 }
 
+// A partial per-user scan names the detector that failed. Only the process
+// and model file scans used to, so a package manifest walk error on macOS
+// reached the gateway as "partial scan: " with no cause.
+func TestScanUserHomeNamesAFailingPackageManifestWalk(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder this account cannot read")
+	}
+	home := t.TempDir()
+	locked := filepath.Join(home, "project")
+	if err := os.Mkdir(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	opts := UserScanOptions{Mode: "enhanced", IncludePackageManifests: true}
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), opts, []AISignature{testAISignature()})
+	if report.Summary.Result != "partial" || report.Summary.DetectorErrors["package_manifest"] == "" {
+		t.Fatalf("summary = %+v, want partial naming package_manifest", report.Summary)
+	}
+}
+
 func TestIngestExternalReport_DoesNotNotifyAutomationObservers(t *testing.T) {
 	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
 		Enabled: true,

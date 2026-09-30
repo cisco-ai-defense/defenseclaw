@@ -1312,10 +1312,10 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		})
 		out, files, err := fn()
 		if err != nil {
+			// Name every failing detector: a partial result that names
+			// none ("partial scan: ") gives the operator nothing to act on.
 			stats.Errors++
-			if name == "process" || name == "model_file" {
-				stats.DetectorErrors[name] = err.Error()
-			}
+			stats.DetectorErrors[name] = err.Error()
 		}
 		endedAt := time.Now()
 		child.end(AIDiscoveryV8DetectorResult{
@@ -2685,6 +2685,16 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 			// walks otherwise block shutdown for tens of seconds.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
+			}
+			if err != nil && macOSPrivacyDenied(runtime.GOOS, err) {
+				// Skipped as the model scan does: macOS privacy
+				// protection keeps ~/.Trash and other apps' folders
+				// from a process without Full Disk Access, which is
+				// not an error of this scan.
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			if err != nil {
 				// Permission errors / vanished entries are
