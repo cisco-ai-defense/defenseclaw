@@ -604,6 +604,20 @@ deleted.
 - The Kiro CLI sandbox image rebuilds: its agent hooks now set
   `timeout_ms` 30000, so a slow verdict no longer lets the tool run (see
   Kiro CLI tool hooks).
+- Claude Code's `Agent` (subagent) calls are recorded in full (#957), on the
+  host and in sandboxes. Claude Code 2.1.156 sends the call's `PostToolUse`
+  after the subagent's own hooks. It reached the gateway, but its
+  correlation failed as stale, so the audit had no decision and no end for
+  the call, and the `PostToolBatch` recorded as `ClaudeCodeTool` was its
+  only result. Main-agent hooks, which carry no `agent_id`, also lost their
+  agent while a subagent's cursor was active (an interrupted subagent's
+  stays active), and each later prompt gave the main agent a new ID. Now
+  every hook is recorded and the main agent keeps one ID. Each subagent's
+  calls carry the subagent's ID and type, with the main agent as parent at
+  depth 1, also for parallel `Agent` calls. The correlation ledger links
+  each subagent to the `Agent` call that ran it (`caused_by`,
+  `spawned-agent-tool-result`). A `PostToolBatch` is recorded as a
+  `tool_batch` listing its calls. Both drivers.
 
 ### OpenShell sandbox lifecycle and configuration
 

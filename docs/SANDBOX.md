@@ -1719,7 +1719,13 @@ compromised hook shows:
   | Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
 
   A failure event closes a call but never proves tamper: Claude Code can
-  report a failure before `PreToolUse` ran. Kiro CLI 2.24.1 sends no
+  report a failure before `PreToolUse` ran. Claude Code's `Agent` tool is
+  paired like any other call. Measured on 2.1.156, its `PostToolUse` comes
+  after the subagent's own hooks, whose calls carry their own `tool_use_id`,
+  and after `SubagentStop`. A subagent interrupted with Esc sends no
+  `PostToolUse`, and a call the user refuses at Claude Code's permission
+  prompt appears only in its turn's `PostToolBatch`. Either call stays
+  open, which is not tamper. Kiro CLI 2.24.1 sends no
   per-call ID, so the manager keys its calls by a digest of the call's
   session, tool name and canonical tool input, which Kiro sends unchanged
   with both events. Measured: Kiro sends `postToolUse` only for a tool that
