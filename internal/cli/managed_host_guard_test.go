@@ -13,11 +13,14 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -69,6 +72,27 @@ func TestRefusePerUserGatewayOnWindowsStandaloneHost(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
 		t.Fatalf("the managed gateway service refused: %v", err)
+	}
+}
+
+// On a Windows standalone computer `defenseclaw setup rotate-token` was an
+// unknown command; other hosts get no setup command.
+func TestManagedWindowsSetupAnswer(t *testing.T) {
+	restore := managedHostWindowsStandalone
+	defer func() { managedHostWindowsStandalone = restore }()
+	root := &cobra.Command{Use: "defenseclaw"}
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	addManagedWindowsSetupAnswer(root)
+	if len(root.Commands()) != 0 {
+		t.Fatalf("a host without a standalone deployment got %v", root.Commands())
+	}
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	addManagedWindowsSetupAnswer(root)
+	root.SetArgs([]string{"setup", "rotate-token", "--yes"})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("setup rotate-token on a managed Windows computer: %v", err)
 	}
 }
 

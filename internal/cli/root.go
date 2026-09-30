@@ -385,6 +385,7 @@ func ExecuteContext(ctx context.Context) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	addManagedWindowsSetupAnswer(rootCmd)
 	err := rootCmd.ExecuteContext(ctx)
 	if err == nil {
 		return 0

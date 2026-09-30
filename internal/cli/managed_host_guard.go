@@ -22,6 +22,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -59,6 +61,34 @@ func refusePerUserGatewayOnManagedHost() error {
 // managedHostUnixRecord returns the unix standalone runtime descriptor when
 // this host has one an administrator wrote. An untrusted record is reported
 // to warn (when non-nil) and ignored.
+// addManagedWindowsSetupAnswer gives a Windows standalone managed computer an
+// answer to the per-user `defenseclaw setup ...` commands. Its payload ships
+// this binary as defenseclaw.exe and no per-user CLI, so `defenseclaw setup
+// rotate-token` printed `unknown command "setup" ... Did you mean this? stop`.
+// Other hosts, Secure Client included, get no such command.
+func addManagedWindowsSetupAnswer(root *cobra.Command) {
+	where, present := managedHostWindowsStandalone()
+	if !present {
+		return
+	}
+	for _, command := range root.Commands() {
+		if command.Name() == "setup" {
+			return
+		}
+	}
+	root.AddCommand(&cobra.Command{
+		Use:                "setup",
+		Hidden:             true,
+		DisableFlagParsing: true,
+		SilenceUsage:       true,
+		RunE: func(*cobra.Command, []string) error {
+			return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
+				"commands are not available; your administrator manages its connectors and credentials. "+
+				"Rotating the credentials of a managed Windows deployment is not available yet. Nothing was changed", where)
+		},
+	})
+}
+
 func managedHostUnixRecord(warn io.Writer) (string, bool) {
 	path := managedHostDescriptorPath()
 	if path == "" {

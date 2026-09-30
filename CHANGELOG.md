@@ -71,6 +71,11 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **`defenseclaw setup` answers on a managed Windows computer.** The
+  enterprise standalone payload has no per-user CLI, so
+  `defenseclaw setup rotate-token` printed `unknown command "setup"` and
+  suggested `stop`. It now says the computer is managed and per-user setup
+  commands are not available. Other computers are unchanged.
 - **`uninstall --all --binaries` ends cleanly, and its plan lists only
   what is there.** After removing everything, the command printed a
   `ModuleNotFoundError` traceback and exited 1, because the update notice
