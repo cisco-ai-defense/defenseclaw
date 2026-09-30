@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -73,8 +74,10 @@ func watchdogProcessExecutableMatches(info watchdogPIDInfo) bool {
 		return true
 	}
 	// A watchdog whose file was replaced or removed while it ran shows the
-	// recorded path plus Linux's " (deleted)" marker; it is still the owner.
-	return current == info.Executable || current == info.Executable+" (deleted)"
+	// recorded path plus Linux's " (deleted)" marker, or the retirement
+	// custody copy an install moved it to; it is still the owner.
+	return current == info.Executable || current == info.Executable+" (deleted)" ||
+		daemon.IsRetiredInstallCopy(info.Executable, current)
 }
 
 func watchdogCreateControl() (string, <-chan struct{}, func(), error) {
