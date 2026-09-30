@@ -111,7 +111,7 @@ defenseclaw sandbox activity -f
 14:06:02 myapp-7f3a ✗ tool Bash blocked: <the rule's reason>
 ```
 
-{/* SCREENSHOT: terminal-activity-feed.png — `defenseclaw sandbox activity -f` in a second terminal during a session, with ✓ sites, one ⚠ finding and one ✗ blocked site with its unblock command */}
+![defenseclaw sandbox activity -f: sites the agent reached (example.org, pypi.org, registry.npmjs.org, api.github.com) and two blocked ones (webhook.site, pastebin.com), each with its unblock command](/images/sandboxes/screens/terminal-activity-feed.png)
 
 | Mark | Meaning |
 | --- | --- |
@@ -254,7 +254,7 @@ Bring the changes back? [A] apply (3-way)  [b] branch dc/myapp-1c2d  [p] patch f
 </Tab>
 </Tabs>
 
-{/* SCREENSHOT: terminal-session-summary.png — the end-of-session summary with the risk line and the "Keep changes?" (Linux) or "Bring the changes back?" (macOS) question */}
+![End of a macOS sandbox session: tool calls, sites contacted and blocked, files changed, and the question to bring the changes back by apply, branch or patch](/images/sandboxes/screens/terminal-session-summary.png)
 
 Look again later, with the full list and the diff:
 
