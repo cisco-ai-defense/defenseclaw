@@ -9390,7 +9390,7 @@ def _setup_observability_alias(
     yes: bool,
     restart: bool,
     with_local_stack: bool,
-    mode: str = "observe",
+    mode: str | None = None,
     workspace_dir: str | None = None,
     replace: bool = False,
     rule_pack: str | None = None,
@@ -9408,7 +9408,8 @@ def _setup_observability_alias(
     the other) keeps the wiring linear: each Click command parses its
     own flags, then defers to this helper for the actual work.
 
-    *mode* defaults to ``observe`` (the safe one-line setup the alias
+    *mode* ``None`` keeps an already configured connector's mode and
+    starts a new one in ``observe`` (the safe one-line setup the alias
     was designed for). Pass ``action`` to provision hook-driven
     enforcement: the connector's pre-tool hook returns a deny
     verdict on policy hits and the agent blocks inside its own
@@ -9437,6 +9438,11 @@ def _setup_observability_alias(
             "Re-run without --workspace."
         )
 
+    if mode is None:
+        # Doctor's repair advice is `setup <connector> --yes`: leaving
+        # --mode out must not turn an action install into observe.
+        gc = app.cfg.guardrail
+        mode = gc.effective_mode(connector) if connector in _configured_connector_set(gc) else "observe"
     normalized_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
     interactive = not yes and _is_interactive()
 
@@ -10447,13 +10453,13 @@ def _hook_guardrail_options(fn):
 @click.option(
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
-    default="observe",
-    show_default=True,
+    default=None,
     help=(
         "Hook policy mode. observe records only; action returns a deny "
         "verdict from PreToolUse on policy hits so Codex blocks the "
         "tool call inside its own permission flow. No proxy is involved "
-        "in either mode."
+        "in either mode. Default: observe on first setup; a re-run keeps "
+        "the current mode."
     ),
 )
 @click.option(
@@ -10534,7 +10540,8 @@ def setup_codex(
       • Notify  — agent-turn-complete webhooks via the bundled
                   native notification bridge
 
-    Default mode is ``observe`` (record only). Pass ``--mode action``
+    Default mode is ``observe`` (record only); re-running setup keeps
+    the current mode. Pass ``--mode action``
     to provision hook-driven enforcement: the PreToolUse hook returns
     a deny verdict on policy hits and Codex blocks via its permission
     flow. No proxy listener binds in either mode — Codex talks
@@ -10598,13 +10605,13 @@ def setup_codex(
 @click.option(
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
-    default="observe",
-    show_default=True,
+    default=None,
     help=(
         "Hook policy mode. observe records only; action returns a deny "
         "verdict from PreToolUse on policy hits so Claude Code blocks "
         "the tool call inside its own permission flow. No proxy is "
-        "involved in either mode."
+        "involved in either mode. Default: observe on first setup; a "
+        "re-run keeps the current mode."
     ),
 )
 @click.option(
@@ -10681,7 +10688,8 @@ def setup_claude_code(
       • OTel  — native Claude Code OTel exporter (env-driven) pointing
                 at the gateway's /v1/logs and /v1/metrics
 
-    Default mode is ``observe`` (record only). Pass ``--mode action``
+    Default mode is ``observe`` (record only); re-running setup keeps
+    the current mode. Pass ``--mode action``
     to provision hook-driven enforcement: the PreToolUse hook returns
     a deny verdict on policy hits and Claude Code blocks via its
     native permission flow (including HITL when ``--human-approval``
@@ -11009,7 +11017,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             f"Configure DefenseClaw for {label} via its {surface_name}.\n\n"
             "Configures this connector in the hook connector set so CLI/TUI "
             "scanners read that agent's documented local surfaces. Default "
-            "mode is observe. Action may enable agent-native blocking/approval verdicts with "
+            "mode is observe on first setup; a re-run keeps the current mode. "
+            "Action may enable agent-native blocking/approval verdicts with "
             "--mode action on supported events. No proxy is involved in either mode."
             f"{product_note}"
             f"{platform_note}"
@@ -11051,12 +11060,12 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     @click.option(
         "--mode",
         type=click.Choice(["observe", "action"], case_sensitive=False),
-        default="observe",
-        show_default=True,
+        default=None,
         help=(
             "Lifecycle policy mode. observe records only; action requests the connector's "
             "native blocking or approval verdict on supported events. Cursor action uses "
-            "event-native deny and does not enable human approval."
+            "event-native deny and does not enable human approval. Default: observe on "
+            "first setup; a re-run keeps the current mode."
         ),
     )
     @click.option(

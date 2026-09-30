@@ -518,6 +518,26 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 )
                 restart_mock.assert_not_called()
 
+    def test_rerun_without_mode_keeps_the_current_mode(self):
+        # Doctor's repair advice is `setup opencode --yes`; with --mode
+        # defaulting to observe it turned an action install into observe.
+        supported = platform_support.supported_connectors(HOOK_ALIAS_CONNECTORS)
+        connector = "opencode" if "opencode" in supported else supported[0]
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            first = _invoke([connector, "--yes", "--mode", "action", "--no-restart"], self.app)
+            again = _invoke([connector, "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(first.exit_code, 0, msg=first.output)
+        self.assertEqual(again.exit_code, 0, msg=again.output)
+        self.assertEqual(self.app.cfg.guardrail.effective_mode(connector), "action")
+
     def test_omnigent_restart_reports_staged_policy_not_live_enforcement(self):
         with (
             patch(

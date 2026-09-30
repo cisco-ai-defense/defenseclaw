@@ -71,6 +71,11 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Re-running `defenseclaw setup <connector>` keeps its mode.** `--mode`
+  defaulted to observe, so `defenseclaw setup opencode --yes`, which doctor
+  recommends to repair the OpenCode plugin, turned an action install into
+  observe without a prompt or a warning. Without `--mode`, a connector that
+  is already configured keeps its mode; a new one still starts in observe.
 - **Per-user AI discovery on macOS no longer reads `partial` with no
   cause.** The package manifest scan counted each folder macOS privacy
   protection keeps from the guardian's per-user worker (such as `~/.Trash`)
