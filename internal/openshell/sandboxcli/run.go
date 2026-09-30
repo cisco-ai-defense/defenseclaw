@@ -1311,8 +1311,10 @@ func (a *App) createRequest(spec *harness.Spec, project string, o RunOptions, co
 // explainRun is what of the create request req the run files of its
 // sandbox depend on (sandboxapi.ExplainRun), without a secret: the values of
 // the --env variables spec's run files read (a variable whose name looks
-// like a secret's, or that holds HTTP headers, which carry credentials,
-// only by name), and the names of its credentials, never their values.
+// like a secret's, that holds HTTP headers, or whose value is a URL
+// carrying a credential, which the daemon refuses to bake into a run
+// image, only by name), and the names of its credentials, never their
+// values. It goes in a GET's query, which a log of request URLs keeps.
 func explainRun(spec *harness.Spec, req sandboxapi.CreateRequest) *sandboxapi.ExplainRun {
 	run := &sandboxapi.ExplainRun{}
 	if reader, ok := spec.Provider.(connector.SandboxRunEnvReader); ok {
@@ -1320,7 +1322,7 @@ func explainRun(spec *harness.Spec, req sandboxapi.CreateRequest) *sandboxapi.Ex
 			v, set := req.Env[k]
 			switch {
 			case !set:
-			case secretLooking(k) || strings.Contains(strings.ToUpper(k), "HEADERS"):
+			case secretLooking(k) || strings.Contains(strings.ToUpper(k), "HEADERS") || manager.CredentialURL(v):
 				run.EnvWithheld = append(run.EnvWithheld, k)
 			default:
 				if run.Env == nil {

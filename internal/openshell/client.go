@@ -518,6 +518,13 @@ const maxWaitBackoff = 5 * time.Second
 // or systemd's Restart=on-failure) or one poll timed out, while the wait
 // itself still has time.
 func transientWaitError(ctx context.Context, err error) bool {
+	return gatewayDidNotAnswer(ctx, err)
+}
+
+// gatewayDidNotAnswer reports a call that failed because the gateway did
+// not answer it: the gateway is unreachable or the call timed out, while
+// ctx itself still has time.
+func gatewayDidNotAnswer(ctx context.Context, err error) bool {
 	return ctx.Err() == nil && (IsUnavailable(err) || IsDeadlineExceeded(err))
 }
 

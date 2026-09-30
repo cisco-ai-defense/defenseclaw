@@ -234,10 +234,7 @@ func bakedSecret(files []connector.SandboxFile, extra map[string]string) string 
 		if v == "" {
 			continue
 		}
-		secret := slices.Contains(runFileSecretEnv, k)
-		if u, err := url.Parse(v); err == nil && (u.User != nil || u.Host != "" && (u.Fragment != "" || queryValue(u))) {
-			secret = true
-		}
+		secret := slices.Contains(runFileSecretEnv, k) || CredentialURL(v)
 		if secret && filesCarry(files, v) {
 			return k
 		}
@@ -656,12 +653,14 @@ var credentialPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
 const credentialMinLen = 20
 
 // mcpCredential reports an MCP server whose command line or URL looks like
-// it carries a credential: a URL with a query or fragment value (where
-// tokens and keys are passed), an argument that follows or holds the value
-// of a credential flag (--api-key VALUE, --token=VALUE), a NAME=VALUE
-// argument or a "Name: value" header with a credential name, a Bearer
-// value, or a value in a well-known credential format. It errs on the side
-// of leaving a server behind.
+// it carries a credential: a URL with a user name or password, or a query
+// or fragment value (where tokens and keys are passed), whether it is the
+// server's URL or an argument (npx mcp-remote https://...), as is or as
+// the value of a NAME=URL or --flag=URL argument; an argument that
+// follows or holds the value of a credential flag (--api-key VALUE,
+// --token=VALUE), a NAME=VALUE argument or a "Name: value" header with a
+// credential name, a Bearer value, or a value in a well-known credential
+// format. It errs on the side of leaving a server behind.
 func mcpCredential(s connector.SandboxMCPServer) bool {
 	if s.URL != "" {
 		if u, err := url.Parse(s.URL); err != nil || u.User != nil || u.Fragment != "" || queryValue(u) {
@@ -685,6 +684,12 @@ func mcpCredential(s connector.SandboxMCPServer) bool {
 			return true
 		}
 		for _, v := range []string{arg, value, strings.TrimSpace(headerValue)} {
+			// A URL argument is judged like the server's URL. Only an
+			// absolute one (a scheme and a host) is taken to be a URL,
+			// so a path or a NAME=VALUE is not.
+			if u, err := url.Parse(v); err == nil && u.Scheme != "" && u.Host != "" && argURLCredential(u) {
+				return true
+			}
 			for _, p := range credentialPrefixes {
 				if len(v) >= credentialMinLen && strings.HasPrefix(v, p) {
 					return true
@@ -694,6 +699,52 @@ func mcpCredential(s connector.SandboxMCPServer) bool {
 	}
 	return false
 }
+
+// CredentialURL reports a value that is a URL carrying a credential
+// (urlCredential), such as a --env base URL with a user name and password
+// or a key in its query. The daemon refuses to bake one into a run image
+// (bakedSecret); the CLI withholds one from what it sends before the
+// create.
+func CredentialURL(v string) bool {
+	u, err := url.Parse(v)
+	return err == nil && urlCredential(u)
+}
+
+// urlCredential reports a URL that looks like it carries a credential:
+// one with a user name or password in it or, with a host, with a query or
+// fragment value, where servers and gateways take keys and tokens
+// (https://gw.example/?key=...).
+func urlCredential(u *url.URL) bool {
+	return u.User != nil || u.Host != "" && (u.Fragment != "" || queryValue(u))
+}
+
+// argURLCredential is urlCredential for a URL in a server's arguments,
+// where package and database URLs name an ordinary user
+// (git+ssh://git@github.com/..., postgresql://postgres@db/app): a user
+// name alone counts only when it looks like a token (https://ghp_...@...,
+// or one of credentialTokenLen characters or more).
+func argURLCredential(u *url.URL) bool {
+	if u.User == nil {
+		return urlCredential(u)
+	}
+	if _, set := u.User.Password(); set {
+		return true
+	}
+	name := u.User.Username()
+	if len(name) >= credentialTokenLen {
+		return true
+	}
+	for _, p := range credentialPrefixes {
+		if len(name) >= credentialMinLen && strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return u.Fragment != "" || queryValue(u)
+}
+
+// credentialTokenLen is the length from which a URL's user name alone is
+// taken to be a token.
+const credentialTokenLen = 32
 
 // queryValue reports a URL whose query gives some parameter a value.
 func queryValue(u *url.URL) bool {

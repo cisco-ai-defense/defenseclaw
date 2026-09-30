@@ -902,6 +902,105 @@ func TestHookReachIgnoresStartupModelCall(t *testing.T) {
 	}
 }
 
+// The layer-7 records on the harness's connection to its model show what
+// each request is. The model list, in the start-up grace or after it,
+// starts no window; a prompt's model call does at once, also within the
+// grace, where the connection alone (no path) would not. Layer-7 records
+// name no binary: they are the harness's when the connection they ride on
+// is, and a tool's connection to the same endpoint lends them nothing.
+func TestHookReachTellsTheModelListFromAModelCall(t *testing.T) {
+	const (
+		list   = "HTTP:GET [INFO] ALLOWED GET http://api.anthropic.com:443/v1/models?limit=100 [policy:_provider_anthropic engine:l7]"
+		prompt = "HTTP:POST [INFO] ALLOWED POST http://api.anthropic.com:443/v1/messages?beta=true [policy:_provider_anthropic engine:l7]"
+	)
+	idle := func(r *reachEnv) {
+		t.Helper()
+		for range 6 {
+			r.advance(DefaultHookReachWindow)
+			r.check()
+		}
+		if h := r.hooks(); h.Unreachable || h.NoHookYet {
+			t.Fatalf("an idle session was flagged: %+v", h)
+		}
+	}
+
+	// A first prompt within the grace, on the connection the model list
+	// opened, starts the window.
+	r := newReachEnv(t)
+	r.advance(2 * time.Second)
+	r.line(modelCall)
+	r.line(list)
+	r.advance(3 * time.Second)
+	r.line(prompt)
+	r.advance(DefaultHookReachWindow - time.Second)
+	r.check()
+	if r.hooks().Unreachable {
+		t.Fatalf("flagged within the window: %+v", r.hooks())
+	}
+	r.advance(2 * time.Second)
+	r.check()
+	if h := r.hooks(); !h.Unreachable || !h.NoHookYet || !strings.Contains(h.UnreachableReason, "the harness has been calling its model") {
+		t.Fatalf("a prompt in the start-up grace without a hook was not flagged: %+v", h)
+	}
+
+	// The model list alone, again after the grace, starts none.
+	r = newReachEnv(t)
+	r.advance(2 * time.Second)
+	r.line(modelCall)
+	r.line(list)
+	r.advance(harnessStartupGrace)
+	r.line(list)
+	r.line(strings.Replace(list, "/v1/models?limit=100", "/v1/models/claude-sonnet-4-5", 1))
+	idle(r)
+
+	// A model call on a tool's connection to the harness's model endpoint
+	// is not the harness's, nor is one replayed from before the session.
+	r = newReachEnv(t)
+	r.line("NET:OPEN [INFO] ALLOWED /usr/bin/curl(3) -> api.anthropic.com:443 [policy:_provider_anthropic engine:opa]")
+	r.line(prompt)
+	r.ocsf(r.name, prompt, r.m.now().Add(-time.Hour))
+	idle(r)
+	r = newReachEnv(t)
+	r.line(modelCall)
+	r.ocsf(r.name, prompt, r.m.now().Add(-time.Hour))
+	idle(r)
+}
+
+// What the path of a request of the harness to its model shows.
+func TestModelRequestOf(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         modelRequest
+	}{
+		{"", "", modelConnection},
+		{"POST", "/v1/messages", modelTurn},
+		{"POST", "/v1/messages?beta=true", modelTurn},
+		{"POST", "/v1/chat/completions", modelTurn},
+		{"POST", "/chat/completions", modelTurn},
+		{"POST", "/v1/responses", modelTurn},
+		{"POST", "/model/anthropic.claude-sonnet-4-5-v1%3A0/invoke-with-response-stream", modelTurn},
+		{"POST", "/model/anthropic.claude-sonnet-4-5-v1%3A0/converse", modelTurn},
+		{"POST", "/v1beta/models/gemini-2.5-pro:streamGenerateContent", modelTurn},
+		{"GET", "/v1/models", modelListing},
+		{"GET", "/v1/models/", modelListing},
+		{"GET", "/v1/models/claude-sonnet-4-5", modelListing},
+		{"GET", "/foundation-models", modelListing},
+		{"GET", "/inference-profiles", modelListing},
+		{"GET", "/api/tags", modelListing},
+		{"HEAD", "/v1/models", modelListing},
+		// A GET of a model call's path opens the Responses API's
+		// WebSocket, which a harness may do before any prompt.
+		{"GET", "/v1/responses", modelConnection},
+		{"POST", "/v1/messages/count_tokens", modelConnection},
+		{"POST", "/api/event_logging/batch", modelConnection},
+		{"POST", "/v1/models", modelConnection},
+	} {
+		if got := modelRequestOf(ocsf.Record{Method: tc.method, Path: tc.path}); got != tc.want {
+			t.Errorf("%s %s: %d, want %d", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
 // A harness calling its model without a hook is flagged after the window as
 // "no hook yet", not as every tool call blocked; one whose hooks arrived is not.
 func TestHookReachSilentWork(t *testing.T) {

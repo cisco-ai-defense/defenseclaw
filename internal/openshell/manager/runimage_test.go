@@ -477,11 +477,17 @@ func TestCreateOnVMLeavesMCPCredentialsBehind(t *testing.T) {
 		{Name: "remote", Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse", "--header", "Authorization: Bearer not-real"}},
 		{Name: "query", URL: "https://mcp.example.com/sse?token=not-real", Transport: "sse"},
 		{Name: "linear", URL: "https://mcp.linear.app/mcp"},
+		// A URL in the arguments is judged like the server's URL.
+		{Name: "arg-query", Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse?apiKey=not-real"}},
+		{Name: "arg-userinfo", Command: "npx", Args: []string{"mcp-remote", "https://user:not-real@mcp.example.com/sse"}},
+		{Name: "arg-fragment", Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse#not-real"}},
+		{Name: "arg-flag-url", Command: "srv", Args: []string{"--server=https://mcp.example.com/sse?s=not-real"}},
+		{Name: "arg-plain", Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/mcp"}},
 	}
 	e := newVMEnv(t, nil)
 	e.m.opts.MCP = &fakeMCP{entries: entries}
 	sb := e.create(sandboxapi.CreateRequest{Name: "vm-mcp", Copy: true})
-	if !slices.Equal(sb.MCP.Imported, []string{"github", "linear"}) {
+	if imported := slices.Sorted(slices.Values(sb.MCP.Imported)); !slices.Equal(imported, []string{"arg-plain", "github", "linear"}) {
 		t.Fatalf("imported = %v", sb.MCP.Imported)
 	}
 	var behind []string
@@ -490,7 +496,7 @@ func TestCreateOnVMLeavesMCPCredentialsBehind(t *testing.T) {
 			behind = append(behind, l.Name)
 		}
 	}
-	if slices.Sort(behind); !slices.Equal(behind, []string{"keyed", "query", "remote"}) {
+	if slices.Sort(behind); !slices.Equal(behind, []string{"arg-flag-url", "arg-fragment", "arg-query", "arg-userinfo", "keyed", "query", "remote"}) {
 		t.Fatalf("left behind = %+v", sb.MCP.LeftBehind)
 	}
 	for _, f := range e.images.runCalls()[0] {
@@ -526,6 +532,20 @@ func TestMCPCredential(t *testing.T) {
 		{"a GitHub token", connector.SandboxMCPServer{Command: "srv", Args: []string{"ghp_0123456789abcdefghij"}}, true},
 		{"a query value", connector.SandboxMCPServer{URL: "https://mcp.example.com/sse?key=abc"}, true},
 		{"a fragment", connector.SandboxMCPServer{URL: "https://mcp.example.com/sse#abc"}, true},
+		{"a URL argument", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse"}}, false},
+		{"a URL argument with an empty query value", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse?debug"}}, false},
+		{"a URL argument with a query value", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse?t=abc"}}, true},
+		{"a URL argument with a user", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "https://u:abc@mcp.example.com/sse"}}, true},
+		{"a URL argument with a fragment", connector.SandboxMCPServer{Command: "npx", Args: []string{"mcp-remote", "https://mcp.example.com/sse#abc"}}, true},
+		{"--flag=URL", connector.SandboxMCPServer{Command: "srv", Args: []string{"--url=https://mcp.example.com/sse?t=abc"}}, true},
+		{"NAME=URL", connector.SandboxMCPServer{Command: "env", Args: []string{"SERVER_URL=https://u:abc@mcp.example.com/sse", "srv"}}, true},
+		{"a path with a query", connector.SandboxMCPServer{Command: "srv", Args: []string{"/sandbox/work/app?x=1"}}, false},
+		{"a git URL argument with a user", connector.SandboxMCPServer{Command: "uvx", Args: []string{"--from", "git+ssh://git@github.com/org/mcp-srv.git", "mcp-srv"}}, false},
+		{"a database URL argument with a user", connector.SandboxMCPServer{Command: "npx", Args: []string{"@modelcontextprotocol/server-postgres", "postgresql://postgres@db.example.com/app"}}, false},
+		{"a URL argument with a token for its user", connector.SandboxMCPServer{Command: "srv", Args: []string{"https://ghp_0123456789abcdefghij@github.com/org/repo.git"}}, true},
+		{"a URL argument with a long user", connector.SandboxMCPServer{Command: "srv", Args: []string{"https://" + strings.Repeat("a1", 16) + "@mcp.example.com/sse"}}, true},
+		{"a URL argument with an empty password", connector.SandboxMCPServer{Command: "srv", Args: []string{"https://u:@mcp.example.com/sse"}}, true},
+		{"a server URL with a user", connector.SandboxMCPServer{URL: "https://u@mcp.example.com/sse"}, true},
 	} {
 		if got := mcpCredential(tc.s); got != tc.want {
 			t.Errorf("%s: mcpCredential(%+v) = %t, want %t", tc.name, tc.s, got, tc.want)
