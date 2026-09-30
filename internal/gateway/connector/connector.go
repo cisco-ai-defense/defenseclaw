@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"strings"
 
 	acpcatalog "github.com/defenseclaw/defenseclaw/internal/acp"
 )
@@ -428,6 +429,23 @@ func LLMTrafficModeForConnector(name string) string {
 		return LLMTrafficModeProxy
 	}
 	return LLMTrafficModeHooksOnly
+}
+
+// resolveGatewayTokenForProxyEnv reads the gateway token from the dotenv
+// file at ~/.defenseclaw/.env. Used by standalone env-builder functions
+// that don't have a connector receiver.
+func resolveGatewayTokenForProxyEnv() string {
+	envPath := homePath(".defenseclaw", ".env")
+	raw, err := os.ReadFile(envPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "DEFENSECLAW_GATEWAY_TOKEN=") {
+			return strings.TrimPrefix(line, "DEFENSECLAW_GATEWAY_TOKEN=")
+		}
+	}
+	return ""
 }
 
 // ConnectorCapabilityProvider — optional, connectors that can describe their

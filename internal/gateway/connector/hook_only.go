@@ -2328,9 +2328,19 @@ func (c *hookOnlyConnector) writeProxyEnvFile(opts SetupOpts) error {
 }
 
 // patchCursorProxyEnv writes proxy environment variables for Cursor.
-// Cursor respects OPENAI_BASE_URL from the process environment when
-// using OpenAI-compatible providers.
+// NOTE: Cursor's LLM base_url is only configurable via the Settings UI
+// (Cmd+, > Models > Override OpenAI Base URL). Env vars like OPENAI_BASE_URL
+// are NOT picked up by Cursor for LLM routing. The proxy env file is
+// written as best-effort for any SDK-level calls that do respect env vars,
+// but the user must also configure the proxy URL in Cursor Settings:
+//   Override OpenAI Base URL = http://127.0.0.1:4000/c/cursor
 func (c *hookOnlyConnector) patchCursorProxyEnv(opts SetupOpts) error {
+	proxyURL := "http://" + opts.ProxyAddr + "/c/cursor"
+	fmt.Fprintf(os.Stderr, "[cursor] LLM proxy routing requires manual Cursor Settings configuration:\n")
+	fmt.Fprintf(os.Stderr, "[cursor]   Settings > Models > Override OpenAI Base URL = %s\n", proxyURL)
+	if c.gatewayToken != "" {
+		fmt.Fprintf(os.Stderr, "[cursor]   Settings > Models > OpenAI API Key = %s\n", c.gatewayToken)
+	}
 	return c.writeProxyEnvFile(opts)
 }
 
@@ -2339,10 +2349,23 @@ func (c *hookOnlyConnector) patchCopilotProxyEnv(opts SetupOpts) error {
 	return c.writeProxyEnvFile(opts)
 }
 
-// patchHermesProxyEnv writes proxy environment for Hermes. Hermes reads
-// its LLM provider config from config.yaml; the env file is sourced by
-// the hook script wrapper.
-func (c *hookOnlyConnector) patchHermesProxyEnv(opts SetupOpts, _ string) error {
+// patchHermesProxyEnv configures Hermes to route LLM traffic through
+// DefenseClaw by writing the gateway token to ~/.hermes/.env (same
+// approach as OpenRouter's Hermes integration) and generating the
+// generic proxy env file for SDK-level overrides.
+func (c *hookOnlyConnector) patchHermesProxyEnv(opts SetupOpts, configPath string) error {
+	if c.gatewayToken != "" {
+		hermesDir := filepath.Dir(configPath)
+		envPath := filepath.Join(hermesDir, ".env")
+		envContent := "DEFENSECLAW_API_KEY=" + c.gatewayToken + "\n"
+		if err := os.MkdirAll(hermesDir, 0o755); err != nil {
+			return fmt.Errorf("create hermes config dir: %w", err)
+		}
+		if err := os.WriteFile(envPath, []byte(envContent), 0o600); err != nil {
+			return fmt.Errorf("write hermes .env: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "[hermes] wrote gateway token to %s\n", envPath)
+	}
 	return c.writeProxyEnvFile(opts)
 }
 

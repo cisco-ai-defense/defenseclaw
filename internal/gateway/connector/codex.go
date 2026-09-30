@@ -1527,9 +1527,11 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				}
 			}
 			providers["defenseclaw"] = map[string]interface{}{
-				"name":     "defenseclaw",
-				"base_url": "http://" + opts.ProxyAddr + "/c/codex",
-				"auth":     authBlock,
+				"name":                "defenseclaw",
+				"base_url":            "http://" + opts.ProxyAddr + "/c/codex",
+				"wire_api":            "responses",
+				"supports_websockets": false,
+				"auth":                authBlock,
 			}
 			cfg["model_providers"] = providers
 		} else {

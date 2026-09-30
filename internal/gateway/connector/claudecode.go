@@ -244,18 +244,15 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		bearer := strings.TrimPrefix(auth, "Bearer ")
+		if c.gatewayToken != "" && SecureTokenMatch(bearer, c.gatewayToken) {
 			return true
 		}
-	}
-
-	// Hybrid proxy: Claude Code's SDK cannot send X-DC-Auth. Trust loopback
-	// so ANTHROPIC_BASE_URL traffic reaches the guardrail. Non-loopback
-	// callers still need X-DC-Auth or the master key.
-	if c.hybridProxy && isLoopback {
-		return true
+		if c.masterKey != "" && SecureTokenMatch(bearer, c.masterKey) {
+			return true
+		}
 	}
 
 	// No gateway token configured: trust loopback callers. The masterKey is
@@ -1501,13 +1498,16 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	}
 	if (opts.HybridProxyMode || opts.RoutingEnabled) && opts.ProxyAddr != "" {
 		proxyBase := "http://" + opts.ProxyAddr + "/c/claudecode"
-		// Route Claude Code traffic through the DefenseClaw proxy for
-		// semantic routing, model selection, and/or full inspection.
-		// Uses Bedrock wire format because the Anthropic-native
-		// /anthropic/v1/messages route 404s for Claude Opus 4.6.
-		env["ANTHROPIC_BEDROCK_BASE_URL"] = proxyBase
-		env["CLAUDE_CODE_USE_BEDROCK"] = "1"
-		env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] = "1"
+		// Route Claude Code traffic through the DefenseClaw proxy using
+		// the Anthropic Messages API (same approach as OpenRouter).
+		// ANTHROPIC_BASE_URL redirects all API calls to the proxy.
+		// ANTHROPIC_AUTH_TOKEN sends the gateway token as Bearer (not x-api-key).
+		// ANTHROPIC_API_KEY must be empty to prevent fallback to direct Anthropic auth.
+		env["ANTHROPIC_BASE_URL"] = proxyBase
+		if gwToken := resolveGatewayTokenForProxyEnv(); gwToken != "" {
+			env["ANTHROPIC_AUTH_TOKEN"] = gwToken
+		}
+		env["ANTHROPIC_API_KEY"] = ""
 	}
 	return env
 }
