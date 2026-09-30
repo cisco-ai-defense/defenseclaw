@@ -468,14 +468,21 @@ type AcceptRequest struct {
 	Session int `json:"session,omitempty"`
 }
 
-// Detached-run states of a kept run log (RunLog.State).
+// RunState is how a sandbox's latest detached run (`sandbox run --detach`)
+// stands. A kept run log (RunLog.State) is RunExited or RunInterrupted.
+type RunState string
+
 const (
+	// RunNone: the sandbox has no detached run.
+	RunNone RunState = "none"
+	// RunRunning: the run is still going.
+	RunRunning RunState = "running"
 	// RunExited: the run had ended on its own before the stop; RunLog.Exit
 	// is its exit status.
-	RunExited = "exited"
+	RunExited RunState = "exited"
 	// RunInterrupted: the stop ended the run (or the sandbox had stopped
 	// under it before).
-	RunInterrupted = "interrupted"
+	RunInterrupted RunState = "interrupted"
 )
 
 // MaxRunLogBytes bounds the log of a detached run the daemon keeps at a
@@ -490,7 +497,7 @@ const MaxRunLogBytes = 1 << 20
 type RunLog struct {
 	Name string `json:"name"`
 	// State is RunExited or RunInterrupted.
-	State string `json:"state"`
+	State RunState `json:"state"`
 	// Exit is the exit status of an exited run.
 	Exit string `json:"exit,omitempty"`
 	// StartedAt is when the run started (zero: unknown), KeptAt when the

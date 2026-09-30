@@ -808,13 +808,13 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		return nil
 	}
 	switch run.State {
-	case runRunning:
+	case sandboxapi.RunRunning:
 		a.note("the run is still going (follow it with -f)")
 		if sb.Hooks.Unreachable {
 			a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
 		}
 		return nil
-	case runInterrupted, runNone:
+	case sandboxapi.RunInterrupted, sandboxapi.RunNone:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
 		return nil
 	}
@@ -857,12 +857,12 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 	}
 	_ = flush()
 	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(kept.KeptAt)))
-	switch runState(kept.State) {
-	case runExited:
+	switch kept.State {
+	case sandboxapi.RunExited:
 		a.note("the run exited with status " + kept.Exit)
-	case runInterrupted:
+	case sandboxapi.RunInterrupted:
 		a.warn("the run did not finish: the sandbox stopped while it ran")
-	case runRunning:
+	case sandboxapi.RunRunning:
 		a.note("the run was still going when the log was kept")
 	}
 	return nil
@@ -883,6 +883,6 @@ func (a *App) keptRunLog(ctx context.Context, api API, sb *sandboxapi.Sandbox, l
 	if err != nil || meta == nil {
 		return nil, err
 	}
-	return &sandboxapi.RunLog{Name: sb.Name, State: string(meta.State), Exit: meta.Exit, KeptAt: meta.SavedAt,
-		Log: string(lastLines(log, lines))}, nil
+	return &sandboxapi.RunLog{Name: sb.Name, State: meta.State, Exit: meta.Exit, KeptAt: meta.SavedAt,
+		Log: string(harness.LastLines(log, lines))}, nil
 }

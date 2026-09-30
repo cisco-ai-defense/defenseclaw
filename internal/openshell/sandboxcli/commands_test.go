@@ -584,7 +584,7 @@ func TestExecAndLogs(t *testing.T) {
 			return 0, "log line\nmore\n"
 		case isRunStatus(cmd):
 			// The run started a minute ago; the sandbox's last hook is now.
-			return 0, fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", time.Now().Add(-time.Minute).Unix())
+			return 0, fmt.Sprintf("run_started=%d\nrun=exited\nrun_exit=0\n", time.Now().Add(-time.Minute).Unix())
 		case cmd[0] == "false":
 			return 7, ""
 		}
@@ -665,7 +665,7 @@ func TestLogsCannotDriveTheTerminal(t *testing.T) {
 				ta.daemon.add(sb)
 				ta.stream.answer = func(argv []string) (int, string) {
 					if isRunStatus(sandboxCommand(argv)) {
-						return 0, "state=running\n"
+						return 0, "run=running\n"
 					}
 					return 0, c.log
 				}

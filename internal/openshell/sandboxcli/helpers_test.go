@@ -366,7 +366,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			out := *kept
 			if n, _ := strconv.Atoi(r.URL.Query().Get("lines")); n > 0 {
-				out.Log = string(lastLines([]byte(out.Log), n))
+				out.Log = string(harness.LastLines([]byte(out.Log), n))
 			}
 			reply(out)
 		case r.Method == http.MethodGet:

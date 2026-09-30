@@ -308,38 +308,43 @@ func TestEndHarnessScriptReportsTheDetachedRun(t *testing.T) {
 	goneRunner(t, finished)
 	gone := detachedRunDir(t, "x\n", "")
 	goneRunner(t, gone)
+	// A runner still alive after its run recorded a status: the run is over
+	// (the CLI reads it the same way, harness.RunStateFunc).
+	recorded := detachedRunDir(t, "x\n", "0\n")
+	liveRunner(t, recorded)
 	for _, c := range []struct {
 		name string
 		runs string
-		want detachedRun
+		want harness.DetachedRun
 	}{
-		{"going", going, detachedRun{State: runRunning, Started: 1790000000}},
-		{"finished", finished, detachedRun{State: runExited, Exit: "3", Started: 1790000000}},
-		{"gone", gone, detachedRun{State: runInterrupted, Started: 1790000000}},
-		{"none", t.TempDir(), detachedRun{State: runNone}},
+		{"going", going, harness.DetachedRun{State: sandboxapi.RunRunning, Started: 1790000000}},
+		{"finished", finished, harness.DetachedRun{State: sandboxapi.RunExited, Exit: "3", Started: 1790000000}},
+		{"gone", gone, harness.DetachedRun{State: sandboxapi.RunInterrupted, Started: 1790000000}},
+		{"going, its status recorded", recorded, harness.DetachedRun{State: sandboxapi.RunExited, Exit: "0", Started: 1790000000}},
+		{"none", t.TempDir(), harness.DetachedRun{State: sandboxapi.RunNone}},
 	} {
 		if got := end(c.runs); got.Harness != "none" || got.Run != c.want {
 			t.Fatalf("%s: %+v, want %+v", c.name, got, c.want)
 		}
 	}
-	for dir, want := range map[string]string{going: "interrupted\n", finished: "3\n", gone: "interrupted\n"} {
+	for dir, want := range map[string]string{going: "interrupted\n", finished: "3\n", gone: "interrupted\n", recorded: "0\n"} {
 		if data, err := os.ReadFile(filepath.Join(dir, "latest.exit")); err != nil || string(data) != want {
 			t.Fatalf("latest.exit = %q, %v; want %q", data, err, want)
 		}
 	}
 	// What the workload writes there is read as a status, not as output.
 	odd := detachedRunDir(t, "x\n", "0 run=running\n")
-	if got := end(odd); got.Run.State != runExited || got.Run.Exit != "0runrunning" {
+	if got := end(odd); got.Run.State != sandboxapi.RunExited || got.Run.Exit != "0runrunning" {
 		t.Fatalf("odd status: %+v", got.Run)
 	}
 }
 
 func TestParseHarnessEnd(t *testing.T) {
 	got := parseHarnessEnd([]byte("run_exit=0\nrun=exited\nrun_started=12\nexited\nsynced\n"))
-	if got.Harness != "exited" || !got.Synced || got.Run != (detachedRun{State: runExited, Exit: "0", Started: 12}) {
+	if got.Harness != "exited" || !got.Synced || got.Run != (harness.DetachedRun{State: sandboxapi.RunExited, Exit: "0", Started: 12}) {
 		t.Fatalf("parsed %+v", got)
 	}
-	if got := parseHarnessEnd([]byte("running\n")); got.Harness != "running" || got.Synced || got.Run.State != runNone {
+	if got := parseHarnessEnd([]byte("running\n")); got.Harness != "running" || got.Synced || got.Run.State != sandboxapi.RunNone {
 		t.Fatalf("parsed %+v", got)
 	}
 }

@@ -79,18 +79,15 @@ const flushTrap = "trap '/bin/sync && echo synced' EXIT\n"
 // always is. It prints how it ended: "none", "exited" or "running".
 //
 // Before any of that it looks at the latest detached run in the run
-// directory $3 (harness.RunDir), as `sandbox logs` does (sandboxcli's
-// runAlive): the run is going while the pid in latest.pid is a live
-// process whose command line names latest.exit, its runner's (a pid reused
-// after a restart is not the run's; a process table that hides command
-// lines trusts the pid). A run that has not ended is marked interrupted in
-// latest.exit, a mark its runner keeps. It prints run=running (a live run
-// the stop ends), run=exited with run_exit=<status>, or run=interrupted
+// directory $3 (harness.RunDir) as `sandbox logs` does (harness.RunStateFunc,
+// with mark: a run that has not ended is marked interrupted in latest.exit,
+// a mark its runner keeps), and prints what it found: run=running (a live
+// run the stop ends), run=exited with run_exit=<status>, or run=interrupted
 // (the sandbox stopped under it before), and run_started=<epoch seconds>;
-// nothing without a run. The run directory is the workload's: only
-// regular files are read, and only their first bytes.
+// nothing without a run.
 const endHarnessScript = `root=$1; ticks=$2; runs=$3; self=$$; pids=
-` + runScanScript + `for d in /proc/[0-9]*; do
+` + harness.RunStateFunc + `[ -z "$runs" ] || run_state "$runs" mark
+for d in /proc/[0-9]*; do
   p=${d#/proc/}
   [ "$p" = "$self" ] && continue
   exe=$(readlink "$d/exe" 2>/dev/null) || exe=
@@ -113,67 +110,34 @@ while [ "$i" -lt "$ticks" ]; do
 done
 echo running`
 
-// runScanScript is endHarnessScript's look at the latest detached run in
-// the run directory $runs.
-const runScanScript = `if [ -n "$runs" ] && { [ -e "$runs/latest.pid" ] || [ -e "$runs/latest.log" ]; }; then
-  run=interrupted; pid=; started=
-  [ -f "$runs/latest.pid" ] && pid=$(head -c 32 "$runs/latest.pid" 2>/dev/null | tr -d '\n')
-  case "$pid" in
-    ''|*[!0-9]*) ;;
-    *) if kill -0 "$pid" 2>/dev/null && { [ ! -r "/proc/$pid/cmdline" ] || tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q latest.exit; }; then
-         run=running
-       fi ;;
-  esac
-  if [ -f "$runs/latest.exit" ] && [ -s "$runs/latest.exit" ]; then
-    s=$(head -c 32 "$runs/latest.exit" 2>/dev/null | tr -dc 'A-Za-z0-9_.-')
-    [ "$s" = interrupted ] || { run=exited; echo "run_exit=$s"; }
-  elif [ -e "$runs/latest.pid" ]; then
-    { printf 'interrupted\n' > "$runs/latest.exit"; } 2>/dev/null
-  fi
-  [ -f "$runs/latest.started" ] && started=$(head -c 32 "$runs/latest.started" 2>/dev/null | tr -dc 0-9)
-  echo "run=$run"
-  echo "run_started=$started"
-fi
+// runProbeScript is endHarnessScript's look at the run on its own, run
+// directory $1: a stop whose endHarnessScript exec failed before it said how
+// the run stood asks again, so the run is still marked and its log kept.
+const runProbeScript = harness.RunStateFunc + `run_state "$1" mark
 `
-
-// runProbeScript is runScanScript on its own, run directory $1: a stop
-// whose endHarnessScript exec failed before it said how the run stood asks
-// again, so the run is still marked and its log kept.
-const runProbeScript = "runs=$1\n" + runScanScript
 
 // runProbeWait bounds runProbeScript.
 const runProbeWait = 10 * time.Second
 
 // harnessEnd is what endHarnessScript printed: how the harness ended
 // (none, exited or running), whether the flush trap ran, and the latest
-// detached run as the stop found it (State runNone without one).
+// detached run as the stop found it (State sandboxapi.RunNone without one).
 type harnessEnd struct {
 	Harness string
 	Synced  bool
-	Run     detachedRun
+	Run     harness.DetachedRun
 }
 
 // parseHarnessEnd reads endHarnessScript's output.
 func parseHarnessEnd(out []byte) harnessEnd {
-	end := harnessEnd{Run: detachedRun{State: runNone}}
+	end := harnessEnd{Run: harness.ParseRun(out)}
 	for _, tok := range strings.Fields(string(out)) {
-		k, v, kv := strings.Cut(tok, "=")
 		switch {
-		case !kv && tok == "synced":
+		case strings.Contains(tok, "="):
+		case tok == "synced":
 			end.Synced = true
-		case !kv:
-			if end.Harness == "" {
-				end.Harness = tok
-			}
-		case k == "run":
-			switch s := runState(v); s {
-			case runRunning, runExited, runInterrupted:
-				end.Run.State = s
-			}
-		case k == "run_exit":
-			end.Run.Exit = v
-		case k == "run_started":
-			end.Run.Started, _ = strconv.ParseInt(v, 10, 64)
+		case end.Harness == "":
+			end.Harness = tok
 		}
 	}
 	return end
@@ -182,13 +146,13 @@ func parseHarnessEnd(out []byte) harnessEnd {
 // endHarness asks a ready sandbox's harness to exit before the sandbox is
 // stopped, so its end-of-session hook reaches DefenseClaw, and flushes the
 // sandbox's disk when the driver's stop would not. It returns the latest
-// detached run as it found it (State runNone: there is none, or the
+// detached run as it found it (State sandboxapi.RunNone: there is none, or the
 // sandbox did not answer), whose log the stop keeps next: from what the
 // script printed before an exec that failed (a slow flush cut short), or
 // else from a look at the run of its own (probeRun). Failures are logged:
 // the stop goes ahead either way.
-func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) detachedRun {
-	none := detachedRun{State: runNone}
+func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.DetachedRun {
+	none := harness.DetachedRun{State: sandboxapi.RunNone}
 	m.mu.Lock()
 	name, harnessName := b.rec.Name, b.rec.Harness
 	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
@@ -220,7 +184,7 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) detachedR
 		m.logf("sandbox %s: ask the harness to exit before the stop: %v", name, err)
 		end := parseHarnessEnd(streamed.Bytes())
 		run := end.Run
-		if end.Harness == "" && run.State == runNone {
+		if end.Harness == "" && run.State == sandboxapi.RunNone {
 			// The script did not get as far as saying whether there is a
 			// run: ask on its own, so a run the stop ends is still marked
 			// and its log kept.
@@ -249,16 +213,16 @@ const harnessEndOutput = 256
 
 // probeRun looks at a ready sandbox's latest detached run on its own
 // (runProbeScript), for a stop whose endHarnessScript exec failed first.
-func (m *Manager) probeRun(ctx context.Context, gw *Gateway, name string) detachedRun {
+func (m *Manager) probeRun(ctx context.Context, gw *Gateway, name string) harness.DetachedRun {
 	ctx, cancel := context.WithTimeout(ctx, runProbeWait+5*time.Second)
 	defer cancel()
 	res, err := gw.Client.Exec(ctx, name, []string{"/bin/sh", "-c", runProbeScript, "defenseclaw-run-probe", harness.RunDir},
 		openshell.ExecOptions{Timeout: runProbeWait, Attempts: 1, MaxOutputBytes: harnessEndOutput})
 	if err != nil {
 		m.logf("sandbox %s: look at its detached run before the stop: %v", name, err)
-		return detachedRun{State: runNone}
+		return harness.DetachedRun{State: sandboxapi.RunNone}
 	}
-	return parseHarnessEnd(res.Stdout).Run
+	return harness.ParseRun(res.Stdout)
 }
 
 // headBuffer keeps the first limit bytes written to it.

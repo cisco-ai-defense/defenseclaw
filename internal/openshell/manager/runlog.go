@@ -17,7 +17,6 @@
 package manager
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,25 +45,6 @@ import (
 // logs` of a stopped sandbox reads it there (GET /sandboxes/{name}/logs).
 // The next stop that finds a run replaces it, and a delete removes it.
 
-// runState is the state of a sandbox's latest detached run.
-type runState string
-
-const (
-	runNone        runState = "none"
-	runRunning     runState = "running"
-	runExited      runState = "exited"
-	runInterrupted runState = "interrupted"
-)
-
-// detachedRun is what a sandbox's latest detached run left in harness.RunDir.
-type detachedRun struct {
-	State runState
-	// Exit is the exit status of an exited run.
-	Exit string
-	// Started is the epoch second the run started (0: unknown).
-	Started int64
-}
-
 // runLogDirName is the directory under <data_dir>/sandboxes/<name> where a
 // stop keeps the log of the sandbox's latest detached run.
 const runLogDirName = "runlog"
@@ -90,11 +70,11 @@ const runLogWait = 30 * time.Second
 type keptRun struct {
 	// SandboxID ties the log to the OpenShell sandbox it came from: a later
 	// sandbox of the name never shows it.
-	SandboxID string    `json:"sandbox_id,omitempty"`
-	State     string    `json:"state"`
-	Exit      string    `json:"exit,omitempty"`
-	StartedAt time.Time `json:"started_at,omitzero"`
-	KeptAt    time.Time `json:"kept_at"`
+	SandboxID string              `json:"sandbox_id,omitempty"`
+	State     sandboxapi.RunState `json:"state"`
+	Exit      string              `json:"exit,omitempty"`
+	StartedAt time.Time           `json:"started_at,omitzero"`
+	KeptAt    time.Time           `json:"kept_at"`
 }
 
 func (m *Manager) runLogDir(name string) string {
@@ -117,21 +97,21 @@ func (b *box) sandboxID() string {
 // a ready sandbox (endHarness), with how the run stood: a run still going
 // is interrupted by the stop, and the feed says so. Best effort: the stop
 // goes ahead whatever happens here.
-func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detachedRun) {
-	if run.State == runNone {
+func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harness.DetachedRun) {
+	if run.State == sandboxapi.RunNone {
 		return
 	}
 	m.mu.Lock()
 	name, id := b.rec.Name, b.sandboxID()
 	m.mu.Unlock()
 	meta := keptRun{SandboxID: id, State: sandboxapi.RunInterrupted, KeptAt: m.now().UTC()}
-	if run.State == runExited {
+	if run.State == sandboxapi.RunExited {
 		meta.State, meta.Exit = sandboxapi.RunExited, run.Exit
 	}
 	if run.Started > 0 {
 		meta.StartedAt = time.Unix(run.Started, 0).UTC()
 	}
-	if run.State != runRunning && m.keptAlready(name, meta) {
+	if run.State != sandboxapi.RunRunning && m.keptAlready(name, meta) {
 		// A run that was over at an earlier stop (a session since, or a
 		// pull that started the sandbox): its log is kept as it is.
 		return
@@ -142,7 +122,7 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
 	}
 	kept := m.readRunLog(ctx, gw, name, meta)
-	if run.State != runRunning {
+	if run.State != sandboxapi.RunRunning {
 		return
 	}
 	m.logf("sandbox %s: the stop ends its detached run, which was still going", name)
@@ -276,25 +256,8 @@ func (m *Manager) RunLog(_ context.Context, name string, lines int) (*sandboxapi
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "read the kept run log of %s: %v", name, err)
 	}
 	if lines > 0 {
-		log = lastLines(log, lines)
+		log = harness.LastLines(log, lines)
 	}
 	return &sandboxapi.RunLog{Name: name, State: meta.State, Exit: meta.Exit, StartedAt: meta.StartedAt, KeptAt: meta.KeptAt,
 		Log: strings.ToValidUTF8(string(log), "\uFFFD")}, nil
-}
-
-// lastLines returns the last n lines of data.
-func lastLines(data []byte, n int) []byte {
-	data = bytes.TrimRight(data, "\n")
-	if len(data) == 0 {
-		return nil
-	}
-	for i := len(data) - 1; i >= 0; i-- {
-		if data[i] == '\n' {
-			n--
-			if n == 0 {
-				return append(data[i+1:len(data):len(data)], '\n')
-			}
-		}
-	}
-	return append(data[:len(data):len(data)], '\n')
 }
