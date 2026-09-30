@@ -122,6 +122,11 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **AI discovery records name the user.** The `ai_component.discovered`,
+  `changed` and `removed` records carry `user.id`,
+  `defenseclaw.user.id_kind` and `defenseclaw.user.name` when the signal
+  came from a user's scan, and the AI discovery dashboard's event log shows
+  the user.
 - **Amp traces are named after Amp.** Amp turns were named after the
   agent mode or definition kind (`invoke_agent medium`,
   `invoke_agent agent-definition`), so a search for Amp traces found none.

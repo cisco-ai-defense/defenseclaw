@@ -294,9 +294,10 @@ enabled:
   directory of the authorization ledger (`root`, readable by the gateway's
   group). The gateway adds it to its inventory on every full scan.
 - Each signal carries `user` and `user_id` from the account the guardian
-  started the scan for, never from the scan's own output. Managed
+  started the scan for, never from the scan's own output. The
+  `ai_component.discovered`, `changed` and `removed` records, managed
   `ai_component.observed` records and the per-entry skill, plugin and MCP
-  records carry the same user.
+  records carry the same user (`user.id`, `defenseclaw.user.name`).
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
 - A user's results turn `gone` when the user leaves the manifest, or three
