@@ -142,6 +142,8 @@ test("refreshes agent identity when a thread changes mode between turns", async 
 		const secondTool = posts.find(payload => payload.tool_call_id === "TU-2")
 
 		assert.equal(firstStart.agent_mode, "medium")
+		assert.equal(firstStart.agent_type, "amp", "traces are named after agent_type, which must stay amp")
+		assert.equal(secondStart.agent_type, "amp")
 		assert.equal(firstTool.agent_mode, "medium")
 		assert.equal(secondStart.agent_name, "security-reviewer")
 		assert.equal(secondStart.agent_display_name, "Security Reviewer")

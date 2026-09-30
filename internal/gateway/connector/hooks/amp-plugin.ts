@@ -360,11 +360,15 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			const agent = await ctx.thread.agent()
 			const definition = agent.definition
 			let facts: AgentFacts
+			// agent_type names the agent's traces (invoke_agent <type>), so it
+			// stays "amp"; the mode or custom agent is its name and the
+			// definition kind its own field. Naming traces after the mode
+			// ("invoke_agent medium") hid Amp from a search by agent.
 			if (definition.kind === "agent-definition") {
 				const display = definition.display?.label || ""
 				facts = {
 					agent_name: definition.name || display || "amp",
-					agent_type: definition.kind,
+					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(display ? { agent_display_name: display } : {}),
 					agent_metadata_provenance: "reported",
@@ -374,7 +378,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				const mode = stringID(definition.mode)
 				facts = {
 					agent_name: mode || "amp",
-					agent_type: mode || definition.kind,
+					agent_type: "amp",
 					agent_definition_kind: definition.kind,
 					...(mode ? { agent_mode: mode } : {}),
 					agent_metadata_provenance: "reported",

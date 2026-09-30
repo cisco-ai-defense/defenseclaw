@@ -122,6 +122,11 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Amp traces are named after Amp.** Amp turns were named after the
+  agent mode or definition kind (`invoke_agent medium`,
+  `invoke_agent agent-definition`), so a search for Amp traces found none.
+  They are now `invoke_agent amp`; the mode or custom agent stays in
+  `gen_ai.agent.name`.
 - **Amp keeps DefenseClaw's prompt notice apart from the prompt.** The
   hidden notice DefenseClaw adds when a prompt matches a rule followed the
   prompt text directly, so a prompt ending in a command could be read, and
