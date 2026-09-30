@@ -249,6 +249,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			cache = enterprisehooks.NewWindowsEnrollmentGroupCache()
 		}
 		enumerateOpts.GroupCache = cache
+		enterprisehooks.SetUnverifiedVersionsPolicy(cfg.Enterprise.Enrollment.UnverifiedVersionsFor)
 		enumerateOpts.ReportUnprotected = func(agent enterprisehooks.UnprotectedAgent) {
 			unprotected = append(unprotected, agent)
 		}

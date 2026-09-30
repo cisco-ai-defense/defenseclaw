@@ -533,3 +533,46 @@ func TestClaudeVersionFloorValidation(t *testing.T) {
 		t.Fatalf("an unmanaged config accepted version_floor: %v", err)
 	}
 }
+
+// unverified_versions defaults to report, a per-connector override wins,
+// both are validated, and Secure Client refuses the knob.
+func TestEnterpriseUnverifiedVersions(t *testing.T) {
+	en := EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse", UnverifiedVersionsByConnector: map[string]string{"devin": "report"}}
+	if got := (EnterpriseEnrollmentConfig{}).UnverifiedVersionsFor("codex"); got != EnterpriseUnverifiedReport {
+		t.Fatalf("default = %q, want report", got)
+	}
+	if en.UnverifiedVersionsFor("codex") != EnterpriseUnverifiedRefuse || en.UnverifiedVersionsFor("Devin") != EnterpriseUnverifiedReport {
+		t.Fatalf("override not applied: %+v", en)
+	}
+	for _, tc := range []struct {
+		en      EnterpriseEnrollmentConfig
+		profile string
+		ok      bool
+	}{
+		{en, "", true},
+		{EnterpriseEnrollmentConfig{UnverifiedVersions: "block"}, "", false},
+		{EnterpriseEnrollmentConfig{UnverifiedVersionsByConnector: map[string]string{"codex": "allow"}}, "", false},
+		{EnterpriseEnrollmentConfig{UnverifiedVersions: "report"}, "secure_client", false},
+	} {
+		goos := "linux"
+		if tc.profile == "secure_client" {
+			goos = "windows"
+		}
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: tc.profile, Enrollment: tc.en}}
+		if err := resolveEnterpriseConfig(&cfg, goos, ""); (err == nil) != tc.ok {
+			t.Fatalf("%+v (%q): err = %v, want ok=%v", tc.en, tc.profile, err, tc.ok)
+		}
+	}
+	for doc, ok := range map[string]bool{
+		"    unverified_versions: refuse\n    unverified_versions_by_connector:\n      codex: report\n": true,
+		"    unverified_versions: block\n": false,
+	} {
+		document, err := ParseV8YAML("unverified.yaml", []byte("config_version: 8\nenterprise:\n  enrollment:\n"+doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateV8Schema("unverified.yaml", document); (err == nil) != ok {
+			t.Fatalf("schema on %q: err = %v, want ok=%v", doc, err, ok)
+		}
+	}
+}

@@ -208,6 +208,11 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 	}
 	version, reason := standaloneWindowsAgentVersionExplain(row.UserHome, row.Connector)
 	if version == "" {
+		// A user with only the desktop app or an editor extension is
+		// enrolled at its admitted engine version.
+		version = windowsStandaloneSurfaceVersion(row, logf, rowContext)
+	}
+	if version == "" {
 		logfSafely(logf, row.SID, fmt.Sprintf("newly-discovered (SID, %s) row skipped: %s", row.Connector, reason))
 		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path != "" {
 			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read, so no hook contract can be selected", path))

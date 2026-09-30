@@ -47,7 +47,8 @@ import (
 // the guardian's other goroutines, and NFS root_squash homes work.
 
 const (
-	enterpriseHookWorkerProtocolVersion = 1
+	// 2: the discover operation also answers app and extension surfaces.
+	enterpriseHookWorkerProtocolVersion = 2
 	enterpriseHookWorkerRequestLimit    = 1 << 20
 	enterpriseHookWorkerResponseLimit   = 8 << 20
 	enterpriseHookWorkerStderrLimit     = 64 << 10
@@ -185,10 +186,13 @@ type enterpriseHookWorkerTargetResult struct {
 }
 
 type enterpriseHookWorkerResponse struct {
-	Version  int                                          `json:"version"`
-	Targets  []enterpriseHookWorkerTargetResult           `json:"targets,omitempty"`
-	Versions map[string]string                            `json:"versions,omitempty"`
-	Reasons  map[string]string                            `json:"reasons,omitempty"`
+	Version  int                                `json:"version"`
+	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
+	Versions map[string]string                  `json:"versions,omitempty"`
+	Reasons  map[string]string                  `json:"reasons,omitempty"`
+	// Surfaces are the discovered app and extension installs per connector
+	// (user-influenced; the parent validates them).
+	Surfaces map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
 	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
@@ -270,6 +274,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 	case enterpriseHookWorkerOpDiscover:
 		versions := map[string]string{}
 		reasons := map[string]string{}
+		surfaces := map[string][]connector.AgentSurface{}
 		for _, name := range request.Connectors {
 			name = strings.ToLower(strings.TrimSpace(name))
 			if name == "" {
@@ -286,8 +291,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			} else if reason != "" {
 				reasons[name] = reason
 			}
+			// Host apps are never run; an engine CLI bundled in one is run
+			// only outside a static (untrusted-home) discovery.
+			if found := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery); len(found) != 0 {
+				surfaces[name] = found
+			}
 		}
-		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, 0)
+		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
 			if target.Mode != enterpriseHookWorkerModeRemoveLeftover {
@@ -325,6 +335,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 var (
 	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
 	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverSurfaces      = enterprisehooks.DiscoverUnixAgentSurfaces
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {

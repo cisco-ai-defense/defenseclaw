@@ -63,7 +63,7 @@ the layouts of the common Node version managers and package managers:
 | OS | Also searched |
 | --- | --- |
 | Linux and macOS | nvm, fnm, Volta, asdf and mise Node installs, pnpm and yarn global directories, the npm prefix set in the user's `~/.npmrc`, Linuxbrew, the machine prefixes `/usr/local`, `/usr` and `/opt/homebrew`, and `agent_prefixes`. The extended search runs only in the worker that runs as the user, never as root. |
-| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. A Codex install from the Microsoft Store (MSIX) is not found. |
+| Windows | nvm-windows, fnm, Volta and pnpm installs, yarn's global directory, the npm prefix set in `%USERPROFILE%\.npmrc` when it is inside the profile, the native per-user installers (including `%USERPROFILE%\.local\bin\claude.exe`), Cursor under `C:\Program Files\Cursor`, the Cursor Agent CLI builds under `%LOCALAPPDATA%\cursor-agent\versions` (the build its launcher runs; Cursor Desktop's version wins when both are installed), and machine-scope WinGet packages. The enumerator reads these as static files and registry values; nothing is executed. The Codex app from the Microsoft Store (MSIX) is reported, not enrolled; see [Desktop apps and editor extensions](#desktop-apps-and-editor-extensions). |
 
 An agent CLI installed anywhere else in a user's home (a custom `NVM_DIR`,
 `XDG_DATA_HOME` or `PNPM_HOME`, an `npm --prefix` given on the command line,
@@ -115,6 +115,7 @@ unprotected, and `enterprise policy show` lists the agent.
 | Code | Meaning |
 | --- | --- |
 | `hook_contract_unverified` | The installed version has no verified DefenseClaw hook contract |
+| `surface_unverified` | A desktop app or editor extension has no engine version that selects a hook contract, or its hook delivery is not live-verified and `unverified_versions` is `refuse` |
 | `agent_unprotected` | The agent's version could not be read, it is below the platform minimum, its user's home is untrusted (Linux and macOS), its signed-in user's enrollment is pending (Windows), a Claude Code change to an older hook contract was not followed (Windows), or (Windows) it is not installed where the guardian can manage it |
 
 A per-user agent in this state runs without DefenseClaw hooks. A
@@ -153,6 +154,45 @@ stays at its version, the change is reported as `agent_unprotected`, and no
 other user's policy changes. A user enrolled for the first time with an
 older Claude Code still sets the oldest contract.
 
+## Desktop apps and editor extensions
+
+Some agents also ship as a desktop app or an editor extension that reads the
+same hook settings as the CLI. The enumerator finds them next to the CLI and
+enrolls a user who has only the app or the extension, at the version of the
+agent engine it runs:
+
+| Agent | Surface | Engine version source |
+| --- | --- | --- |
+| Claude Code | VS Code-family extension `anthropic.claude-code` | The extension version: it bundles the CLI at that version ([vendor docs](https://code.claude.com/docs/en/vs-code)) |
+| Claude Code | Claude Desktop | The Claude Code build it keeps under its data folder (macOS, Windows; Linux and the Windows MSIX package are not yet live-checked) |
+| Codex | VS Code-family extension `openai.chatgpt`, Codex app | The bundled `codex` CLI on Linux and macOS, run with `--version` as the user; none on Windows, so these are reported, not enrolled ([vendor docs](https://learn.chatgpt.com/docs/hooks)) |
+| Cursor | Cursor desktop | The app version, as before |
+| Antigravity | Antigravity IDE | None: the IDE shares the CLI's hook file ([vendor docs](https://antigravity.google/docs/hooks)) but is never enrolled on its own, and its launcher is never run |
+
+The editor folders searched are `.vscode`, `.vscode-insiders`,
+`.vscode-server` (Linux and macOS), `.vscode-oss`, `.cursor`, `.windsurf`,
+`.kiro` and `.antigravity` under the home, each with `extensions`. An
+extensions folder relocated with `VSCODE_EXTENSIONS` or `--extensions-dir`
+is not followed. A host version (the editor's or the app's own version)
+never selects a hook contract. The Devin Desktop app version is not a Devin
+CLI version, so Devin is still enrolled only from its CLI.
+
+A version without a known contract is compatible by default, like an
+untested newer CLI; known-broken versions and floors still refuse it.
+`enrollment.unverified_versions` decides what happens to a surface whose
+hook delivery DefenseClaw has not live-verified (today the CLIs and Cursor
+desktop are):
+
+| `unverified_versions` | Surface-only user | User with the CLI too |
+| --- | --- | --- |
+| `report` (default) | Enrolled at the surface's engine version. A surface with no engine version is reported as `surface_unverified`. | Enrolled at the older of the CLI and surface engine versions |
+| `refuse` | Not enrolled and reported as `surface_unverified`. For a machine-policy agent the gateway refuses that user's hook calls (`enterprise_managed_surface_unverified`) on Linux and macOS, and the unenrolled user is refused on Windows. For a per-user agent nothing refuses it, and `verify` fails. | Enrolled from the CLI. Hook calls do not say which surface sent them, so the surface cannot be refused: it is reported and `verify` fails. |
+
+`unverified_versions_by_connector` sets the value for one agent, for
+example `{codex: refuse}`. Both keys are standalone-only; Secure Client
+rejects them. Surfaces are found one enumeration cycle after they are
+installed. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
+
 ## What each OS honors
 
 | Setting | Linux and macOS | Windows |
@@ -163,6 +203,7 @@ older Claude Code still sets the oldest contract.
 | `include_groups`, `exclude_groups` | Group filters | Group filters for local, Active Directory and Microsoft Entra ID groups; see [Windows](#windows) |
 | `exempt_users` | Not enrolled; their calls are allowed, inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
 | `unenrolled_users` | `inspect` or `deny` for machine-policy agents | Not applied: a user who is not enrolled fails closed |
+| `unverified_versions`, `unverified_versions_by_connector` | `report` or `refuse` for desktop apps and editor extensions | Same; the gateway refusal is the fail-closed refusal of an unenrolled user |
 | `root` | `inspect`, `deny` or `exempt` | Not applied |
 | `uid_min`, `uid_max` | The interactive uid range | Not applied |
 | `home_roots`, `agent_prefixes` | Extra home parents; extra administrator install prefixes | Not applied, but still validated: an entry that is not an absolute `/` path makes the config invalid |

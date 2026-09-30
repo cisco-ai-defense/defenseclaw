@@ -60,6 +60,8 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 	}
 	ledger := newManagedHookLedgerLoader(managed.HookGuardianAuthorizationPath(a.configDataDir()))
 	authorizer := newManagedHookAuthorizer(a.scannerCfg.Enterprise.Enrollment, machinePolicy, ledger.Load)
+	authorizer.loadRefused = newManagedHookRefusedLoader(filepath.Join(
+		managed.HookGuardianAuthorizationDir(a.configDataDir()), managed.HookGuardianRefusedSurfacesFile)).Load
 
 	listener, inherited, err := inheritedHookListener()
 	if err != nil {

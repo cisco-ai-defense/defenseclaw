@@ -55,8 +55,18 @@ type UnprotectedAgent struct {
 	UID       *int   `json:"uid,omitempty"`
 	Connector string `json:"connector"`
 	Version   string `json:"version,omitempty"`
-	Code      string `json:"code"`
-	Reason    string `json:"reason"`
+	// Surface, Host and HostVersion describe an app or extension install
+	// (connector.AgentSurface); Version is then its engine version. Empty
+	// for a CLI install.
+	Surface     string `json:"surface,omitempty"`
+	Host        string `json:"host,omitempty"`
+	HostVersion string `json:"host_version,omitempty"`
+	// Refusal is set for a surface refused under
+	// enterprise.enrollment.unverified_versions: refuse (RefusalEnforced
+	// or RefusalMissing).
+	Refusal string `json:"refusal,omitempty"`
+	Code    string `json:"code"`
+	Reason  string `json:"reason"`
 }
 
 type unprotectedAgentsFile struct {
@@ -92,6 +102,16 @@ func (a UnprotectedAgent) Message() string {
 			who += " (" + sid + ")"
 		}
 	}
+	if surface := strings.TrimSpace(a.Surface); surface != "" {
+		name += " (" + surface
+		if host := strings.TrimSpace(a.Host); host != "" {
+			name += " in " + host
+		}
+		if hostVersion := strings.TrimSpace(a.HostVersion); hostVersion != "" {
+			name += " " + hostVersion
+		}
+		name += ")"
+	}
 	return fmt.Sprintf("%s for user %s is not protected: %s", name, who, strings.TrimSpace(a.Reason))
 }
 
@@ -123,8 +143,11 @@ func ParseUnprotectedAgents(data []byte) ([]UnprotectedAgent, error) {
 		if strings.TrimSpace(agent.Connector) == "" || (strings.TrimSpace(agent.User) == "" && strings.TrimSpace(agent.SID) == "") {
 			continue
 		}
-		if agent.Code != UnprotectedCodeHookContractUnverified {
+		if agent.Code != UnprotectedCodeHookContractUnverified && agent.Code != UnprotectedCodeSurfaceUnverified {
 			agent.Code = UnprotectedCodeAgentUnprotected
+		}
+		if agent.Refusal != RefusalEnforced && agent.Refusal != RefusalMissing {
+			agent.Refusal = ""
 		}
 		out = append(out, agent)
 	}
@@ -138,11 +161,14 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		agent.SID = boundedStatusText(agent.SID, 128)
 		agent.Connector = strings.ToLower(boundedStatusText(agent.Connector, 64))
 		agent.Version = boundedStatusText(agent.Version, 128)
+		agent.Surface = strings.ToLower(boundedStatusText(agent.Surface, 32))
+		agent.Host = boundedStatusText(agent.Host, 64)
+		agent.HostVersion = boundedStatusText(agent.HostVersion, 128)
 		agent.Reason = boundedStatusText(agent.Reason, unprotectedReasonMaxRunes)
 		if agent.Code == "" {
 			agent.Code = UnprotectedCodeForReason(agent.Reason)
 		}
-		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector
+		key := strings.ToLower(agent.SID) + "\x00" + agent.User + "\x00" + agent.Connector + "\x00" + agent.Surface + "\x00" + agent.Host
 		byKey[key] = agent
 	}
 	out := make([]UnprotectedAgent, 0, len(byKey))
@@ -156,7 +182,13 @@ func normalizeUnprotectedAgents(agents []UnprotectedAgent) []UnprotectedAgent {
 		if out[i].SID != out[j].SID {
 			return out[i].SID < out[j].SID
 		}
-		return out[i].Connector < out[j].Connector
+		if out[i].Connector != out[j].Connector {
+			return out[i].Connector < out[j].Connector
+		}
+		if out[i].Surface != out[j].Surface {
+			return out[i].Surface < out[j].Surface
+		}
+		return out[i].Host < out[j].Host
 	})
 	return out
 }

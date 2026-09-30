@@ -31,6 +31,12 @@ const (
 	// did to each target and which per-user credential key it rendered from
 	// (enterprisehooks.CredentialAttestation).
 	HookGuardianCredentialAttestationFile = "credential-attestation.json"
+	// HookGuardianRefusedSurfacesFile, next to the ledger, lists the
+	// (user, connector) pairs whose only installs are app or extension
+	// surfaces refused under enterprise.enrollment.unverified_versions:
+	// refuse. The standalone Unix enumerator writes it with the ledger's
+	// ownership and mode; the gateway refuses those hook calls.
+	HookGuardianRefusedSurfacesFile = "refused-surfaces.json"
 	// HookGuardianReconcileLockFile, next to the ledger, serializes the
 	// standalone Unix guardian's reconciles with each other and with a
 	// credential rotation staging or committing a key.
