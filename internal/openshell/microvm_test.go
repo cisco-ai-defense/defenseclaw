@@ -629,6 +629,19 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		}
 		expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusPass, "signed for Apple's Hypervisor")
 		expectCheck(t, r, openshell.CheckIDVMIdentity, openshell.StatusSkip, "the gateway runs the docker driver")
+		// No Docker Desktop setting can help without Landlock: its host
+		// networking and file sharing warnings asked for one (the #1019
+		// retest), and are skipped, saying why.
+		for id, why := range map[string]string{
+			openshell.CheckIDDockerHostNetwork: "OpenShell MicroVMs, the way on, do not use Docker's network",
+			openshell.CheckIDDockerFileSharing: "OpenShell MicroVMs, the way on, mount no project folder",
+		} {
+			c := expectCheck(t, r, id, openshell.StatusSkip, "not needed: without a usable Landlock in the Linux VM Docker runs in, "+
+				"no sandbox starts there whatever this setting is, and "+why)
+			if c.Fix != nil {
+				t.Fatalf("%s fix = %+v", id, c.Fix)
+			}
+		}
 		if r.Driver != openshell.DriverDocker {
 			t.Fatalf("driver = %q", r.Driver)
 		}
@@ -684,10 +697,13 @@ func TestDoctorOnADockerMac(t *testing.T) {
 	t.Run("Landlock not checked", func(t *testing.T) {
 		f := docker(t)
 		f.vmErr = openshell.ErrNoProbeImage
-		c := expectCheck(t, f.run(), openshell.CheckIDGatewayDriver, openshell.StatusWarn, "whether the Linux VM Docker runs in has Landlock is not known")
+		r := f.run()
+		c := expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusWarn, "whether the Linux VM Docker runs in has Landlock is not known")
 		if c.Fix == nil || !c.Fix.Automatic {
 			t.Fatalf("fix = %+v", c.Fix)
 		}
+		// Landlock may be there: the Docker Desktop settings still count.
+		expectCheck(t, r, openshell.CheckIDDockerHostNetwork, openshell.StatusWarn, "Docker Desktop does not report the host networking setting")
 	})
 
 	t.Run("a Docker VM with Landlock", func(t *testing.T) {
@@ -698,6 +714,8 @@ func TestDoctorOnADockerMac(t *testing.T) {
 		expectCheck(t, r, openshell.CheckIDVMResources, openshell.StatusSkip, "the gateway runs the docker driver")
 		expectCheck(t, r, openshell.CheckIDBindMounts, openshell.StatusFail, "disabled")
 		expectCheck(t, r, openshell.CheckIDDisk, openshell.StatusSkip, "images live in the Docker Desktop VM disk")
+		expectCheck(t, r, openshell.CheckIDDockerHostNetwork, openshell.StatusWarn, "Docker Desktop does not report the host networking setting")
+		expectCheck(t, r, openshell.CheckIDDockerFileSharing, openshell.StatusWarn, "Docker Desktop does not report its shared directories")
 	})
 
 	t.Run("configured for MicroVMs, not restarted", func(t *testing.T) {

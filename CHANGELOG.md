@@ -404,7 +404,10 @@ deleted.
   check names the switch too, on a line of its own (`→ …`) after
   OpenShell's output. A failing `sandbox doctor` ends with `✗ not ready for
   sandboxes: N checks failed`, as a passing one ends with `✓ ready for
-  sandboxes` (every driver; `--json` is unchanged).
+  sandboxes` (every driver; `--json` is unchanged). Without Landlock in the
+  Docker VM, the doctor skips Docker Desktop's host networking and file
+  sharing checks, saying why, instead of asking for a setting that cannot
+  help.
 - With OpenShell's release binaries outside Homebrew, a gateway that answers
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,

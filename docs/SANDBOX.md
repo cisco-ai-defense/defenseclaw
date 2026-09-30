@@ -2743,7 +2743,11 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
   driver, global policy, bind mounts, OpenShell telemetry and the sandbox
   ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor
   signature, image architecture), `vm-identity` and `vm-resources`, and the
-  disk of the prepared-rootfs cache.
+  disk of the prepared-rootfs cache. On a Mac's docker gateway whose Docker
+  VM fails the Landlock check, the host networking and file sharing checks
+  are skipped with the reason (`mootWithoutLandlock`): no Docker Desktop
+  setting helps there, and MicroVMs use neither. A failing report ends with
+  `✗ not ready for sandboxes: N checks failed`.
 
 ## Code map
 

@@ -138,6 +138,14 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 	} else {
 		landlock := r.dockerVMLandlockCheck(ctx)
 		hostNet, sharing, disk := r.dockerDriverChecks(r.dockerRoot)
+		if landlock.Status == StatusFail {
+			// No Docker Desktop setting lets a sandbox start on a VM
+			// kernel without Landlock, and the way on, MicroVMs, uses
+			// neither of these: the doctor does not ask for a change that
+			// cannot help.
+			hostNet = mootWithoutLandlock(hostNet, "OpenShell MicroVMs, the way on, do not use Docker's network")
+			sharing = mootWithoutLandlock(sharing, "OpenShell MicroVMs, the way on, mount no project folder")
+		}
 		// What a switch to MicroVMs needs is checked when the doctor
 		// offers one.
 		vmDriver := Check{ID: CheckIDVMDriver, Title: "MicroVM driver", Status: StatusSkip, Detail: "the gateway runs the docker driver"}
@@ -151,6 +159,19 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 	}
 	r.landlock = checks[0].Status
 	r.report.Checks = slices.Insert(r.report.Checks, r.machineAt, checks...)
+}
+
+// mootWithoutLandlock skips a Docker Desktop setting check (host
+// networking, file sharing) that warned or failed on a Mac whose Docker VM
+// has no Landlock, saying why: its fix, a change in Docker Desktop's
+// settings, cannot make a sandbox start there. One that passed stays.
+func mootWithoutLandlock(c Check, microVMs string) Check {
+	if c.Status != StatusWarn && c.Status != StatusFail {
+		return c
+	}
+	c.Status, c.Fix = StatusSkip, nil
+	c.Detail = "not needed: without a usable Landlock in the Linux VM Docker runs in, no sandbox starts there whatever this setting is, and " + microVMs
+	return c
 }
 
 // dockerDesktopSharing are the directories Docker Desktop for Mac shares

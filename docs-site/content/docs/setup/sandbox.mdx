@@ -1352,7 +1352,11 @@ reason. Its file sharing check is of your temp directory (`$TMPDIR`, under
 `/var/folders`), from which an image build mounts a MicroVM's `/etc/hosts`
 into the container that checks the image; Docker Desktop shares it by
 default. A gateway configured for the MicroVM driver that
-still runs the Docker driver is reported as a restart pending.
+still runs the Docker driver is reported as a restart pending. On a gateway
+still on the Docker driver whose Docker VM has no Landlock (Docker
+Desktop's), the doctor skips the Docker Desktop host networking and file
+sharing checks and says why: no setting there lets a sandbox start, and
+MicroVMs, the way on, use neither.
 The command exits 1 when a check fails, and its last line then reads
 **✗ not ready for sandboxes: N checks failed**. With `--json` it prints the
 report as JSON and always exits 0; the report's `ok` field says whether every check
