@@ -343,6 +343,18 @@ func prepareRequiredProjection(
 	if contract.family == "span.guardrail.judge" {
 		attributes["defenseclaw.guardrail.judge"] = true
 	}
+	if contract.shape == ShapeAgent {
+		// Galileo requires a provider on an agent span. Amp's built-in modes
+		// name no model, so its agent spans carry none, the span failed this
+		// projection, and those traces never appeared in Galileo. The
+		// connector stands in, as every other hook connector's spans already
+		// name it when no model says otherwise.
+		if provider, _ := attributes["gen_ai.provider.name"].(string); strings.TrimSpace(provider) == "" {
+			if connector := strings.TrimSpace(envelope.Connector); observability.IsStableToken(connector) {
+				attributes["gen_ai.provider.name"] = connector
+			}
+		}
+	}
 	for _, key := range contract.requiredAttributes {
 		requireNonEmptyString(attributes, key, &missing)
 	}

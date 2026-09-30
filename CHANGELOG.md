@@ -71,6 +71,13 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
+  on an agent span, and Amp names no model in its built-in modes (such as
+  `medium`), so those agent spans were left out of the Galileo export and
+  their traces never appeared, while the gateway reported every batch
+  delivered. The Galileo view now names the connector as the provider when
+  a span reports none, as other hook connectors already do; other
+  destinations are unchanged.
 - **Windows MDM detection no longer fails while the hook guardian writes
   its records.** On the enterprise standalone profile, verify (and so
   `detect.ps1` and `Remediate-Detect.ps1`) failed about one run in eight
