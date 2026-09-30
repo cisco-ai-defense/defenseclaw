@@ -51,6 +51,21 @@
   --diagram-role-evidence: #70569a;
   --diagram-role-operator: #24775a;
   --diagram-role-system: #5d6b75;
+  /* Trust-zone tones for <Zone> in <Flow>. The accent colors the tone
+   * name on the zone badge and tints the border; the fill stays close
+   * to the canvas so member cards remain the primary surface. */
+  --diagram-zone-trusted: #24775a;
+  --diagram-zone-trusted-bg: #f4f9f7;
+  --diagram-zone-privileged: #0075a3;
+  --diagram-zone-privileged-bg: #f2f8fb;
+  --diagram-zone-restricted: #087f75;
+  --diagram-zone-restricted-bg: #f2f9f8;
+  --diagram-zone-protected: #70569a;
+  --diagram-zone-protected-bg: #f8f6fa;
+  --diagram-zone-untrusted: #955900;
+  --diagram-zone-untrusted-bg: #fbf8f2;
+  --diagram-zone-external: #5d6b75;
+  --diagram-zone-external-bg: #f6f8f9;
 
   --color-fd-primary: var(--brand-cisco);
   --color-fd-accent: var(--brand-cisco);
@@ -136,6 +151,18 @@
   --diagram-role-evidence: #c1a8eb;
   --diagram-role-operator: #69c9a2;
   --diagram-role-system: #abb7bf;
+  --diagram-zone-trusted: #69c9a2;
+  --diagram-zone-trusted-bg: #1f2b2e;
+  --diagram-zone-privileged: #5bc2e8;
+  --diagram-zone-privileged-bg: #1e2b33;
+  --diagram-zone-restricted: #5fd0c3;
+  --diagram-zone-restricted-bg: #1e2c30;
+  --diagram-zone-protected: #c1a8eb;
+  --diagram-zone-protected-bg: #242933;
+  --diagram-zone-untrusted: #efb052;
+  --diagram-zone-untrusted-bg: #272a2a;
+  --diagram-zone-external: #abb7bf;
+  --diagram-zone-external-bg: #1f262c;
 }
 
 /* Hero terminal window — minimal styling, leans on the Fumadocs token

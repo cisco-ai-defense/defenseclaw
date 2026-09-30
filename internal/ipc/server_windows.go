@@ -187,7 +187,13 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 	if programFiles == "" {
 		return fmt.Errorf("ipc: trusted program files root is empty; refusing to bind IPC surface")
 	}
-	trustedParent := filepath.Clean(filepath.Join(programFiles, windowsManagedIPCRelativeDir))
+	// The managed IPC directory follows the service's enterprise profile pin
+	// (Secure Client or standalone), exactly as the sensor helper and the
+	// gateway resolve it; without a pin it is the Secure Client directory.
+	trustedParent := winpath.ManagedIPCDir()
+	if trustedParent == "" {
+		return fmt.Errorf("ipc: trusted managed IPC directory is unresolved; refusing to bind IPC surface")
+	}
 	if !strings.EqualFold(parent, trustedParent) {
 		return fmt.Errorf(
 			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",

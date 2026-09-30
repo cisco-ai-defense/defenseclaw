@@ -80,6 +80,22 @@ class HintEngine:
             return self._ai_discovery_hint(state)
         if panel in {"registry", "registries"}:
             return self._registries_hint(state)
+        if panel == "runtime":
+            return self._runtime_hint(state)
+        if panel == "sandboxes":
+            from defenseclaw.tui.services.sandbox_state import sandbox_keys_hint
+
+            return state.panel_keys or sandbox_keys_hint(
+                state.panel_view or "sandboxes", has_rows=state.panel_has_rows
+            )
+        if panel == "policies":
+            from defenseclaw.platform_support import openshell_sandboxes_supported
+            from defenseclaw.tui.services.policy_state import policies_keys_hint
+
+            return policies_keys_hint(
+                state.panel_view or "policies",
+                sandbox_supported=openshell_sandboxes_supported(),
+            )
         if panel == "setup":
             return self._setup_hint(state, status)
         if panel in {"first-run", "firstrun"}:
@@ -163,8 +179,8 @@ class HintEngine:
                 "Enter opens details, Dismiss filtered clears the view."
             )
         return (
-            "KEYS  j/k move | Enter detail | click severity chips | Space select | "
-            "x ack | c dismiss | / search | Esc close."
+            "KEYS  j/k move | Enter detail | 1-5 severity | Space select | x ack selected | "
+            "d dismiss | c dismiss filtered | / search."
         )
 
     def _audit_hint(self, state: HintState) -> str:
@@ -174,7 +190,7 @@ class HintEngine:
                 "Same target/run correlates rows."
             )
         return (
-            "KEYS  j/k move | Enter detail | click common filters | / search field:value | "
+            "KEYS  j/k move | Enter detail | 1 all 2 risk 3 blocks 4 scans 5 keys | / search field:value | "
             "t same target | u same run | e export | Esc close."
         )
 
@@ -202,17 +218,26 @@ class HintEngine:
     def _plugins_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "KEYS  j/k move | Enter detail | o actions | s scan | r refresh | / filter | : plugin install <name>."
+        return (
+            "KEYS  j/k move | Enter detail | o actions | s scan | b block | a allow | u unblock | "
+            "r refresh | / filter | : plugin install <name>."
+        )
 
     def _inventory_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "h/l switch sub-tabs · 1-4 filter active list · j/k scroll · Enter detail · o fast scope · r scan."
+        return (
+            "KEYS  h/l sub-tab | j/k move | Enter detail | 1 all, 2-4 filter Skills/Plugins | "
+            "o fast scan scope | r scan."
+        )
 
     def _logs_hint(self, state: HintState) -> str:
         if state.logs_paused:
             return f"Paused. Space resumes. New lines since pause: +{state.new_lines_since_pause}."
-        return "Streaming live. Space pauses, / searches, e filters errors, w filters warnings."
+        return (
+            "KEYS  h/l source | 1-8 filter | Space pause | / search | e errors | w warnings | "
+            "Enter detail | g/G top/end."
+        )
 
     def _activity_hint(self, state: HintState) -> str:
         if state.command_running:
@@ -232,12 +257,24 @@ class HintEngine:
     def _ai_discovery_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "KEYS  j/k move | Enter detail | s scan | r refresh | / search vendor/product/component."
+        return (
+            "KEYS  j/k move | t switch table | a all models | Enter detail | s scan | r refresh | "
+            "/ search vendor/product/component."
+        )
 
     def _registries_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "1 sources · 2 entries · 3 approved · s sync source · S sync all · a approve · x reject."
+        return (
+            "KEYS  1/2/3 sources/entries/approved | j/k move | Enter detail | s sync | S sync all | "
+            "a approve | x reject | d remove source."
+        )
+
+    def _runtime_hint(self, state: HintState) -> str:
+        return (
+            "KEYS  j/k move | Enter finding | / filter | e enable | s poll now | r refresh | "
+            "p planes detail."
+        )
 
     def _setup_hint(self, state: HintState, status: StatusModel | None) -> str:
         if self._command_running(state, status):
@@ -254,16 +291,20 @@ class HintEngine:
                 "Ctrl+C to cancel · A for live output"
             )
             return f"⟳ {label}{elapsed_str}{tail}"
-        if hint := self._missing_credentials_hint(status):
+        from defenseclaw.tui.panels.setup_keys import SETUP_VIEWS, keys_hint
+
+        view = state.panel_view if state.panel_view in SETUP_VIEWS else "wizards"
+        # The missing-keys nudge belongs on the task list, not inside a form.
+        if view == "wizards" and (hint := self._missing_credentials_hint(status)):
             return hint
-        return "j/k or [] choose wizard · Enter opens form · backtick config editor · r credentials · G restart."
+        return keys_hint(view, state.panel_conditions)
 
     def _first_run_hint(self, state: HintState, status: StatusModel | None) -> str:
         if self._command_running(state, status):
             return "First-run setup is applying. Press Ctrl+C to cancel. Output streams in Activity."
-        if hint := self._missing_credentials_hint(status):
-            return hint
-        return "First-run setup: j/k choose field · h/l change value · Ctrl+R apply."
+        from defenseclaw.tui.panels.setup_keys import keys_hint
+
+        return keys_hint("first-run")
 
 
 class HintBar(_Static):

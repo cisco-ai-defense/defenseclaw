@@ -58,8 +58,58 @@ rollback  Restore the install that the last upgrade replaced.
 """
 
 
+# A machine-wide managed (MDM-deployed) installation announces itself: on
+# Linux and macOS with the runtime descriptor it publishes, on Windows with
+# the HKLM marker its lifecycle registers. Either means the organization
+# installs and updates DefenseClaw on this computer.
+MANAGED_DESCRIPTORS = (
+    "/etc/defenseclaw/managed-runtime.json",
+    "/opt/cisco/defenseclaw/etc/managed-runtime.json",
+)
+WINDOWS_MANAGED_MARKER_KEY = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
+
+
 class ShimError(RuntimeError):
     """A user-facing failure; nothing on the machine was changed."""
+
+
+def managed_deployment() -> str | None:
+    """Name the machine-wide managed deployment on this host, or None.
+
+    The one managed-host check for per-user upgrade and rollback: the
+    runtime descriptor path on Linux and macOS, the registered profile on
+    Windows.
+    """
+
+    if os.name == "nt":
+        return _windows_managed_profile()
+    return managed_descriptor()
+
+
+def managed_descriptor() -> str | None:
+    """Return the managed runtime descriptor on this Linux or macOS host, if any."""
+
+    if os.name == "nt":
+        return None
+    for path in MANAGED_DESCRIPTORS:
+        if os.path.isfile(path) and not os.path.islink(path):
+            return path
+    return None
+
+
+def _windows_managed_profile() -> str | None:
+    try:
+        import winreg
+
+        access = winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, WINDOWS_MANAGED_MARKER_KEY, 0, access) as key:
+            try:
+                value, _kind = winreg.QueryValueEx(key, "Profile")
+            except OSError:
+                value = ""
+        return str(value) or "managed"
+    except (ImportError, OSError):
+        return None
 
 
 def run(argv: list[str]) -> int:
@@ -72,6 +122,12 @@ def run(argv: list[str]) -> int:
         if options is None:
             print(USAGE, end="")
             return 0
+        deployment = managed_deployment()
+        if deployment:
+            raise ShimError(
+                f"this computer's DefenseClaw is managed by your organization ({deployment}); "
+                "your IT department installs and updates it through the managed deployment channel"
+            )
         if command == "rollback":
             return _rollback(yes=options["yes"])
         return _upgrade(options["version"], yes=options["yes"])

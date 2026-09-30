@@ -29,7 +29,7 @@ import (
 	"strings"
 	"text/template"
 
-	"gopkg.in/yaml.v3"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 //go:embed shims/*.sh
@@ -47,22 +47,61 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 
 // templateData holds the values injected into hook and shim templates.
 type templateData struct {
-	APIAddr       string
-	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
-	TokenFileJS   string // absolute token path, escaped for a JavaScript double-quoted string
-	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
-	Managed       bool
-	TokenFile     string
-	ScopedToken   bool
-	ConnectorName string
-	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	APIAddr     string
+	APIToken    string // gateway bearer token; empty when unconfigured (loopback-allow)
+	TokenFileJS string // absolute token path, escaped for a JavaScript double-quoted string
+	// HookSocketJS is the standalone gateway's unix hook socket, escaped for a
+	// JavaScript double-quoted string; empty keeps the TCP transport.
+	HookSocketJS string
+	// InstallMarkerJS is the managed deployment's install marker, escaped for
+	// a JavaScript double-quoted string; empty when unused.
+	InstallMarkerJS string
+	// ServiceUID is the standalone gateway's service uid trusted as the
+	// hook socket owner (with root); 0 when unused.
+	ServiceUID int
+	// ForeignHookGuardJS is the administrator-owned hook binary an in-agent
+	// plugin runs for the standalone foreign-hook guard, escaped for a
+	// JavaScript double-quoted string; empty skips the check.
+	ForeignHookGuardJS string
+	// ListenerProofJS is "1" when an in-agent plugin on loopback TCP must
+	// make the listener prove it is the gateway before sending its per-user
+	// credential (UserScopedListenerProof); empty skips the proof.
+	ListenerProofJS string
+	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
+	Managed         bool
+	TokenFile       string
+	ScopedToken     bool
+	ConnectorName   string
+	HookBinaryPS    string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS   int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int
 	// Copilot has the same 30-second command-hook envelope and needs an
 	// explicit byte-stream adapter for the GUI-subsystem launcher on Windows.
 	CopilotHookTimeoutMS int
+	// HookSocketTransportSH is the standalone unix-socket transport block a
+	// connector shell hook runs before it builds its bearer header (see
+	// shellHookSocketTransport). Empty keeps the TCP transport, and the
+	// rendered hook is then byte-identical to one without the block.
+	HookSocketTransportSH string
+	// ForeignHookGuardSH is the standalone foreign-hook guard block the
+	// Hermes shell hook runs before its gateway request (see
+	// shellHookForeignGuard). Empty for every other hook and install, whose
+	// renders are then byte-identical to one without it.
+	ForeignHookGuardSH string
+
+	// Sandbox selects the OpenShell in-image variant (sandbox_hooks.go):
+	// APIAddr is the baked hook ingress, FailMode is baked rather than
+	// env-overridable, and the token comes only from DEFENSECLAW_SANDBOX_TOKEN.
+	// Host renders leave it false and every Sandbox* field zero.
+	Sandbox bool
+	// Sandbox ingress budgets in whole seconds (curl --connect-timeout and
+	// --max-time for the first attempt, the retry and Codex SessionEnd).
+	SandboxConnectTimeout    int
+	SandboxMaxTime           int
+	SandboxRetryMaxTime      int
+	SandboxSessionEndMaxTime int
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -433,18 +472,13 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
-		content, err := hookFS.ReadFile("hooks/" + name)
+		rendered, err := renderHookTemplate(name, data)
 		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-
-		rendered, err := renderTemplate(string(content), data)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
+			return err
 		}
 
 		hookPath := filepath.Join(hookDir, name)
-		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := atomicWriteFile(hookPath, rendered, 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
 	}
@@ -479,6 +513,15 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 }
 
 func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool) error {
+	return writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, extras, managed, connectorName, scopedToken, "", "")
+}
+
+// writeHookScriptsCommonWithTransport is writeHookScriptsCommonWithOptions
+// plus the connector scripts' standalone socket transport block (empty for
+// TCP) and foreign-hook guard block (empty unless the connector's standalone
+// shell hook runs the guard). The shared inspect-* scripts keep TCP: no
+// per-user enterprise hook registration invokes them.
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -497,48 +540,13 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 
-	connectorData := templateData{
-		APIAddr:              apiAddr,
-		APIToken:             "",
-		FailMode:             normalizeHookFailMode(failMode),
-		Managed:              managed,
-		TokenFile:            tokenFile,
-		ScopedToken:          scopedToken,
-		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
-		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
-		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
-		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
-		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
+	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard)
+	if err != nil {
+		return err
 	}
-	// The inspect-* family has one physical copy per data directory.  Its
-	// bytes must therefore depend only on install-wide inputs; connector mode,
-	// identity and scoped credential selection happen at invocation time.  The
-	// connector-owned lifecycle scripts retain the selected connector data.
-	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
-	renderAndWrite := func(name string, renderData templateData) error {
-		content, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-		rendered, err := renderTemplate(string(content), renderData)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
-		}
-		hookPath := filepath.Join(hookDir, name)
-		if err := writeFile(hookPath, []byte(rendered), 0o700); err != nil {
-			return fmt.Errorf("write hook %s: %w", name, err)
-		}
-		return nil
-	}
-	for _, name := range genericHookScripts {
-		if err := renderAndWrite(name, sharedData); err != nil {
-			return err
-		}
-	}
-	scripts := hookScriptNamesFromExtras(extras)
-	for _, name := range scripts[len(genericHookScripts):] {
-		if err := renderAndWrite(name, connectorData); err != nil {
-			return err
+	for _, script := range scripts {
+		if err := writeFile(filepath.Join(hookDir, script.name), script.body, 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", script.name, err)
 		}
 	}
 	if err := writeHookConfigSidecarUsing(
@@ -552,6 +560,143 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 	return nil
+}
+
+// renderedHookScript is one generated hook script: its basename in the hook
+// directory and its rendered bytes.
+type renderedHookScript struct {
+	name string
+	body []byte
+}
+
+// renderHookScripts renders, without writing anything, the shared inspect-*
+// scripts and the connector-owned lifecycle scripts named in extras, in the
+// order writeHookScriptsCommonWithTransport writes them. tokenFile is the
+// basename of the token file the connector scripts read.
+func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string) ([]renderedHookScript, error) {
+	connectorData := templateData{
+		APIAddr:              apiAddr,
+		APIToken:             "",
+		FailMode:             normalizeHookFailMode(failMode),
+		Managed:              managed,
+		TokenFile:            tokenFile,
+		ScopedToken:          scopedToken,
+		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
+		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
+		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
+		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
+		// Rendered only when a managed standalone install names a hook
+		// socket; see WriteHookScriptsForConnectorObjectWithOpts.
+		HookSocketTransportSH: socketTransport,
+		ForeignHookGuardSH:    foreignGuard,
+	}
+	// The inspect-* family has one physical copy per data directory.  Its
+	// bytes must therefore depend only on install-wide inputs; connector mode,
+	// identity and scoped credential selection happen at invocation time.  The
+	// connector-owned lifecycle scripts retain the selected connector data.
+	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
+	// renderHookScriptSet is the one renderer the host and sandbox hook
+	// files share (hook_render.go).
+	set, err := renderHookScriptSet(connectorData, sharedData, extras)
+	if err != nil {
+		return nil, err
+	}
+	scripts := make([]renderedHookScript, 0, len(set))
+	for _, file := range set {
+		scripts = append(scripts, renderedHookScript{name: file.Name, body: file.Data})
+	}
+	return scripts, nil
+}
+
+// hookRuntimeRenderMaxBytes bounds each installed hook runtime file
+// HookScriptRenderDrift reads.
+const hookRuntimeRenderMaxBytes = 4 << 20
+
+// renderedHookRuntimeFile is a per-user hook runtime file Setup writes: its
+// path and the bytes this release renders for it.
+type renderedHookRuntimeFile struct {
+	path string
+	body []byte
+}
+
+// HookScriptRenderDrift compares the hook runtime files conn's managed Setup
+// writes into opts.DataDir/hooks with the bytes this release renders for
+// opts, and returns the first file that is missing or differs, or "" when
+// every file matches. For a shell hook connector these are its own hook
+// scripts, the shared inspect-* scripts and the _hardening.sh helper they
+// source; for OmniGent, its policy module. A connector whose Setup publishes
+// a managed in-agent plugin (Amp, OpenCode) writes none of them:
+// ManagedPluginArtifactDrift covers the plugin. The standalone Unix guardian
+// relies on this rather than on the digests recorded at the last write: after
+// a package upgrade the files still match those digests but carry the
+// previous release's render, and the user can edit a file together with its
+// recorded digest. Files are read with the caller's credentials, bounded and
+// without following a link.
+func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
+	files, err := renderedHookRuntimeFiles(conn, opts)
+	if err != nil {
+		return filepath.Join(opts.DataDir, "hooks"), err
+	}
+	for _, file := range files {
+		installed, err := safefile.ReadRegularFileBounded(file.path, hookRuntimeRenderMaxBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			return file.path, nil
+		}
+		if err != nil {
+			return file.path, err
+		}
+		if !bytes.Equal(installed, file.body) {
+			return file.path, nil
+		}
+	}
+	return "", nil
+}
+
+// renderedHookRuntimeFiles renders the files HookScriptRenderDrift compares,
+// as a managed install writes them.
+func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRuntimeFile, error) {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" {
+		return nil, nil
+	}
+	if omnigent, ok := conn.(*OmnigentConnector); ok {
+		body, err := omnigent.renderPolicyModule(opts)
+		if err != nil {
+			return nil, err
+		}
+		return []renderedHookRuntimeFile{{path: omnigentPolicyModulePath(opts), body: body}}, nil
+	}
+	if _, ok := conn.(HookScriptOwner); !ok || len(ManagedPluginArtifacts(conn, opts)) > 0 {
+		return nil, nil
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	render := resolveConnectorHookRender(opts, conn)
+	tokenFile := ".token"
+	if render.scopedToken {
+		path, err := HookTokenFilePath(hookDir, conn.Name())
+		if err != nil {
+			return nil, err
+		}
+		tokenFile = filepath.Base(path)
+	}
+	scripts, err := renderHookScripts(opts.APIAddr, render.failMode, tokenFile, render.extras, opts.ManagedEnterprise,
+		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]renderedHookRuntimeFile, 0, len(hookHelperScripts)+len(scripts))
+	// A managed install writes the embedded helpers as they are.
+	for _, name := range hookHelperScripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return nil, fmt.Errorf("read hook helper %s: %w", name, err)
+		}
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, name), body: content})
+	}
+	for _, script := range scripts {
+		files = append(files, renderedHookRuntimeFile{path: filepath.Join(hookDir, script.name), body: script.body})
+	}
+	return files, nil
 }
 
 // hookRuntimeFileWriter selects the final-descriptor publication primitive for
@@ -642,6 +787,19 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 	)
 }
 
+// managedNativeHookRuntimeConnector reports whether a connector's hook is
+// administrator machine policy that runs the hook binary with a
+// runtime-only per-user footprint: Codex, Claude Code, Cursor, Copilot, and
+// OpenCode through its managed plugin on the standalone profile.
+func managedNativeHookRuntimeConnector(name string) bool {
+	switch name {
+	case "codex", "claudecode", "cursor", "copilot", "opencode":
+		return true
+	default:
+		return false
+	}
+}
+
 // ReconcileManagedNativeHookRuntime writes only DefenseClaw's connector-scoped
 // native runtime. It deliberately does not invoke the connector Setup method,
 // so Windows machine-policy connectors never read or modify the agent's
@@ -654,7 +812,7 @@ func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -681,7 +839,7 @@ func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
 	name := normalizeConnectorName(connectorName)
-	if name != "codex" && name != "claudecode" && name != "cursor" {
+	if !managedNativeHookRuntimeConnector(name) {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
@@ -1322,27 +1480,56 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
 // force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
-	var extras []string
+	render := resolveConnectorHookRender(opts, c)
+	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.extras, opts.ManagedEnterprise,
+		c.Name(), render.scopedToken, render.socketTransport, render.foreignGuard)
+}
+
+// connectorHookRender is what WriteHookScriptsForConnectorObjectWithOpts
+// renders a connector's hook scripts with.
+type connectorHookRender struct {
+	extras          []string
+	failMode        string
+	token           string
+	scopedToken     bool
+	socketTransport string
+	foreignGuard    string
+}
+
+func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender {
+	var render connectorHookRender
 	if owner, ok := c.(HookScriptOwner); ok {
-		extras = owner.HookScriptNames(opts)
+		render.extras = owner.HookScriptNames(opts)
 	}
-	failMode := resolveHookFailMode(opts, c)
+	render.failMode = resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
-		if failMode == "closed" && !caps.SupportsFailClosed {
-			failMode = "open"
+		if render.failMode == "closed" && !caps.SupportsFailClosed {
+			render.failMode = "open"
 		}
 	}
-	hookToken := opts.HookAPIToken
-	scopedToken := opts.HookAPITokenScoped
-	if strings.TrimSpace(hookToken) == "" {
-		hookToken = opts.APIToken
+	render.token = opts.HookAPIToken
+	render.scopedToken = opts.HookAPITokenScoped
+	if strings.TrimSpace(render.token) == "" {
+		render.token = opts.APIToken
 		// Backward-compatible direct callers predate HookAPIToken. Preserve
 		// scoped sidecars for hook-native connectors, but never disguise a
 		// proxy connector's master token as connector-scoped.
-		scopedToken = !IsProxyConnector(c.Name())
+		render.scopedToken = !IsProxyConnector(c.Name())
 	}
-	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
+	// A managed standalone install on a unix host sends connector shell hooks
+	// through the gateway's peer-authorized unix hook socket, as it already
+	// does for in-agent plugins. Every other install (per-user, Secure
+	// Client, Windows) has no socket here and keeps the TCP transport.
+	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
+		render.socketTransport = shellHookSocketTransport(socket, serviceUID)
+	}
+	// The standalone Hermes hook also runs the foreign-hook guard first
+	// (shellHookForeignGuardBinary); no other hook or install does.
+	if binary := shellHookForeignGuardBinary(opts, c.Name()); binary != "" {
+		render.foreignGuard = shellHookForeignGuard(binary)
+	}
+	return render
 }
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
@@ -1407,66 +1594,11 @@ func HookScripts() []string {
 	return out
 }
 
-type sandboxPolicy struct {
-	Sandbox struct {
-		Mode       string         `yaml:"mode"`
-		Exec       sandboxExec    `yaml:"exec"`
-		Network    sandboxNetwork `yaml:"network"`
-		Filesystem sandboxFilesys `yaml:"filesystem"`
-	} `yaml:"sandbox"`
-}
-
-type sandboxExec struct {
-	Allow []string `yaml:"allow"`
-	Deny  []string `yaml:"deny"`
-}
-
-type sandboxNetwork struct {
-	AllowEgress []string `yaml:"allow_egress"`
-	DenyEgress  string   `yaml:"deny_egress"`
-}
-
-type sandboxFilesys struct {
-	DenyWrite []string `yaml:"deny_write"`
-}
-
-// WriteSandboxPolicy generates a sandbox policy YAML for OpenShell enforcement.
-// The policy restricts exec, network egress, and filesystem writes.
-func WriteSandboxPolicy(dataDir, proxyAddr, apiAddr string) error {
-	policyDir := filepath.Join(dataDir, "policies")
-	if err := os.MkdirAll(policyDir, 0o755); err != nil {
-		return fmt.Errorf("create policy dir: %w", err)
-	}
-
-	var pol sandboxPolicy
-	pol.Sandbox.Mode = "enforce"
-	pol.Sandbox.Exec.Allow = []string{
-		"/usr/bin/git", "/usr/bin/node", "/usr/bin/python3", "/usr/bin/npm",
-	}
-	pol.Sandbox.Exec.Deny = []string{
-		"/usr/bin/curl", "/usr/bin/wget", "**/nc", "**/ncat", "**/ssh",
-	}
-	pol.Sandbox.Network.AllowEgress = []string{proxyAddr, apiAddr}
-	pol.Sandbox.Network.DenyEgress = "*"
-	pol.Sandbox.Filesystem.DenyWrite = []string{"/etc/", "~/.ssh/", "~/.aws/credentials"}
-
-	out, err := yaml.Marshal(&pol)
-	if err != nil {
-		return fmt.Errorf("marshal sandbox policy: %w", err)
-	}
-
-	policyPath := filepath.Join(policyDir, "defenseclaw-policy.yaml")
-	return os.WriteFile(policyPath, out, 0o644)
-}
-
-// ResolveSubprocessPolicy determines the effective subprocess policy for
-// this platform. Sandbox requires Linux (Landlock + seccomp); macOS and
-// other platforms fall back to shims.
+// ResolveSubprocessPolicy determines the effective subprocess policy. The
+// legacy openshell-sandbox tier is gone (its generated policy file was never
+// enforced), so a sandbox preference resolves to shims on every platform.
 func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
-	if preferred == SubprocessNone {
-		return SubprocessNone
-	}
-	if preferred == SubprocessSandbox && runtime.GOOS != "linux" {
+	if preferred == SubprocessSandbox {
 		return SubprocessShims
 	}
 	return preferred
@@ -1475,22 +1607,13 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
 // tier based on the resolved policy.
 func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
-	switch policy {
-	case SubprocessSandbox:
-		if err := WriteSandboxPolicy(opts.DataDir, opts.ProxyAddr, opts.APIAddr); err != nil {
-			return fmt.Errorf("sandbox policy: %w", err)
-		}
+	switch ResolveSubprocessPolicy(policy) {
+	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
 		// F-2029 / F-3397: persist the gateway bearer token alongside
 		// the shim scripts so every inspection call carries an
 		// Authorization header. Pre-fix the shim had no auth token
 		// available and silently downgraded a 401 to "allow".
-		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
-			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
-		}
-
-	case SubprocessShims:
-		shimDir := filepath.Join(opts.DataDir, "shims")
 		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
@@ -1501,8 +1624,9 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	return nil
 }
 
-// TeardownSubprocessEnforcement removes shim scripts and the sandbox
-// policy file. It deliberately does NOT touch the shared hooks/
+// TeardownSubprocessEnforcement removes shim scripts and any stale policy
+// file an older release wrote for the removed openshell-sandbox tier. It
+// deliberately does NOT touch the shared hooks/
 // directory anymore: the previous implementation iterated the GLOBAL
 // `hookScripts` slice (= every connector's *-hook.sh + every generic
 // inspect-*.sh) and deleted them all from the shared dir. When called
@@ -1573,16 +1697,20 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("ensure hook dir: %w", err)
 	}
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
+}
+
+// disabledHookTombstone is the body writeDisabledHookTombstone writes.
+func disabledHookTombstone(vendorLabel string) string {
 	if vendorLabel == "" {
 		vendorLabel = "DefenseClaw connector"
 	}
-	body := "#!/bin/sh\n" +
+	return "#!/bin/sh\n" +
 		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
 		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
 		"exit 0\n"
-	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }
 
 // ShimBinaries returns the list of binary names that are shimmed.

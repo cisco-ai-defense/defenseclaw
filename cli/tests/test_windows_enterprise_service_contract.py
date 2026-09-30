@@ -220,15 +220,17 @@ def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
     lifecycle_suffix = r"Cisco\Cisco Secure Client\DefenseClaw-Lifecycle"
     certification_suffix = r"Cisco\Cisco Secure Client\DefenseClaw-Cert"
 
-    for source in (installer, module, harness, smoke, documentation):
+    # The standalone profile's vendor-neutral roots exist only in the
+    # lifecycle's profile-root helpers (see
+    # test_windows_enterprise_standalone_contract.py); the Secure Client
+    # harness, smoke tests, and deployment guide never name them.
+    for source in (harness, smoke, documentation):
         assert r"Cisco\DefenseClaw" not in source
     for source in (installer, module, harness, smoke):
         assert "Cisco Secure Client" in source
     assert production_suffix in installer
-    assert production_suffix in module
     assert production_suffix in harness
     assert production_suffix in smoke
-    assert lifecycle_suffix in module
     assert lifecycle_suffix in harness
     assert certification_suffix in harness
 
@@ -3317,7 +3319,7 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     assert "Test-NormalModeLiveAutoHeal" in harness
     assert "normal-mode-live-hook-auto-heal-preserved" in harness
     assert "normal-mode active user did not prove existing hook auto-heal" in harness
-    assert "known-folder APIs" in documentation
+    assert "protected 64-bit machine registration in HKLM" in documentation
     assert "Environment poisoning therefore cannot redirect" in documentation
 
     run_service = service_host[
@@ -5298,7 +5300,9 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     assert "quarantine_descriptor" not in fallback
     assert "Get-DefenseClawManagedServiceNames" in fallback
     assert "$managedServiceNames.Count -ne 5" in fallback
-    assert "'SensorHelper' { [string]$expectedServiceNames[2] }" in fallback
+    assert "SensorHelper = [string]$expectedServiceNames[2]" in fallback
+    # The standalone profile has no broker row and resolves exactly four.
+    assert "$managedServiceNames.Count -ne 4" in fallback
     assert "@('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')" in fallback
     assert "Assert-DefenseClawOwnedServiceOrAbsent" in fallback
     assert "Revoke-DefenseClawManagedIPCServiceAccess" in fallback

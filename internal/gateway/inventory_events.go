@@ -411,6 +411,15 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	return owner
 }
 
+// discoveryUserIDKind is the id namespace of the account a per-user scan
+// ran as: a uid, the only id those scans carry.
+func discoveryUserIDKind(userID string) string {
+	if userID == "" {
+		return ""
+	}
+	return useridentity.KindPOSIXUID
+}
+
 // daemonHomeForInventoryAttribution returns the profile the sidecar itself
 // runs under, but only when that profile belongs to a person.
 //
@@ -420,7 +429,7 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 // its MCP configuration to that principal would put a row in the inventory
 // claiming a service account uses an agent.
 func daemonHomeForInventoryAttribution() string {
-	if ManagedEnterpriseActive() {
+	if gatewayRunsAsServiceAccount() {
 		return ""
 	}
 	home, err := os.UserHomeDir()
@@ -1255,6 +1264,9 @@ func discoveredEntriesFromReport(
 				itemDescription: "",
 				agentConnector:  connectorSlug,
 				agentInstalled:  &installed,
+				userID:          signal.UserID,
+				userIDKind:      discoveryUserIDKind(signal.UserID),
+				userName:        signal.UserName,
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
@@ -1304,6 +1316,9 @@ func discoveredMCPEntriesFromReport(
 				itemName:       name,
 				mcpDisabled:    &disabled,
 				agentConnector: connectorSlug,
+				userID:         signal.UserID,
+				userIDKind:     discoveryUserIDKind(signal.UserID),
+				userName:       signal.UserName,
 			})
 		}
 	}

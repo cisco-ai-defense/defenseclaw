@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -23,8 +22,7 @@ func TestPolicyFilePoll_BumpsGeneration(t *testing.T) {
 	if err := os.MkdirAll(cfg.PolicyDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, nil, nil, store, logger, shell, nil, nil)
+	w := New(cfg, nil, nil, store, logger, nil, nil)
 	blockPath := filepath.Join(cfg.DataDir, "block_list.yaml")
 	if err := os.WriteFile(blockPath, []byte(`- target_type: skill
   target_name: a

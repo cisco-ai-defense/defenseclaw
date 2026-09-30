@@ -63,6 +63,7 @@ struct OverviewView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 quickActionsCard
+                SandboxOverviewCard()
                 configurationCard
                 if !overviewConnectorRows.isEmpty { connectorCard }
                 observabilityCard

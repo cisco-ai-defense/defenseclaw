@@ -166,7 +166,7 @@ func windowsAgentVersionCandidatePaths(profileHome, connectorName string) []stri
 			windowsMachineScopedCursorPackageJSON,
 		}
 	default:
-		return nil
+		return windowsStandalonePerUserAgentVersionCandidatePaths(profileHome, connectorName)
 	}
 }
 

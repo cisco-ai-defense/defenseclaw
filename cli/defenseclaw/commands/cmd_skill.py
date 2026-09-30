@@ -474,10 +474,9 @@ def _run_openclaw(*args: str) -> str | None:
     to substring extraction when the whole stream isn't valid JSON.
     """
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
         result = subprocess.run(
-            [*prefix, openclaw_bin(), *args],
+            [openclaw_bin(), *args],
             capture_output=True, text=True, timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -511,15 +510,15 @@ def _run_openclaw(*args: str) -> str | None:
 
 
 def _api_bind_host(app: AppContext) -> str:
-    """Resolve the API bind address, mirroring sidecar.runAPI in Go.
+    """Resolve the host to dial for the sidecar API (config.APIBindHost in Go).
 
-    In standalone sandbox mode with a non-localhost guardrail host,
-    the Go gateway binds to guardrail.host (the bridge IP) instead
-    of 127.0.0.1.
+    An explicit ``gateway.api_bind`` wins; a legacy standalone sandbox
+    install otherwise keeps the API on guardrail.host (the veth bridge IP)
+    until ``defenseclaw sandbox legacy-cleanup``.
     """
-    if app.cfg.openshell.is_standalone() and app.cfg.guardrail.host not in ("", "localhost"):
-        return app.cfg.guardrail.host
-    return "127.0.0.1"
+    from defenseclaw.gateway import gateway_api_client_host
+
+    return gateway_api_client_host(app.cfg)
 
 
 def _sidecar_client(app: AppContext):

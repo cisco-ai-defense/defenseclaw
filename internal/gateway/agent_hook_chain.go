@@ -204,7 +204,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		)
 	}
 	if len(typedFindings) != 0 {
-		intent := guardrailRuntimeActionForConnector(
+		intent := guardrailToolCallActionForConnector(
 			a.scannerCfg,
 			req.ConnectorName,
 			HighestSeverity(typedFindings),
@@ -326,7 +326,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			req.Payload,
 		)
 		readPathDigest, readValueDigests :=
-			toolValueLineageSuccessfulReadResult(req, outcome)
+			toolValueLineageSuccessfulReadResult(ctx, req, outcome)
 		var (
 			sqlSource                  audit.ToolChainPendingSQLValueSource
 			sqlProjection              toolValueLineageSQLSuccessfulProjection
@@ -489,7 +489,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			guardrailRuntimeActionForConnector(
+			guardrailToolCallActionForConnector(
 				a.scannerCfg,
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
@@ -530,7 +530,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			guardrailRuntimeActionForConnector(
+			guardrailToolCallActionForConnector(
 				a.scannerCfg,
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
@@ -845,7 +845,7 @@ func toolChainProjectionHasBlockIntent(
 		steps := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
 			definition.Step4Bit
 		if projection.EnforcementStepMask&steps != 0 &&
-			guardrailRuntimeActionForConnector(
+			guardrailToolCallActionForConnector(
 				cfg,
 				connectorName,
 				definition.Severity,
@@ -863,7 +863,7 @@ func toolChainBlockEligibleProjection(
 	projection guardrail.ToolChainProjection,
 ) guardrail.ToolChainProjection {
 	for index, definition := range guardrail.ToolChainDefinitions() {
-		if guardrailRuntimeActionForConnector(
+		if guardrailToolCallActionForConnector(
 			cfg,
 			connectorName,
 			definition.Severity,
@@ -2048,6 +2048,7 @@ func projectToolValueLineageSink(
 }
 
 func toolValueLineageSuccessfulReadResult(
+	ctx context.Context,
 	req agentHookRequest,
 	outcome connector.ToolLifecycleOutcome,
 ) (string, guardrail.ToolChainValueJoinDigests) {
@@ -2075,7 +2076,7 @@ func toolValueLineageSuccessfulReadResult(
 		Tool:       req.ToolName,
 		Args:       args,
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: hookActiveHome(ctx),
 	})
 	pathDigest, exact := exactSingleReadPathDigest(facts)
 	kind, supported := toolValueLineageSourceKindForSensitiveRead(facts)

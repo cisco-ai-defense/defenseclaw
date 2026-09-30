@@ -40,7 +40,7 @@ command = "operator-mcp"
 	}
 	cfg.Guardrail.Connector = "codex"
 
-	targets := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil).enumerateTargets()
+	targets := New(cfg, []string{skillDir}, nil, store, logger, nil, nil).enumerateTargets()
 	seen := map[string]bool{}
 	for _, target := range targets {
 		if target.Type == InstallMCP {

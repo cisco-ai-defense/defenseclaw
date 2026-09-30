@@ -61,16 +61,16 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test go-test-cov \
+        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync \
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
-        dist dist-cli dist-gateway dist-installers dist-requirements dist-sandbox dist-test dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -301,16 +301,6 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "  defenseclaw init         # or initialize via CLI (scripting / CI)"
 	@echo "  defenseclaw --help       # see all CLI commands"
 	@echo ""
-	@if [ "$$(uname -s)" = "Linux" ]; then \
-		echo "Sandbox mode (Linux):"; \
-		echo "  defenseclaw init --sandbox          # create sandbox user + directories"; \
-		echo "  defenseclaw setup sandbox            # configure networking + systemd"; \
-		echo "  scripts/install-openshell-sandbox.sh  # install openshell-sandbox binary"; \
-	else \
-		echo "Sandbox mode (Linux only):"; \
-		echo "  On a Linux host, use 'defenseclaw init --sandbox' to set up"; \
-		echo "  openshell-sandbox standalone mode with network isolation."; \
-	fi
 
 maybe-openclaw-plugin-install: _source-install-preflight
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
@@ -702,8 +692,8 @@ cli-test: pycli
 cli-test-cov: pycli
 	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-cli-test-snap: pycli
-	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
+tui-test: pycli
+	$(VENV_BIN)/python$(EXE) -m pytest cli/tests/tui -q
 
 gateway-test: sync-openclaw-extension
 	go test -race -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/ ./test/... -v
@@ -780,6 +770,21 @@ packaging-macos-bundle:
 	    "$(BUNDLE_TAGS)" \
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
+
+# packaging-linux-enterprise builds the standalone managed-enterprise
+# payload tarball and the defenseclaw-enterprise .deb/.rpm for linux
+# amd64/arm64 with a local GoReleaser snapshot (into dist/). Packages are
+# unsigned unless NFPM_GPG_KEY_FILE (and NFPM_PASSPHRASE) are set.
+packaging-linux-enterprise:
+	@command -v goreleaser >/dev/null || { echo "packaging-linux-enterprise needs goreleaser v2" >&2; exit 1; }
+	goreleaser release --snapshot --clean --skip=sbom,sign,publish,validate
+
+# packaging-macos-enterprise builds the standalone managed-enterprise
+# installer package dist/defenseclaw-enterprise-$(VERSION)-darwin-arm64.pkg.
+# Unsigned unless MACOS_APP_SIGN_IDENTITY / MACOS_INSTALLER_SIGN_IDENTITY
+# are set; see scripts/build-macos-enterprise-pkg.sh.
+packaging-macos-enterprise:
+	@scripts/build-macos-enterprise-pkg.sh --version "$(VERSION)" --dist-dir "$(DIST_DIR)"
 
 # The managed-enterprise Windows build is split so a macOS release box (which
 # has SSH access to cisco-aispg/ai-common) prepares the -tags cmid gateway
@@ -887,6 +892,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
 	macos/DefenseClawMac/script/test_ai_runtime_models.sh
+	macos/DefenseClawMac/script/test_sandbox_models.sh
 	macos/DefenseClawMac/script/test_panel_registry.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
@@ -1061,6 +1067,33 @@ lint: py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity
 go-mod-no-toolchain:
 	@scripts/check-go-mod-no-toolchain.sh
 
+# check-quiet-startup builds the shipped binaries with this host's Go and runs
+# a no-op command of each (name:package:argument). None may exit non-zero or
+# write to stderr: a dependency that warns at start-up, such as sonic's "only
+# supports go1.x ... will fallback to encoding/json" when the toolchain is newer
+# than the pinned sonic release supports, reaches admin and MDM output and the
+# hook-error text agents show their users.
+QUIET_STARTUP_COMMANDS := \
+	defenseclaw-gateway:./cmd/defenseclaw:--version \
+	defenseclaw-hook:./cmd/defenseclaw-hook:--version-json \
+	defenseclaw-sensor-helper:./cmd/defenseclaw-sensor-helper:--version
+
+check-quiet-startup:
+	@set -e; dir=$$(mktemp -d); trap 'rm -rf "$$dir"' EXIT; status=0; \
+	for spec in $(QUIET_STARTUP_COMMANDS); do \
+		name=$${spec%%:*}; rest=$${spec#*:}; package=$${rest%%:*}; argument=$${rest#*:}; \
+		go build -o "$$dir/$$name$(EXE)" "$$package"; \
+		rc=0; HOME="$$dir/home" "$$dir/$$name$(EXE)" $$argument >"$$dir/stdout" 2>"$$dir/stderr" || rc=$$?; \
+		if [ "$$rc" -ne 0 ]; then echo "$$name $$argument exited $$rc" >&2; status=1; fi; \
+		if [ -s "$$dir/stderr" ]; then \
+			echo "$$name $$argument wrote to stderr:" >&2; sed 's/^/  /' "$$dir/stderr" >&2; status=1; \
+		fi; \
+	done; \
+	if [ "$$status" -eq 0 ]; then \
+		echo "no start-up output on stderr ($$(go env GOVERSION) $$(go env GOOS)/$$(go env GOARCH)): $(QUIET_STARTUP_COMMANDS)"; \
+	fi; \
+	exit "$$status"
+
 # repro-flags-parity refuses drift between the bash and pwsh copies of
 # repro-flags.* — both files must ship the same fixed env exports and
 # the same required-env list, or the byte-identical outer Setup EXE
@@ -1135,9 +1168,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 
 _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/rego
-	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
-	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/envvars
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
@@ -1149,19 +1180,19 @@ _bundle-data: _checkout-write-preflight
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
+	@rm -rf cli/defenseclaw/_data/policies/guardrail-use-cases
 	@rm -rf cli/defenseclaw/_data/splunk_o11y_dashboards
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
-	cp policies/openshell/*.rego cli/defenseclaw/_data/policies/openshell/
-	cp policies/openshell/*.yaml cli/defenseclaw/_data/policies/openshell/
 	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
+	cp policies/guardrail/tool-chains.json cli/defenseclaw/_data/policies/guardrail/
+	cp -r policies/guardrail-use-cases cli/defenseclaw/_data/policies/
 	@# Use the canonical generator without repairing tracked docs before CI checks.
 	$(PYTHON) scripts/gen_envvars_docs.py --bundle-only
-	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
 	@# Textual TUI model picker via importlib.resources. Tracked source lives
@@ -1217,7 +1248,9 @@ _bundle-data: _checkout-write-preflight
 	  fi; \
 	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
-	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
+	@# The legacy openshell-sandbox assets were removed; drop copies an older
+	@# build left in this ignored staging tree so wheels cannot ship them.
+	@rm -rf cli/defenseclaw/_data/policies/openshell cli/defenseclaw/_data/scripts
 
 # Gateway archives with the published names. The Release workflow builds the
 # same names with goreleaser; this target is for local and CI install tests.
@@ -1259,23 +1292,12 @@ dist-requirements:
 	uv export --frozen --no-dev --no-emit-project --no-header --format requirements-txt \
 		-o $(DIST_DIR)/defenseclaw-$(VERSION)-requirements.txt
 
-dist-sandbox: _checkout-write-preflight
-	@mkdir -p $(DIST_DIR)/sandbox/policies $(DIST_DIR)/sandbox/scripts
-	cp policies/openshell/*.rego $(DIST_DIR)/sandbox/policies/
-	cp policies/openshell/*.yaml $(DIST_DIR)/sandbox/policies/
-	cp scripts/install-openshell-sandbox.sh $(DIST_DIR)/sandbox/scripts/
-	chmod +x $(DIST_DIR)/sandbox/scripts/install-openshell-sandbox.sh
-	@echo "Sandbox artifacts copied to $(DIST_DIR)/sandbox/"
-
 dist-test: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)/test
-	cp scripts/test-proxy-sandbox.py $(DIST_DIR)/test/
 	cp scripts/test-e2e-tool-block.sh $(DIST_DIR)/test/
-	cp scripts/test-e2e-sandbox-policy-diff.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-cli.py $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-spark.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	cp scripts/test-e2e-mac.sh $(DIST_DIR)/test/ 2>/dev/null || true
-	cp scripts/bundle-sandbox-test.sh $(DIST_DIR)/test/ 2>/dev/null || true
 	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
 	@echo "Test scripts copied to $(DIST_DIR)/test/"
 
@@ -1287,7 +1309,6 @@ dist-checksums: _checkout-write-preflight
 dist-clean: _checkout-write-preflight
 	rm -rf $(DIST_DIR)
 	rm -rf cli/defenseclaw/_data
-	rm -rf sandbox-test-*
 
 clean:
 	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe

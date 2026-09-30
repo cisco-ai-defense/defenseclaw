@@ -87,7 +87,9 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
 
     #config-diff-dialog {{
         width: 92;
+        max-width: 96%;
         height: auto;
+        max-height: 100%;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
         background: {DEFAULT_TOKENS.surface_panel};
@@ -162,8 +164,18 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
                 )
 
     def on_mount(self) -> None:
+        self._fit_changes(self.app.size.height)
         target = "#config-diff-save" if self.model.has_changes else "#config-diff-cancel"
         self.query_one(target, Button).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit_changes(event.size.height)
+
+    def _fit_changes(self, height: int) -> None:
+        # The change list scrolls; on a short terminal it gives up rows so the
+        # title, status line and buttons stay on screen.
+        chrome = 13
+        self.query_one("#config-diff-scroll").styles.max_height = max(3, min(18, height - chrome))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

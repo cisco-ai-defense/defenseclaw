@@ -162,6 +162,41 @@ jobs:
           cp dist/*.sbom.json assets/ 2>/dev/null || true
           ls -l assets
 
+      - name: Collect the standalone enterprise packages
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          enterprise=(dist/defenseclaw-enterprise-"$VERSION"-*)
+          (( ${#enterprise[@]} > 0 )) || { echo "::error::goreleaser produced no defenseclaw-enterprise artifacts"; exit 1; }
+          cp "${enterprise[@]}" assets/
+          ls -l assets/defenseclaw-enterprise-*
+
+      # Optional: GPG detached signatures for the Linux enterprise packages
+      # (signed trust in packaging/mdm/linux). Without the secret the
+      # packages rely on the cosign-signed checksums.txt (hash-pinned trust).
+      - name: Sign the enterprise Linux packages (optional)
+        env:
+          ENTERPRISE_GPG_PRIVATE_KEY: ${{ secrets.ENTERPRISE_GPG_PRIVATE_KEY }}
+          ENTERPRISE_GPG_PASSPHRASE: ${{ secrets.ENTERPRISE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ENTERPRISE_GPG_PRIVATE_KEY:-}" ]]; then
+            echo "::notice title=Unsigned enterprise Linux packages::ENTERPRISE_GPG_PRIVATE_KEY is not set; the packages ship hash-pinned through checksums.txt."
+            exit 0
+          fi
+          GNUPGHOME="$(mktemp -d)"; export GNUPGHOME; chmod 0700 "$GNUPGHOME"
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          printf '%s' "$ENTERPRISE_GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          passphrase="$GNUPGHOME/passphrase"
+          printf '%s' "${ENTERPRISE_GPG_PASSPHRASE:-}" > "$passphrase"
+          shopt -s nullglob
+          for file in assets/defenseclaw-enterprise-"$VERSION"-linux-*; do
+            gpg --batch --yes --pinentry-mode loopback --passphrase-file "$passphrase" \
+              --armor --detach-sign --output "$file.asc" "$file"
+            gpg --batch --verify "$file.asc" "$file"
+          done
+          gpg --batch --armor --export > assets/defenseclaw-enterprise-release-key.asc
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: assets
@@ -230,9 +265,90 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Standalone managed-enterprise Setup for MDMs (packaging/mdm). Signed with
+  # Authenticode only when a code-signing certificate is configured;
+  # otherwise it ships hash-pinned (flavor standalone-unsigned).
+  enterprise-windows:
+    name: Build the standalone Windows enterprise Setup
+    if: inputs.operation == 'release'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build, and Authenticode-sign when a certificate is configured
+        env:
+          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+          WINDOWS_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          set -euo pipefail
+          args=(--version "$VERSION" --out-dir enterprise-windows)
+          if [[ -n "${WINDOWS_AUTHENTICODE_PFX_BASE64:-}" ]]; then
+            sudo apt-get install -y -q osslsigncode
+            AUTHENTICODE_PFX="$RUNNER_TEMP/codesign.pfx"; export AUTHENTICODE_PFX
+            ( umask 077; printf '%s' "$WINDOWS_AUTHENTICODE_PFX_BASE64" | base64 --decode > "$AUTHENTICODE_PFX" )
+            trap 'rm -f "$AUTHENTICODE_PFX"' EXIT
+            export AUTHENTICODE_PFX_PASSWORD="${WINDOWS_AUTHENTICODE_PFX_PASSWORD:-}"
+            args+=(--sign-command "$GITHUB_WORKSPACE/packaging/mdm/signing/authenticode-sign.sh")
+          else
+            echo "::notice title=Unsigned standalone Setup::WINDOWS_AUTHENTICODE_PFX_BASE64 is not set; the Setup ships hash-pinned (flavor standalone-unsigned)."
+          fi
+          packaging/windows/standalone/build-setup.sh "${args[@]}"
+          mv enterprise-windows/payload-manifest.json \
+            enterprise-windows/DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enterprise-windows
+          path: |
+            enterprise-windows/DefenseClawSetup-Enterprise-Standalone-x64.exe
+            enterprise-windows/DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Standalone managed-enterprise pkg for MDMs. Developer ID signing and
+  # notarization run only when the Apple secrets are configured.
+  enterprise-macos:
+    name: Build the standalone macOS enterprise package
+    if: inputs.operation == 'release'
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: release
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build, sign and notarize when Apple credentials are configured
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_INSTALLER_P12_BASE64: ${{ secrets.MACOS_INSTALLER_P12_BASE64 }}
+          MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MACOS_INSTALLER_P12_PASSWORD }}
+          MACOS_INSTALLER_SIGNING_IDENTITY: ${{ secrets.MACOS_INSTALLER_SIGNING_IDENTITY }}
+          MACOS_NOTARY_KEY_BASE64: ${{ secrets.MACOS_NOTARY_KEY_BASE64 }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: packaging/mdm/signing/build-macos-release.sh "$VERSION" enterprise-macos
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enterprise-macos
+          path: enterprise-macos/defenseclaw-enterprise-${{ inputs.version }}-darwin-arm64.pkg
+          if-no-files-found: error
+          retention-days: 7
+
   sign:
     name: Checksum and sign
-    needs: [build, macos-app]
+    needs: [build, macos-app, enterprise-windows, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

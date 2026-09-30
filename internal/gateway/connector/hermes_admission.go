@@ -37,9 +37,21 @@ const (
 )
 
 var (
-	hermesManagedExecutablePathResolver = hermespath.ManagedExecutablePath
+	hermesManagedExecutablePathResolver = hermesManagedExecutablePath
 	hermesAgentVersionProbe             = probeHermesAgentVersion
+	hermesInstalledVersionReader        = hermespath.InstalledVersionForManagedExecutable
 )
+
+// hermesManagedExecutablePath resolves the updater-managed image for the user
+// whose paths connector code is resolving. A privileged guardian acting for a
+// target user sets that home with WithUserHomeDir; its own token's known
+// folders would name the service profile instead.
+func hermesManagedExecutablePath() string {
+	if home := activeUserHomeOverride(); home != "" {
+		return hermespath.ManagedExecutablePathForUserHome(home)
+	}
+	return hermespath.ManagedExecutablePath()
+}
 
 type hermesExecutableAuthority struct {
 	path              string
@@ -183,9 +195,21 @@ func validateHermesExecutableEvidence(
 		return errors.New("selected executable digest does not match protected evidence")
 	}
 
-	raw, err := hermesAgentVersionProbe(ctx, selected)
-	if err != nil {
-		return fmt.Errorf("fresh version probe failed: %w", err)
+	// A privileged guardian acting for a target user must never launch that
+	// user's executable: Windows CreateProcess would run it with the
+	// guardian's LocalSystem process token. It reads the updater's install
+	// stamp beside the digest-pinned image instead.
+	var raw string
+	if activeUserHomeOverride() != "" {
+		raw, err = hermesInstalledVersionReader(selected)
+		if err != nil {
+			return fmt.Errorf("read installed version: %w", err)
+		}
+	} else {
+		raw, err = hermesAgentVersionProbe(ctx, selected)
+		if err != nil {
+			return fmt.Errorf("fresh version probe failed: %w", err)
+		}
 	}
 	resolution := ResolveHookContract("hermes", raw)
 	if raw != authority.rawVersion || resolution.Status != HookCompatibilityKnown ||

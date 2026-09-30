@@ -40,16 +40,71 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
 fi
 {{end}}
 
-. "${HOOK_DIR}/_hardening.sh"
+{{if .Sandbox}}# OpenShell sandbox: Devin blocks only on exit 2 and fails open on every other
+# hook error. Every exit path below is explicit, and the EXIT trap installed
+# after defenseclaw_harden_env turns an unexpected status (set -e, set -u)
+# into 2 as well.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! . "${HOOK_DIR}/_hardening.sh"; then
+  echo "defenseclaw: hook hardening helper unavailable, blocking devin tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+# _sandbox.sh drops every inherited variable the hook does not read and pins
+# the baked PATH before the first child process (mktemp in
+# defenseclaw_harden_env) or helper call.
+if [ ! -r "${HOOK_DIR}/_sandbox.sh" ] || ! . "${HOOK_DIR}/_sandbox.sh"; then
+  echo "defenseclaw: sandbox transport helper unavailable, blocking devin tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+if ! defenseclaw_harden_resources; then
+  echo "defenseclaw: resource hardening failed, blocking devin tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+if ! defenseclaw_harden_env; then
+  echo "defenseclaw: environment hardening failed, blocking devin tool (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+trap '_dc_devin_rc=$?; _defenseclaw_hook_cleanup; case "$_dc_devin_rc" in 0|2) ;; *) exit 2 ;; esac' EXIT
+
+# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status, so no failed, refused or unparseable reply may turn into an allow.
+FAIL_MODE="closed"
+readonly FAIL_MODE
+{{else}}. "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
-DEFENSECLAW_HOOK_CONNECTOR="devin"
+{{end}}DEFENSECLAW_HOOK_CONNECTOR="devin"
 DEFENSECLAW_HOOK_NAME="devin-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+{{if .Sandbox}}defenseclaw_sandbox_require_token devin devin-hook "devin tool"
+
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: devin hook refusing oversized payload, blocking devin tool (sandbox hooks fail closed)" >&2
+  printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+  exit 2
+}
+# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
+
+fail_unreachable() {
+  defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE"
+  echo "defenseclaw: sandbox ingress unreachable, blocking devin tool (sandbox hooks fail closed): $1" >&2
+  printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
+  exit 2
+}
+
+fail_response() {
+  defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE"
+  echo "defenseclaw: devin hook error, blocking devin tool (sandbox hooks fail closed): $1" >&2
+  printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
+  exit 2
+}
+{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token devin devin-hook "devin hook"
 fi
 
@@ -93,8 +148,8 @@ fail_response() {
   printf '{"decision":"block","reason":"DefenseClaw hook failed closed"}\n'
   exit 2
 }
-
-AUTH_HEADER_ARGS=()
+{{end}}
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -115,15 +170,25 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/devin/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/devin/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: devin-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/devin/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: devin-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 --max-time 10 -d "$PAYLOAD" 2>/dev/null) || {
+  --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} --max-time 10 -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -138,11 +203,32 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
+{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|block|confirm|alert) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+DECISION=""
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  echo "$OUTPUT"
+  DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || DECISION=""
+elif [ "$ACTION" = "block" ]; then
+  # A block without an event-native verdict still denies: exit 2 is Devin's
+  # veto. Print Devin's block object, and the gateway's reason on stderr.
+  printf '{"decision":"block","reason":"Blocked by DefenseClaw Devin policy."}\n'
+  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+  printf '%s\n' "${REASON:-Blocked by DefenseClaw Devin policy.}" >&2
+fi
+if [ "$ACTION" = "block" ] || [ "$DECISION" = "block" ]; then
+  exit 2
+fi
+exit 0{{else}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
   DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
   if [ "$DECISION" = "block" ]; then
     exit 2
   fi
 fi
-exit 0
+exit 0{{end}}

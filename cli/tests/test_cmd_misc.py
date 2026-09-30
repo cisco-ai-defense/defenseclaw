@@ -46,8 +46,7 @@ class TestStatusCommand(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which", return_value=None)
-    def test_status_output(self, _mock_which, mock_client_cls):
+    def test_status_output(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
         mock_client = MagicMock()
@@ -68,8 +67,7 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("not running", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which", return_value=None)
-    def test_status_shows_counts(self, _mock_which, mock_client_cls):
+    def test_status_shows_counts(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
         from defenseclaw.enforce.policy import PolicyEngine
 
@@ -87,11 +85,9 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("Allowed skills:", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which")
-    def test_status_sidecar_running(self, mock_which, mock_client_cls):
+    def test_status_sidecar_running(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        mock_which.return_value = None
         mock_client = MagicMock()
         mock_client.is_running.return_value = True
         mock_client_cls.return_value = mock_client
@@ -101,47 +97,28 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("running", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which")
-    def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
+    def test_status_points_legacy_sandbox_hosts_at_cleanup(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        def fake_which(binary, *, path=None):
-            del path
-            if binary == "openshell-sandbox":
-                return "/usr/local/bin/openshell-sandbox"
-            return None
-
-        mock_which.side_effect = fake_which
+        self.app.cfg.openshell.mode = "standalone"
         mock_client = MagicMock()
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
 
         result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Sandbox:", result.output)
-        self.assertIn("available", result.output)
+        self.assertIn("legacy install detected", result.output)
+        self.assertIn("defenseclaw sandbox legacy-cleanup", result.output)
 
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertTrue(payload["sandbox"]["available"])
+        self.assertEqual(payload["sandbox"], {"available": False, "legacy_standalone": True})
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which")
-    def test_status_does_not_replace_explicit_missing_sandbox_binary(
-        self, mock_which, mock_client_cls
-    ):
+    def test_status_sandbox_not_configured_on_host_mode(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        self.app.cfg.openshell.binary = "/opt/operator/openshell"
-
-        def fake_which(binary, *, path=None):
-            del path
-            if binary == "openshell-sandbox":
-                return "/usr/local/bin/openshell-sandbox"
-            return None
-
-        mock_which.side_effect = fake_which
         mock_client = MagicMock()
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
@@ -149,8 +126,7 @@ class TestStatusCommand(unittest.TestCase):
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertFalse(payload["sandbox"]["available"])
-        self.assertNotIn("openshell-sandbox", [call.args[0] for call in mock_which.call_args_list])
+        self.assertEqual(payload["sandbox"], {"available": False, "legacy_standalone": False})
 
 
 # ---------------------------------------------------------------------------

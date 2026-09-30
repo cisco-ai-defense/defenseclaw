@@ -1,0 +1,98 @@
+# DefenseClaw sandbox policy pack: open (the default)
+#
+# Open web through the DefenseClaw egress proxy, which allows by default and
+# blocks the exfiltration/abuse feed, private networks and metadata. The
+# project folder is mounted live, the harness runs in skip-permissions mode,
+# and approvals are only asked for doors into your machine or network.
+# Tighter packs: balanced (allowlist) and strict (no web).
+version: 1
+name: open
+description: Open web through the egress proxy with the exfiltration blocklist; live project mount; skip-permissions on.
+
+network:
+  mode: open
+
+approvals:
+  mode: auto
+
+egress:
+  feeds: [builtin]
+  block: []
+  allow: []
+  ports: [80, 443]
+  large_upload_mb: 25
+
+workspace:
+  mode: mount
+  # Secret files appear empty inside the sandbox (--unmask PATH shares one).
+  masks:
+    - .env
+    - .env.*
+    - "*.pem"
+    - "*.key"
+    - "*.p12"
+    - "*.pfx"
+    - "*.jks"
+    - "*.keystore"
+    - id_rsa*
+    - id_dsa*
+    - id_ecdsa*
+    - id_ed25519*
+    - .netrc
+    - .npmrc
+    - .pypirc
+    - .git-credentials
+    - .pgpass
+    - .vault-token
+    - .aws/credentials
+    - .kube/config
+    - .docker/config.json
+    - credentials.json
+    - service-account*.json
+    - "*.tfvars"
+  # Committed templates of masked files stay visible.
+  unmask:
+    - .env.example
+    - .env.sample
+    - .env.template
+    - .env.dist
+  # Changed files that can run code on your machine; the end-of-session
+  # review lists them before you run anything.
+  review:
+    - package.json
+    - Makefile
+    - GNUmakefile
+    - makefile
+    - Justfile
+    - Taskfile.yml
+    - .envrc
+    - .vscode/**
+    - .idea/**
+    - .devcontainer/**
+    - .github/workflows/**
+    - .gitlab-ci.yml
+    - .gitattributes
+    - .gitmodules
+    - .husky/**
+    - .pre-commit-config.yaml
+    - setup.py
+    - pyproject.toml
+    - docker-compose*.yml
+    - compose*.yaml
+  max_upload_mb: 500
+
+harness:
+  yolo: true
+  allowed: []
+
+mcp:
+  import: true
+  host_ports: true
+  blocked_tools: []
+  # MCP servers a repository defines (.mcp.json, .codex/config.toml) start
+  # without a tool call, unseen by DefenseClaw hooks: keep them stopped.
+  project_servers: block
+
+hooks:
+  fail_mode: closed
+  on_tamper: alert

@@ -74,7 +74,7 @@ configuration.
 DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The supported POSIX contract starts at `OpenHands CLI 1.12.0`, the first version that loads user-global `~/.openhands/hooks.json`. It is source-reviewed against `OpenHands CLI 1.16.0` with no maximum version currently declared.
 
 <Callout type="warning">
-Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. A repository-local `.openhands/hooks.json` can still override or layer with that behavior depending on OpenHands' own config loading. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly.
+Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. OpenHands 1.16.0 loads a repository-local `.openhands/hooks.json` instead of the global file, not next to it: in a project that has its own file, none of DefenseClaw's global hooks run, so tool calls there are not inspected or logged. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly. In an enterprise deployment the guardian writes only the global file, and the foreign-hook guard does not cover OpenHands; see the [enterprise residual risks](/docs/enterprise/threat-model#residual-risks).
 </Callout>
 
 ## Hook schema
@@ -142,8 +142,152 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="openhands" />
 
 <Callout>
-OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only.
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `PreToolUse` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
 </Callout>
+
+## OpenShell sandbox
+
+DefenseClaw can build an OpenHands OpenShell overlay image. The files below
+exist only in the image; nothing on your host changes.
+
+- **Hooks in the user tier.** OpenHands CLI has no system or managed hook
+  location. It loads the first of `<workdir>/.openhands/hooks.json` and
+  `~/.openhands/hooks.json` that exists, once per conversation. The image
+  seeds the reviewed `~/.openhands/hooks.json` and keeps a root-owned copy
+  under `/usr/local/lib/defenseclaw/openhands/`. The launcher restores the
+  user file from that copy before every start, so an edit made during a
+  session is undone at the next launch. If `~/.openhands/hooks.json` is
+  anything but a regular file (a directory, for example), the launcher
+  refuses to start OpenHands and names the path; remove it and start again.
+- **Project hook files are refused.** A working directory with its own
+  `.openhands/hooks.json` would replace DefenseClaw's hooks, so the launcher
+  refuses to start there with a message that names the file. Rename the file
+  to run OpenHands in the sandbox.
+- **Fail closed.** The sandbox hook exits 2, the status OpenHands enforces, on
+  every failure: missing token, ingress down, or a bad reply.
+- **Launch environment.** The launcher drops every `PYTHON*` variable, so a
+  `PYTHONPATH` exported from a shell start-up file cannot load code into
+  OpenHands.
+- **Session end.** OpenHands 1.16 closes the conversation after its TUI has
+  stopped and then hands the `SessionEnd` hook results to that TUI, which
+  printed `Exception ignored in atexit callback` and a
+  `RuntimeError: App is not running` traceback above DefenseClaw's session
+  summary at every exit. A root-owned module in the image runs the
+  `SessionEnd` hooks as before and drops only that display event, so the
+  session ends cleanly and DefenseClaw still gets the hook. The module also
+  ignores the `AuthlibDeprecationWarning` (`authlib.jose module is
+  deprecated`) an OpenHands dependency printed at every start.
+- **Blocks on screen.** OpenHands shows a hook result as a collapsed line cut
+  at 70 characters, which left `Status: BLOCKED - Blocked by DefenseCla...`.
+  The same module starts a DefenseClaw block's rendering with the block, so
+  the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: <title>...`; Ctrl+O still expands it to
+  the full reason and OpenHands' own details. The reason the model gets is
+  unchanged.
+- **Screen updates.** OpenHands 1.16 sometimes does not scroll to a new
+  turn: the token counter moves but the view stays on the previous turn, and
+  PageDown does nothing. Pressing Ctrl+O twice redraws it. This is OpenHands'
+  own TUI, not DefenseClaw.
+- **Known gaps.** The agent can edit `~/.openhands/hooks.json`, or start a
+  second OpenHands with another `HOME`, from a tool call. DefenseClaw sees that
+  tool call first, and hook-silence detection is the backstop. Command rules
+  judge the terminal tool's commands. Text the terminal tool sends to a
+  running process (`is_input`) is judged as a shell command too. A command
+  that a script runs, when the agent writes the script to a file and runs it,
+  is judged by the command that starts the script.
+- **Install pin.** The image installs OpenHands CLI 1.16.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13. The build refuses a
+  version below the reviewed hook contract (`>=1.12.0`).
+- **Model access.** Every DefenseClaw provider profile runs OpenHands with
+  `--override-with-envs`. The launcher copies the profile's credential
+  placeholder into `LLM_API_KEY`; you choose the model with `LLM_MODEL`, a
+  LiteLLM name. `defenseclaw sandbox run openhands` picks a profile from
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or, with `--llm bedrock`,
+  `AWS_BEARER_TOKEN_BEDROCK`:
+  - `defenseclaw-openai`: `openai/<model>`
+  - `defenseclaw-anthropic`: `anthropic/<model>`
+  - the regional `defenseclaw-bedrock-mantle-openai-<region>`:
+    `openai/<Mantle model id>`, with `LLM_BASE_URL` set to the Mantle route
+- **Launch flags.** Skip-permissions mode adds `--always-approve`. A run with
+  `--safe` drops `--always-approve`, `--yolo` and `--llm-approve`, and every
+  prefix OpenHands accepts for them. A headless run is
+  `openhands --headless --exit-without-confirmation -t <prompt>`; pass
+  `-- --headless -t "TEXT"` to `sandbox run` for a detached run. OpenHands'
+  headless mode approves every action itself, so `--safe` keeps its prompts
+  only in interactive runs.
+- **Other traffic.** Apart from the model, a mock-model run reached only
+  `pypi.org` (the version check), `github.com` and `raw.githubusercontent.com`
+  (the public skills download). That traffic goes through the DefenseClaw
+  egress proxy, which logs it and applies the blocklist. OpenShell also
+  logged about 20 refused attempts to reach the sandbox's own hostname;
+  OpenHands worked regardless.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, on a mock model behind a credential binding, showed:
+  - hooks reaching the sandbox ingress, with OpenShell substituting the model
+    key;
+  - a command that a DefenseClaw rule blocks refused by the hook, with the
+    rule's reason passed back to the model;
+  - egress through the proxy, including a blocklisted host that a
+    sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe. In that probe a replaced user
+  `hooks.json` is restored, a planted `sitecustomize` module in the launch
+  environment never runs, and the launcher refuses to start when the hooks
+  file is a directory. The curated provider profiles have not carried a real
+  model inside a sandbox; see the harness's verification note for what was
+  run.
+
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) on Linux and macOS the
+guardian writes DefenseClaw's hooks into each enrolled user's
+`~/.openhands/hooks.json` and repairs them when the user changes them.
+OpenHands has no machine-wide hook location, so the hooks live in a file the
+user owns, and OpenHands coverage is advisory against a user who sets out to
+avoid it:
+
+- **Project hook files replace DefenseClaw's hooks.** OpenHands looks for
+  `.openhands/hooks.json` in the working directory first, then for
+  `~/.openhands/hooks.json`, and uses only the first file it finds. In a
+  project that has its own file, even one with a single unrelated hook,
+  none of DefenseClaw's hooks run (OpenHands reports `Loaded: ... 1 hook`
+  instead of 6), and no DefenseClaw message is shown. A repository a
+  developer clones can carry the file. The guardian does not restore or
+  remove project files, the foreign-hook guard does not cover OpenHands,
+  and status and verify do not report it.
+- **Older OpenHands releases.** OpenHands before 1.12.0 does not load
+  `~/.openhands/hooks.json`. A user can start one without installing it, for
+  example with `uvx --from openhands==1.11.0 openhands`, and its tool calls
+  then run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it
+  is not reported.
+- **Another home.** OpenHands reads the hook file under `HOME`, so a session
+  started with `HOME` pointing elsewhere loads no DefenseClaw hooks. The guardian never repairs that
+  session, and status and verify keep reporting the user's OpenHands ready.
+  `OPENHANDS_PERSISTENCE_DIR` and `DEFENSECLAW_*` environment overrides do
+  not remove the hooks.
+- **A killed or stalled hook lets the call run.** `openhands-hook.sh` runs
+  as the user. OpenHands treats a killed hook (`Exit Code: -9`) and can
+  treat a hook that stalls until its 60-second timeout as non-blocking,
+  so the call runs with no DefenseClaw decision; OpenHands' own
+  confirmation prompt, which the user answers, is the only check left.
+
+What reduces it:
+
+- Where you need enforcement, prefer agents that DefenseClaw governs
+  through machine policy (Claude Code, Codex, Cursor, GitHub Copilot and
+  OpenCode).
+- Keep `.openhands/hooks.json` out of the repositories developers use, for
+  example with a repository rule or a server-side push check, and search
+  existing checkouts for it.
+- Use application control (fapolicyd on Linux, Santa or similar on macOS)
+  to allow only OpenHands 1.12.0 or later from approved locations,
+  including copies a package runner such as `uvx` starts from its cache, and
+  to control how users start it (for example only from an
+  administrator-owned launcher that resets `HOME`).
+- Use EDR process protection so users cannot stop or kill the hook process.
+
+See R1, R15, R18 and R30 in the
+[enterprise threat model](/docs/enterprise/threat-model#residual-risks).
 
 ## Disable
 

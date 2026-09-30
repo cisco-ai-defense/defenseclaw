@@ -131,6 +131,10 @@ func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 		data, _ := os.ReadFile(cfgPath)
 		t.Fatalf("OwnedHooksPresent=false after Setup; config:\n%s", data)
 	}
+	if remaining, err := OwnedHookConfigReferences(conn, opts); err != nil || len(remaining) != 1 ||
+		filepath.Clean(remaining[0]) != filepath.Clean(cfgPath) {
+		t.Fatalf("OwnedHookConfigReferences after Setup = %v, %v; want %s", remaining, err, cfgPath)
+	}
 
 	// Strip the hook block: an empty JSON object no longer references our
 	// hook command.
@@ -143,6 +147,9 @@ func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 	}
 	if present {
 		t.Fatal("OwnedHooksPresent=true after stripping the hook block; want false")
+	}
+	if remaining, err := OwnedHookConfigReferences(conn, opts); err != nil || len(remaining) != 0 {
+		t.Fatalf("OwnedHookConfigReferences after strip = %v, %v; want none", remaining, err)
 	}
 }
 

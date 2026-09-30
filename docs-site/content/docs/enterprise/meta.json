@@ -1,0 +1,24 @@
+{
+  "title": "Enterprise",
+  "pages": [
+    "index",
+    "concepts",
+    "rollout",
+    "threat-model",
+    "---Install---",
+    "windows",
+    "linux",
+    "macos",
+    "mdm",
+    "---Configure---",
+    "configuration",
+    "enrollment",
+    "machine-policy",
+    "foreign-hook-guard",
+    "ai-defense-key",
+    "---Operate---",
+    "operations",
+    "lifecycle",
+    "troubleshooting"
+  ]
+}

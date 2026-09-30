@@ -1451,6 +1451,22 @@ with locked_file_update(lock_base):
             self.assertIn("--no-restart", result.output)
             self.assertFalse(os.path.exists(os.path.join(td, ".env")))
 
+    def test_managed_host_is_refused_before_any_mutation(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            lifecycle = mock.Mock()
+            with (
+                mock.patch("defenseclaw.upgrade_shim.managed_deployment", return_value="managed-runtime.json"),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", lifecycle),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0)
+            lifecycle.assert_not_called()
+            self.assertIn("managed by your organization", result.output)
+            self.assertFalse(os.path.exists(os.path.join(td, ".env")))
+
     def test_custom_token_environment_is_rejected_before_stop(self) -> None:
         from tempfile import TemporaryDirectory
 

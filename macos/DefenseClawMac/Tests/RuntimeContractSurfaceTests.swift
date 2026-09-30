@@ -19,7 +19,7 @@ import Foundation
 @main
 enum RuntimeContractSurfaceTests {
     static func main() {
-        precondition(CommandRegistry.sourceCount == 235, "unexpected upstream command count")
+        precondition(CommandRegistry.sourceCount == 225, "unexpected upstream command count")
         precondition(CommandRegistry.all.count == CommandRegistry.sourceCount, "registry count mismatch")
 
         let titles = CommandRegistry.all.map(\.title)

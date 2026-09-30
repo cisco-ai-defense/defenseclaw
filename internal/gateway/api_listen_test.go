@@ -19,8 +19,14 @@ package gateway
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // TestIsAddrInUse confirms a genuine double-bind is classified as
@@ -117,5 +123,59 @@ func TestListenWithRetryHonorsContext(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("listenWithRetry ignored context cancellation (took %s)", elapsed)
+	}
+}
+
+// TestHeldAPIPortFailsRunForSecureClient pins the Secure Client
+// (managed_enterprise without the standalone profile) API bind on every
+// platform: there is no hook socket, so a held API port still ends Run with
+// an error after the bind budget and reports the API as failed.
+func TestHeldAPIPortFailsRunForSecureClient(t *testing.T) {
+	holder, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	restoreAPI := inheritedAPIListener
+	restoreBudget := apiListenRetryBudget
+	t.Cleanup(func() {
+		inheritedAPIListener = restoreAPI
+		apiListenRetryBudget = restoreBudget
+	})
+	inheritedAPIListener = func() (net.Listener, bool, error) { return nil, false, nil }
+	apiListenRetryBudget = 200 * time.Millisecond
+	// A runtime descriptor that names a hook socket does not make a Secure
+	// Client gateway bind one.
+	socket := filepath.Join(t.TempDir(), "hook.sock")
+	restoreDescriptor := loadStandaloneRuntimeDescriptor
+	t.Cleanup(func() { loadStandaloneRuntimeDescriptor = restoreDescriptor })
+	loadStandaloneRuntimeDescriptor = func(string) (*managed.RuntimeDescriptor, error) {
+		return &managed.RuntimeDescriptor{Profile: managed.ProfileStandalone, HookSocket: socket}, nil
+	}
+
+	store, logger := testStoreAndV8Logger(t)
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: t.TempDir()}
+	cfg.Guardrail.Mode = "observe"
+	health := NewSidecarHealth()
+	api := NewAPIServer(holder.Addr().String(), health, nil, store, logger, cfg)
+	api.SetConnectorRegistry(connector.NewDefaultRegistry())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- api.Run(ctx) }()
+	select {
+	case err := <-runErr:
+		if err == nil || !isAddrInUse(err) {
+			t.Fatalf("Run with the API port held = %v, want an address-in-use error", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run kept running with the API port held outside the standalone profile")
+	}
+	if snap := health.Snapshot().API; snap.State != StateError || snap.Details["hook_socket"] != nil {
+		t.Fatalf("API health = %+v, want error without a hook socket", snap)
+	}
+	if _, err := os.Lstat(socket); !os.IsNotExist(err) {
+		t.Fatalf("a hook socket was created outside the standalone profile: %v", err)
 	}
 }

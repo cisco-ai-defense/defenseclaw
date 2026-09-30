@@ -61,6 +61,10 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		topLevelOutput  string // expected top-level JSON output key
 		expectAction    string
 		additionalAttrs map[string]string
+		// name distinguishes a second wire shape for the same connector.
+		name string
+		// argMetadata is merged into the Antigravity tool arguments.
+		argMetadata map[string]interface{}
 	}
 
 	shapes := []wireShape{
@@ -121,6 +125,21 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
+			// The live Antigravity CLI sends scheduling and status-line
+			// metadata beside CommandLine and Cwd.
+			name:           "antigravity-cli-metadata",
+			connector:      "antigravity",
+			event:          "PreToolUse",
+			toolName:       "run_command",
+			topLevelOutput: "hook_output",
+			expectAction:   "block",
+			argMetadata: map[string]interface{}{
+				"WaitMsBeforeAsync": 5000,
+				"toolAction":        "Running command",
+				"toolSummary":       "Run command",
+			},
+		},
+		{
 			connector:      "opencode",
 			event:          "tool.execute.before",
 			toolName:       "bash",
@@ -133,6 +152,17 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			toolName:  "bash",
 			// The TypeScript plugin consumes canonical top-level action,
 			// reason, and additional_context fields directly.
+			topLevelOutput: "",
+			expectAction:   "block",
+		},
+		{
+			// Amp runs background commands through async_shell_command; it
+			// was not parsed into command facts, so a rule that needs typed
+			// proof was only recorded (CRITICAL, allow).
+			name:           "amp-async-shell",
+			connector:      "amp",
+			event:          "tool.call",
+			toolName:       "async_shell_command",
 			topLevelOutput: "",
 			expectAction:   "block",
 		},
@@ -156,7 +186,11 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 
 	for _, sh := range shapes {
 		sh := sh
-		t.Run(sh.connector, func(t *testing.T) {
+		runName := sh.connector
+		if sh.name != "" {
+			runName = sh.name
+		}
+		t.Run(runName, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = sh.connector
@@ -180,16 +214,20 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				if runtime.GOOS == "windows" {
 					command, cwd = `Remove-Item -Recurse -Force C:\`, `C:\workspace`
 				}
+				args := map[string]interface{}{
+					"Cwd":         cwd,
+					"CommandLine": command,
+				}
+				for key, value := range sh.argMetadata {
+					args[key] = value
+				}
 				requestPayload = map[string]interface{}{
 					"conversationId": "session-antigravity",
 					"stepIdx":        1,
 					"workspacePaths": []string{cwd},
 					"toolCall": map[string]interface{}{
 						"name": sh.toolName,
-						"args": map[string]interface{}{
-							"Cwd":         cwd,
-							"CommandLine": command,
-						},
+						"args": args,
 					},
 				}
 			}
@@ -764,6 +802,7 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		surface      string
+		headers      map[string]string
 		wantAction   string
 		wantRaw      string
 		wantWould    bool
@@ -782,6 +821,21 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 			// existed. Fall back to the surface that vetoes less.
 			name: "unmarked config records a would-block", surface: "",
 			wantAction: "allow", wantRaw: "block", wantWould: true,
+		},
+		{
+			// The native hook binary (Kiro on Windows) forwards its
+			// --hook-surface value in the generic dialect header.
+			name:       "native hook dialect header vetoes the prompt",
+			headers:    map[string]string{"X-DefenseClaw-Hook-Dialect": connector.KiroHookSurfaceV3},
+			wantAction: "block", wantRaw: "block", wantWould: false, wantDecision: "block",
+		},
+		{
+			name: "dialect header wins over the kiro-hook.sh header",
+			headers: map[string]string{
+				"X-DefenseClaw-Hook-Dialect": connector.KiroHookSurfaceV3,
+				"X-DefenseClaw-Kiro-Surface": connector.KiroHookSurfaceV2,
+			},
+			wantAction: "block", wantRaw: "block", wantWould: false, wantDecision: "block",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -802,6 +856,9 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			if tc.surface != "" {
 				req.Header.Set("X-DefenseClaw-Kiro-Surface", tc.surface)
+			}
+			for name, value := range tc.headers {
+				req.Header.Set(name, value)
 			}
 			w := httptest.NewRecorder()
 			http.HandlerFunc(api.handleAgentHook("kiro")).ServeHTTP(w, req)

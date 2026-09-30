@@ -1,0 +1,19 @@
+id: defenseclaw-amp
+display_name: Amp service for the Amp CLI (DefenseClaw)
+description: Binds AMP_API_KEY to the Amp service (ampcode.com), which serves the account check, threads and every model request, as a bearer; only the Amp binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Amp access token
+    env_vars: [AMP_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: ampcode.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: [{{range $i, $b := .Binaries}}{{if $i}}, {{end}}{{quote $b}}{{end}}]

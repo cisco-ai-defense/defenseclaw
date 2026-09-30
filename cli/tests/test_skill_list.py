@@ -276,10 +276,6 @@ class TestListSkillsForOpenClaw(unittest.TestCase):
         }
         with patch("defenseclaw.skill_list.subprocess.run") as mock_run, \
              patch(
-                 "defenseclaw.config.openclaw_cmd_prefix",
-                 return_value=[],
-             ), \
-             patch(
                  "defenseclaw.config.openclaw_bin",
                  return_value="openclaw",
              ):
@@ -323,10 +319,6 @@ class TestListSkillsForOpenClaw(unittest.TestCase):
     def test_returns_empty_when_cli_returns_non_dict(self):
         cfg = _make_cfg(self.tmp, "openclaw")
         with patch("defenseclaw.skill_list.subprocess.run") as mock_run, \
-             patch(
-                 "defenseclaw.config.openclaw_cmd_prefix",
-                 return_value=[],
-             ), \
              patch(
                  "defenseclaw.config.openclaw_bin",
                  return_value="openclaw",

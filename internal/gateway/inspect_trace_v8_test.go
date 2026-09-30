@@ -81,7 +81,7 @@ func TestInspectTraceV8ExportsRichGeneratedGuardrailSpanWithoutLegacyProvider(t 
 	span := spans[0]
 	if span.Name != "apply_guardrail inspect tool_call" ||
 		span.Kind != tracepb.Span_SPAN_KIND_INTERNAL ||
-		span.Status.GetCode() != tracepb.Status_STATUS_CODE_OK {
+		span.Status.GetCode() != tracepb.Status_STATUS_CODE_ERROR {
 		t.Fatalf("generated inspect identity name=%q kind=%s status=%s", span.Name, span.Kind, span.Status.GetCode())
 	}
 	traceID, parentID := spanContext.TraceID(), spanContext.SpanID()
@@ -111,10 +111,16 @@ func TestInspectTraceV8ExportsRichGeneratedGuardrailSpanWithoutLegacyProvider(t 
 		"defenseclaw.destination.app":            "mcp.example",
 		"defenseclaw.guardrail.latency_ms":       "12.5",
 		"defenseclaw.guardrail.finding_count":    "1",
+		"defenseclaw.guardrail.action":           "block",
+		"defenseclaw.guardrail.rule_id":          "CG-EXEC-001",
+		"defenseclaw.guardrail.severity":         "HIGH",
 	} {
 		if got := attributes[key]; got != want {
 			t.Errorf("generated inspect attribute %s=%q want=%q; attributes=%v", key, got, want, attributes)
 		}
+	}
+	if len(span.Events) != 1 || span.Events[0].Name != "defenseclaw.guardrail.block" {
+		t.Fatalf("generated inspect block events=%v", span.Events)
 	}
 }
 

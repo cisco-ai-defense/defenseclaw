@@ -101,6 +101,10 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	if env.Result == "" {
 		env.Result = "ok"
 	}
+	if env.UserID == "" && env.UserName == "" {
+		caller := auditCallerIdentity(ctx)
+		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
+	}
 	auditAction := string(audit.ActionConnectorHook)
 	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
 		auditAction = env.AuditActionOverride
@@ -348,7 +352,7 @@ func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName
 	if env.Connector == "" {
 		env.Connector = connectorName
 	}
-	env.StepIdx = a.stepIndexForTurn(req.SessionID, req.TurnID, req.HookEventName)
+	env.StepIdx = a.stepIndexForTurn(sandboxSessionStateKey(ctx, req.SessionID), req.TurnID, req.HookEventName)
 	env.Enforced = resp.Action == "block"
 	env.RulePackDir = a.effectiveRulePackDir(connectorName)
 

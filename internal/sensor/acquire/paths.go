@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	winpath "github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -53,8 +54,14 @@ func DefaultSocketPath(dataDir string, managedEnterprise bool) string {
 	if managedEnterprise {
 		switch runtime.GOOS {
 		case "linux":
-			return filepath.Join("/run", "defenseclaw", SocketFileName)
+			// Linux managed deployments are standalone. The socket lives in
+			// the helper's own runtime directory, so a gateway restart (which
+			// clears the gateway's /run/defenseclaw) never removes it.
+			return filepath.Join(standaloneSocketDir("linux"), SocketFileName)
 		case "darwin":
+			if managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+				return filepath.Join(standaloneSocketDir("darwin"), SocketFileName)
+			}
 			return filepath.Join("/var", "run", "defenseclaw", SocketFileName)
 		case "windows":
 			// The trusted managed IPC directory, resolved the same way the
@@ -72,4 +79,13 @@ func DefaultSocketPath(dataDir string, managedEnterprise bool) string {
 		dataDir = "."
 	}
 	return filepath.Join(dataDir, "ipc", SocketFileName)
+}
+
+// standaloneSocketDir is the standalone layout's sensor socket directory.
+func standaloneSocketDir(goos string) string {
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return filepath.Join("/run", "defenseclaw-sensor")
+	}
+	return layout.SensorSocketDir
 }

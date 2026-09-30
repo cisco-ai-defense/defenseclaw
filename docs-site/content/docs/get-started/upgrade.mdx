@@ -136,11 +136,15 @@ you run `defenseclaw setup devin`:
 
 - In `~/.defenseclaw/config.yaml`, `guardrail.connector`, `claw.mode`, and the
   `windsurf` key of every per-connector block (`guardrail.connectors`,
-  `asset_policy.connectors`, `application_protection.connectors`, and
-  `observability.connectors`) become `devin`. The old block keeps its settings
-  (mode, `hook_fail_mode`, `enabled`, and so on). If a `devin` block already
-  exists, it wins and the `windsurf` block is dropped; the upgrade output names
-  the dropped key.
+  `asset_policy.connectors`, `application_protection.connectors`,
+  `observability.connectors` and `connector_hooks`) become `devin`. The old
+  block keeps its settings (mode, `hook_fail_mode`, `enabled`, and so on). If a
+  `devin` block already exists, it wins and the `windsurf` block is dropped;
+  the upgrade output names the dropped key. The same rename applies to the
+  connector name lists (`guardrail.judge.hook_connectors`,
+  `application_protection.include_connectors` and `exclude_connectors`), to
+  the `connector` of `asset_policy` rules (for example a denied rule or a
+  registry entry), and to observability route `selector.connectors`.
 - The gateway removes only the hook entries DefenseClaw wrote into
   `~/.codeium/windsurf/hooks.json`. Hooks from other tools in that file stay.
   It checks the gateway user's home and, when the data directory is
@@ -152,8 +156,8 @@ you run `defenseclaw setup devin`:
   `%APPDATA%\devin\config.json`).
 - The gateway log records one line that starts with `Windsurf is now Devin
   Desktop:` and names the files it changed. It reads
-  `moved connector "windsurf" to "devin" in <config path>` when the gateway made
-  the rename itself, and `removed state left by the retired connector ID` when
+  `moved connector "windsurf" to "devin" in <settings> of <config path>`
+  (listing each setting that moved) when the gateway made the rename itself, and `removed state left by the retired connector ID` when
   `defenseclaw upgrade` had already rewritten `config.yaml`.
 
 What is not protected: conversations in Devin Desktop's legacy **Cascade**
@@ -174,9 +178,18 @@ What `defenseclaw upgrade` and the gateway do for you:
   `guardrail.connectors` and moves `guardrail.connector` and `claw.mode` to the
   first remaining connector. The upgrade output names the connector it
   removed. (The same step removes any other connector name this release does
-  not ship, unless a plugin under `plugin_dir` provides it.)
-- If Gemini CLI was your only connector, the upgrade leaves `config.yaml`
-  unchanged and warns. The gateway does not start until you do step 1.
+  not ship. While `plugin_dir` holds a plugin the gateway could load, it
+  removes none: a plugin registers under the name its code reports, which
+  need not match its folder or manifest, so the upgrade's preflight asks the
+  new gateway before it counts a name as unshipped.)
+- If Gemini CLI was your only connector (or every connector you configured
+  is one this release does not ship), the upgrade stops before it changes
+  anything. Its preflight, `defenseclaw migrate --check`, fails, names the
+  connector and prints commands your installed release accepts (on
+  releases before 0.7.0, which have no `setup remove`: set up a supported
+  connector or edit `config.yaml`), and the installer reports that your
+  configuration cannot be migrated and that nothing was changed. Your current release keeps running. Do step 1 on it,
+  then run the upgrade again.
 - On its next start, the gateway drops `geminicli` from its lock and
   active-connector state and deletes `~/.defenseclaw/hooks/geminicli-hook.sh`
   (and `geminicli-hook.ps1`) and `~/.defenseclaw/hooks/.otlp-geminicli.token`.
@@ -191,15 +204,18 @@ Do this once, before you set up Antigravity:
 
 1. Only if Gemini CLI was your only connector, or you replaced the package
    without running `defenseclaw upgrade`: remove it from DefenseClaw's config.
+   When the upgrade stopped, run this on the release you still have: it
+   refuses to remove the last connector without `--force`.
 
    ```bash
-   defenseclaw setup remove geminicli --yes
+   defenseclaw setup remove geminicli --yes --force
    ```
 
-   This works even when Gemini CLI was your only connector; DefenseClaw then
-   enforces nothing until step 7. Or delete `geminicli` from
-   `guardrail.connectors` and `guardrail.connector` in
-   `~/.defenseclaw/config.yaml`.
+   DefenseClaw then enforces nothing until step 7. You can instead set up
+   another connector first (`defenseclaw setup <connector>`) and then remove
+   Gemini CLI, or delete `geminicli` from `guardrail.connectors` and
+   `guardrail.connector` in `~/.defenseclaw/config.yaml`. Then run the
+   upgrade again.
 2. Open `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`;
    on Windows `%USERPROFILE%\.gemini\settings.json`). Under `hooks`, look at
    each of these events: `SessionStart`, `SessionEnd`, `BeforeAgent`,

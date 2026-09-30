@@ -9,6 +9,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make test` | Python CLI unit tests plus focused Go gateway/test packages |
 | `make cli-test` | Python `pytest` suite under `cli/tests/` |
 | `make cli-test-cov` | Python pytest coverage report |
+| `make tui-test` | Textual TUI suite under `cli/tests/tui/` |
 | `make gateway-test` | Race-enabled Go tests for gateway and `test/` |
 | `make security-suite-test` | Deterministic security + PII coverage suite (regex + stubbed judge); see [SECURITY-TEST-SUITE.md](SECURITY-TEST-SUITE.md) |
 | `make security-suite-eval` | Live LLM-judge scoring of the security + PII corpus (needs `DEFENSECLAW_LLM_KEY`) |
@@ -33,6 +34,45 @@ npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.tes
 
 # Rego policy tests
 opa test policies/rego/ -v
+```
+
+## TUI Tests
+
+The Textual TUI (`cli/defenseclaw/tui/`) is tested mostly without a running
+app. Write tests in this order:
+
+1. **Unit tests first.** Test the pure panel models (`panels/*.py`),
+   services (`services/*_state.py`) and helpers directly. This is where
+   behaviour, key handling and command intents are covered.
+2. **At most two Pilot tests per new screen**, at `size=(80, 24)`, built on
+   `fixtures.snapshot_app(tmp_path)` (a fake-data app that never reads the
+   real home, gateway or SQLite). Prove the screen opens, its primary
+   content is on screen, and it closes.
+3. **Journeys only for mutating flows**: one happy path from the key press to
+   the argv captured by a fake `app.executor.run`, plus one real regression.
+
+`cli/tests/tui/test_smoke.py` covers every panel in `PANELS`, the cheap
+modals and global key routing at 80x24, so a new panel is smoke-tested
+automatically. Tests that call `app.run_test(` are marked `tui_pilot`
+automatically; `-m "not tui_pilot"` runs only the unit tests. The TUI
+`conftest.py` stubs agent discovery for every test and the CLI's quiet
+`--json` loads for Pilot tests.
+
+Don't:
+
+- assert UI copy, except security or contract strings
+- use sleeps to wait for the app (await `pilot.pause()` or the worker)
+- assert private attributes where a model API exists
+- touch real host discovery, the network or a gateway
+- compare golden SVG snapshots
+
+Run the suite with `make tui-test`, or in parallel with
+`.venv/bin/python -m pytest cli/tests/tui -q -n 4`. To see what a screen
+looks like without a terminal, print it as text:
+
+```bash
+.venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --panel setup --size 80x24
+.venv/bin/python .claude/skills/defenseclaw-tui/scripts/render.py --keys : "text:policy list" enter
 ```
 
 ## End-to-End Tests
@@ -81,6 +121,71 @@ Codex only from where its installer puts it. Unless Codex is already
 installed there, the lane copies it into the real profile's
 `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` and removes it afterwards.
 
+## Enterprise Install Lanes
+
+For end-to-end manual certification on Windows, macOS and Linux, use the [enterprise test plan](ENTERPRISE-TEST-PLAN.md).
+
+The standalone managed-enterprise packages have their own install lanes.
+They install and remove system services, so run them only on a disposable
+host (a CI runner, a container or a throwaway VM), as root or from an
+elevated shell.
+
+| Script | What it does |
+| --- | --- |
+| `scripts/test-enterprise-unix-install.sh` | Installs a `.deb`, `.rpm` or macOS `.pkg` and applies a config that enables Claude Code and Codex, whose machine policy must be owned and locked. Checks that a second `ensure` is a no-op, and runs `verify`, `status` and the MDM `detect.sh`. Then uninstalls, checks that no service or machine-policy entry is left and that the config is kept, and purges |
+| `scripts/test-enterprise-linux-container.sh` | Runs the Linux lane in a container that boots systemd (`--image`), for a distribution other than the host's |
+| `scripts/test-enterprise-windows-install.ps1` | Runs the hash-pinned unsigned `DefenseClawSetup-Enterprise-Standalone-x64.exe` through `/ensure`, a no-op `/ensure`, `verify`, `status`, `detect.ps1`, the installed CLI's own `ensure` and `/uninstall`. Checks the four services, the HKLM marker, the Add/Remove Programs entry, and that the Codex requirements and the Claude Code managed-settings fragment name the DefenseClaw hook after `/ensure` and are gone after `/uninstall` |
+| `scripts/check_enterprise_lifecycle_result.py` | Checks one saved lifecycle result against what the step must produce. Every lane uses it. A step fails on any error and on any warning it does not allow (`--allow-warning`); `--complete` also requires `coverage_complete` and `security_complete` |
+
+Build the packages the lanes install:
+
+- **Linux deb, rpm and payload tarball:** `make packaging-linux-enterprise`
+  runs a GoReleaser snapshot of the release config into `dist/`. It needs
+  GoReleaser v2; `ci.yml` and `release.yaml` pin v2.15.4, so install the
+  same version (`go install github.com/goreleaser/goreleaser/v2@v2.15.4`).
+  `GORELEASER_CURRENT_TAG` sets the version: `v9.9.9` builds
+  `9.9.9-SNAPSHOT-<commit>`. To test an upgrade, build the second package
+  with a higher tag.
+- **macOS pkg:** `make packaging-macos-enterprise VERSION=<version>` runs
+  `scripts/build-macos-enterprise-pkg.sh` on a Mac with Go and the Xcode
+  command line tools, and writes
+  `dist/defenseclaw-enterprise-<version>-darwin-arm64.pkg`. The Makefile's
+  default `VERSION` is an old release number, so always pass `VERSION`:
+  the package refuses to install over a newer deployment, so a build for an
+  upgrade test needs a version above the installed one. See
+  [packaging/macos/PACKAGING.md](../packaging/macos/PACKAGING.md).
+
+```bash
+# Unsigned deb and rpm from the release config, then the rpm lane on RHEL 9.
+GORELEASER_CURRENT_TAG=v9.9.9 make packaging-linux-enterprise
+v=$(python3 -c 'import json; print(json.load(open("dist/metadata.json"))["version"])')
+scripts/test-enterprise-linux-container.sh \
+  --image registry.access.redhat.com/ubi9/ubi-init \
+  --package "dist/defenseclaw-enterprise-$v-linux-amd64.rpm" --version "$v"
+
+# Unsigned macOS pkg (on a Mac), then the pkg lane on a disposable Mac.
+make packaging-macos-enterprise VERSION=9.9.9
+sudo bash scripts/test-enterprise-unix-install.sh \
+  --package dist/defenseclaw-enterprise-9.9.9-darwin-arm64.pkg --version 9.9.9
+```
+
+On every pull request, `ci.yml` runs the deb lane on the Ubuntu 24.04
+runner, the rpm lane in RHEL 9 and RHEL 8 UBI containers, the pkg lane on
+`macos-latest` and the Windows lane on `windows-latest`. Each lane uploads
+its lifecycle results as an artifact.
+
+Standalone Windows enrolls a user for a connector only when it finds the
+connector's CLI in that user's profile, and the Windows runner has neither
+Claude Code nor Codex. The Windows lane therefore writes the npm package
+manifests listed in `testdata/enterprise_install_lane/windows-agents.json`
+into the runner account's profile, removes them at the end, and refuses a host
+where they already exist. Windows reports `security_complete` false until an
+administrator records the live Claude Code policy proof
+(`Repair -AttestClaudeEffectivePolicy`, see
+[WINDOWS-ENTERPRISE-CERTIFICATION.md](WINDOWS-ENTERPRISE-CERTIFICATION.md)),
+so the Windows lane requires `coverage_complete` and requires
+`security_complete` to stay false.
+
 ## CI Workflows
 
 Ordinary PRs stay fast, while the release dispatch tests the final signed
@@ -89,7 +194,7 @@ assets on every platform before publishing them. See the
 
 | Workflow | Purpose |
 |----------|---------|
-| `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR |
+| `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services) |
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
 | `.github/workflows/release.yaml` | One manual build, sign, install-gate and publish pipeline for a reviewed `main` commit |

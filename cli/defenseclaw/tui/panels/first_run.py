@@ -150,7 +150,7 @@ class FirstRunPanelModel:
         if key in {"left", "h"}:
             self.cycle(-1)
             return FirstRunAction(True)
-        if key in {"right", "l", "enter", " "}:
+        if key in {"right", "l", "enter", " ", "space"}:
             self.cycle(1)
             return FirstRunAction(True)
         if key == "ctrl+r":
@@ -173,7 +173,7 @@ class FirstRunPanelModel:
             self.fields[self.cursor] = _replace_field(field, value=next_value)
 
     def empty_state(self) -> str:
-        return "No config.yaml was found. Pick the basics, then press Ctrl+R to apply."
+        return "No config.yaml yet. Pick the basics below, then press Ctrl+R to write it."
 
 
 def default_first_run_fields() -> tuple[FirstRunField, ...]:
@@ -183,44 +183,44 @@ def default_first_run_fields() -> tuple[FirstRunField, ...]:
             "connector",
             "codex",
             visible_connector_choices(),
-            "Agent framework to protect. OpenClaw is optional, not assumed.",
+            "The agent to protect. OpenClaw is optional.",
         ),
-        FirstRunField("Profile", "choice", "observe", PROFILE_CHOICES, "observe=detect/log; action=block."),
+        FirstRunField("Profile", "choice", "observe", PROFILE_CHOICES, "observe = detect and log; action = block."),
         FirstRunField(
             "Scanner Mode",
             "choice",
             "local",
             SCANNER_MODE_CHOICES,
-            "local needs no Cisco key; remote/both probe Cisco AI Defense.",
+            "local needs no Cisco key; remote and both use Cisco AI Defense.",
         ),
         FirstRunField(
             "LLM Judge",
             "bool",
             "false",
-            hint="Enable LLM adjudication now. Requires a configured LLM key/model.",
+            hint="Let an LLM double-check findings. Needs an LLM key and model.",
         ),
         FirstRunField(
             "Hook Fail Mode",
             "choice",
             "open",
             FAIL_MODE_CHOICES,
-            "On delivery/auth/response failure: open=allow+log, closed=block where supported.",
+            "If a check can't finish: open = allow and log, closed = block where supported.",
         ),
         FirstRunField(
             "HITL",
             "bool",
             "false",
-            hint="Action mode only: require operator approval before risky tool calls.",
+            hint="Action profile only: ask you before risky tool calls.",
         ),
         FirstRunField(
             "HITL Min Severity",
             "choice",
             "HIGH",
             HILT_SEVERITY_CHOICES,
-            "Lowest finding severity that triggers a HITL approval prompt.",
+            "Lowest finding severity that asks for your approval.",
         ),
-        FirstRunField("Start Gateway", "bool", "false", hint="Start the sidecar after writing config."),
-        FirstRunField("Verify", "bool", "true", hint="Run targeted readiness checks before landing on Overview."),
+        FirstRunField("Start Gateway", "bool", "false", hint="Start the gateway once the config is written."),
+        FirstRunField("Verify", "bool", "true", hint="Run readiness checks before opening Overview."),
     )
 
 

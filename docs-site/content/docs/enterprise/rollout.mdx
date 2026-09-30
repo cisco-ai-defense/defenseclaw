@@ -1,0 +1,239 @@
+---
+title: Plan a rollout
+description: Plan a DefenseClaw enterprise rollout across thousands of mixed Windows, Linux, and macOS endpoints, from prerequisites and a pilot in observe mode to per-user installs and rings.
+keywords:
+  - DefenseClaw enterprise rollout
+  - MDM rollout plan
+  - observe mode pilot
+  - enrollment
+  - per-user install migration
+  - security_complete
+---
+
+This page walks through a rollout of the
+[standalone profile](/docs/enterprise/concepts#standalone-profile) to a large,
+mixed fleet, for example 5,000 Windows, Linux, and macOS endpoints. It tells
+you what to decide and in which order. The install pages and the MDM recipes
+have the exact commands.
+
+## Before you start
+
+| Need | Details |
+| --- | --- |
+| Administrator rights on every endpoint | Your MDM must run commands as SYSTEM on Windows and as root on Linux and macOS. The lifecycle refuses to change anything without them |
+| PowerShell 7 on Windows | A stable, machine-wide PowerShell 7 from Microsoft's installer. The standalone lifecycle uses it and ignores any `pwsh` on `PATH`. Deploy it before DefenseClaw. See [Windows requirements](/docs/enterprise/windows#requirements) |
+| systemd on Linux | systemd 239 or later, and a distribution that installs `.deb` or `.rpm` packages. See [Linux requirements](/docs/enterprise/linux#requirements) |
+| Apple silicon on macOS | macOS 13.0 or later on Apple silicon for the `.pkg` package. See [macOS requirements](/docs/enterprise/macos#requirements) |
+| Supported agents | Each agent you protect must be a version its [connector page](/docs/connectors#platform-support) supports, installed for each user who runs it |
+| Cisco AI Defense key (optional) | Only if you want Cisco AI Defense to inspect as well. See [Cisco AI Defense key](/docs/enterprise/ai-defense-key) |
+
+Collect the release files for each OS:
+
+| OS | Files |
+| --- | --- |
+| Windows | `DefenseClawSetup-Enterprise-Standalone-x64.exe`, with `checksums.txt` and `checksums.txt.bundle`. `DefenseClawSetup-Enterprise-Standalone-x64.payload-manifest.json` is published too, for auditing what the Setup embeds; you do not deliver it |
+| Linux | The `defenseclaw-enterprise` `.deb` or `.rpm` package, or `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz`, with `checksums.txt` and `checksums.txt.bundle` (and, when the release signs the Linux packages, their `.asc` signatures and `defenseclaw-enterprise-release-key.asc`) |
+| macOS | `defenseclaw-enterprise-<version>-darwin-arm64.pkg`, with `checksums.txt` and `checksums.txt.bundle` |
+
+`DefenseClawSetup-Enterprise-x64.exe` is the Secure Client Setup, not the
+standalone one. The MDM scripts that wrap these files live in `packaging/mdm`
+in the repository; [Install with an MDM](/docs/enterprise/mdm) explains them.
+
+<Callout type="warn" title="Agents with administrator rights">
+DefenseClaw does not defend a computer from its administrators. An agent
+that runs with unrestricted `sudo` or administrator rights can remove it. Keep
+agents running as standard users.
+</Callout>
+
+## Step 1: Choose the agents
+
+List every agent you want to protect under `guardrail.connectors` in the
+config. Each key turns that agent on. On Linux and macOS, the config the
+lifecycle writes when you supply none lists no agents, so it protects nothing.
+On Windows, install and `ensure` require a config.
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+    cursor: {}
+    copilot: {}
+```
+
+How each agent is protected depends on the agent and the OS:
+
+| Agents | How | Notes |
+| --- | --- | --- |
+| Codex, Claude Code, Cursor, GitHub Copilot, OpenCode | [Machine policy](/docs/enterprise/concepts#machine-policy-connector) | Applies to every user of the computer. OpenCode uses DefenseClaw's managed OpenCode plugin |
+| Devin, Antigravity, Hermes, Amp | [Per-user](/docs/enterprise/concepts#per-user-connector) | The guardian writes and repairs each enrolled user's config |
+| OpenHands, OmniGent | Per-user, on Linux and macOS only | Refused on Windows |
+| Kiro | Per-user on Linux and macOS; [ACP guard](/docs/acp-guard) on Windows | The guardian writes each user's global `~/.kiro/hooks` file. On Windows, enroll it with `defenseclaw-gateway enterprise acp enroll` |
+
+Machine-policy agents give the strongest protection: users cannot edit the
+vendor's policy files, and where DefenseClaw sets the vendor's
+[managed-hooks-only lock](/docs/enterprise/concepts#managed-hooks-only-lock),
+the agent ignores hooks that users add. [Machine policy](/docs/enterprise/machine-policy)
+shows which lock is set on which OS. [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
+has the full rules.
+
+## Step 2: Choose the users
+
+The [enumerator](/docs/enterprise/concepts#enumerator) decides which users are
+[enrolled](/docs/enterprise/concepts#enrollment). It enrolls a user for an agent
+only after it finds a supported install of that agent for that user, and it
+checks again every five minutes. The settings live under
+`enterprise.enrollment` and behave differently per OS:
+
+| Setting | Linux and macOS | Windows |
+| --- | --- | --- |
+| Candidates | Every account the user database lists (NSS on Linux, Directory Services on macOS), signed-in users, the owners of folders under the home roots, and `include_users` | Every user profile on the computer: local, domain, and Microsoft Entra ID accounts |
+| Built-in filter | A user ID in the interactive range, a login shell, and a home under `/home` or `/var/home` (Linux) or `/Users` (macOS) or a `home_roots` entry. Never root or `nobody`. The range starts at `UID_MIN` from `/etc/login.defs` (1000 when unset) on Linux and at 501 on macOS. On Linux, `UID_MAX` (60000 when unset) caps only local accounts in `/etc/passwd`; directory accounts have no upper bound unless you set `uid_max` | Interactive user profiles only |
+| `include_users` | Adds these users even outside the user-ID range or with a no-login shell. Everyone else who passes the filter is still enrolled | Accepted, but it adds and removes no one: every profile on the computer is already a candidate |
+| `exclude_users` | Never enrolled | Never enrolled |
+| `include_groups`, `exclude_groups` | Filter by group | Filter by local, Active Directory and Microsoft Entra ID group. A user whose membership is not known yet, or who is left undecided by an `include_groups` entry that does not resolve, is pending: no new rows, nothing revoked |
+| `exempt_users` | Not enrolled, but their calls are still inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept |
+| A user who is not enrolled and runs a machine-policy agent | Inspected by default (`unenrolled_users: inspect`). Refused with `unenrolled_users: deny` | Refused |
+
+Three cases to plan for:
+
+- **Linux directory accounts.** SSSD and Active Directory often map users to
+  user IDs above 60000. The `UID_MAX` cap does not apply to them, so they are
+  enrolled like local users. Set `uid_max` only if you want to cap directory
+  and local accounts alike. Check a user's ID on a pilot host with
+  `getent passwd <user>` or `id -u <user>`.
+- **One config for several OSes.** Windows applies `include_groups` and
+  `exclude_groups` too. A Linux group name such as `wheel` in `include_groups`
+  does not resolve on Windows, so a new Windows user that no other entry
+  admits stays pending: they get no rows, and their machine-policy calls are
+  refused. Name groups that exist on every OS the config reaches (or by SID
+  on Windows), or use separate configs.
+- **Windows exclusions.** On Windows, excluding a user does not leave them
+  unprotected: their calls through a machine-policy agent are refused.
+  Exclude only accounts that do not run the protected agents. To keep an
+  account working without per-user registrations, list it in `exempt_users`
+  instead: it keeps its machine-policy rows and is inspected and logged.
+
+[Enrollment](/docs/enterprise/enrollment) has every setting.
+
+## Step 3: Pilot in observe mode
+
+Pick a pilot ring of a few dozen endpoints that covers every OS, every agent
+you chose, and some IT staff. Deploy with `guardrail.mode: observe`. In
+observe mode policy verdicts never block: DefenseClaw records every decision,
+including what it would have blocked. The deployment's own checks still apply:
+a tool call is refused while an unapproved foreign hook is present (with
+`foreign_hooks: remove`), or when the user is not enrolled where enrollment is
+enforced.
+
+1. **Install.** Run the MDM recipe for each OS. Every run ends with an exit
+   code: `0` on success on every OS. The failure codes are `1`, `2` and `75`
+   on Linux and macOS, and `1603`, `1618` and `1639` on Windows. See
+   [Exit codes](/docs/enterprise/mdm#exit-codes).
+2. **Check health.** Run `status` and `verify` on a few hosts and read
+   `coverage_complete` and `security_complete`
+   ([Status and verify](/docs/enterprise/operations#status-and-verify)).
+3. **Check enrollment.** Confirm that the users you expect appear for each
+   agent. The enumerator runs every five minutes, so allow a few minutes after
+   a user first installs an agent.
+4. **Read the decisions.** Let people work for a week or two. Review what
+   DefenseClaw would have blocked
+   ([Logs and events](/docs/enterprise/operations#logs-and-events)), and tune
+   policy for legitimate work that it flags.
+5. **Switch to action mode.** Set `guardrail.mode: action` in the config and
+   deliver it again. You can switch one agent first by setting
+   `mode: action` under its `guardrail.connectors` entry.
+   [Change the config](/docs/enterprise/lifecycle#change-the-config) shows how
+   the change reaches each OS.
+
+## Step 4: Handle existing per-user installs
+
+Some users may already run the ordinary per-user DefenseClaw. On a managed
+computer, the per-user installer (`install.sh`, `install.ps1`),
+`defenseclaw upgrade`, and the per-user gateway refuse to run.
+
+There is no automatic migration in this release.
+`enterprise.coexistence.per_user_install` is reserved: it is accepted and
+validated but has no effect. Remove per-user installs yourself, before the
+managed install reaches a computer:
+
+1. Find them. A per-user install lives in the user's home, in
+   `~/.defenseclaw` (`%USERPROFILE%\.defenseclaw` on Windows), with its
+   programs in `~/.local/bin`.
+2. As that user, remove it. This removes the connector hooks and the programs
+   and keeps the user's data:
+
+   ```bash
+   defenseclaw uninstall --binaries --yes
+   ```
+
+   To remove the data in `~/.defenseclaw` as well:
+
+   ```bash
+   defenseclaw uninstall --all --binaries --yes
+   ```
+
+   The commands are the same in PowerShell on Windows.
+3. Then deploy the managed install.
+
+A per-user gateway listens on the same loopback port as the managed gateway,
+`127.0.0.1:18970`, which is why you remove the per-user install first.
+
+On Linux and macOS, `--adopt-existing` covers a different case: DefenseClaw
+files at the managed paths that no committed deployment owns, such as an
+earlier manual deployment. `install` and `ensure` refuse to run over them
+unless you pass `--adopt-existing`, which archives them into the lifecycle
+directory and takes over. It does not touch per-user installs in users'
+homes. See [Per-user installs](/docs/enterprise/linux#per-user-installs) on
+each install page.
+
+## Step 5: Expand in rings
+
+Grow the deployment in rings and move on only when a ring is healthy. A
+possible plan for 5,000 endpoints:
+
+| Ring | Endpoints | Mode | Move on when |
+| --- | --- | --- | --- |
+| Pilot | About 50, every OS and agent | `observe` | Every install exits `0`, `verify` passes, and the decisions are reviewed |
+| Early | About 500 | `observe`, then `action` | No unexpected blocks for a week in `action` mode |
+| Broad | About 2,000 | `action` | Detection and health stay green |
+| Everyone | The rest | `action` | |
+
+Watch these on every ring:
+
+- **MDM detection.** The detection script reports the installed version and,
+  optionally, health ([Detection](/docs/enterprise/mdm#detection)).
+- **Health fields.** `coverage_complete` and `security_complete` in the
+  lifecycle result ([Health fields](/docs/enterprise/operations#health-fields)).
+- **Enrollment counts** in `status`, against the users you expect.
+
+Two Windows cases keep `security_complete` at `false` on a healthy install:
+
+- Windows requires at least one of Codex, Claude Code, or Cursor to be turned
+  on. A Windows deployment that protects only per-user agents or GitHub Copilot
+  reports `false`.
+- With Claude Code turned on, `security_complete` stays `false` until an
+  administrator confirms, in a real Claude Code session, that DefenseClaw's
+  managed policy is in effect, and records it with the Windows lifecycle's
+  `repair --attest-claude-effective-policy`. See
+  [Health fields](/docs/enterprise/operations#health-fields).
+
+Plan for them so a `false` there does not stop the rollout by mistake. Every
+other `false` needs a look.
+
+## Step 6: Plan upgrades and rollback
+
+Decide how new releases reach the fleet before the first ring goes out. The
+same rings work for upgrades: run `ensure` with the new release on the pilot
+ring first. On Linux and macOS the package manager, or `ensure` with a newer
+payload, upgrades in place. On Windows, `ensure` with the new Setup program
+upgrades and refuses to install an older version over a newer one.
+
+[Lifecycle](/docs/enterprise/lifecycle) covers
+[upgrade](/docs/enterprise/lifecycle#upgrade),
+[roll back](/docs/enterprise/lifecycle#roll-back),
+[changing the config](/docs/enterprise/lifecycle#change-the-config),
+[repair](/docs/enterprise/lifecycle#repair), and
+[uninstall](/docs/enterprise/lifecycle#uninstall).

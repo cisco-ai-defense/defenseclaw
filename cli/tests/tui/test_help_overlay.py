@@ -68,7 +68,7 @@ def test_active_panel_section_switches_with_panel() -> None:
     # Alerts doesn't — so the two blocks must be different.
     assert alerts_keys != logs_keys
     assert "1-5" in alerts_keys
-    assert "e" in logs_keys
+    assert "e / w" in logs_keys
 
 
 def test_running_section_includes_signal_keys() -> None:
@@ -78,10 +78,10 @@ def test_running_section_includes_signal_keys() -> None:
     # These are the keys that the running-state UI surfaces — if
     # any disappears we should explicitly remove it here too.
     assert "Ctrl+C" in keys
-    assert "!" in keys
-    assert "Y" in keys
-    assert "Ctrl+S" in keys
-    assert "D" in keys
+    assert "Y / Ctrl+S" in keys
+    # D (background doctor) and ! (rerun, Activity only) work when idle,
+    # so they are listed under Global / Activity instead.
+    assert "D" in {k for k, _ in app._help_sections()[0][1]}
 
 
 def test_ai_panel_help_includes_table_switch_shortcut() -> None:

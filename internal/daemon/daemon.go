@@ -164,7 +164,8 @@ func (d *Daemon) IsRunning() (bool, int) {
 		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
-	if !d.verifyProcess(info) && !d.verifyProcessForAuthenticatedMigration(info) {
+	if !d.verifyProcess(info) && !d.verifyProcessForAuthenticatedMigration(info) &&
+		!d.verifyReplacedExecutable(info) {
 		// Closes (chain ): a stale gateway.pid
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
@@ -256,6 +257,27 @@ func (d *Daemon) verifyProcessForAuthenticatedMigration(info pidInfo) bool {
 	}
 	return d.verifyExecutableForAuthenticatedMigration(info) &&
 		d.verifyStartIdentityForAuthenticatedMigration(info)
+}
+
+// verifyReplacedExecutable recognizes this data directory's current record
+// for a gateway whose file was replaced or removed while it ran (an in-place
+// upgrade, or a rename of the installed file): Linux then shows its
+// executable as the recorded path plus " (deleted)". The general verifier
+// rejects that, so status called the running gateway stopped, removed its
+// PID record, and stop printed "not running". Like the migration record it
+// never authorizes a signal: stop may only ask the authenticated control
+// plane to shut it down.
+func (d *Daemon) verifyReplacedExecutable(info pidInfo) bool {
+	if runtime.GOOS != "linux" || strings.TrimSpace(info.Executable) == "" ||
+		strings.TrimSpace(info.StartIdentity) == "" || strings.TrimSpace(info.DataDir) == "" ||
+		!pathidentity.Same(info.DataDir, d.dataDir) {
+		return false
+	}
+	executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
+	if err != nil || executable != info.Executable+" (deleted)" {
+		return false
+	}
+	return d.verifyStartIdentity(info)
 }
 
 func (d *Daemon) verifyExecutableForAuthenticatedMigration(info pidInfo) bool {
@@ -751,7 +773,7 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 	currentControlIdentity := d.verifyProcessForControl(started)
 	authenticatedMigration := !currentControlIdentity &&
 		request != nil &&
-		d.verifyProcessForAuthenticatedMigration(started)
+		(d.verifyProcessForAuthenticatedMigration(started) || d.verifyReplacedExecutable(started))
 	if !currentControlIdentity && !authenticatedMigration {
 		return fmt.Errorf(
 			"%w: daemon PID record is not bound to data directory %s",

@@ -40,6 +40,13 @@ dc_handoff() {
         esac
         shift
     done
+    # A computer managed by the organization is updated through its MDM.
+    for descriptor in /etc/defenseclaw/managed-runtime.json /opt/cisco/defenseclaw/etc/managed-runtime.json; do
+        if [ -f "${descriptor}" ] && [ ! -L "${descriptor}" ]; then
+            echo "  ✗ this computer's DefenseClaw is managed by your organization; your IT department updates it. Nothing was changed." >&2
+            return 1
+        fi
+    done
     # A 0.8.x gateway that the installer restores on failure would skip its
     # readiness wait with this marker from the 0.8.x controller.
     unset DEFENSECLAW_UPGRADE_FRESH_PROCESS 2>/dev/null || true

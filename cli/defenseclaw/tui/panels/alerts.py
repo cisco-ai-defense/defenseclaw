@@ -885,25 +885,32 @@ class AlertsPanelModel:
         return AlertPanelAction(False)
 
     def summary_text(self) -> str:
+        """One header line: the counts for the current scope.
+
+        Keys live in the hint bar and the ``?`` sheet, and the scope and
+        severity chips are the button bar right below, so the body no
+        longer spends five rows on instructions: at 80x24 those rows pushed
+        the alert table and its detail pane off the screen.
+        """
+
         metrics = self._scope_metrics()
         counts = metrics.severity_counts
-        active = self.active_scope_label()
         selected = len(self.selected_ids)
-        filter_label = f"  search={self.filter_text!r}" if self.filter_text else ""
+        selected_label = f"  [bold #A78BFA]{selected} selected[/]" if selected else ""
         # ``filter_text`` is operator-typed search input that may
         # contain bracketed tokens (``target:[skill]``). Escape so the
         # markup parser can't drop the bracketed substring or, worse,
         # leave the span unclosed when the user types a stray ``[``.
+        filter_label = (
+            f"  [#9FB2CC]search:[/] {rich_escape(self.filter_text)}" if self.filter_text and not self.filtering else ""
+        )
         search_prompt = f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]" if self.filtering else ""
         return (
-            "[bold #22D3EE]Alerts[/]  [#9FB2CC]Alert queue. Click a scope or severity chip above; 1-5 selects All/Critical/High/Medium/Low.[/]\n"
-            f"[bold]Actionable {metrics.actionable_count}[/]  [bold]In scope {metrics.total_count}[/]  "
-            f"[#F87171]Critical {counts['CRITICAL']}[/]  [#FB923C]High {counts['HIGH']}[/]  "
-            f"[#FBBF24]Medium {counts['MEDIUM']}[/]  [#60A5FA]Low {counts['LOW']}[/]  "
-            f"active={active}  selected={selected}"
-            f"{filter_label}{search_prompt}\n"
-            "Next: Enter opens detail, Space selects a row, Ack selected marks chosen alerts, "
-            "Dismiss filtered clears the active view, / searches target/action/details."
+            "[bold #22D3EE]Alerts[/]  "
+            f"[bold]Actionable {metrics.actionable_count}[/] · In scope {metrics.total_count} · "
+            f"[#F87171]Critical {counts['CRITICAL']}[/] [#FB923C]High {counts['HIGH']}[/] "
+            f"[#FBBF24]Medium {counts['MEDIUM']}[/] [#60A5FA]Low {counts['LOW']}[/]"
+            f"{selected_label}{filter_label}{search_prompt}"
         )
 
     def data_table_columns(self) -> tuple[str, ...]:
@@ -1004,42 +1011,48 @@ class AlertsPanelModel:
             lines = _hook_detail_lines(event)
         else:
             display_severity = _event_display_severity(event)
+            # Targets, details and finding text come from scanned
+            # skills/MCPs/agents: escape them so a name such as
+            # ``[red]ok[/]`` can't restyle (or break) the pane.
             lines = [
-                f"[bold #22D3EE]{display_severity} {event.action}[/]",
-                f"Target: {event.target}",
+                f"[bold #22D3EE]{rich_escape(display_severity)} {rich_escape(event.action)}[/]",
+                f"Target: {rich_escape(event.target)}",
                 f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
             ]
             if event.details:
                 human = humanize_alert_details(event.details)
                 if human and human != event.details:
-                    lines.append(f"Summary: {human}")
-                lines.append(f"Details: {event.details}")
+                    lines.append(f"Summary: {rich_escape(human)}")
+                lines.append(f"Details: {rich_escape(event.details)}")
         if event.run_id:
-            lines.append(f"RunID: {event.run_id}")
+            lines.append(f"RunID: {rich_escape(event.run_id)}")
         if event.trace_id:
-            lines.append(f"TraceID: {event.trace_id}")
+            lines.append(f"TraceID: {rich_escape(event.trace_id)}")
         if event.request_id:
-            lines.append(f"ReqID: {event.request_id}")
+            lines.append(f"ReqID: {rich_escape(event.request_id)}")
         if event.session_id:
-            lines.append(f"SessionID: {event.session_id}")
+            lines.append(f"SessionID: {rich_escape(event.session_id)}")
         if info.gateway_finding is not None:
             lines.extend(_gateway_finding_lines(info.gateway_finding))
         for finding in info.findings:
-            value = f"{finding.severity} {finding.title}".strip()
+            value = rich_escape(f"{finding.severity} {finding.title}".strip())
             if finding.scanner:
                 # Escape ``[{scanner}]``: scanner names are lowercase
                 # identifiers (``trivy``, ``semgrep``, …) that Rich
                 # would parse as style tags, dropping the badge from
                 # the detail line.
-                value += f" \\[{finding.scanner}]"
+                value += " \\[" + rich_escape(finding.scanner) + "]"
             if finding.location:
-                value += f" @ {finding.location}"
+                value += f" @ {rich_escape(finding.location)}"
             lines.append(f"Finding: {value}")
             if finding.remediation:
-                lines.append(f"Remediation: {finding.remediation}")
+                lines.append(f"Remediation: {rich_escape(finding.remediation)}")
         history = tuple(item for item in info.history if item.id != event.id)
         for item in history[:5]:
-            lines.append(f"History: {item.timestamp.strftime('%b %d %H:%M')} {item.action} {item.severity}")
+            lines.append(
+                f"History: {item.timestamp.strftime('%b %d %H:%M')} "
+                f"{rich_escape(item.action)} {rich_escape(item.severity)}"
+            )
         lines.append("[Enter] close detail  [Esc] close")
         return "\n".join(lines)
 
@@ -1348,21 +1361,24 @@ def _format_severity_counts(counts: dict[str, int]) -> str:
 
 def _gateway_finding_lines(detail: GatewayFindingDetail) -> list[str]:
     finding = detail.finding
+    def text(value: object) -> str:
+        return rich_escape(str(value))
+
     lines = [
-        f"Scan: {detail.scan.scan_id}",
-        f"Scanner: {finding.get('scanner') or detail.scan.scanner}",
-        f"Target: {finding.get('target') or detail.scan.target}",
+        f"Scan: {text(detail.scan.scan_id)}",
+        f"Scanner: {text(finding.get('scanner') or detail.scan.scanner)}",
+        f"Target: {text(finding.get('target') or detail.scan.target)}",
     ]
     if finding.get("rule_id"):
-        lines.append(f"Rule: {finding['rule_id']}")
+        lines.append(f"Rule: {text(finding['rule_id'])}")
     if finding.get("line_number") not in {"", None}:
-        lines.append(f"Line: {finding.get('line_number')}")
+        lines.append(f"Line: {text(finding.get('line_number'))}")
     if finding.get("location"):
-        lines.append(f"Loc: {finding['location']}")
+        lines.append(f"Loc: {text(finding['location'])}")
     if finding.get("title"):
-        lines.append(f"Title: {finding['title']}")
+        lines.append(f"Title: {text(finding['title'])}")
     if finding.get("description"):
-        lines.append(f"Desc: {finding['description']}")
+        lines.append(f"Desc: {text(finding['description'])}")
     return lines
 
 
@@ -1568,8 +1584,8 @@ def _hook_detail_lines(event: AlertEvent) -> list[str]:
     """
 
     parsed = parse_kv_details(event.details)
-    connector = parsed.get("connector", "")
-    phase = event.target or ""
+    connector = rich_escape(parsed.get("connector", ""))
+    phase = rich_escape(event.target or "")
     if connector and phase:
         title = f"[bold #22D3EE]{connector} {phase}[/]"
     elif connector:
@@ -1577,7 +1593,7 @@ def _hook_detail_lines(event: AlertEvent) -> list[str]:
     elif phase:
         title = f"[bold #22D3EE]{phase}[/]"
     else:
-        title = f"[bold #22D3EE]{_event_display_severity(event)} {event.action}[/]"
+        title = f"[bold #22D3EE]{rich_escape(_event_display_severity(event))} {rich_escape(event.action)}[/]"
     lines = [
         title,
         f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -1588,7 +1604,7 @@ def _hook_detail_lines(event: AlertEvent) -> list[str]:
     rows = structured_detail_rows(event.details)
     if rows:
         for label, value in rows:
-            lines.append(f"{label}: {value}")
+            lines.append(f"{rich_escape(label)}: {rich_escape(value)}")
     elif event.details:
-        lines.append(f"Details: {event.details}")
+        lines.append(f"Details: {rich_escape(event.details)}")
     return lines

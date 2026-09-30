@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -358,7 +359,11 @@ observability:
 		base.Plan,
 		config.ObservabilityV8ManagedAIDOptions{
 			DeploymentMode: managed.DeploymentModeManagedEnterprise,
-			Endpoint:       config.DefaultConfig().CiscoAIDefense.Endpoint,
+			// Without an enterprise block the host default applies:
+			// standalone on Linux (no Secure Client sink), Secure Client
+			// elsewhere.
+			Profile:  managed.DefaultEnterpriseProfile(runtime.GOOS),
+			Endpoint: config.DefaultConfig().CiscoAIDefense.Endpoint,
 		},
 	)
 	if err != nil {
@@ -404,6 +409,13 @@ observability:
 	}
 	if !bytes.Equal(effective.Effective, expected.EffectiveJSON()) {
 		t.Fatalf("read-only effective plan does not match generated managed plan")
+	}
+
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		if _, ok := expected.RuntimeDestination(config.ObservabilityV8ManagedAIDDestinationName); ok {
+			t.Fatal("standalone managed plan gained the Secure Client AI Defense destination")
+		}
+		return
 	}
 
 	snapshot := expected.Snapshot()

@@ -19,6 +19,7 @@ from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
+from textual.renderables.digits import DIGITS
 from textual.widgets import Digits, ProgressBar, Sparkline, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
@@ -106,7 +107,19 @@ class MetricTile(Vertical):
         color: {TOKENS.text_primary};
     }}
 
+    MetricTile .metric-word {{
+        height: 3;
+        content-align: left middle;
+        color: {TOKENS.text_primary};
+        text-style: bold;
+    }}
+
+    /* The tile is 8 rows: border (2) + title, digits (3), sparkline and
+       detail. The progress bar used to take the detail's row, so the
+       severity breakdown / guardrail mode line was always clipped. It
+       stays mounted (and updated) but is not drawn. */
     MetricTile .metric-progress {{
+        display: none;
         height: 1;
         margin-top: 0;
     }}
@@ -128,6 +141,10 @@ class MetricTile(Vertical):
         self._rendered_metric: MetricDatum | None = None
         self._title = Static(metric.label, classes="metric-title")
         self._digits = Digits(self._digits_text(metric), classes="metric-digits")
+        # Digits only draws 0-9, A-F and a few symbols; a status word such
+        # as "ON" / "OFF" came out as a jumble of glyph fragments, so words
+        # are shown as plain bold text of the same height instead.
+        self._word = Static("", classes="metric-word", markup=False)
         self._progress = ProgressBar(
             total=100,
             show_eta=False,
@@ -140,6 +157,7 @@ class MetricTile(Vertical):
     def compose(self) -> ComposeResult:
         yield self._title
         yield self._digits
+        yield self._word
         yield self._progress
         yield self._sparkline
         yield self._detail
@@ -160,7 +178,13 @@ class MetricTile(Vertical):
 
         digits_text = self._digits_text(metric)
         if previous is None or self._digits_text(previous) != digits_text:
-            self._digits.update(digits_text)
+            as_word = not self.digits_renderable(digits_text)
+            self._digits.display = not as_word
+            self._word.display = as_word
+            if as_word:
+                self._word.update(digits_text)
+            else:
+                self._digits.update(digits_text)
 
         progress = _clamp(metric.progress)
         if previous is None or _clamp(previous.progress) != progress:
@@ -199,6 +223,12 @@ class MetricTile(Vertical):
         if metric.value_text:
             return metric.value_text
         return str(max(metric.value, 0))
+
+    @staticmethod
+    def digits_renderable(text: str) -> bool:
+        """True when every character has a Digits glyph."""
+
+        return all(character in DIGITS or character == "." for character in text)
 
     @staticmethod
     def _class_map(metric: MetricDatum) -> dict[str, bool]:

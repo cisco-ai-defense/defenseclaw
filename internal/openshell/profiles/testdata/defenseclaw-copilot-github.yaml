@@ -1,0 +1,39 @@
+id: defenseclaw-copilot-github
+display_name: GitHub Copilot for Copilot CLI (DefenseClaw)
+description: Binds a Copilot-entitled GitHub token (COPILOT_GITHUB_TOKEN) to GitHub and the Copilot API; only the Copilot CLI binaries may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: github_token
+    description: GitHub token with a Copilot subscription
+    env_vars: [COPILOT_GITHUB_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+endpoints:
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: api.githubcopilot.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: api.individual.githubcopilot.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: api.business.githubcopilot.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+  - host: api.enterprise.githubcopilot.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/copilot/cache/pkg/linux-arm64/1.0.88/prebuilds/linux-arm64/copilot-runtime", "/opt/defenseclaw-harness/copilot/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-arm64/copilot"]

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +162,13 @@ func newProtectedOpenHandsLaunchFixture(t *testing.T) (SetupOpts, string, string
 	conn := NewOpenHandsConnector()
 	if err := conn.setup(context.Background(), opts, ""); err != nil {
 		t.Fatalf("seed OpenHands hook registration: %v", err)
+	}
+	if runtime.GOOS == "darwin" {
+		// macOS contract publication binds to the protected setup selection;
+		// write it before the lock so the lock stays the newer record.
+		if err := WriteManagedSetupAgentSelection(dataDir, "openhands", stablePath, opts.AgentVersion); err != nil {
+			t.Fatalf("seed OpenHands setup selection: %v", err)
+		}
 	}
 	entry := NewHookContractLockEntry(opts, conn, "test")
 	entry.AgentExecutable = stablePath
@@ -328,4 +336,25 @@ func TestOpenHandsProtectedLaunchRejectsNonDarwinAndNonLoopback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// seedOpenHandsDarwinSelection writes an OpenHands image and the protected
+// setup selection that macOS setup admission and contract publication
+// require, and returns the executable and version to set up with.
+func seedOpenHandsDarwinSelection(t *testing.T, dataDir, binDir string) (string, string) {
+	t.Helper()
+	const version = "1.16.0"
+	for _, dir := range []string{binDir, dataDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executable := filepath.Join(binDir, "openhands")
+	if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteManagedSetupAgentSelection(dataDir, "openhands", executable, version); err != nil {
+		t.Fatalf("seed OpenHands setup selection: %v", err)
+	}
+	return executable, version
 }

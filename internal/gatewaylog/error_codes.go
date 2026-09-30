@@ -90,6 +90,32 @@ const (
 	ErrCodePluginOwnerMismatch    ErrorCode = "PLUGIN_OWNER_MISMATCH"
 	ErrCodePluginHashMismatch     ErrorCode = "PLUGIN_HASH_MISMATCH"
 	ErrCodePluginLoadFailed       ErrorCode = "PLUGIN_LOAD_FAILED"
+
+	// OpenShell subsystem — the NVIDIA OpenShell 0.1.x sandbox
+	// integration. Always paired with SubsystemOpenShell.
+	//   - UNAVAILABLE: the local OpenShell gateway or CLI is missing or
+	//     unreachable.
+	//   - VERSION_UNSUPPORTED: the installed release is outside the
+	//     supported window (internal/openshell/version.go).
+	//   - PACK_INVALID: a sandbox policy pack failed strict loading.
+	//   - ADMIN_VIOLATION: openshell.admin refused a requested setting or
+	//     runtime action (unblock, host port, mount, yolo, learn mode,
+	//     harness).
+	//   - POLICY_REJECTED: the gateway rejected a rendered sandbox policy.
+	//   - SANDBOX_FAILED: a sandbox create/start/stop/delete failed.
+	//   - IMAGE_BUILD_FAILED: the overlay image build or probe failed.
+	//   - WATCH_FAILED: the WatchSandbox event stream failed or lost events.
+	//   - LISTENER_FAILED: the sandbox hook ingress or egress proxy could
+	//     not bind.
+	ErrCodeOpenShellUnavailable        ErrorCode = "OPENSHELL_UNAVAILABLE"
+	ErrCodeOpenShellVersionUnsupported ErrorCode = "OPENSHELL_VERSION_UNSUPPORTED"
+	ErrCodeOpenShellPackInvalid        ErrorCode = "OPENSHELL_PACK_INVALID"
+	ErrCodeOpenShellAdminViolation     ErrorCode = "OPENSHELL_ADMIN_VIOLATION"
+	ErrCodeOpenShellPolicyRejected     ErrorCode = "OPENSHELL_POLICY_REJECTED"
+	ErrCodeOpenShellSandboxFailed      ErrorCode = "OPENSHELL_SANDBOX_FAILED"
+	ErrCodeOpenShellImageBuildFailed   ErrorCode = "OPENSHELL_IMAGE_BUILD_FAILED"
+	ErrCodeOpenShellWatchFailed        ErrorCode = "OPENSHELL_WATCH_FAILED"
+	ErrCodeOpenShellListenerFailed     ErrorCode = "OPENSHELL_LISTENER_FAILED"
 )
 
 // Subsystem is the v7 standardized vocabulary for the `subsystem` field
@@ -166,6 +192,15 @@ func AllErrorCodes() []ErrorCode {
 		ErrCodePanicRecovered,
 		ErrCodeLLMBridgeError,
 		ErrCodeSchemaViolation,
+		ErrCodeOpenShellUnavailable,
+		ErrCodeOpenShellVersionUnsupported,
+		ErrCodeOpenShellPackInvalid,
+		ErrCodeOpenShellAdminViolation,
+		ErrCodeOpenShellPolicyRejected,
+		ErrCodeOpenShellSandboxFailed,
+		ErrCodeOpenShellImageBuildFailed,
+		ErrCodeOpenShellWatchFailed,
+		ErrCodeOpenShellListenerFailed,
 	}
 }
 

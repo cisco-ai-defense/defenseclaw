@@ -23,14 +23,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path
+from defenseclaw.config import config_path, legacy_standalone_configured
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.scanner_binary import resolve_scanner_binary
 
@@ -63,6 +62,49 @@ _OPENCODE_HEARTBEAT_FRESHNESS = timedelta(minutes=15)
 _OPENCODE_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 _OPENCODE_REGISTRATION_SOURCES = frozenset({"manual", "automatic"})
 _RUNTIME_HEALTHY_STATES = frozenset({"running", "active", "ready", "up", "healthy", "ok"})
+
+
+# Only the standalone profile reports its profile in `status`. The Secure
+# Client and unmanaged output (text rows and JSON keys) stays exactly as it
+# was before enterprise profiles existed.
+_STANDALONE_ENTERPRISE_PROFILE = "standalone"
+
+
+def _enterprise_profile(cfg) -> str:
+    """Return the managed_enterprise profile, or "" for unmanaged installs.
+
+    Mirrors internal/managed/profile.go: the service pin wins, then the
+    config's ``enterprise.profile``, then the per-OS default (standalone on
+    Linux, secure_client elsewhere). Read-only; never raises.
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return ""
+    pinned = os.environ.get("DEFENSECLAW_ENTERPRISE_PROFILE", "").strip().lower()
+    if pinned:
+        return pinned
+    configured = ""
+    try:
+        import yaml
+
+        with open(config_path()) as handle:
+            raw = yaml.safe_load(handle) or {}
+        enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
+        if isinstance(enterprise, dict):
+            configured = str(enterprise.get("profile") or "").strip().lower()
+    except (OSError, ValueError, ImportError):
+        configured = ""
+    except Exception:  # noqa: BLE001 - status must never fail on a malformed config
+        configured = ""
+    if configured:
+        return configured
+    return _default_enterprise_profile()
+
+
+def _default_enterprise_profile() -> str:
+    """Return the per-OS default profile: standalone on Linux, secure_client elsewhere."""
+    import sys
+
+    return "standalone" if sys.platform.startswith("linux") else "secure_client"
 
 
 def _opencode_registration_source_valid(value: object) -> bool:
@@ -193,19 +235,6 @@ def _status_row(key: str, value: str) -> None:
     ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
-def _openshell_available(cfg) -> bool:
-    binary = getattr(getattr(cfg, "openshell", None), "binary", "")
-    if binary and shutil.which(str(binary)):
-        return True
-    # ``openshell`` is the historical default launcher name. Older installs
-    # may instead provide the companion ``openshell-sandbox`` executable, so
-    # retain that compatibility fallback only for the default/unset value.
-    # A missing operator-supplied path must not silently select another binary.
-    if binary and str(binary) != "openshell":
-        return False
-    return bool(shutil.which("openshell-sandbox"))
-
-
 @click.command()
 @click.option(
     "--json",
@@ -221,7 +250,7 @@ def _openshell_available(cfg) -> bool:
 def status(app: AppContext, as_json: bool) -> None:
     """Show DefenseClaw status.
 
-    Displays environment, sandbox health, scanner availability,
+    Displays environment, sandbox state, scanner availability,
     enforcement counts, and activity summary. On multi-connector installs
     it also lists the active connector roster with each peer's mode.
 
@@ -247,20 +276,25 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Environment", cfg.environment)
     if getattr(cfg, "deployment_mode", ""):
         _status_row("Deployment", cfg.deployment_mode)
+    profile = _enterprise_profile(cfg)
+    if profile == _STANDALONE_ENTERPRISE_PROFILE:
+        _status_row("Enterprise", f"{profile} (managed by your organization)")
     _status_row("Data dir", cfg.data_dir)
     _status_row("Config", str(config_path()))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
 
-    # Sandbox
-    if _openshell_available(cfg):
-        _status_row("Sandbox", ux._style("available", fg="green"))
-    else:
+    # Sandbox. The legacy openshell-sandbox mode was removed; a host that
+    # still carries its config is pointed at the cleanup command.
+    if legacy_standalone_configured(cfg):
         _status_row(
             "Sandbox",
-            ux._style("not available", fg="yellow") + ux.dim(" (OpenShell not found)"),
+            ux._style("legacy install detected", fg="yellow")
+            + ux.dim(" (run: defenseclaw sandbox legacy-cleanup)"),
         )
+    else:
+        _status_row("Sandbox", ux.dim("not configured"))
 
     # Scanners
     ux.section("Scanners")
@@ -331,11 +365,9 @@ def status(app: AppContext, as_json: bool) -> None:
 
     # Sidecar status
     ux.echo()
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
+    bind = gateway_api_client_host(cfg)
     client = OrchestratorClient(
         host=bind,
         port=cfg.gateway.api_port,
@@ -1195,13 +1227,20 @@ def _status_payload(app) -> dict:
     payload: dict = {
         "environment": cfg.environment,
         "deployment_mode": getattr(cfg, "deployment_mode", ""),
-        "data_dir": cfg.data_dir,
-        "config": str(config_path()),
-        "audit_db": cfg.audit_db,
-        "scope": _connector_scope_text(cfg),
-        "sandbox": {"available": _openshell_available(cfg)},
-        "scanners": _scanner_status_map(cfg),
     }
+    profile = _enterprise_profile(cfg)
+    if profile == _STANDALONE_ENTERPRISE_PROFILE:
+        payload["enterprise_profile"] = profile
+    payload.update(
+        {
+            "data_dir": cfg.data_dir,
+            "config": str(config_path()),
+            "audit_db": cfg.audit_db,
+            "scope": _connector_scope_text(cfg),
+            "sandbox": {"available": False, "legacy_standalone": legacy_standalone_configured(cfg)},
+            "scanners": _scanner_status_map(cfg),
+        }
+    )
 
     if app.store:
         try:
@@ -1225,11 +1264,9 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
+    bind = gateway_api_client_host(cfg)
     try:
         client = OrchestratorClient(
             host=bind,

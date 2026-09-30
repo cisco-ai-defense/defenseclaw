@@ -1,0 +1,19 @@
+id: defenseclaw-opencode-anthropic
+display_name: Anthropic API for OpenCode (DefenseClaw)
+description: Binds ANTHROPIC_API_KEY to the Anthropic Messages API as x-api-key for OpenCode's anthropic provider; only the OpenCode binary may use it
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Anthropic API key
+    env_vars: [ANTHROPIC_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+endpoints:
+  - host: api.anthropic.com
+    port: 443
+    protocol: rest
+    access: full
+    enforcement: enforce
+binaries: ["/opt/defenseclaw-harness/opencode/lib/node_modules/opencode-ai/bin/opencode.exe"]

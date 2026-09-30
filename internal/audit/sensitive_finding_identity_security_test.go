@@ -350,3 +350,28 @@ func TestSensitiveFindingIDFailsClosedWhenKeyedIdentityIsUnavailable(t *testing.
 		t.Fatalf("failed keyed identity RuleID=%q", finding.RuleID)
 	}
 }
+
+type constantSensitiveFindingFingerprinter string
+
+func (fingerprint constantSensitiveFindingFingerprinter) FingerprintRuntimeV8FindingContent(string) (string, error) {
+	return string(fingerprint), nil
+}
+
+func TestShippedRulePackIDsCrossSensitiveBoundaryVerbatim(t *testing.T) {
+	fingerprinter := constantSensitiveFindingFingerprinter("0123abcd")
+	// Rules tagged "credential" that match paths and commands, not secret
+	// values, are classified as secret findings; their shipped ids must stay
+	// readable while an id only a custom pack defines is keyed.
+	for _, ruleID := range []string{"PATH-AWS-CREDS", "C2-METADATA-AWS", "exfil.secret_read_and_egress_oneliner"} {
+		finding := scanner.Finding{RuleID: ruleID, Severity: scanner.SeverityCritical, Tags: []string{"credential"}}
+		ensureSensitiveFindingRuleID(&finding, "local-pattern", sensitiveFindingKindSecret, fingerprinter)
+		if finding.RuleID != ruleID {
+			t.Fatalf("shipped rule id %q persisted as %q", ruleID, finding.RuleID)
+		}
+	}
+	custom := scanner.Finding{RuleID: "CUSTOM-PACK-CRED-RULE", Severity: scanner.SeverityHigh, Tags: []string{"credential"}}
+	ensureSensitiveFindingRuleID(&custom, "local-pattern", sensitiveFindingKindSecret, fingerprinter)
+	if !strings.HasPrefix(custom.RuleID, "redacted.secret.id-") {
+		t.Fatalf("custom pack rule id persisted as %q, want a keyed identity", custom.RuleID)
+	}
+}

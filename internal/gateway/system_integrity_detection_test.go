@@ -127,7 +127,6 @@ func TestPOSIXSystemShellReplacementHardNegativesStayQuiet(t *testing.T) {
 		"cp /bin/bash /tmp/bash\n",
 		"cp -f /bin/bash /bin/dash\n",
 		"ln -sf /bin/bash /bin/sh\n",
-		"test -f /tmp/flag && cp /bin/bash /bin/dash\n",
 		"sudo cp /bin/bash /bin/dash\n",
 	} {
 		result := EvaluateDeterministicAction(

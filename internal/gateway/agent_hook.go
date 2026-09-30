@@ -27,6 +27,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
@@ -110,6 +112,7 @@ type agentHookRequest struct {
 	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
 	CorrelationIdentifiers      []connector.CorrelationValue
 	SuppressCorrelationEmit     bool
+	CorrelationUnavailable      bool // correlation failed, not a replay: not exported, still audited
 	CorrelationReceipt          *audit.CorrelationReceiptLocator
 	CWD                         string
 	ToolName                    string
@@ -235,7 +238,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			registeredEvent = event
 		}
 
-		profile := a.hookProfileForConnector(connectorName)
+		profile := a.hookProfileForRequest(r.Context(), connectorName)
 		if connectorName == "codex" {
 			boundEvent := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Hook-Event"))
 			boundContract := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Hook-Contract"))
@@ -275,21 +278,22 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
 			return
 		}
-		req.CWD = sanitizeHookCWD(req.CWD)
+		req.CWD = hookCWDForContext(r.Context(), req.CWD)
 		// Kiro installs two hook configs with different veto contracts and
 		// they are indistinguishable by release version, because v3 is a flag
 		// on the 2.x binary rather than a new release. Setup marks the
 		// .kiro/hooks command, so the request states which config invoked it.
 		if connectorName == "kiro" {
-			req.HookSurface = strings.TrimSpace(r.Header.Get("X-DefenseClaw-Kiro-Surface"))
+			req.HookSurface = kiroHookSurfaceFromHeaders(r.Header)
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
 		// SessionStart is the last authoritative recovery signal before a
 		// Codex session proceeds; synchronously upsert a missing managed runtime
 		// registration through the Sidecar-owned guard. No other connector/event
-		// may mutate registration from hook input.
-		if connectorName == "codex" && req.HookEventName == "SessionStart" {
+		// may mutate registration from hook input. A sandboxed Codex has no host
+		// registration to repair: its hooks are baked into the sandbox image.
+		if connectorName == "codex" && req.HookEventName == "SessionStart" && !isSandboxHookRequest(r.Context()) {
 			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
 				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
@@ -305,9 +309,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// enforcement. The hook must still be evaluated if the local ledger is
 			// temporarily unavailable; runtime export receives no incomplete
 			// occurrence envelope and therefore cannot publish a partial join.
+			// The verdict still gets its local audit row (finalizeAgentHook).
 			fmt.Fprintf(os.Stderr, "[gateway] hook correlation unavailable connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, correlationErr)
-			req.SuppressCorrelationEmit = true
+			req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
 		} else {
 			req = correlatedReq
 		}
@@ -322,9 +327,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// decision and can still protect the exact pre-execution boundary.
 		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
+		ctx = withSandboxCoverage(ctx)
 		ctx = enrichAgentHookContext(ctx, req)
+		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
-			a.hookJudge.ResetToolJudgeSession(req.SessionID)
+			a.hookJudge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -347,10 +354,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				elapsed := time.Since(t0)
 				resp := safeHookPanicResponse(connectorName, req.HookEventName, recovered)
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
+				// Sandbox hooks fail closed, as on the inline panic path, so
+				// post-evaluation panics (e.g., in enrichAgentHookSpan,
+				// deferred EmitLLMEvent, finalizeAgentHook) also block.
+				resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
-					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, nil)
+					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, sandboxHookAuditExtra(ctx))
 					if persisted {
 						if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -391,7 +402,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// registered dedupe callback and every other connector
 		// through the generic profile path.
 		if !req.SuppressCorrelationEmit {
-			rawEventIDs = runtime.RememberRawEvents(a, req, b, payload)
+			rawEventIDs = runtime.RememberRawEvents(a, ctx, req, b, payload)
 		}
 
 		// Emit the LLM event (prompt/tool/response) BEFORE the
@@ -452,6 +463,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
 		resp, panicked := a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+		if panicked {
+			// Sandbox hooks fail closed: the host's fail-open posture for
+			// a crashed evaluator keeps workflows running outside the
+			// sandbox, but inside it the hook is the only gate on the
+			// tool call, so an undecided call is blocked, and says so.
+			resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
+		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked {
 			resp = a.safeApplyExperimentalArtifactPromotion(
@@ -469,6 +487,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp,
 				time.Since(t0),
 			)
+			// Last, once the verdict is final: a sandbox verdict carries
+			// a plain reason (rule, title, what to do instead) to the
+			// agent, the activity feed and last_blocked.
+			resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -492,7 +514,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
 		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -598,7 +620,7 @@ func (a *APIServer) finalizeAgentHook(
 	})
 
 	safeSection("health", func() {
-		if a.health == nil {
+		if !a.recordsConnectorHealth(ctx) {
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
@@ -615,12 +637,22 @@ func (a *APIServer) finalizeAgentHook(
 			a.health.RecordToolInspectionFor(connectorName)
 		}
 	})
+	safeSection("sandbox", func() {
+		a.observeSandboxHookDecision(ctx, req, resp)
+	})
 
 	if !req.SuppressCorrelationEmit {
 		safeSection("observability_v8", func() {
 			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			if !panicked {
+				a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
+			}
 		})
-
+	}
+	// Every verdict has its audit row, save the exact replay of a delivery
+	// whose row is already persisted: a hook whose correlation failed is
+	// not exported (no partial join), but it is audited.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("audit", func() {
 			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
 		})
@@ -838,12 +870,12 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	if strings.TrimSpace(connectorName) != "" {
 		req.ConnectorName = connectorName
 	}
-	profile := a.hookProfileForConnector(connectorName)
+	profile := a.hookProfileForRequest(ctx, connectorName)
 	correlatedCtx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, rawBody)
 	if correlationErr != nil {
 		fmt.Fprintf(os.Stderr, "[gateway] synthetic hook correlation unavailable connector=%s event=%s: %v\n",
 			connectorName, req.HookEventName, correlationErr)
-		req.SuppressCorrelationEmit = true
+		req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
 	} else {
 		ctx, req = correlatedCtx, correlatedReq
 	}
@@ -871,7 +903,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		enrichAgentHookSpanPanic(ctx)
 	}
 
-	if a.health != nil {
+	if a.recordsConnectorHealth(ctx) {
 		a.health.RecordConnectorRequestFor(connectorName)
 		if resp.Action == "block" {
 			a.health.RecordToolBlockFor(connectorName)
@@ -907,12 +939,15 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		EvaluationID:        resp.EvaluationID,
 		RuleIDs:             resp.RuleIDs,
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
-		Extra:               mergeHookEnvelopeExtra(extra, hookCompatibilityExtra(profile)),
+		Extra:               mergeHookEnvelopeExtra(extra, hookRequestAuditExtra(ctx, profile)),
 	}
 	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 	if !req.SuppressCorrelationEmit {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+	}
+	// As in finalizeAgentHook: only an exact replay goes without its row.
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -1183,7 +1218,7 @@ func (a *APIServer) safeEvaluateHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = a.agentHookMode(connectorName)
+			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(connectorName))
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1207,7 +1242,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = a.agentHookMode(connectorName)
+			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(connectorName))
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1848,15 +1883,19 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
 	}
-	mode := a.agentHookMode(req.ConnectorName)
-	if a.scannerCfg != nil && !a.agentHookEnabled(req.ConnectorName) {
+	// A hook authenticated through a sandbox binding is always evaluated and
+	// enforced: DefenseClaw launched that harness itself, usually with its
+	// own permission prompts off, and the host's connector selection and
+	// guardrail mode say nothing about what runs inside a sandbox.
+	mode := sandboxHookMode(ctx, req.ConnectorName, a.agentHookMode(req.ConnectorName))
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, req.ConnectorName) && !a.agentHookEnabled(req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
-	profile := a.hookProfileForConnector(req.ConnectorName)
+	profile := a.hookProfileForRequest(ctx, req.ConnectorName)
 	// Resolve Kiro's veto surface from the hook config that invoked us. The
 	// declared capability is the .kiro/hooks contract; a request from the CLI
 	// 2.x agent-hook config narrows to what 2.x honors. Replacing the slice
@@ -1909,12 +1948,23 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
-		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		trustedArgs, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
+		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "cursor") {
+			// beforeShellExecution names no tool: its payload is the shell
+			// command (see connector.CursorTrustedShellArgs).
+			if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
+				actionTool, trustedArgs, toolCWD = "shell", args, dir
+			}
+		}
+		// A sandbox shell call is also judged on its command alone when its
+		// other arguments leave the parse partial.
+		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
+		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                     actionTool,
-				Args:                     req.ToolArgs,
-				CWD:                      req.CWD,
-				ActiveHome:               trustedSameHostHome(),
+				Args:                     trustedArgs,
+				CWD:                      agentHookTrustedActionCWD(ctx, req.CWD, toolCWD),
+				ActiveHome:               hookActiveHome(ctx),
 				ToolResourceIdentity:     resourceIdentity,
 				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
@@ -1922,7 +1972,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
 			record:             toolChainRecorder(req.toolChain),
-		})
+		}, command, commandTool)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
@@ -2031,7 +2081,101 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
 		return "shell"
 	}
+	// OmniGent's os_env shell tool (an agent's os_env block registers
+	// sys_os_shell, {"command": "..."}; the DefenseClaw OpenShell sandbox
+	// agent uses it) is the same shell shape under another name. Unmapped,
+	// its commands parse to no command facts and a CRITICAL command finding
+	// stays an unproven candidate that allows.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "omnigent") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "sys_os_shell") {
+		return "shell"
+	}
+	// Text sent to a running process is judged as shell input (see
+	// agentHookTrustedActionArgs): agy's send_command_input as run_command
+	// input, Hermes' process tool (write, submit) as a shell command.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "send_command_input") {
+		return "run_command"
+	}
+	if strings.EqualFold(strings.TrimSpace(connectorName), "hermes") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "process") {
+		return "shell"
+	}
 	return toolName
+}
+
+// agentHookTrustedActionArgs selects the arguments the trusted-action parser
+// sees. OpenHands' terminal tool and agy's run_command report execution
+// controls and model labels next to the command;
+// connector.OpenHandsTrustedShellArgs and connector.AntigravityTrustedShellArgs
+// project them onto the plain shell shape when that is exact (as
+// connector.AmpBashTrustedShellArgs does for Amp's Bash "cmd"), and
+// connector.TrustedShellArgs takes the working directory and control
+// arguments out of the other harnesses' shell tools. Text a tool sends to a
+// running process (OpenHands terminal input, agy send_command_input, Hermes
+// process write and submit) is projected the same way, so it is judged as
+// shell input rather than not at all. The recorded ToolArgs never change.
+//
+// cwd is the directory the tool call names for its command (agy's Cwd, and
+// the working-directory argument of the shell tools that have one), or "".
+// It is the command's working directory, so the caller uses it in place of
+// the session's; left in the arguments, any directory other than the
+// workspace conflicted with the request's working directory and the parse
+// was ambiguous.
+func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMessage) (projected json.RawMessage, cwd string) {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "openhands":
+		if out, ok := connector.OpenHandsTrustedShellArgs(toolName, args); ok {
+			return out, ""
+		}
+	case "antigravity":
+		if out, dir, ok := connector.AntigravityTrustedShellArgs(toolName, args); ok {
+			return out, dir
+		}
+	case "hermes":
+		if out, ok := connector.HermesTrustedShellArgs(toolName, args); ok {
+			return out, ""
+		}
+	case "amp":
+		if out, dir, ok := connector.AmpBashTrustedShellArgs(toolName, args); ok {
+			return out, dir
+		}
+	}
+	if out, dir, ok := connector.TrustedShellArgs(connectorName, toolName, args); ok {
+		return out, dir
+	}
+	return args, ""
+}
+
+// agentHookTrustedActionCWD is the working directory of a structured tool
+// call: the one the call names, mapped like the request's (host-sanitized,
+// or to the host directory a sandbox path is mounted from, "" when it has
+// none), else the request's. A relative directory is resolved against the
+// session's first; one the gateway cannot place ("~" or no session
+// directory) is none.
+func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
+	if toolCWD == "" {
+		return requestCWD
+	}
+	if strings.HasPrefix(toolCWD, "~") {
+		return ""
+	}
+	if !filepath.IsAbs(toolCWD) && !path.IsAbs(toolCWD) {
+		if requestCWD == "" {
+			return ""
+		}
+		if view, ok := sandboxHookView(ctx); ok {
+			// requestCWD is already mapped to the host: join in the
+			// sandbox's namespace and map the result like any other.
+			sandboxCWD, mapped := view.SandboxPath(requestCWD)
+			if !mapped {
+				return ""
+			}
+			return hookCWDForContext(ctx, path.Join(sandboxCWD, toolCWD))
+		}
+		toolCWD = filepath.Join(requestCWD, toolCWD)
+	}
+	return hookCWDForContext(ctx, toolCWD)
 }
 
 // collectAgentHookAssetDecisions runs the runtime asset-policy
@@ -2273,6 +2417,9 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 			Caps:      caps,
 			Payload:   payload,
 		})
+		if out.Action == "alert" && confirmWithoutAskAgent(profile.Name, rawAction, mode, event) != "" {
+			return "block", false
+		}
 		return out.Action, out.WouldBlock
 	}
 	rawAction = normalizeCodexAction(rawAction)
@@ -2298,6 +2445,24 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 	}
 }
 
+// confirmWithoutAskAgent names the agent when the standalone enterprise
+// profile blocks a confirmation instead of downgrading it to an alert: a tool
+// call on Hermes or OpenHands, whose hooks can neither ask the user nor show
+// a notice while the call runs, so the call would run unseen although the
+// organization's rule asked for a person's approval. It returns "" otherwise.
+func confirmWithoutAskAgent(connectorName, rawAction, mode, event string) string {
+	if !standaloneEnterpriseActive.Load() || mode != "action" || normalizeCodexAction(rawAction) != "confirm" {
+		return ""
+	}
+	switch {
+	case connectorName == "hermes" && canonicalEvent(event) == "pretoolcall":
+		return "Hermes"
+	case connectorName == "openhands" && canonicalEvent(event) == "pretooluse":
+		return "OpenHands"
+	}
+	return ""
+}
+
 func agentHookResponseFor(req agentHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, caps connector.HookCapability, policy ...redaction.SinkPolicy) agentHookResponse {
 	return agentHookResponseForProfile(connector.HookProfile{}, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps, policy...)
 }
@@ -2313,7 +2478,15 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
-	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
+	verdictAction := action
+	if action == "alert" && rawAction == "confirm" {
+		verdictAction = agentReviewAction
+	}
+	safeReason = agentVerdictReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
+	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
+	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
+		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
+	}
 	resp := agentHookResponse{
 		Action:            action,
 		RawAction:         rawAction,
@@ -2439,19 +2612,26 @@ func copilotHookOutput(event, action, rawAction, reason, additional string) map[
 	return nil
 }
 
-func genericHookAdditionalContext(connectorName, rawAction, severity, reason string, wouldBlock bool) string {
+func genericHookAdditionalContext(connectorName, event, mode, rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	// Both branches keep the "a <SEVERITY> <connector> hook finding"
+	// Every branch keeps the "a <SEVERITY> <connector> hook finding"
 	// phrase so telemetry consumers that grep on that prefix (T5.9
 	// finding: earlier revision dropped the "a" from the block path
 	// and consumers keyed on "a HIGH" / "a CRITICAL" stopped matching)
-	// continue to match either shape. The lead clause differs to keep
+	// continue to match any shape. The lead clause differs to keep
 	// the block-mode intent unambiguous ("would block ..." reads
 	// distinctly from "observed ...").
 	lead := "DefenseClaw observed"
-	if wouldBlock {
+	switch {
+	case wouldBlock && mode == "action" && connectorName == "amp" && canonicalEvent(event) == "agentstart":
+		// Amp cannot block a prompt, so in action mode this hidden notice
+		// is what DefenseClaw does about a blocking rule. Saying it "would
+		// block this in action mode" read as observe mode; tell the model
+		// the request must not be carried out instead.
+		lead = "This request matched a DefenseClaw blocking rule and must not be carried out:"
+	case wouldBlock:
 		lead = "DefenseClaw would block this in action mode:"
 	}
 	finding := fmt.Sprintf("a %s %s hook finding", severity, connectorName)

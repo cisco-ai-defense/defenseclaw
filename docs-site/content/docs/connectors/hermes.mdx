@@ -71,7 +71,10 @@ and third-party approval entries. **There is no proxy-enforcement path** for
 Hermes — blocking happens hook-side only when a valid synchronous
 `pre_tool_call` stdout response requests block. Hermes has no documented native
 human-approval or system-message response shape, so confirm verdicts remain
-audit/alert-only with `raw_action` preserved for audit.
+audit/alert-only with `raw_action` preserved for audit. In the standalone
+enterprise profile, a confirm verdict on a `pre_tool_call` is blocked instead,
+and the message says the organization's rule needs a confirmation that Hermes
+cannot ask for.
 
 Discovery keeps installation and contract compatibility distinct. A healthy
 older client such as v0.17.0 is reported as
@@ -99,6 +102,23 @@ multiplex gateways because one `HERMES_HOME` cannot cover them. Project plugins
 and other launch-directory-conditional sources remain unverified. Enterprise,
 managed, Team, ProgramData, cloud-dashboard, and MDM surfaces are outside this
 connector contract.
+</Callout>
+
+<Callout type="info" title="Standalone enterprise profile: other hooks in config.yaml">
+Hermes runs every hook registered for an event, in order, and a
+`pre_tool_call` hook can rewrite the tool input, so a hook added after
+DefenseClaw's could change a command DefenseClaw already checked. Hermes has
+no way to lock or order hooks. On Linux and macOS hosts with the standalone
+enterprise profile, DefenseClaw's Hermes hook runs the
+[foreign-hook guard](/docs/enterprise/foreign-hook-guard) before each tool
+call: while `config.yaml`, or the managed-scope `config.yaml` in the folder
+`HERMES_MANAGED_DIR` names, has a hook entry that is not DefenseClaw's and
+that your organization has not approved, tool calls are blocked with a
+message that names the file and the digest to approve, and the guardian
+removes the entry (with a backup). A Hermes process that started with the
+entry keeps running it, so it stays blocked until Hermes restarts. The
+`output_spill` and `outbound` settings under `hooks` are not hooks; the
+guard leaves them alone.
 </Callout>
 
 #### What `setup hermes` actually does
@@ -185,7 +205,7 @@ Hermes's pre-tool-call hook blocks only when DefenseClaw returns valid
 synchronous Hermes block JSON. A `confirm` result is recorded and alerted but
 returns no hook output because Hermes has no native ask/approve or general
 message response; the TUI can review the audit event but cannot resume the
-call. A requested global/per-connector
+call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
 `fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
 output, auth failure, or gateway outage cannot create Hermes enforcement and
 remains fail-open.
@@ -247,9 +267,13 @@ context at `pre_llm_call`, and continue its bounded verification loop at
 `pre_verify`. DefenseClaw registers all 23 Hermes v0.19 shell-hook-valid events,
 but transform, API, gateway, approval, Kanban, and ordinary lifecycle events
 remain attributed audit unless the official shell response parser documents a
-compatible effect. Hermes does not enforce exit status, timeout, nonzero,
-malformed, auth, or network failures and has no DefenseClaw ask surface.
-Confirm verdicts are audit/alert-only, with no synthesized hook output.
+compatible effect. Hermes blocks a `pre_tool_call` only on a valid block
+answer and, from Hermes 0.21, on exit code 2. Other exit codes, a timeout,
+malformed output and auth or network failures let the call run in the
+releases DefenseClaw supports (DefenseClaw's entries do not set Hermes'
+`fail_closed`), and Hermes has no DefenseClaw ask surface.
+Confirm verdicts are audit/alert-only, with no synthesized hook output, except
+in the standalone enterprise profile, which blocks a confirmed `pre_tool_call`.
 Registration is not claimed live until Hermes reload evidence exists; Doctor
 reports the staged state as unhealthy/pending reload.
 </Callout>
@@ -257,12 +281,179 @@ reports the staged state as unhealthy/pending reload.
 The official-source record and full cross-surface matrix are in
 [`docs/research/HERMES-NATIVE-WINDOWS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-NATIVE-WINDOWS.md).
 
+## OpenShell sandbox
+
+DefenseClaw can build a Hermes OpenShell overlay image. The files below exist
+only in the image; nothing on your host changes.
+
+- **Hooks in the managed layer, user tier.** Hermes 0.19 reads an
+  administrator layer from `/etc/hermes/config.yaml` and merges it over
+  `~/.hermes/config.yaml` key by key, with the managed value winning. The
+  image registers the DefenseClaw hook for all 23 Hermes events in that
+  root-owned file. It also pins `hooks_auto_accept: true` (the hooks register
+  without the first-use prompt), `plugins.enabled: []`, `terminal.backend:
+  local` (approved commands run inside the sandbox), `agent.disabled_toolsets:
+  [code_execution]`, `security.tirith_enabled: false`,
+  `security.allow_lazy_installs: false` and `model_catalog.enabled: false`.
+  A user setting can add hooks for
+  other events but cannot drop or replace DefenseClaw's.
+
+  Hermes still reads settings and imports code from its home directory,
+  which the agent can write. It loads `~/.hermes/.env` over the process
+  environment, where `HERMES_SAFE_MODE` switches every hook off and
+  `HERMES_MANAGED_DIR` moves the managed layer. It also imports model-provider
+  plugins from `~/.hermes/plugins/model-providers` whatever `plugins.enabled`
+  says. The hooks therefore depend on the launcher's checks, not only on file
+  ownership, so the tier is **user**.
+- **Launcher checks.** The root-owned launcher runs before every Hermes start.
+  It refuses to start while any of these is true:
+  - an argument is `--safe-mode` or a prefix of it that Hermes accepts
+    (`--sa` and longer). DefenseClaw's own `--safe`, which keeps the harness's
+    prompts, goes before the harness name.
+  - a `.env` or `.op.env` in the Hermes home or one of its profiles names a
+    variable that switches the hooks off, moves the managed layer or the
+    Hermes home, or loads other code (`HERMES_SAFE_MODE`,
+    `HERMES_MANAGED_DIR`, `HERMES_HOME`, `HERMES_ENABLE_PROJECT_PLUGINS`,
+    `HERMES_PYTHON*`, `PYTHON*`, `LD_*` and a few more).
+  - the home or a profile holds Python code under `plugins/`.
+  - a user `config.yaml` has a `secrets` section. Its secret sources set
+    environment variables before the managed settings apply.
+
+  The launcher also pins `HOME` and `HERMES_HOME`, and drops every `PYTHON*`
+  variable and the variables that move Hermes' code before the harness
+  starts. `/etc/hermes/.env`, which Hermes applies last, pins safe mode and
+  project plugins off. The refusal names the file; remove it and start Hermes
+  again.
+- **Fail closed.** Hermes ignores a hook's exit status and treats a timeout as
+  no opinion, so the sandbox hook prints a Hermes block directive on every
+  failure: missing token, ingress down, or a bad reply. It does so well inside
+  the 30-second hook timeout.
+- **Blocks on screen.** Hermes 0.19 shows nothing for a tool call a hook
+  blocked: the reason goes to the model as the tool's error, and the terminal
+  shows only `preparing terminal…`. A root-owned module in the image prints
+  the reason under that line, the way Hermes prints its own tool lines, for
+  example `┊ ✗ terminal blocked by DefenseClaw rule <ID>: <title>. …`. It
+  prints only to a terminal, and what the model gets is unchanged.
+- **Known gaps.** An agent can still start a second Hermes from a tool call,
+  for example by running the pinned binary directly. That start skips the
+  launcher's checks. DefenseClaw judges that tool call first, and
+  hook-silence detection is the backstop. Command rules judge the terminal
+  tool's commands, and the text the process tool sends to a background
+  process (judged as shell input). The image turns off `execute_code`, which
+  runs model-written Python that command rules cannot read. A command that a
+  script runs, when the agent writes the script to a file and runs it, is
+  judged by the command that starts the script.
+- **Install pin.** The image installs Hermes Agent 0.19.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13, with dependency
+  resolution cut off at the review date. The build refuses a Hermes version
+  outside the reviewed hook contracts (`>=0.19.0,<0.22.0`).
+- **Model access.** Use one of these provider profiles. Each key is an
+  OpenShell placeholder that resolves only at the provider endpoint, and only
+  for the harness's own interpreter. `defenseclaw sandbox run hermes` picks
+  one from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or, with `--llm bedrock`,
+  `AWS_BEARER_TOKEN_BEDROCK`:
+  - `defenseclaw-openai` or the regional
+    `defenseclaw-bedrock-mantle-openai-<region>`, through the image's managed
+    `defenseclaw` provider (`--provider defenseclaw -m <model>`)
+  - `defenseclaw-anthropic`, through Hermes' built-in `anthropic` provider
+- **Launch flags.** Skip-permissions mode adds `--yolo`. A run with `--safe`
+  drops `--yolo` and every prefix Hermes accepts for it. A headless run is
+  `hermes chat -q <prompt> -Q`; pass `-- chat -q "TEXT"` to `sandbox run`
+  for a detached run.
+- **Ctrl-Z.** Hermes suspends itself by signalling its process group, which
+  the OpenShell sandbox refuses. Hermes prints its own "has been suspended.
+  Run `fg` to bring Hermes Agent back." line first, which DefenseClaw cannot
+  keep off the screen; the image then answers the call with `defenseclaw:
+  Ctrl-Z cannot suspend a harness in an OpenShell sandbox (the sandbox
+  refuses the signal): Hermes Agent keeps running, and there is nothing to
+  bring back with fg.`, and Hermes keeps running.
+- **Ctrl-C.** One Ctrl-C at an empty Hermes prompt ends Hermes at once
+  (`Shutting down… (finalizing session)`), and DefenseClaw goes on to the end
+  of the session. That is Hermes' own binding: with a draft, Ctrl-C clears
+  it, and while the agent runs it interrupts the agent. The sandbox is
+  kept; `defenseclaw sandbox connect <name>` starts Hermes in it again.
+- **Other traffic.** Apart from the model, Hermes reaches only `models.dev`
+  at start (its model metadata, which has no setting to turn off). The
+  image marks the install the way Hermes' own image does (an
+  `.install_method` of `docker` next to the code), so Hermes neither checks
+  `pypi.org` for updates nor prints its "pip installs are no longer an
+  officially supported platform" notice; `hermes update` then says it does
+  not apply in a container (rebuild the image instead). The managed layer
+  pins `model_catalog.enabled: false`, which stops the fetch of Hermes'
+  curated OpenRouter and Nous Portal model lists
+  (`hermes-agent.nousresearch.com`, redirected to `nousresearch.github.io`).
+  It also turns off the Tirith scanner download and runtime installs, which
+  reached `github.com` and fetched about 20 MB from
+  `release-assets.githubusercontent.com` and `files.pythonhosted.org`
+  before. Remaining traffic goes through the DefenseClaw egress proxy, which
+  logs it and applies the blocklist.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, on a mock model behind a credential binding, showed:
+  - hooks reaching the sandbox ingress, with OpenShell substituting the model
+    key;
+  - a command that a DefenseClaw rule blocks refused by the hook, with the
+    rule's reason passed back to the model;
+  - egress through the proxy, including a blocklisted host that a
+    sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe. In that probe a hostile user
+  `config.yaml` and a launch environment with a planted `sitecustomize`
+  module change nothing, and the launcher refuses to start with a planted
+  `.env`, model-provider plugin or profile `secrets` section. The curated
+  provider profiles have not carried a real model inside a sandbox; see the
+  harness's verification note for what was run.
+
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) the guardian writes the
+DefenseClaw hooks into each enrolled user's default Hermes `config.yaml` and
+repairs them when the user changes them. The enterprise profile writes no
+machine-wide Hermes configuration, so the hooks live in a file the user
+owns, and Hermes coverage is advisory against a user who sets out to avoid
+it:
+
+- **Safe mode and another Hermes home.** `hermes --safe-mode` skips the
+  user's `config.yaml`, and `HERMES_HOME` pointing at a copy of it without
+  the `hooks` block does the same. No DefenseClaw hook runs, nothing is
+  logged, the guardian never repairs that session, and status and verify
+  keep reporting the user's Hermes ready. `--ignore-user-config` on its own
+  keeps the hooks.
+- **A killed hook lets the call run.** `hermes-hook.sh` runs as the user.
+  Hermes blocks a tool call only on a block answer (and, from Hermes 0.21,
+  exit code 2), so when the user kills their own hook process the call runs
+  with no DefenseClaw decision; Hermes' later `post_tool_call` hook can
+  still record it after it ran. In the Hermes releases DefenseClaw supports,
+  a hook timeout also lets the call run. Some builds block the call when a
+  stalled hook times out, but Hermes does not document that.
+
+What reduces it:
+
+- Where you need enforcement, prefer agents that DefenseClaw governs
+  through machine policy (Claude Code, Codex, Cursor, GitHub Copilot and
+  OpenCode).
+- Use application control (fapolicyd on Linux, Santa or similar on macOS,
+  WDAC or AppLocker on Windows) so users can start Hermes only the way you
+  allow, for example only from an administrator-owned launcher that resets
+  `HERMES_HOME` and `HERMES_MANAGED_DIR` and refuses `--safe-mode` and
+  `--ignore-user-config`.
+- Use EDR process protection so users cannot stop or kill the hook process.
+
+See R1, R5 and R18 in the
+[enterprise threat model](/docs/enterprise/threat-model#residual-risks).
+
 ## Disable
 
 ```bash
 defenseclaw guardrail disable --connector hermes --yes
 ```
 
+Disabling removes only DefenseClaw's entries: its hooks from `config.yaml`,
+which keeps every byte outside the `hooks` mapping (comments included), and
+its approvals from `shell-hooks-allowlist.json`.
+
 Then reload or restart every affected Hermes host. Until that happens, the
 Windows native tombstone keeps any cached exact DefenseClaw callback disabled;
-DefenseClaw does not manage Hermes's PortableGit terminal behavior.
+DefenseClaw does not manage Hermes's PortableGit terminal behavior. On Linux
+and macOS, `~/.defenseclaw/hooks/hermes-hook.sh` stays as a stub that exits
+without doing anything, for the same reason: a running Hermes process keeps
+calling it until it restarts.

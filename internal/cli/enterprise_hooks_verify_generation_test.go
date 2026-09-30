@@ -119,6 +119,25 @@ func TestEnterpriseHookVerifyPersistentStableDriftStillFailsClosed(t *testing.T)
 	if verifyCalls != 3 || run.Failures != 1 || run.Rows[0].OK {
 		t.Fatalf("run=%+v calls=%d, want bounded stable failure", run, verifyCalls)
 	}
+
+	// A deleted account's excused row is not retried.
+	verifyCalls = 0
+	run, err = runEnterpriseHookVerifyGenerationConsistent(
+		t.Context(),
+		func() (enterpriseHookVerifyGenerationSnapshot, bool, error) {
+			return generation, true, nil
+		},
+		3,
+		0,
+		func(context.Context) (enterpriseHookVerifyRun, error) {
+			verifyCalls++
+			row := enterpriseHookReconcileRow{Connector: "codex", Error: "inspect user home: not found"}
+			return enterpriseHookVerifyRun{Failures: 1, Rows: []enterpriseHookReconcileRow{row}, Excused: []enterpriseHookReconcileRow{row}}, nil
+		},
+	)
+	if err != nil || verifyCalls != 1 || len(run.Excused) != 1 {
+		t.Fatalf("run=%+v err=%v calls=%d, want one pass for an excused row", run, err, verifyCalls)
+	}
 }
 
 func TestEnterpriseHookVerifyContinuousPublicationFailsBounded(t *testing.T) {

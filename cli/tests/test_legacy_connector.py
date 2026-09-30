@@ -62,6 +62,64 @@ class MigrateRawConfigTests(unittest.TestCase):
         self.assertEqual(len(notices), 1)
         self.assertIn(repr(f"observability.connectors.{RETIRED}"), notices[0])
 
+    def test_connector_settings_and_lists_are_renamed(self):
+        raw = {"guardrail": {"connector": DEVIN}, "connector_hooks": {RETIRED: {"enabled": True, "mode": "action"}}}
+        notices = legacy_connector.migrate_raw_config(raw, "/etc/dc/config.yaml")
+        self.assertEqual(raw["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
+        self.assertEqual(len(notices), 1)
+        self.assertIn("connector_hooks of /etc/dc/config.yaml", notices[0])
+        # An explicit devin entry wins, and each list names devin once.
+        raw = {
+            "connector_hooks": {DEVIN: {"mode": "observe"}, RETIRED: {"mode": "action"}},
+            "guardrail": {"judge": {"enabled": True, "hook_connectors": ["codex", RETIRED, DEVIN]}},
+            "application_protection": {
+                "include_connectors": [RETIRED, "cursor"],
+                "exclude_connectors": [RETIRED.capitalize(), RETIRED],
+            },
+        }
+        notices = "\n".join(legacy_connector.migrate_raw_config(raw))
+        self.assertEqual(raw["connector_hooks"], {DEVIN: {"mode": "observe"}})
+        self.assertEqual(raw["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
+        self.assertEqual(raw["application_protection"]["include_connectors"], [DEVIN, "cursor"])
+        self.assertEqual(raw["application_protection"]["exclude_connectors"], [DEVIN])
+        for setting in (repr(f"connector_hooks.{RETIRED}"), "guardrail.judge.hook_connectors",
+                        "application_protection.include_connectors", "application_protection.exclude_connectors"):
+            self.assertIn(setting, notices)
+
+    def test_asset_policy_rules_and_route_selectors_are_renamed(self):
+        raw = {
+            "guardrail": {"connector": RETIRED},
+            "asset_policy": {
+                "mcp": {
+                    "registry": [{"name": "approved-server", "connector": RETIRED}],
+                    "denied": [{"name": "marker-server", "connector": f" {RETIRED.upper()} "}, {"name": "other"}],
+                },
+                "skill": {"allowed": [{"name": "marker-skill", "connector": "codex"}]},
+            },
+            "observability": {
+                "destinations": [
+                    {
+                        "name": "console",
+                        "routes": [
+                            {"name": "codex-only", "selector": {"connectors": ["codex"]}},
+                            {"name": "desktop", "selector": {"connectors": ["codex", RETIRED, DEVIN]}},
+                        ],
+                    }
+                ]
+            },
+        }
+        notices = legacy_connector.migrate_raw_config(raw, "config.yaml")
+        self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
+        self.assertEqual(raw["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
+        self.assertNotIn("connector", raw["asset_policy"]["mcp"]["denied"][1])
+        self.assertEqual(raw["asset_policy"]["skill"]["allowed"][0]["connector"], "codex")
+        routes = raw["observability"]["destinations"][0]["routes"]
+        self.assertEqual(routes[0]["selector"]["connectors"], ["codex"])
+        self.assertEqual(routes[1]["selector"]["connectors"], ["codex", DEVIN])
+        for setting in ("asset_policy.mcp.registry, asset_policy.mcp.denied",
+                        "observability.destinations[0].routes[1].selector.connectors of config.yaml"):
+            self.assertIn(setting, notices[0])
+
     def test_unaffected_config_is_untouched(self):
         raw = {"claw": {"mode": "cursor"}, "guardrail": {"connector": "cursor", "connectors": {"cursor": {}}}}
         before = yaml.safe_dump(raw)
@@ -184,11 +242,60 @@ class UpgradeMigrationTests(unittest.TestCase):
         self.assertEqual(doc["observability"]["connectors"], {DEVIN: {"webhooks": []}})
         self.assertEqual(doc["observability"]["destinations"][0]["select"]["connectors"], ["codex"])
 
+    def test_migration_renames_connector_settings_lists_and_rules_in_place(self):
+        body = (
+            "# operator comment kept\n"
+            "guardrail:\n  connector: codex\n  judge:\n    enabled: true\n"
+            f"    hook_connectors: [codex, {RETIRED}]  # judge comment kept\n"
+            "connector_hooks:\n"
+            f"  {RETIRED}:\n    enabled: true\n    mode: action\n"
+            "application_protection:\n  include_connectors:\n    - cursor\n"
+            f"    - {RETIRED}\n  exclude_connectors:\n  - '{RETIRED}'\n"
+            "asset_policy:\n  enabled: true\n  mcp:\n    denied:\n"
+            f"      - name: marker-server\n        connector: {RETIRED}  # rule comment kept\n"
+            f"    registry:\n      - connector: '{RETIRED}'\n        name: approved-server\n"
+            "observability:\n  destinations:\n    - name: console\n      kind: console\n      routes:\n"
+            "        - name: desktop\n          signals: [logs]\n          selector:\n"
+            f"            connectors: [codex, {RETIRED}]\n"
+        )
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        for setting in ("connector_hooks", "asset_policy.mcp.registry, asset_policy.mcp.denied",
+                        "observability.destinations[0].routes[0].selector.connectors"):
+            self.assertIn(setting, changes[0])
+        for comment in ("# operator comment kept", "# judge comment kept", "# rule comment kept"):
+            self.assertIn(comment, text)
+        self.assertNotIn(RETIRED, text)
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["guardrail"]["judge"]["hook_connectors"], ["codex", DEVIN])
+        self.assertEqual(doc["connector_hooks"], {DEVIN: {"enabled": True, "mode": "action"}})
+        self.assertEqual(doc["application_protection"]["include_connectors"], ["cursor", DEVIN])
+        self.assertEqual(doc["application_protection"]["exclude_connectors"], [DEVIN])
+        self.assertEqual(doc["asset_policy"]["mcp"]["denied"][0]["connector"], DEVIN)
+        self.assertEqual(doc["asset_policy"]["mcp"]["registry"][0]["connector"], DEVIN)
+        self.assertEqual(doc["observability"]["destinations"][0]["routes"][0]["selector"]["connectors"], ["codex", DEVIN])
+
+    def test_migration_deduplicates_a_list_that_already_names_devin(self):
+        body = f"guardrail:\n  connector: codex\n  judge:\n    hook_connectors:\n      - {DEVIN}\n      - {RETIRED}\n"
+        text, changes = self._run(body)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(yaml.safe_load(text)["guardrail"]["judge"]["hook_connectors"], [DEVIN])
+
     def test_migration_leaves_unaffected_config_alone(self):
         body = "guardrail:\n  connector: cursor\n"
         text, changes = self._run(body)
         self.assertEqual(text, body)
         self.assertEqual(changes, [])
+
+    def test_migrate_runs_the_step_for_a_retired_name_only_in_a_list(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    f"config_version: 8\nguardrail:\n  connector: codex\napplication_protection:\n  exclude_connectors: [{RETIRED}]\n"
+                )
+            steps = migrations._pending_migration_steps(8, None, tmpdir, path, 8)
+            self.assertEqual([fn for _name, fn in steps], [migrations._migrate_connector_roster])
 
     def test_migrate_runs_the_step_only_when_the_config_names_the_old_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -204,6 +311,11 @@ class UpgradeMigrationTests(unittest.TestCase):
             with open(path, encoding="utf-8") as fh:
                 self.assertEqual(yaml.safe_load(fh)["guardrail"]["connector"], DEVIN)
             self.assertEqual(migrations._pending_migration_steps(8, None, tmpdir, path, 8), [])
+
+    def test_the_frozen_0x_chain_does_not_grow(self):
+        chain = [fn for _ver, _desc, fn in migrations.MIGRATIONS]
+        self.assertNotIn(migrations._migrate_retired_desktop_connector, chain)
+        self.assertNotIn(migrations._migrate_connector_roster, chain)
 
 
 class UninstallMarkerTests(unittest.TestCase):

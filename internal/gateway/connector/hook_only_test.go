@@ -28,13 +28,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
@@ -1216,6 +1218,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if conn.Name() == "hermes" {
 				opts = prepareHermesSetupAdmissionFixture(t, opts)
 			}
+			if conn.Name() == "openhands" {
+				opts = prepareOpenHandsSetupAdmissionFixture(t, opts)
+			}
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
@@ -1980,6 +1985,55 @@ func TestHermesAllowlistSurgicalCleanupPreservesForeignEntries(t *testing.T) {
 			t.Fatalf("managed approval survived surgical cleanup: %#v", entry)
 		}
 	}
+
+	// Files put back from an enrolled state (a commented config.yaml with
+	// DefenseClaw's hooks, the allowlist with its approvals) are what the
+	// next Setup captures. Teardown still takes out only DefenseClaw's
+	// entries, and every other config.yaml byte stays.
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	enrolledConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolledAllowlist, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("second Teardown: %v", err)
+	}
+	if err := os.WriteFile(configPath, append([]byte("# Hermes settings\n"), enrolledConfig...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(allowlistPath, enrolledAllowlist, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over put-back files: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown over put-back files: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean over put-back files: %v", err)
+	}
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(config, []byte("# Hermes settings\nhooks_auto_accept: false\n")) || bytes.Contains(config, []byte(conn.hookCommand(opts))) {
+		t.Fatalf("config.yaml after teardown over put-back files:\n%s", config)
+	}
+	if cleaned, err = readHermesAllowlist(allowlistPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range cleaned["approvals"].([]interface{}) {
+		if entry := raw.(map[string]interface{}); entry[hermesAllowlistOwnerField] == true {
+			t.Fatalf("managed approval survived teardown over put-back files: %#v", entry)
+		}
+	}
 }
 
 func TestHermesAllowlistTamperedOwnershipRefusesAmbiguousCleanup(t *testing.T) {
@@ -2467,6 +2521,9 @@ func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
 		APIAddr:      "127.0.0.1:18970",
 		APIToken:     "tok-test",
 	}
+	if runtime.GOOS == "darwin" {
+		opts.AgentExecutable, opts.AgentVersion = seedOpenHandsDarwinSelection(t, opts.DataDir, filepath.Join(dir, "bin"))
+	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -2522,50 +2579,58 @@ func newOpenHandsTokenLifecycleFixture(t *testing.T) (*hookOnlyConnector, SetupO
 		APIAddr:      "127.0.0.1:18970",
 		APIToken:     "gateway-token-must-not-be-published",
 	}
-	if runtime.GOOS == "darwin" {
-		trustedDir := filepath.Join(root, "trusted")
-		if err := os.MkdirAll(trustedDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		executable := filepath.Join(trustedDir, "openhands")
-		if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
-		if !ok {
-			t.Fatal("capture OpenHands setup-selected executable evidence")
-		}
-		now := time.Now().UTC().Truncate(time.Second)
-		receipt := agentSelectionReceipt{
-			SchemaVersion: agentSelectionSchemaVersion,
-			UpdatedAt:     now.Format(time.RFC3339),
-			Selections: map[string]agentSelectionEvidence{
-				"openhands": {
-					Connector:         "openhands",
-					Source:            "setup-selected",
-					Executable:        stablePath,
-					RawVersion:        "OpenHands CLI 1.16.0",
-					NormalizedVersion: "1.16.0",
-					SHA256:            digest,
-					SelectedAt:        now.Format(time.RFC3339),
-					ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
-				},
-			},
-		}
-		body, err := json.Marshal(receipt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(opts.DataDir, agentSelectionFile), body, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		opts.AgentVersion = "OpenHands CLI 1.16.0"
-		opts.AgentExecutable = stablePath
+	return NewOpenHandsConnector(), prepareOpenHandsSetupAdmissionFixture(t, opts), configPath
+}
+
+// prepareOpenHandsSetupAdmissionFixture gives opts the protected
+// setup-selected executable receipt that OpenHands Setup requires on macOS.
+func prepareOpenHandsSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return opts
 	}
-	return NewOpenHandsConnector(), opts, configPath
+	trustedDir := filepath.Join(testenv.PrivateTempDir(t), "trusted")
+	if err := os.MkdirAll(trustedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(trustedDir, "openhands")
+	if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("capture OpenHands setup-selected executable evidence")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"openhands": {
+				Connector:         "openhands",
+				Source:            "setup-selected",
+				Executable:        stablePath,
+				RawVersion:        "OpenHands CLI 1.16.0",
+				NormalizedVersion: "1.16.0",
+				SHA256:            digest,
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts.DataDir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts.AgentVersion = "OpenHands CLI 1.16.0"
+	opts.AgentExecutable = stablePath
+	return opts
 }
 
 func TestOpenHandsDarwinExporterTokenLifecycle(t *testing.T) {
@@ -2981,11 +3046,21 @@ func TestCopilotLifecycleHomeRejectsNonExactBinding(t *testing.T) {
 }
 
 func TestCopilotShellBootstrapFailuresAlwaysOpen(t *testing.T) {
-	script, err := hookFS.ReadFile("hooks/copilot-hook.sh")
-	if err != nil {
-		t.Fatal(err)
+	// The host render; the OpenShell sandbox variant of the same template
+	// fails closed instead (TestCopilotSandboxPolicyShape).
+	for _, managed := range []bool{false, true} {
+		script, err := renderHookTemplate("copilot-hook.sh", templateData{
+			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: managed, TokenFile: ".hook-copilot.token", ScopedToken: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCopilotShellBootstrapFailsOpen(t, string(script))
 	}
-	body := string(script)
+}
+
+func assertCopilotShellBootstrapFailsOpen(t *testing.T, body string) {
+	t.Helper()
 	if strings.Contains(body, "exit 2") {
 		t.Fatalf("Copilot shell bootstrap contains a fail-closed exit: %s", body)
 	}
@@ -3523,7 +3598,9 @@ func TestCursorHooksHighCardinalityForeignRegistrationsStayWithinLifecycleBudget
 	}
 	elapsed := time.Since(started)
 	t.Logf("%d Cursor 21x23 patch plus two exact ownership-scan cycles completed in %s (average %s)", iterations, elapsed, elapsed/iterations)
-	if elapsed > 15*time.Second {
+	// Under the race detector on a shared runner wall-clock time says nothing
+	// about the budget; the uninstrumented macOS lifecycle job enforces it.
+	if elapsed > 15*time.Second && !raceInstrumentedBuild() {
 		t.Fatalf("Cursor patch plus repeated ownership verification took %s, want <=15s within the fixed 2m lifecycle budget", elapsed)
 	}
 
@@ -3628,4 +3705,33 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 	if !strings.Contains(string(out), `"decision":"deny"`) {
 		t.Fatalf("OpenHands deny hook did not print decision JSON; output=%s", string(out))
 	}
+}
+
+// Hermes writes its direct-native state only on Windows; elsewhere the
+// file must not be declared as patched, or the enterprise installer
+// refuses every install for a file that never exists.
+func TestHermesAgentPathsDeclareNativeStateOnlyOnWindows(t *testing.T) {
+	dataDir := t.TempDir()
+	opts := SetupOpts{DataDir: dataDir}
+	paths := NewHermesConnector().AgentPaths(opts)
+	state := filepath.Join(dataDir, "hooks", hermesDirectNativeStateFileName)
+	declared := false
+	for _, path := range paths.PatchedFiles {
+		declared = declared || path == state
+	}
+	if declared != (runtime.GOOS == "windows") {
+		t.Fatalf("native state declared=%v on %s: %v", declared, runtime.GOOS, paths.PatchedFiles)
+	}
+}
+
+// raceInstrumentedBuild reports whether this test binary was built with -race.
+func raceInstrumentedBuild() bool {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "-race" {
+				return setting.Value == "true"
+			}
+		}
+	}
+	return false
 }

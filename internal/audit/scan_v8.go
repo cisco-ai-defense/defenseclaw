@@ -244,6 +244,9 @@ func scanFindingV8Operation(
 			DefenseClawFindingDecisionPath:        optionalScanV8DecisionPath(finding.DecisionPath),
 			DefenseClawFindingContentFingerprint:  optionalScanV8Identifier(finding.ContentFingerprint),
 			DefenseClawScanScanner:                optionalScanV8Text(result.Scanner),
+			UserID:                                optionalScanV8Identifier(correlation.UserID),
+			DefenseClawUserIDKind:                 optionalNetworkUserIDKind(correlation.UserIDKind),
+			DefenseClawUserName:                   optionalScanV8Identifier(correlation.UserName),
 		})
 		return verifyRuntimeV8Record(record, buildErr, event, false)
 	}
@@ -358,6 +361,9 @@ func scanSummaryV8Operation(
 			DefenseClawScanVerdict:       optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict)),
 			DefenseClawScanExitCode:      observability.Present(int64(result.ExitCode)),
 			DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
+			UserID:                       optionalScanV8Identifier(correlation.UserID),
+			DefenseClawUserIDKind:        optionalNetworkUserIDKind(correlation.UserIDKind),
+			DefenseClawUserName:          optionalScanV8Identifier(correlation.UserName),
 		}
 		var record observability.Record
 		if eventName == observability.EventName(observability.TelemetryEventScanFailed) {

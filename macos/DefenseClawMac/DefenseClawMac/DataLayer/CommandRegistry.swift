@@ -196,7 +196,7 @@ enum CommandInvocationError: LocalizedError, Equatable {
 }
 
 enum CommandRegistry {
-    static let sourceCount = 235
+    static let sourceCount = 225
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
@@ -349,15 +349,6 @@ enum CommandRegistry {
         CommandDefinition(id: 148, title: "connector list-backups", binary: "defenseclaw-gateway", arguments: ["connector", "list-backups"], summary: "List connector backup files", category: "daemon", requiresInput: false, usage: ""),
         CommandDefinition(id: 149, title: "gateway audit export", binary: "defenseclaw-gateway", arguments: ["audit", "export"], summary: "Export gateway audit log", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 150, title: "gateway provenance show", binary: "defenseclaw-gateway", arguments: ["provenance", "show"], summary: "Show gateway binary/config provenance", category: "info", requiresInput: false, usage: ""),
-        CommandDefinition(id: 151, title: "sandbox init", binary: "defenseclaw", arguments: ["sandbox", "init"], summary: "Initialize sandbox environment", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 152, title: "sandbox setup", binary: "defenseclaw", arguments: ["sandbox", "setup"], summary: "Configure sandbox networking", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 153, title: "sandbox start", binary: "defenseclaw-gateway", arguments: ["sandbox", "start"], summary: "Start sandbox services", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 154, title: "sandbox stop", binary: "defenseclaw-gateway", arguments: ["sandbox", "stop"], summary: "Stop sandbox services", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 155, title: "sandbox restart", binary: "defenseclaw-gateway", arguments: ["sandbox", "restart"], summary: "Restart sandbox services", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 156, title: "sandbox status", binary: "defenseclaw-gateway", arguments: ["sandbox", "status"], summary: "Show sandbox status", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 157, title: "sandbox exec", binary: "defenseclaw-gateway", arguments: ["sandbox", "exec"], summary: "Run command in sandbox", category: "sandbox", requiresInput: true, usage: "<command>"),
-        CommandDefinition(id: 158, title: "sandbox shell", binary: "defenseclaw-gateway", arguments: ["sandbox", "shell"], summary: "Open sandbox shell", category: "sandbox", requiresInput: false, usage: ""),
-        CommandDefinition(id: 159, title: "sandbox policy diff", binary: "defenseclaw-gateway", arguments: ["sandbox", "policy", "diff"], summary: "Compare policy vs endpoints", category: "sandbox", requiresInput: false, usage: ""),
         CommandDefinition(id: 160, title: "upgrade", binary: "defenseclaw", arguments: ["upgrade", "--yes"], summary: "Update to the latest release by downloading and running its install.sh", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 161, title: "uninstall dry-run", binary: "defenseclaw", arguments: ["uninstall", "--dry-run"], summary: "Preview uninstall changes without modifying the system", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 162, title: "uninstall --yes", binary: "defenseclaw", arguments: ["uninstall", "--yes"], summary: "Uninstall DefenseClaw after showing the plan", category: "other", requiresInput: false, usage: ""),
@@ -416,7 +407,6 @@ enum CommandRegistry {
         CommandDefinition(id: 215, title: "codeguard", binary: "defenseclaw", arguments: ["codeguard"], summary: "Show CodeGuard commands", category: "install", requiresInput: false, usage: ""),
         CommandDefinition(id: 216, title: "codeguard install-skill", binary: "defenseclaw", arguments: ["codeguard", "install-skill"], summary: "Install CodeGuard skill", category: "install", requiresInput: false, usage: ""),
         CommandDefinition(id: 217, title: "aibom", binary: "defenseclaw", arguments: ["aibom"], summary: "Show AIBOM commands", category: "scan", requiresInput: false, usage: ""),
-        CommandDefinition(id: 218, title: "sandbox", binary: "defenseclaw", arguments: ["sandbox"], summary: "Show sandbox commands", category: "sandbox", requiresInput: false, usage: ""),
         CommandDefinition(id: 219, title: "reset", binary: "defenseclaw", arguments: ["reset"], summary: "Run interactive local data reset", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 220, title: "uninstall", binary: "defenseclaw", arguments: ["uninstall"], summary: "Run interactive uninstall flow", category: "other", requiresInput: false, usage: ""),
         CommandDefinition(id: 221, title: "skills", binary: "defenseclaw", arguments: ["skill", "list"], summary: "List skills", category: "info", requiresInput: false, usage: ""),

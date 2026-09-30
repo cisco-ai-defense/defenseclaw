@@ -488,6 +488,15 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 		m.recordLoadError(ctx, "managed_downgrade")
 		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
 	}
+	// Only a change between two managed profiles is a reinstall. An unmanaged
+	// config has no profile, so switching it to managed_enterprise keeps its
+	// pre-profile behavior: deployment_mode is restart-required below.
+	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) &&
+		managed.IsManagedEnterprise(next.DeploymentMode) &&
+		oldCfg.EnterpriseProfile() != next.EnterpriseProfile() {
+		m.recordLoadError(ctx, "enterprise_profile_change")
+		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
+	}
 	// AVC env_config.json overlay. When present and well-formed the
 	// endpoint from env_config wins over whatever the installer wrote
 	// into config.yaml, so a region change delivered AFTER install
@@ -599,12 +608,13 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 				state = StateError
 				msg = envOverlayErr.Error()
 			}
-			m.health.SetConfig(state, msg, map[string]interface{}{
+			detail := map[string]interface{}{
 				"path":       m.path,
 				"generation": m.gen.Load(),
 				"reason":     reason,
 				"changed":    []string{},
-			})
+			}
+			m.health.SetConfig(state, msg, detail)
 		}
 		return nil
 	}
@@ -644,14 +654,15 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 			state = StateError
 			msg = envOverlayErr.Error()
 		}
-		m.health.SetConfig(state, msg, map[string]interface{}{
+		detail := map[string]interface{}{
 			"path":             m.path,
 			"generation":       gen,
 			"reason":           reason,
 			"changed":          diff.Changed,
 			"restart_required": diff.RestartRequired,
 			"last_success":     time.Now().UTC().Format(time.RFC3339),
-		})
+		}
+		m.health.SetConfig(state, msg, detail)
 	}
 	return nil
 }
@@ -874,11 +885,12 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 // Fields preserved:
 //   - Gateway.Token — synthesised by ensureGatewayTokenSynthesis on
 //     first boot; not written into config.yaml on disk.
-//   - Gateway.NoTLS — mapstructure:"-", set at boot from
-//     RequiresTLSWithMode(&OpenShell). Runtime state, not user-
+//   - Gateway.NoTLS — mapstructure:"-", set at boot from RequiresTLS
+//     and the legacy standalone shim. Runtime state, not user-
 //     configurable.
 //   - Gateway.SandboxHome, Gateway.ClawHome — mapstructure:"-",
-//     derived from OpenShell / os.UserHomeDir() at Load time. Stable
+//     derived from the legacy OpenShell shim / os.UserHomeDir() at Load
+//     time. Stable
 //     across reloads on the same host but the initial cached snapshot
 //     may have been rendered before every derivation ran.
 //
@@ -898,7 +910,7 @@ func preserveManagedGatewayRuntimeFields(oldCfg, next *config.Config) {
 	// NoTLS is bool — the "was it set on the runtime side and zeroed
 	// by LoadFromFile?" question reduces to "old=true, new=false".
 	// Copy that specific transition; the reverse (old=false, new=true)
-	// can only happen if the OpenShell mode legitimately flipped,
+	// can only happen if the legacy OpenShell mode legitimately flipped,
 	// which is a real change.
 	if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
 		next.Gateway.NoTLS = true
@@ -954,6 +966,26 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("data_dir", oldCfg.DataDir, newCfg.DataDir)
 	add("audit_db", oldCfg.AuditDB, newCfg.AuditDB)
 	add("judge_bodies_db", oldCfg.JudgeBodiesDB, newCfg.JudgeBodiesDB)
+	standalone := oldCfg.StandaloneEnterprise() || newCfg.StandaloneEnterprise()
+	if standalone {
+		// The standalone profile keeps its runtime settings in the enterprise
+		// block. The AI Defense client (enterprise.inspection) is rebuilt in
+		// place. enterprise.network is restart-required: the egress route every
+		// other outbound client dials through (webhooks, the LLM passthrough,
+		// the remote model router, the telemetry exporters and the Bifrost
+		// provider proxies) and the process proxy environment are installed
+		// once when the gateway starts, so a hot reload would leave them on the
+		// old proxy. Every other enterprise setting (enrollment and the
+		// hook-socket authorizer built from it) is also read once at startup.
+		// Secure Client deployments carry only the resolved profile, and a
+		// profile change is refused before diffing.
+		oldEnterprise, newEnterprise := oldCfg.Enterprise, newCfg.Enterprise
+		add("enterprise.inspection", oldEnterprise.Inspection, newEnterprise.Inspection)
+		add("enterprise.network", oldEnterprise.Network, newEnterprise.Network)
+		oldEnterprise.Inspection, newEnterprise.Inspection = config.EnterpriseInspectionConfig{}, config.EnterpriseInspectionConfig{}
+		oldEnterprise.Network, newEnterprise.Network = config.EnterpriseNetworkConfig{}, config.EnterpriseNetworkConfig{}
+		add("enterprise", oldEnterprise, newEnterprise)
+	}
 
 	var restart []string
 	hotReloadable := map[string]struct{}{
@@ -966,6 +998,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"tenant_id":        {},
 		"workspace_id":     {},
 		"discovery_source": {},
+		// Sandbox settings are read per launch, and the sandbox listeners
+		// rebind in-process (apiNeedsRestart). Only the legacy standalone
+		// mode behind the bind shim needs a fresh process (below).
+		"openshell": {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)
@@ -976,6 +1012,12 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// forces the operator's attention.
 	if managed.IsManagedEnterprise(newCfg.DeploymentMode) {
 		hotReloadable["cisco_ai_defense"] = struct{}{}
+	}
+	// standalone: inspectorNeedsRebuild covers the enterprise AI Defense
+	// settings, so they stay hot. enterprise.network is restart-required
+	// (see above).
+	if standalone {
+		hotReloadable["enterprise.inspection"] = struct{}{}
 	}
 	for _, path := range changed {
 		if path == "guardrail" && onlyRetainJudgeBodiesChanged(oldCfg, newCfg) {
@@ -997,6 +1039,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		if _, ok := hotReloadable[path]; !ok {
 			restart = append(restart, path)
 		}
+	}
+	if config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) {
+		// The shim decides gateway TLS, the sandbox home, and the API bind at
+		// construction; entering or leaving legacy mode needs a fresh process.
+		restart = append(restart, "openshell.mode")
 	}
 	if oldCfg.DataDir != newCfg.DataDir {
 		restart = append(restart, "data_dir")

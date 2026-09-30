@@ -1199,6 +1199,16 @@ function Invoke-Install {
         Die "Could not read the enterprise update policy: $($_.Exception.Message). Nothing was changed."
     }
     if ($policy) { Die "DefenseClaw self-update is disabled by enterprise policy; use the managed deployment channel. Nothing was changed." }
+    # A machine-wide managed deployment registers this marker; a per-user
+    # install beside it would run a second, unmanaged gateway.
+    $managedProfile = $null
+    try {
+        $marker = $hklm.OpenSubKey("SOFTWARE\Cisco\DefenseClaw\Enterprise")
+        if ($marker) { $managedProfile = [string]$marker.GetValue("Profile", "managed"); $marker.Close() }
+    } catch {
+        Die "Could not read the managed deployment marker: $($_.Exception.Message). Nothing was changed."
+    }
+    if ($managedProfile) { Die "A managed DefenseClaw enterprise deployment ($managedProfile) is installed on this computer; use the managed deployment channel. Nothing was changed." }
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {

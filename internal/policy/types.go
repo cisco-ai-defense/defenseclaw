@@ -124,22 +124,6 @@ type FirewallOutput struct {
 	RuleName string `json:"rule_name"`
 }
 
-// SandboxInput is the structured input passed to the OPA sandbox policy.
-type SandboxInput struct {
-	SkillName            string   `json:"skill_name"`
-	RequestedEndpoints   []string `json:"requested_endpoints"`
-	RequestedPermissions []string `json:"requested_permissions"`
-}
-
-// SandboxOutput is the structured output from the OPA sandbox policy.
-type SandboxOutput struct {
-	AllowedEndpoints  []string `json:"allowed_endpoints"`
-	DeniedEndpoints   []string `json:"denied_endpoints"`
-	DeniedFromRequest []string `json:"denied_from_request"`
-	Permissions       []string `json:"permissions"`
-	AllowedSkills     []string `json:"allowed_skills"`
-}
-
 // AuditInput is the structured input passed to the OPA audit policy.
 type AuditInput struct {
 	EventType     string   `json:"event_type"`

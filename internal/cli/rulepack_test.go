@@ -160,3 +160,20 @@ func shippedRulePackForCLITest(t *testing.T, profile string) string {
 	}
 	return filepath.Join(filepath.Dir(source), "..", "..", "policies", "guardrail", profile)
 }
+
+// The validator is the rule-pack check enterprise hosts have (they ship no
+// defenseclaw CLI), so it is listed in help.
+func TestRulePackValidateIsAVisibleCommand(t *testing.T) {
+	command, _, err := rootCmd.Find([]string{"rulepack", "validate"})
+	if err != nil || command != rulePackValidateCmd {
+		t.Fatalf("rulepack validate is not registered: %v", err)
+	}
+	for current := command; current != nil && current != rootCmd; current = current.Parent() {
+		if current.Hidden {
+			t.Fatalf("%q is hidden from help", current.CommandPath())
+		}
+	}
+	if rulePackValidateCmd.Flags().Lookup("dir") == nil || rulePackValidateCmd.Flags().Lookup("json") == nil {
+		t.Fatal("rulepack validate lost its --dir or --json flag")
+	}
+}

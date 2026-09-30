@@ -1,0 +1,29 @@
+{
+  "connector": "omnigent",
+  "hook_contract": "omnigent-custom-policy-v1",
+  "tamper_tier": "managed",
+  "env": {},
+  "binaries": [
+    "omnigent (harness)"
+  ],
+  "files": {
+    "/etc/omnigent/config.yaml": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 626,
+      "sha256": "5cb30197a159606a7b92bd85e59a82a0727f8e66599d3aeb5839da0fb7fff418"
+    },
+    "/usr/local/lib/defenseclaw/omnigent/agent/config.yaml": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 1061,
+      "sha256": "796f3634e5a47d7930c0fd41f2f60eb908e9c8d9eac92b9644890d123056f77c"
+    },
+    "/usr/local/lib/defenseclaw/omnigent/defenseclaw_omnigent_policy.py": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 26955,
+      "sha256": "7cd352f7393a05be64122eed716d1caa3ca0b233302d5506cfabed221f59d1ae"
+    }
+  }
+}

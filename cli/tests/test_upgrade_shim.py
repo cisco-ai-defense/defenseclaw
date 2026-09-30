@@ -29,8 +29,11 @@ import urllib.error
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 from defenseclaw import entry, update_notice, upgrade_shim
+from defenseclaw.commands import cmd_upgrade
 
+ROOT = Path(__file__).resolve().parents[2]
 _FIND_COSIGN = upgrade_shim._cosign
 
 
@@ -330,6 +333,14 @@ def test_entry_dispatches_upgrade_before_importing_the_cli(monkeypatch: pytest.M
     assert "defenseclaw.main" not in sys.modules
 
 
+def test_entry_notice_survives_an_uninstall_that_removed_the_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """uninstall --all --binaries finished, then the notice import raised ModuleNotFoundError."""
+    monkeypatch.setitem(sys.modules, "defenseclaw.update_notice", None)
+
+    entry._notice(["uninstall", "--all", "--binaries"])
+    entry._notice(["status"])
+
+
 def test_notice_is_silent_without_a_terminal(home: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     monkeypatch.setattr(update_notice, "available_message", lambda: "update!")
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
@@ -412,6 +423,8 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
 
     def open_key(_root, path, _reserved, _access):
         opened.append(path)
+        if path == upgrade_shim.WINDOWS_MANAGED_MARKER_KEY:
+            raise OSError("no managed deployment on this host")
         return FakeKey()
 
     fake_winreg = types.SimpleNamespace(
@@ -425,7 +438,9 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
     monkeypatch.setattr(update_notice.os, "name", "nt")
 
     assert update_notice.available_message() is None
-    assert opened == [r"SOFTWARE\Policies\Cisco\DefenseClaw"]
+    # The managed-deployment marker is checked first; without it the
+    # DisableSelfUpdate policy still silences the notice.
+    assert opened == [upgrade_shim.WINDOWS_MANAGED_MARKER_KEY, r"SOFTWARE\Policies\Cisco\DefenseClaw"]
 
 
 def test_notice_gives_up_on_a_slow_network(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -523,3 +538,145 @@ def test_a_download_without_cosign_says_the_signature_was_not_checked(
     upgrade_shim._verify_release_signature("cisco-ai-defense/defenseclaw", "1.0.1", None, str(tmp_path), "")
 
     assert "checked against checksums.txt only" in capsys.readouterr().out
+
+# ---- managed hosts: per-user upgrades, installs and notices stay out of the way
+
+
+class _FakeKey:
+    def __init__(self, values: dict[str, str]) -> None:
+        self.values = values
+
+    def __enter__(self) -> "_FakeKey":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+def _fake_winreg(values: dict[str, str] | None) -> types.ModuleType:
+    module = types.ModuleType("winreg")
+    module.HKEY_LOCAL_MACHINE = object()
+    module.KEY_READ = 1
+    module.KEY_WOW64_64KEY = 2
+
+    def open_key(_hive, path, _reserved, _access):
+        assert path == r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
+        if values is None:
+            raise FileNotFoundError(path)
+        return _FakeKey(values)
+
+    def query_value(key, name):
+        if name not in key.values:
+            raise FileNotFoundError(name)
+        return key.values[name], 1
+
+    module.OpenKey = open_key
+    module.QueryValueEx = query_value
+    return module
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [(None, None), ({"Profile": "standalone"}, "standalone"), ({}, "managed")],
+)
+def test_marker_detection(monkeypatch: pytest.MonkeyPatch, values, expected) -> None:
+    # One managed-host check serves the click commands and the console
+    # entry point, which runs the upgrade shim directly.
+    monkeypatch.setattr(upgrade_shim, "os", types.SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setitem(sys.modules, "winreg", _fake_winreg(values))
+    assert cmd_upgrade._managed_enterprise_profile() == expected
+    assert upgrade_shim.managed_deployment() == expected
+
+
+@pytest.mark.parametrize("command", [cmd_upgrade.upgrade, cmd_upgrade.rollback])
+def test_commands_refuse_before_running_the_shim(monkeypatch: pytest.MonkeyPatch, command) -> None:
+    monkeypatch.setattr(cmd_upgrade, "_managed_enterprise_profile", lambda: "standalone")
+    shim = types.ModuleType("defenseclaw.upgrade_shim")
+
+    def run(_argv):
+        raise AssertionError("the upgrade shim must not run on a managed host")
+
+    shim.run = run
+    monkeypatch.setitem(sys.modules, "defenseclaw.upgrade_shim", shim)
+    result = CliRunner().invoke(command, ["--yes"])
+    assert result.exit_code == 1
+    assert "managed DefenseClaw enterprise deployment (standalone)" in result.output
+
+
+@pytest.fixture
+def descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "managed-runtime.json"
+    monkeypatch.setattr(upgrade_shim, "MANAGED_DESCRIPTORS", (str(path),))
+    return path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX managed hosts only")
+def test_upgrade_and_rollback_refuse_on_a_managed_host(descriptor: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    descriptor.write_text("{}", encoding="utf-8")
+    for command in (["upgrade", "--yes"], ["rollback", "--yes"]):
+        assert upgrade_shim.run(command) == 1
+        err = capsys.readouterr().err
+        assert "managed by your organization" in err
+        assert "Nothing was changed" in err
+
+
+def test_update_notice_is_silent_on_any_managed_deployment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(update_notice.NO_CHECK_ENV, raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(tmp_path / "missing-config.yaml"))
+    monkeypatch.setattr(update_notice, "_windows_self_update_policy", lambda: False)
+    monkeypatch.setattr(update_notice, "_latest_cached", lambda: "999.0.0")
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: None)
+    assert update_notice.available_message() is not None
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    assert update_notice.available_message() is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is POSIX")
+def test_install_sh_refuses_before_changing_anything(tmp_path: Path) -> None:
+    descriptor = tmp_path / "managed-runtime.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR": str(descriptor),
+    }
+    completed = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "install.sh"), "--yes"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "managed by your organization" in completed.stdout + completed.stderr
+    assert list(home.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is POSIX")
+def test_install_sh_environment_cannot_replace_the_platform_descriptor(tmp_path: Path) -> None:
+    # The test hook may only add a descriptor. Pointing it elsewhere must not
+    # skip the platform descriptor, or any user could bypass the refusal.
+    text = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    block = text[text.index("# ── Managed hosts") : text.index("# ── Which version")]
+    platform = tmp_path / "managed-runtime.json"
+    platform.write_text("{}", encoding="utf-8")
+    assert "/etc/defenseclaw/managed-runtime.json" in block
+    script = 'die() { echo "DIE: $*"; exit 1; }\nOS=linux\n' + block.replace(
+        "/etc/defenseclaw/managed-runtime.json", str(platform)
+    ) + "\necho proceeded\n"
+    for override in (str(tmp_path / "missing.json"), ""):
+        completed = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": "/usr/bin:/bin", "DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR": override},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert completed.returncode == 1, (override, completed.stdout, completed.stderr)
+        assert "managed by your organization" in completed.stdout
+        assert "proceeded" not in completed.stdout

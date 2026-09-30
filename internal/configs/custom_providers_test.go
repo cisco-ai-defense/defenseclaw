@@ -5,8 +5,10 @@
 package configs
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -248,5 +250,96 @@ func TestApplyOverlay_DeduplicatesDomains(t *testing.T) {
 	}
 	if portCount != 1 {
 		t.Fatalf("expected ollama port to remain unique, got %d copies", portCount)
+	}
+}
+
+// The overlay lives in the DefenseClaw data dir. A managed service (or a
+// per-user install relocated with DEFENSECLAW_HOME) used to read the
+// caller's ~/.defenseclaw instead, which the Python CLI never writes when
+// DEFENSECLAW_HOME is set.
+func TestCustomProvidersPathHonorsTheDataDir(t *testing.T) {
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	if got, want := CustomProvidersPath(), filepath.Join(dataDir, "custom-providers.json"); got != want {
+		t.Fatalf("CustomProvidersPath() = %q, want %q", got, want)
+	}
+	override := filepath.Join(t.TempDir(), "overlay.json")
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", override)
+	if got := CustomProvidersPath(); got != override {
+		t.Fatalf("CustomProvidersPath() = %q, want the explicit override %q", got, override)
+	}
+}
+
+// captureStderr returns what fn writes to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stderr
+	os.Stderr = writer
+	defer func() { os.Stderr = previous }()
+	fn()
+	_ = writer.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// A missing overlay, or one this account may not read, prints nothing: an
+// administrator's `audit export` used to print "custom-providers overlay
+// open error: ... permission denied" for another account's data dir.
+func TestLoadProvidersIsQuietForAMissingOrUnreadableOverlay(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "custom-providers.json")
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", missing)
+	if out := captureStderr(t, func() {
+		if _, err := LoadProviders(); err != nil {
+			t.Fatal(err)
+		}
+	}); out != "" {
+		t.Fatalf("a missing overlay printed %q", out)
+	}
+
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs a file this account cannot read: root reads a mode-0000 file, and Windows mode bits do not deny reads")
+	}
+	// Under the ~/.defenseclaw fallback an unreadable overlay is not this
+	// process's (a service account's or another account's home): quiet.
+	home := t.TempDir()
+	unreadable := filepath.Join(home, ".defenseclaw", "custom-providers.json")
+	if err := os.MkdirAll(filepath.Dir(unreadable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unreadable, []byte(`{"providers":[]}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+	t.Setenv("DEFENSECLAW_HOME", "")
+	t.Setenv("HOME", home)
+	if out := captureStderr(t, func() {
+		if _, err := LoadProviders(); err != nil {
+			t.Fatal(err)
+		}
+	}); out != "" {
+		t.Fatalf("an unreadable fallback overlay printed %q", out)
+	}
+
+	// In the data dir the process was pointed at, an overlay it cannot read
+	// means its providers are silently missing: logged.
+	dataDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDir, "custom-providers.json"), []byte(`{"providers":[]}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	if out := captureStderr(t, func() {
+		if _, err := LoadProviders(); err != nil {
+			t.Fatal(err)
+		}
+	}); !strings.Contains(out, "custom-providers overlay open error") {
+		t.Fatalf("an unreadable DEFENSECLAW_HOME overlay printed %q, want the open error", out)
 	}
 }

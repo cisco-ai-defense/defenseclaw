@@ -14,6 +14,7 @@ from typing import Literal
 from defenseclaw.platform_support import (
     connector_supported_on_os,
     local_observability_stack_supported,
+    openshell_sandboxes_supported,
 )
 from defenseclaw.tui.registry_data import GO_PARITY_REGISTRY
 
@@ -56,6 +57,8 @@ def build_registry(os_name: str | None = None) -> tuple[CmdEntry, ...]:
             local_observability_stack_supported(os_name) or tuple(cli_args[:2]) != ("setup", "local-observability")
         ):
             return False
+        if cli_args[:1] == ("sandbox",):
+            return openshell_sandboxes_supported(os_name)
         if len(cli_args) < 2 or cli_args[0] != "setup":
             return True
         connector = _SETUP_CONNECTOR_ALIASES.get(cli_args[1])

@@ -206,7 +206,9 @@ func ResolveV8PushURL(ctx context.Context, u *url.URL, policy V8NetworkSafetyPol
 // V8SafeDialContext returns a guarded dial function for one immutable
 // destination policy. Hostnames are resolved and classified immediately before
 // every connection, preventing validation-time DNS rebinding. The selected IP
-// literal, rather than the hostname, is passed to the underlying dialer.
+// literal, rather than the hostname, is passed to the underlying dialer, with
+// the checked host recorded by WithDialTarget (an EgressRoute dialer uses it
+// to apply no_proxy and to name the proxy's CONNECT target).
 func V8SafeDialContext(policy V8NetworkSafetyPolicy, dialer V8Dialer, resolver V8Resolver) func(context.Context, string, string) (net.Conn, error) {
 	if dialer == nil {
 		dialer = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
@@ -242,7 +244,7 @@ func V8SafeDialContext(policy V8NetworkSafetyPolicy, dialer V8Dialer, resolver V
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(selected.String(), port))
+		conn, err := dialer.DialContext(WithDialTarget(ctx, host), network, net.JoinHostPort(selected.String(), port))
 		if err != nil {
 			if contextErr := boundedContextError(ctx, err); contextErr != nil {
 				return nil, contextErr

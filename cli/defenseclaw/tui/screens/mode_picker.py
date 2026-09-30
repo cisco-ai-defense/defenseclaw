@@ -107,11 +107,22 @@ class ModePickerScreen(ModalScreen[str | None]):
 
     #mode-picker-dialog {{
         width: 82;
+        max-width: 96%;
         height: auto;
+        max-height: 96%;
+        overflow-y: auto;
         padding: 1 2;
         border: round {DEFAULT_TOKENS.border_active};
         background: {DEFAULT_TOKENS.surface_panel};
         color: {DEFAULT_TOKENS.text_primary};
+    }}
+
+    /* The connector list scrolls inside itself so the title, keys and
+       switch preview above it stay put on short terminals. */
+    #mode-picker-menu {{
+        height: auto;
+        max-height: 45vh;
+        overflow-y: auto;
     }}
 
     #mode-picker-title {{
@@ -124,7 +135,7 @@ class ModePickerScreen(ModalScreen[str | None]):
     #mode-picker-preview,
     #mode-picker-hint {{
         height: auto;
-        margin-top: 1;
+        margin-bottom: 1;
         color: {DEFAULT_TOKENS.text_secondary};
     }}
     """
@@ -168,9 +179,11 @@ class ModePickerScreen(ModalScreen[str | None]):
         )
         with Vertical(id="mode-picker-dialog"):
             yield Static("Switch active claw connector", id="mode-picker-title")
-            yield ActionMenu(actions, selected_index=selected, id="mode-picker-menu")
-            yield Static(preview_for_switch(self.current_wire, current.wire), id="mode-picker-preview")
+            # Preview and keys go above the (long) connector list so they are
+            # on screen at 80x24; the list scrolls to the selection.
             yield Static(self._hint_text(), id="mode-picker-hint")
+            yield Static(preview_for_switch(self.current_wire, current.wire), id="mode-picker-preview")
+            yield ActionMenu(actions, selected_index=selected, id="mode-picker-menu")
 
     def _hint_text(self) -> str:
         # Built from the visible rows so the advertised jump keys match what

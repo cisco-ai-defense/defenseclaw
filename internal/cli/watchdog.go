@@ -347,16 +347,7 @@ func watchdogHealthURL(cfg *config.Config) string {
 		apiPort = cfg.Gateway.APIPort
 	}
 
-	apiBind := "127.0.0.1"
-	if cfg != nil {
-		if cfg.Gateway.APIBind != "" {
-			apiBind = cfg.Gateway.APIBind
-		} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
-			apiBind = cfg.Guardrail.Host
-		}
-	}
-
-	return fmt.Sprintf("http://%s:%d/health", apiBind, apiPort)
+	return fmt.Sprintf("http://%s:%d/health", config.APIBindHost(cfg), apiPort)
 }
 
 func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, requirements watchdogHealthRequirements, webhooks *gateway.WebhookDispatcher, recovery watchdogRecoveryRecorder) {

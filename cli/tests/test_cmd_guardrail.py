@@ -70,6 +70,20 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
     return app
 
 
+# Status draws a table or per-connector blocks by the terminal width, which
+# other tests in the same process (a pytest worker, a CI shard) can leave
+# narrowed. These tests assume 120 columns unless one patches it itself.
+_TERMINAL_WIDTH = patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=120)
+
+
+def setUpModule():
+    _TERMINAL_WIDTH.start()
+
+
+def tearDownModule():
+    _TERMINAL_WIDTH.stop()
+
+
 class ResolveActiveConnectorTests(unittest.TestCase):
     def test_uses_active_connector_method(self):
         cfg = SimpleNamespace()
@@ -216,7 +230,7 @@ class StatusCommandTests(unittest.TestCase):
             result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("- Codex", result.output)
-        self.assertIn("key:       codex", result.output)
+        self.assertRegex(result.output, r"key:\s+codex")
         self.assertNotIn("connector: codex", result.output)
         self.assertIn("rule-pack:", result.output)
         self.assertIn("scan:", result.output)
@@ -701,17 +715,24 @@ class PerConnectorToggleTests(unittest.TestCase):
         # claudecode inherits the defaults.
         from defenseclaw import config as dcconfig
         runner = CliRunner()
-        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app = make_multi_ctx({"codex": None, "claudecode": None, "copilot": None})
         app.cfg.guardrail.connectors["codex"].rule_pack_dir = "/packs/strict"
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
-        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        app.cfg.guardrail.connectors["copilot"].rule_pack_dir = "/packs/protected-copilot/default"
+        app.cfg.guardrail.block_at = "HIGH"
+        with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout
+            result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Rule pack", result.output)
         self.assertIn("strict", result.output)    # codex's own pack
         self.assertIn("default", result.output)   # claudecode inherits
         self.assertIn("on@LOW", result.output)    # codex's own HILT
+        self.assertIn("protected-copilot", result.output)  # a composed pack by its scope
+        # Tool-call levels: the global block_at over each connector's pack.
+        self.assertIn("HIGH+/LOW+", result.output)     # codex: strict alerts LOW+
+        self.assertIn("HIGH+/MEDIUM+", result.output)  # claudecode: default alerts MEDIUM+
 
     def test_status_global_disable_overrides_per_connector_enabled(self):
         # Regression: when the GLOBAL guardrail kill switch is off, no
@@ -1319,7 +1340,10 @@ class CommandRegistrationTests(unittest.TestCase):
         # packs (built-in presets + the dir each connector enforces) — the
         # day-to-day counterpart to `setup <connector> --rule-pack` (R2).
         # validate-pack delegates strict offline validation to the installed
-        # gateway helper without starting the runtime.
+        # gateway helper without starting the runtime. mode flips observe /
+        # action without re-running setup, and protection turns the opt-in
+        # protection packs on and off per scope. block-at / alert-at set the
+        # tool-call block and alert levels, globally or per connector.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1331,8 +1355,13 @@ class CommandRegistrationTests(unittest.TestCase):
                 "fail-mode",
                 "hilt",
                 "block-message",
+                "block-at",
+                "alert-at",
                 "judge",
                 "list-packs",
+                "mode",
+                "protection",
+                "use-pack",
                 "validate-pack",
             },
         )

@@ -240,7 +240,11 @@ func optionalNetworkUserIDKind(value string) observability.Optional[string] {
 	}
 }
 
+// optionalNetworkIdentifier emits the trimmed value it validated;
+// runtimeV8Identifier trims before matching, and the untrimmed value would
+// fail the registered identifier pattern and cost the decision its record.
 func optionalNetworkIdentifier(value string) observability.Optional[string] {
+	value = strings.TrimSpace(value)
 	if !runtimeV8Identifier(value) {
 		return observability.Absent[string]()
 	}

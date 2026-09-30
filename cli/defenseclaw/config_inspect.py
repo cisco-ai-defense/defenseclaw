@@ -32,7 +32,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.gateway import resolve_trusted_gateway_binary
+from defenseclaw.pinned_exec import run_pinned_executable
 
 CONFIG_V8_WIRE_VERSION: Final = 2
 CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 15
@@ -158,7 +160,10 @@ def _helper_argv(
     gateway_binary: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> list[str]:
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw") from exc
     if not binary:
         raise ConfigInspectError(
             "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"
@@ -180,16 +185,18 @@ def _run(
     environment = None
     if environment_overrides is not None:
         environment = _validation_environment(environment_overrides)
+    # Run the checked gateway file itself, as the lifecycle does: running it
+    # by path let a swap after the custody check run another file.
     try:
         if environment is None:
-            return subprocess.run(
+            return run_pinned_executable(
                 argv,
                 capture_output=True,
                 text=True,
                 timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
                 check=False,
             )
-        return subprocess.run(
+        return run_pinned_executable(
             argv,
             capture_output=True,
             text=True,
@@ -199,6 +206,8 @@ def _run(
         )
     except subprocess.TimeoutExpired as exc:
         raise ConfigInspectError("configuration helper timed out without producing a result") from exc
+    except UnsafePathError as exc:
+        raise ConfigInspectError(f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw") from exc
     except OSError as exc:
         raise ConfigInspectError("configuration helper could not be started; run defenseclaw upgrade") from exc
 

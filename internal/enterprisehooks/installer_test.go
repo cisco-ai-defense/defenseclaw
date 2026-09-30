@@ -180,6 +180,172 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	}
 }
 
+// TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket covers an upgrade:
+// hooks installed for the TCP transport (before the standalone hook socket
+// was configured) must fail Verify once a socket is configured, so the
+// guardian's verify-or-repair pass reinstalls them, and must pass again only
+// after an Install renders the socket transport.
+func TestVerifyFailsWhenHooksPredateTheConfiguredHookSocket(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	tcpOpts := InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "test-token",
+		OTLPPathToken: strings.Repeat("d", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+	socketOpts := tcpOpts
+	socketOpts.ManagedHookSocket = "/var/run/defenseclaw/hook.sock"
+	socketOpts.ManagedServiceUID = 461
+	hookScript := filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")
+	readHook := func() string {
+		t.Helper()
+		data, err := os.ReadFile(hookScript)
+		if err != nil {
+			t.Fatalf("read codex hook: %v", err)
+		}
+		return string(data)
+	}
+	const transportDrift = "different gateway transport"
+
+	if _, err := Install(context.Background(), tcpOpts); err != nil {
+		t.Fatalf("Install (TCP): %v", err)
+	}
+	if strings.Contains(readHook(), "--unix-socket") {
+		t.Fatal("TCP install rendered the hook socket transport")
+	}
+	if _, err := Verify(context.Background(), tcpOpts); err != nil {
+		t.Fatalf("Verify (TCP install, TCP configured): %v", err)
+	}
+	if _, err := Verify(context.Background(), socketOpts); err == nil || !strings.Contains(err.Error(), transportDrift) {
+		t.Fatalf("Verify (TCP install, socket configured) = %v, want transport drift", err)
+	}
+
+	if _, err := Install(context.Background(), socketOpts); err != nil {
+		t.Fatalf("Install (socket): %v", err)
+	}
+	hook := readHook()
+	if !strings.Contains(hook, "--unix-socket") || !strings.Contains(hook, "DEFENSECLAW_HOOK_SOCKET='/var/run/defenseclaw/hook.sock'") {
+		t.Fatal("socket install did not render the hook socket transport")
+	}
+	if _, err := Verify(context.Background(), socketOpts); err != nil {
+		t.Fatalf("Verify (socket install, socket configured): %v", err)
+	}
+
+	otherUID := socketOpts
+	otherUID.ManagedServiceUID = 462
+	otherPath := socketOpts
+	otherPath.ManagedHookSocket = "/run/defenseclaw/hook.sock"
+	for name, opts := range map[string]InstallOptions{
+		"TCP configured":         tcpOpts,
+		"other service uid":      otherUID,
+		"other hook socket path": otherPath,
+	} {
+		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), transportDrift) {
+			t.Fatalf("Verify (socket install, %s) = %v, want transport drift", name, err)
+		}
+	}
+}
+
+// TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser covers the move
+// to per-user credentials: hooks rendered with the connector-scoped
+// credential every user shared, or with another user's or an older key's
+// credentials, must fail Verify so the guardian reinstalls them with the
+// target's own credentials.
+func TestVerifyFailsWhenHooksCarryCredentialsNotBoundToTheUser(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	shared := InstallOptions{
+		ConnectorName:     "codex",
+		UserHome:          home,
+		OwnerUID:          os.Getuid(),
+		OwnerGID:          os.Getgid(),
+		APIAddr:           "127.0.0.1:18970",
+		ProxyAddr:         "127.0.0.1:4000",
+		APIToken:          strings.Repeat("a", 64),
+		OTLPPathToken:     strings.Repeat("b", 64),
+		GuardrailMode:     "action",
+		HookFailMode:      "closed",
+		AgentVersion:      "codex-cli 0.142.0",
+		Registry:          connector.NewDefaultRegistry(),
+		ManagedHookSocket: "/var/run/defenseclaw/hook.sock",
+		ManagedServiceUID: 461,
+	}
+	perUser := shared
+	perUser.APIToken = strings.Repeat("c", 64)
+	perUser.OTLPPathToken = strings.Repeat("d", 64)
+	perUser.HookCredentialIdentity = "1001"
+	const credentialDrift = "not bound to this user"
+
+	if _, err := Install(context.Background(), shared); err != nil {
+		t.Fatalf("Install (connector-scoped): %v", err)
+	}
+	if _, err := Verify(context.Background(), perUser); err == nil || !strings.Contains(err.Error(), credentialDrift) {
+		t.Fatalf("Verify (connector-scoped install, per-user configured) = %v, want credential drift", err)
+	}
+	if _, err := Install(context.Background(), perUser); err != nil {
+		t.Fatalf("Install (per-user): %v", err)
+	}
+	if _, err := Verify(context.Background(), perUser); err != nil {
+		t.Fatalf("Verify (per-user install, per-user configured): %v", err)
+	}
+	data, err := os.ReadFile(codexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Bearer "+perUser.OTLPPathToken) || strings.Contains(string(data), shared.OTLPPathToken) {
+		t.Fatalf("codex config does not carry only the per-user OTLP credential:\n%s", data)
+	}
+	lock, err := os.ReadFile(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(lock), perUser.APIToken) || strings.Contains(string(lock), perUser.OTLPPathToken) {
+		t.Fatal("the hook contract lock must not contain a credential")
+	}
+	if !strings.Contains(string(lock), `"hook_credential_binding": "1001:`) {
+		t.Fatalf("the hook contract lock does not record the credential binding:\n%s", lock)
+	}
+
+	otherUser := perUser
+	otherUser.HookCredentialIdentity = "1002"
+	rotated := perUser
+	rotated.OTLPPathToken = strings.Repeat("e", 64)
+	for name, opts := range map[string]InstallOptions{
+		"connector-scoped configured": shared,
+		"another user":                otherUser,
+		"rotated key":                 rotated,
+	} {
+		if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), credentialDrift) {
+			t.Fatalf("Verify (per-user install, %s) = %v, want credential drift", name, err)
+		}
+	}
+}
+
 func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
@@ -1589,4 +1755,132 @@ func sliceContains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Antigravity and OpenHands load a hooks file that they create only when the
+// user writes hooks; a first install creates it as the user and registers
+// the DefenseClaw hooks there.
+func TestInstallBootstrapsAMissingHooksFile(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	for _, tc := range []struct{ connector, version, config string }{
+		{"antigravity", "1.2.11", filepath.Join(".gemini", "config", "hooks.json")},
+		{"openhands", "1.16.0", filepath.Join(".openhands", "hooks.json")},
+	} {
+		if tc.connector == "openhands" && runtime.GOOS == "darwin" {
+			// macOS OpenHands setup also needs the user's executable; covered
+			// by TestInstallOpenHandsRecordsTheUsersExecutableOnDarwin.
+			continue
+		}
+		home := newTestHome(t)
+		if _, err := Install(context.Background(), InstallOptions{
+			ConnectorName: tc.connector,
+			UserHome:      home,
+			OwnerUID:      os.Getuid(),
+			OwnerGID:      os.Getgid(),
+			APIAddr:       "127.0.0.1:18970",
+			APIToken:      "test-token",
+			AgentVersion:  tc.version,
+			GuardrailMode: "action",
+			Registry:      connector.NewDefaultRegistry(),
+		}); err != nil {
+			t.Fatalf("%s: Install with a missing hooks file: %v", tc.connector, err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, tc.config))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), tc.connector+"-hook") && !strings.Contains(string(data), "defenseclaw") {
+			t.Fatalf("%s: hooks file lacks the DefenseClaw hook:\n%s", tc.connector, data)
+		}
+	}
+}
+
+// Only the user-global OpenHands hooks file is bootstrapped; a pinned
+// workspace keeps the strict must-exist check.
+func TestOpenHandsHookStubOnlyForUserGlobalHooks(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	home := t.TempDir()
+	conn := connector.NewOpenHandsConnector()
+	stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home)
+	if want := filepath.Join(home, ".openhands", "hooks.json"); stub.ContentPath != want || stub.Mode != 0o600 {
+		t.Fatalf("user-global OpenHands stub = %q mode %o, want %q mode 600", stub.ContentPath, stub.Mode, want)
+	}
+	pinned := connector.SetupOpts{WorkspaceDir: filepath.Join(home, "project")}
+	if stub := defaultHookConfigStubForConnector(conn, pinned, home); stub.ContentPath != "" {
+		t.Fatalf("pinned-workspace OpenHands stub = %q, want none", stub.ContentPath)
+	}
+}
+
+// The OpenHands and Antigravity hook-config stubs are a standalone-profile
+// behavior. The Secure Client macOS guardian never created those files, so
+// outside the standalone profile a first install still stops on the
+// missing file, and nothing is written.
+func TestHookConfigStubsForOpenHandsAndAntigravityAreStandaloneOnly(t *testing.T) {
+	setStandaloneProfileForTest(t, false)
+	home := t.TempDir()
+	for _, conn := range []connector.Connector{connector.NewOpenHandsConnector(), connector.NewAntigravityConnector()} {
+		if stub := defaultHookConfigStubForConnector(conn, connector.SetupOpts{}, home); stub.ContentPath != "" {
+			t.Fatalf("%s stub outside the standalone profile = %q, want none", conn.Name(), stub.ContentPath)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	skipIfRoot(t)
+	home = newTestHome(t)
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "antigravity",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		AgentVersion:  "1.2.11",
+		GuardrailMode: "action",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent missing") {
+		t.Fatalf("Secure Client install with no Antigravity hooks file = %v, want the missing-config refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".gemini")); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client install created the Antigravity config tree: %v", err)
+	}
+}
+
+// TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone
+// covers the standalone version re-check: once an enrolled user's agent
+// moves to another version, the standalone guardian re-renders the hooks
+// when that version has a known, verified hook contract, refuses a version
+// without one (reported as hook_contract_unverified), and the Secure Client
+// profile keeps refusing every change.
+func TestValidateHookContractFollowsVerifiedVersionChangesOnlyInStandalone(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	conn := connector.NewClaudeCodeConnector()
+	dataDir := t.TempDir()
+	installed := connector.SetupOpts{DataDir: dataDir, AgentVersion: "2.1.154"}
+	if err := connector.SaveHookContractLockEntry(dataDir, connector.NewHookContractLockEntry(installed, conn, "test-build")); err != nil {
+		t.Fatalf("seed contract lock: %v", err)
+	}
+	withVersion := func(version string) connector.SetupOpts {
+		return connector.SetupOpts{DataDir: dataDir, AgentVersion: version, ManagedEnterprise: true}
+	}
+
+	setStandaloneProfileForTest(t, false)
+	if err := validateHookContract("action", conn, withVersion("2.1.230")); err == nil ||
+		!strings.Contains(err.Error(), "hook contract drift detected") {
+		t.Fatalf("Secure Client version change = %v, want the drift refusal", err)
+	}
+
+	setStandaloneProfileForTest(t, true)
+	for _, version := range []string{"2.1.230", "2.1.200"} {
+		if err := validateHookContract("action", conn, withVersion(version)); err != nil {
+			t.Fatalf("standalone change to verified version %s = %v, want it accepted for re-render", version, err)
+		}
+	}
+	err := validateHookContract("action", conn, withVersion("2.1.100"))
+	if err == nil || !strings.Contains(err.Error(), "is not verified against a known hook contract") {
+		t.Fatalf("standalone change to unverified version = %v, want the hook_contract_unverified refusal", err)
+	}
 }

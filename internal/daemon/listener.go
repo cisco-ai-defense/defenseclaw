@@ -30,3 +30,16 @@ var (
 func ListenerOwnerPID(host string, port int) (int, error) {
 	return listenerOwnerPID(host, port)
 }
+
+// Listener is one TCP listener that can collide with a bind of host:port.
+type Listener struct {
+	Address string // the listener's local address and port
+	PID     int
+}
+
+// Listeners lists every TCP listener that can collide with a bind of
+// host:port and the process that owns it. Other platforms than Windows
+// report ErrListenerInspectionUnavailable.
+func Listeners(host string, port int) ([]Listener, error) {
+	return listeners(host, port)
+}

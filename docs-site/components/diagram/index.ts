@@ -1,5 +1,5 @@
-export { Flow, Node, Edge } from './flow';
-export type { NodeProps, EdgeProps } from './flow';
+export { Flow, Node, Edge, Zone } from './flow';
+export type { NodeProps, EdgeProps, ZoneProps } from './flow';
 export { Sequence, Message } from './sequence';
 export type { ParticipantSpec, MessageProps } from './sequence';
-export type { DiagramKind, EdgeVariant, MessageKind } from './shared';
+export type { DiagramKind, EdgeVariant, MessageKind, ZoneTone } from './shared';

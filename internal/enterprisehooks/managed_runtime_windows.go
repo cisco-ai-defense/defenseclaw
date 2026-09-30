@@ -19,6 +19,15 @@ import (
 
 const WindowsManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 
+// WindowsManagedEnrollmentPendingReason is the standalone hook's refusal of
+// an account the machine policy registers that has no managed runtime yet:
+// the guardian creates it while the account is signed in.
+const WindowsManagedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
+
+// ErrWindowsManagedRuntimeGenerationPending reports that no managed runtime
+// generation is selected for a registered account yet.
+var ErrWindowsManagedRuntimeGenerationPending = errors.New("no managed runtime generation is selected for this account yet")
+
 // WindowsManagedHookRuntime is the administrator-authorized runtime selected
 // for the current process token. PolicyActive distinguishes a clean
 // post-uninstall absence from a damaged or unregistered active global policy.
@@ -64,6 +73,8 @@ func ResolveWindowsManagedHookRuntime(
 		return resolveWindowsCodexManagedHookRuntime(hookExecutable)
 	case "cursor":
 		return resolveWindowsCursorManagedHookRuntime(hookExecutable)
+	case "copilot", "antigravity", "devin", "hermes", "opencode":
+		return resolveWindowsPerUserManagedHookRuntime(hookExecutable, name)
 	default:
 		return WindowsManagedHookRuntime{}, fmt.Errorf(
 			"enterprise hooks: unsupported Windows managed connector %q",

@@ -1,0 +1,18 @@
+# Loopback API listener for the DefenseClaw gateway (plugins and the CLI).
+# PID 1 owns the socket, so it remains bound while the gateway restarts.
+# Managed hooks verify that the accepted socket belongs to root or the
+# gateway account before sending a request.
+
+[Unit]
+Description=DefenseClaw gateway loopback API socket
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+
+[Socket]
+ListenStream=127.0.0.1:18970
+FileDescriptorName=api
+Service=defenseclaw-gateway.service
+NoDelay=true
+Backlog=256
+
+[Install]
+WantedBy=sockets.target

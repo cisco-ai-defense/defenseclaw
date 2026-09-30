@@ -231,6 +231,9 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 }
 
 func runStart(cmd *cobra.Command, _ []string) error {
+	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+		return err
+	}
 	rotationTransaction := rotationTransactionRequested(cmd)
 	var expectedConnectorState rotationConnectorState
 	if rotationTransaction {
@@ -395,6 +398,19 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		return errors.New("rotation cleanup requires transaction-grade verification")
 	}
 	d := daemon.New(config.DefaultDataPath())
+	// On a managed host stop refuses like start and restart; reporting "not
+	// running" with exit 0 read as if no gateway ran while the managed one
+	// did. Only this account's own per-user gateway, left over from before
+	// the managed deployment, may still be stopped here.
+	if refusal := refuseGatewayLifecycleOnManagedHost(); refusal != nil {
+		if running, _ := d.IsRunning(); !running {
+			// A per-user watchdog left over from before the managed
+			// deployment keeps trying to restart that gateway (and its
+			// restarts are refused now), so stop still ends it.
+			stopLeftoverWatchdogOnManagedHost()
+			return refusal
+		}
+	}
 	cfg, cfgErr := loadDaemonConfig(cmd)
 	var running bool
 	var pid int
@@ -483,6 +499,18 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// stopLeftoverWatchdogOnManagedHost stops this account's own watchdog, when
+// one runs, before stop refuses on a managed host. A seam for tests.
+var stopLeftoverWatchdogOnManagedHost = func() {
+	running, err := rotationWatchdogRunning(config.DefaultDataPath())
+	if err != nil || !running {
+		return
+	}
+	if err := runWatchdogStop(nil, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "could not stop this account's watchdog: %v\n", err)
+	}
+}
+
 func rotationWatchdogRunning(dataDir string) (bool, error) {
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 	locked, info, err := watchdogIsLocked(pidPath)
@@ -566,6 +594,9 @@ func waitForRunningDaemonReadiness(
 }
 
 func runRestart(cmd *cobra.Command, _ []string) error {
+	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+		return err
+	}
 	d := daemon.New(config.DefaultDataPath())
 	// Restart may stop an otherwise healthy managed gateway. Validate every
 	// process-identity artifact before that first side effect so malformed or

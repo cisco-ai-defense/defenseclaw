@@ -27,8 +27,8 @@ It mirrors:
 
 Importing this module instead of reaching into private helpers in
 :mod:`defenseclaw.config` lets other CLI commands (``cmd_doctor``,
-``cmd_uninstall``, ``cmd_setup_sandbox``) walk the connector matrix
-without circular imports through ``Config``.
+``cmd_uninstall``) walk the connector matrix without circular imports
+through ``Config``.
 
 Public surface
 --------------
@@ -372,35 +372,94 @@ def is_known(connector: str | None) -> bool:
     return normalize(connector) in KNOWN_CONNECTORS
 
 
+# How much of a plugin.yaml is read, in bytes (the gateway's
+# maxPluginManifestBytes).
+_PLUGIN_MANIFEST_MAX_BYTES = 64 * 1024
+
+
+def _read_plugin_manifest(manifest: str) -> dict | None:
+    """Parse one plugin.yaml the way the gateway does, or return ``None``.
+
+    The bytes go straight to the YAML parser, which reads a UTF-8 or UTF-16
+    (BOM) manifest; any read, decode or parse error means "no manifest",
+    as in the gateway's ``readPluginManifestName``.
+    """
+    try:
+        with open(manifest, "rb") as fh:
+            doc = yaml.safe_load(fh.read(_PLUGIN_MANIFEST_MAX_BYTES))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def scan_plugin_connectors(plugin_dir: str) -> tuple[set[str], bool]:
+    """Return ``(declared names, whether any manifest is loadable)``.
+
+    A manifest is loadable when it sets ``entry`` and ``sha256`` and its
+    ``entry`` is a regular file in the plugin's directory, on an OS where the
+    gateway loads Go plugins (not Windows). Raises :class:`OSError` when
+    *plugin_dir* exists but cannot be listed.
+    """
+    names: set[str] = set()
+    loadable = False
+    if not (plugin_dir or "").strip():
+        return names, loadable
+    try:
+        entries = list(os.scandir(plugin_dir))
+    except FileNotFoundError:
+        return names, loadable
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        names.add(entry.name.strip().lower())
+        doc = _read_plugin_manifest(os.path.join(entry.path, "plugin.yaml"))
+        if doc is None:
+            continue
+        if isinstance(doc.get("name"), str):
+            names.add(doc["name"].strip().lower())
+        if all(isinstance(doc.get(key), str) and doc[key].strip() for key in ("entry", "sha256")):
+            loadable = loadable or _plugin_entry_loadable(entry.path, doc["entry"].strip())
+    return names, loadable
+
+
+def _plugin_entry_loadable(directory: str, entry: str) -> bool:
+    """Report whether the gateway could open plugin *entry* of *directory*:
+    Go plugins never load on Windows, and the loader opens
+    ``<directory>/<entry>`` only when it is a regular file."""
+    if sys.platform == "win32":
+        return False
+    try:
+        info = os.lstat(os.path.join(directory, entry))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
+
+
 def declared_plugin_connectors(plugin_dir: str) -> set[str]:
     """Return the connector names the plugin directories under *plugin_dir* declare.
 
     Each subdirectory declares its own name and, when its ``plugin.yaml`` has
     one, that ``name`` (both lowercased), mirroring the gateway's
-    ``pluginDirDeclares``. A missing *plugin_dir* declares nothing. Any other
-    read error raises :class:`OSError`: callers must then treat every name as
-    one a plugin might provide.
+    ``pluginDirDeclares``. A manifest that cannot be read, decoded (for
+    example one that is not UTF-8) or parsed declares only its directory
+    name, as in the gateway. A missing *plugin_dir* declares nothing. Only a
+    *plugin_dir* that exists but cannot be listed raises :class:`OSError`:
+    callers must then treat every name as one a plugin might provide.
     """
-    names: set[str] = set()
-    if not (plugin_dir or "").strip():
-        return names
-    try:
-        entries = list(os.scandir(plugin_dir))
-    except FileNotFoundError:
-        return names
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        names.add(entry.name.strip().lower())
-        manifest = os.path.join(entry.path, "plugin.yaml")
-        try:
-            with open(manifest, encoding="utf-8") as fh:
-                doc = yaml.safe_load(fh.read(64 * 1024))
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(doc, dict) and isinstance(doc.get("name"), str):
-            names.add(doc["name"].strip().lower())
-    return names
+    return scan_plugin_connectors(plugin_dir)[0]
+
+
+def plugin_dir_may_provide_any_connector(plugin_dir: str) -> bool:
+    """Report whether a plugin under *plugin_dir* could register any name.
+
+    The gateway registers a plugin connector under the name its code reports
+    (``Name()``), which need not match the plugin's directory or manifest
+    name. So while *plugin_dir* holds a manifest the gateway would try to
+    load (``entry`` and ``sha256`` set and the entry file present, not on
+    Windows), no connector name can be ruled out offline. Raises
+    :class:`OSError` like :func:`declared_plugin_connectors`.
+    """
+    return scan_plugin_connectors(plugin_dir)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -2003,7 +2062,6 @@ def mcp_servers(
     openclaw_config: str | None = None,
     workspace_dir: str | None = None,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     infer_workspace_from_cwd: bool = False,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
@@ -2029,10 +2087,8 @@ def mcp_servers(
     * OpenClaw:    ``openclaw config get mcp.servers`` (preferred)
                     falling back to direct ``openclaw.json`` parse
 
-    *openclaw_bin_resolver* and *openclaw_cmd_prefix* let callers
-    inject test doubles or sandbox-mode prefixes (``sudo -u sandbox``);
-    when omitted, lookups go through ``shutil.which`` and an empty
-    prefix.
+    *openclaw_bin_resolver* lets callers inject a test double; when
+    omitted, the lookup goes through ``shutil.which``.
     """
     name = normalize(connector)
     infer = infer_workspace_from_cwd
@@ -2105,7 +2161,6 @@ def mcp_servers(
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
 
@@ -2975,6 +3030,30 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
     return _dedup(files)
 
 
+def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
+    """Return a folder of an OpenCode plugin destination that group or other can write.
+
+    The gateway refuses to install its plugin there and does not start.
+    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
+    as 0775. Only the folders inside the home directory are checked.
+    """
+    if os.name == "nt":
+        return ""
+    home = os.path.realpath(os.path.expanduser("~"))
+    for plugin_path in plugin_paths:
+        folder = os.path.dirname(os.path.realpath(plugin_path))
+        while folder.startswith(home + os.sep):
+            try:
+                mode = os.lstat(folder).st_mode
+            except OSError:
+                folder = os.path.dirname(folder)
+                continue
+            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
+                return folder
+            folder = os.path.dirname(folder)
+    return ""
+
+
 def _opencode_config_dir() -> str:
     raw = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
     if raw:
@@ -3782,12 +3861,10 @@ def _openclaw_mcp_servers(
     openclaw_config: str | None,
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     cli_entries = _read_mcp_servers_via_openclaw_cli(
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
     if cli_entries is not None:
@@ -4596,14 +4673,12 @@ def _devin_config_paths(workspace_dir: str | None = None) -> list[str]:
 def _read_mcp_servers_via_openclaw_cli(
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry] | None:
     """Run ``openclaw config get mcp.servers`` and parse the JSON.
 
     Returns ``None`` (not ``[]``) on any failure so callers can fall
-    back to direct ``openclaw.json`` parsing. Honors *openclaw_cmd_prefix*
-    so sandbox-mode setups can prepend ``sudo -u sandbox``.
+    back to direct ``openclaw.json`` parsing.
     """
     if openclaw_bin_resolver is None:
         import shutil
@@ -4611,10 +4686,9 @@ def _read_mcp_servers_via_openclaw_cli(
         bin_path = shutil.which("openclaw") or "openclaw"
     else:
         bin_path = openclaw_bin_resolver()
-    prefix = list(openclaw_cmd_prefix or [])
     try:
         result = subprocess.run(
-            [*prefix, bin_path, "config", "get", "mcp.servers"],
+            [bin_path, "config", "get", "mcp.servers"],
             capture_output=True,
             text=True,
             timeout=10,

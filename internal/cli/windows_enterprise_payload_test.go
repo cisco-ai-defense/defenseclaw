@@ -308,6 +308,8 @@ func TestStageWindowsEnterprisePayloadRemovesStagingWhenTrustFails(t *testing.T)
 func TestRunWindowsEnterpriseLifecycleStagesTheEmbeddedInstallerWhenDiscoveryFindsNone(
 	t *testing.T,
 ) {
+	// Hermetic: the host running the test may carry a real deployment.
+	stubWindowsEnterpriseDeployments(t, nil)
 	originalRunner := windowsEnterpriseCommandRunner
 	originalScriptFinder := windowsEnterpriseScriptFinder
 	originalStager := windowsEnterprisePayloadStager

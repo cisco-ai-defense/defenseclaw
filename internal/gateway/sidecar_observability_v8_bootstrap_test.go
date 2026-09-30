@@ -304,6 +304,9 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 }
 
 func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	// This component fixture runs as the test user, not as a pinned Windows
 	// virtual service account. Keep the process identity honest while the
@@ -989,7 +992,7 @@ func TestSidecarBootstrapObservabilityV8RejectsV7WithoutMutation(t *testing.T) {
 }
 
 func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
-	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil, nil); err == nil || sidecar != nil {
+	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil); err == nil || sidecar != nil {
 		t.Fatalf("v7 constructor = sidecar:%v error:%v", sidecar, err)
 	}
 }
@@ -1019,7 +1022,7 @@ func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 			candidate.DeploymentMode = test.failedNewMode
 			candidate.Gateway.DeviceKeyFile = badKey
 
-			sidecar, err := NewSidecar(candidate, nil, nil, nil)
+			sidecar, err := NewSidecar(candidate, nil, nil)
 			if err == nil || sidecar != nil {
 				t.Fatalf("failed constructor = sidecar:%v error:%v", sidecar, err)
 			}
@@ -1097,6 +1100,9 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 }
 
 func TestSidecarRawReloadResolvesManagedModeAndDefaultEndpoint(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
 		t.Context(), fixture.configPath, fixture.raw,

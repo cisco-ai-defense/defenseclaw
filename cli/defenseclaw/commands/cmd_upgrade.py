@@ -26,11 +26,38 @@ from __future__ import annotations
 import click
 
 
+def _managed_enterprise_profile() -> str | None:
+    """The machine-wide managed deployment on this host, or None.
+
+    A per-user upgrade beside a managed deployment would install a second,
+    unmanaged gateway, so both commands refuse while it exists. The check
+    itself lives in the upgrade shim, which the console entry point runs
+    directly for ``defenseclaw upgrade``.
+    """
+
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    return managed_deployment()
+
+
+def _refuse_on_managed_host(command: str) -> None:
+    profile = _managed_enterprise_profile()
+    if profile:
+        click.echo(
+            f"  ✗ A managed DefenseClaw enterprise deployment ({profile}) is installed on this computer; "
+            f"'defenseclaw {command}' is disabled. Use the managed deployment channel.",
+            err=True,
+        )
+        click.echo("    Nothing was changed.", err=True)
+        raise SystemExit(1)
+
+
 @click.command("upgrade")
 @click.option("--version", "target_version", default=None, metavar="X.Y.Z", help="Install this release.")
 @click.option("--yes", "-y", is_flag=True, help="Do not prompt.")
 def upgrade(target_version: str | None, yes: bool) -> None:
     """Upgrade to the latest release (or X.Y.Z) using that release's installer."""
+    _refuse_on_managed_host("upgrade")
     from defenseclaw.upgrade_shim import run
 
     args = ["upgrade"] + (["--version", target_version] if target_version else []) + (["--yes"] if yes else [])
@@ -41,6 +68,7 @@ def upgrade(target_version: str | None, yes: bool) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Do not prompt.")
 def rollback(yes: bool) -> None:
     """Restore the install that the last upgrade replaced."""
+    _refuse_on_managed_host("rollback")
     from defenseclaw.upgrade_shim import run
 
     raise SystemExit(run(["rollback"] + (["--yes"] if yes else [])))

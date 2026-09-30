@@ -18,6 +18,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,9 +35,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -113,7 +114,6 @@ type InstallWatcher struct {
 	managedArtifacts []string
 	store            *audit.Store
 	logger           *audit.Logger
-	shell            *sandbox.OpenShell
 	opa              *policy.Engine
 	webhooks         WebhookDispatcher
 	debounce         time.Duration
@@ -147,7 +147,7 @@ func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
 // to the built-in Go admission logic. Watcher observability is exclusively
 // emitted through the audit logger's generated v8 runtime.
-func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
+func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -158,7 +158,6 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		pluginDirs:       pluginDirs,
 		store:            store,
 		logger:           logger,
-		shell:            shell,
 		opa:              opa,
 		debounce:         debounce,
 		onAdmit:          onAdmit,
@@ -228,7 +227,14 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if _, exists := watchedDirs[key]; exists {
 			return true
 		}
-		if err := ensureAndWatch(fsw, dir); err != nil {
+		created, err := ensureAndWatch(fsw, dir)
+		if len(created) > 0 && watcherConnectorName(w.cfg) == "opencode" {
+			// The OpenCode teardown removes these again while they are empty.
+			if recordErr := gatewayconnector.RecordWatcherCreatedDirs(w.cfg.DataDir, created); recordErr != nil {
+				fmt.Fprintf(os.Stderr, "[watch] record created dirs: %v\n", recordErr)
+			}
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
@@ -912,8 +918,9 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	switch evt.Type {
 	case InstallMCP:
-		me := enforce.NewMCPEnforcer(w.shell)
-		_ = me.BlockEndpoint(evt.Name)
+		// MCP servers have no filesystem artifact to quarantine. The sidecar's
+		// handleMCPAdmission applies the block verdict to the connector's MCP
+		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
 		w.quarantineAsset(ctx, evt)
 	}
@@ -1353,16 +1360,32 @@ func toFindingInputs(findings []scanner.Finding) []policy.FindingInput {
 	return out
 }
 
-func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
+// ensureAndWatch creates dir when it is missing and watches it. It returns
+// the absolute paths of the folders it created: dir and any missing parents.
+func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
+	var created []string
+	if current, err := filepath.Abs(dir); err == nil {
+		for {
+			if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+			created = append(created, current)
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+			current = parent
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create dir: %w", err)
+		return nil, fmt.Errorf("create dir: %w", err)
 	}
 
 	if err := fsw.Add(dir); err != nil {
-		return fmt.Errorf("watch: %w", err)
+		return created, fmt.Errorf("watch: %w", err)
 	}
 
-	return nil
+	return created, nil
 }
 
 func addClaudeCacheWatches(

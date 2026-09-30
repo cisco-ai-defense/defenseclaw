@@ -21,12 +21,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
 
 import click
 import yaml
 
-from defenseclaw import ux
+from defenseclaw import policy_catalog, ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
@@ -57,25 +56,6 @@ def _ensure_policies_dir(app: AppContext) -> str:
     return d
 
 
-def _list_policy_files(app: AppContext) -> list[str]:
-    """Return paths to all .yaml policy files (user dir + bundled)."""
-    files: list[str] = []
-    user_dir = _policies_dir(app)
-    if os.path.isdir(user_dir):
-        for name in os.listdir(user_dir):
-            if name.endswith(".yaml") and not name.startswith("."):
-                files.append(os.path.join(user_dir, name))
-
-    bundled = _bundled_policies_dir()
-    if os.path.isdir(bundled):
-        seen = {os.path.basename(f) for f in files}
-        for name in os.listdir(bundled):
-            if name.endswith(".yaml") and not name.startswith(".") and name not in seen:
-                files.append(os.path.join(bundled, name))
-
-    return sorted(files)
-
-
 def _load_policy(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f) or {}
@@ -96,8 +76,8 @@ def _sanitize_policy_name(name: str) -> str:
     return safe
 
 
-def _find_policy(app: AppContext, name: str) -> str | None:
-    """Find a policy file by name (without .yaml extension)."""
+def _find_policy_file(app: AppContext, name: str) -> str | None:
+    """Find ``<name>.yaml`` (user dir, then bundled), whatever its content."""
     name = _sanitize_policy_name(name)
     user_dir = _policies_dir(app)
     candidate = os.path.join(user_dir, f"{name}.yaml")
@@ -110,6 +90,41 @@ def _find_policy(app: AppContext, name: str) -> str | None:
         return candidate
 
     return None
+
+
+def _not_a_policy_error(name: str, data: object) -> None:
+    """Explain why ``<name>.yaml`` can't be used as a named policy, then exit 1."""
+    if isinstance(data, dict) and {"rules", "default_action", "allowlist"} & set(data):
+        click.echo(
+            f"error: '{name}' is the host egress-firewall template, not a security policy. "
+            "List security policies with `defenseclaw policy list`.",
+            err=True,
+        )
+    else:
+        click.echo(
+            f"error: '{name}.yaml' is not a DefenseClaw security policy "
+            "(no admission, skill_actions or guardrail section). "
+            "List security policies with `defenseclaw policy list`.",
+            err=True,
+        )
+    raise SystemExit(1)
+
+
+def _find_policy(app: AppContext, name: str) -> str | None:
+    """Find a named security policy file by name (without .yaml extension).
+
+    Returns ``None`` when no such file exists. A file that exists but is not
+    a named policy (e.g. the bundled ``firewall-deny-default`` host-firewall
+    template) exits 1 with a plain explanation instead of being treated as
+    one.
+    """
+    path = _find_policy_file(app, name)
+    if path is None:
+        return None
+    data = policy_catalog.load_policy_yaml(path)
+    if data is None or not policy_catalog.is_named_policy(data):
+        _not_a_policy_error(name, data)
+    return path
 
 
 @click.group()
@@ -246,37 +261,40 @@ def create(
 # ---------------------------------------------------------------------------
 
 @policy.command("list")
+@click.option("--json", "json_out", is_flag=True, help="Print the policies as JSON.")
 @pass_ctx
-def list_policies(app: AppContext) -> None:
+def list_policies(app: AppContext, json_out: bool) -> None:
     """List all available policies (built-in and custom)."""
-    files = _list_policy_files(app)
+    policies = policy_catalog.list_named_policies(_policies_dir(app))
+    active = policy_catalog.active_policy_name(_policies_dir(app))
 
-    if not files:
+    if json_out:
+        click.echo(
+            json.dumps(
+                {"version": 1, "active": active, "policies": [p.to_json() for p in policies]},
+                indent=2,
+            )
+        )
+        return
+
+    if not policies:
         ux.warn("No policies found.")
         return
 
-    active = _get_active_policy_name(app)
-
     click.echo(f"{ux.bold('Available policies:')}")
     click.echo()
-    for path in files:
-        data = _load_policy(path)
-        pname = data.get("name", Path(path).stem)
-        desc = data.get("description", "")
-        is_builtin = path.startswith(_bundled_policies_dir())
-        is_active = pname == active
-
-        prefix = "  * " if is_active else "    "
-        label = ux.bold(pname)
+    for summary in policies:
+        prefix = "  * " if summary.active else "    "
+        label = ux.bold(summary.name)
         tag = ""
-        if is_builtin:
+        if summary.builtin:
             tag += ux.dim(" [built-in]")
-        if is_active:
+        if summary.active:
             tag += ux._style(" [active]", fg="green")
 
         click.echo(f"{prefix}{label}{tag}")
-        if desc:
-            click.echo(f"      {ux.dim(desc)}")
+        if summary.description:
+            click.echo(f"      {ux.dim(summary.description)}")
 
     click.echo()
     click.echo(f"  {ux.dim('Activate a policy:')} defenseclaw policy activate <name>")
@@ -289,13 +307,22 @@ def list_policies(app: AppContext) -> None:
 
 @policy.command()
 @click.argument("name")
+@click.option("--json", "json_out", is_flag=True, help="Print the policy summary as JSON.")
 @pass_ctx
-def show(app: AppContext, name: str) -> None:
+def show(app: AppContext, name: str, json_out: bool) -> None:
     """Show details of a policy."""
     path = _find_policy(app, name)
     if not path:
         click.echo(f"error: policy '{name}' not found", err=True)
         raise SystemExit(1)
+
+    if json_out:
+        summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app))
+        if summary is None:
+            click.echo(f"error: policy '{name}' could not be read", err=True)
+            raise SystemExit(1)
+        click.echo(json.dumps({"version": 1, "policy": summary.to_json()}, indent=2))
+        return
 
     data = _load_policy(path)
     pname = data.get("name", name)
@@ -410,13 +437,132 @@ def show(app: AppContext, name: str) -> None:
 
 @policy.command()
 @click.argument("name")
+@click.option(
+    "--reload/--no-reload",
+    "reload_gateway",
+    default=True,
+    show_default=True,
+    help="Ask the running gateway to reload its policy after saving.",
+)
 @pass_ctx
-def activate(app: AppContext, name: str) -> None:
-    """Activate a policy — applies it to config.yaml and syncs OPA data.json."""
+def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
+    """Activate a policy — applies it to config.yaml and syncs OPA data.json.
+
+    By default the running gateway is then asked to reload its policy
+    (POST /policy/reload) so the change takes effect immediately. If the
+    gateway isn't running, it loads the policy when it next starts.
+    """
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
     if app.logger:
-        app.logger.log_action("policy-activate", name, f"source={path}")
+        try:
+            app.logger.log_action("policy-activate", name, f"source={path}")
+        except CanonicalObservabilityUnavailableError:
+            # Same offline-staging rule as setup: the policy is saved for the
+            # next gateway start, but the audit event can't be admitted now.
+            click.echo(
+                "  ⚠ Policy saved, but the gateway runtime is unavailable; the audit event "
+                "was not recorded.",
+                err=True,
+            )
+    if not reload_gateway:
+        return
+    _reload_and_report(app, name)
+
+
+def _reload_and_report(app: AppContext, name: str) -> None:
+    """Ask the running gateway to reload its policy and say how that went.
+
+    Shared by ``policy activate`` and ``policy edit``: reloaded → ok;
+    gateway not running → the change is saved for its next start (exit 0);
+    rejected → exit 1 pointing at ``defenseclaw policy validate``.
+    """
+    outcome, detail = _reload_gateway_policy(app)
+    if outcome == "reloaded":
+        ux.ok("Gateway reloaded the policy; it is enforcing it now.")
+        return
+    if outcome == "unreachable":
+        click.echo("saved; the gateway isn't running, it loads this policy when it starts")
+        return
+    click.echo(
+        f"error: policy '{name}' was saved, but the running gateway rejected the reload"
+        + (f" ({detail})" if detail else "")
+        + ". Run `defenseclaw policy validate` to find the problem, fix it, then activate again.",
+        err=True,
+    )
+    raise SystemExit(1)
+
+
+def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
+    """POST /policy/reload to the running gateway.
+
+    Returns ``(outcome, detail)`` where outcome is ``"reloaded"``,
+    ``"unreachable"`` (nothing listening / timed out / no API port) or
+    ``"rejected"`` (HTTP error or malformed response; *detail* says why).
+    """
+    import requests
+
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    gateway = getattr(app.cfg, "gateway", None)
+    port = int(getattr(gateway, "api_port", 0) or 0) if gateway is not None else 0
+    if port <= 0:
+        return "unreachable", ""
+    resolver = getattr(gateway, "resolved_token", None)
+    try:
+        token = resolver() if callable(resolver) else str(getattr(gateway, "token", "") or "")
+    except Exception:  # noqa: BLE001 — a token lookup failure is an auth problem, not a crash.
+        token = ""
+    client = OrchestratorClient(
+        host=gateway_api_client_host(app.cfg),
+        port=port,
+        token=(token or "").strip(),
+        timeout=5,
+    )
+    try:
+        client.reload_policy()
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status in (401, 403):
+            return "rejected", "the gateway refused the request; check the gateway token"
+        reason = ""
+        if exc.response is not None:
+            try:
+                body = exc.response.json()
+                if isinstance(body, dict):
+                    reason = str(body.get("error") or "")
+            except ValueError:
+                reason = ""
+        return "rejected", reason[:300] or f"HTTP {status}"
+    except (requests.ConnectionError, requests.Timeout, OSError):
+        return "unreachable", ""
+    except ValueError:
+        return "rejected", "the gateway sent an unexpected reply"
+    return "reloaded", ""
+
+
+def _skill_actions_from_policy(data: dict):  # noqa: ANN202 - SkillActionsConfig, imported lazily
+    """The ``skill_actions`` block of a policy as the config.yaml section."""
+    from defenseclaw.config import SeverityAction, SkillActionsConfig
+
+    actions_raw = data.get("skill_actions", {})
+
+    def _parse_action(raw: dict) -> SeverityAction:
+        return SeverityAction(
+            file=raw.get("file", "none"),
+            runtime=raw.get("runtime", "enable"),
+            install=raw.get("install", "none"),
+        )
+
+    return SkillActionsConfig(
+        critical=_parse_action(actions_raw.get("critical", {})),
+        high=_parse_action(actions_raw.get("high", {})),
+        medium=_parse_action(actions_raw.get("medium", {})),
+        low=_parse_action(actions_raw.get("low", {})),
+        info=_parse_action(actions_raw.get("info", {})),
+    )
 
 
 def _activate_policy(app: AppContext, name: str) -> str:
@@ -435,30 +581,8 @@ def _activate_policy(app: AppContext, name: str) -> str:
 
     data = _load_policy(path)
 
-    actions_raw = data.get("skill_actions", {})
-
-    from defenseclaw.config import (
-        SeverityAction,
-        SkillActionsConfig,
-    )
-
-    def _parse_action(raw: dict) -> SeverityAction:
-        return SeverityAction(
-            file=raw.get("file", "none"),
-            runtime=raw.get("runtime", "enable"),
-            install=raw.get("install", "none"),
-        )
-
-    new_actions = SkillActionsConfig(
-        critical=_parse_action(actions_raw.get("critical", {})),
-        high=_parse_action(actions_raw.get("high", {})),
-        medium=_parse_action(actions_raw.get("medium", {})),
-        low=_parse_action(actions_raw.get("low", {})),
-        info=_parse_action(actions_raw.get("info", {})),
-    )
-
     watch_raw = data.get("watch", {})
-    app.cfg.skill_actions = new_actions
+    app.cfg.skill_actions = _skill_actions_from_policy(data)
     if "rescan_enabled" in watch_raw:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
@@ -726,7 +850,21 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
 
 @policy.group()
 def edit() -> None:
-    """Edit policy sections (guardrail, firewall, scanner, actions)."""
+    """Edit policy sections (guardrail, firewall, scanner, actions).
+
+    Editing the active policy also syncs OPA data.json and, by default, asks
+    the running gateway to reload it (``--no-reload`` to skip). Editing any
+    other policy only saves the draft.
+    """
+
+
+_reload_option = click.option(
+    "--reload/--no-reload",
+    "reload_gateway",
+    default=True,
+    show_default=True,
+    help="When the edited policy is the active one, ask the running gateway to reload it.",
+)
 
 
 @edit.command("actions")
@@ -736,9 +874,10 @@ def edit() -> None:
 @click.option("--file", "file_action", type=click.Choice(FILE_CHOICES), default=None)
 @click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None)
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_actions(app: AppContext, severity: str, runtime: str | None, file_action: str | None,
-                 install: str | None, policy_name: str | None) -> None:
+                 install: str | None, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit severity actions for the global policy."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -760,8 +899,15 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         click.echo("No changes specified.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
+    if synced:
+        # CLI skill-action paths fall back to config.yaml's skill_actions,
+        # which `policy activate` writes; an edit to the active policy
+        # updates them the same way. A draft edit leaves them alone.
+        app.cfg.skill_actions = _skill_actions_from_policy(data)
+        app.cfg.save()
     ux.ok(f"Updated {severity.upper()}: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("scanner")
@@ -774,10 +920,11 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
 @click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None)
 @click.option("--remove", is_flag=True, help="Remove this override (revert to global)")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str | None,
                  file_action: str | None, install: str | None, remove: bool,
-                 policy_name: str | None) -> None:
+                 policy_name: str | None, reload_gateway: bool) -> None:
     """Edit per-scanner-type severity overrides."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -789,8 +936,9 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             del scanner_ovr[severity]
             if not scanner_ovr:
                 del overrides[scanner_type]
-            _save_and_maybe_sync(app, path, data, name)
+            synced = _save_and_maybe_sync(app, path, data, name)
             ux.ok(f"Removed {scanner_type}/{severity.upper()} override.")
+            _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
         return
@@ -813,8 +961,9 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Updated scanner override {scanner_type}/{severity.upper()}: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("guardrail")
@@ -830,11 +979,16 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
 @click.option("--set-severity-mapping", nargs=2, multiple=True, metavar="CATEGORY SEVERITY",
               help="Set severity mapping (e.g. --set-severity-mapping injection CRITICAL)")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold: int | None,
                    cisco_trust_level: str | None, add_pattern: tuple, remove_pattern: tuple,
-                   set_severity_mapping: tuple, policy_name: str | None) -> None:
-    """Edit guardrail thresholds, patterns, and severity mappings."""
+                   set_severity_mapping: tuple, policy_name: str | None, reload_gateway: bool) -> None:
+    """Edit guardrail thresholds, patterns, and severity mappings.
+
+    Thresholds are severity ranks (4=CRITICAL, 3=HIGH, 2=MEDIUM, 1=LOW) and
+    apply to every connector that uses this policy.
+    """
     path, data, name = _resolve_editable_policy(app, policy_name)
 
     guardrail = data.setdefault("guardrail", {})
@@ -876,8 +1030,9 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         click.echo("No changes specified.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Guardrail updated: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("firewall")
@@ -889,10 +1044,11 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 @click.option("--add-port", multiple=True, type=int, help="Add an allowed port")
 @click.option("--remove-port", multiple=True, type=int, help="Remove an allowed port")
 @click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_reload_option
 @pass_ctx
 def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple,
                   remove_domain: tuple, add_blocked: tuple, remove_blocked: tuple,
-                  add_port: tuple, remove_port: tuple, policy_name: str | None) -> None:
+                  add_port: tuple, remove_port: tuple, policy_name: str | None, reload_gateway: bool) -> None:
     """Edit egress firewall rules (domains, ports, blocked destinations)."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
@@ -937,8 +1093,9 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         click.echo("No changes specified.")
         return
 
-    _save_and_maybe_sync(app, path, data, name)
+    synced = _save_and_maybe_sync(app, path, data, name)
     ux.ok(f"Firewall updated: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 # ---------------------------------------------------------------------------
@@ -1095,7 +1252,7 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     return path, data, name
 
 
-def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> None:
+def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> bool:
     """Persist the edited policy YAML, syncing the live OPA data.json only
     when the edited policy is the active one (OTHER-2).
 
@@ -1103,16 +1260,24 @@ def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> N
     data.json nor silently stamp the draft as active (a "tweak a draft"
     action becoming a live policy swap). When the edited policy isn't
     active we save the YAML and tell the operator how to apply it.
+    Returns True when the live (active) copy was synced.
     """
     _save_policy(path, data)
     active = _get_active_policy_name(app)
     if active is not None and name == active:
         _sync_opa_data(app, data)
-    else:
-        click.echo(
-            f"  {ux.dim('Saved draft. Activate with:')} "
-            f"defenseclaw policy activate {name}"
-        )
+        return True
+    click.echo(
+        f"  {ux.dim('Saved draft. Activate with:')} "
+        f"defenseclaw policy activate {name}"
+    )
+    return False
+
+
+def _reload_after_edit(app: AppContext, name: str, *, synced: bool, reload_gateway: bool) -> None:
+    """After editing the active policy, reload it like ``policy activate``."""
+    if synced and reload_gateway:
+        _reload_and_report(app, name)
 
 
 def _opa_runtime_action(runtime: str) -> str:

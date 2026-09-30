@@ -185,6 +185,14 @@ YAML_ANNOTATIONS = {
     "    token_env: SPLUNK_HEC_TOKEN": ("    # Required HEC token environment-variable name.",),
     "  - name: http-archive": ("  # Generic HTTP JSONL: logs only. Header/auth values use environment references.",),
     "    bearer_env: ARCHIVE_BEARER_TOKEN": ("    # Optional bearer token environment-variable name.",),
+    "  - name: splunk-standalone": (
+        "  # A standalone enterprise deployment can read tokens and header values from",
+        "  # protected credentials stored with enterprise secret set.",
+    ),
+    "    token_credential: splunk-hec-token": ("    # HEC token from a protected credential; use it instead of token_env.",),
+    "    bearer_credential: archive-bearer-token": (
+        "    # Bearer token from a protected credential; use it instead of bearer_env.",
+    ),
     "  - name: general-otel": ("  # General OTLP: logs, traces, and metrics with per-signal endpoint overrides.",),
     "    protocol: http/protobuf": (
         "    # grpc, grpc/protobuf, http, or http/protobuf; HTTP means OTLP protobuf,",
@@ -199,7 +207,10 @@ YAML_ANNOTATIONS = {
         "    # Presence normally defaults true. Disabled examples retain policy without",
         "    # initializing transports or resolving their secrets.",
     ),
-    "    headers:": ("    # Header values may be bounded literal metadata or {env: NAME} secrets.",),
+    "    headers:": (
+        "    # Header values may be bounded literal metadata, {env: NAME} secrets, or",
+        "    # {credential: NAME} protected credentials (standalone enterprise only).",
+    ),
     "    tls:": ("    # TLS verification defaults on. A CA path is read-only and may be shared.",),
     "    timeout_ms: 10000": ("    # Positive per-export timeout in milliseconds.",),
     "    network_safety:": (
@@ -416,7 +427,10 @@ def _reference_document() -> dict[str, Any]:
                     "endpoint": "https://archive.example.test/defenseclaw",
                     "method": "POST",
                     "bearer_env": "ARCHIVE_BEARER_TOKEN",
-                    "headers": {"X-Tenant": {"env": "ARCHIVE_TENANT"}},
+                    "headers": {
+                        "X-Tenant": {"env": "ARCHIVE_TENANT"},
+                        "X-Archive-Key": {"credential": "archive-api-key"},
+                    },
                     "tls": {"insecure_skip_verify": False, "ca_cert": ""},
                     "timeout_ms": 10000,
                     "network_safety": {
@@ -435,6 +449,20 @@ def _reference_document() -> dict[str, Any]:
                         "buckets": ["compliance.activity"],
                         "redaction_profile": "strict",
                     },
+                },
+                {
+                    "name": "splunk-standalone",
+                    "kind": "splunk_hec",
+                    "enabled": False,
+                    "endpoint": "https://splunk.example.test:8088/services/collector/event",
+                    "token_credential": "splunk-hec-token",
+                },
+                {
+                    "name": "http-standalone",
+                    "kind": "http_jsonl",
+                    "enabled": False,
+                    "endpoint": "https://archive.example.test/defenseclaw",
+                    "bearer_credential": "archive-bearer-token",
                 },
                 {
                     "name": "general-otel",

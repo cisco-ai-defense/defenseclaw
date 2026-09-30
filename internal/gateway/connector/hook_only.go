@@ -501,7 +501,10 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		profile.MapVerdict = openCodeProfileMapVerdict
 	}
 	if c.name == "openhands" {
-		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, runtime.GOOS)
+		profile.NativeOTLP = openhandsNativeOTLPSpecForOS(opts, opts.profileGOOS())
+		// The CLI reports PascalCase SDK event types; see
+		// openhands_hook_profile.go.
+		profile.Decode = openHandsProfileDecode
 	}
 	if c.name == "amp" {
 		// Amp exposes an opaque plugin span ID but no documented W3C
@@ -1183,7 +1186,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
 			return err
 		}
-		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
+		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
@@ -1194,6 +1197,22 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return c.setupOpenHandsWithTokenRollback(ctx, opts)
 	}
 	return c.setup(ctx, opts, "")
+}
+
+// prepareHermesLifecycleDataDir makes <data dir>, which holds Hermes'
+// lifecycle lock, owner-private. On Windows the managed enterprise guardian
+// creates and protects that directory itself: re-protecting it under the
+// user's token needs the WRITE_DAC its DACL withholds (teardown failed with
+// "Access is denied" and left Hermes' hooks), and doing so rewrote the
+// inherited entries of every other subfolder to the user and SYSTEM only,
+// so an administrator could not remove them. There it is used as it is.
+func prepareHermesLifecycleDataDir(opts SetupOpts) error {
+	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
+		if info, err := os.Lstat(opts.DataDir); err == nil && info.IsDir() {
+			return nil
+		}
+	}
+	return ensureManagedBackupDirRestricted(opts.DataDir)
 }
 
 // setupOpenHandsWithTokenRollback binds the optional process-environment OTLP
@@ -1254,6 +1273,11 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 			return err
 		}
 	}
+	if c.name == "devin" {
+		if err := c.migrateDevinConfigTarget(opts, c.configPath(opts)); err != nil {
+			return err
+		}
+	}
 	if err := c.migrateManagedBackup(opts); err != nil {
 		return fmt.Errorf("%s managed backup migration: %w", c.name, err)
 	}
@@ -1288,20 +1312,38 @@ func (c *hookOnlyConnector) setup(ctx context.Context, opts SetupOpts, hermesCon
 // bytes are restored exactly; an operator-edited target receives surgical
 // removal of DefenseClaw entries and retains all foreign hooks.
 func (c *hookOnlyConnector) migrateOpenHandsConfigTarget(opts SetupOpts, target string) error {
+	return c.migrateConfigTarget(opts, target, "OpenHands")
+}
+
+// migrateDevinConfigTarget closes the previous ownership cycle when the
+// Devin hook config moved. Earlier builds resolved the macOS config root
+// with os.UserConfigDir (~/Library/Application Support/devin), which the
+// Devin CLI never reads; its config is ~/.config/devin/config.json. Without
+// this, Setup over the old receipt fails with a backup target mismatch on
+// every upgraded macOS host. Switching between the user-global config and
+// a workspace hooks.v1.json is handled the same way.
+func (c *hookOnlyConnector) migrateDevinConfigTarget(opts SetupOpts, target string) error {
+	return c.migrateConfigTarget(opts, target, "Devin")
+}
+
+// migrateConfigTarget restores or surgically cleans the file the "config"
+// receipt is bound to when Setup now targets another path, then discards the
+// receipt so patchConfig captures the new target.
+func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label string) error {
 	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
 	if os.IsNotExist(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("load previous OpenHands config backup: %w", err)
+		return fmt.Errorf("load previous %s config backup: %w", label, err)
 	}
 	oldPath, err := validateManagedFileBackupTarget(backup, c.name, "config", backup.Path)
 	if err != nil {
-		return fmt.Errorf("validate previous OpenHands config backup: %w", err)
+		return fmt.Errorf("validate previous %s config backup: %w", label, err)
 	}
 	newPath, err := normalizeManagedTargetPath(target)
 	if err != nil {
-		return fmt.Errorf("resolve new OpenHands config target: %w", err)
+		return fmt.Errorf("resolve new %s config target: %w", label, err)
 	}
 	equal := oldPath == newPath
 	if runtime.GOOS == "windows" {
@@ -1312,13 +1354,13 @@ func (c *hookOnlyConnector) migrateOpenHandsConfigTarget(opts SetupOpts, target 
 	}
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)
 	if err != nil {
-		return fmt.Errorf("restore previous OpenHands config target: %w", err)
+		return fmt.Errorf("restore previous %s config target: %w", label, err)
 	}
 	if restored {
 		return nil
 	}
 	if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
-		return fmt.Errorf("remove previous OpenHands hook entries: %w", err)
+		return fmt.Errorf("remove previous %s hook entries: %w", label, err)
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	return nil
@@ -1355,39 +1397,197 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	return bytes.Equal(installedMarker, marker), nil
 }
 
-// setupPluginArtifact renders the embedded bridge-plugin template
-// (APIAddr / stable token-sidecar path / FailMode substituted) and writes it
-// to the host agent's auto-load plugin directory at 0o600. The scoped token is
-// deliberately loaded from its owner-only sidecar at request time rather than
-// copied into this longer-lived artifact. The destination is
-// captured in the managed-file backup so Teardown can heal it: if the
-// plugin file is unchanged since setup it is removed (we created it);
-// if the operator hand-edited it, the backup restore leaves it alone.
-func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
-	tmpl, err := hookFS.ReadFile("hooks/" + c.pluginArtifactAsset)
+// managedPluginHookSocket returns the unix hook socket and trusted service
+// uid an in-agent plugin or connector shell hook must use, or ("", 0) to keep
+// the TCP transport. Only a managed install on a unix host with an absolute
+// socket path switches transports; Windows hooks and plugins keep TCP.
+func managedPluginHookSocket(opts SetupOpts) (string, int) {
+	socket := strings.TrimSpace(opts.ManagedHookSocket)
+	if !opts.ManagedEnterprise || socket == "" || runtime.GOOS == "windows" || !filepath.IsAbs(socket) {
+		return "", 0
+	}
+	uid := opts.ManagedServiceUID
+	if uid < 0 {
+		uid = 0
+	}
+	return filepath.Clean(socket), uid
+}
+
+// managedPluginForeignHookGuard returns the administrator-owned hook binary
+// a standalone managed plugin runs for the foreign-hook guard, or "" for
+// any other install.
+func managedPluginForeignHookGuard(opts SetupOpts) string {
+	binary := strings.TrimSpace(opts.ForeignHookGuardBinary)
+	if !opts.ManagedEnterprise || binary == "" || !filepath.IsAbs(binary) {
+		return ""
+	}
+	return filepath.Clean(binary)
+}
+
+// pluginSecureClientProfile reports a plugin rendered for the Secure Client
+// managed profile: a managed install without the standalone profile's
+// foreign-hook guard (standalone installs always render the guard). Its
+// plugin bytes stay as the Secure Client release pins them.
+func pluginSecureClientProfile(opts SetupOpts) bool {
+	return opts.ManagedEnterprise && managedPluginForeignHookGuard(opts) == ""
+}
+
+// secureClientPluginAssets are the plugin templates the Secure Client
+// profile renders instead of the current ones: copies of the templates its
+// release pins, kept byte for byte (the plugin scanner recognizes both).
+var secureClientPluginAssets = map[string]string{
+	"opencode-plugin.js": "opencode-plugin-secure-client.js",
+	"amp-plugin.ts":      "amp-plugin-secure-client.ts",
+}
+
+// pluginArtifactAssetFor is the embedded plugin template Setup renders for
+// opts. Both templates share the ownership marker line, so verification
+// reads either the same way.
+func (c *hookOnlyConnector) pluginArtifactAssetFor(opts SetupOpts) string {
+	if pluginSecureClientProfile(opts) {
+		if pinned, ok := secureClientPluginAssets[c.pluginArtifactAsset]; ok {
+			return pinned
+		}
+	}
+	return c.pluginArtifactAsset
+}
+
+// managedPluginForeignHookGuardMarker is the rendered line a standalone
+// managed plugin must carry; a plugin rendered before the guard existed
+// (or with another binary) fails verification and is repaired.
+func managedPluginForeignHookGuardMarker(opts SetupOpts, declaration, terminator string) []byte {
+	binary := managedPluginForeignHookGuard(opts)
+	if binary == "" {
+		return nil
+	}
+	return []byte(declaration + `"` + javaScriptStringContent(binary) + `"` + terminator)
+}
+
+// managedPluginListenerProof reports whether an in-agent plugin must make
+// the loopback TCP listener prove it is the gateway before sending its
+// per-user credential (UserScopedListenerProof). Only a managed install that
+// asks for it and keeps the TCP transport renders it; a plugin on the hook
+// socket verifies the socket's owner instead.
+func managedPluginListenerProof(opts SetupOpts) bool {
+	if !opts.ManagedEnterprise || !opts.ManagedListenerProof {
+		return false
+	}
+	socket, _ := managedPluginHookSocket(opts)
+	return socket == ""
+}
+
+// managedPluginListenerProofJS is the rendered DC_LISTENER_PROOF value.
+func managedPluginListenerProofJS(opts SetupOpts) string {
+	if managedPluginListenerProof(opts) {
+		return "1"
+	}
+	return ""
+}
+
+// managedPluginInstallMarker returns the install marker an in-agent plugin
+// checks before failing closed, or "" when unused. Only a managed install
+// with an absolute marker renders one.
+func managedPluginInstallMarker(opts SetupOpts) string {
+	marker := strings.TrimSpace(opts.ManagedInstallMarker)
+	if !opts.ManagedEnterprise || marker == "" || !filepath.IsAbs(marker) {
+		return ""
+	}
+	return filepath.Clean(marker)
+}
+
+// renderPluginArtifact is shared by Setup and standalone verification so
+// verification compares the agent's executable plugin with the bytes Setup
+// would install for the current options.
+func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error) {
+	asset := c.pluginArtifactAssetFor(opts)
+	tmpl, err := hookFS.ReadFile("hooks/" + asset)
 	if err != nil {
-		return fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
+		return nil, fmt.Errorf("%s read plugin template %s: %w", c.name, asset, err)
 	}
 	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.name)
 	if err != nil {
-		return fmt.Errorf("%s resolve scoped hook credential: %w", c.name, err)
+		return nil, fmt.Errorf("%s resolve scoped hook credential: %w", c.name, err)
 	}
 	tokenPath, err = filepath.Abs(tokenPath)
 	if err != nil {
-		return fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
+		return nil, fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}
+	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:     opts.APIAddr,
-		TokenFileJS: javaScriptStringContent(tokenPath),
-		FailMode:    failMode,
-		Managed:     opts.ManagedEnterprise,
+		APIAddr:            opts.APIAddr,
+		TokenFileJS:        javaScriptStringContent(tokenPath),
+		HookSocketJS:       javaScriptStringContent(hookSocket),
+		ServiceUID:         serviceUID,
+		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
+		ListenerProofJS:    managedPluginListenerProofJS(opts),
+		FailMode:           failMode,
+		Managed:            opts.ManagedEnterprise,
 	})
 	if err != nil {
-		return fmt.Errorf("%s render plugin template: %w", c.name, err)
+		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
+	}
+	return []byte(rendered), nil
+}
+
+// managedPluginArtifactDrift returns the managed plugin path when the
+// installed plugin is missing or differs in any byte from the plugin Setup
+// renders for opts, and "" when it matches or c installs no plugin.
+func (c *hookOnlyConnector) managedPluginArtifactDrift(opts SetupOpts) (string, error) {
+	if c == nil || !c.pluginArtifact {
+		return "", nil
+	}
+	path := c.configPath(opts)
+	expected, err := c.renderPluginArtifact(opts)
+	if err != nil {
+		return path, err
+	}
+	const maxManagedPluginBytes = 4 << 20
+	installed, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	if err != nil {
+		return path, err
+	}
+	if !bytes.Equal(installed, expected) {
+		return path, nil
+	}
+	return "", nil
+}
+
+// ManagedPluginArtifactDrift compares conn's managed in-agent plugin (Amp,
+// OpenCode) with the bytes Setup renders for opts, and returns the plugin
+// path when the installed file is missing or differs. The standalone
+// guardian (Linux, macOS and Windows) relies on it rather than on the
+// ownership markers or the recorded digests (the contract lock and the
+// custody receipt): the user can edit the plugin and those digests together,
+// a package upgrade leaves the previous release's plugin with both intact,
+// and the agent runs every line of the plugin. It returns "" for a
+// connector without a managed plugin. The file is read with the caller's
+// credentials, bounded and without following a link.
+func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) {
+	plugin, ok := conn.(interface {
+		managedPluginArtifactDrift(SetupOpts) (string, error)
+	})
+	if !ok {
+		return "", nil
+	}
+	return plugin.managedPluginArtifactDrift(opts)
+}
+
+// setupPluginArtifact writes the rendered bridge plugin to the host agent's
+// auto-load directory at 0o600. Its scoped token stays in an owner-only
+// sidecar. The managed-file backup lets Teardown restore a prior file only
+// when it is unchanged since Setup.
+func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+	renderedBody, err := c.renderPluginArtifact(opts)
+	if err != nil {
+		return err
 	}
 	path := c.configPath(opts)
 	if err := prepareOpenCodePluginArtifactDestination(path); err != nil {
@@ -1416,7 +1616,6 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return rollback(fmt.Errorf("%s capture plugin backup: %w", c.name, err))
 	}
-	renderedBody := []byte(rendered)
 	// Finalize the custody receipt before the atomic plugin replacement. This
 	// ordering guarantees that a visible DefenseClaw plugin never precedes the
 	// backup/post-hash record needed to own and restore it.
@@ -1486,10 +1685,16 @@ func javaScriptStringContent(value string) string {
 // Unlike ordinary agent config writes, plugin installation never follows a
 // symlink: an existing target must be the trusted regular file we inspected.
 func validatePluginArtifactDestination(path string) error {
+	return validatePluginArtifactDestinationFor(path, "")
+}
+
+// validatePluginArtifactDestinationFor also trusts trustedOwnerSID, the
+// per-user target a Windows guardian verifies without that user's token.
+func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("plugin path must be absolute: %q", path)
 	}
-	if err := hookAPIValidateDirectory(filepath.Dir(filepath.Clean(path))); err != nil {
+	if err := hookAPIValidateDirectoryFor(filepath.Dir(filepath.Clean(path)), trustedOwnerSID); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -1505,7 +1710,7 @@ func validatePluginArtifactDestination(path string) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("plugin target must be a regular file: %s", path)
 	}
-	if err := hookAPIValidateOwner(path, info); err != nil {
+	if err := hookAPIValidateOwnerFor(path, info, trustedOwnerSID); err != nil {
 		return err
 	}
 	return nil
@@ -1525,6 +1730,11 @@ func (c *hookOnlyConnector) hookCommandForOS(goos string, opts SetupOpts) string
 	unixCommand := filepath.Join(opts.DataDir, "hooks", c.scriptName)
 	if goos == "windows" && c.name == "hermes" && strings.TrimSpace(opts.HookExecutable) != "" {
 		return windowsHermesDirectHookCommand(opts.HookExecutable)
+	}
+	if c.name == "devin" {
+		if command := devinManagedHookCommand(goos, opts); command != "" {
+			return command
+		}
 	}
 	return hookInvocationCommandFor(goos, c.name, unixCommand)
 }
@@ -1555,7 +1765,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := validateHermesWindowsConfigPath(configPath); err != nil {
 			return err
 		}
-		if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
+		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
 		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
@@ -1608,10 +1818,29 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 	if c.name != "hermes" {
 		path = managedFileBackupTargetPath(opts.DataDir, c.name, logicalName, c.configPath(opts))
 	}
-	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
+	// Hermes: a captured config.yaml that already registers DefenseClaw's
+	// hook (a file put back from an earlier enrollment) is not restored, or
+	// DefenseClaw's entries would stay; only they are removed instead.
+	var restored bool
+	var err error
+	if c.name != "hermes" || !hermesConfigBackupHoldsOwnedHooks(opts.DataDir, logicalName, path, c.hookCommand(opts)) {
+		restored, err = restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
+	}
 	switch {
 	case err != nil:
 		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+	case restored && c.name == "devin":
+		// A Devin backup captured after an earlier DefenseClaw setup (the
+		// per-user devin-hook.sh route) holds DefenseClaw's own hooks, which
+		// the restore just put back; they go too.
+		owned := devinOwnedHookCommands(opts, c.hookCommand(opts))
+		if present, err := devinConfigReferencesHook(path, owned...); err != nil {
+			errs = append(errs, fmt.Sprintf("inspect restored config: %v", err))
+		} else if present {
+			if err := removeDevinHookReferences(path, owned...); err != nil {
+				errs = append(errs, fmt.Sprintf("remove hook entries from the restored config: %v", err))
+			}
+		}
 	case restored:
 	case !restored:
 		if err := c.removeConfigEntriesWithManagedBackup(
@@ -1623,6 +1852,15 @@ func (c *hookOnlyConnector) teardown(ctx context.Context, opts SetupOpts, hermes
 			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
 		} else {
 			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
+		}
+	}
+	if c.name == "antigravity" && opts.ManagedEnterprise {
+		// DefenseClaw's Antigravity entries are its own by their outer key,
+		// also in a hooks.json the restore just put back that was captured
+		// after an earlier DefenseClaw setup (one a rolled-back install left),
+		// and when they run a command this release does not render.
+		if err := removeAntigravityOwnedHookEntries(path); err != nil {
+			errs = append(errs, fmt.Sprintf("remove DefenseClaw hook entries: %v", err))
 		}
 	}
 	if c.name == "hermes" {
@@ -1682,7 +1920,16 @@ func removeCursorHookArtifacts(opts SetupOpts) error {
 // process caches and re-execs), an opencode plugin is re-read from the
 // plugins directory on each startup, so simply removing the file stops
 // it loading.
+//
+// Without a backup receipt (the user deleted the DefenseClaw data directory)
+// there is no edit to protect: a plugin whose first line is DefenseClaw's
+// ownership marker is DefenseClaw's and is removed; any other file stays.
 func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
+	if _, err := os.Lstat(managedFileBackupPath(opts.DataDir, c.name, "config")); os.IsNotExist(err) {
+		return c.removeOwnedPluginWithoutBackup(c.configPath(opts))
+	} else if err != nil {
+		return fmt.Errorf("%s inspect plugin backup: %w", c.name, err)
+	}
 	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path)
 	if err != nil {
@@ -1695,6 +1942,47 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
+	if opts.ManagedEnterprise {
+		// A plugin captured after an earlier DefenseClaw setup (one a
+		// rolled-back install left) is DefenseClaw's own, so putting it back
+		// would leave the registration in place; it goes too.
+		return c.removeOwnedPluginWithoutBackup(path)
+	}
+	return nil
+}
+
+// removeOwnedPluginWithoutBackup deletes the plugin at path when it is a
+// regular file whose first line is a DefenseClaw ownership marker (any
+// version, so an older DefenseClaw's plugin is recognized too) in a trusted
+// plugin directory. Any other file is left alone.
+func (c *hookOnlyConnector) removeOwnedPluginWithoutBackup(path string) error {
+	const maxManagedPluginBytes = 4 << 20
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%s inspect plugin %s: %w", c.name, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	data, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("%s read plugin %s: %w", c.name, path, err)
+	}
+	firstLine, _, _ := bytes.Cut(data, []byte("\n"))
+	if !validManagedPluginOwnershipMarker(bytes.TrimSuffix(firstLine, []byte("\r"))) {
+		return nil
+	}
+	if err := validatePluginArtifactDestination(path); err != nil {
+		return fmt.Errorf("%s validate plugin %s for removal: %w", c.name, path, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("%s remove plugin %s: %w", c.name, path, err)
+	}
 	return nil
 }
 
@@ -1949,12 +2237,19 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 		if validateHermesWindowsConfigPath(configPath) != nil {
 			return AgentPaths{}
 		}
+		patched := []string{
+			configPath,
+			filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+		}
+		// Setup writes the direct-native state only on Windows; listing it
+		// elsewhere made the enterprise installer refuse every POSIX Hermes
+		// install and every managed Hermes repair fail on a file that is
+		// never created (seen live on Linux and macOS).
+		if runtime.GOOS == "windows" {
+			patched = append(patched, filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName))
+		}
 		return AgentPaths{
-			PatchedFiles: uniqueNonEmptyStrings([]string{
-				configPath,
-				filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
-				filepath.Join(opts.DataDir, "hooks", hermesDirectNativeStateFileName),
-			}),
+			PatchedFiles: uniqueNonEmptyStrings(patched),
 			BackupFiles: []string{
 				managedFileBackupPath(opts.DataDir, c.name, c.managedBackupLogicalName()),
 				managedFileBackupPath(opts.DataDir, c.name, hermesAllowlistLogicalName),
@@ -2233,7 +2528,9 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 		return removeHermesHooks(path, hookScript, nil)
 	case "cursor":
 		return removeJSONHookReferences(path, cursorOwnedHookCommands(opts)...)
-	case "copilot", "openhands":
+	case "copilot":
+		return removeCopilotHookReferences(path, hookScript)
+	case "openhands":
 		return removeJSONHookReferences(path, hookScript)
 	case "devin":
 		return removeDevinHookReferences(path, devinOwnedHookCommands(opts, hookScript)...)
@@ -2257,6 +2554,11 @@ func (c *hookOnlyConnector) effectiveFailClosed(opts SetupOpts) bool {
 func hermesConfigPath(SetupOpts) string {
 	if HermesConfigPathOverride != "" {
 		return HermesConfigPathOverride
+	}
+	// A privileged service acting for another user (the managed guardian)
+	// must resolve that user's profile, not its own token's known folders.
+	if home := activeUserHomeOverride(); home != "" && runtime.GOOS == "windows" {
+		return hermespath.ConfigPathForUserHome(home)
 	}
 	return hermesConfigPathResolver()
 }
@@ -3493,16 +3795,21 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	}
 	logicalName := hermesAllowlistLogicalName
 	path := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
-	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
-	if err != nil {
-		return err
-	}
-	if restored {
-		return nil
-	}
 	backup, backupErr := loadManagedFileBackupForTransform(opts.DataDir, "hermes", logicalName, path)
 	if backupErr != nil && !os.IsNotExist(backupErr) {
 		return backupErr
+	}
+	// Approvals that carry DefenseClaw's ownership marker are DefenseClaw's
+	// even in the copy Setup captured (a file put back from an earlier
+	// enrollment holds them), so that copy is restored only without them.
+	if backup == nil || !hermesAllowlistHoldsOwnedApprovals(backup.PristineBytes) {
+		restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, "hermes", logicalName, path)
+		if err != nil {
+			return err
+		}
+		if restored {
+			return nil
+		}
 	}
 	if backup == nil {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
@@ -3529,6 +3836,9 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 		if approvals, ok := pristine["approvals"].([]interface{}); ok {
 			for _, raw := range approvals {
 				if entry, ok := raw.(map[string]interface{}); ok {
+					if owned, _ := entry[hermesAllowlistOwnerField].(bool); owned {
+						continue
+					}
 					event, _ := entry["event"].(string)
 					entryCommand, _ := entry["command"].(string)
 					pristinePairs[event+"\x00"+entryCommand] = true
@@ -3571,6 +3881,39 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 	}
 	discardManagedFileBackup(opts.DataDir, "hermes", logicalName)
 	return nil
+}
+
+// hermesConfigBackupHoldsOwnedHooks reports whether the config.yaml copy
+// Setup captured registers DefenseClaw's hook.
+func hermesConfigBackupHoldsOwnedHooks(dataDir, logicalName, path, hookScript string) bool {
+	backup, err := loadManagedFileBackupForTransform(dataDir, "hermes", logicalName, path)
+	if err != nil || backup == nil || !backup.Existed {
+		return false
+	}
+	var cfg map[string]interface{}
+	if yaml.Unmarshal(backup.PristineBytes, &cfg) != nil {
+		return false
+	}
+	return containsHookScript(cfg["hooks"], hookScript)
+}
+
+// hermesAllowlistHoldsOwnedApprovals reports whether an allowlist document
+// holds an approval with DefenseClaw's ownership marker.
+func hermesAllowlistHoldsOwnedApprovals(data []byte) bool {
+	var document struct {
+		Approvals []interface{} `json:"approvals"`
+	}
+	if json.Unmarshal(data, &document) != nil {
+		return false
+	}
+	for _, raw := range document.Approvals {
+		if entry, ok := raw.(map[string]interface{}); ok {
+			if owned, _ := entry[hermesAllowlistOwnerField].(bool); owned {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func writeHermesDirectNativeState(opts SetupOpts, command, status string) error {
@@ -3814,6 +4157,18 @@ func marshalTopLevelYAMLFieldPreservingOtherBytes(
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	return replaceTopLevelYAMLFieldPreservingOtherBytes(path, original, field, value)
+}
+
+// replaceTopLevelYAMLFieldPreservingOtherBytes is
+// marshalTopLevelYAMLFieldPreservingOtherBytes for bytes already read; path
+// only names the document in errors.
+func replaceTopLevelYAMLFieldPreservingOtherBytes(
+	path string,
+	original []byte,
+	field string,
+	value interface{},
+) ([]byte, error) {
 	rendered, err := yaml.Marshal(map[string]interface{}{field: value})
 	if err != nil {
 		return nil, err
@@ -4022,22 +4377,32 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 			return err
 		}
 	}
+	// A missing config reads as an empty document; teardown must not create
+	// one for a user who never had it.
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	cfg, err := readYAMLObject(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
-	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
-		for event, raw := range hooks {
-			hooks[event] = removeOwnedFlatHooks(raw, hookScript)
-		}
-		pruneEmptyMapArrays(hooks)
+	hooks, ok := cfg["hooks"].(map[string]interface{})
+	if !ok {
+		return nil
 	}
-	data, err := yaml.Marshal(cfg)
+	for event, raw := range hooks {
+		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
+	}
+	pruneEmptyMapArrays(hooks)
+	// DefenseClaw owns entries in the hooks mapping only: every other byte of
+	// config.yaml (Hermes' commented template, the user's settings and their
+	// order and quoting) stays as it is.
+	data, err := marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", hooks)
 	if err != nil {
 		return err
+	}
+	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
+		return nil
 	}
 	return atomicWriteFile(path, data, 0o600)
 }
@@ -4310,20 +4675,7 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
 		}
 		selected[event] = true
-		entry := map[string]interface{}{
-			"type":       "command",
-			"timeoutSec": 30,
-		}
-		eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
-		if goos == "windows" {
-			// Copilot selects this field itself and evaluates it with PowerShell.
-			// eventCommand is therefore the complete vendor-specific program:
-			// do not prepend a call operator or another PowerShell process.
-			entry["powershell"] = eventCommand
-		} else {
-			entry["bash"] = eventCommand
-		}
-		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, entry)
+		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, copilotHookRegistration(goos, event, hookScript))
 	}
 	// A version downgrade must remove only the now-out-of-contract managed
 	// handler (currently userPromptTransformed), while retaining operator hooks
@@ -4341,6 +4693,29 @@ func patchCopilotHooksForOS(path, hookScript string, events []string, goos strin
 	}
 	return writeJSONObject(path, cfg)
 }
+
+// copilotHookRegistration is the one Copilot hook entry DefenseClaw registers
+// for event: user and workspace hook files on the host, and the root-owned
+// policy.d document in OpenShell sandbox images.
+func copilotHookRegistration(goos, event, hookScript string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"type":       "command",
+		"timeoutSec": copilotHookTimeoutSeconds,
+	}
+	eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
+	if goos == "windows" {
+		// Copilot selects this field itself and evaluates it with PowerShell.
+		// eventCommand is therefore the complete vendor-specific program:
+		// do not prepend a call operator or another PowerShell process.
+		entry["powershell"] = eventCommand
+	} else {
+		entry["bash"] = eventCommand
+	}
+	return entry
+}
+
+// copilotHookTimeoutSeconds is Copilot's command-hook envelope.
+const copilotHookTimeoutSeconds = 30
 
 func copilotHookInvocationCommandForEvent(goos, event, hookScript string) string {
 	if goos == "windows" {
@@ -4472,8 +4847,50 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 	return writeJSONObject(path, cfg)
 }
 
+// antigravityOwnedHookKeyPrefix begins each outer key DefenseClaw owns in
+// Antigravity's hooks.json (patchAntigravityHooks).
+const antigravityOwnedHookKeyPrefix = "defenseclaw-antigravity-"
+
+// AntigravityHooksHoldOwnedEntries reports whether the Antigravity hooks file
+// at path still has one of DefenseClaw's own outer keys, whatever command
+// the entry runs.
+func AntigravityHooksHoldOwnedEntries(path string) (bool, error) {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return false, err
+	}
+	for key := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// removeAntigravityOwnedHookEntries drops DefenseClaw's own outer keys from
+// the Antigravity hooks file at path and keeps every other key.
+func removeAntigravityOwnedHookEntries(path string) error {
+	owned, err := AntigravityHooksHoldOwnedEntries(path)
+	if err != nil || !owned {
+		return err
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	for key := range cfg {
+		if strings.HasPrefix(key, antigravityOwnedHookKeyPrefix) {
+			delete(cfg, key)
+		}
+	}
+	return writeJSONObject(path, cfg)
+}
+
 func readYAMLObject(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil
@@ -4494,7 +4911,7 @@ func readYAMLObject(path string) (map[string]interface{}, error) {
 }
 
 func readJSONObject(path string) (map[string]interface{}, error) {
-	data, err := os.ReadFile(path)
+	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[string]interface{}{}, nil
@@ -4573,12 +4990,17 @@ func appendUniqueMatcherHookGroup(raw interface{}, hookScript string, group map[
 	return append(list, group)
 }
 
+// removeJSONHookReferences removes DefenseClaw's handlers from an agent's
+// JSON hooks file. The file is the agent's (and the operator's), so teardown
+// for a user who never had one leaves it absent instead of writing "{}";
+// readJSONObject reads a missing file as an empty document, so the absence is
+// checked first.
 func removeJSONHookReferences(path string, hookScripts ...string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	cfg, err := readJSONObject(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
 		return err
 	}
 	pruned, _ := removeHookScriptReferences(cfg, hookScripts...).(map[string]interface{})
@@ -4586,6 +5008,48 @@ func removeJSONHookReferences(path string, hookScripts ...string) error {
 		pruned = map[string]interface{}{}
 	}
 	return writeJSONObject(path, pruned)
+}
+
+// removeCopilotHookReferences removes DefenseClaw's Copilot handlers from
+// its own hooks file (<hooks>/defenseclaw.json, which Copilot loads with
+// every other *.json there). Teardown for a user who never had the file must
+// not create one, and a file left with nothing but the schema version (or an
+// empty document an earlier teardown wrote) is DefenseClaw's leftover and is
+// deleted; operator handlers in it are kept.
+func removeCopilotHookReferences(path, hookScript string) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	pruned, _ := removeHookScriptReferences(cfg, hookScript).(map[string]interface{})
+	if pruned == nil {
+		pruned = map[string]interface{}{}
+	}
+	if strings.EqualFold(filepath.Base(path), "defenseclaw.json") && copilotHooksDocumentEmpty(pruned) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return writeJSONObject(path, pruned)
+}
+
+// copilotHooksDocumentEmpty reports a Copilot hooks document that holds no
+// handler and nothing but its schema version.
+func copilotHooksDocumentEmpty(cfg map[string]interface{}) bool {
+	for key, value := range cfg {
+		if key == "version" {
+			continue
+		}
+		if hooks, ok := value.(map[string]interface{}); key == "hooks" && ok && len(hooks) == 0 {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func removeHookScriptReferences(raw interface{}, hookScripts ...string) interface{} {

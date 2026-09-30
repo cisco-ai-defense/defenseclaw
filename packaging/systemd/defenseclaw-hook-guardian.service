@@ -1,20 +1,33 @@
+# DefenseClaw hook guardian — keeps every enrolled user's hook registrations
+# and the DefenseClaw machine agent policy in place.
+#
+# Runs as root with a bounded capability set. Writes into a user's home run
+# in a worker process that holds that user's own uid and gid, so the kernel
+# enforces the user's permissions on every path. The lifecycle adds the
+# enrollment home roots and the enabled vendor policy directories as a
+# drop-in in /etc/systemd/system/defenseclaw-hook-guardian.service.d/.
+
 [Unit]
-Description=DefenseClaw per-user hook guardian reconcile
-Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment
+Description=DefenseClaw hook guardian (managed enterprise)
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
 After=defenseclaw-gateway.service
-Wants=defenseclaw-gateway.service
+StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
+Type=simple
 User=root
 Group=root
 Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
 Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
 Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
 Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
-ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks reconcile --manifest /etc/defenseclaw/hook-guardian/targets.yaml
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks watch --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 1m
+Restart=always
+RestartSec=5s
 UMask=0077
-NoNewPrivileges=false
+
+NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
@@ -25,17 +38,28 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
-ProcSubset=pid
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
 ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID
+# CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
+# drops CAP_SETUID from a User= service that filters system calls unless it
+# is in the ambient set, and the per-user workers need both. The kernel
+# clears the ambient set when a worker switches to the user's uid.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_SETGID CAP_SETUID
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
+LockPersonality=true
+# No MemoryDenyWriteExecute: the per-user workers this unit starts run agent
+# CLIs for version discovery and hook setup, and JIT runtimes such as Node
+# (V8) die under it (SIGTRAP). DefenseClaw's own binary also needs
+# executable memory on x86_64 (see defenseclaw-gateway.service).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
 SystemCallErrorNumber=EPERM
-LockPersonality=true
-MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

@@ -11,7 +11,10 @@ import (
 )
 
 func validateManifestPlatformTarget(index int, target ManifestTarget) error {
-	if target.Deferred {
+	// Standalone Unix manifests defer rows whose home does not exist or is
+	// locked yet. Other Unix manifests (Secure Client macOS) keep rejecting
+	// the Windows-only bit.
+	if target.Deferred && !StandaloneUnix() {
 		return fmt.Errorf(
 			"enterprise hooks: target %d uses Windows-only deferred enrollment",
 			index,

@@ -223,7 +223,7 @@
     {
       "type": "stat",
       "title": "Discovery runs ($__range)",
-      "description": "Exact canonical agent.discovery.completed and agent.discovery.rejected summary events recorded during the selected range. This log count includes a first report even when Prometheus has not yet scraped two counter samples.",
+      "description": "Exact canonical agent.discovery.completed, agent.discovery.rejected and ai.discovery.completed summary events recorded during the selected range. This log count includes a first report even when Prometheus has not yet scraped two counter samples.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -236,7 +236,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.](completed|rejected)\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.](completed|rejected)|ai[.]discovery[.]completed\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -918,6 +918,7 @@
             },
             "renameByName": {
               "Value": "Observations",
+              "Value #A": "Observations",
               "connector": "Connector",
               "gen_ai_agent_id": "Agent ID",
               "gen_ai_agent_name": "Name",

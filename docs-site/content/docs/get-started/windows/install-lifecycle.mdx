@@ -17,8 +17,9 @@ installer is retired, and its `/repair`, `/uninstall` and `DELETEUSERDATA=1`
 options do not apply to an `install.ps1` install. Re-running `install.ps1`
 imports an existing Setup install (see
 [Moving from the 0.8.x Setup package](#moving-from-the-08x-setup-package)). Administrator
-deployments use the separate
-[enterprise Setup](/docs/setup/enterprise-deployment).
+deployments use the separate [enterprise deployment](/docs/enterprise): the
+standalone [enterprise Setup](/docs/enterprise/windows) or the
+[Cisco Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout).
 
 ## System requirements
 
@@ -94,9 +95,10 @@ defenseclaw setup omnigent --mode observe
 defenseclaw setup opencode --mode observe
 defenseclaw setup copilot --mode observe
 defenseclaw setup antigravity --mode observe
+defenseclaw setup kiro --mode observe
 ```
 
-One local gateway can host all ten native lifecycle connectors. Add connectors without removing the
+One local gateway can host all eleven native lifecycle connectors. Add connectors without removing the
 first:
 
 ```powershell
@@ -111,6 +113,7 @@ defenseclaw setup `
   --connector opencode `
   --connector copilot `
   --connector antigravity `
+  --connector kiro `
   --mode observe `
   --restart `
   --yes
@@ -121,7 +124,9 @@ Setup records validated `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`,
 plus `HERMES_HOME` when Hermes is selected. Antigravity uses the
 `%USERPROFILE%\.gemini\config` home. A predecessor custom path is retained only as
 internal custody long enough to restore its exact file and migrate the managed
-registration to the official path.
+registration to the official path. Setup writes only
+`%USERPROFILE%\.gemini\config\hooks.json` and records that home as its own
+ownership boundary for repair, rollback, and teardown.
 Cursor publishes no configuration-home
 environment variable, so Setup records its exact configuration home
 internally. Devin setup records `%APPDATA%\devin` and the exact admitted CLI
@@ -170,7 +175,13 @@ See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
 When an administrator sets the `DisableSelfUpdate` policy (a nonzero DWORD
 under `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw`), `install.ps1`,
 `defenseclaw upgrade` and `defenseclaw rollback` refuse and change nothing, and
-the update notice is off. Update through your managed deployment instead.
+the update notice is off. Update through your managed deployment instead. A
+standalone [enterprise deployment](/docs/enterprise) sets this policy when the
+value is absent, unless its config sets
+`enterprise.coexistence.disable_self_update: false`. On such a computer
+`install.ps1`, `defenseclaw upgrade` and `defenseclaw rollback` refuse in any
+case, because the
+deployment's registration marks the computer as managed.
 
 ### Moving from the 0.8.x Setup package
 
@@ -180,6 +191,18 @@ program folder, sign-in entry, Add/Remove Programs entry, and `PATH` entry,
 keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
 old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
 Connector hooks are rewritten to the new paths when the gateway starts.
+
+You do not need to run the old Setup to move. The published 0.8.x
+`DefenseClawSetup-x64.exe` files are not Authenticode signed, so their
+`/verify` exits `1` with `release setup lacks the required Cisco RFC3161
+Authenticode identity`. That is their signing state, not a sign of
+tampering: authenticate such a file only by matching its SHA-256
+(`Get-FileHash -Algorithm SHA256`) with its entry in that release's
+`checksums.txt` after verifying the Sigstore signature of `checksums.txt`.
+A Setup built from the current source checks its embedded payload and
+reports an unsigned build as unsigned, with its SHA-256 for that comparison;
+its `/verify` fails only when the payload no longer matches its manifest or
+the file's signature does not match the signing state the manifest records.
 
 ## Repair
 
@@ -194,6 +217,8 @@ defenseclaw uninstall --binaries   # also remove the programs in %USERPROFILE%\.
 defenseclaw uninstall --all --binaries --yes   # remove everything, including %USERPROFILE%\.defenseclaw
 ```
 
-Enterprise deployments use the managed Setup package; see
+For a machine-wide deployment managed by Intune or another MDM, see
+[enterprise deployment](/docs/enterprise). The Cisco Secure Client profile is
+described in
 [Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
 

@@ -36,6 +36,21 @@ set in the `release` environment. Without them the run fails, because
 mode, on users' Macs. To publish such an app anyway (a fork, a test), run with
 `-f allow_unnotarized_macos_app=true`.
 
+The same run builds the standalone enterprise packages for MDM deployment:
+the Windows Setup, the Linux `.deb`, `.rpm` and payload archives, and the
+macOS `.pkg`. Unlike the app, they do not need signing secrets. Without them
+they ship unsigned, and deployments pin each one by its SHA-256 in the
+cosign-signed `checksums.txt`. The release signs them when their secrets
+are set: `WINDOWS_AUTHENTICODE_PFX_BASE64` and
+`WINDOWS_AUTHENTICODE_PFX_PASSWORD` (Authenticode for the Setup),
+`ENTERPRISE_GPG_PRIVATE_KEY` and `ENTERPRISE_GPG_PASSPHRASE` (GPG signatures
+for the Linux packages), and `MACOS_INSTALLER_SIGNING_IDENTITY` with
+`MACOS_SIGNING_IDENTITY` for the pkg. The pkg reuses the app's Developer ID
+certificate and notary key (add `MACOS_INSTALLER_P12_BASE64` and
+`MACOS_INSTALLER_P12_PASSWORD` when the Developer ID Installer certificate is
+in its own PKCS#12); the app's five secrets alone leave the pkg unsigned. See
+`packaging/mdm/signing/README.md` for the trust channels.
+
 To try a release on real machines before users see it, run the workflow with
 `draft: true` and download the draft's assets (`gh release download X.Y.Z`).
 Use disposable test machines or VMs, not anyone's working install: an

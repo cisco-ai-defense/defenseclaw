@@ -50,6 +50,16 @@ type CorrelationEnvelope struct {
 	// onto Event.Connector via applyEnvelope so every audit surface
 	// (SQLite, sinks, Splunk HEC, OTel logs) can filter by connector.
 	Connector string
+	// SandboxID and SandboxName identify the OpenShell sandbox whose
+	// binding authenticated the request (the OpenShell sandbox ID and the
+	// DefenseClaw sandbox name, by default <folder>-<rand4>). They are stamped only
+	// from the authenticated sandbox binding, never from request headers or
+	// payloads, and are empty for host traffic. Sandbox-aware v8 families
+	// such as the hook decision project them onto their correlation.sandbox
+	// attributes. They are never metric labels, and audit rows do not carry
+	// them as columns.
+	SandboxID   string
+	SandboxName string
 }
 
 type envelopeCtxKey struct{}
@@ -142,6 +152,12 @@ func MergeEnvelope(base, overlay CorrelationEnvelope) CorrelationEnvelope {
 	if base.Connector == "" {
 		base.Connector = overlay.Connector
 	}
+	if base.SandboxID == "" {
+		base.SandboxID = overlay.SandboxID
+	}
+	if base.SandboxName == "" {
+		base.SandboxName = overlay.SandboxName
+	}
 	return base
 }
 
@@ -209,5 +225,11 @@ func applyEnvelope(e *Event, env CorrelationEnvelope) {
 	}
 	if e.Connector == "" {
 		e.Connector = env.Connector
+	}
+	if e.SandboxID == "" {
+		e.SandboxID = env.SandboxID
+	}
+	if e.SandboxName == "" {
+		e.SandboxName = env.SandboxName
 	}
 }

@@ -16,12 +16,17 @@ quirks live on the [connector pages](/docs/connectors#platform-support), next
 to the equivalent macOS/Linux guidance. A supported availability label does
 not populate validation evidence or certify an official-client run.
 
-For centrally managed endpoints, the separate
-[managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout)
-installs four administrator-owned Windows services: `DefenseClawGateway`,
-`DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-`DefenseClawHookEnumerator`. It is explicitly opt-in and does not change this
-per-user package or its existing auto-heal behavior.
+For centrally managed endpoints, use [enterprise deployment](/docs/enterprise)
+instead. It installs administrator-owned Windows services. The
+[standalone profile](/docs/enterprise/windows), for Intune or any other MDM,
+installs `DefenseClawGateway`, `DefenseClawSensorHelper`,
+`DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. The
+[Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout)
+installs the same services plus the `DefenseClawCMIDBroker` credential broker.
+Both are opt-in. On a computer with a standalone enterprise deployment, this
+per-user package does not run: `install.ps1`, `defenseclaw upgrade`,
+`defenseclaw rollback`, and the per-user gateway refuse, because the organization installs and updates
+DefenseClaw there.
 
 <Callout type="warning" title="WSL is not supported">
 This guide is for DefenseClaw, the agent, and its configuration running in the
@@ -53,7 +58,7 @@ documented hook, awaited policy, or native telemetry surface.
 <Cards>
   <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, install, upgrade, rollback, repair, and uninstall." />
   <Card title="Choose a connector" href="/docs/connectors#platform-support" description="Compare macOS/Linux and native Windows support, then open one connector's setup and quirks." />
-  <Card title="Managed enterprise" href="/docs/setup/enterprise-deployment#windows-system-service-layout" description="Gateway, credential broker, hook guardian, profile enumerator, non-admin guarantees, and the enterprise CLI lifecycle." />
+  <Card title="Enterprise deployment" href="/docs/enterprise" description="Administrator-owned services for Intune or any MDM, with the standalone and Secure Client profiles." />
   <Card title="Capabilities" href="/docs/capability-matrix" description="Connector enforcement, native ask, fail-closed, and subprocess capabilities." />
   <Card title="CLI commands" href="/docs/reference/cli" description="Canonical command reference with platform-specific availability notes." />
   <Card title="Windows security model" href="/docs/get-started/windows/telemetry-security" description="Loopback authentication, local audit, scoped credentials, release provenance, and recovery guarantees." />
@@ -88,12 +93,12 @@ the authentication, redaction, and local-storage boundaries.
 | WSL installation or a mixed native/WSL connector | **Unsupported** | Native and WSL executables, profiles, and hook paths are different trust domains. |
 | Windows x86 | **Unsupported** | Release binaries are `amd64` only. |
 | Windows ARM64, including x64 emulation | **Not certified** | Releases publish no ARM64 build. |
-| Machine-wide install or MSI | **Unsupported** | `install.ps1` installs for the current user only. |
+| Machine-wide install or MSI | **Unsupported** | `install.ps1` installs for the current user only. For a machine-wide deployment, see [enterprise deployment](/docs/enterprise). |
 | Windows model-proxy connectors | **Unsupported** | The native Windows gateway supports connector hook, plugin, and awaited-policy lanes, not the guardrail-proxy lifecycle. |
 | A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
-| OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
+| Sandbox commands and OpenShell sandboxes | **Unsupported** | `sandbox legacy-cleanup` and the removed legacy standalone sandbox it cleans up are Linux-only. The OpenShell sandbox integration in development refuses to render sandbox image files on Windows hosts. |
 | `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
-| Machine services from the per-user install | **Unsupported** | The per-user install never installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
+| Machine services from the per-user install | **Unsupported** | The per-user install never installs services. The separate enterprise lifecycle installs machine services: see the [standalone profile](/docs/enterprise/windows) or the [Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout). |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
 
 No roadmap is implied by these classifications.
@@ -104,7 +109,7 @@ For a normal-mode migration from macOS or Linux, expect `install.ps1` instead of
 an HKCU `PATH` entry, native process
 identity instead of PID-only signaling, and the selected connector's native
 hook, adapter, plugin, or awaited-policy lane instead of a DefenseClaw POSIX
-hook script. Sandbox and proxy connector features do not move with you.
+hook script. Proxy connector features do not move with you.
 
 From WSL, perform a fresh native install. Install the selected
 [supported connector](/docs/connectors#platform-support) natively for the same

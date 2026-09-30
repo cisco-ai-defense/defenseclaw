@@ -33,6 +33,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ from defenseclaw.connector_paths import (
     devin_hook_config_path,
     hermes_config_path,
     omnigent_config_path,
+    opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
 
@@ -105,6 +107,15 @@ class StepResult:
             "detail": self.detail,
             "next_command": self.next_command,
         }
+
+
+# ``init --sandbox`` is accepted so existing automation keeps working; the
+# legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
+SANDBOX_FLAG_DEPRECATION = (
+    "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
+    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
+    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
+)
 
 
 @dataclass
@@ -657,8 +668,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 StepResult(
                     "Sandbox",
                     "warn",
-                    "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
-                    "defenseclaw sandbox setup",
+                    SANDBOX_FLAG_DEPRECATION,
+                    "defenseclaw sandbox legacy-cleanup --dry-run",
                 )
             )
 
@@ -1541,6 +1552,16 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
+        if loose := opencode_writable_plugin_folder([path]):
+            # The gateway will not install its plugin there and does not
+            # start; `setup opencode` would fail the same way.
+            return StepResult(
+                "Connector",
+                "warn",
+                f"{loose} can be written by other accounts, so the gateway does not install the "
+                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
+                f"chmod go-w {shlex.quote(loose)}",
+            )
         return StepResult(
             "Connector",
             "warn",

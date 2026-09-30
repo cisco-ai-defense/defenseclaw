@@ -422,6 +422,38 @@ def test_setup_wait_retries_transient_opencode_heartbeat(monkeypatch, tmp_path: 
     assert attempts == 2
 
 
+def test_setup_wait_accepts_opencode_that_has_not_loaded_the_plugin_yet(monkeypatch, tmp_path: Path) -> None:
+    """setup opencode failed every time on Linux: a closed OpenCode never reports its load."""
+    cfg = _config(tmp_path)
+    entry = _entry("opencode", tmp_path)
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"opencode": entry}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["opencode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(cmd_setup, "_OPENCODE_LOAD_HEARTBEAT_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(
+        cmd_doctor,
+        "connector_setup_readiness",
+        lambda *_args: cmd_doctor.ConnectorSetupReadiness(
+            False,
+            "opencode",
+            "live-runtime",
+            "OpenCode hooks: warn: managed plugin digest current; runtime load unverified: "
+            "no authenticated load heartbeat; OpenCode may be stopped or idle",
+        ),
+    )
+
+    readiness = cmd_setup._wait_for_connector_runtime(str(tmp_path), ["opencode"], None, None, timeout=2.0)
+
+    assert readiness
+    assert (readiness.connector, readiness.invariant) == ("opencode", "pending-reload")
+
+
 def test_setup_wait_commits_truthful_hermes_pending_reload(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     entry = _entry("hermes", tmp_path)

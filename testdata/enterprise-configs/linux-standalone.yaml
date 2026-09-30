@@ -1,0 +1,15 @@
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw          # must be exactly this path
+policy_dir: /etc/defenseclaw/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe                         # observe | action
+  connectors:
+    codex: {}
+    claudecode: {}

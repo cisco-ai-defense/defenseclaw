@@ -187,6 +187,139 @@ unsupported and unverified instead of appearing as an empty live inventory.
 
 <HookEventsList connector="omnigent" />
 
+## OpenShell sandbox
+
+DefenseClaw can build an OmniGent OpenShell overlay image. The files below
+exist only in the image; nothing on your host changes.
+
+- **Policy in the managed tier.** OmniGent evaluates policies in the server
+  that `omnigent run` starts inside the sandbox. That server reads
+  `$OMNIGENT_CONFIG_HOME/config.yaml`, and the image launcher points it at the
+  root-owned `/etc/omnigent/config.yaml`. That file loads the DefenseClaw
+  policy module and attaches the server-wide `defenseclaw_guardrail` policy.
+  A user `~/.omnigent/config.yaml` has no effect on it. The policy bridge
+  itself is root-owned under `/usr/local/lib/defenseclaw/omnigent/`.
+- **TUI theme.** OmniGent's TUI keeps its theme in the same file, so the image
+  sets the dark theme there: the first-launch theme picker would otherwise
+  fail writing the root-owned file. `/theme` cannot change the theme inside a
+  sandbox. It fails with OmniGent's own message, `Failed to write TUI user
+  config at /etc/omnigent/config.yaml: [Errno 13] Permission denied`, and the
+  top of that file says why. The file and its directory stay root-owned
+  because the file carries DefenseClaw's policy.
+- **Fail closed.** The sandbox bridge presents only the per-sandbox binding
+  token and retries a dropped request once. Every failure becomes a DENY:
+  missing token, ingress down, a bad status or a bad reply.
+- **Confirm denies.** On a host, a DefenseClaw confirm verdict becomes
+  OmniGent's native ASK. In a sandbox it becomes a DENY that says approval is
+  not available. OmniGent parks an ASK on its local server, and that server's
+  approval routes accept an answer from any process in the sandbox, so the
+  agent could approve its own call.
+- **Sandbox agent.** OmniGent's own bubblewrap sandbox cannot run inside
+  OpenShell. The image therefore ships an agent,
+  `/usr/local/lib/defenseclaw/omnigent/agent`, whose shell runs in the caller
+  process on the `openai-agents` harness. The managed configuration names it
+  as `default_agent`, so `omnigent run --model <model>` starts it. Every
+  request, model call and tool call still passes the DefenseClaw policy.
+- **Blocked tool calls.** OmniGent's TUI hides tool results until you press
+  Ctrl+T, and a DefenseClaw block reaches it only as the blocked call's result
+  (`Denied by policy: <reason>`). OmniGent's policy results have no field
+  meant for the user. So the sandbox agent's instructions tell the model to
+  say that DefenseClaw blocked the call and to quote the reason word for
+  word. Ctrl+T shows the results of later calls. The session summary names
+  the blocking rule, and `defenseclaw sandbox activity --sandbox <name>`
+  lists every block.
+- **Continuing a conversation.** `defenseclaw sandbox connect <name>` starts
+  a new OmniGent conversation.
+  `defenseclaw sandbox connect <name> -- --continue` continues the sandbox
+  agent's latest one, and a kept sandbox's session end names that command.
+  The `Resume: omnigent run … --resume <id>` line OmniGent prints at `/quit`
+  runs OmniGent on this machine, outside the sandbox, unless the `omnigent`
+  shell wrapper is on (`defenseclaw sandbox enable omnigent`). The wrapper
+  sends it into the folder's sandbox; the sandbox drops the `run` it
+  forwards, since the launcher runs `omnigent run` already.
+- **Ctrl-Z.** OmniGent's TUI has no suspend, on a host as in a sandbox. It
+  keeps prompt_toolkit's default binding, which types Ctrl-Z into the prompt
+  as a `^Z` character (Backspace removes it). OmniGent never tries to stop
+  itself, so DefenseClaw's notice that a sandbox cannot suspend a harness
+  does not appear.
+- **One server.** OmniGent reuses a running local server or host daemon that
+  it finds in its records under `~/.omnigent`. It does not check which
+  configuration that process started with. Before every start the launcher
+  checks each recorded process: it must be the pinned OmniGent, started with
+  `OMNIGENT_CONFIG_HOME=/etc/omnigent` and nothing that moves the
+  configuration or loads other code. For the server, it must also listen on
+  the recorded port. If a recorded process fails this check, the launcher
+  runs `omnigent stop --force` and drops the process's record, so OmniGent
+  starts its own. The launcher also refuses `--server` with a URL, and a
+  project `.omnigent/config.yaml` that sets `server`. Either would run the
+  session on a server that does not load DefenseClaw's policy.
+- **Known gaps.** The policy binds through `OMNIGENT_CONFIG_HOME`, which the
+  launcher sets. A second OmniGent that a tool call starts without it (the
+  pinned binary run directly) runs without the policy, as does a client that
+  a tool call points straight at such a server. DefenseClaw judges that tool
+  call first. Command rules judge the sandbox agent's `sys_os_shell` calls.
+- **Install pin.** The image installs OmniGent 0.13.0 from PyPI as a
+  root-owned `uv tool` on a private CPython 3.12.13. The build refuses a
+  version outside `>=0.13.0,<0.14.0`, a narrower range than the host
+  contract's (`>=0.7.0,<0.14.0`): before 0.13.0 OmniGent's server never runs
+  the response policy phase for the sandbox agent, whose runner it relays,
+  so an image of an older release would fail the hook-fire probe (`hook
+  AfterAgentResponse never fired`). An older
+  `openshell.image.harness_versions.omnigent` pin, such as `"0.12.0"`, is
+  refused before the build starts, with that reason.
+- **Model access.** The sandbox agent names no model, and OmniGent sends a
+  run without one to Databricks. Pick one of these profiles:
+  - the regional `defenseclaw-bedrock-mantle-openai-<region>`: the launcher
+    copies the Bedrock key into `OPENAI_API_KEY`, the profile points
+    `OPENAI_BASE_URL` at the Mantle route and defaults the model to
+    `openai.gpt-oss-20b`.
+  - `defenseclaw-openai` (`OPENAI_API_KEY`) needs `--model <model>`.
+  - `defenseclaw-anthropic` (`ANTHROPIC_API_KEY`) needs
+    `--model anthropic/<model>`. This profile is unverified: the sandbox
+    agent runs on the `openai-agents` harness.
+
+  `defenseclaw sandbox run omnigent` picks the profile from the same
+  variables (`--llm bedrock` reads `AWS_BEARER_TOKEN_BEDROCK`). It refuses a
+  profile without a default model unless you pass `--model` after the
+  harness name, and it does so before a sandbox is created. OmniGent has no
+  skip-permissions switch: approval pauses come from its policies.
+- **Tool commands and the proxy.** OmniGent runs the agent's tools in a
+  runner that inherits only an allowlisted environment. The launcher lists the
+  proxy settings in `OMNIGENT_RUNNER_ENV_PASSTHROUGH`, so tool commands also
+  go through the DefenseClaw egress proxy. Loopback traffic between
+  OmniGent's own processes stays off the proxy.
+- **Other traffic.** OmniGent's usage telemetry is off in a sandbox: the
+  managed configuration sets `telemetry: false`, which every OmniGent process
+  reads (the tool runner included), and the launcher sets
+  `OMNIGENT_DISABLE_TELEMETRY=1`. So OmniGent does not contact
+  `config.omnigent-telemetry.io` or `api.omnigent-telemetry.io`. The launcher
+  also sets `OMNIGENT_NO_UPDATE_CHECK=1`. At start OmniGent still fetches
+  its model catalog, which gives a model's context window and prices, from
+  MLflow's GitHub releases (`github.com`, redirected to
+  `release-assets.githubusercontent.com`). A session summary counts those two
+  as new sites even when nothing was prompted. An earlier mock-model run also
+  reached `chatgpt.com` and `models.dev` (model catalogs). That traffic goes
+  through the DefenseClaw egress proxy, which logs it and applies the
+  blocklist.
+- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
+  OpenShell sandbox, with the sandbox agent on a mock model behind a
+  credential binding, showed:
+  - policy events reaching the sandbox ingress, with OpenShell substituting
+    the model key;
+  - a command that a DefenseClaw rule blocks denied by the policy, with the
+    rule's reason passed back to the model;
+  - egress through the proxy from a tool command, and a blocklisted host that
+    a sandbox-scoped unblock then let through.
+
+  The image also passes the hook-fire probe with the request, llm_request,
+  tool_call, tool_result and response policy events, both headless and with
+  the TUI started on a terminal and a prompt typed into it. In that probe a hostile
+  user `~/.omnigent/config.yaml` and a planted `sitecustomize` module in the
+  launch environment change nothing, and the launcher refuses a project
+  configuration that names another server. The curated provider profiles
+  have not carried a real model inside a sandbox; see the harness's
+  verification note for what was run.
+
 ## Disable
 
 ```bash

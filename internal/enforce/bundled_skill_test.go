@@ -96,7 +96,7 @@ func TestPluginEnforcerQuarantineRefusesBundledSkill(t *testing.T) {
 	if err := os.MkdirAll(quarantineDir, 0o700); err != nil {
 		t.Fatalf("prepare quarantine dir: %v", err)
 	}
-	e := NewPluginEnforcer(quarantineDir, nil)
+	e := NewPluginEnforcer(quarantineDir)
 	dest, err := e.Quarantine(bundledDir)
 	if !errors.Is(err, ErrBundledSkill) {
 		t.Fatalf("expected ErrBundledSkill, got dest=%q err=%v", dest, err)
@@ -133,7 +133,7 @@ func TestPluginEnforcerQuarantineAcceptsUserSkill(t *testing.T) {
 	if err := os.MkdirAll(quarantineDir, 0o700); err != nil {
 		t.Fatalf("prepare quarantine: %v", err)
 	}
-	e := NewPluginEnforcer(quarantineDir, nil)
+	e := NewPluginEnforcer(quarantineDir)
 	dest, err := e.Quarantine(userDir)
 	if err != nil {
 		t.Fatalf("user skill quarantine failed: %v", err)

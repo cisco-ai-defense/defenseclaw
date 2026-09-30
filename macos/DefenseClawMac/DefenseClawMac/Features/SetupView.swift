@@ -537,7 +537,7 @@ struct ConfigEditorView: View {
 
     private var sections: [ConfigEditorSection] {
         var all = dynamicSections
-            ?? ConfigEditorCatalog.sections(activeConnectors: appState.activeConnectorNames)
+            ?? ConfigEditorCatalog.sections(activeConnectors: appState.activeConnectorNames, config: appState.config.raw)
         if let uncatalogued { all.append(uncatalogued) }
         return all
     }
@@ -863,7 +863,7 @@ struct ConfigEditorView: View {
             } else {
                 guard installationGeneration == appState.installationGeneration else { return }
                 freshDynamicSections = nil
-                active = ConfigEditorCatalog.sections(activeConnectors: appState.activeConnectorNames)
+                active = ConfigEditorCatalog.sections(activeConnectors: appState.activeConnectorNames, config: appState.config.raw)
                 freshCatalogSource = "built-in catalog (runtime dump unavailable)"
                 for field in active.flatMap(\.fields) where !field.key.isEmpty {
                     if field.kind == .password { continue }

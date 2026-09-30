@@ -64,6 +64,553 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
+## [Unreleased] — Enterprise hardening
+
+Entries that name the enterprise standalone profile apply only there; the
+rest also reach per-user installs.
+
+### Fixed
+
+- **Amp traces in a built-in mode reach Galileo.** Galileo needs a provider
+  on an agent span, and Amp names no model in its built-in modes (such as
+  `medium`), so those agent spans were left out of the Galileo export and
+  their traces never appeared, while the gateway reported every batch
+  delivered. The Galileo view now names the connector as the provider when
+  a span reports none, as other hook connectors already do; other
+  destinations are unchanged.
+- **Windows MDM detection no longer fails while the hook guardian writes
+  its records.** On the enterprise standalone profile, verify (and so
+  `detect.ps1` and `Remediate-Detect.ps1`) failed about one run in eight
+  with `... being used by another process` on the guardian's state files,
+  or with records from two guardian passes, while status stayed ok. Status
+  and verify now re-read those records for up to two seconds until they
+  describe one pass, and verify waits up to 30 seconds for the guardian to
+  activate a `targets.yaml` the enumerator has just republished.
+- **A rolled-back first Windows install takes back DefenseClaw's agent
+  registrations and machine policy.** On the enterprise standalone profile,
+  the rollback of a failed first install removed each account's
+  `~\.defenseclaw`, with the backups of the agent files the install had
+  changed, but left DefenseClaw's entries in them (the Amp plugin, the
+  Antigravity `hooks.json`, the Hermes `config.yaml` and
+  `shell-hooks-allowlist.json`) and left the Copilot and OpenCode machine
+  policy, the Claude Code version floor, the hook runtime folder and the
+  vendor lock files. The rollback now puts each agent file back to the bytes
+  the install found, as the account, or removes it when the install created
+  it, before it removes the folder, and then removes that machine policy. A
+  file changed after the install wrote it stays as it is, and so do the
+  files of an account that is not signed in.
+- **`/uninstall PURGE=1` removes what an earlier rolled-back install left.**
+  An Amp plugin or Antigravity `hooks.json` that such a rollback left was
+  captured as the user's own file by the next install and put back by the
+  uninstall; the uninstall now removes DefenseClaw's own plugin and hook
+  entries from the file it restores, and names an Antigravity file that
+  still has them. With purge, it also removes a Claude Code version floor
+  drop-in that holds exactly DefenseClaw's floor but that DefenseClaw no
+  longer records writing.
+- **A rolled-back first Windows install leaves no event log or empty
+  folder.** Its failure event registered the DefenseClaw event log and
+  `C:\Program Files\Cisco` stayed empty; the event now goes to the
+  Application log, as after an uninstall, and the empty folder is removed.
+- **A failing Windows `verify --json` no longer reads as uninstalled.** It
+  reported `installed: false`, no services and 0 targets for a running
+  deployment, as a refused repair did before; it now carries the state a
+  status probe reads.
+- **A Linux gateway whose file was replaced while it ran can be stopped.**
+  After `~/.local/bin/defenseclaw-gateway` was renamed or replaced under a
+  running gateway, `defenseclaw-gateway stop` said "Gateway sidecar is not
+  running" with exit 0 and dropped its PID record, `watchdog stop` refused
+  after 15 seconds, and `uninstall --all` failed on that timeout; only
+  `kill` recovered. Status now reports that gateway as running, `stop` asks
+  its authenticated control plane to shut down (it still never signals it
+  by PID), and the watchdog recognizes its own replaced file.
+- **Re-running `defenseclaw setup <connector>` keeps its mode.** `--mode`
+  defaulted to observe, so `defenseclaw setup opencode --yes`, which doctor
+  recommends to repair the OpenCode plugin, turned an action install into
+  observe without a prompt or a warning. Without `--mode`, a connector that
+  is already configured keeps its mode; a new one still starts in observe.
+- **Per-user AI discovery on macOS no longer reads `partial` with no
+  cause.** The package manifest scan counted each folder macOS privacy
+  protection keeps from the guardian's per-user worker (such as `~/.Trash`)
+  as an error, and only the process and model file scans named themselves,
+  so every scan ended `partial scan: `. That scan now skips those folders as
+  the model file scan does, and every failing scan is named.
+- **A Kiro hook on Windows that exits at once still blocks.** The Windows
+  Kiro command started the hook with `Start-Process -Wait`, which opens its
+  handle to the hook only after the hook is running; a hook that had already
+  exited came back as exit 1 ("the process has exited") instead of the block
+  code 2, and Kiro went ahead. The command now starts the hook with .NET
+  `Process.Start`, which keeps that handle. In Constrained Language mode,
+  which does not allow those calls, it runs the hook with the call operator
+  and pipes its output, so PowerShell waits on the handle it started the
+  hook with. Run `defenseclaw setup kiro` again to replace the older
+  command. Other connectors are unchanged.
+- **Uninstall removes the empty OpenCode folders DefenseClaw created.** The
+  gateway's install watcher creates missing `plugin`, `skill` and `skills`
+  folders under `~/.config/opencode`, and a per-user uninstall left them
+  behind, empty. The watcher now lists the OpenCode folders it creates in
+  the DefenseClaw data directory, and the uninstall's OpenCode teardown
+  removes each one that is still empty. Folders with content, folders outside the OpenCode
+  config folder and folders DefenseClaw did not create stay.
+- **A Windows uninstall drops a deleted account's runtime selector entry.**
+  On the enterprise standalone profile, an account deleted together with its
+  profile has left the enrollment manifest, so the teardown never removed its
+  Claude Code or Codex runtime selector entry, and even `/uninstall PURGE=1`
+  left `.defenseclaw-managed-runtime-selector.state` and its lock in the
+  vendor's machine-policy folder. Uninstall now drops the entries of local
+  accounts that no longer exist and whose profile folder is gone, and then
+  removes a selector left empty and its lock.
+- **Kiro's hook file goes when its version key is gone.** Teardown still
+  left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
+  file had lost its `version` key (as `uninstall --purge` on macOS found in
+  every Kiro-enrolled home): the ownership check read the missing key as
+  `<nil>`. A file with nothing but DefenseClaw's hooks is removed with or
+  without the key.
+- **Windows status and verify say how to recover a pending transaction.**
+  On the enterprise standalone profile, `status` showed only `not_ready`
+  and the installed version, and `verify` said `run Repair`, which cannot
+  recover it from an administrator shell. Both now say a transaction is
+  pending and name the Setup `/ensure` command to run as LocalSystem, as a
+  failed Setup does.
+- **A Windows install that fails on a held API port names the holder.** On
+  the enterprise standalone profile, a first install whose gateway could not
+  bind `127.0.0.1:18970` reported only `enterprise readiness timed out:
+  broker_ready=True gateway_ready=False ...`, and `status` could not run on
+  the rolled-back computer. The result now carries `api_port_held` and
+  `api_port_holders[]` with the PID, image and account of each holder.
+- **Setup `/verify` says what a failure means.** A per-user Windows Setup
+  whose payload or signature was changed failed `/verify` with internal text
+  such as `zip: checksum error`. The message now says the file is not the
+  published Setup, not to run it, and to download it again and compare its
+  SHA-256 with the Sigstore-verified `checksums.txt`.
+- **`defenseclaw setup` answers on a managed Windows computer.** The
+  enterprise standalone payload has no per-user CLI, so
+  `defenseclaw setup rotate-token` printed `unknown command "setup"` and
+  suggested `stop`. It now says the computer is managed and per-user setup
+  commands are not available. Other computers are unchanged.
+- **`uninstall --all --binaries` ends cleanly, and its plan lists only
+  what is there.** After removing everything, the command printed a
+  `ModuleNotFoundError` traceback and exited 1, because the update notice
+  it runs at exit had just been removed. The plan also listed launchers
+  that were never installed. `defenseclaw version` before `init` shows the
+  OpenClaw plugin as `(not used)` instead of `missing`.
+- **Doctor names more of what it finds on Linux.** A `Sidecar API` row no
+  longer passes when the process answering on the API port is not your
+  verified gateway; it warns and, on Linux, names the account holding the
+  port. An OpenCode plugin folder that other accounts can write (Ubuntu's
+  umask 002 leaves `~/.config/opencode/plugins` at 0775), which stops the
+  gateway, is named with the `chmod go-w` fix instead of `hook file not
+  found`; `defenseclaw init` names it too, with the same fix as its next
+  step, instead of suggesting `setup opencode`. `doctor --fix` no longer
+  warns "watchdog runtime - repair is
+  unavailable on platform 'linux'" on every run, the skill-scanner version
+  check allows 30 seconds for a first run after install, and the OpenCode
+  row mentions the Windows DACL only on Windows.
+- **`defenseclaw setup opencode` finishes when OpenCode is closed.** Setup
+  waited for OpenCode to report that it loaded the managed plugin after the
+  gateway restart. A closed OpenCode cannot report and an open one does not
+  report again, so on Linux every run failed after about two minutes with
+  `connector setup did not converge` and rolled back, which also undid the
+  requested mode. Setup now waits 10 seconds for the report, then finishes
+  with the plugin current and tells you to restart open OpenCode sessions.
+- **Config and rule-pack checks no longer run a gateway binary another
+  account can replace.** Doctor, `config validate` and the observability
+  and redaction commands run `defenseclaw-gateway config-v8` and
+  `rulepack validate` to check the config and rule packs. On Linux and
+  macOS a `defenseclaw-gateway` found on `PATH` or in `~/.local/bin` now
+  needs the custody the gateway lifecycle already required (held by root or
+  this account, no group- or world-writable file or parent folder); before,
+  a binary in a folder any account could write was run five times per
+  `doctor --fix`. `DEFENSECLAW_GATEWAY_BIN` is used as it is. The doctor
+  repair names such a binary instead of reporting `binary not found`.
+  These helpers and doctor's gateway version check now run the checked
+  file itself, as the lifecycle commands do, so a path swapped right after
+  the check is not run.
+- **Doctor's own audit record no longer goes to another account's
+  listener.** Doctor's checks refused to send the gateway token to a process
+  that is not the verified gateway, but the action record it writes at the
+  end still did: with another account's process on the API port, that
+  process received the token on every `defenseclaw doctor` run. The record
+  now goes only over a connection the verified gateway accepted, and is
+  skipped otherwise.
+- **`rotate-credentials` says what it did.** On the enterprise standalone
+  profile on Linux and macOS, a successful rotation printed only `done`. It
+  now lists the committed and the previous key by SHA-256 prefix, how many
+  targets and users moved, and the reminder to restart running agents. It
+  refuses at once when the gateway service is not running, instead of after
+  90 seconds of silence, and an interrupted run prints the `reconcile`
+  command that completes or rolls back the rotation.
+- **One unprotected account no longer blocks `rotate-credentials`.** On the
+  enterprise standalone profile on Linux and macOS, one account whose agent
+  the guardian could not protect, such as an agent version without a
+  verified hook contract, stopped the rotation for the whole host. The
+  rotation now moves every account that holds a per-user credential and
+  lists the targets that hold none as skipped: agents the guardian never
+  protected, accounts that no longer exist and homes that are not available
+  yet. A target that was protected before and now fails still stops the
+  rotation, because it holds the current key's credentials.
+- **A config change on macOS no longer leaves the gateway unloaded.** On the
+  enterprise standalone profile, launchd could still be stopping the gateway
+  when the lifecycle started it again; the start and its restart fallback
+  failed with exit 37, the rollback failed the same way, and hooks failed
+  closed until `enterprise macos repair`. The lifecycle now waits for
+  launchd to remove the job before starting it again.
+- **audit.db no longer corrupts beside a long-running CLI or TUI.** Opening
+  the audit store fixed its permissions by opening and closing audit.db,
+  which drops the process's SQLite lock. A CLI command that closed while the
+  gateway was stopped then deleted the WAL under the TUI or another open
+  command, and their later writes failed with "database disk image is
+  malformed" or corrupted the file. The permission fix now runs before
+  SQLite opens the file, and only while no other audit store in the same
+  process has it open. The gateway also checks audit.db when it starts: a
+  corrupt store is moved to `audit.db.corrupt-<time>` with its WAL and SHM
+  files, the block/allow list is copied into a new store, and the gateway
+  starts and logs a warning instead of failing. It refuses to move a store
+  another process still has open.
+- **Findings keep the ids of the shipped rules.** A finding from a bundled
+  rule tagged `credential` (for example `PATH-AWS-CREDS`, `C2-METADATA-AWS`
+  or `exfil.secret_read_and_egress_oneliner`) was stored and exported as
+  `redacted.secret.id-…`, so the findings dashboards and `rule_id` filters
+  could not name it. Every rule id in the default, strict and permissive
+  packs is now kept; ids that only a custom pack defines are still keyed.
+- **Finding and scan rows name the user.** `finding.observed` and the
+  `scan.*` records now carry `user.id`, `defenseclaw.user.id_kind` and
+  `defenseclaw.user.name` for the caller whose request was inspected, the
+  same identity the `hook_decision` rows carry, so findings can be filtered
+  by user without joining on `evaluation_id`. On the enterprise standalone
+  profile only the verified caller is recorded.
+- **Guardrail blocks show on spans.** A tool call a hook blocks now gets a
+  tool span that ends at the decision with status `ERROR`; before, a blocked
+  call left no span. Blocked, confirmed and alerted calls carry a
+  `defenseclaw.guardrail.block`, `.ask` or `.alert` span event (rule,
+  severity, connector, user, redacted reason) and the
+  `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id` and
+  `defenseclaw.guardrail.severity` attributes, on every trace destination
+  including Galileo. Other hook decisions, such as a blocked prompt, and the
+  `/api/v1/inspect/*` routes produce an `apply_guardrail` span with the same
+  status, event and attributes; that span no longer reports `OK` for a block.
+- **Local observability dashboards show the findings and blocks that
+  happened.** The Findings tiles, top rule and per-rule activity panel count
+  `finding.observed` records in Loki, because a Prometheus counter misses a
+  rule's first finding; the per-rule panel no longer fails with
+  `Cannot read properties of undefined (reading 'config')` on an empty
+  range, and the top rule and top target tiles show the name instead of
+  `Value #A`. The Blocked events **Hook surface** filter lists the hook
+  surfaces the panels filter on, the recent guardrail event panels include
+  `hook_decision` records, Agent360 opens on one agent instead of an **All**
+  that matched nothing once two agents existed, and the AI runtime tiles and
+  discovery error rate show data. The local observability guide explains
+  when to set `observability.metric_policy.temporality: cumulative`.
+- **OpenCode newer than 1.18.19 is supported.** OpenCode updates itself, and
+  setup refused 1.18.20 and later with `detected-but-unsupported-version`, so
+  enterprise deployments reported it unprotected. The reviewed range is now
+  `>=1.18.10,<1.19.0`, checked against OpenCode 1.18.33.
+- **The gateway reports the OpenClaw fleet client off when OpenClaw is not
+  installed.** OpenClaw is the default connector, so an install without
+  OpenClaw dialed `127.0.0.1:18789` without end and showed the gateway as
+  reconnecting. When agent discovery found no OpenClaw and `gateway.host` is a
+  loopback address, the gateway reports it disabled with "OpenClaw is not
+  installed", and doctor expects that. Any other `gateway.host`, or
+  `gateway.fleet_mode: enabled`, still dials.
+- **`defenseclaw version` skips the OpenClaw plugin when OpenClaw is not
+  configured.** On installs of other connectors the plugin row read
+  `(not installed)` and `missing`, and a plugin left from an earlier OpenClaw
+  setup counted as drift. The row now reads `(not used)` and `skipped`.
+- **Disabling Kiro leaves an inert hook script.** Teardown replaces
+  `~/.defenseclaw/hooks/kiro-hook.sh` with a stub that exits 0, as the
+  Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
+  the path stops posting to the gateway until it restarts; setup writes
+  the active script again.
+- **Galileo shows guardrail decisions.** Galileo ignores the OTLP span
+  status and custom attributes, so a blocked tool call appeared there with
+  status code `0` and no rule. The Galileo preset now also sends the decision
+  (action, rule, severity, user and `status: ERROR` for a block) as the
+  OpenInference `metadata` attribute, which Galileo shows as the span's
+  metadata.
+- **Blocked spans keep the rule title.** The status message and block event
+  of a blocked span showed a shipped rule's title as a redacted token
+  (`matched: <RULE-ID>:<redacted ...>`). A reason made only of shipped rule
+  IDs and their catalog titles is now kept as written; other reasons are
+  still scrubbed.
+- **AI discovery records name the user.** The `ai_component.discovered`,
+  `changed` and `removed` records carry `user.id`,
+  `defenseclaw.user.id_kind` and `defenseclaw.user.name` when the signal
+  came from a user's scan, and the AI discovery dashboard's event log shows
+  the user.
+- **Amp traces are named after Amp.** Amp turns were named after the
+  agent mode or definition kind (`invoke_agent medium`,
+  `invoke_agent agent-definition`), so a search for Amp traces found none.
+  They are now `invoke_agent amp`; the mode or custom agent stays in
+  `gen_ai.agent.name`.
+- **Amp keeps DefenseClaw's prompt notice apart from the prompt.** The
+  hidden notice DefenseClaw adds when a prompt matches a rule followed the
+  prompt text directly, so a prompt ending in a command could be read, and
+  run, as that command with the notice's words appended. The notice now
+  starts on its own lines and says it is not part of the request.
+  In action mode it also no longer says DefenseClaw "would block this in
+  action mode": it says the request matched a blocking rule and must not be
+  carried out.
+- **Amp shell commands get the same rule checks as Claude Code and Codex.**
+  Amp's Bash tool sends its command as `cmd`, which the command analysis did
+  not read, so every Amp command was judged only by the text-pattern
+  fallback. A command that blocks in Claude Code or Codex could then run in
+  Amp with a detection-only finding, for example one that writes its output
+  to `~/out.txt`. Amp commands are now analyzed like the other agents'.
+- **AI discovery on macOS skips the folders macOS protects.** Without Full
+  Disk Access, every model file scan counted each folder macOS privacy
+  protection keeps it out of (for example other apps' containers under
+  `~/Library/Containers`) as a filesystem error and reported the scan as
+  `partial`. Those folders are now skipped, as the macOS guide says.
+- **Disabling Kiro removes DefenseClaw's hook file.** When
+  `~/.kiro/hooks/defenseclaw.json` had changed since setup, teardown removed
+  DefenseClaw's hooks but left the file behind as `{"hooks": []}`. A file that
+  holds nothing else once those hooks are out is now removed.
+- **OpenHands tool calls are inspected.** OpenHands sends PascalCase
+  `event_type` values (`PreToolUse`) that DefenseClaw did not route, so
+  terminal calls ran uninspected even in action mode. OpenHands payloads now
+  have their own decoder, so terminal commands can be blocked.
+- **Antigravity `run_command` calls match command rules.** The scheduling
+  and UI arguments Antigravity sends beside the command
+  (`WaitMsBeforeAsync`, `toolAction` and others) left it unproven.
+  DefenseClaw now drops them when each has its expected type.
+- **An upgrade whose only connector was removed stops before the swap.**
+  When no configured connector ships in the new release, `defenseclaw
+  migrate --check` fails before anything is replaced, names the connector
+  and prints commands the installed release accepts.
+- **A command rule still blocks a write to a `~/` or `$HOME/` path.** A
+  redirect target the shell expands (`> ~/out.txt`) made the parse partial,
+  so a CRITICAL CEL match was only detected. CEL rules that cannot depend on
+  that redirect now see the command with a static target. A built-in rule's
+  code check must hold with and without that target (#925).
+- **Writes to `~/.ssh/authorized_keys` block in every spelling.** The
+  shell expands `~/` and `$HOME/` when the command runs, so
+  `>> ~/.ssh/authorized_keys`, `>> "$HOME/.ssh/authorized_keys"` and
+  `tee -a ~/.ssh/authorized_keys` were allowed with no finding while the
+  absolute path blocked. The authorized-keys rule now also checks the command
+  with those paths resolved under the caller's home.
+- **A command rule blocks every command of an `&&` or `||` list.** Any list
+  made the parse partial, so a rule that blocks `<cmd>` only detected
+  `cd <dir> && <cmd>` or `<cmd> || true`. A list is now judged as if all of
+  its commands run: if a rule blocks any of them, the whole tool call is
+  blocked (#923).
+- **Agents say that DefenseClaw policy made a block.** Rule verdicts reached
+  the agent as `matched: <RULE-ID>:<redacted ...>`. They now say
+  `DefenseClaw policy blocked this action (rule <RULE-ID>)` and not to retry
+  it in another form; the audit keeps the full reason.
+- **OpenCode shows DefenseClaw blocks.** A blocked call failed with the bare
+  reason or no text, so the model reported success. The plugin now fails it
+  with an error that names DefenseClaw and shows an error notice; a confirm
+  verdict runs with a warning notice.
+- **A confirmation the agent cannot ask about names the rule.** On a hook
+  that cannot ask, such as OpenCode's, a confirm verdict runs as an alert
+  whose reason read `matched: <RULE-ID>:...`. It now says DefenseClaw policy
+  flagged the action for review (rule <RULE-ID>), and OpenCode's notice
+  starts with it. The Secure Client wording is unchanged.
+- **OpenCode and Amp say to restart after a failed start-up check.** When
+  the plugin's load-time check for unapproved plugins fails, its blocks say
+  so and ask the user to restart the agent once DefenseClaw is available.
+- **OpenCode and Amp explain a block for an unapproved plugin.** The message
+  started with the internal code `enterprise_foreign_hook_blocked:`. It now
+  starts with what DefenseClaw did, and the audit keeps the code. When Amp
+  stops a turn for such a plugin, the message also stays in the thread
+  instead of only in a notice that fades after a few seconds.
+- **`defenseclaw doctor` passes a global Kiro install.** `Connector scope
+  [kiro]` failed every install without `claw.workspace_dir`. It now passes
+  when the global `~/.kiro/hooks/defenseclaw.json`, which recent Kiro builds
+  read, holds DefenseClaw's hooks.
+- **Devin on macOS after the config folder moved.** Setup writes
+  `~/.config/devin/config.json`, which the Devin CLI reads, and closes the
+  old `~/Library/Application Support/devin` target first instead of failing
+  with "managed backup target mismatch".
+- **Kiro teardown finds the agent it hooked.** Teardown and VerifyClean also
+  clean the default agent named in the settings backup, even after the user
+  changed `chat.defaultAgent`. An agent name with `/`, `\`, `.` or `..` is
+  no longer resolved to a file.
+- **The `windsurf` to `devin` rename reaches every setting.**
+  `connector_hooks`, the judge and `application_protection` lists,
+  `asset_policy` rules and observability selectors kept the retired ID; the
+  loaders and `migrate` now rename them.
+- **`defenseclaw migrate` survives a plugin manifest that is not UTF-8.** A
+  Latin-1 `plugin.yaml` raised `UnicodeDecodeError` through `migrate` and
+  `setup remove`; such a manifest now declares only its directory name, as
+  in the gateway.
+- **`defenseclaw migrate` keeps plugin connectors.** While `plugin_dir`
+  holds a plugin the gateway could load, `migrate` drops no connector name,
+  and the upgrade preflight asks the staged gateway whether it knows a name
+  before it keeps it.
+- **The gateway reads the custom-providers overlay from its data
+  directory.** It now reads `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`, then
+  `$DEFENSECLAW_HOME/custom-providers.json`, then `~/.defenseclaw`, and
+  skips a missing overlay quietly.
+- **`defenseclaw-gateway status` no longer shows a disabled connector as
+  enforced.** A connector with `enabled: false` now reads `Status: disabled,
+  not enforced` under Connector Mode.
+- **No sonic warning on stderr.** Binaries built with Go 1.27 printed
+  `WARNING: sonic/ast only supports ...` on every run, which agents also
+  showed as the hook-error text. The sonic dependency now supports Go 1.27.
+- **`defenseclaw uninstall` works on a host with a managed deployment.** It
+  stopped at its gateway-stop phase, because `stop` refuses there. A
+  per-user install left over from before the managed deployment is now
+  removed.
+- **A Windows purge removes each account's DefenseClaw folder (enterprise
+  standalone).** Setup `/uninstall PURGE=1` and `uninstall --purge`, run as
+  LocalSystem, now remove each enrolled account's `%USERPROFILE%\.defenseclaw`,
+  including its per-user hook tokens, whether or not the account is signed
+  in. As on Linux and macOS, only the inert hook stubs a running agent may
+  still call and the account's own hooks the foreign-hook policy moved aside
+  stay. The `per_user_state_remaining` warning names each folder the purge
+  could not remove, with the reason.
+- **Amp's `async_shell_command` is inspected like its bash tool.** Commands
+  an Amp release ran through `async_shell_command` got no command facts, so
+  a rule that needs them was recorded but did not block.
+- **Kiro CLI 2.x runs DefenseClaw's tool hooks.** The `defenseclaw` agent
+  used the matcher `.*`, which kiro-cli 2.x never matches, so its tool hooks
+  never ran. It now uses `*`, and an agent with the old matcher fails
+  verification and is rewritten.
+- **Kiro shell calls get command facts.** The `__tool_use_purpose` note
+  (2.x) and the unset `cwd`, `description` and `timeout` (v3) left every Kiro
+  command partly parsed, so a command rule was only detected. They are now
+  dropped from the analyzed copy.
+- **Audit rows name the account for per-user connector hooks.** Rejected
+  connector-hook and inspect-tool rows now carry `user.id` and
+  `defenseclaw.user.name` when the caller is known, like hook decision rows.
+- **Kiro on native Windows blocks again.** The hook binary rejected
+  `--hook-surface` and exited 1, which Kiro lets through. It now accepts the
+  flag, and the Kiro commands use a PowerShell bridge that returns exit 2;
+  `defenseclaw setup kiro` replaces the old entries.
+- **Enterprise (standalone) Kiro follows kiro-cli self-updates.** The Linux
+  and macOS guardian refused every repair after a kiro-cli update. It now
+  follows updates at or above 2.24.1, the certified minimum, and in action
+  mode refuses to enroll a new user below it.
+- **A named pipe in place of an agent's hook config no longer hangs.**
+  Setup, verify and the enterprise guardian's per-user worker waited for a
+  writer (`worker for uid N timed out`). The read now fails at once with
+  `<path> is a named pipe, not a regular file`.
+- **Disabling Kiro keeps the user's CLI settings.** Teardown put back the
+  `~/.kiro/settings/cli.json` captured at enrollment, which dropped the keys
+  added since. It now removes only DefenseClaw's `chat.defaultAgent` and puts
+  back the user's earlier value.
+- **Disabling Hermes keeps the rest of `config.yaml`.** Teardown rewrote the
+  file without its comments, and approvals in a file put back from an
+  earlier enrollment stayed in `shell-hooks-allowlist.json`. It now rewrites
+  only the `hooks` mapping, keeping every byte outside it, and removes all of
+  DefenseClaw's approvals.
+- **Disabling Devin no longer puts DefenseClaw's earlier hooks back.** A
+  Devin backup captured while the config already held DefenseClaw's
+  `devin-hook.sh` hooks restored them at teardown. Teardown now removes
+  DefenseClaw's hooks from the restored config.
+- **`defenseclaw doctor` sends the gateway token only to the gateway it
+  checked.** Doctor verified which process owned the API port, then opened a
+  new connection for its authenticated requests, so a process that took the
+  port over in between could receive the token. Doctor now requires the
+  verified gateway process to have accepted that same connection before it
+  writes the request, and otherwise reports `the connected gateway endpoint is
+  not served by the verified gateway process`. The Codex telemetry runtime
+  check, which sent the token without checking the listener, does the same.
+- **Doctor and setup run the gateway controller they checked.** Starting,
+  restarting and stopping the gateway ran `defenseclaw-gateway` by path after
+  checking who can write it, so the path could name another file by the time
+  it ran. Linux now runs the checked file itself, Windows keeps it locked
+  against replacement until the command finishes, and macOS stops the launch if
+  the file or a directory above it changed. The Windows Cursor runtime probe
+  does the same for PowerShell, and the Windows watchdog repair uses the
+  verified gateway executable instead of the first one on `PATH`.
+- **A failed first Windows standalone install rolls back accounts with
+  per-user agents.** For an account whose `%USERPROFILE%\.defenseclaw` the
+  install created, rollback refused the whole plan when the account had an
+  Amp, Antigravity, Copilot, Devin, Hermes or OpenCode row, and left the
+  folder behind. Each of these connectors now has a bounded list of the
+  files its managed install writes there (runtime sidecars, hook scripts,
+  scoped tokens, runtime generations, the executable selection and its own
+  config backup records), and rollback removes exactly those; any other
+  file, such as the backups of displaced user hooks, still keeps the folder.
+  Stale OpenCode runtime generations are now also cleaned up (#927).
+- **Windows standalone status names the process holding the gateway API
+  port.** While another process listened on `127.0.0.1:18970` (or another
+  account's wildcard listener made Windows refuse the gateway's bind),
+  `enterprise windows status` and `verify` reported only `not_ready`. They
+  now report `api_port_held` with each holder's PID, image and account (or
+  that this account cannot identify it), list them in `api_port_holders`
+  in `--json`, and say that the gateway takes the port back by itself once
+  it is free, as on Linux and macOS (#929).
+- **Windows Setup `/verify` accepts an authentic unsigned build.** `/verify`
+  required a Cisco Authenticode signature even when the Setup's own manifest
+  records an unsigned release, so the documented check failed for every
+  unsigned Setup. It now checks the embedded payload against its manifest,
+  requires the signing state that manifest records, and for an unsigned
+  build prints its SHA-256 to compare with the release's Sigstore-verified
+  `checksums.txt`. It fails only for a changed payload, a stripped signature
+  or an unexpected one. The Windows install page says how to authenticate a
+  0.8.x Setup whose `/verify` still reports the missing signature (#919).
+- **The Windows guardian restores the managed OpenCode plugin right after a
+  change to its attributes.** OpenCode's runtime needs the write-attributes
+  right to load a plugin, and with it a standard account could make the
+  plugin unreadable (read-only or a reparse point), so every account's
+  OpenCode ran without DefenseClaw until the next pass, about a minute. The
+  guardian now watches the plugin's folder and runs the same heal within
+  about a second and logs a tamper line. After 12 restores in a minute it
+  slows to one restore every 5 seconds, so repeated changes cannot keep the
+  plugin unreadable until the next pass, which stays the backstop (#930).
+
+### Added
+
+- **Per-user credential rotation (enterprise standalone, Linux and macOS).**
+  `defenseclaw-gateway enterprise linux|macos rotate-credentials` replaces
+  the key every enrolled user's per-user credentials derive from.
+  The gateway accepts the old and the new key while the guardian moves and
+  verifies every user; the new key takes effect only then, and any failure
+  moves every user back to the old key. Agents already running lose
+  telemetry until they restart. On Windows the command refuses (exit
+  `1639`); see the enterprise operations guide.
+- **`defenseclaw-gateway audit export --since`, `--until` and `--newest`.**
+  `--since` and `--until` take an RFC3339 time or a duration ago (`30m`,
+  `2h`). With `--limit N`, `--newest` keeps the N most recent rows; output
+  stays oldest first.
+- **`defenseclaw-sensor-helper --version`.** The helper (shipped only in the
+  enterprise archive and packages) reports its version and commit.
+- **Claude Code version floor (enterprise standalone).** DefenseClaw sets
+  `requiredMinimumVersion` to 2.1.154 in its own `managed-settings.d`
+  drop-in. An administrator's value wins; `enterprise policy show|verify`
+  report the floor, and `connectors.claudecode.version_floor` controls it.
+  Claude Code reads the setting only from 2.1.163, so this floor stops no
+  build older than that
+  ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)).
+
+### Changed
+
+- **`defenseclaw setup rotate-token` on a managed computer.** Where the
+  organization manages DefenseClaw (the standalone profile), the command
+  now refuses before changing anything and names the administrator's
+  rotation command, instead of failing when it tried to stop the per-user
+  gateway. Other computers, Secure Client ones included, are unchanged.
+- **Windows standalone lifecycle events go to a `DefenseClaw` event log
+  that only administrators can write.** Any account can write
+  Application-log entries under any source name, so entries under
+  `DefenseClaw Enterprise` could be forged. Events 100 to 150 now go to the
+  `DefenseClaw` log (source `DefenseClaw Lifecycle`), which only LocalSystem
+  and Administrators can write and the Application log's readers can read;
+  each run that writes an event registers it and a successful uninstall
+  unregisters it. The Application-log copies continue in this release as legacy: move
+  MDM detection rules and SIEM forwarding that query the Application log by
+  source to the `DefenseClaw` log before a later release drops them.
+  `enterprise windows events` now checks the new log, and `--application`
+  the legacy copies. The lifecycle log line's `event.logs` names the logs
+  that took each event (#928).
+- **Plugin teardown without a backup receipt.** Removing the OpenCode or Amp
+  connector (or uninstalling) deletes DefenseClaw's plugin file when its
+  backup receipt is missing, as long as the file still starts with the
+  `// defenseclaw-managed-plugin` marker.
+- **An empty Copilot hooks file is deleted.** Teardown removes
+  `<hooks>/defenseclaw.json` when nothing but its schema version is left,
+  instead of rewriting it; handlers you added to it are kept.
+- **Teardown no longer creates missing files.** Removing the Cursor,
+  Copilot, OpenHands, Antigravity, Devin or Hermes connector for a user who
+  has no config file there leaves it absent. The Cursor change also applies
+  to the Secure Client profile.
+- **Enterprise Kiro route.** `enterprise policy show|verify` reports Kiro as
+  `per_user` on Linux and macOS, where the guardian enrolls it. A managed
+  install writes each user's global Kiro hooks and the CLI 2.x `defenseclaw`
+  agent only. Windows keeps `acp`.
+
 ## [Unreleased] — Hook collector unification
 
 This rollup unifies the agent hook collector across all 8 hook-first
@@ -73,6 +620,354 @@ There are **no new environment variables** — the unification is the
 default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
+
+### NVIDIA OpenShell 0.1 sandboxes
+
+- Adds `defenseclaw sandbox`: run a coding agent in skip-permissions mode
+  inside an NVIDIA OpenShell 0.1.x sandbox (Linux amd64/arm64; local gateway
+  with the Docker driver; OpenShell `>=0.1.1 <0.2.0`) that sees only the
+  project folder. OpenShell supplies the kernel-enforced boundary (network
+  namespace, Landlock, seccomp, non-root, credential placeholders); DefenseClaw
+  keeps judging every tool call through its hooks, which fail closed in a
+  sandbox.
+- On the Docker driver macOS cannot run sandboxes: OpenShell needs Landlock,
+  and Docker Desktop's Linux VM kernel has none (measured with engine 29.1.5:
+  kernel 6.12.65-linuxkit, active security modules `capability,bpf`), so
+  OpenShell refuses to start any sandbox there. A Mac runs sandboxes on
+  OpenShell's MicroVM driver instead (see the next section).
+- Harnesses: Claude Code, Codex, OpenCode, GitHub Copilot CLI, Kiro CLI,
+  Hermes, OpenHands, Antigravity and OmniGent run end to end. Cursor Agent,
+  Amp and Devin CLI images build but are refused until a hook check with a
+  vendor account passes. Each image pins the harness at DefenseClaw's
+  reviewed hook contract, installs root-owned hooks (managed or user tier, see
+  the capability matrix) and must pass a hook-fire probe before use.
+- Workspace: the project is mounted live by default, with secret files
+  masked, `.git/hooks` and `.git/config` read-only, a pre-session snapshot and
+  `sandbox undo`, an end-of-session review of changes that can run code on the
+  host, and a nested-repository guard. `--copy` works on a copy and brings
+  changes back with `sandbox pull` (apply, branch or patch); worktrees and git
+  directories outside the project fall back to copy mode. One sandbox at a
+  time can mount a folder live.
+- Network: an egress proxy on the daemon (default `api_port+2`) allows the
+  web by default and blocks a curated feed of exfiltration and abuse
+  destinations, private networks, this machine and cloud metadata, with
+  one-command `sandbox unblock`. Asks are rare: host ports, private addresses
+  and (under `balanced`/`strict`) hosts off the allowlist. Hooks arrive on a
+  separate ingress listener (default `api_port+1`) with per-sandbox binding
+  tokens.
+- Policy packs `open` (default), `balanced` and `strict`, custom packs under
+  `openshell.pack_dir`, and enterprise constraints under `openshell.admin`
+  (required pack, minimum profile, yolo, mounts, host ports, unblocks, learn
+  mode, allowed harnesses, egress block/allow-only lists, copy requirements,
+  resources, locked keys). Refusals say "blocked by your organization's
+  DefenseClaw policy" and `sandbox policy explain` shows where each value came
+  from.
+- Commands: `sandbox setup|doctor|run|connect|list|status|exec|logs|activity|
+  stop|start|delete|undo|review|pull|approvals|approve|reject|unblock|policy|
+  pack|image|enable|disable|teardown|legacy-cleanup`; the daemon serves them
+  under `/api/v1/sandbox/*` (master token and CSRF). The TUI gains a
+  Sandboxes panel (key `7`) and a Sandbox setup wizard; the macOS app gains
+  sandbox views.
+- Telemetry: sandbox lifecycle, workspace, egress, approval and hook-tamper
+  events in the v8 families, with a `correlation.sandbox` attribute group on
+  hook verdicts.
+- New configuration under `openshell:` (enabled, ports, pack/profile, yolo,
+  workdir, egress, image, approvals, resources, harnesses, wrappers, mcp,
+  token_delivery, admin) and new environment variables
+  (`DEFENSECLAW_SANDBOX_ID`, `DEFENSECLAW_SANDBOX_NAME`,
+  `DEFENSECLAW_SANDBOX_TOKEN`, `DEFENSECLAW_EGRESS_URL`,
+  `DEFENSECLAW_EGRESS_BYPASS`, `DEFENSECLAW_NO_SANDBOX`); see the
+  configuration and environment-variable references.
+- The `openshell` commands DefenseClaw runs (sandbox connect and the harness
+  terminal, copy-mode uploads, pulls, port forwards) use an ssh with
+  connection sharing off. With `ControlMaster` and `ControlPath` in
+  `~/.ssh/config`, OpenShell's CLI sent every sandbox's ssh session over the
+  connection the first one left open, so an upload landed in, and a connect
+  could attach to, another sandbox. Your ssh configuration is not changed;
+  `sandbox doctor` gains an `ssh-connection-sharing` check that names the
+  risk for `openshell` commands you run yourself. That ssh is used only once
+  it has been seen to run from where it was put (a `/tmp` mounted `noexec`
+  would have let your own ssh run instead, and moves it under the data
+  directory), and not from a folder other users can change, macOS ACLs
+  included. An `ssh` wrapper first on `PATH` that turns sharing back on
+  with its own `ControlMaster`, `ControlPath`, `-S` or `-M` is refused, as
+  `ssh -G sandbox` shows it, with the wrapper named; the doctor fails too.
+  Each copy-mode upload is also checked to have arrived in the sandbox it
+  named, and a baseline failure names the missing path.
+- Fixes that also apply outside sandboxes:
+  - The Claude Code and Codex hook scripts treated an `alert` verdict (flag
+    without blocking) as an invalid reply, so a fail-closed install blocked
+    the tool call. They now let it run and show the notice.
+  - Shell tool calls that name their own working directory or pass extra
+    control arguments (OpenCode, Hermes, Amp, Cursor, Kiro, Devin, Copilot
+    CLI, Antigravity) were only partly parsed, so a matching CRITICAL command
+    rule was reported but not enforced. Those calls are now judged in the
+    directory they name.
+
+### OpenShell sandboxes on macOS (MicroVM driver)
+
+- Apple-silicon Macs run sandboxes on OpenShell's MicroVM (`vm`) compute
+  driver, which boots each sandbox in its own VM with a kernel that runs
+  Landlock. OpenShell calls the driver experimental. Intel Macs are refused
+  before any sandbox command runs (`teardown` still runs). Linux, and any
+  gateway on the Docker driver, behave as before.
+- The daemon reads the gateway's compute driver when it connects, refuses
+  one it does not drive, keeps the driver with each sandbox, and reports it
+  as `gateway.driver` in the sandbox status API. What differs per driver
+  lives in one table (`internal/openshell/driver.go`).
+- A MicroVM mounts no host folders, so every run on a Mac works on a copy:
+  `sandbox run` says so in one line before it copies, refuses `--context`,
+  says `--no-snapshot` does not apply and that `--cpu`/`--memory` have no
+  effect (every MicroVM gets the gateway's `vcpus` and `mem_mib`), and notes
+  that the first start of an image prepares its MicroVM disk (about a
+  minute). `policy explain` shows `workdir.mode = copy` from
+  `openshell.gateway.compute_driver`.
+- Copy-mode sessions (on every driver) that bring nothing back, without a
+  terminal, with `--yes` or after a skip, end with `N files changed; nothing
+  was applied` and the `sandbox pull` command, and say when they keep a
+  sandbox despite `--rm`. `sandbox review` of a copy-mode sandbox previews
+  its pull instead of failing. A copy above the upload cap names
+  `openshell.workdir.max_upload_mb`; on a Mac a full sandbox disk names the
+  MicroVM's overlay (`overlay_disk_mib`).
+- Claude Code and Codex per-run managed settings are baked, root-owned and
+  read-only, into a content-addressed run image instead of bind-mounted, and
+  every image name sent to the MicroVM driver is under `defenseclaw.invalid/`,
+  so its registry fallback cannot fetch a stand-in. After each create and
+  start a check inside the sandbox proves its uid and gid, that it has no
+  capabilities, and the digests of its hooks and run files.
+- `sandbox setup` on a Mac asks to switch the gateway to the MicroVM driver,
+  offers `brew install e2fsprogs`, and writes `compute_driver = "vm"` and the
+  sandbox identity (your uid and gid) in one plan with one restart;
+  `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
+  checks. On a Mac still on the Docker driver, a run that fails OpenShell's
+  Landlock check names the switch.
+- With OpenShell's release binaries outside Homebrew, a gateway that answers
+  on the vm driver no longer fails the doctor: `vm-driver` passes on the
+  driver it runs (naming the binary when found), and `gateway-service` warns,
+  saying how the gateway runs (a launchd label, or started by hand, which
+  does not start at login) and that DefenseClaw cannot restart it. Its fix
+  is the one setup, which refuses such an OpenShell, gives: stop that
+  gateway and remove that OpenShell, then `sandbox setup
+  --install-openshell` installs the formula; the TUI's machine check says
+  the same instead of "✓ OpenShell". A driver outside the formula's keg that lacks the Hypervisor entitlement
+  gets a fix that names it; `doctor --fix` and setup re-sign only the
+  formula's driver (`brew postinstall` signs no other).
+  The doctor's disk line counts only the MicroVM disks prepared from images,
+  not the driver's overlay templates and bootstrap rootfs.
+- The first start of an image on MicroVMs prepares a disk of about the
+  image's size (about 5 GB): `sandbox run` now refuses it before copying
+  anything when the volume of the driver's image cache has less free space
+  than the image plus 1 GiB (at least the doctor's 6 GiB), warns below twice
+  that (at least 12 GiB), and names `sandbox image prune`; the daemon refuses
+  such a create from any client (`unavailable`), and `image build` warns
+  after a build. Docker-driver runs are not checked.
+- `sandbox image prune` and `sandbox teardown` on a Mac give back the disk
+  of what they remove: the MicroVM disk (about 5 GB) OpenShell prepared from
+  each image ID they removed, in `<state_dir>/images`, and say how much they
+  freed (`--dry-run`: what they would). Only `sandbox-prepared-rootfs-*`
+  directories of IDs Docker no longer has and no sandbox is recorded with are
+  removed, and only while the daemon (or, for teardown, the gateway) listed
+  the sandboxes; OpenShell's other state stays. The doctor's disk fix names
+  prune and `lsof +L1` for space a backup or indexing app still holds.
+- On every driver, a harness image removed from Docker (`docker rmi`) no
+  longer shows as built and hook-verified: `sandbox image list` names it
+  apart from the table (`"missing": true` in JSON), `image prune` says it
+  forgets its record, and the doctor's image check does not count it. That
+  check also lists every harness image built for you, not only the
+  configured harnesses'.
+- Fixes from the macOS connector certification (every driver unless noted):
+  a copy names the secret files it holds back once; a Kiro tool block names
+  DefenseClaw once (host hooks too); the egress counts are destinations
+  everywhere: the session summary reads `N new sites contacted · M sites
+  blocked` with M matching its `✗` lines, `sandbox status` reads
+  `N destinations contacted, M blocked`, and an invalid destination (a host
+  without a dot) counts as blocked like the feed shows it (the status JSON
+  keeps the request count as `egress.blocked_requests`). The banner's
+  `Hooks` line says, per user-tier harness, what the image keeps root-owned
+  and what the agent can still change (it said "the agent could edit its own
+  hook settings" also for Kiro and Hermes, whose hooks are root-owned). The
+  end of a session names `sandbox connect NAME -- <continue args>` last, and
+  not dimmed, for Kiro CLI, Hermes Agent and OpenHands too, and says that the
+  resume line the harness printed (`copilot --resume=…`, `kiro-cli
+  --resume-id …`, `hermes --resume …`, `openhands --resume …`) works only
+  inside the sandbox. After an apply, the next pull or session end of a
+  copy-mode sandbox shows, reviews and merges only what changed since that
+  apply (`… since the last apply`); with nothing new it asks nothing, and
+  `sandbox delete` of the stopped sandbox does not warn about unpulled work.
+  `sandbox pull` asks the same confirmation as a session's end. A new
+  sandbox runs in this machine's time zone (`DEFENSECLAW_HOST_TZ`, exported
+  as `TZ` where the image has the zone's file) instead of UTC. Ctrl-Z in a
+  harness whose own suspend fails (Copilot CLI) is explained at once in the
+  terminal's title, and the notice after it exits (and Hermes' at once) says
+  there is nothing to bring back with `fg`.
+- Harness start-up fixes from the macOS certification, on both drivers: the
+  Copilot launcher passes `NODE_OPTIONS=--disable-warning=UNDICI-EHPA`, as
+  the Codex one does, so Node's experimental-EnvHttpProxyAgent warning no
+  longer prints above the TUI at every start.
+- The Kiro image unpacks the embedding model Kiro CLI downloads at its first
+  start (`all-MiniLM-L6-v2`, 79 MiB, each file checked against the SHA-256
+  the pinned `kiro-cli-chat` carries) into the image HOME, so a new Kiro
+  sandbox's first session no longer downloads it. When that download fails
+  or its files do not match, the image builds without the model and Kiro
+  downloads it as before. The Kiro launcher sets
+  `KIRO_SKIP_BINARY_PINNING=1`, so an interactive session runs the root-owned
+  `kiro-cli-chat` rather than the copy Kiro makes in
+  `~/.local/share/kiro-cli/run`.
+- A DefenseClaw block now shows in the Hermes TUI: a root-owned module in the
+  Hermes image prints the block reason under the tool's line
+  (`┊ ✗ terminal blocked by DefenseClaw rule <ID>: …`), where Hermes 0.19
+  printed nothing. The reason the model gets is unchanged.
+- The Hermes image stamps its install the way Hermes' own image does
+  (`.install_method` = `docker`), so Hermes no longer prints "pip installs are
+  no longer an officially supported platform" or asks `pypi.org` for updates
+  at every start, and its managed layer pins `model_catalog.enabled: false`,
+  which stops the start-up fetch from `hermes-agent.nousresearch.com` and
+  `nousresearch.github.io`.
+- An OpenHands sandbox session no longer ends with an
+  `Exception ignored in atexit callback` / `RuntimeError: App is not running`
+  traceback above the session summary: a root-owned module in the OpenHands
+  image runs the `SessionEnd` hooks as before and drops only the display
+  event OpenHands hands to its already stopped TUI. The same module starts a
+  DefenseClaw block's hook line with the block, so the collapsed line reads
+  `BLOCKED by DefenseClaw rule <ID>: …` instead of
+  `Status: BLOCKED - Blocked by DefenseCla...`, and it ignores the
+  `AuthlibDeprecationWarning` an OpenHands dependency printed at every start.
+- Interactive GitHub Copilot CLI sessions wait out Copilot's 30-second hook
+  timeout on every hook in a MicroVM too (#966): OpenShell's seccomp filter
+  refuses `pidfd_open` there as well. The launch banner of an interactive
+  Copilot session now says so, on Linux as well; `--prompt` runs are not
+  slowed. Copilot's HTTP hooks, which would avoid the wait, let a tool call
+  run when the request fails, so the sandbox keeps its fail-closed command
+  hooks.
+- A harness that exits while a command it started still runs (OpenCode quit
+  in the middle of a tool call) no longer leaves that command changing the
+  sandbox while DefenseClaw pulls or reviews the work: the launcher's
+  terminal-session supervisor adopts what the harness leaves, ends it before
+  the session's end (two seconds' grace, then `SIGTERM` and `SIGKILL`) and
+  names it. OmniGent's server and `sandbox exec` commands are kept. Both
+  drivers; the images rebuild.
+- An interactive OpenCode session's banner has a `Keys` line: Esc
+  interrupts a turn, and Ctrl-C (OpenCode's quit key, also mid-turn) ends
+  the session.
+- A new OpenCode sandbox no longer downloads `@opencode-ai/plugin` and its
+  dependencies (about 20 MiB from registry.npmjs.org) at start: the image
+  records the pinned version as installed in `~/.config/opencode`, which
+  OpenCode's install check accepts. Both drivers; the OpenCode image
+  rebuilds.
+- The toast for a tool call DefenseClaw blocked in an OpenCode sandbox says
+  to click the tool's red line to see the reason again: OpenCode shows a
+  refused call's reason only there, and its plugins cannot set the tool's
+  output.
+- The OpenCode launcher's refusal of a plugin, custom tool or config file
+  inside the sandbox gives the commands that remove it from your machine
+  (`sandbox start`, `sandbox exec <name> -- rm <file>`, `sandbox connect`),
+  with the path quoted for the shell. Both drivers; the OpenCode image
+  rebuilds.
+
+### Legacy OpenShell standalone sandbox removed
+
+- **Breaking:** removes the legacy standalone sandbox integration for the
+  `openshell-sandbox` 0.0.x binary. It was Linux- and OpenClaw-only: a network
+  namespace and veth pair (`10.200.0.1` host, `10.200.0.2` sandbox), iptables
+  NAT rules, root `openshell-sandbox.service` / `defenseclaw-sandbox.target`
+  units, launcher scripts under `/usr/local/lib/defenseclaw/`, a `sandbox`
+  Linux user, and ownership/ACL changes on `~/.openclaw`. The Go wrappers
+  called OpenShell CLI verbs that do not exist, and the generated
+  per-connector sandbox policy was never enforced. The NVIDIA OpenShell 0.1
+  sandboxes above replace it.
+- **Breaking:** removed commands: `defenseclaw sandbox init`, the old
+  `defenseclaw sandbox setup` flags (`--disable`, `--sandbox-ip`, `--policy`
+  and the others; `sandbox setup` now sets up OpenShell 0.1),
+  `defenseclaw-gateway sandbox start|stop|restart|status|exec|shell`, and
+  `defenseclaw-gateway sandbox policy diff`.
+- Removed files: `policies/openshell/*`, `policies/rego/sandbox.rego`
+  (`policies/rego/data-sandbox.json` stays; it carries firewall data),
+  `internal/sandbox/`, `internal/cli/sandbox.go`, `internal/cli/policy_diff.go`,
+  `cli/defenseclaw/commands/cmd_init_sandbox.py`,
+  `cli/defenseclaw/commands/cmd_setup_sandbox.py`,
+  `scripts/bundle-sandbox-test.sh`, `scripts/test-e2e-sandbox*.sh`,
+  `scripts/test-e2e-tool-block-sandbox.sh`, `scripts/test-proxy-sandbox.py`,
+  and `scripts/fix-sandbox-acls.sh`. `scripts/install-openshell-sandbox.sh`,
+  which older `install.sh` versions fetch as a release asset, is now a stub
+  that prints a deprecation notice and exits 0, so cached older installers do
+  not fail.
+- `defenseclaw init --sandbox` is hidden and deprecated: it prints a notice and
+  continues a normal init. `install.sh --sandbox` prints a deprecation notice
+  and is otherwise a no-op.
+- **Breaking:** OpenClaw and ZeptoClaw subprocess policy is now `shims` on
+  every platform. Earlier docs claimed Linux installed an enforced
+  Landlock/seccomp OpenShell policy with shims as a supplement; that policy was
+  never enforced.
+- Adds
+  `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]`.
+  Linux only; privileged steps run through `sudo` with binaries resolved only
+  from root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. It detects a
+  legacy install, prints every step with its exact commands, and asks for
+  confirmation unless `--yes`; `--dry-run` changes nothing. Each artifact is
+  handled idempotently and recorded in `<data_dir>/legacy-sandbox-cleanup.json`.
+  Steps: disable and remove the generated systemd units and root-owned,
+  DefenseClaw-generated launchers; stop unless nothing of the legacy sandbox
+  still runs (no active unit, no live PID from `sandbox.pids` or
+  `openshell.pid`, no process of the sandbox uid; the non-systemd
+  `run-sandbox.sh` launcher must be stopped by the operator first); delete the
+  recorded namespace and the veths whose peer is in it, remove the exact NAT
+  rules (checked with `iptables -C` first), and restore
+  `net.ipv4.conf.all.route_localnet`; remove the `sandbox` user's ACLs, then
+  restore the OpenClaw home's original ownership from the validated backup and
+  clear only the `o+x` legacy setup added to the home's ancestors, and remove
+  the `/home/sandbox/.openclaw` symlink (a host whose old `--disable` erased the
+  pin and backup still has its sandbox ACLs removed from `claw.home_dir` or
+  `~/.openclaw`); then, as the operator and refusing symlinks, restore the
+  `openclaw.json` gateway and provider settings to loopback; remove the
+  invoking user from the `sandbox` group; optionally `userdel -r sandbox`
+  (`--remove-user`, refused while that user has processes, until its
+  ownership and ACLs are gone from the OpenClaw home, or when the account's
+  home is not the configured sandbox home) and remove a non-package-owned
+  0.0.x `/usr/local/bin/openshell-sandbox` (`--remove-binary`); once the
+  ownership and `openclaw.json` restores are done, reset `openshell.mode`,
+  `gateway.host`, `gateway.port`, `guardrail.host`, `claw.home_dir`,
+  `claw.config_file`, and `claw.openclaw_home_original`; back up legacy
+  data-dir artifacts to `<data_dir>/backups/legacy-sandbox-<timestamp>/`
+  before removing them; and print next steps (scan the skills, plugins, and
+  MCP servers the sandboxed agent could have changed, then
+  `defenseclaw setup guardrail`, which restarts the gateway and OpenClaw).
+  The group and user steps only run on a host with legacy evidence.
+- Legacy bind shim: until cleanup runs on a host whose config still says
+  `openshell.mode: standalone` with a non-localhost `guardrail.host`, the
+  gateway API keeps binding to that host (an explicit `gateway.api_bind`
+  still wins) so `upgrade` health checks keep working. While
+  `openshell.mode: standalone` remains, `/health` reports the `sandbox`
+  subsystem as `degraded` with a `last_error` pointing at
+  `defenseclaw sandbox legacy-cleanup`; on every other host the subsystem is
+  absent. `defenseclaw doctor` and `defenseclaw status` point a detected
+  legacy install at the same command.
+- Config: the `openshell:` key stays in the v8 schema with no migration.
+  `mode` and `sandbox_home` are read only by the legacy shim and
+  `legacy-cleanup`; `binary`, `policy_dir`, `version`, `auto_pair`, and
+  `host_networking` are accepted and ignored.
+- **Breaking:** telemetry and audit: removes the `metric.defenseclaw.openshell.exit`
+  metric family (instrument `defenseclaw.openshell.exit`) and its
+  `defenseclaw.metric.command` attribute, and retires the `init-sandbox` audit
+  action. A route selector that still names the `init-sandbox` action or the
+  `defenseclaw.openshell.exit` event name keeps compiling: the value stays in
+  the selector, where it matches nothing, and the effective plan carries a
+  `retired_selector_value` warning so it can be removed.
+- Removes the seven environment variables whose only consumers were deleted:
+  the legacy installer's binary-digest, manifest-digest, and unpinned-download
+  variables; the launcher scripts' broad-regex namespace cleanup opt-in and
+  install-directory variable; the `sandbox setup` pre-pairing device-key trust
+  override; and the sandbox proxy test harness's bearer token.
+
+### Kiro CLI tool hooks
+
+- Fixes the Kiro CLI 2.x agent hooks (`~/.kiro/agents/defenseclaw.json`, and
+  the operator's own default agent when `chat.defaultAgent` names one):
+  setup registered `preToolUse` and `postToolUse` with the matcher `.*`.
+  Kiro CLI reads matchers as globs, so `.*` matched no tool and no tool call
+  on the host was ever checked. Setup now writes `*`. The gateway runs
+  connector setup at every start, so the first start after an upgrade
+  rewrites DefenseClaw's own entries in place; entries the operator added
+  are left as they are. Measured against kiro-cli 2.24.1 on Linux.
 
 ### Renamed and removed connectors
 
@@ -93,17 +988,20 @@ deleted.
   are protected; conversations in Devin Desktop's legacy Cascade agent are not.
 - **Gemini CLI removed.** Use the Antigravity connector instead.
   `defenseclaw upgrade` removes `geminicli` from `config.yaml` when another
-  connector is configured (and warns, leaving the file unchanged, when it was
-  the only one). On its next start the gateway drops `geminicli` from its lock
+  connector is configured. When it was the only one, the upgrade's preflight
+  (`defenseclaw migrate --check`) stops before anything changes and names
+  the command to run on the installed release. On its next start the gateway drops `geminicli` from its lock
   and active-connector state and deletes DefenseClaw's
   `hooks/geminicli-hook.sh`/`.ps1` and `hooks/.otlp-geminicli.token`; Gemini CLI
   then treats the missing hook as a non-blocking error. DefenseClaw never edits
   `~/.gemini`; clean it up once by hand, then set up Antigravity:
   1. Only if Gemini CLI was the only connector, or the package was replaced
      without `defenseclaw upgrade`: run `defenseclaw setup remove geminicli
-     --yes` (no `--force` needed even when it is the last connector), or delete
-     `geminicli` from `guardrail.connectors` / `guardrail.connector` in
-     `~/.defenseclaw/config.yaml`.
+     --yes --force` (the 0.8.x release still installed after a stopped
+     upgrade refuses to remove the last connector without `--force`), set up
+     another connector first, or delete `geminicli` from
+     `guardrail.connectors` / `guardrail.connector` in
+     `~/.defenseclaw/config.yaml`; then run the upgrade again.
   2. In `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`;
      on Windows `%USERPROFILE%\.gemini\settings.json`), under `hooks`, for each
      of `SessionStart`, `SessionEnd`, `BeforeAgent`, `AfterAgent`,

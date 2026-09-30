@@ -1,28 +1,55 @@
+# DefenseClaw gateway — managed enterprise, standalone profile.
+#
+# Installed and configured by `defenseclaw-gateway enterprise linux install`
+# (or the defenseclaw-enterprise package). Do not edit: the lifecycle writes
+# host-specific settings (credentials, home roots) as drop-ins in
+# /etc/systemd/system/defenseclaw-gateway.service.d/.
+#
+# The gateway runs as the unprivileged `defenseclaw` account with no
+# capabilities. Its two listeners are socket units owned by PID 1, so they
+# stay bound across gateway restarts: hooks queue instead of failing, and a
+# standard user can never bind 127.0.0.1:18970 or the hook socket in the
+# gap. The gateway reports readiness and watchdog pings with sd_notify.
+
 [Unit]
-Description=DefenseClaw Gateway
-Documentation=https://docs.defenseclaw.ai/docs/setup/enterprise-deployment
-After=network-online.target
-Wants=network-online.target
+Description=DefenseClaw Gateway (managed enterprise)
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+Wants=network-online.target defenseclaw-sensor-helper.service
+After=network-online.target defenseclaw-sensor-helper.service
+Requires=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket
+After=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+Sockets=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket
 User=defenseclaw
 Group=defenseclaw
 Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
 Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
 Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
 Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
 ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway
-Restart=on-failure
-RestartSec=5s
+Restart=always
+RestartSec=2s
+TimeoutStartSec=120s
+WatchdogSec=60s
+OOMScoreAdjust=-900
+
 StateDirectory=defenseclaw
 RuntimeDirectory=defenseclaw
 LogsDirectory=defenseclaw
-StateDirectoryMode=0750
+StateDirectoryMode=0700
 RuntimeDirectoryMode=0750
 LogsDirectoryMode=0750
 WorkingDirectory=/var/lib/defenseclaw
 UMask=0077
+
+# PrivateUsers and DynamicUser would remap the account the hook socket peer
+# check and the file-ownership trust checks depend on.
+PrivateUsers=no
 NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
@@ -36,19 +63,25 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ProcSubset=pid
-ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw
+ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw -/var/lib/defenseclaw-hook-guardian
+ReadWritePaths=/var/lib/defenseclaw /var/log/defenseclaw /run/defenseclaw -/run/defenseclaw-hook
 CapabilityBoundingSet=
+AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true
+LockPersonality=true
+# No MemoryDenyWriteExecute: the gateway links bytedance/sonic (through the
+# bifrost LLM client). On x86_64 sonic loads its SIMD code and JIT-compiles
+# JSON codecs into executable memory, starting in package init; under the
+# directive mprotect(PROT_EXEC) fails with EPERM and the process panics before
+# it answers on its sockets (seen on RHEL 9 x86_64).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
 SystemCallErrorNumber=EPERM
-LockPersonality=true
-MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target

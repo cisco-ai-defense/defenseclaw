@@ -72,13 +72,19 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	if dataDir == "" {
 		return "", fmt.Errorf("EnsureHookAPIToken: empty dataDir; refusing to mint transient token")
 	}
-	hookAPITokenMu.Lock()
-	defer hookAPITokenMu.Unlock()
-
 	tokenPath, err := HookAPITokenFilePath(dataDir, connectorName)
 	if err != nil {
 		return "", err
 	}
+	hookAPITokenMu.Lock()
+	defer hookAPITokenMu.Unlock()
+	return ensureHookAPITokenFileLocked(dataDir, tokenPath)
+}
+
+// ensureHookAPITokenFileLocked returns the 64-character hex secret stored at
+// tokenPath (a file directly under dataDir/hooks), minting it when absent.
+// The caller holds hookAPITokenMu.
+func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 	if _, err := os.Lstat(tokenPath); err == nil {
 		existing, readErr := readSecureHookAPITokenFile(dataDir, tokenPath)
 		if readErr != nil {

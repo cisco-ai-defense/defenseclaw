@@ -80,6 +80,7 @@ type tenantKey struct {
 	tlsID    string // sha256 of tls posture; empty when no per-instance TLS overrides.
 	subID    string // sha256 of per-provider sub-block; empty when none set.
 	aliasID  string // current model only when a per-model identity alias is needed.
+	egressID string // enterprise proxy route when the tenant connects through it; empty otherwise.
 }
 
 // tlsOverrides bundles the per-instance TLS knobs from a custom-providers
@@ -138,7 +139,7 @@ var (
 // are endpoint, TLS, provider sub-block, and optional model-alias posture;
 // none contain raw credentials.
 func tenantKeyString(k tenantKey) string {
-	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID + "|" + k.tlsID + "|" + k.subID + "|" + k.aliasID
+	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID + "|" + k.tlsID + "|" + k.subID + "|" + k.aliasID + "|" + k.egressID
 }
 
 // evictOldestBifrostTenantLocked drops the LRU tenant client. Caller
@@ -520,6 +521,21 @@ func getBifrostClient(
 	azure *config.AzureKeyConfig,
 	extraHeaders map[string]string,
 ) (*bifrost.Bifrost, error) {
+	// A standalone gateway sends provider traffic through the
+	// enterprise.network proxy unless no_proxy excludes the endpoint.
+	endpoint := baseURL
+	if providerKey == schemas.Azure && azure != nil && strings.TrimSpace(azure.Endpoint) != "" {
+		endpoint = azure.Endpoint
+	}
+	route := currentEnterpriseEgress()
+	proxyConfig, err := bifrostEgressProxy(route, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
+	}
+	egressID := ""
+	if proxyConfig != nil {
+		egressID = route.ID()
+	}
 	tk := tenantKey{
 		provider: providerKey,
 		keyID:    bifrostKeyID(providerKey, apiKey),
@@ -527,6 +543,7 @@ func getBifrostClient(
 		tlsID:    tls.id(),
 		subID:    subBlockID(bedrock, vertex, azure),
 		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure),
+		egressID: egressID,
 	}
 
 	now := time.Now()
@@ -553,6 +570,7 @@ func getBifrostClient(
 	}
 
 	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, model, tls, bedrock, vertex, azure, extraHeaders)
+	acct.config.ProxyConfig = proxyConfig
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})

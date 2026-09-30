@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -147,8 +148,15 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is unavailable")
-    tool_dirs = {str(Path(tool).parent) for name in ("go", "python3") if (tool := shutil.which(name)) is not None}
-    test_path = os.pathsep.join(sorted(tool_dirs) + ["/usr/bin", "/bin"])
+    # Expose go and python3 themselves, not their directories: a virtualenv
+    # bin that holds python3 can also hold another checkout's defenseclaw,
+    # which the PATH ownership check rightly refuses before the case under test.
+    tool_bin = tmp_path / "tools/bin"
+    tool_bin.mkdir(parents=True)
+    for name in ("go", "python3"):
+        if (tool := shutil.which(name)) is not None:
+            _write_executable(tool_bin / name, f'#!/bin/sh\nexec {shlex.quote(tool)} "$@"\n')
+    test_path = os.pathsep.join([str(tool_bin), "/usr/bin", "/bin"])
 
     def run(
         home: Path,

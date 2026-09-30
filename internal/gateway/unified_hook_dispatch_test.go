@@ -98,7 +98,9 @@ func TestHookProfileForConnector(t *testing.T) {
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", true, true, true},
 		{"devin", "devin", "devin", true, true, true},
-		{"openhands", "openhands", "openhands", false, true, true},
+		// openhands' Decode maps the CLI's PascalCase SDK event_type onto
+		// the contract's snake_case event names.
+		{"openhands", "openhands", "openhands", true, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {

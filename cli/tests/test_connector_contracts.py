@@ -440,6 +440,7 @@ class TestConnectorContractManifest(unittest.TestCase):
             "openhands": (("openhands-hooks-v1", "1.12.0", "", True, "v6", 6),),
             "opencode": (("opencode-hooks-v1", "1.18.10", "1.19.0", False, "v7", 10),),
             "amp": (("amp-plugin-v1", "0.0.1785334225", "", True, "v2", 5),),
+            "devin": (("devin-hooks-v1", "", "", True, "v7", 8),),
         }
 
         for platform_name in ("darwin", "linux", "windows"):
@@ -473,8 +474,25 @@ class TestConnectorContractManifest(unittest.TestCase):
         }
         self.assertEqual(
             overridden,
-            {("openhands", "openhands-hooks-v1"): {"darwin", "windows"}},
+            {
+                ("devin", "devin-hooks-v1"): {"darwin", "windows"},
+                ("openhands", "openhands-hooks-v1"): {"darwin", "windows"},
+            },
         )
+
+    def test_devin_contract_pins_are_per_platform(self) -> None:
+        # Same per-OS pins as Go's TestDevinContractPinsArePerOS.
+        for platform_name, want in (
+            ("linux", STATUS_KNOWN),
+            ("darwin", STATUS_UNKNOWN),
+            ("windows", STATUS_UNKNOWN),
+        ):
+            with self.subTest(platform_name=platform_name):
+                verified = resolve_connector_contract("devin", "3000.11.3", platform_name=platform_name)
+                self.assertEqual(verified.status, want)
+                reviewed = resolve_connector_contract("devin", "3000.4.25", platform_name=platform_name)
+                self.assertEqual(reviewed.status, STATUS_KNOWN)
+                self.assertEqual(reviewed.contract.contract_id, "devin-hooks-v1")
 
     def test_unversioned_connectors_use_default_contract(self) -> None:
         compat = resolve_connector_contract("cursor", "")

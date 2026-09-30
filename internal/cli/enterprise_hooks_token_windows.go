@@ -38,6 +38,28 @@ func alignEnterpriseHookScopedTokenOwner(dataDir, connectorName string) error {
 	return alignEnterpriseWindowsTokenOwner(dataDir, path, "hook token")
 }
 
+func validateEnterpriseHookUserTokenKeyLocation(dataDir string) error {
+	path, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return err
+	}
+	return validateEnterpriseWindowsTokenLocation(dataDir, path, "per-user credential key")
+}
+
+// loadEnterpriseHookPendingUserTokenKey: the Windows lifecycle does not
+// rotate the per-user credential key, so no key is ever staged there.
+func loadEnterpriseHookPendingUserTokenKey(string) (string, error) {
+	return "", nil
+}
+
+func alignEnterpriseHookUserTokenKeyOwner(dataDir string) error {
+	path, err := connector.UserScopedTokenKeyPath(dataDir)
+	if err != nil {
+		return err
+	}
+	return alignEnterpriseWindowsTokenOwner(dataDir, path, "per-user credential key")
+}
+
 func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
 	path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
 	if err != nil {

@@ -700,6 +700,8 @@ function Test-SetupImport {
                 @("Publisher", "Cisco Systems, Inc."), @("UninstallString", "`"$cache\DefenseClawSetup-x64.exe`" /uninstall"))) {
             New-ItemProperty -Path $uninstallKey -Name $value[0] -Value $value[1] -PropertyType String -Force | Out-Null
         }
+        # A fresh profile (some hosted runners) has no Run key until something writes to it.
+        if (-not (Test-Path -LiteralPath $runKey)) { New-Item -Path $runKey -Force | Out-Null }
         New-ItemProperty -Path $runKey -Name "DefenseClawGateway" -PropertyType ExpandString -Force `
             -Value "`"$setupRoot\bin\defenseclaw-startup.exe`"".Replace($env:LOCALAPPDATA, "%LOCALAPPDATA%") | Out-Null
         New-ItemProperty -Path $runKey -Name "DefenseClawDeferredUninstallCleanup" -PropertyType String -Force `

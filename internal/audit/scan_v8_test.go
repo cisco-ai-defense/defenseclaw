@@ -354,6 +354,7 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		RequestID: "request-runtime", SessionID: "session-runtime",
 		TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef",
 		AgentID: "agent-runtime", AgentInstanceID: "instance-runtime", Connector: "codex",
+		UserID: "1002", UserIDKind: "posix_uid", UserName: "bob",
 	}
 
 	gotEvaluationID, scanID, err := logger.LogInspectFindingsWithCorrelation(t.Context(), source, corr)
@@ -380,6 +381,11 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		body := securityActionBody(t, record)
 		if body["defenseclaw.evaluation.id"] != evaluationID || body["defenseclaw.scan.id"] != scanID {
 			t.Fatalf("record[%d] identifiers=%#v", index, body)
+		}
+		// Finding and scan-verdict rows name the caller, as hook decisions do.
+		if body["user.id"] != "1002" || body["defenseclaw.user.id_kind"] != "posix_uid" ||
+			body["defenseclaw.user.name"] != "bob" {
+			t.Fatalf("record[%d] caller=%#v", index, body)
 		}
 		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != wantEvidence {
 			t.Fatalf("finding evidence summary=%#v", body)

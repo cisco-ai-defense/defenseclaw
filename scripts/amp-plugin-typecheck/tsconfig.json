@@ -19,6 +19,6 @@
   "files": [
     "node-os.d.ts",
     "symbol-observable.d.ts",
-    "../../internal/gateway/connector/hooks/amp-plugin.ts"
+    "../../internal/gateway/connector/testdata/bridge_host/amp-plugin.ts"
   ]
 }

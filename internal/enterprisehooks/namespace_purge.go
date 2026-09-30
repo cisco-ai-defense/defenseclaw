@@ -22,6 +22,10 @@ type WindowsNamespacePurgeRequest struct {
 	ExpectedIdentity  string `json:"expected_identity"`
 	GatewayServiceSID string `json:"gateway_service_sid"`
 	ValidateOnly      bool   `json:"validate_only"`
+	// Profile names the enterprise profile whose exact install layout Root
+	// must belong to. Empty is the Secure Client profile, so requests from
+	// the Secure Client lifecycle keep their original shape.
+	Profile string `json:"profile,omitempty"`
 }
 
 // WindowsNamespacePurgeReport records the exact outcome of one native cleanup
