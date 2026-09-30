@@ -907,7 +907,9 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 			ta.out.Reset()
 			ta.stream.runs = nil
 			ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
-			has(t, ta.output(), "still working", "the log kept when it stopped", "the run did not finish")
+			// It says which run the log is of: the one that started then.
+			has(t, ta.output(), "still working", "the log of its detached run started "+ta.clock(time.Unix(1790000000, 0))+", kept when it stopped",
+				"the run did not finish")
 			lacks(t, ta.output(), "working on it")
 			if len(ta.stream.runs) != 0 {
 				t.Fatalf("logs of a stopped sandbox ran %q in it", ta.stream.commands())

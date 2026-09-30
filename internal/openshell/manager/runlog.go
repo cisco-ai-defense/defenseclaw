@@ -240,8 +240,11 @@ func (m *Manager) removeRunLog(name string) error {
 	return nil
 }
 
-// RunLog returns the log of the latest detached run the daemon kept when
-// it last stopped the sandbox; lines > 0 keeps its last lines lines.
+// RunLog returns the log of a detached run the daemon kept when it stopped
+// the sandbox, with the run's start (StartedAt) to say which run it is of: a
+// stop that finds a run replaces it (or drops it when it cannot keep the new
+// one), and one that could not look at the run leaves it. lines > 0 keeps
+// its last lines lines.
 func (m *Manager) RunLog(_ context.Context, name string, lines int) (*sandboxapi.RunLog, error) {
 	b, err := m.box(name)
 	if err != nil {

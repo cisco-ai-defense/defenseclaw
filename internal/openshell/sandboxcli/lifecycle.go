@@ -856,7 +856,13 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 		return err
 	}
 	_ = flush()
-	a.note(fmt.Sprintf("%s is %s; this is the log kept when it stopped (%s)", sb.Name, sb.Phase, a.clock(kept.KeptAt)))
+	// Which run it is of: a stop that could not look at the run keeps the
+	// log an earlier stop kept.
+	what := "the log"
+	if !kept.StartedAt.IsZero() {
+		what = "the log of its detached run started " + a.clock(kept.StartedAt) + ","
+	}
+	a.note(fmt.Sprintf("%s is %s; this is %s kept when it stopped (%s)", sb.Name, sb.Phase, what, a.clock(kept.KeptAt)))
 	switch kept.State {
 	case sandboxapi.RunExited:
 		a.note("the run exited with status " + kept.Exit)
