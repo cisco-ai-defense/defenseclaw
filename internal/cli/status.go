@@ -178,6 +178,16 @@ func fetchSidecarHealth(client *http.Client, addr string) (gateway.HealthSnapsho
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	addr := sidecarHealthURL(cfg)
+	// /health is public: any process on the port answers it. Never present
+	// another home's or account's gateway as this one.
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		fmt.Println()
+		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+		printGatewayKV("Endpoint", addr)
+		Subhead(problem + ". Its status is not shown.")
+		Subhead(foreignGatewayListenerFix)
+		return fmt.Errorf("the gateway port is held by another process")
+	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	snap, err := fetchSidecarHealth(client, addr)
