@@ -15,7 +15,7 @@ The OmniGent connector uses OmniGent's documented custom Python policy API. It d
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | The reviewed OmniGent (`>=0.7.0,<0.14.0`) custom-policy bridge maps all six awaited phases to DefenseClaw decisions; native OTLP remains an explicit launch-time opt-in. |
-| Native Windows x64 | **Supported — native degraded** | Support is limited to the reviewed OmniGent range (`>=0.7.0,<0.14.0`) `server` and SDK-based harnesses using the official same-user `uv tool` layout. Native terminal wrappers, filesystem/network sandboxing, and L7 egress proxy parity are unavailable; DefenseClaw does not emulate them through WSL or a shell compatibility layer. |
+| Native Windows x64 | **Supported — native degraded** | Support is limited to the reviewed OmniGent range (`>=0.7.0,<0.14.0`) `server` and SDK-based harnesses using the official same-user `uv tool` layout. Native terminal wrappers, filesystem/network sandboxing, and L7 egress proxy parity are unavailable; DefenseClaw does not emulate them through WSL or a shell compatibility layer. Not yet tested against the official client. |
 
 ## Setup
 
@@ -54,10 +54,10 @@ Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
 - registers the module in OmniGent's effective `config.yaml` under `policy_modules`; and
 - enables the `defenseclaw_guardrail` server-wide policy.
 
-`setup omnigent` is the dedicated OmniGent alias. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for its common setup
-options and [full guardrail setup](/docs/setup/guardrail) for advanced scanner
-and judge configuration.
+`setup omnigent` is the dedicated OmniGent alias.
+
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
 DefenseClaw patches the explicit `OMNIGENT_CONFIG` path when set, then
 `$OMNIGENT_CONFIG_HOME/config.yaml`, and finally `~/.omnigent/config.yaml`.
@@ -81,15 +81,35 @@ The native Windows Setup executable accepts the explicit
 `CONNECTOR=omnigent` selection. Its transaction ledger records the
 exact previous and current `OMNIGENT_CONFIG_HOME`, carries that binding through
 repair and upgrade, reconciles all three managed backup identities, and retains
-failed teardown evidence for retry or deferred uninstall. This implemented
-lifecycle remains supported while validation metadata stays empty and
-`live=false`. Connector setup and teardown share a
+failed teardown evidence for retry or deferred uninstall. Connector setup and teardown share a
 process-local plus owned cross-process lifecycle lock; scoped credentials are
 refreshed inside that transaction and revoked only after clean teardown.
 
 All three managed files are backed up. Teardown restores unchanged files byte-for-byte and removes only DefenseClaw-owned YAML entries when the operator has edited the config.
 
-## Policy phases and decisions
+## Files DefenseClaw modifies
+
+<Files>
+  <Folder name="~/.omnigent" defaultOpen>
+    <File name="config.yaml" />
+  </Folder>
+  <Folder name="~/.defenseclaw/hooks" defaultOpen>
+    <File name="defenseclaw_omnigent_policy.py" />
+  </Folder>
+</Files>
+
+### Inventory surfaces
+
+Official OmniGent agent YAML can declare local functions, MCP tools, and
+subagents. DefenseClaw v1 neither modifies nor scans those sources, so MCP,
+function, subagent, skill, rule, plugin, and agent-bundle inventory remains
+unsupported and unverified instead of appearing as an empty live inventory.
+
+## Hook capabilities
+
+<HookEventsList connector="omnigent" />
+
+### Policy phases and decisions
 
 | OmniGent phase | DefenseClaw event | Enforcement |
 | --- | --- | --- |
@@ -130,7 +150,7 @@ enforcement result through a process exit code. A bridge exception is
 fail-closed by OmniGent's policy engine; DefenseClaw's configured fail mode
 governs transport and invalid-response handling inside the bridge.
 
-## Telemetry
+### Telemetry
 
 Policy evaluations always produce DefenseClaw hook logs, counters, and spans. When OmniGent has an active OpenTelemetry span, the bridge forwards its W3C `traceparent`; otherwise the gateway starts a new trace.
 
@@ -166,26 +186,6 @@ model-request IDs. Native spans can carry OmniGent's `session.id`, but there is
 no source-proven field that joins that native session to a policy event.
 DefenseClaw therefore labels policy-event session correlation unavailable and
 does not infer missing cross-rail identities.
-
-## Local surfaces
-
-<Files>
-  <Folder name="~/.omnigent" defaultOpen>
-    <File name="config.yaml" />
-  </Folder>
-  <Folder name="~/.defenseclaw/hooks" defaultOpen>
-    <File name="defenseclaw_omnigent_policy.py" />
-  </Folder>
-</Files>
-
-Official OmniGent agent YAML can declare local functions, MCP tools, and
-subagents. DefenseClaw v1 neither modifies nor scans those sources, so MCP,
-function, subagent, skill, rule, plugin, and agent-bundle inventory remains
-unsupported and unverified instead of appearing as an empty live inventory.
-
-## Hook capabilities
-
-<HookEventsList connector="omnigent" />
 
 ## OpenShell sandbox
 
@@ -298,28 +298,10 @@ exist only in the image; nothing on your host changes.
   its model catalog, which gives a model's context window and prices, from
   MLflow's GitHub releases (`github.com`, redirected to
   `release-assets.githubusercontent.com`). A session summary counts those two
-  as new sites even when nothing was prompted. An earlier mock-model run also
-  reached `chatgpt.com` and `models.dev` (model catalogs). That traffic goes
+  as new sites even when nothing was prompted. OmniGent can also reach
+  `chatgpt.com` and `models.dev` (model catalogs). That traffic goes
   through the DefenseClaw egress proxy, which logs it and applies the
   blocklist.
-- **Status.** Verified end to end. A run through the DefenseClaw daemon in an
-  OpenShell sandbox, with the sandbox agent on a mock model behind a
-  credential binding, showed:
-  - policy events reaching the sandbox ingress, with OpenShell substituting
-    the model key;
-  - a command that a DefenseClaw rule blocks denied by the policy, with the
-    rule's reason passed back to the model;
-  - egress through the proxy from a tool command, and a blocklisted host that
-    a sandbox-scoped unblock then let through.
-
-  The image also passes the hook-fire probe with the request, llm_request,
-  tool_call, tool_result and response policy events, both headless and with
-  the TUI started on a terminal and a prompt typed into it. In that probe a hostile
-  user `~/.omnigent/config.yaml` and a planted `sitecustomize` module in the
-  launch environment change nothing, and the launcher refuses a project
-  configuration that names another server. The curated provider profiles
-  have not carried a real model inside a sandbox; see the harness's
-  verification note for what was run.
 
 ## Disable
 
@@ -327,4 +309,17 @@ exist only in the image; nothing on your host changes.
 defenseclaw guardrail disable --connector omnigent --yes
 ```
 
+`--connector` turns off only OmniGent on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. To remove
+the connector from the config, use `defenseclaw setup remove omnigent`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
 Restart OmniGent after teardown so its running server drops the removed policy module.
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/hitl" title="Human-in-the-loop" description="How ASK decisions reach OmniGent." />
+  <Card href="/docs/setup/sandbox" title="OpenShell sandbox" description="Run OmniGent in a sandbox." />
+</Cards>

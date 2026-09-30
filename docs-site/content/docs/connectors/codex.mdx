@@ -24,7 +24,7 @@ are not proxy-intercepted.
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks, native OTel, and the notify bridge. |
-| Native Windows x64 | **Supported** | Event- and contract-bound PowerShell `-EncodedCommand` bridge to the protected `defenseclaw-hook.exe`, plus native OTel and notify configuration. Validation version, date, and run metadata remain empty and `live=false`. |
+| Native Windows x64 | **Supported** | Event- and contract-bound PowerShell `-EncodedCommand` bridge to the protected `defenseclaw-hook.exe`, plus native OTel and notify configuration. Not yet tested against the official client. |
 
 ## Setup
 
@@ -57,38 +57,33 @@ it does not use a POSIX hook shell or WSL.
   </Tab>
 </Tabs>
 
-`setup codex` is the dedicated Codex setup alias. It uses the same setup
-backend as `setup guardrail`, adds or reconfigures Codex, wires hooks + OTel +
-the notify bridge, and can join an existing hook-connector roster when you
-choose **Add**. No proxy listener binds in either mode.
+`setup codex` is the Codex alias for the shared guardrail setup. It adds or
+reconfigures Codex, wires hooks, OTel and the notify bridge, and can join an
+existing hook-connector roster when you choose **Add**. It defaults to observe
+mode. No proxy listener binds in either mode.
 
-Native logs, metrics, and traces use the standard loopback
-`/v1/{logs,metrics,traces}` endpoints with
-`X-DefenseClaw-Source: codex` and an Authorization bearer managed in Codex's
-exporter configuration. The credential is separate from both the gateway
-master token and the Codex hook credential, is accepted only for matching Codex
-OTLP over loopback, and cannot call management or another connector.
-Do not print or copy the managed exporter header or its protected sidecar.
-Setup also pins Codex's documented `otel.environment` field to DefenseClaw's
-configured environment (Codex otherwise defaults it to `dev`). Doctor compares
-that on-disk value with authenticated live runtime metadata and telemetry
-health so a stale gateway or configuration drift is visible.
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
-Redaction is configured through the v8 bucket/profile policy: edit
-`observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles`, then follow
-[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
+Codex-specific settings:
 
-The alias defaults to observe mode and accepts the common hook-connector
-options, including `--mode`, `--workspace`, `--rule-pack`,
-`--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
-`--replace`, `--with-local-stack`, and restart controls. Use the
-[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
-the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
-detection-strategy, or judge-provider configuration. Defaults are documented
-once on the [Defaults page](/docs/defaults).
+- Native logs, metrics, and traces use the loopback
+  `/v1/{logs,metrics,traces}` endpoints with `X-DefenseClaw-Source: codex` and
+  an Authorization bearer managed in Codex's exporter configuration.
+- That credential is separate from the gateway master token and the Codex hook
+  credential. It is accepted only for matching Codex OTLP over loopback and
+  cannot call management or another connector. Do not print or copy the
+  managed exporter header or its protected sidecar.
+- Setup pins Codex's documented `otel.environment` field to DefenseClaw's
+  configured environment (Codex otherwise defaults it to `dev`). Doctor
+  compares that value with live runtime metadata and telemetry health, so a
+  stale gateway or configuration drift is visible.
+- Redaction follows the v8 bucket and profile policy. Edit
+  `observability.destinations[].routes[].selector.buckets` and
+  `observability.redaction_profiles`, then follow
+  [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
-## Files DefenseClaw will modify
+## Files DefenseClaw modifies
 
 <Tabs items={['Native Windows', 'macOS/Linux']}>
   <Tab value="Native Windows">
@@ -122,40 +117,7 @@ Everything outside DefenseClaw-marked fields is preserved. Teardown restores a
 pristine backup when its identity still matches; otherwise it removes only
 owned entries.
 
-## Hook capabilities
-
-<HookEventsList connector="codex" />
-
-Action-mode responses follow each event's official control or feedback
-contract; the events do not all have the same effect:
-
-Each native hook request must exactly match the registered event and its stdin
-`hook_event_name`. Before policy evaluation, the gateway also compares that
-event and its contract ID with the protected contract lock; mismatches or
-tampering are rejected.
-
-The lifecycle-control rows marked **v3/v4** below are contract-supported only
-for Codex `>=0.133`: v3 covers `0.133` through `0.144`, and v4 covers
-`>=0.145`. This version boundary is not release certification; native Windows
-support does not populate authentic official-client validation metadata.
-DefenseClaw does not infer or backfill these matcher/control semantics onto the
-smaller v1/v2 contracts.
-
-| Event | DefenseClaw-owned action response |
-| --- | --- |
-| `SessionStart` (v3/v4, `>=0.133`) | `continue: false` ends the turn before another model request. Its matcher includes all official sources: `startup`, `resume`, `clear`, and `compact`. |
-| `PostToolUse` | `decision: "block"` cannot undo the completed tool. In interactive use, the reason replaces the tool result fed to the next loop; in code mode, the corresponding tool promise rejects. |
-| `SubagentStop` (v3/v4, `>=0.133`) | `decision: "block"` continues the subagent flow; it does not terminate the subagent. |
-| `PreCompact` (v3/v4, `>=0.133`) | `continue: false` stops before compaction. |
-| `PostCompact` (v3/v4, `>=0.133`) | `continue: false` stops after compaction has already completed. |
-| `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new continuation prompt. |
-| `SessionEnd` (0.145+) | Advisory observation only. Output cannot steer Codex or keep the thread open, and the hook has a three-second host maximum. |
-
-<Callout>
-Codex has no native ask surface here. Confirm verdicts become an alert/system message with `raw_action` preserved so operators can review the original action in audit or the TUI. That review cannot resume the hook call.
-</Callout>
-
-## Inventory surfaces
+### Inventory surfaces
 
 DefenseClaw follows the current Codex layouts rather than Claude Code's
 `.mcp.json` convention:
@@ -209,12 +171,44 @@ trusted projects. Filesystem inventory reports project entries as
 `trust_required`; it does not infer the client's private trust decision from
 the presence of a file.
 
-## Telemetry channels at boot
+## Hook capabilities
+
+<HookEventsList connector="codex" />
+
+Each native hook request must exactly match the registered event and its stdin
+`hook_event_name`. Before policy evaluation, the gateway also compares that
+event and its contract ID with the protected contract lock; mismatches or
+tampering are rejected.
+
+Action-mode responses follow each event's official control or feedback
+contract, so the events do not all have the same effect.
+
+The lifecycle-control rows marked **v3/v4** below are contract-supported only
+for Codex `>=0.133`: v3 covers `0.133` through `0.144`, and v4 covers
+`>=0.145`.
+DefenseClaw does not infer or backfill these matcher/control semantics onto the
+smaller v1/v2 contracts.
+
+| Event | DefenseClaw-owned action response |
+| --- | --- |
+| `SessionStart` (v3/v4, `>=0.133`) | `continue: false` ends the turn before another model request. Its matcher includes all official sources: `startup`, `resume`, `clear`, and `compact`. |
+| `PostToolUse` | `decision: "block"` cannot undo the completed tool. In interactive use, the reason replaces the tool result fed to the next loop; in code mode, the corresponding tool promise rejects. |
+| `SubagentStop` (v3/v4, `>=0.133`) | `decision: "block"` continues the subagent flow; it does not terminate the subagent. |
+| `PreCompact` (v3/v4, `>=0.133`) | `continue: false` stops before compaction. |
+| `PostCompact` (v3/v4, `>=0.133`) | `continue: false` stops after compaction has already completed. |
+| `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new continuation prompt. |
+| `SessionEnd` (0.145+) | Advisory observation only. Output cannot steer Codex or keep the thread open, and the hook has a three-second host maximum. |
+
+<Callout>
+Codex has no native ask surface here. Confirm verdicts become an alert/system message with `raw_action` preserved so operators can review the original action in audit or the TUI. That review cannot resume the hook call.
+</Callout>
+
+### Telemetry channels at boot
 
 <Flow
   direction="LR"
   compact
-  caption="Three independent channels make Codex one of the most thoroughly inspected agents."
+  caption="Three independent channels: hooks, native OTel, and the notify bridge."
 >
   <Node id="codex" kind="agent">Codex</Node>
   <Node id="hooks" kind="connector">{`SessionStart / prompt / tool / permission /\nsubagent / compact / Stop hooks`}</Node>
@@ -250,11 +244,8 @@ your own Codex configuration does not change.
   commands Codex runs), and the hooks and the notify bridge give it to curl
   as configuration on a file descriptor. The notify bridge only sends
   telemetry, so it never blocks Codex.
-- **Startup tip download.** The Codex TUI fetches its startup tip from
-  `raw.githubusercontent.com` at every start, around the egress proxy.
-  OpenShell refuses it and DefenseClaw's triage rejects the drafted rule
-  (`harness_background_fetch`) instead of opening a direct one; the refusal
-  is not counted as a blocked site, and Codex shows a built-in tip.
+- **Startup tip.** The sandbox refuses the Codex TUI's startup-tip download.
+  The refusal is not counted as a blocked site, and Codex shows a built-in tip.
 - **Skip-permissions.** On by default (the `open` and `balanced` packs):
   Codex starts with `--dangerously-bypass-approvals-and-sandbox`. Codex's own
   sandbox cannot run inside OpenShell, so `--safe` (or the `strict` pack) keeps
@@ -300,17 +291,26 @@ your own Codex configuration does not change.
   repository could add environment variables to an imported server of the
   same name. DefenseClaw leaves such a server behind and names it when the run
   starts.
-- **Image and verification.** The image installs Codex 0.146.0 by default,
-  replacing the base image's older Codex, and refuses a version without a
-  reviewed Linux hook contract. Verified end to end: against a mock model
-  every required hook fired and a blocked tool call did not run, also with
-  hostile user and project config (`features.hooks = false`, hooks, a notify
-  program and OTel exporters of their own, a planted `BASH_ENV`, fake tools
-  on `PATH` and a forged sandbox token), and a live sandbox run fired the hooks
-  and honoured a deny with a Bedrock Mantle model.
+- **Image.** The sandbox image ships Codex 0.146.0 and refuses a version
+  without a reviewed Linux hook contract.
 
 ## Disable
 
 ```bash
 defenseclaw guardrail disable --connector codex --yes
 ```
+
+`--connector` turns off only Codex on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. Teardown
+restores the pristine backup, or removes only DefenseClaw-owned entries when
+the files have changed. To remove the connector from the config, use
+`defenseclaw setup remove codex`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/connectors/compatibility" title="Compatibility" description="Supported Codex versions and hook contracts." />
+  <Card href="/docs/setup/sandbox" title="OpenShell sandbox" description="Run Codex in a sandbox." />
+</Cards>

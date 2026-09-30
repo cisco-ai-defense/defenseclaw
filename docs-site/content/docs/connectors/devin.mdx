@@ -28,7 +28,7 @@ wrote for the old app. See
 | Surface | Protected | Why |
 | --- | --- | --- |
 | Devin CLI | **Yes** | DefenseClaw registers the `devin-hooks-v1` contract in the Devin CLI hook config. |
-| Devin Desktop 3.9.19 or later, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file, and hooks with Devin CLI, so the same hook registration applies. DefenseClaw has not yet recorded a live Devin Desktop validation run. |
+| Devin Desktop 3.9.19 or later, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file, and hooks with Devin CLI, so the same hook registration applies. Not yet tested against Devin Desktop. |
 | Devin Desktop, legacy **Cascade** agent | **No** | Cascade uses a separate hook contract that this connector does not register. On Devin Desktop 3.9.19 or later new conversations never start on Cascade, but existing Cascade conversations still run unprotected. Builds from 3.0.12 up to (not including) 3.9.19 still start conversations on Cascade; keep Devin Desktop at 3.9.19 or later (enterprise threat model [R28](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ENTERPRISE-THREAT-MODEL.md#residual-risks)). |
 | Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
@@ -75,6 +75,9 @@ The connector can join an existing hook-connector roster. After setup, restart
 any open Devin CLI session and reopen Devin Desktop tabs so they load the new
 hooks.
 
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
+
 ### Native Windows admission
 
 Native Windows Setup accepts only the current user's official CLI at
@@ -89,7 +92,14 @@ Bash-safe direct command. This preserves the hook JSON streams and blocking
 exit code without a PowerShell decode boundary. DefenseClaw does not install
 or add Bash, WSL, Docker, a VM, Git Bash, Cygwin/MSYS, or a proxy dependency.
 
-## Configuration custody
+### Upgrading an older Devin Desktop install
+
+Upgrades migrate the previous Devin Desktop connector automatically; you do
+not need to edit files by hand. The details, including what DefenseClaw removes and what it
+leaves alone, are in
+[Upgrade → Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors).
+
+## Files DefenseClaw modifies
 
 DefenseClaw manages only the documented Devin-native hook locations. Devin CLI
 and Devin Desktop's Devin Local agent read the same files:
@@ -103,14 +113,48 @@ Existing foreign hook groups and JSONC content are preserved. Devin also loads
 hooks from `.claude/` settings for compatibility; DefenseClaw does not claim or
 modify those locations.
 
-In a standalone enterprise deployment on Linux and macOS, each hook runs the
-administrator-owned hook binary with
-`defenseclaw-hook hook --connector devin --enterprise-managed`, which runs
-the foreign-hook guard and always fails closed: the Devin fail mode is `closed` whatever `hook_fail_mode` says, and
-status and the hook-contract lock report it that way. See
-[Machine policy](/docs/enterprise/machine-policy).
+<Files>
+  <Folder name="~/.config/devin" defaultOpen>
+    <File name="config.json (user hooks)" />
+    <File name="mcp_config.json" />
+    <Folder name="skills" />
+  </Folder>
+  <Folder name="<workspace>/.devin" defaultOpen>
+    <File name="hooks.v1.json" />
+    <File name="mcp_config.json" />
+    <Folder name="skills" />
+    <Folder name="rules" />
+  </Folder>
+</Files>
 
-## Lifecycle and enforcement
+### Inventory surfaces
+
+Read/write MCP custody is limited to the canonical user and project
+`mcp_config.json` files. Higher-precedence local compatibility files may be
+read for effective inventory but are not rewritten. Skills and rules are
+discovered from the documented `.devin` and `.agents` roots, including
+`AGENT.md`, `AGENTS.md`, and `AGENTS.local.md` where applicable. Inventory
+also reads the pre-rename Devin Desktop rule and skill locations that the
+vendor still loads (see Cognition's
+[memories and rules](https://docs.devin.ai/desktop/cascade/memories) and
+[skills](https://docs.devin.ai/desktop/cascade/skills) documentation).
+Setup never installs anything there; `defenseclaw skill quarantine` and
+`restore` can move a flagged skill out of and back into those folders, as for
+any other skill folder. Traversal is bounded and does not follow links or
+reparse points.
+
+Devin plugins are closed beta, so DefenseClaw does not advertise plugin setup
+or enforcement. The separate `devin acp` entry point is cataloged for the
+shared [ACP guard](/docs/acp-guard), but it is not yet tested against the
+official client and is not part of this hook contract. Cloud Devin execution, proxy
+transport, native OTLP, sandboxing, egress control, and managed higher-layer
+policy are also outside this connector's support boundary.
+
+## Hook capabilities
+
+<HookEventsList connector="devin" />
+
+### Lifecycle and enforcement
 
 The `devin-hooks-v1` contract registers exactly eight events:
 
@@ -136,50 +180,6 @@ invocation ID. Devin CLI 3000.11.3 also sends an undocumented `tool_use_id`,
 which DefenseClaw does not rely on. Cross-event tool pairing is therefore
 detection-only. A `confirm` finding remains available in audit but cannot
 pause and resume in the DefenseClaw TUI.
-
-## Local customization surfaces
-
-Read/write MCP custody is limited to the canonical user and project
-`mcp_config.json` files. Higher-precedence local compatibility files may be
-read for effective inventory but are not rewritten. Skills and rules are
-discovered from the documented `.devin` and `.agents` roots, including
-`AGENT.md`, `AGENTS.md`, and `AGENTS.local.md` where applicable. Inventory
-also reads the pre-rename Devin Desktop rule and skill locations that the
-vendor still loads (see Cognition's
-[memories and rules](https://docs.devin.ai/desktop/cascade/memories) and
-[skills](https://docs.devin.ai/desktop/cascade/skills) documentation).
-Setup never installs anything there; `defenseclaw skill quarantine` and
-`restore` can move a flagged skill out of and back into those folders, as for
-any other skill folder. Traversal is bounded and does not follow links or
-reparse points.
-
-Devin plugins are closed beta, so DefenseClaw does not advertise plugin setup
-or enforcement. The separate `devin acp` entry point is cataloged for the
-shared [ACP guard](/docs/acp-guard), but it has not completed official-client
-testing and is not part of this hook contract. Cloud Devin execution, proxy
-transport, native OTLP, sandboxing, egress control, and managed higher-layer
-policy are also outside this connector's support boundary.
-
-<Files>
-  <Folder name="~/.config/devin" defaultOpen>
-    <File name="config.json (user hooks)" />
-    <File name="mcp_config.json" />
-    <Folder name="skills" />
-  </Folder>
-  <Folder name="<workspace>/.devin" defaultOpen>
-    <File name="hooks.v1.json" />
-    <File name="mcp_config.json" />
-    <Folder name="skills" />
-    <Folder name="rules" />
-  </Folder>
-</Files>
-
-## Upgrading an older Devin Desktop install
-
-Upgrades migrate the previous Devin Desktop connector automatically; you do
-not need to edit files by hand. The details, including what DefenseClaw removes and what it
-leaves alone, are in
-[Upgrade → Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors).
 
 ## In an OpenShell sandbox
 
@@ -218,8 +218,8 @@ the Devin CLI image already holds:
   so a tool that ran although DefenseClaw denied it, or whose `PreToolUse`
   hook never reached DefenseClaw, raises a `hook_tamper` finding and the
   pack's `hooks.on_tamper` applies (see
-  [Sandbox policy](/docs/setup/sandbox-policy)). Measured on a logged-in
-  Devin CLI 3000.11.3: `PostToolUse` fires only for a tool that ran, not for
+  [Sandbox policy](/docs/setup/sandbox-policy)). On Devin CLI 3000.11.3,
+  `PostToolUse` fires only for a tool that ran, not for
   a call a hook denied or you refused at Devin's permission prompt.
 - **Workspace trust is skipped.** A headless Devin run fails in an untrusted
   folder, and a declined trust prompt runs Devin without hooks, so the
@@ -230,10 +230,17 @@ the Devin CLI image already holds:
   (`/usr/local/lib/defenseclaw/bin/devin-launch auth login --force-manual-token-flow`,
   which runs `devin auth login` through the launcher; paste the token from the
   browser flow) is the only sign-in. The credential stays in the sandbox's
-  `~/.local/share/devin`, where the agent can read it and send it out. It was
-  not tested live.
-- **Image.** Devin CLI 3000.4.25 from its release archive, checked against the
-  SHA-256 in Devin's release manifest.
+  `~/.local/share/devin`, where the agent can read it and send it out.
+- **Image.** Ships Devin CLI 3000.4.25.
+
+## Enterprise deployments
+
+In a standalone enterprise deployment on Linux and macOS, each hook runs the
+administrator-owned hook binary with
+`defenseclaw-hook hook --connector devin --enterprise-managed`, which runs
+the foreign-hook guard and always fails closed: the Devin fail mode is `closed` whatever `hook_fail_mode` says, and
+status and the hook-contract lock report it that way. See
+[Machine policy](/docs/enterprise/machine-policy).
 
 ## Disable
 
@@ -241,4 +248,15 @@ the Devin CLI image already holds:
 defenseclaw guardrail disable --connector devin --yes
 ```
 
-<HookEventsList connector="devin" />
+`--connector` turns off only Devin on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. To remove
+the connector from the config, use `defenseclaw setup remove devin`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/acp-guard" title="ACP guard" description="Guard ACP agents from Zed and other clients." />
+  <Card href="/docs/get-started/upgrade#renamed-and-removed-connectors" title="Upgrade" description="Renamed and removed connectors." />
+</Cards>

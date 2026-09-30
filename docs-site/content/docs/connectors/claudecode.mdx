@@ -24,7 +24,7 @@ stopping Claude's next turn. No proxy listener is involved.
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Portable command hooks plus Claude Code's native OTel exporter. |
-| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. Official-client validation metadata remains empty and `live=false`; support availability is not a certification claim. |
+| Native Windows x64 | **Supported** | Shell-free native executable hooks using Claude Code's `command` plus `args` exec form. Not yet tested against the official client. |
 
 ## Setup
 
@@ -59,34 +59,29 @@ outside this native connector path.
   </Tab>
 </Tabs>
 
-`setup claude-code` is the dedicated Claude Code setup alias. It uses the same
-setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
-hooks + native OTel, and can join an existing hook-connector roster when you
-choose **Add**. No proxy listener binds in either mode.
+`setup claude-code` is the Claude Code alias for the shared guardrail setup.
+It adds or reconfigures `claudecode`, wires hooks and native OTel, and can join
+an existing hook-connector roster when you choose **Add**. It defaults to
+observe mode. No proxy listener binds in either mode.
 
-Native OTLP uses managed loopback exporter settings with a Claude-scoped
-Authorization bearer. Logs and metrics are enabled; traces are explicitly
-disabled. Prompt and assistant-response content logging are independent
-vendor opt-ins and DefenseClaw explicitly defaults both off; downstream
-redaction settings do not silently authorize source capture. The scoped
-credential cannot authenticate management or another connector and must never
-be printed or copied.
+- For the alias flags, see [shared alias flags](/docs/setup/guardrail/aliases#shared-flags).
+- For recipes, the wizard, the judge and the full flag list, see [Guardrail setup](/docs/setup/guardrail).
 
-Redaction is configured through the v8 bucket/profile policy: edit
-`observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles`, then follow
-[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
+Claude Code-specific settings:
 
-The alias defaults to observe mode and accepts the common hook-connector
-options, including `--mode`, `--workspace`, `--rule-pack`,
-`--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
-`--replace`, `--with-local-stack`, and restart controls. Use the
-[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
-the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
-detection-strategy, or judge-provider configuration. Defaults are documented
-once on the [Defaults page](/docs/defaults).
+- Native OTLP uses managed loopback exporter settings with a Claude-scoped
+  Authorization bearer. Logs and metrics are on; traces are off.
+- Prompt and assistant-response content logging are separate vendor opt-ins.
+  DefenseClaw leaves both off. Downstream redaction settings do not turn
+  source capture on.
+- The scoped credential cannot authenticate management or another connector.
+  Never print or copy it.
+- Redaction follows the v8 bucket and profile policy. Edit
+  `observability.destinations[].routes[].selector.buckets` and
+  `observability.redaction_profiles`, then follow
+  [Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
-## Files DefenseClaw will modify
+## Files DefenseClaw modifies
 
 <Tabs items={['Native Windows', 'macOS/Linux']}>
   <Tab value="Native Windows">
@@ -119,50 +114,39 @@ DefenseClaw stores a hash-checked backup of `settings.json` before edits.
 Teardown restores it byte-for-byte when the identity still matches; if the file
 drifted, only DefenseClaw-owned entries are removed.
 
-Claude Code keeps user/local MCP registration state in `~/.claude.json`
-(`%CLAUDE_CONFIG_DIR%\.claude.json` when that override is set) and project MCP
-state in `<workspace>/.mcp.json`; these are inventory surfaces, not hook setup
-files. See Anthropic's [MCP scope reference](https://code.claude.com/docs/en/mcp).
-The current connector inventories those local, project, and user manual scopes.
-Plugin-provided MCP and claude.ai connector MCP are not attributed from these
-files. Marketplace plugin cache artifacts honor
-`CLAUDE_CODE_PLUGIN_CACHE_DIR`; retained versions are not presented as active
-without semantic client evidence. Managed `enabledPlugins` takes precedence
-over user, project, and local preferences; a dynamic `policyHelper` is reported
-as unverified instead of guessed. Skill inventory covers the launch directory,
-every parent through the repository root, and existing nested
-`.claude/skills` roots that Claude can lazily activate after file activity.
-Nested skills remain discoverable-unverified until session activity proves
-activation; true skills take precedence over legacy commands, and documented
-skill-directory symlinks are canonicalized and de-duplicated. Recursive
-user/project agents use required frontmatter identity and closest-project
-precedence. Managed/plugin agents and session `--agents` remain unverified.
-Auto-memory resolves file-based `autoMemoryDirectory` precedence or the shared
-repository/worktree default under `~/.claude/projects/<project>/memory`; it is
-marked unverified when session `--settings`, remote settings, or native policy
-could change the active path.
-Runtime `/add-dir` roots remain outside persistent passive inventory.
-Claude Code 2.1.219+ emits `DirectoryAdded`, so DefenseClaw records the added
-path and source without treating the observation as durable discovery authority.
+### Inventory surfaces
 
-## Enterprise (standalone profile)
+These files are inventory surfaces, not hook setup files. DefenseClaw reads
+them to report what Claude Code can load.
 
-In the [enterprise standalone profile](/docs/enterprise/machine-policy),
-Claude Code gets machine policy instead of the per-user files above. The
-`managed-settings.d` directory (`/etc/claude-code` on Linux,
-`/Library/Application Support/ClaudeCode` on macOS,
-`C:\Program Files\ClaudeCode` on Windows) holds `90-defenseclaw.json` with the
-hooks and `00-defenseclaw-version-floor.json`, which sets
-`requiredMinimumVersion` to 2.1.154, the lowest Claude Code version with a
-verified DefenseClaw hook contract. Claude Code reads that setting only from
-2.1.163, so builds older than 2.1.163 ignore it and this floor stops no
-build; use application control to keep older builds off a host. Your own
-`requiredMinimumVersion` wins, and a file at that name that DefenseClaw did
-not write (for example the `version-floor` export you deploy) is yours:
-DefenseClaw never rewrites or removes it. A higher-precedence source (HKLM `Settings`,
-macOS managed preferences) has to carry the key itself, because Claude Code
-builds before 2.1.242 read only that source. See
-[Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor).
+- **MCP servers.** Claude Code keeps user and local MCP registration state in
+  `~/.claude.json` (`%CLAUDE_CONFIG_DIR%\.claude.json` when that override is
+  set) and project MCP state in `<workspace>/.mcp.json`. The connector
+  inventories the local, project, and user manual scopes. Plugin-provided MCP
+  and claude.ai connector MCP are not attributed from these files. See
+  Anthropic's [MCP scope reference](https://code.claude.com/docs/en/mcp).
+- **Plugins.** Marketplace plugin cache artifacts honor
+  `CLAUDE_CODE_PLUGIN_CACHE_DIR`. Retained versions are not shown as active
+  without client evidence. Managed `enabledPlugins` takes precedence over user,
+  project, and local preferences. A dynamic `policyHelper` is reported as
+  unverified.
+- **Skills.** Inventory covers the launch directory, every parent through the
+  repository root, and existing nested `.claude/skills` roots that Claude can
+  activate after file activity. Nested skills stay discoverable-unverified
+  until session activity proves activation. True skills take precedence over
+  legacy commands, and documented skill-directory symlinks are canonicalized
+  and de-duplicated.
+- **Agents.** Recursive user and project agents use the required frontmatter
+  identity and closest-project precedence. Managed and plugin agents and
+  session `--agents` stay unverified.
+- **Auto-memory.** DefenseClaw resolves file-based `autoMemoryDirectory`
+  precedence, or the shared repository and worktree default under
+  `~/.claude/projects/<project>/memory`. It is marked unverified when session
+  `--settings`, remote settings, or native policy could change the active path.
+- **Added directories.** Runtime `/add-dir` roots stay outside persistent
+  passive inventory.
+  Claude Code 2.1.219+ emits `DirectoryAdded`, so DefenseClaw records the added
+  path and source without treating the observation as durable discovery authority.
 
 ## Hook capabilities
 
@@ -183,10 +167,11 @@ telemetry. Batch, failure, denial, and mixed outputs remain untrusted content;
 they are still advisory because they cannot be attributed to one executable
 request safely.
 
+
 ### Subagents and the Agent tool
 
-Claude Code runs subagents through its `Agent` tool. Measured on 2.1.156, with
-the hooks outside a sandbox:
+Claude Code runs subagents through its `Agent` tool. As of Claude Code
+2.1.156, with the hooks outside a sandbox:
 
 - The `Agent` call gets its own `PreToolUse`, and a `PostToolUse` once the
   subagent is done. That `PostToolUse` arrives after the subagent's own hooks
@@ -214,19 +199,24 @@ the `Agent` call that ran it (relationship `caused_by`, rule
 recorded as a `tool_batch` tool record that lists its calls by `tool_name` and
 `tool_use_id`, rather than as a second result of one of them.
 
-Protection for active `AGENTS.md` and `MEMORY.md` files is similarly
-context-bound. DefenseClaw accepts an active file only from an authenticated
-`InstructionsLoaded` event that names the exact absolute, regular,
-non-symlinked file. A later `PreToolUse` mutation is enforcement-eligible only
-in that same Claude Code session and for that exact path. A file mention, a
-`Read` call, a generic payload field, or an event from another session cannot
-claim this authority. If an authenticated event names a recognized absolute
-`AGENTS.md` or `MEMORY.md` path but native file identity cannot be proved,
-DefenseClaw records bounded session uncertainty and fails closed only for a
-statically proven mutation of the corresponding canonical instruction-file
-name. Relative, malformed, and unrelated instruction loads remain ignored.
-Distinct lexical same-name mutation aliases remain visible as detection-only
-unless cached identity or filename-case proof establishes the exact active path.
+### Active AGENTS.md and MEMORY.md files
+
+Protection for active `AGENTS.md` and `MEMORY.md` files is context-bound.
+
+- DefenseClaw accepts an active file only from an authenticated
+  `InstructionsLoaded` event that names the exact absolute, regular,
+  non-symlinked file.
+- A later `PreToolUse` mutation is enforcement-eligible only in that same
+  Claude Code session and for that exact path.
+- A file mention, a `Read` call, a generic payload field, or an event from
+  another session cannot claim this authority.
+- If an authenticated event names a recognized absolute `AGENTS.md` or
+  `MEMORY.md` path but native file identity cannot be proved, DefenseClaw
+  records bounded session uncertainty. It fails closed only for a statically
+  proven mutation of the matching canonical instruction-file name.
+- Relative, malformed, and unrelated instruction loads are ignored.
+- Distinct lexical same-name mutation aliases stay detection-only unless cached
+  identity or filename-case proof establishes the exact active path.
 
 <Callout type="info">
 Claude Code is one of the few connectors that supports native PreToolUse ask. HITL approvals surface inside the agent UI itself, so the operator never has to leave Claude Code to decide.
@@ -240,7 +230,7 @@ The added `DirectoryAdded` hook is synchronous, matcherless, bounded to 30
 seconds, and observation-only: it runs after the directory is added and has no
 block, ask, or decision authority.
 
-## Telemetry channels at boot
+### Telemetry channels at boot
 
 <Flow
   direction="LR"
@@ -300,8 +290,8 @@ sandbox image; your own Claude Code configuration does not change.
   Opus to `anthropic.claude-opus-4-8`, Sonnet to `anthropic.claude-sonnet-5`
   and Haiku (also used for background tasks) to `anthropic.claude-haiku-4-5`.
   Pick another model with `-- --model MODEL`, for example
-  `defenseclaw sandbox run claude --llm bedrock -- --model anthropic.claude-opus-5`,
-  or type `/model anthropic.claude-opus-5` in the session. The banner's
+  `defenseclaw sandbox run claude --llm bedrock -- --model <anthropic.model-id>`,
+  or type `/model <anthropic.model-id>` in the session. The banner's
   `Model` line names the model either way.
 - **Per-sandbox settings.** Each sandbox also gets a read-only drop-in,
   `60-defenseclaw-run.json`, that wins over the image's. It pins the model
@@ -312,15 +302,45 @@ sandbox image; your own Claude Code configuration does not change.
   `.mcp.json` servers never start unless the sandbox pack sets
   [`mcp.project_servers: allow`](/docs/setup/sandbox-policy#mcp-servers-in-a-sandbox).
   `--no-mcp` leaves your servers behind.
-- **Image and verification.** The image installs Claude Code 2.1.156 by
-  default and refuses a version without a reviewed Linux hook contract.
-  Verified end to end: against a mock model every required hook fired and a
-  blocked tool call did not run, also with hostile user and project settings
-  such as `disableAllHooks`, and a live sandbox run showed a
-  DefenseClaw-blocked command denied and the egress block list holding.
+- **Image.** The sandbox image ships Claude Code 2.1.156 and refuses a
+  version without a reviewed Linux hook contract.
+
+## Enterprise (standalone profile)
+
+In the [enterprise standalone profile](/docs/enterprise/machine-policy),
+Claude Code gets machine policy instead of the per-user files above. The
+`managed-settings.d` directory (`/etc/claude-code` on Linux,
+`/Library/Application Support/ClaudeCode` on macOS,
+`C:\Program Files\ClaudeCode` on Windows) holds `90-defenseclaw.json` with the
+hooks and `00-defenseclaw-version-floor.json`, which sets
+`requiredMinimumVersion` to 2.1.154, the lowest Claude Code version with a
+verified DefenseClaw hook contract. Claude Code reads that setting only from
+2.1.163, so builds older than 2.1.163 ignore it and this floor stops no
+build; use application control to keep older builds off a host. Your own
+`requiredMinimumVersion` wins, and a file at that name that DefenseClaw did
+not write (for example the `version-floor` export you deploy) is yours:
+DefenseClaw never rewrites or removes it. A higher-precedence source (HKLM `Settings`,
+macOS managed preferences) has to carry the key itself, because Claude Code
+builds before 2.1.242 read only that source. See
+[Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor).
 
 ## Disable
 
 ```bash
 defenseclaw guardrail disable --connector claudecode --yes
 ```
+
+`--connector` turns off only Claude Code on a multi-connector install. On a
+single-connector install, run `defenseclaw guardrail disable --yes`. Teardown
+restores `settings.json` from the backup, or removes only DefenseClaw entries
+when the file has changed. To remove the connector from the config, use
+`defenseclaw setup remove claudecode`; see
+[Quick aliases](/docs/setup/guardrail/aliases).
+
+## Next steps
+
+<Cards>
+  <Card href="/docs/hitl" title="Human-in-the-loop" description="How native PreToolUse ask works across connectors." />
+  <Card href="/docs/setup/guardrail" title="Guardrail setup" description="Modes, recipes, and the full flag list." />
+  <Card href="/docs/setup/sandbox" title="OpenShell sandbox" description="Run Claude Code in a sandbox." />
+</Cards>
