@@ -1763,9 +1763,11 @@ func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
 // list (openshell.egress.allow, a custom or required pack's egress.allow),
 // or one on the organization's allowed list (egress.allow_only). With that
 // list set, every host the sandbox may reach is on it, so the block cuts
-// nothing and the line says uploads are only reported. The allow list the
-// line names is the effective one (egress.allow), which
-// openshell.admin.allow_unblock: false empties of the user's entries.
+// nothing and the line says uploads are only reported. Otherwise it names
+// the exemptions as the user's own (the curated entries a built-in pack
+// allows come from a feed, which the block does not exempt), where the
+// organization lets them (openshell.admin.allow_unblock: false drops the
+// user's allow entries and refuses unblocks, and explain does not say so).
 func uploadBlockText(policy []sandboxapi.Setting) string {
 	block, ok := settingOf(policy, "egress.block_large_uploads")
 	if !ok || block.Value != "true" {
@@ -1783,11 +1785,8 @@ func uploadBlockText(policy []sandboxapi.Setting) string {
 		return size + " is reported, not cut: every host this sandbox may reach is on your organization's allowed list, which " +
 			whose + " exempts"
 	}
-	except := "hosts you unblock"
-	if listed(settingValue(policy, "egress.allow")) {
-		except = "hosts on the allow list (egress.allow) or that you unblock"
-	}
-	return size + " to a host the sandbox has not contacted before is cut, except to " + except + " (" + whose + ")"
+	return size + " to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your " +
+		"organization lets you (" + whose + ")"
 }
 
 // listed reports a list setting of explain that names something.

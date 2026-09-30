@@ -394,14 +394,16 @@ func askDestination(ev sandboxapi.ActivityEvent) string {
 	return ev.Host
 }
 
-// portBlock reports a block of one port rather than of the host: a port the
-// egress proxy does not carry, a port on this machine the sandbox may not
-// reach (host.openshell.internal, whose hook ingress and approved ports stay
-// open), and OpenShell's own denials, which its rules make per host and
-// port.
+// portBlock reports a block of one port rather than of the host, named
+// with its port (443 too): a port the egress proxy or triage does not
+// carry, a port on this machine the sandbox may not reach
+// (host.openshell.internal, whose hook ingress and approved ports stay
+// open), and OpenShell's own direct denials (no category), which its rules
+// make per host and port. DefenseClaw's triage rejections of OpenShell's
+// proposals carry the proxy's host-wide category (blocklisted, ip_literal).
 func portBlock(ev sandboxapi.ActivityEvent) bool {
 	return ev.Category == string(egress.CategoryPortNotAllowed) || ev.Reason == sandboxapi.ReasonHostPortClosed ||
-		ev.Source == sandboxapi.SourceOpenShell
+		ev.Source == sandboxapi.SourceOpenShell && ev.Category == ""
 }
 
 // askText is an ask of sandbox name for the live notice: the destination
@@ -458,7 +460,7 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	}
 	where, key := ev.Host, "block "+ev.Host
 	if portBlock(ev) {
-		where = hostPort(ev)
+		where = askDestination(ev)
 		key = "block " + where
 	}
 	text := "✗ DefenseClaw blocked " + where

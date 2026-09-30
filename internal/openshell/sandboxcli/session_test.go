@@ -376,6 +376,12 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		{Seq: 13, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 6379, Reason: sandboxapi.ReasonHostPortClosed},
 		{Seq: 14, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "db.example.net", Port: 6379, Source: sandboxapi.SourceOpenShell,
 			Reason: "transparent_tcp_mapping_denied"},
+		// Port 443 is named too when the port is what is blocked; a triage
+		// rejection of an OpenShell proposal carries the proxy's host-wide
+		// category, so it names the host (PR 1022 final review).
+		{Seq: 15, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 443, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 16, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "paste.example.net", Port: 80, Source: sandboxapi.SourceOpenShell,
+			Category: "blocklisted", Unblockable: true},
 	}
 	large := "⚠ large upload to httpbin.io (more than 1 MiB)"
 	port := "✗ DefenseClaw blocked example.org:8443 (port not allowed)"
@@ -385,14 +391,18 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
 		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "db.example.net") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "paste.example.net") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
-	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379"} {
+	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379", "host.openshell.internal:443",
+		"paste.example.net (blocklisted)"} {
 		if !strings.Contains(live, "✗ DefenseClaw blocked "+where) {
 			t.Errorf("no notice names %s:\n%q", where, live)
 		}
+	}
+	if strings.Contains(live, "paste.example.net:80") {
+		t.Errorf("a host-wide triage rejection names the first request's port:\n%q", live)
 	}
 	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") ||
 		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") ||
@@ -1574,15 +1584,10 @@ func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
 	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "files.example.net", Source: "user"},
 		sandboxapi.Setting{Key: "egress.allow_only", Value: "(none)", Source: "admin"})
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
-	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts on the allow list (egress.allow) or that you unblock (the large-upload block)\n")
-
-	// With the allow list empty (openshell.admin.allow_unblock: false drops
-	// the user's entries), it is not named.
-	ta = newTestApp(t, "")
-	noChanges(ta)
-	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "(none)", Source: "user"})
-	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
-	has(t, ta.output(), cut+"hosts you unblock (the large-upload block)\n")
+	// The exemptions are the user's own: a built-in pack's curated allow
+	// entries come from a feed, which the block cuts (PR 1022 final
+	// review), and the organization may turn the user's off.
+	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts you allowed or unblocked, where your organization lets you (the large-upload block)\n")
 
 	ta = newTestApp(t, "")
 	noChanges(ta)
