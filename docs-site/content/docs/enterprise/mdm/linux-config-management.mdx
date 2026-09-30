@@ -1,6 +1,6 @@
 ---
 title: Deploy on Linux with configuration management
-description: Idempotent Ansible, Puppet, Chef, Salt and plain apt or dnf recipes that install, configure, verify, upgrade and remove the standalone DefenseClaw enterprise package on Linux.
+description: Deploy DefenseClaw enterprise on Linux with Ansible, Puppet, Chef, Salt or plain apt and dnf, with pinned packages and a managed config.
 keywords:
   - DefenseClaw Ansible
   - DefenseClaw Puppet
@@ -122,7 +122,7 @@ guardrail:
 Pick your tool. Each recipe follows the procedure above.
 
 <Tabs items={['Ansible', 'Puppet', 'Chef', 'Salt']}>
-  <Tab value="Ansible">
+<Tab value="Ansible">
 
 This play uses `ansible.builtin` modules only
 ([copy](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/copy_module.html),
@@ -259,8 +259,8 @@ Notes:
 - `enterprise secret set` writes the key and runs `ensure`. Storing the same
   key again changes nothing, so the task reports no change.
 
-  </Tab>
-  <Tab value="Puppet">
+</Tab>
+<Tab value="Puppet">
 
 This class uses the core `file`, `package` and `exec` types
 ([file](https://github.com/puppetlabs/puppet/blob/main/references/types/file.md),
@@ -380,8 +380,8 @@ Notes:
   If you do not want that copy, run `enterprise secret set` from standard
   input in a one-off task instead.
 
-  </Tab>
-  <Tab value="Chef">
+</Tab>
+<Tab value="Chef">
 
 This recipe uses the `directory`, `file`, `cookbook_file`, `remote_file`,
 `dpkg_package` or `rpm_package`, and `execute` resources
@@ -486,8 +486,8 @@ Notes:
   retried. `sensitive true` keeps the key out of Chef's logs and reports.
 - `remote_file` checks the download against `checksum`, the SHA-256 pin.
 
-  </Tab>
-  <Tab value="Salt">
+</Tab>
+<Tab value="Salt">
 
 This state uses `file.directory`, `file.managed`, `pkg.installed` and
 `cmd.run`
@@ -609,7 +609,7 @@ Notes:
   `show_changes: False` keeps the key out of the state output.
 - `retry` runs a failed state again, so a busy lock (`75`) is retried.
 
-  </Tab>
+</Tab>
 </Tabs>
 
 ## Plain apt and dnf
