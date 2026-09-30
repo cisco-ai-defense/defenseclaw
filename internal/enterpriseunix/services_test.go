@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -71,6 +72,53 @@ func (r launchctlPrintRunner) Run(_ context.Context, name string, args ...string
 		}
 	}
 	return CommandResult{ExitCode: 113}, errors.New("launchctl print: exit 113: Could not find service")
+}
+
+// teardownRunner is launchd finishing a bootout after bootout returned: the
+// job stays listed (SIGTERMed) for a few prints, and bootstrap or kickstart
+// fails with EALREADY until it is gone.
+type teardownRunner struct {
+	printsLeft int
+	calls      []string
+}
+
+func (r *teardownRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	r.calls = append(r.calls, args[0])
+	switch args[0] {
+	case "print":
+		if r.printsLeft > 0 {
+			r.printsLeft--
+			return CommandResult{Stdout: []byte("state = SIGTERMed\n")}, nil
+		}
+		return CommandResult{ExitCode: 113}, errors.New("launchctl print: exit 113: Could not find service")
+	case "bootstrap", "kickstart":
+		if r.printsLeft > 0 {
+			return CommandResult{ExitCode: 37}, errors.New("launchctl " + args[0] + ": exit 37: ")
+		}
+	}
+	return CommandResult{}, nil
+}
+
+// A config change on macOS left the gateway unloaded: bootout returned while
+// launchd was still terminating the gateway, and the bootstrap and the
+// kickstart -k fallback both failed with exit 37.
+func TestLaunchdStopWaitsForTeardownBeforeStart(t *testing.T) {
+	gateway := Unit{Name: labelGateway, Kind: "gateway"}
+	for _, stop := range []bool{true, false} {
+		runner := &teardownRunner{printsLeft: 3}
+		manager := &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+		if stop {
+			if err := manager.Stop(context.Background(), gateway); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := manager.Start(context.Background(), gateway); err != nil {
+			t.Fatalf("stop=%v: start: %v (calls %v)", stop, err, runner.calls)
+		}
+		if got := runner.calls[len(runner.calls)-1]; got != "bootstrap" || contains(runner.calls, "kickstart") {
+			t.Fatalf("stop=%v: calls %v, want a bootstrap after the job is gone and no kickstart", stop, runner.calls)
+		}
+	}
 }
 
 // `enterprise macos status` printed the on-demand apply and verify jobs as

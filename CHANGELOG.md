@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **A config change on macOS no longer leaves the gateway unloaded.** On the
+  enterprise standalone profile, launchd could still be stopping the gateway
+  when the lifecycle started it again; the start and its restart fallback
+  failed with exit 37, the rollback failed the same way, and hooks failed
+  closed until `enterprise macos repair`. The lifecycle now waits for
+  launchd to remove the job before starting it again.
 - **audit.db no longer corrupts beside a long-running CLI or TUI.** Opening
   the audit store fixed its permissions by opening and closing audit.db,
   which drops the process's SQLite lock. A CLI command that closed while the
