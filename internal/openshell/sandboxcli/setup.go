@@ -666,6 +666,36 @@ func (a *App) restartStops(ctx context.Context) string {
 	return "this restarts the OpenShell gateway, which stops " + what + ", once their disks are flushed"
 }
 
+// manualRestartStops ends a line that leaves the restart of the OpenShell
+// gateway to its user, for a gateway no gateway service runs: the restart
+// stops every sandbox on it, of every owner, and DefenseClaw, which does
+// not make it, cannot flush the MicroVM ones first. On the MicroVM driver
+// (microVM) a sandbox stopped without a flush loses what it wrote since
+// its last sync, so the running ones are to be stopped first with `sandbox
+// stop`, which flushes their disks. The running sandboxes are named when
+// the gateway lists them, but for those in gone (ones the caller removes
+// before then).
+func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []string) string {
+	running, known := a.runningSandboxes(ctx)
+	running = slices.DeleteFunc(running, func(name string) bool { return slices.Contains(gone, name) })
+	names := ""
+	if known && len(running) > 0 {
+		names = " (" + shortList(running) + ")"
+	}
+	stop := "`" + CommandName + " stop NAME`"
+	switch {
+	case !microVM && names != "":
+		return "restarting it stops every sandbox on it, and " + plural(int64(len(running)), "sandbox runs", "sandboxes run") + " on it now" + names
+	case !microVM:
+		return "restarting it stops every sandbox on it"
+	case known && len(running) == 0:
+		return "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first (" + stop +
+			", which flushes its disk), or what it wrote since its last sync is lost"
+	}
+	return "restarting it stops every sandbox on it: first stop the MicroVM sandboxes running on it" + names + " with " + stop +
+		", which flushes their disks, or what they wrote since their last sync is lost"
+}
+
 // shortList names at most five of names.
 func shortList(names []string) string {
 	shown := names

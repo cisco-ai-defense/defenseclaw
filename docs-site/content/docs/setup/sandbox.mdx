@@ -1291,7 +1291,13 @@ Teardown takes these steps, in order:
 6. **gateway config**: restores the OpenShell gateway configuration setup
    changed, from the backup setup kept, and restarts the gateway. A file
    someone changed since is left alone with a warning. `nothing to restore`
-   means setup never changed it.
+   means setup never changed it. For a gateway no gateway service runs
+   (started by hand), DefenseClaw restores the files but cannot restart it:
+   the plan says ``then you restart the OpenShell gateway yourself, the way
+   you started it, so it loads them``, that restarting it stops every
+   sandbox on it, and on the MicroVM driver to first stop the sandboxes
+   still running on it (named) with `defenseclaw sandbox stop NAME`, which
+   flushes their disks, or what they wrote since their last sync is lost.
 7. **shell wrappers**: removes them from every shell's rc file.
 8. **config**: turns `openshell.enabled` off in `config.yaml`.
 

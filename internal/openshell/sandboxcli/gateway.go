@@ -36,7 +36,8 @@ import (
 // configuration (the compute driver, bind mounts, upstream telemetry),
 // restores it, and restarts the gateway on what its files already say.
 // Write writes a change without the restart, for a gateway no gateway
-// service runs (openshell.GatewayConfigurator.Write).
+// service runs (openshell.GatewayConfigurator.Write), which NoService
+// reports.
 type GatewayService interface {
 	State() (*openshell.GatewayConfigState, error)
 	Plan(ctx context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error)
@@ -44,6 +45,7 @@ type GatewayService interface {
 	Write(ctx context.Context, plan *openshell.GatewayPlan) (*openshell.GatewayApplyResult, error)
 	Rollback(ctx context.Context, res *openshell.GatewayApplyResult) error
 	Restart(ctx context.Context) error
+	NoService(ctx context.Context) bool
 }
 
 type gatewayService struct {
@@ -84,6 +86,10 @@ func (g *gatewayService) Rollback(ctx context.Context, res *openshell.GatewayApp
 
 func (g *gatewayService) Restart(ctx context.Context) error {
 	return g.configurator().Restart(ctx)
+}
+
+func (g *gatewayService) NoService(ctx context.Context) bool {
+	return g.configurator().NoService(ctx)
 }
 
 // setupReceipt records what setup changed outside DefenseClaw, so

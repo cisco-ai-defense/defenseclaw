@@ -871,6 +871,10 @@ func (f *fakeGateway) Rollback(_ context.Context, res *openshell.GatewayApplyRes
 	return nil
 }
 
+// NoService: a gateway service runs this gateway (noServiceGateway is one
+// without).
+func (f *fakeGateway) NoService(context.Context) bool { return false }
+
 // testApp wires an App to fakes.
 type testApp struct {
 	*App

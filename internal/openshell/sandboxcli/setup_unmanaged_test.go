@@ -257,8 +257,45 @@ func TestSetupSaysAnUnwrittenChangeNeedsSetup(t *testing.T) {
 
 // TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay: the gateway files
 // setup wrote for a gateway no gateway service runs are restored, and the
-// user is told to restart it (Rollback returns ErrNoGatewayService).
+// user is told to restart it (Rollback returns ErrNoGatewayService). The
+// plan the user agreed to said "then restart the OpenShell gateway, which
+// drops the connections of every sandbox on it", a restart DefenseClaw
+// does not make (fu2 review 4): it says the user restarts it, what that
+// stops, and on the MicroVM driver to stop the sandboxes still running
+// (another owner's, which teardown leaves) first, which flushes their
+// disks.
 func TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay(t *testing.T) {
+	const yourself = "then you restart the OpenShell gateway yourself, the way you started it, so it loads them (DefenseClaw cannot restart it); " +
+		"restarting it stops every sandbox on it"
+	for _, driver := range []string{"docker", "vm"} {
+		t.Run(driver, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			writeConfig(t, ta, "")
+			toml := ta.home + "/gateway.toml"
+			writeFile(t, toml, "[openshell]\nversion = 2\n")
+			if err := ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml}}}); err != nil {
+				t.Fatal(err)
+			}
+			runningOn(t, ta, 1)
+			ta.daemon.status.Gateway.Driver = driver
+			ta.App.Gateway = noServiceGateway{ta.gateway}
+			ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
+			out := ta.output()
+			has(t, out, "✓ restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
+			if driver == "vm" {
+				has(t, out, yourself+": first stop the MicroVM sandboxes running on it (dc-claude-theirs-a) with `defenseclaw sandbox stop NAME`, "+
+					"which flushes their disks, or what they wrote since their last sync is lost")
+			} else {
+				has(t, out, yourself+", and 1 sandbox runs on it now (dc-claude-theirs-a)")
+				lacks(t, out, "flushes")
+			}
+			lacks(t, out, "could not", "and restarted it", "then restart the OpenShell gateway, which drops the connections")
+			if r, err := ta.loadReceipt(); err != nil || len(r.GatewayFiles) != 0 {
+				t.Fatalf("receipt = %+v, %v", r, err)
+			}
+		})
+	}
+	// A gateway service runs the gateway: teardown restarts it.
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")
 	toml := ta.home + "/gateway.toml"
@@ -266,13 +303,10 @@ func TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay(t *testing.T) {
 	if err := ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml}}}); err != nil {
 		t.Fatal(err)
 	}
-	ta.App.Gateway = noServiceGateway{ta.gateway}
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
-	has(t, ta.output(), "✓ restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
-	lacks(t, ta.output(), "could not", "and restarted it")
-	if r, err := ta.loadReceipt(); err != nil || len(r.GatewayFiles) != 0 {
-		t.Fatalf("receipt = %+v, %v", r, err)
-	}
+	has(t, ta.output(), "then restart the OpenShell gateway, which drops the connections of every sandbox on it",
+		"✓ restored the OpenShell gateway configuration and restarted it")
+	lacks(t, ta.output(), "yourself")
 }
 
 // noServiceGateway is a gateway no gateway service runs.
@@ -282,3 +316,5 @@ func (g noServiceGateway) Rollback(ctx context.Context, res *openshell.GatewayAp
 	_ = g.fakeGateway.Rollback(ctx, res)
 	return openshell.ErrNoGatewayService
 }
+
+func (noServiceGateway) NoService(context.Context) bool { return true }

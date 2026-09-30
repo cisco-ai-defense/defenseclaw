@@ -1229,7 +1229,7 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if res == nil || len(res.Files) == 0 {
 		return nil
 	}
-	if g.noService(ctx) {
+	if g.NoService(ctx) {
 		if err := g.restore(res); err != nil {
 			return err
 		}
@@ -1249,11 +1249,15 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	return g.restart(ctx)
 }
 
-// noService reports that the service manager has no gateway service
-// (ErrNoGatewayService): on a Mac the formula is not installed (a file
-// system check, without the slow `brew services info`), on Linux systemd
-// does not know the user unit. An unknown state is not a missing service.
-func (g *GatewayConfigurator) noService(ctx context.Context) bool {
+// NoService reports that the service manager has no gateway service
+// (ErrNoGatewayService), so the gateway, where one runs, is its user's to
+// restart: on a Mac the formula is not installed (a file system check,
+// without the slow `brew services info`), on Linux systemd does not know
+// the user unit. An unknown state is not a missing service.
+func (g *GatewayConfigurator) NoService(ctx context.Context) bool {
+	if err := g.defaults(); err != nil {
+		return false
+	}
 	if g.GOOS == "darwin" {
 		return !g.BrewFormulaInstalled()
 	}
