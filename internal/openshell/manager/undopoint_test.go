@@ -24,6 +24,7 @@ import (
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -159,6 +160,34 @@ func TestAFailedStartKeepsTheAcceptance(t *testing.T) {
 	e.startBox("failstart", sandboxapi.StartRequest{})
 	if e.ws.snapshots["failstart"] == snap {
 		t.Fatal("the start after a failed one kept the undo point the user accepted the changes on")
+	}
+}
+
+// A start that failed on DefenseClaw's side while OpenShell went on with it
+// (the request was cut off, the connection dropped): the sandbox comes up
+// anyway, and what that session changes on top of the accepted snapshot was
+// not accepted. The next start keeps the undo point.
+func TestASessionAfterAFailedStartEndsTheAcceptance(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "cutoff"})
+	e.stopBox("cutoff")
+	snap := e.ws.snapshots["cutoff"]
+	if _, err := e.m.Accept(t.Context(), "cutoff", sandboxapi.AcceptRequest{Snapshot: snap.CreatedAt}); err != nil {
+		t.Fatal(err)
+	}
+	e.fake.FailNext(openshelltest.MethodStartSandbox, &types.StatusError{Code: types.ErrorUnavailable, Message: "connection reset"})
+	if _, err := e.m.Start(t.Context(), "cutoff", sandboxapi.StartRequest{NoSnapshot: true}); err == nil {
+		t.Fatal("start succeeded")
+	}
+	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "cutoff", types.SandboxReady))
+	must(t, e.m.Reconcile(t.Context()))
+	if got := e.get("cutoff"); got.Phase != "ready" || got.Snapshot == nil || !got.Snapshot.AcceptedAt.IsZero() {
+		t.Fatalf("the sandbox came up anyway: phase %s, snapshot %+v; want it ready and the acceptance ended", got.Phase, got.Snapshot)
+	}
+	e.stopBox("cutoff")
+	e.startBox("cutoff", sandboxapi.StartRequest{})
+	if e.ws.snapshots["cutoff"] != snap {
+		t.Fatal("the start took a new undo point over a session nobody accepted")
 	}
 }
 

@@ -21,7 +21,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
@@ -39,16 +38,22 @@ import (
 // so an accepted session is the base of the next one.
 
 // acceptedSnapshot is the user's acceptance of the changes made on top of a
-// pre-session snapshot, which it names by creation time.
+// pre-session snapshot, which it names by creation time, as they stood
+// after the sandbox's session Session (the record's Sessions then).
 type acceptedSnapshot struct {
 	Snapshot time.Time `json:"snapshot_created_at"`
 	At       time.Time `json:"accepted_at"`
+	Session  int       `json:"session"`
 }
 
-// acceptedFor reports whether a accepts the changes on top of snap: snap is
-// the snapshot it names, and not undone.
-func (a *acceptedSnapshot) acceptedFor(snap *workspace.SnapshotRecord) bool {
-	return a != nil && snap != nil && snap.UndoneAt == nil && a.Snapshot.Equal(snap.CreatedAt)
+// acceptedFor reports whether a accepts the changes on top of snap for a
+// sandbox whose record counts sessions: snap is the snapshot it names, not
+// undone, and no session ran since the acceptance. A session since (a
+// --no-snapshot start keeps the accepted snapshot, and a start that failed
+// on DefenseClaw's side may still have run) changed what sits on top, and
+// nobody accepted that.
+func (a *acceptedSnapshot) acceptedFor(snap *workspace.SnapshotRecord, sessions int) bool {
+	return a != nil && snap != nil && snap.UndoneAt == nil && a.Snapshot.Equal(snap.CreatedAt) && a.Session == sessions
 }
 
 // Accept records that the user kept the changes a session made on top of a
@@ -112,7 +117,7 @@ func (m *Manager) Accept(ctx context.Context, name string, req sandboxapi.Accept
 			"sandbox %s has another undo point by now than the one its changes were reviewed against; review them again", name)
 	}
 	m.mu.Lock()
-	b.rec.Accepted = &acceptedSnapshot{Snapshot: snap.CreatedAt.UTC(), At: m.now().UTC()}
+	b.rec.Accepted = &acceptedSnapshot{Snapshot: snap.CreatedAt.UTC(), At: m.now().UTC(), Session: sessions}
 	m.mu.Unlock()
 	if err := m.saveRecord(b); err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
@@ -122,45 +127,4 @@ func (m *Manager) Accept(ctx context.Context, name string, req sandboxapi.Accept
 		Message: "the changes in sandbox " + name + "'s folder were kept: its next start takes a new undo point"})
 	v := m.viewOf(b)
 	return &v, nil
-}
-
-// dropAcceptance forgets an acceptance once a start used it: what the new
-// session changes on top was not accepted (a --no-snapshot start keeps the
-// accepted snapshot, and the next start must keep it again). It returns the
-// acceptance, which a start that fails before the sandbox runs gives back
-// (restoreAcceptance).
-func (m *Manager) dropAcceptance(b *box) (*acceptedSnapshot, error) {
-	m.mu.Lock()
-	had := b.rec.Accepted
-	b.rec.Accepted = nil
-	m.mu.Unlock()
-	if had == nil {
-		return nil, nil
-	}
-	return had, m.saveRecord(b)
-}
-
-// restoreAcceptance gives back the acceptance a failed start dropped, when
-// OpenShell reports the sandbox stopped: no session ran, so nothing on top
-// of the snapshot is unreviewed, and the next start still takes a new undo
-// point. A sandbox that may have run (the start went through, or OpenShell
-// could not say) keeps it dropped. Best effort.
-func (m *Manager) restoreAcceptance(b *box, accepted *acceptedSnapshot) {
-	if accepted == nil {
-		return
-	}
-	m.mu.Lock()
-	stopped := b.phase != audit.SandboxPhaseStarting && b.sb != nil && stoppedPhase(b.sb.Status.Phase)
-	restore := stopped && b.rec.Accepted == nil
-	if restore {
-		b.rec.Accepted = accepted
-	}
-	name := b.rec.Name
-	m.mu.Unlock()
-	if !restore {
-		return
-	}
-	if err := m.saveRecord(b); err != nil {
-		m.logf("sandbox %s: keep the acceptance its failed start did not use: %v", name, err)
-	}
 }

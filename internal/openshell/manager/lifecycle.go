@@ -442,7 +442,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		if err != nil {
 			snap = nil
 		}
-		if kept, why := m.keepSnapshot(ctx, rec.Name, snap, req.NewSnapshot || rec.Accepted.acceptedFor(snap)); kept {
+		if kept, why := m.keepSnapshot(ctx, rec.Name, snap, req.NewSnapshot || rec.Accepted.acceptedFor(snap, rec.Sessions)); kept {
 			// Replacing it would take the earlier session's changes into the
 			// new baseline, and undo could never revert them.
 			m.logf("sandbox %s: kept its pre-session snapshot: %s", rec.Name, why)
@@ -463,12 +463,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// An acceptance covers the sessions before this start, not what the new
 	// one changes on top (a --no-snapshot start keeps the accepted
-	// snapshot). A start that fails before the sandbox runs gives it back.
-	accepted, err := m.dropAcceptance(b)
-	if err != nil {
-		m.restoreAcceptance(b, accepted)
-		return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
-	}
+	// snapshot): it names the session it was given after (acceptedFor), so
+	// the new session ends it once the sandbox runs, and a start that fails
+	// before that leaves it in place.
 	// The harness starts with the sandbox: every tool call of the new
 	// session reaches this process, so its tool-call ledger is complete.
 	// The binding outlives the session, so the CONNECT refusals the last
@@ -490,7 +487,6 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		b.rec.Guard = rec.Guard
 		m.mu.Unlock()
 		if err := m.saveRecord(b); err != nil {
-			m.restoreAcceptance(b, accepted)
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
@@ -498,7 +494,6 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		m.restoreAcceptance(b, accepted)
 		return upstream("start sandbox "+rec.Name, err)
 	}
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
