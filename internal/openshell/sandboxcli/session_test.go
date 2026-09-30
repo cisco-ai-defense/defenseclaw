@@ -923,8 +923,11 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 
 // A stopped sandbox without a kept log says how to read its log; a log an
 // earlier CLI kept on this machine (before the daemon kept them) is still
-// shown, for its own sandbox only, and the daemon's wins over it. Without
-// the kept marker, a run whose process is gone reads "did not finish", not
+// shown, said to be that CLI's, for its own sandbox only, and the daemon's
+// wins over it. Once the daemon has seen the sandbox start since (its
+// session count), every stop since was the daemon's: the earlier CLI's log
+// is older than the latest stop and is not shown as its log. Without the
+// kept marker, a run whose process is gone reads "did not finish", not
 // "still going".
 func TestLogsOfAStoppedSandbox(t *testing.T) {
 	ta := newTestApp(t, "")
@@ -936,8 +939,14 @@ func TestLogsOfAStoppedSandbox(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "run.json"), `{"state":"exited","exit":"0","sandbox_id":"sb-box","name":"box","saved_at":"2026-09-29T10:00:00Z"}`)
 	writeFile(t, filepath.Join(dir, "run.log"), "earlier\ndone\n")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
-	has(t, ta.output(), "done", "the log kept when it stopped", "the run exited with status 0")
-	lacks(t, ta.output(), "earlier")
+	has(t, ta.output(), "done", "the log an earlier DefenseClaw CLI kept when it stopped", "the run exited with status 0")
+	lacks(t, ta.output(), "earlier\n")
+	ta.out.Reset()
+	started := sb
+	started.Session = 1
+	ta.daemon.add(started)
+	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
+	ta.daemon.add(sb)
 	ta.out.Reset()
 	ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "newer\n"}
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))

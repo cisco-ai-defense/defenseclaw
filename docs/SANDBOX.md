@@ -1344,7 +1344,10 @@ Every stop goes through this: the CLI's, the TUI's, the macOS app's, undo's
 and a tamper stop's, except that a tamper stop keeps no log (it waits on
 nothing the workload controls; the feed says the log was not kept). The CLI
 only asks first, on a terminal, before `sandbox stop` ends a run still
-going. In a git project undo:
+going. `sandbox logs` names the run a kept log is of (its start), and still
+shows a log an earlier CLI kept in `cli/run.log`, said to be that CLI's,
+until the daemon sees the sandbox start again (its `session` count): every
+stop after that is the daemon's. In a git project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;

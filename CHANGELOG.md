@@ -690,8 +690,8 @@ deleted.
   file, bounded, after it publishes `stopping`; a tamper stop keeps none, so
   it waits on nothing the workload controls); `sandbox logs` of a
   stopped sandbox reads it from the new `GET
-  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows a log an earlier
-  CLI kept. Keeping the changes at the end of a session is recorded through
+  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows (as such) a log an earlier
+  CLI kept, until the sandbox starts again. Keeping the changes at the end of a session is recorded through
   the new `POST /api/v1/sandbox/sandboxes/{name}/accept` instead of
   `cli/accepted.json` (one an earlier CLI wrote is honoured once), so the
   next start takes a new undo point whoever starts the sandbox, and the
