@@ -82,8 +82,9 @@ func (d *DeveloperTools) OutdatedXcodeApp() bool {
 // homebrewMinimum are the oldest Xcode and Command Line Tools Homebrew
 // builds a formula from source with on the macOS releases before 26
 // (MacOS::Xcode.minimum_version and MacOS::CLT.minimum_version in its
-// os/mac/xcode.rb): the tools of the next year's release, so macOS 15
-// needs Xcode 16.0 and the Command Line Tools 16.0.0.
+// os/mac/xcode.rb). Before macOS 26 their major version is one above the
+// macOS major: macOS 15 needs Xcode 16.0 and the Command Line Tools
+// 16.0.0, which shipped with it the same year.
 var homebrewMinimum = map[int]struct{ xcode, clt string }{
 	15: {"16.0", "16.0.0"},
 	14: {"15.0", "15.0.0"},
