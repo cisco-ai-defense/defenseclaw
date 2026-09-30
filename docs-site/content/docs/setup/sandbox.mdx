@@ -405,6 +405,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
+| `Uploads` | Shown when [the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts on the allow list (egress.allow) or that you unblock (the large-upload block)`. Uploads to hosts you unblocked, or that the effective allow list names (`openshell.egress.allow` or a pack's `egress.allow`, which `openshell.admin.allow_unblock: false` empties of your entries), are only reported; with an empty allow list the line reads `except to hosts you unblock`. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
@@ -632,6 +633,15 @@ run tells you three times:
 - in the exit status: 69 when not one hook got through, unless the harness
   exited with its own error.
 
+The daemon keeps no hook counts across a restart. When it restarted during
+the session and no hook reached it since, the run can't tell whether the
+session's hooks got through before, so it says that instead, with no warning
+and no exit status 69:
+`the DefenseClaw daemon restarted during the session (at 11:05) and keeps no
+hook counts across a restart, so DefenseClaw cannot tell whether this
+session's hooks reached it`. A warning the restarted daemon raises itself
+still counts.
+
 ### Tamper alerts
 
 DefenseClaw tracks each tool call from its "before" hook to its result. A
@@ -702,7 +712,7 @@ go instead (see [work on a copy](#work-on-a-copy)).
 
 ```text
 Session ended · 57 tool calls (1 blocked: <the rule's reason>) · 23 new sites contacted · 1 site blocked · 8 files changed (+212 −37)
-✗ DefenseClaw blocked webhook.site:443 (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
 ⚠ Changed files that can run code on your machine: package.json, .envrc  → review before running
 Keep changes? [Y] keep  [u] undo everything  [d] show diff
   Sandbox kept (stopped) → resume: defenseclaw sandbox connect myapp-7f3a   delete: defenseclaw sandbox delete myapp-7f3a
@@ -710,13 +720,21 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff
 
 The network counts are sites (destinations): the new ones the sandbox
 reached, and the ones blocked during the session, each counted once however
-often it was tried and listed below with `✗`. A site you unblocked for the
+often it was tried and listed below with `✗`. A blocked site is named without
+a port, since the block holds it on every port. A block of one port is named
+with it: a port the egress proxy doesn't carry (`✗ DefenseClaw blocked
+example.org:8443 (port not allowed)`), a port on this machine the sandbox may
+not reach (`host.openshell.internal:5432`), and a connection OpenShell itself
+denied, whose rules are per host and port. A site you unblocked for the
 sandbox later in the session is listed without the unblock command
-(``✗ DefenseClaw blocked webhook.site:443 (webhook catcher); unblocked
+(``✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked
 since``). An invalid destination (a
 host name without a dot, such as a mistyped `curl echo`) counts as blocked
 too. The counts cover everything in the sandbox while the session ran,
-`sandbox exec` commands from another terminal included. `sandbox status NAME`
+`sandbox exec` commands from another terminal included. Nothing keeps them
+across a restart of the DefenseClaw daemon: after one during the session,
+the line says they cover only the time since (`0 tool calls since the
+daemon restarted at 11:05 · 0 new sites contacted since then`). `sandbox status NAME`
 shows the same two counts for the sandbox's life (since the daemon started):
 `Egress 9 destinations contacted, 2 blocked, …`.
 

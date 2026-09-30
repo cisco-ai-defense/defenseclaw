@@ -17,6 +17,7 @@
 package sandboxapi
 
 import (
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -66,6 +67,11 @@ type Status struct {
 	Running          int       `json:"running"`
 	PendingApprovals int       `json:"pending_approvals"`
 	LastReconcile    time.Time `json:"last_reconcile,omitzero"`
+	// StartedAt is when the daemon's sandbox subsystem started. Nothing
+	// keeps the sandboxes' counters (HookCoverage, EgressStats) across a
+	// restart: they count from then, so a session that began earlier knows
+	// its counts cover only the time since.
+	StartedAt time.Time `json:"started_at,omitzero"`
 	// DaemonUID is the uid the daemon runs as (unset where there is none):
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.
@@ -885,6 +891,23 @@ type ActivityEvent struct {
 	// which OpenShell's stream replays when DefenseClaw starts again: it
 	// arrives after newer events.
 	Replayed bool `json:"replayed,omitempty"`
+}
+
+// HostPort is a destination as the feed names it: the host, with its port
+// unless that is 443 (HTTPS, which nearly every request uses) or unknown.
+// A plain-HTTP request reads host:80, so an HTTPS and an HTTP request to
+// one host (the egress proxy refuses them one by one) do not read as one
+// line twice. An IPv6 literal with its port is bracketed, as
+// net.JoinHostPort does: "[fd00:ec2::254]:80", not "fd00:ec2::254:80",
+// which is another address.
+func HostPort(host string, port int) string {
+	if port == 0 || port == 443 {
+		return host
+	}
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	return host + ":" + strconv.Itoa(port)
 }
 
 // ActivityQuery selects the activity stream.

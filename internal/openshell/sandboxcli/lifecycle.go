@@ -407,7 +407,13 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	} else if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
-	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept})
+	// The policy the sandbox runs under, for the banner's Uploads line; a
+	// daemon that cannot say leaves the line out.
+	var policy []sandboxapi.Setting
+	if ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name}); err == nil {
+		policy = ex.Settings
+	}
+	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy})
 	var code int
 	if o.Shell {
 		// A shell in the project, reviewed at its end like a harness

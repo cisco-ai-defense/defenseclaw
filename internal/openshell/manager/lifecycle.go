@@ -122,6 +122,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		}
 	}
 	st.LastReconcile = m.lastReconcile
+	st.StartedAt = m.startedAt.UTC()
 	return st, nil
 }
 

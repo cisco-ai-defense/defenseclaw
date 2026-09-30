@@ -126,6 +126,14 @@ struct SandboxModelTests {
         expect(notes.map(\.kind) == [.blocked, .ask], "one block and one ask notification")
         expect(notes[0].host == "webhook.site" && notes[0].sandbox == "myapp-claude-7f3a", "block target")
         expect(notes[0].title == "Blocked webhook.site", "block title \(notes[0].title)")
+        // An unblockable block holds the host on every port, and the
+        // notification is once per host: the first request's ":80" would
+        // say the block stops there.
+        var plain = SandboxSnapshot()
+        var http = blocked
+        http["port"] = 80
+        let first = plain.merge(events: SandboxDecoding.activity(from: ["events": [http]]), notify: true, now: start)
+        expect(first.first?.title == "Blocked webhook.site", "block title without the port \(first.first?.title ?? "")")
         expect(notes[1].approvalID == "a1", "ask id")
         expect(snapshot.lastSeq == 7, "last seq")
         expect(snapshot.merge(events: events, notify: true, now: start).isEmpty, "a replay adds nothing")
@@ -221,6 +229,17 @@ struct SandboxModelTests {
                                      reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.")
         expect(upload.summary == "files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB "
                + "to a destination it had not contacted before)", "large upload summary \(upload.summary)")
+        // An HTTPS and a plain-HTTP refusal of one host read apart (PR 1022
+        // live retest N3): the port shows unless it is 443.
+        let https = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 443, category: "large_upload", reason: "Blocked.")
+        let http = SandboxActivity(kind: "egress.blocked", host: "httpbin.org", port: 80, category: "large_upload", reason: "Blocked.")
+        expect(https.summary == "httpbin.org (large upload blocked: blocked)", "https summary \(https.summary)")
+        expect(http.summary == "httpbin.org:80 (large upload blocked: blocked)", "http summary \(http.summary)")
+        // An IPv6 literal with its port is bracketed: "fd00:ec2::254:80" is
+        // another address (PR 1022 review of N3).
+        expect(SandboxFormat.hostPort("fd00:ec2::254", 80) == "[fd00:ec2::254]:80", "ipv6 host port")
+        expect(SandboxFormat.hostPort("fd00:ec2::254", 443) == "fd00:ec2::254", "ipv6 on 443")
+        expect(SandboxFormat.hostPort("[::1]", 8080) == "[::1]:8080", "bracketed ipv6 host port")
     }
 
     private static func decodesSandboxAPIErrorBodies() {

@@ -343,7 +343,10 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	stderr := liveErr(ta)
 	noChanges(ta)
 	ta.daemon.live = []sandboxapi.ActivityEvent{
-		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 443, Category: "webhook_catcher", Unblockable: true},
+		// The block holds the host on every port: the notice, once per
+		// host, said "webhook.site:80" after a plain-HTTP request came
+		// first, though HTTPS was blocked too (PR 1022 review of N3).
+		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 80, Category: "webhook_catcher", Unblockable: true},
 		{Seq: 2, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 443, Category: "webhook_catcher", Unblockable: true},
 		{Seq: 3, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "raw.githubusercontent.com", Reason: harnessFetchReason},
 		{Seq: 4, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "HIGH", Reason: "tool_alert", Host: "webhook.site",
@@ -358,21 +361,52 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		{Seq: 8, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "cut.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
 			Reason:      "This destination is blocked since this sandbox tried to send more than 10 MiB to it, a destination it had not contacted before.",
 			Unblockable: true},
+		// A large upload only the report saw (the block off): the summary
+		// listed the ⚠ rule finding but not this ⚠ (PR 1022 live retest
+		// N2). Once per host.
+		{Seq: 9, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "httpbin.io", Port: 80, BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		{Seq: 10, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "HTTPBIN.io", Port: 443, BytesUp: 1<<20 + 9, Threshold: 1 << 20},
+		// A port the proxy does not carry is what is blocked: it shows.
+		{Seq: 11, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "example.org", Port: 8443, Category: "port_not_allowed"},
+		// So does a closed port on this machine, whose alias keeps its
+		// other ports, and an OpenShell denial, which is per host and port:
+		// the notice said "blocked host.openshell.internal", and a second
+		// closed port went unannounced (PR 1022 review of fix 4).
+		{Seq: 12, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 5432, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 13, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 6379, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 14, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "db.example.net", Port: 6379, Source: sandboxapi.SourceOpenShell,
+			Reason: "transparent_tcp_mapping_denied"},
 	}
+	large := "⚠ large upload to httpbin.io (more than 1 MiB)"
+	port := "✗ DefenseClaw blocked example.org:8443 (port not allowed)"
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
 	upload := "✗ DefenseClaw blocked a large upload to files.example.net (this sandbox tried to send more than 10 MiB to a destination it had not " +
 		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
 	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
 		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "cut.example.net") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "db.example.net") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
-	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") {
+	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379"} {
+		if !strings.Contains(live, "✗ DefenseClaw blocked "+where) {
+			t.Errorf("no notice names %s:\n%q", where, live)
+		}
+	}
+	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") ||
+		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") ||
+		strings.Count(live, "\x1b]9;DefenseClaw: "+port+"\a") != 1 {
 		t.Fatalf("live output = %q", live)
 	}
-	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
+	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict",
+		large+"\n")
+	if out := ta.output(); strings.Count(out, "large upload to httpbin.io") != 1 || strings.Contains(out, "HTTPBIN.io") {
+		t.Errorf("the large upload is summarised once:\n%s", out)
+	}
+	if out := ta.output() + live; strings.Contains(out, "webhook.site:80") || strings.Contains(out, "httpbin.io:80") {
+		t.Errorf("a notice once per host names the first request's port:\n%s", out)
+	}
 	if out := ta.output(); strings.Index(out, "Session ended") > strings.Index(out, block) {
 		t.Errorf("the notices come before the summary line:\n%s", out)
 	}
@@ -544,7 +578,22 @@ func TestSessionSummary(t *testing.T) {
 					sb.Egress = sandboxapi.EgressStats{Destinations: 2}
 				})
 			}
-		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted"}, not: []string{"hooks are not reaching"}},
+		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
+		// PR 1022 live retest N1: the daemon restarted twice during the
+		// session, which left its counters at zero rather than below the
+		// session's start, and the summary read "0 tool calls · 0 new sites
+		// contacted" after 7 tool calls. Its start time says it restarted.
+		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls since the daemon restarted at " + time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04") +
+			" · 0 new sites contacted since then"}},
+		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
 		{name: "the harness failed before its hooks", opts: claude, exit: 1, setup: func(ta *testApp) {
 			noChanges(ta)
 			ta.term.hooks, ta.term.code = nil, 1
@@ -757,8 +806,46 @@ func TestSessionHookWarnings(t *testing.T) {
 			not:  []string{"hooks are not reaching"}, notLive: []string{"hooks are not reaching"}},
 		{name: "kiro the daemon found unreachable", opts: kiro, setup: quiet(0), exit: ExitHooksUnreachable,
 			during: unreachable("r2c1-kiro", "no hook request")},
+		// PR 1022 review of N1: a daemon restart during the session left
+		// the new daemon's counters at zero, and the session said none of
+		// its hooks reached DefenseClaw (Copilot CLI, after 7 allowed tool
+		// calls, without the continue line; Claude Code with
+		// ExitHooksUnreachable). That cannot be told.
+		{name: "a copilot session across a daemon restart", opts: RunOptions{Harness: "copilot"}, setup: func(ta *testApp) {
+			quiet(time.Hour)(ta)
+			ta.env["OPENAI_API_KEY"] = "sk-mock"
+		}, during: restartedAt(5 * time.Minute),
+			want: []string{"Session ended · 0 tool calls since the daemon restarted at " + restartClock, restartNote, "continue this conversation"},
+			not:  []string{"no hook of this session reached", "not reaching"}},
+		{name: "a claude session across a daemon restart", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			quiet(10 * time.Millisecond)(ta)
+			restartedAt(5*time.Minute)(t, ta) // before the hook window ends
+		}, during: func(*testing.T, *testApp) { time.Sleep(50 * time.Millisecond) }, // past the window
+			want: []string{restartNote, "continue this conversation"}, not: []string{"not reaching"}, notLive: []string{"not reaching"}},
+		// The new daemon's own verdict still counts.
+		{name: "a daemon restart and the new daemon's verdict", opts: RunOptions{Harness: "claude"}, setup: quiet(time.Hour), exit: ExitHooksUnreachable,
+			during: func(t *testing.T, ta *testApp) {
+				restartedAt(5*time.Minute)(t, ta)
+				unreachable(sbName, "the hook token was refused")(t, ta)
+			}, want: []string{"✗ " + hooksWarningText("the hook token was refused")}, not: []string{"cannot tell"}},
 	})
 }
+
+// restartedAt makes the fake daemon one that started that long after the
+// session did (at 12:00): it restarted during the session.
+func restartedAt(after time.Duration) func(*testing.T, *testApp) {
+	return func(_ *testing.T, ta *testApp) {
+		ta.daemon.mu.Lock()
+		ta.daemon.status.StartedAt = ta.Now().Add(after)
+		ta.daemon.mu.Unlock()
+	}
+}
+
+var (
+	restartClock = time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04")
+	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and keeps no hook counts across a restart, " +
+		"so DefenseClaw cannot tell whether this session's hooks reached it"
+)
 
 // Manual R2-11: Ctrl-C at the keep/undo question does not end the process
 // silently: it says the changes stay and undo still reverts them, stops
@@ -1464,6 +1551,63 @@ func TestConnectPassesTheRunsOptionsAndBanner(t *testing.T) {
 	has(t, ta.output(), "Model     mock-model", "OPENAI_API_KEY comes from --credential", "Secret    OPENAI_API_KEY → host.openshell.internal:38221 only")
 }
 
+// PR 1022 live retest N4: with openshell.egress.block_large_uploads on, the
+// run banner said only "network: open + blocklist". Its Uploads line names
+// what the block cuts, from the policy the sandbox runs under, on a run and
+// on a connect; the organization's block says whose it is.
+//
+// The block only reports an upload to a host the user unblocked or an allow
+// list names (egress.exemptFromUploadBlock): the line said every first
+// upload over the threshold is cut, with files.example.net on
+// openshell.egress.allow (PR 1022 review of N4).
+func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
+	const cut = "Uploads   an upload of more than 1 MiB to a host the sandbox has not contacted before is cut, except to "
+	policy := func(source string, extra ...sandboxapi.Setting) func(sandboxapi.ExplainRequest, *sandboxapi.Explain) {
+		return func(_ sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+			ex.Settings = append(ex.Settings, sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "1", Source: "user"},
+				sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true", Source: source})
+			ex.Settings = append(ex.Settings, extra...)
+		}
+	}
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "files.example.net", Source: "user"},
+		sandboxapi.Setting{Key: "egress.allow_only", Value: "(none)", Source: "admin"})
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts on the allow list (egress.allow) or that you unblock (the large-upload block)\n")
+
+	// With the allow list empty (openshell.admin.allow_unblock: false drops
+	// the user's entries), it is not named.
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "(none)", Source: "user"})
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), cut+"hosts you unblock (the large-upload block)\n")
+
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.add(sampleSandbox("box"))
+	var asked []string
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+		asked = append(asked, req.Sandbox)
+		policy("admin", sandboxapi.Setting{Key: "egress.allow_only", Value: "files.example.net, *.corp.example", Source: "admin"})(req, ex)
+	}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "box"}))
+	// With the organization's allowed list, every host the sandbox reaches
+	// is on it and exempt: nothing is cut.
+	has(t, ta.output(), "Uploads   an upload of more than 1 MiB is reported, not cut: every host this sandbox may reach is on your "+
+		"organization's allowed list, which your organization's large-upload block exempts\n")
+	if !slices.Equal(asked, []string{"box"}) {
+		t.Fatalf("explained %q, want the connected sandbox's policy", asked)
+	}
+
+	// Off (the default), there is no line.
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	lacks(t, ta.output(), "Uploads ")
+}
+
 // The connect banner of a sandbox the CLI remembers nothing of keeps its
 // Model line, named by the variable its credential came from, not the
 // provider profile's id (manual R2-7, L10).
@@ -1671,5 +1815,25 @@ func TestWhatRunsInASandboxDropsItsStopMark(t *testing.T) {
 	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"true"}}))
 	if ta.cleanCopy(&stopped) {
 		t.Fatal("the mark outlived a command in the sandbox")
+	}
+}
+
+// An ask is for one host and port, 443 included; an IPv6 literal is
+// bracketed, or its port read as part of another address (PR 1022 review
+// of fix 3).
+func TestAskDestination(t *testing.T) {
+	for _, tc := range []struct {
+		ev   sandboxapi.ActivityEvent
+		want string
+	}{
+		{sandboxapi.ActivityEvent{Host: "api.example.com", Port: 443}, "api.example.com:443"},
+		{sandboxapi.ActivityEvent{Host: "fd00:ec2::254", Port: 80}, "[fd00:ec2::254]:80"},
+		{sandboxapi.ActivityEvent{Host: "[fd00:ec2::254]", Port: 80}, "[fd00:ec2::254]:80"},
+		{sandboxapi.ActivityEvent{Host: "host.openshell.internal"}, "host.openshell.internal"},
+		{sandboxapi.ActivityEvent{}, ""},
+	} {
+		if got := askDestination(tc.ev); got != tc.want {
+			t.Errorf("askDestination(%+v) = %q, want %q", tc.ev, got, tc.want)
+		}
 	}
 }

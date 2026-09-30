@@ -292,7 +292,13 @@ def format_duration(seconds: int) -> str:
 
 
 def host_port(host: str, port: int) -> str:
-    if port and port not in (80, 443):
+    """sandboxapi.HostPort: the host, with its port unless that is 443 (HTTPS)
+    or unknown. Plain HTTP reads host:80, so an HTTPS and an HTTP refusal of
+    one host are told apart. An IPv6 literal with its port is bracketed
+    ("[fd00:ec2::254]:80"; "fd00:ec2::254:80" is another address)."""
+    if port and port != 443:
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
         return f"{host}:{port}"
     return host
 
@@ -1126,9 +1132,9 @@ class SandboxesPanelModel:
             self._toasted[key] = clock
             why = f" ({row.category or row.reason})" if (row.category or row.reason) else ""
             where = f" in {row.sandbox}" if row.sandbox else ""
-            return SandboxNotice(
-                "warn", f"✗ {host_port(row.host, row.port)} blocked{where}{why}. Sandboxes panel (7): u to unblock"
-            )
+            # An unblockable block holds the host on every port: the port of
+            # the first request would say it stops there.
+            return SandboxNotice("warn", f"✗ {row.host} blocked{where}{why}. Sandboxes panel (7): u to unblock")
         if row.kind == "approval.requested":
             where = f"{row.sandbox}: " if row.sandbox else ""
             return SandboxNotice("warn", f"? {where}{row.summary}. Sandboxes panel (7): press a to review")

@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -364,7 +365,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 			return fail(err)
 		}
 	}
-	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown})
+	a.banner(sb, bannerInfo{llm: llm, o: o, shown: shown, policy: ex.Settings})
 	if err := s.probe(ctx, sb.Workdir); err != nil {
 		return fail(err)
 	}
@@ -1255,12 +1256,18 @@ func resumeIgnores(o RunOptions, sb *sandboxapi.Sandbox, run *runLaunch) []strin
 }
 
 func settingValue(settings []sandboxapi.Setting, key string) string {
+	s, _ := settingOf(settings, key)
+	return s.Value
+}
+
+// settingOf is the setting key of an explain, and whether it has one.
+func settingOf(settings []sandboxapi.Setting, key string) (sandboxapi.Setting, bool) {
 	for _, s := range settings {
 		if s.Key == key {
-			return s.Value
+			return s, true
 		}
 	}
-	return ""
+	return sandboxapi.Setting{}, false
 }
 
 // createRequest turns the flags into the daemon's create request.
@@ -1420,6 +1427,9 @@ type bannerInfo struct {
 	// shown are the violations the preflight printed already (violationKey),
 	// and the warnings (warningKey).
 	shown map[string]bool
+	// policy is the effective policy the sandbox runs under (the daemon's
+	// explain): the banner names the large-upload block from it.
+	policy []sandboxapi.Setting
 }
 
 // launchModel is the banner's model: the one a launch of sb with the
@@ -1513,6 +1523,9 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
 		}
 		row("Host", strings.Join(hosts, " ")+" (opens when you approve the sandbox's first connection)")
+	}
+	if text := uploadBlockText(b.policy); text != "" {
+		row("Uploads", text)
 	}
 	// Asks (a host port, a private address, a destination the profile
 	// does not list) wait for the user while the harness owns the terminal;
@@ -1740,6 +1753,47 @@ func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
 		}
 	}
 	return out
+}
+
+// uploadBlockText is the banner's Uploads line: what the large-upload block
+// (egress.block_large_uploads) cuts, when it is on in the effective policy,
+// else "". The network label ("open + blocklist") says nothing of it. The
+// proxy only reports an upload to a host that is exempt from the block
+// (egress.exemptFromUploadBlock): one the user unblocked, one on an allow
+// list (openshell.egress.allow, a custom or required pack's egress.allow),
+// or one on the organization's allowed list (egress.allow_only). With that
+// list set, every host the sandbox may reach is on it, so the block cuts
+// nothing and the line says uploads are only reported. The allow list the
+// line names is the effective one (egress.allow), which
+// openshell.admin.allow_unblock: false empties of the user's entries.
+func uploadBlockText(policy []sandboxapi.Setting) string {
+	block, ok := settingOf(policy, "egress.block_large_uploads")
+	if !ok || block.Value != "true" {
+		return ""
+	}
+	size := "a large upload"
+	if mb, err := strconv.Atoi(settingValue(policy, "egress.large_upload_mb")); err == nil && mb > 0 {
+		size = "an upload of more than " + egress.FormatThreshold(int64(mb)<<20)
+	}
+	whose := "the large-upload block"
+	if block.Source == string(packs.SourceAdmin) {
+		whose = "your organization's large-upload block"
+	}
+	if listed(settingValue(policy, "egress.allow_only")) {
+		return size + " is reported, not cut: every host this sandbox may reach is on your organization's allowed list, which " +
+			whose + " exempts"
+	}
+	except := "hosts you unblock"
+	if listed(settingValue(policy, "egress.allow")) {
+		except = "hosts on the allow list (egress.allow) or that you unblock"
+	}
+	return size + " to a host the sandbox has not contacted before is cut, except to " + except + " (" + whose + ")"
+}
+
+// listed reports a list setting of explain that names something.
+func listed(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && v != "(none)"
 }
 
 func networkLabel(sb *sandboxapi.Sandbox) string {

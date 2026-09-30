@@ -159,6 +159,12 @@ func TestActivityRendering(t *testing.T) {
 		// daemon's report names no threshold.
 		{Seq: 14, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "drop.example.net", BytesUp: 30 << 20},
 		{Seq: 15, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "httpbin.io", BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		// After a cut, an HTTPS and a plain-HTTP request to the host read as
+		// one line twice (PR 1022 live retest N3): the port tells them apart.
+		{Seq: 16, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 443, Method: "CONNECT",
+			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
+		{Seq: 17, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 80, Method: "GET",
+			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -179,6 +185,8 @@ func TestActivityRendering(t *testing.T) {
 			"  → unblock: defenseclaw sandbox unblock files.example.net --sandbox box",
 		"12:01:02 ⚠ large upload to drop.example.net (30.0 MiB)",
 		"12:01:02 ⚠ large upload to httpbin.io (more than 1 MiB)",
+		"12:01:02 ✗ httpbin.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
+		"12:01:02 ✗ httpbin.org:80 (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
