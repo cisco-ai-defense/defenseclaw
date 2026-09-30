@@ -47,10 +47,10 @@ every value goes here:
 
 ```sh
 DC_ACTION=ensure
-DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-1.4.0-linux-amd64.deb"
+DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-<version>-linux-amd64.deb"
 DC_SOURCE_SHA256="replace-with-the-64-hex-sha256-from-checksums.txt"
 DC_TRUST_MODE=hash_pinned
-DC_PRODUCT_VERSION="1.4.0"
+DC_PRODUCT_VERSION="<version>"   # set this to the release you deploy
 ```
 
 For GPG trust, when the release ships signatures, set `DC_TRUST_MODE=signed`,
@@ -119,7 +119,7 @@ code. A busy package manager, for example during unattended upgrades, exits
 The platform script's own run status is the first signal: it fails whenever
 `ensure` fails. For a separate health signal, add a second root platform
 script: a copy of `packaging/mdm/linux/detect.sh` with
-`DC_REQUIRE_HEALTHY=1` and, optionally, `DC_MIN_VERSION="1.4.0"` in its
+`DC_REQUIRE_HEALTHY=1` and, optionally, `DC_MIN_VERSION="<version>"` in its
 settings block. In the default `exit` format it exits `0` when DefenseClaw is
 installed, new enough and passes `verify`, and `1` otherwise, so its run status
 reports health. Set its retries to **No retries**.

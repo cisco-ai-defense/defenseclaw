@@ -60,10 +60,10 @@ every value goes here:
 
 ```sh
 DC_ACTION=ensure
-DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-1.4.0-darwin-arm64.pkg"
+DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-<version>-darwin-arm64.pkg"
 DC_SOURCE_SHA256="replace-with-the-64-hex-sha256-from-checksums.txt"
 DC_TRUST_MODE=hash_pinned
-DC_PRODUCT_VERSION="1.4.0"
+DC_PRODUCT_VERSION="<version>"   # set this to the release you deploy
 ```
 
 For Developer ID trust on a signed and notarized release pkg, set
@@ -125,7 +125,7 @@ script's run status in Intune is Success for exit `0` and Failed otherwise.
 ### 4. Report the version with a custom attribute
 
 Copy `packaging/mdm/macos/detect.sh` and set `DC_FORMAT="value"` in its
-settings block. Optionally set `DC_MIN_VERSION="1.4.0"` to report `outdated`
+settings block. Optionally set `DC_MIN_VERSION="<version>"` to report `outdated`
 below that version, and `DC_REQUIRE_HEALTHY=1` to run `verify` and report
 `unhealthy` when it fails.
 

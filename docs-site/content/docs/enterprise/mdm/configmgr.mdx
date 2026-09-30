@@ -59,9 +59,11 @@ location. Despite its name, the content does not depend on Intune:
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 <SHA-256 from the cosign-verified checksums.txt> `
   -ConfigPath .\config.yaml `
-  -OutputDirectory \\server\sources\DefenseClaw\1.4.0 `
-  -ProductVersion 1.4.0
+  -OutputDirectory \\server\sources\DefenseClaw\<version> `
+  -ProductVersion <version>
 ```
+
+`<version>` is a placeholder: set this to the release you deploy, with no `v` prefix.
 
 The `content` folder holds:
 
@@ -93,7 +95,7 @@ information**, and add a **Script Installer** deployment type
 
 | Page | Setting | Value |
 | --- | --- | --- |
-| Content | **Content location** | The `content` folder, such as `\\server\sources\DefenseClaw\1.4.0\content` |
+| Content | **Content location** | The `content` folder, such as `\\server\sources\DefenseClaw\<version>\content` |
 | | **Installation program** | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` |
 | | **Uninstall program** | `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` |
 | | **Run installation and uninstall program as 32-bit process on 64-bit clients** | Cleared |
@@ -102,7 +104,7 @@ information**, and add a **Script Installer** deployment type
 | | **Key** | `SOFTWARE\Cisco\DefenseClaw\Enterprise` |
 | | **Value** | `ProductVersion` |
 | | **Data Type** | **Version** |
-| | Rule | **This registry setting must satisfy the following rule**: **Greater than or equal to** `1.4.0` |
+| | Rule | **This registry setting must satisfy the following rule**: **Greater than or equal to** `<version>` (set this to the release you deploy) |
 | | **This registry key is associated with a 32-bit application on 64-bit systems** | Cleared |
 | User Experience | **Installation behavior** | **Install for system** |
 | | **Logon requirement** | **Whether or not a user is logged on** |

@@ -80,7 +80,7 @@ its signature, and read the SHA-256 of each package you deploy. Those values
 are the pins in the recipes.
 
 ```bash
-VERSION=1.4.0   # the release you deploy
+VERSION="<version>"   # set this to the release you deploy
 BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
 curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle"
 cosign verify-blob --bundle checksums.txt.bundle \
@@ -103,7 +103,7 @@ too:
 
 ```bash
 gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-release.gpg
-gpgv --keyring ./defenseclaw-release.gpg defenseclaw-enterprise-1.4.0-linux-amd64.rpm.asc defenseclaw-enterprise-1.4.0-linux-amd64.rpm
+gpgv --keyring ./defenseclaw-release.gpg "defenseclaw-enterprise-<version>-linux-amd64.rpm.asc" "defenseclaw-enterprise-<version>-linux-amd64.rpm"
 ```
 
 The example config below is valid for Linux. Replace it with your own:
@@ -142,13 +142,13 @@ task has `no_log: true` and sends the value on standard input.
   hosts: defenseclaw_linux
   become: true
   vars:
-    defenseclaw_version: "1.4.0"
+    defenseclaw_version: "<version>"
     # SHA-256 values from the release's cosign-verified checksums.txt
     defenseclaw_pins:              # one entry per architecture and format you deploy
-      defenseclaw-enterprise-1.4.0-linux-amd64.deb: "<sha256>"
-      defenseclaw-enterprise-1.4.0-linux-amd64.rpm: "<sha256>"
-      defenseclaw-enterprise-1.4.0-linux-arm64.deb: "<sha256>"
-      defenseclaw-enterprise-1.4.0-linux-arm64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-amd64.rpm: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.deb: "<sha256>"
+      defenseclaw-enterprise-<version>-linux-arm64.rpm: "<sha256>"
     defenseclaw_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
     defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
     defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"
@@ -276,7 +276,7 @@ your Hiera backend.
 
 ```puppet title="manifests/defenseclaw.pp"
 class profile::defenseclaw (
-  String $version = '1.4.0',
+  String $version = '<version>',
   String $sha256 = '<sha256 of the package for this host>',
 ) {
   $arch = $facts['os']['architecture'] ? { 'aarch64' => 'arm64', 'arm64' => 'arm64', default => 'amd64' }
@@ -396,7 +396,7 @@ This recipe uses the `directory`, `file`, `cookbook_file`, `remote_file`,
 data bag item `defenseclaw/ai_defense` with a `key` field.
 
 ```ruby title="recipes/default.rb"
-version = '1.4.0'
+version = '<version>'
 sha256 = '<sha256 of the package for this host>'
 arch = node['kernel']['machine'] == 'aarch64' ? 'arm64' : 'amd64'
 format = platform_family?('debian') ? 'deb' : 'rpm'
@@ -500,7 +500,7 @@ Put `config.yaml` in `salt://defenseclaw/`, and the key in Pillar as
 `defenseclaw:ai_defense_key`, encrypted with your Pillar renderer.
 
 ```yaml title="defenseclaw/init.sls"
-{% set version = '1.4.0' %}
+{% set version = '<version>' %}
 {% set sha256 = '<sha256 of the package for this host>' %}
 {% set arch = 'arm64' if grains['cpuarch'] == 'aarch64' else 'amd64' %}
 {% set format = 'deb' if grains['os_family'] == 'Debian' else 'rpm' %}
@@ -620,8 +620,8 @@ install -m 0600 -o root -g root config.yaml /etc/mdm/defenseclaw/config.yaml
 install -d -m 0755 -o root -g root /etc/defenseclaw
 [ -e /etc/defenseclaw/config.yaml ] || install -m 0640 -o root -g root config.yaml /etc/defenseclaw/config.yaml
 
-apt-get install -y ./defenseclaw-enterprise-1.4.0-linux-amd64.deb   # Debian, Ubuntu
-dnf install -y ./defenseclaw-enterprise-1.4.0-linux-amd64.rpm       # RHEL family
+apt-get install -y "./defenseclaw-enterprise-<version>-linux-amd64.deb"   # Debian, Ubuntu
+dnf install -y "./defenseclaw-enterprise-<version>-linux-amd64.rpm"       # RHEL family
 
 rc=75
 for attempt in 1 2 3 4 5; do

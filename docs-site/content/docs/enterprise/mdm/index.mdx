@@ -74,7 +74,7 @@ Verify it once on an administrator workstation that has `cosign` and
 `sha256sum`, then read the pin:
 
 ```bash
-VERSION=1.4.0
+VERSION="<version>"   # set this to the release you deploy
 FILE="defenseclaw-enterprise-$VERSION-linux-amd64.deb"
 BASE="https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION"
 curl -fsSLO "$BASE/checksums.txt"
@@ -184,7 +184,7 @@ On Linux, with a package:
 
 ```bash
 sudo ./defenseclaw-enterprise.sh \
-  --source /var/cache/mdm/defenseclaw-enterprise-1.4.0-linux-amd64.deb \
+  --source "/var/cache/mdm/defenseclaw-enterprise-<version>-linux-amd64.deb" \
   --sha256 "$PIN" \
   --config-file /etc/mdm/defenseclaw/config.yaml
 ```
@@ -194,30 +194,30 @@ archive, and `--source-url https://...` downloads it):
 
 ```bash
 sudo ./defenseclaw-enterprise.sh \
-  --source /Library/Caches/mdm/defenseclaw-enterprise-1.4.0-darwin-arm64.pkg \
+  --source "/Library/Caches/mdm/defenseclaw-enterprise-<version>-darwin-arm64.pkg" \
   --sha256 "$PIN" \
   --config-file /Library/Management/defenseclaw/config.yaml
 ```
 
 On Windows, in PowerShell 7 as SYSTEM. The staging folder must be writable
 only by SYSTEM and Administrators, or the wrapper and Setup refuse the config.
-On Windows client editions a new folder under `C:\` inherits write access for
-authenticated users, so restrict it first:
+Create it as `C:\ProgramData\DefenseClaw-Staging` and restrict it first:
 
 ```powershell
-icacls C:\Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+New-Item -ItemType Directory -Path C:\ProgramData\DefenseClaw-Staging -Force | Out-Null
+icacls C:\ProgramData\DefenseClaw-Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
 $pin = '<SHA-256 of the Setup from checksums.txt>'
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -NonInteractive -File .\Invoke-DefenseClawEnterprise.ps1 `
-  -SetupPath C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -SetupPath C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 $pin `
-  -ConfigPath C:\Staging\config.yaml
+  -ConfigPath C:\ProgramData\DefenseClaw-Staging\config.yaml
 ```
 
 If your MDM can run a native executable as SYSTEM but not PowerShell 7, run
 Setup directly. Setup has no pin of its own, so verify the file first:
 
 ```powershell
-C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1
+C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 ```
 
 ### Wrapper options
@@ -399,7 +399,7 @@ files, hooks and machine policy are intact.
 
 `detect.ps1 [-MinimumVersion X.Y.Z] [-RequireHealthy]` follows Intune's
 custom-detection rules: "detected" is exit `0` with one line on standard
-output (`DefenseClaw Enterprise 1.4.0`) and nothing on standard error; "not
+output (`DefenseClaw Enterprise <version>`) and nothing on standard error; "not
 detected" is exit `1` with the reason on standard error. It reads the marker
 through the 64-bit registry view, so it works in 32-bit Windows PowerShell.
 
@@ -417,8 +417,8 @@ In every format, an unknown argument or a bad `--format` exits `2` and
 prints nothing on standard output.
 
 Versions are dotted releases. A leading `v` and build metadata (`+...`) are
-ignored, and a prerelease sorts before its release (`1.4.0-rc1` is older than
-`1.4.0`).
+ignored, and a prerelease sorts before its release (`<version>-rc1` is older than
+`<version>`).
 
 When an installed agent runs without DefenseClaw hooks for one account
 (`agent_unprotected`, `hook_contract_unverified`), `verify`, and so the
@@ -533,7 +533,7 @@ from an elevated PowerShell; `C:\DcSim` holds your copy of the script:
 ```powershell
 $sim = 'C:\DcSim'
 $engine = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
-$command = "/c `"`"$engine`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $sim\detect.ps1 -MinimumVersion 1.4.0 1>$sim\stdout.txt 2>$sim\stderr.txt`""
+$command = "/c `"`"$engine`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $sim\detect.ps1 -MinimumVersion <version> 1>$sim\stdout.txt 2>$sim\stderr.txt`""
 $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\cmd.exe') -Argument $command
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskName 'DefenseClaw MDM simulation' -Action $action -Principal $principal -Force | Out-Null

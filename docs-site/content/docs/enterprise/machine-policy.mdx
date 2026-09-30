@@ -441,25 +441,24 @@ the Claude Code drop-in while that value is set, whatever this setting says.
 
 These commands read the managed config and machine policy. They never write
 machine policy; the lifecycle and the guardian do. Run them as root (Linux
-and macOS) or from an elevated PowerShell 7 session (Windows), and name the
-managed config explicitly with `DEFENSECLAW_CONFIG`.
+and macOS) or from an elevated PowerShell 7 session (Windows). They find the
+managed config automatically.
 
 ```bash title="Linux"
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format toml
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user alice --connector codex --agent-binary /usr/local/bin/codex
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format toml
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --live --user alice --connector codex --agent-binary /usr/local/bin/codex
 ```
 
 ```bash title="macOS"
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector codex --format plist
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector claudecode --format plist
 ```
 
 ```powershell title="Windows (elevated PowerShell 7)"
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy export --connector copilot
 ```
@@ -518,7 +517,7 @@ These come from the agents themselves:
   DefenseClaw hook and no audit record, and `status` and `verify` do not
   report them. These releases read only `managed-settings.json`,
   which DefenseClaw leaves to you. Use application control to allow only
-  Claude Code at or above 2.1.154. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
+  Claude Code at or above 2.1.154.
 - **Older Copilot CLI releases.** A Copilot CLI below its 1.0.18 floor can
   skip machine policy: 1.0.15, installed under a home (`npm install
   --prefix`) and run with `--no-auto-update`, does not load

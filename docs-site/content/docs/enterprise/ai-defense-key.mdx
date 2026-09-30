@@ -100,14 +100,16 @@ restarts the gateway so it reads the key.
   <Tab value="Windows">
 
 Run from an elevated PowerShell 7 session. `--from-file` accepts only a
-file that non-administrators cannot write. On Windows client editions a new
-folder under `C:\` inherits write access for authenticated users, so restrict
-the folder before you put the key in it:
+file that non-administrators cannot write. Use the same staging folder as
+the config, restricted to SYSTEM and Administrators before you put the key
+in it:
 
 ```powershell
-icacls C:\Admin /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-file C:\Admin\ai-defense-api-key.txt
-Remove-Item C:\Admin\ai-defense-api-key.txt
+$Stage = 'C:\ProgramData\DefenseClaw-Staging'
+New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-file "$Stage\ai-defense-api-key.txt"
+Remove-Item "$Stage\ai-defense-api-key.txt"
 ```
 
 The command stores the key and restarts the `DefenseClawGateway` service

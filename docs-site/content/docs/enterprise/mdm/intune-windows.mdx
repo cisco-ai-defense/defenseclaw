@@ -69,10 +69,12 @@ script:
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 '<SHA-256 of the Setup from checksums.txt>' `
   -ConfigPath .\config.yaml `
-  -OutputDirectory .\intune-defenseclaw-1.4.0 `
+  -OutputDirectory .\intune-defenseclaw-<version> `
   -IntuneWinAppUtil C:\Tools\IntuneWinAppUtil.exe `
-  -ProductVersion 1.4.0
+  -ProductVersion <version>
 ```
+
+`<version>` is a placeholder: set this to the release you deploy, with no `v` prefix.
 
 | Parameter | Meaning |
 | --- | --- |
@@ -112,7 +114,7 @@ Upload the `.intunewin` in **Apps** > **All Apps** > **Create** >
 | Program | Return codes | Keep the defaults: `0` Success, `1707` Success, `3010` Soft reboot, `1641` Hard reboot, `1618` Retry. The lifecycle's `1603` and `1639` then report as Failed. |
 | Requirements | Operating system architecture | **x64** only |
 | Requirements | Minimum operating system | The oldest Windows release your fleet runs. DefenseClaw does not check the Windows version; it needs x64 and PowerShell 7. |
-| Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `1.4.0`, *Associated with a 32-bit app on 64-bit clients*: **No** |
+| Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `<version>` (set this to the release you deploy), *Associated with a 32-bit app on 64-bit clients*: **No** |
 | Dependencies | App | The PowerShell 7 app, **Automatically install**: **Yes** |
 | Supersedence | Previous DefenseClaw app | **Uninstall previous version**: **No** |
 | Assignments | Required | Device groups |
@@ -238,7 +240,7 @@ roll out a new config:
    value from the new package's `intune-package.json`:
 
 ```powershell
-$minimum = [version]'1.4.0'
+$minimum = [version]'<version>'
 $configSha256 = 'replace-with-config_sha256-from-intune-package.json'
 $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
 $key = $base.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')

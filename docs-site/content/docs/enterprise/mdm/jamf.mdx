@@ -40,7 +40,7 @@ On an administrator workstation, download the package and the signed
 checksum list, check the signature, then check the package's SHA-256:
 
 ```bash
-VERSION=1.4.0   # the release you deploy
+VERSION="<version>"   # set this to the release you deploy
 BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
 PKG=defenseclaw-enterprise-$VERSION-darwin-arm64.pkg
 curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle" -O "$BASE/$PKG"
@@ -259,7 +259,7 @@ Paste `detect.sh` with these settings:
 
 ```bash
 set -- # Jamf Pro passes positional values; this script takes its settings from this block
-DC_MIN_VERSION="1.4.0"
+DC_MIN_VERSION="<version>"   # set this to the release you deploy
 DC_REQUIRE_HEALTHY=1
 DC_FORMAT="jamf"
 ```
@@ -270,7 +270,7 @@ these values:
 
 | Value | Meaning |
 | --- | --- |
-| The installed version, such as `1.4.0` | Installed, at least `DC_MIN_VERSION`, and `verify` passes |
+| The installed version, such as `<version>` | Installed, at least `DC_MIN_VERSION`, and `verify` passes |
 | `not-installed` | No managed deployment, or its gateway is not root-owned |
 | `outdated` | Older than `DC_MIN_VERSION` |
 | `unhealthy` | `verify` reported problems |
