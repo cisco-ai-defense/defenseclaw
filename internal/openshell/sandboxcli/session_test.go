@@ -1475,6 +1475,45 @@ func TestConnectPassesTheRunsOptionsAndBanner(t *testing.T) {
 	has(t, ta.output(), "Model     mock-model", "OPENAI_API_KEY comes from --credential", "Secret    OPENAI_API_KEY → host.openshell.internal:38221 only")
 }
 
+// PR 1022 live retest N4: with openshell.egress.block_large_uploads on, the
+// run banner said only "network: open + blocklist". Its Uploads line names
+// what the block cuts, from the policy the sandbox runs under, on a run and
+// on a connect; the organization's block says whose it is.
+func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
+	const cut = "Uploads   an upload of more than 1 MiB to a host the sandbox has not contacted before is cut"
+	policy := func(source string) func(sandboxapi.ExplainRequest, *sandboxapi.Explain) {
+		return func(_ sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+			ex.Settings = append(ex.Settings, sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "1", Source: "user"},
+				sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true", Source: source})
+		}
+	}
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.onExplain = policy("user")
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), "network: open + blocklist\n", cut+" (the large-upload block)\n")
+
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.add(sampleSandbox("box"))
+	var asked []string
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+		asked = append(asked, req.Sandbox)
+		policy("admin")(req, ex)
+	}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "box"}))
+	has(t, ta.output(), cut+" (your organization's large-upload block)\n")
+	if !slices.Equal(asked, []string{"box"}) {
+		t.Fatalf("explained %q, want the connected sandbox's policy", asked)
+	}
+
+	// Off (the default), there is no line.
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	lacks(t, ta.output(), "Uploads ")
+}
+
 // The connect banner of a sandbox the CLI remembers nothing of keeps its
 // Model line, named by the variable its credential came from, not the
 // provider profile's id (manual R2-7, L10).
