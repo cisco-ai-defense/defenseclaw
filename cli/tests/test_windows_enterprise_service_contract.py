@@ -45,6 +45,7 @@ SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     / "enterprise-detached-helper-smoke.ps1"
 )
 DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx"
+CERTIFICATION_DOC = ROOT / "docs" / "WINDOWS-ENTERPRISE-CERTIFICATION.md"
 MATRIX_TEST = ROOT / "internal" / "gateway" / "enterprise_mode_matrix_test.go"
 WINDOWS_LIFECYCLE_CLI = ROOT / "internal" / "cli" / "windows_enterprise_service.go"
 DEFENSECLAW_MAIN = ROOT / "cmd" / "defenseclaw" / "main.go"
@@ -2454,7 +2455,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
 
 def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None:
     harness = read(HARNESS)
-    deployment_doc = read(DEPLOYMENT_DOC)
+    certification_doc = read(CERTIFICATION_DOC)
 
     assert (
         '$script:BrokerServiceName = "DefenseClawCMIDBroker_$($script:RunToken)"'
@@ -2518,10 +2519,9 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
     assert "Assert-CertificationServiceName $serviceName $serviceRole" in bounded_cleanup
     assert "@('delete', $serviceName)" in bounded_cleanup
 
-    certification_invocation = deployment_doc[
-        deployment_doc.index(
-            ".\\scripts\\test-windows-enterprise-hardening.ps1"
-        ) : deployment_doc.index("Without `-Execute -DisposableHost`")
+    upgrade_start = certification_doc.index("-BrokerBinary .\\v1\\")
+    certification_invocation = certification_doc[
+        upgrade_start : certification_doc.index("-DisposableHost", upgrade_start)
     ]
     for parameter in (
         "-BrokerBinary",
@@ -2533,21 +2533,6 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         "-UpgradeSensorHelperBinary",
     ):
         assert parameter in certification_invocation
-    public_upgrade = deployment_doc[
-        deployment_doc.index("& $ReleaseCLI enterprise windows upgrade") :
-        deployment_doc.index("Running the installed CLI is still valid")
-    ]
-    assert "--broker-binary" in public_upgrade
-    assert "--acp-binary" in public_upgrade
-    assert "--sensor-helper-binary" in public_upgrade
-    repair = deployment_doc[
-        deployment_doc.index("-Action Repair") : deployment_doc.index(
-            "Use `-Action Upgrade`"
-        )
-    ]
-    assert "-BrokerBinary" in repair
-    assert "-ProviderLibrary" in repair
-    assert "-SensorHelperBinary" in repair
 
 
 def test_certification_treats_broker_as_a_first_class_service_boundary() -> None:
@@ -3308,7 +3293,6 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     ):
         assert mode in matrix
 
-    assert "The matrix is an ownership switch, not an auto-heal switch." in documentation
     assert "normal mode uses the existing per-user repair loop" in documentation
     assert "Enterprise service enforcement is opt-in." in documentation
     assert (

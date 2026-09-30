@@ -414,6 +414,84 @@ run `enterprise secret set` again with the same name. Outside the standalone
 profile a credential reference never resolves, so a config with an enabled
 destination that uses one is refused.
 
+## Sandbox policy pushdown
+
+The `openshell.admin` block of the managed config sets organization-wide
+limits for agents that run inside NVIDIA OpenShell sandboxes. Examples are the
+pack every run must use, the loosest network profile, and whether
+skip-permissions mode, live project mounts, host ports, or unblocking are
+allowed. With `deployment_mode: managed_enterprise`, users can't write
+`config.yaml`, so the admin block is **authoritative**. On any other install it
+is advisory, because the user owns the file.
+
+<Callout type="warn" title="Managed installs don't run sandboxes yet">
+A `managed_enterprise` install doesn't start the sandbox runtime:
+`/health` reports the `sandbox` subsystem as `disabled`, and
+`defenseclaw sandbox setup` and `defenseclaw sandbox run` refuse to start.
+The managed config still accepts and validates the `openshell.admin` block, so
+you can stage it. On installs where the developer owns `config.yaml`, where
+sandboxes do run, the same block is enforced but advisory.
+</Callout>
+
+```yaml
+deployment_mode: managed_enterprise
+openshell:
+  enabled: true
+  admin:
+    required_pack: balanced
+    allow_unblock: false
+    allowed_harnesses: [claudecode, codex]
+    egress_block:
+      - files.example.net
+    require_copy_for:
+      - /Users/*/code/customers    # macOS home directories
+      - /home/*/code/customers     # Linux home directories
+    max_resources:
+      cpu: "4"
+      memory: 8Gi
+    locked: [workdir.unmask, mcp.host_ports]
+```
+
+Use absolute paths in `require_copy_for`, as above. A `~/` path expands to the
+home directory of the account that computes the policy, which in a managed
+install may be the service account rather than the developer.
+
+Push the change through the same administrator channel as any other managed
+edit ([Change the config](/docs/enterprise/lifecycle#change-the-config)).
+The gateway reloads the `openshell` block in place in both
+`gateway.config_reload.mode` settings, so it needs no restart; on Windows the
+lifecycle restarts the services anyway.
+
+Where sandboxes run, a request the admin block forbids is replaced with the
+allowed value or refused. The message starts with
+"blocked by your organization's DefenseClaw policy" and names the setting;
+`defenseclaw sandbox policy explain` shows the constraint behind each
+clamped setting.
+
+To require your own pack instead of a built-in one, set `required_pack` to an
+absolute path and pin its content with `required_pack_digest`. In
+`managed_enterprise`, DefenseClaw loads a custom required pack only when it is
+as protected as the config. On macOS and Linux, the file and every directory
+above it must be owned by root, not writable by group or others, and free of
+symbolic links, such as `/opt/acme/sandbox-packs/acme-dev/pack.yaml`. On
+macOS, an ACL entry that grants write access is refused too. On Windows, the
+file must be on a local NTFS drive, owned together with every folder above it
+by Administrators, LocalSystem, or TrustedInstaller, and no other account may
+be able to change or replace it. Keep the file readable by the accounts that
+run sandboxes. The default pack directory inside the service's data directory
+doesn't qualify. Built-in packs are always trusted.
+
+<Callout title="Where sandboxes run">
+OpenShell's gateway is a per-user service, so OpenShell sandboxes run under
+the developer's own account, with the DefenseClaw gateway running as that
+account too, not as the DefenseClaw service account. That is why managed
+installs don't run them yet. See also [Sandbox](/docs/setup/sandbox).
+</Callout>
+
+Every admin key, the built-in packs, custom packs, and two complete
+organization examples are in
+[Sandbox policy packs and admin controls](/docs/setup/sandbox-policy).
+
 ## Sample configs
 
 Each sample is an observe-mode starter: it inspects Codex, Claude Code,
