@@ -119,7 +119,9 @@ func updateWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *
 	}
 	switch {
 	case result.Action == "uninstall" && !result.Installed:
-		return removeWindowsEnterpriseRegistration()
+		err := removeWindowsEnterpriseRegistration()
+		removeEmptyWindowsEnterpriseInstallParent()
+		return err
 	case windowsEnterpriseMutationAction(result.Action) && result.Installed:
 		return writeWindowsEnterpriseRegistration(result, opts)
 	}
@@ -280,13 +282,16 @@ func releaseWindowsEnterpriseSelfUpdatePolicy() error {
 	if err != nil {
 		return nil
 	}
-	defer policy.Close()
 	if current, _, err := policy.GetIntegerValue("DisableSelfUpdate"); err == nil && current == 1 {
 		if err := policy.DeleteValue("DisableSelfUpdate"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+			policy.Close()
 			return fmt.Errorf("remove the owned DisableSelfUpdate policy: %w", err)
 		}
 	}
-	return nil
+	policy.Close()
+	// The lifecycle created the key for the value it owned; with nothing
+	// else in it, it goes too.
+	return removeEmptyWindowsRegistryKey(windowsEnterprisePolicyKey)
 }
 
 func removeWindowsEnterpriseRegistration() error {
@@ -300,7 +305,47 @@ func removeWindowsEnterpriseRegistration() error {
 			failures = append(failures, fmt.Errorf("remove %s: %w", key, err))
 		}
 	}
+	// The marker's parent, created with the marker, goes once empty.
+	if err := removeEmptyWindowsRegistryKey(filepath.Dir(WindowsEnterpriseMarkerKey)); err != nil {
+		failures = append(failures, err)
+	}
 	return errors.Join(failures...)
+}
+
+// removeEmptyWindowsRegistryKey deletes an HKLM key that has no subkeys and
+// no values. A key that holds anything, or cannot be read, stays.
+func removeEmptyWindowsRegistryKey(path string) error {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	if err != nil {
+		return nil
+	}
+	info, statErr := key.Stat()
+	key.Close()
+	if statErr != nil || info.SubKeyCount != 0 || info.ValueCount != 0 {
+		return nil
+	}
+	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); err != nil &&
+		!errors.Is(err, registry.ErrNotExist) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		return fmt.Errorf("remove empty %s: %w", path, err)
+	}
+	return nil
+}
+
+// removeEmptyWindowsEnterpriseInstallParent removes the folder the install
+// root sits in (C:\Program Files\Cisco), which the install created, once
+// an uninstall left it empty. A folder that holds anything stays: Remove
+// fails on it.
+func removeEmptyWindowsEnterpriseInstallParent() {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
+		return
+	}
+	root := filepath.Clean(roots.InstallRoot)
+	parent := filepath.Dir(root)
+	if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) || !strings.EqualFold(filepath.Base(parent), "Cisco") {
+		return
+	}
+	_ = os.Remove(parent)
 }
 
 // readWindowsEnterpriseSelfUpdateDisabled reads
