@@ -70,10 +70,12 @@ dependencies = [
     # VirusTotal's upstream yara-python distribution.
     "yara-python>=4.5.4; python_version>='3.11'",
     # CVE-2026-40217 is fixed in 1.83.10; CVE-2026-49468 is fixed in 1.84.0.
-    # Stable LiteLLM releases currently declare Python <3.14. Version 1.92.0
-    # also dropped the portable wheel required by Windows and macOS, so keep
-    # the latest portable line until upstream restores cross-platform wheels.
-    "litellm>=1.84.0,<1.92.0",
+    # CVE-2026-84377 affects everything before 1.88.6 and 1.89.0 through
+    # 1.96.1. Stable LiteLLM releases currently declare Python <3.14, and
+    # version 1.92.0 dropped the portable wheel required by Windows
+    # and macOS, so stay on the patched 1.88 line until upstream restores
+    # cross-platform wheels.
+    "litellm>=1.88.6,<1.89.0",
     # LiteLLM requires <9 and the development OpenTelemetry API requires
     # <8.8; retain the security floor while expressing their intersection.
     "importlib-metadata>=8.7.1,<8.8",
@@ -204,8 +206,9 @@ override-dependencies = [
     # CVE-2026-69248/69249 fixed in 49.0.0; CVE-2026-69247 fixed in 50.0.0;
     # PYSEC-2026-3552 / -3553 / -3554 fixed in 50.0.0.
     "cryptography>=50.0.0,<51",
-    # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
-    "litellm>=1.84.0,<1.92.0",
+    # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0;
+    # CVE-2026-84377 fixed in 1.88.6 (portable line; see above).
+    "litellm>=1.88.6,<1.89.0",
     # litellm pins exact transitive versions that conflict with what
     # cisco-ai-skill-scanner 2.0.11 (and our own pins) expect. We
     # override to a single compatible version per package — the newer
