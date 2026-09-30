@@ -181,92 +181,53 @@ retry loop or an agent that is still active.
 
 ![Agent360 lifecycle DAG connecting session start, grouped prompt inputs, root agent, delegated agents, grouped work, message updates, approvals, and outcomes](/images/grafana/agent360-topology.jpg)
 
-The **Lifecycle DAG — prompt → agents → work → outcomes** is built from canonical
-Loki events and durable relationship evidence, never trace parentage or raw
-subagent parent fields. An active typed `parent_of` relationship is read in its
-reported direction; an active typed `delegated_by` relationship is read in the
-inverse direction. Work and outcomes use the selected time range. Session and
-durable lineage anchors may be recovered from the prior 24 hours so a boundary
-window does not leave an edge endpoint missing; a recovered lineage edge remains
-only when that child has graph-eligible activity in the selected range. Its arrows
-are causal or ownership relationships that DefenseClaw can prove:
+The **Lifecycle DAG — prompt → agents → work → outcomes** is built from
+canonical Loki events and durable relationship evidence, never from trace
+parentage or raw parent fields. Work and outcomes use the selected time range;
+session and lineage anchors may come from the prior 24 hours so an edge at the
+window boundary still has both ends. Each arrow is a relationship DefenseClaw can
+prove:
+
+- **Session start** points to the root agent. It is a lifecycle anchor, not
+  prompt text.
+- **Prompt inputs** is one grouped node per root that counts depth-zero prompt
+  submissions.
+- A parent agent points to each child recorded by a `parent_of` or
+  `delegated_by` relationship.
+- Each agent points to one summary node per provider/model pair, and one per
+  tool family: Bash, MCP, Skills, Collaboration, File edits, Web/browser,
+  Visual, or Task control. An unrecognized tool keeps its reported name.
+- Each agent points to its messages to other agents, approvals, turn outcomes,
+  and terminal outcome.
+
+Repeated calls by one agent increase a node's total instead of adding nodes. The
+root agent's own model and tool work appears under the root, like any subagent's.
+Click a node for the exact records behind it, including any content the
+connector exported; the dashboard does not remove or mask fields.
 
 Some Codex versions complete a spawn tool call without emitting `SubagentStart`.
-DefenseClaw correlates a previously unseen child's first event only when one
-completed same-session spawn uniquely owns it, then emits an inferred canonical
-start with lineage provenance. Ambiguous concurrent spawns remain unresolved, so
-no false parent-child edge is drawn.
-
-- the separate **Session start** anchor points to the root agent observed at
-  `session_start` without claiming that the session event contains prompt text;
-- canonical depth-zero prompt submissions increment one grouped **Prompt inputs**
-  node for the root; Codex uses connector-source `UserPromptSubmit` facts while
-  keeping native OTLP `model.request` mirrors in the ordered/raw views;
-- a parent agent points to each child established by an active durable typed
-  `parent_of` or inverse `delegated_by` relationship;
-- an agent points to one summary node for each observed provider/model pair;
-- an agent points to one summary node for each normalized tool family: Bash, MCP,
-  Skills, Collaboration, File edits, Web/browser, Visual, or Task control; an
-  unrecognized tool keeps its reported name; exact
-  `collaboration.send_message` requests are excluded from this generic family so
-  they appear only as message groups, while other collaboration tools remain;
-- an agent points to real `collaboration.send_message` updates, an approval
-  observed in that agent's execution, turn outcomes, and session/subagent
-  terminal outcomes.
-
-The **Session start** circle is a lifecycle anchor, not an invented prompt. For
-Codex, **Prompt inputs** comes from canonical connector-source `UserPromptSubmit`
-facts, not `session_start`; recognized prompt hooks and `model.request` fallback
-keep other connectors visible. Each observation family deduplicates by turn ID,
-model-request ID, request ID, operation ID, then occurrence ID, and the summary
-shows the largest source total. When a connector includes prompt content or any other field in canonical OTEL,
-Agent360 shows it in click
-detail or links to the exact raw record; the dashboard does not remove, truncate,
-or mask it.
-
-Model summary identity is the owning agent plus provider/model and counts
-`model.request` records. It sums within each observation source and shows the
-largest source total, preventing connector/native mirrors from double-counting a
-call while retaining source-only observations. Tool summary identity is the owning agent plus normalized
-family and counts `tool.invocation.requested` records. Repeated requests increase
-the total instead of widening the graph, so a request without a terminal counterpart
-remains visible. That total is not a pending gauge or terminal-status breakdown.
-Exact operation, request/response, tool-call, status, outcome, trace, and payload
-metadata remain available through click details and filtered drill-down across the
-requested and terminal records. Root
-agent calls are not treated specially: if the root emitted matching records in
-the selected range, its model/tool family summaries appear under the root just
-like a subagent's summaries.
+DefenseClaw links a new child's first event to its parent only when one spawn in
+the same session clearly owns it, and marks that start as inferred. Ambiguous
+concurrent spawns stay unlinked, so no false parent-child edge is drawn.
 
 ### Read depth and identity
 
 Depth is zero-based lineage, not a count of anonymous workers:
 
-| Depth | Meaning | Golden validation identity |
-| ---: | --- | --- |
-| `0` | Root agent for the selected tree. | `golden-root` (`agent_type=root`) |
-| `1` | Direct child spawned by the root. | `golden-direct` (`agent_type=direct`) |
-| `2` | Child spawned by the depth-1 agent. | `golden-nested` (`agent_type=nested`) |
-| `3` | Child spawned by the depth-2 agent. | `golden-leaf` (`agent_type=leaf`) |
+| Depth | Meaning |
+| ---: | --- |
+| `0` | Root agent for the selected tree. |
+| `1` | Direct child spawned by the root. |
+| `2` | Child spawned by a depth-1 agent. |
+| `n` | Child spawned by a depth `n-1` agent, up to depth `64`. |
 
-The deterministic golden contract fixture covers **four agent levels total**: one
-root plus three subagent generations. It validates query and correlation behavior;
-it is not evidence that a particular live connector run created four levels. The
-lifecycle contract accepts recursive lineage from depth `0` through depth `64`;
-a real graph shows only levels actually reported or explicitly marked as inferred
-in the selected range.
+The graph shows only levels that were reported, or marked as inferred, in the
+selected range.
 Click an agent node to see its full stable agent ID, name, type, depth,
 root/parent agent IDs, and connector rather than relying on the short label in the
 circle. Optional current/root/parent session fields remain on the session,
 lifecycle, ordered, and raw surfaces; they are deliberately not agent-node
 grouping keys, so missing or late session metadata cannot split one agent's total.
-
-The golden workload is deliberately asymmetric so ownership is testable: depth 0
-emits model and file work; depth 1 emits separate model work; a nested agent emits
-a real collaboration update; and the leaf emits shell work plus approval. Work by
-different owners remains separate, while repeated calls by one owner increment a
-grouped node. Every agent then emits its own terminal outcome. This is fixture
-evidence for the contract, not a claim about the depth or tool use of a live run.
 
 ### Interpret updates and approvals honestly
 
