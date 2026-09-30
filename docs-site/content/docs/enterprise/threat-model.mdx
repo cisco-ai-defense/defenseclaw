@@ -1,6 +1,6 @@
 ---
 title: Enterprise threat model
-description: Who DefenseClaw trusts, where each trust boundary sits on Windows, Linux and macOS, what a standard user can and cannot do, and which risks remain in the standalone enterprise profile.
+description: Who is trusted in a DefenseClaw enterprise deployment, how each trust boundary is protected, what a standard user cannot do, and the risks that remain.
 keywords:
   - DefenseClaw threat model
   - trust zones
@@ -23,17 +23,9 @@ behind each control, are in the repository. They are listed at the
 
 ## Terms used on this page
 
-| Term | Meaning |
-| --- | --- |
-| Gateway | The service that inspects each agent event and answers allow or deny. |
-| Hook | `defenseclaw-hook`, the small program the agent runs for each event, such as a tool call. It forwards the event to the gateway. |
-| Guardian | The service that installs and repairs DefenseClaw's hook registration in each enrolled user's agent config. |
-| Enumerator | The service that finds the users and agents to protect and writes the target manifest. |
-| Authorization ledger | The administrator-owned record of which user is protected for which agent. The gateway reads it to decide who may use a hook. |
-| Machine policy | The agent vendor's machine-wide settings, such as Codex `requirements.toml`. A standard user cannot edit them. |
-| Per-user connector | An agent with no machine policy, so DefenseClaw registers its hook in the user's own config and the guardian keeps it there. |
-
-Each term is defined in more detail in [Concepts](/docs/enterprise/concepts).
+This page uses the terms defined in [Concepts](/docs/enterprise/concepts), such as
+gateway, hook, guardian, enumerator, authorization ledger, machine policy and
+per-user connector.
 
 ## Who is trusted
 
@@ -373,44 +365,354 @@ Which users are protected is set by enrollment. See
 
 ## Residual risks
 
-These risks remain by design or because of how an agent vendor works.
+These risks remain by design or because of how an agent vendor works. Open
+each one for where it applies and what reduces it. The limits of each vendor's
+machine policy are on
+[Machine policy: Vendor limits](/docs/enterprise/machine-policy#vendor-limits).
 
-| Risk | Where | What reduces it |
-| --- | --- | --- |
-| Per-user agents are advisory against a deliberate user. DefenseClaw's registration or plugin lives in the user's own default config. A user can remove it until the guardian repairs it (usually within seconds, at most about a minute), and can start the agent with another config home (for example `XDG_CONFIG_HOME`, `HOME`, `OPENCODE_CONFIG_DIR`, `HERMES_HOME` or a non-default Hermes profile), with `devin --config <file>`, or with Hermes `--safe-mode`, so the registration is never loaded: no DefenseClaw hook runs, nothing fails closed, no audit record is written, and the guardian never repairs that session. Status and verify keep reporting the user's agent ready, because the registration in the default location is intact. On Linux and macOS a user can also leave a path the guardian refuses in their own home, such as a link or a file where the agent's config folder belongs; the registration is then not repaired until the path is fixed, and status and verify report it only as the warning `guardian_target_user_path`, which does not fail verify or `detect.sh --require-healthy`. This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity and OpenHands (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected. | Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent, and OpenCode while it is on the per-user route | Prefer agents that use machine policy where you need enforcement. Use application control to control how users launch these agents, for example by allowing the agent to run only from an administrator-owned launcher that resets these variables and refuses these flags, or a vendor machine policy where the agent has one. |
-| Unsupported, old, copied or self-built clients. A client below DefenseClaw's hook-contract floors, or one built without the vendor's machine-policy handling, can ignore machine policy and hooks. For Claude Code the standalone profile sets `requiredMinimumVersion` (the [version floor](/docs/enterprise/machine-policy#claude-code-version-floor)), but Claude Code reads it only from 2.1.163, so builds older than that, including every build below the 2.1.154 floor, ignore it: the floor stops no build (2.1.153 starts with it in place). No other connector has a vendor setting that stops an older client. For builds from 2.1.163, running sessions continue until the next session start, an administrator value wins even below the floor, and a value that is not a version merging after DefenseClaw's drop-in leaves no floor. While HKLM `Settings`, macOS managed preferences or server-managed settings are in force without the key, the builds it targets never read it. `enterprise policy verify` fails when a value, file or source it can see leaves no floor, and reports a value below the floor. On Linux and macOS, Claude Code releases that do not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77) ignore both DefenseClaw drop-ins, the hooks and the floor: a user who installs one under their home runs it with no DefenseClaw hook and no audit record, and `status` and `verify` do not report it. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920). Per-user agents below their supported minimum are the same: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, does not load DefenseClaw's hooks, so its tool calls run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it is not reported either. | Every OS | Use application control (WDAC or AppLocker on Windows, fapolicyd on Linux, Santa or similar on macOS) to allow only approved agent clients at or above the supported versions, including copies that a package runner such as `uvx` starts from its cache. Put `requiredMinimumVersion` in any higher-precedence Claude Code source you deploy. |
-| Agents installed in unusual places. Discovery covers the usual install locations, the common Node version managers and package managers, and `agent_prefixes`. An agent installed or copied anywhere else in a home is neither enrolled nor reported. | Every OS | Install shared agents under an `agent_prefixes` path (Linux and macOS); use application control. |
-| Hook process control. `defenseclaw-hook` and the per-user hook scripts run as the user, so that user can end, suspend or slow them until the agent's hook timeout. Agents that block only on an explicit deny or exit code then run the call, and no DefenseClaw decision or audit record is written before it runs. Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), and OpenHands, Devin and Hermes run it when the hook is killed. OpenHands can also run it when the hook stalls until its 60-second timeout, leaving only OpenHands' own confirmation prompt, which the user answers. GitHub Copilot stays closed unless every one of its hooks is stopped, and OpenCode, Amp and Antigravity stay closed. "Fail-closed" in the [capability matrix](/docs/capability-matrix) means blocking when the hook cannot reach the gateway, not when the user ends the hook. | Every OS | Use EDR process protection or application control so users cannot signal the hook; keep hook latency low and monitor hook failures, and tool calls that appear in the audit without a pre-tool decision (for example a Hermes `post_tool_call` record with no `pre_tool_call` record). |
-| Windows repairs need a session. The guardian writes a user's files only while that user has an active (connected) session, so a user who is signed out or disconnected is repaired when their session is active again. Revoked users are cleaned at their next sign-in. | Windows, per-user agents | Monitor guardian status for users that stay pending. |
-| Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and none of these agents blocks on a hook command that cannot start. | Windows, per-user agents | Uninstall from your MDM as LocalSystem while users are signed in. |
-| Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` and `UserPromptSubmit` hooks. The managed `PreToolUse` hook still runs, so tool calls are still inspected. `disableAllHooks`, including through `--settings`, does not turn off managed hooks. | Claude Code, every OS | Treat prompt and session inspection as advisory. Tool-call inspection is the enforcement point. |
-| The Windows Claude Code attestation is the administrator's statement. `repair --attest-claude-effective-policy` records it; it does not run Claude Code. | Windows, Claude Code | Before you attest, have Claude Code make a tool call in an enrolled user's own session and find its record with `audit export` from an elevated prompt (`enterprise policy verify --live` is refused on a managed Windows host); repeat after each upgrade. |
-| Agents without a lock or the guard. Antigravity, OpenHands and OmniGent have neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's. | Those agents, every OS; Hermes on Windows | Treat their coverage as advisory; use application control where you need more. |
-| Hermes has no hook lock or ordering. On Linux and macOS the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) blocks tool calls while `config.yaml`, or the managed-scope `config.yaml` a user points `HERMES_MANAGED_DIR` at, has a hook DefenseClaw did not write, but a Hermes process keeps the hooks it loaded at start or re-read on a plugin reload: an entry the user removes after Hermes loaded it and before the next session start or tool call keeps running in that process unseen (one the guardian removes keeps that process's tool calls blocked until Hermes restarts). Hermes Python plugins run inside Hermes and are not inspected. | Hermes, Linux and macOS | Treat Hermes coverage as advisory; use application control over Hermes plugins and how users launch Hermes. |
-| OpenHands project hooks replace DefenseClaw's. OpenHands loads a project's `.openhands/hooks.json` instead of the user's `~/.openhands/hooks.json`: it uses the first of the two it finds, so in a project that has its own file, even one with a single unrelated hook, none of DefenseClaw's OpenHands hooks run. Tool calls there are not inspected or logged, OpenHands shows no DefenseClaw message, and status and verify do not report it. A repository a developer clones can carry the file. | OpenHands, Linux and macOS | Treat OpenHands coverage as advisory. Keep `.openhands/hooks.json` out of the repositories developers use (for example with a repository rule or a server-side push check), search existing checkouts for it, and use application control where you need more. |
-| The foreign-hook guard's session block holds only a hook present when the session started, or one the guardian removed after the agent process started (only for a process DefenseClaw can name). A foreign hook that removes itself before DefenseClaw's session-start check, a hook added later in the session, or a session still running 7 days after its block was recorded is held only by the per-call check, which denies while the hook is present. The guardian cleans a redirected user config location only after a DefenseClaw hook has run with that environment; on Windows it also cleans the locations the user's persistent environment names, while the user's registry hive is loaded. | Agents the foreign-hook guard covers, every OS | For Claude Code and Codex on Linux and macOS, keep the vendor lock (`managed_hooks_only: enforce`). Deliver hooks your developers need through machine policy. |
-| Amp has no machine-wide plugin location, and the order in which it loads plugins is not defined. The DefenseClaw plugin sits in the user's default Amp config directory, so an Amp session that uses a different config directory (for example with `XDG_CONFIG_HOME` or `HOME` set to another folder) does not load it: tool calls there run with no audit record, and status and verify still report the user's Amp ready. | Amp, every OS | Treat Amp coverage as best effort. Use application control over how users launch Amp, as for other per-user agents. |
-| OpenCode can start without plugins. Pure mode (`--pure`, `OPENCODE_PURE=1`) and `OPENCODE_TEST_MANAGED_CONFIG_DIR` start a session without any DefenseClaw plugin, the managed one included, and OpenCode does not document the order in which plugins run. | OpenCode, every OS | The foreign-hook guard stays on for OpenCode. Recheck after each OpenCode release. |
-| Cursor applies the enterprise `hooks.json` only on plans that support enterprise hooks. | Cursor, every OS | Confirm on a real client with your Cursor plan. |
-| Kiro per-user hooks are advisory against a deliberate user, like every per-user agent. Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hooks` file. Neither kiro-cli engine vetoes prompts: kiro-cli 2.24.1 with `--v3` sends a prompt DefenseClaw blocked to the model with the block reason attached (the audit log still records the block), and bare `kiro-cli` (the 2.x engine) vetoes tool calls only, and only through the `defenseclaw` agent. Another agent (`--agent`, `/agent swap`), a relocated `KIRO_HOME`, or hooks from Kiro's cloud configuration sync run without DefenseClaw's hook. Kiro proceeds past any hook exit other than 0 and 2, and its hook timeout is not documented. | Kiro, Linux and macOS | Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console. Use the ACP guard for editors that start Kiro over ACP. |
-| Kiro on Windows is covered only when it runs through the ACP guard. The Windows guardian does not enroll Kiro, so an editor entry or terminal that starts it directly is not controlled, and coverage depends on the user-side setup step. A per-user Kiro hook returns a block as exit 2 when Kiro starts it through `cmd.exe` or directly; Kiro does not document its Windows hook shell, and a `powershell -Command` launcher reports the block as 1, which Kiro proceeds past. | Kiro, Windows | See [ACP guard](/docs/acp-guard) and [Kiro on Windows](/docs/connectors/kiro#native-windows). |
-| Agents used only as a desktop app or editor extension are not enrolled. Enrollment finds an agent only through its CLI install, so a user of Claude Desktop, the Claude Code or Codex VS Code extension, the Codex app or the Antigravity IDE who has no CLI install gets no enrollment: on Windows their machine-policy hook calls are refused, on Linux and macOS they are inspected under the default contract or refused (`unenrolled_users`), and per-user agents get no hooks. Tracked in [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912). | Every OS | Install the agent's CLI for app users, or set `unenrolled_users: deny`. |
-| GitHub Copilot in VS Code (the Local agent harness) is not covered. It does not read Copilot's machine policy, and DefenseClaw has no VS Code hook route yet. Tracked in [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913). | Copilot in VS Code, every OS | Use the Copilot CLI for governed work, or restrict VS Code agent mode with VS Code's enterprise policies. |
-| Agent sessions inside WSL 2 are outside Windows machine policy: Claude Desktop WSL sessions, the Codex app's WSL agent and the Codex VS Code extension's WSL mode. The user can be root in their own distribution, and Windows endpoint sensors do not see the WSL VM. Tracked in [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914). | Windows | Turn WSL off (`AllowWSL=0`) where agents must be governed. |
-| Devin Desktop is not covered. A user without the `devin` CLI is not enrolled, Devin Local under `devin acp` is not certified, and builds before 3.9.19 still run Cascade. Tracked in [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915). | Devin Desktop, every OS | Keep Devin Desktop at 3.9.19 or later; use application control over which apps users run. |
-| The Kiro IDE is not discovered and has no version floor. Kiro IDE 1.0.182 and later should read the global hook file the guardian writes on Linux and macOS, but that is not live-verified, and older IDE builds read only workspace hooks. Tracked in [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916). | Kiro IDE, every OS | Keep Kiro IDE at 1.0.182 or later; use the ACP guard for editors that start Kiro over ACP. |
-| Hermes blocks a tool call only when the hook returns a block answer (and, from Hermes 0.21, exit code 2), so a hook that crashes or is killed cannot fail closed, and in the Hermes releases DefenseClaw supports a hook timeout lets the call run too. Some Hermes builds block the call when a stalled hook times out, but Hermes does not document that. GitHub Copilot command hooks that time out fail open. | Hermes, Copilot | Treat Hermes coverage as advisory. Use EDR process protection or application control so users cannot signal the hook. Keep hook latency low and monitor timeouts. |
-| Availability. A user can hold the gateway's address while the gateway is stopped. `defenseclaw-hook` then fails closed, which blocks that user's tool calls, and does not accept an "allow" from that listener. On Linux, systemd keeps the sockets open across normal restarts. | Every OS | Monitor gateway health. |
-| Availability under a hook flood. Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. It still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control. | Standalone profile, every OS | Limit standard users' CPU (on Linux, for example, `CPUQuota=` on `user.slice`), and find what floods the gateway from the account named in the rate-limit log line. |
-| Windows plugin listener check. The Windows Amp plugin and the per-user OpenCode plugin check the listener with a separate request before each hook call. A user who takes `127.0.0.1:18970` between that check and the hook call receives that call's per-user credential and tool payload, and the plugin accepts the answer. It needs the gateway to release the port at that moment (an administrator or upgrade restart) and the hook call to open a new connection. `defenseclaw-hook` checks the service process on every connection and is not affected. | Windows, Amp and per-user OpenCode | Restart or upgrade the gateway outside working hours; alert on any process other than the gateway listening on `127.0.0.1:18970`. |
-| Telemetry to a held port. The agents' own telemetry exporters send to `127.0.0.1:18970` without verifying the listener. A user who holds the port while the gateway is down receives that telemetry, which can include prompt text, and the sending user's per-user telemetry credential, and can then post telemetry attributed to that user for that agent until the user leaves enrollment. The credential never authenticates hook, inspect or management routes, or another agent. | Codex, Claude Code, OpenHands and OmniGent telemetry. Every gateway restart on macOS and Windows; on Linux only while an administrator has the socket unit stopped | Alert on any process other than the gateway listening on `127.0.0.1:18970`, and treat per-user telemetry attribution as advisory after a gateway restart. |
-| In the Secure Client profile hook and telemetry credentials are shared per agent, so one user can post events attributed to another user of the same agent. | Secure Client profile, Windows and macOS | Treat per-user attribution in Secure Client telemetry as advisory. |
-| Group filters on Windows use cached membership. A signed-out user is decided from the groups seen at their last sign-in, and a directory user who has not signed in since installation is pending: kept, not added, not revoked. | Windows, `include_groups` and `exclude_groups` | Name groups by SID; allow for the next sign-in when you change membership. |
-| User namespaces on Linux. Where standard users can create a private user and mount namespace, an agent started inside one can be given its own view of the machine policy, the runtime descriptor and the hook socket directory. `enterprise linux verify` warns (`unprivileged_user_namespaces`), as it does on stock Ubuntu 24.04 and RHEL 9. | Linux | Set `user.max_user_namespaces=0`, or on AppArmor hosts `kernel.apparmor_restrict_unprivileged_unconfined=1`, for example in `/etc/sysctl.d`. Both also restrict the Codex and Claude Code command sandboxes; see [User namespaces](/docs/enterprise/linux#user-namespaces). |
-| Administrator actions have short windows. A running gateway can reload an edited config just before the lifecycle rejects and reverts it, and on Linux an upgrade that changes a socket unit releases the gateway's port while the socket restarts. | Linux and macOS | Change the config and upgrade through the lifecycle, and monitor `config_rejected`. |
-| A higher-precedence vendor policy, such as Codex cloud or MDM requirements or Claude Code server-managed settings, can override the local machine policy. | Codex, Claude Code | Coordinate with whoever manages those settings, and check the effective policy with `defenseclaw-gateway enterprise policy verify --live --user <user> --connector <codex or claudecode> --agent-binary <absolute path>`, run as root or an administrator with `DEFENSECLAW_CONFIG` set to the managed config (see [Machine policy](/docs/enterprise/machine-policy)). |
-| Unsigned, hash-pinned builds do not satisfy application-control rules that require a publisher signature. | Windows (WDAC, AppLocker), macOS (Gatekeeper) | Use signed builds, or re-sign them and pin your certificate with the trust options at install time. |
-| A compromised privileged DefenseClaw service holds administrator-level power. | Every OS | Keep binaries administrator-owned; the services are part of the trusted base. |
+<Accordions>
+
+<Accordion title="Per-user agents are advisory against a deliberate user">
+
+DefenseClaw's registration or plugin lives in the user's own default config. A user can remove it until the guardian repairs it (usually within seconds, at most about a minute), and can start the agent with another config home (for example `XDG_CONFIG_HOME`, `HOME`, `OPENCODE_CONFIG_DIR`, `HERMES_HOME` or a non-default Hermes profile), with `devin --config <file>`, or with Hermes `--safe-mode`, so the registration is never loaded: no DefenseClaw hook runs, nothing fails closed, no audit record is written, and the guardian never repairs that session. Status and verify keep reporting the user's agent ready, because the registration in the default location is intact. On Linux and macOS a user can also leave a path the guardian refuses in their own home, such as a link or a file where the agent's config folder belongs; the registration is then not repaired until the path is fixed, and status and verify report it only as the warning `guardian_target_user_path`, which does not fail verify or `detect.sh --require-healthy`. This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity and OpenHands (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected.
+
+**Where:** Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent, and OpenCode while it is on the per-user route
+
+**What reduces it:** Prefer agents that use machine policy where you need enforcement. Use application control to control how users launch these agents, for example by allowing the agent to run only from an administrator-owned launcher that resets these variables and refuses these flags, or a vendor machine policy where the agent has one.
+
+</Accordion>
+
+<Accordion title="Unsupported, old, copied or self-built clients">
+
+Unsupported, old, copied or self-built clients. A client below DefenseClaw's hook-contract floors, or one built without the vendor's machine-policy handling, can ignore machine policy and hooks. For Claude Code the standalone profile sets `requiredMinimumVersion` (the [version floor](/docs/enterprise/machine-policy#claude-code-version-floor)), but Claude Code reads it only from 2.1.163, so builds older than that, including every build below the 2.1.154 floor, ignore it: the floor stops no build (2.1.153 starts with it in place). No other connector has a vendor setting that stops an older client. For builds from 2.1.163, running sessions continue until the next session start, an administrator value wins even below the floor, and a value that is not a version merging after DefenseClaw's drop-in leaves no floor. While HKLM `Settings`, macOS managed preferences or server-managed settings are in force without the key, the builds it targets never read it. `enterprise policy verify` fails when a value, file or source it can see leaves no floor, and reports a value below the floor. On Linux and macOS, Claude Code releases that do not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77) ignore both DefenseClaw drop-ins, the hooks and the floor: a user who installs one under their home runs it with no DefenseClaw hook and no audit record, and `status` and `verify` do not report it. Per-user agents below their supported minimum are the same: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, does not load DefenseClaw's hooks, so its tool calls run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it is not reported either.
+
+**Where:** Every OS
+
+**What reduces it:** Use application control (WDAC or AppLocker on Windows, fapolicyd on Linux, Santa or similar on macOS) to allow only approved agent clients at or above the supported versions, including copies that a package runner such as `uvx` starts from its cache. Put `requiredMinimumVersion` in any higher-precedence Claude Code source you deploy.
+
+</Accordion>
+
+<Accordion title="Agents installed in unusual places">
+
+Discovery covers the usual install locations, the common Node version managers and package managers, and `agent_prefixes`. An agent installed or copied anywhere else in a home is neither enrolled nor reported.
+
+**Where:** Every OS
+
+**What reduces it:** Install shared agents under an `agent_prefixes` path (Linux and macOS); use application control.
+
+</Accordion>
+
+<Accordion title="Hook process control">
+
+`defenseclaw-hook` and the per-user hook scripts run as the user, so that user can end, suspend or slow them until the agent's hook timeout. Agents that block only on an explicit deny or exit code then run the call, and no DefenseClaw decision or audit record is written before it runs. Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), and OpenHands, Devin and Hermes run it when the hook is killed. OpenHands can also run it when the hook stalls until its 60-second timeout, leaving only OpenHands' own confirmation prompt, which the user answers. GitHub Copilot stays closed unless every one of its hooks is stopped, and OpenCode, Amp and Antigravity stay closed. "Fail-closed" in the [capability matrix](/docs/capability-matrix) means blocking when the hook cannot reach the gateway, not when the user ends the hook.
+
+**Where:** Every OS
+
+**What reduces it:** Use EDR process protection or application control so users cannot signal the hook; keep hook latency low and monitor hook failures, and tool calls that appear in the audit without a pre-tool decision (for example a Hermes `post_tool_call` record with no `pre_tool_call` record).
+
+</Accordion>
+
+<Accordion title="Windows repairs need a session">
+
+The guardian writes a user's files only while that user has an active (connected) session, so a user who is signed out or disconnected is repaired when their session is active again. Revoked users are cleaned at their next sign-in.
+
+**Where:** Windows, per-user agents
+
+**What reduces it:** Monitor guardian status for users that stay pending.
+
+</Accordion>
+
+<Accordion title="Windows uninstall can leave inert per-user registrations">
+
+Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and none of these agents blocks on a hook command that cannot start.
+
+**Where:** Windows, per-user agents
+
+**What reduces it:** Uninstall from your MDM as LocalSystem while users are signed in.
+
+</Accordion>
+
+<Accordion title="Claude Code bare mode skips session and prompt hooks">
+
+Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` and `UserPromptSubmit` hooks. The managed `PreToolUse` hook still runs, so tool calls are still inspected. `disableAllHooks`, including through `--settings`, does not turn off managed hooks.
+
+**Where:** Claude Code, every OS
+
+**What reduces it:** Treat prompt and session inspection as advisory. Tool-call inspection is the enforcement point.
+
+</Accordion>
+
+<Accordion title="The Windows Claude Code attestation is the administrator's statement">
+
+`repair --attest-claude-effective-policy` records it; it does not run Claude Code.
+
+**Where:** Windows, Claude Code
+
+**What reduces it:** Before you attest, have Claude Code make a tool call in an enrolled user's own session and find its record with `audit export` from an elevated prompt (`enterprise policy verify --live` is refused on a managed Windows host); repeat after each upgrade.
+
+</Accordion>
+
+<Accordion title="Agents without a lock or the guard">
+
+Antigravity, OpenHands and OmniGent have neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's.
+
+**Where:** Those agents, every OS; Hermes on Windows
+
+**What reduces it:** Treat their coverage as advisory; use application control where you need more.
+
+</Accordion>
+
+<Accordion title="Hermes has no hook lock or ordering">
+
+On Linux and macOS the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) blocks tool calls while `config.yaml`, or the managed-scope `config.yaml` a user points `HERMES_MANAGED_DIR` at, has a hook DefenseClaw did not write, but a Hermes process keeps the hooks it loaded at start or re-read on a plugin reload: an entry the user removes after Hermes loaded it and before the next session start or tool call keeps running in that process unseen (one the guardian removes keeps that process's tool calls blocked until Hermes restarts). Hermes Python plugins run inside Hermes and are not inspected.
+
+**Where:** Hermes, Linux and macOS
+
+**What reduces it:** Treat Hermes coverage as advisory; use application control over Hermes plugins and how users launch Hermes.
+
+</Accordion>
+
+<Accordion title="OpenHands project hooks replace DefenseClaw's">
+
+OpenHands loads a project's `.openhands/hooks.json` instead of the user's `~/.openhands/hooks.json`: it uses the first of the two it finds, so in a project that has its own file, even one with a single unrelated hook, none of DefenseClaw's OpenHands hooks run. Tool calls there are not inspected or logged, OpenHands shows no DefenseClaw message, and status and verify do not report it. A repository a developer clones can carry the file.
+
+**Where:** OpenHands, Linux and macOS
+
+**What reduces it:** Treat OpenHands coverage as advisory. Keep `.openhands/hooks.json` out of the repositories developers use (for example with a repository rule or a server-side push check), search existing checkouts for it, and use application control where you need more.
+
+</Accordion>
+
+<Accordion title="The foreign-hook session block has limits">
+
+The foreign-hook guard's session block holds only a hook present when the session started, or one the guardian removed after the agent process started (only for a process DefenseClaw can name). A foreign hook that removes itself before DefenseClaw's session-start check, a hook added later in the session, or a session still running 7 days after its block was recorded is held only by the per-call check, which denies while the hook is present. The guardian cleans a redirected user config location only after a DefenseClaw hook has run with that environment; on Windows it also cleans the locations the user's persistent environment names, while the user's registry hive is loaded.
+
+**Where:** Agents the foreign-hook guard covers, every OS
+
+**What reduces it:** For Claude Code and Codex on Linux and macOS, keep the vendor lock (`managed_hooks_only: enforce`). Deliver hooks your developers need through machine policy.
+
+</Accordion>
+
+<Accordion title="Amp has no machine-wide plugin location">
+
+Amp has no machine-wide plugin location, and the order in which it loads plugins is not defined. The DefenseClaw plugin sits in the user's default Amp config directory, so an Amp session that uses a different config directory (for example with `XDG_CONFIG_HOME` or `HOME` set to another folder) does not load it: tool calls there run with no audit record, and status and verify still report the user's Amp ready.
+
+**Where:** Amp, every OS
+
+**What reduces it:** Treat Amp coverage as best effort. Use application control over how users launch Amp, as for other per-user agents.
+
+</Accordion>
+
+<Accordion title="OpenCode can start without plugins">
+
+Pure mode (`--pure`, `OPENCODE_PURE=1`) and `OPENCODE_TEST_MANAGED_CONFIG_DIR` start a session without any DefenseClaw plugin, the managed one included, and OpenCode does not document the order in which plugins run.
+
+**Where:** OpenCode, every OS
+
+**What reduces it:** The foreign-hook guard stays on for OpenCode. Recheck after each OpenCode release.
+
+</Accordion>
+
+<Accordion title="Cursor enterprise hooks depend on the plan">
+
+Cursor applies the enterprise `hooks.json` only on plans that support enterprise hooks.
+
+**Where:** Cursor, every OS
+
+**What reduces it:** Confirm on a real client with your Cursor plan.
+
+</Accordion>
+
+<Accordion title="Kiro per-user hooks are advisory">
+
+Kiro per-user hooks are advisory against a deliberate user, like every per-user agent. Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hooks` file. Neither kiro-cli engine vetoes prompts: kiro-cli 2.24.1 with `--v3` sends a prompt DefenseClaw blocked to the model with the block reason attached (the audit log still records the block), and bare `kiro-cli` (the 2.x engine) vetoes tool calls only, and only through the `defenseclaw` agent. Another agent (`--agent`, `/agent swap`), a relocated `KIRO_HOME`, or hooks from Kiro's cloud configuration sync run without DefenseClaw's hook. Kiro proceeds past any hook exit other than 0 and 2, and its hook timeout is not documented.
+
+**Where:** Kiro, Linux and macOS
+
+**What reduces it:** Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console. Use the ACP guard for editors that start Kiro over ACP.
+
+</Accordion>
+
+<Accordion title="Kiro on Windows is covered only through the ACP guard">
+
+Kiro on Windows is covered only when it runs through the ACP guard. The Windows guardian does not enroll Kiro, so an editor entry or terminal that starts it directly is not controlled, and coverage depends on the user-side setup step. A per-user Kiro hook returns a block as exit 2 when Kiro starts it through `cmd.exe` or directly; Kiro does not document its Windows hook shell, and a `powershell -Command` launcher reports the block as 1, which Kiro proceeds past.
+
+**Where:** Kiro, Windows
+
+**What reduces it:** See [ACP guard](/docs/acp-guard) and [Kiro on Windows](/docs/connectors/kiro#native-windows).
+
+</Accordion>
+
+<Accordion title="Desktop-app and editor-extension users are not enrolled">
+
+Agents used only as a desktop app or editor extension are not enrolled. Enrollment finds an agent only through its CLI install, so a user of Claude Desktop, the Claude Code or Codex VS Code extension, the Codex app or the Antigravity IDE who has no CLI install gets no enrollment: on Windows their machine-policy hook calls are refused, on Linux and macOS they are inspected under the default contract or refused (`unenrolled_users`), and per-user agents get no hooks.
+
+**Where:** Every OS
+
+**What reduces it:** Install the agent's CLI for app users, or set `unenrolled_users: deny`.
+
+</Accordion>
+
+<Accordion title="GitHub Copilot in VS Code is not covered">
+
+GitHub Copilot in VS Code (the Local agent harness) is not covered. It does not read Copilot's machine policy, and DefenseClaw has no VS Code hook route yet.
+
+**Where:** Copilot in VS Code, every OS
+
+**What reduces it:** Use the Copilot CLI for governed work, or restrict VS Code agent mode with VS Code's enterprise policies.
+
+</Accordion>
+
+<Accordion title="Agent sessions inside WSL 2 are outside machine policy">
+
+Agent sessions inside WSL 2 are outside Windows machine policy: Claude Desktop WSL sessions, the Codex app's WSL agent and the Codex VS Code extension's WSL mode. The user can be root in their own distribution, and Windows endpoint sensors do not see the WSL VM.
+
+**Where:** Windows
+
+**What reduces it:** Turn WSL off (`AllowWSL=0`) where agents must be governed.
+
+</Accordion>
+
+<Accordion title="Devin Desktop is not covered">
+
+A user without the `devin` CLI is not enrolled, Devin Local under `devin acp` is not certified, and builds before 3.9.19 still run Cascade.
+
+**Where:** Devin Desktop, every OS
+
+**What reduces it:** Keep Devin Desktop at 3.9.19 or later; use application control over which apps users run.
+
+</Accordion>
+
+<Accordion title="The Kiro IDE is not discovered">
+
+The Kiro IDE is not discovered and has no version floor. Kiro IDE 1.0.182 and later should read the global hook file the guardian writes on Linux and macOS, but that is not live-verified, and older IDE builds read only workspace hooks.
+
+**Where:** Kiro IDE, every OS
+
+**What reduces it:** Keep Kiro IDE at 1.0.182 or later; use the ACP guard for editors that start Kiro over ACP.
+
+</Accordion>
+
+<Accordion title="Hermes and Copilot hooks that crash or time out can fail open">
+
+Hermes blocks a tool call only when the hook returns a block answer (and, from Hermes 0.21, exit code 2), so a hook that crashes or is killed cannot fail closed, and in the Hermes releases DefenseClaw supports a hook timeout lets the call run too. Some Hermes builds block the call when a stalled hook times out, but Hermes does not document that. GitHub Copilot command hooks that time out fail open.
+
+**Where:** Hermes, Copilot
+
+**What reduces it:** Treat Hermes coverage as advisory. Use EDR process protection or application control so users cannot signal the hook. Keep hook latency low and monitor timeouts.
+
+</Accordion>
+
+<Accordion title="A user can hold the gateway's address while it is stopped">
+
+Availability. A user can hold the gateway's address while the gateway is stopped. `defenseclaw-hook` then fails closed, which blocks that user's tool calls, and does not accept an "allow" from that listener. On Linux, systemd keeps the sockets open across normal restarts.
+
+**Where:** Every OS
+
+**What reduces it:** Monitor gateway health.
+
+</Accordion>
+
+<Accordion title="A hook flood slows other accounts">
+
+Availability under a hook flood. Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. It still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control.
+
+**Where:** Standalone profile, every OS
+
+**What reduces it:** Limit standard users' CPU (on Linux, for example, `CPUQuota=` on `user.slice`), and find what floods the gateway from the account named in the rate-limit log line.
+
+</Accordion>
+
+<Accordion title="Windows plugin listener check">
+
+The Windows Amp plugin and the per-user OpenCode plugin check the listener with a separate request before each hook call. A user who takes `127.0.0.1:18970` between that check and the hook call receives that call's per-user credential and tool payload, and the plugin accepts the answer. It needs the gateway to release the port at that moment (an administrator or upgrade restart) and the hook call to open a new connection. `defenseclaw-hook` checks the service process on every connection and is not affected.
+
+**Where:** Windows, Amp and per-user OpenCode
+
+**What reduces it:** Restart or upgrade the gateway outside working hours; alert on any process other than the gateway listening on `127.0.0.1:18970`.
+
+</Accordion>
+
+<Accordion title="Telemetry to a held port">
+
+The agents' own telemetry exporters send to `127.0.0.1:18970` without verifying the listener. A user who holds the port while the gateway is down receives that telemetry, which can include prompt text, and the sending user's per-user telemetry credential, and can then post telemetry attributed to that user for that agent until the user leaves enrollment. The credential never authenticates hook, inspect or management routes, or another agent.
+
+**Where:** Codex, Claude Code, OpenHands and OmniGent telemetry. Every gateway restart on macOS and Windows; on Linux only while an administrator has the socket unit stopped
+
+**What reduces it:** Alert on any process other than the gateway listening on `127.0.0.1:18970`, and treat per-user telemetry attribution as advisory after a gateway restart.
+
+</Accordion>
+
+<Accordion title="Secure Client profile credentials are shared per agent">
+
+In the Secure Client profile hook and telemetry credentials are shared per agent, so one user can post events attributed to another user of the same agent.
+
+**Where:** Secure Client profile, Windows and macOS
+
+**What reduces it:** Treat per-user attribution in Secure Client telemetry as advisory.
+
+</Accordion>
+
+<Accordion title="Windows group filters use cached membership">
+
+Group filters on Windows use cached membership. A signed-out user is decided from the groups seen at their last sign-in, and a directory user who has not signed in since installation is pending: kept, not added, not revoked.
+
+**Where:** Windows, `include_groups` and `exclude_groups`
+
+**What reduces it:** Name groups by SID; allow for the next sign-in when you change membership.
+
+</Accordion>
+
+<Accordion title="User namespaces on Linux">
+
+Where standard users can create a private user and mount namespace, an agent started inside one can be given its own view of the machine policy, the runtime descriptor and the hook socket directory. `enterprise linux verify` warns (`unprivileged_user_namespaces`), as it does on stock Ubuntu 24.04 and RHEL 9.
+
+**Where:** Linux
+
+**What reduces it:** Set `user.max_user_namespaces=0`, or on AppArmor hosts `kernel.apparmor_restrict_unprivileged_unconfined=1`, for example in `/etc/sysctl.d`. Both also restrict the Codex and Claude Code command sandboxes; see [User namespaces](/docs/enterprise/linux#user-namespaces).
+
+</Accordion>
+
+<Accordion title="Administrator actions have short windows">
+
+A running gateway can reload an edited config just before the lifecycle rejects and reverts it, and on Linux an upgrade that changes a socket unit releases the gateway's port while the socket restarts.
+
+**Where:** Linux and macOS
+
+**What reduces it:** Change the config and upgrade through the lifecycle, and monitor `config_rejected`.
+
+</Accordion>
+
+<Accordion title="A higher-precedence vendor policy can override machine policy">
+
+A higher-precedence vendor policy, such as Codex cloud or MDM requirements or Claude Code server-managed settings, can override the local machine policy.
+
+**Where:** Codex, Claude Code
+
+**What reduces it:** Coordinate with whoever manages those settings, and check the effective policy with `defenseclaw-gateway enterprise policy verify --live --user <user> --connector <codex or claudecode> --agent-binary <absolute path>`, run as root or an administrator (see [Machine policy](/docs/enterprise/machine-policy)).
+
+</Accordion>
+
+<Accordion title="Unsigned builds do not satisfy publisher rules">
+
+Unsigned, hash-pinned builds do not satisfy application-control rules that require a publisher signature.
+
+**Where:** Windows (WDAC, AppLocker), macOS (Gatekeeper)
+
+**What reduces it:** Use signed builds, or re-sign them and pin your certificate with the trust options at install time.
+
+</Accordion>
+
+<Accordion title="A compromised privileged service holds administrator power">
+
+A compromised privileged DefenseClaw service holds administrator-level power.
+
+**Where:** Every OS
+
+**What reduces it:** Keep binaries administrator-owned; the services are part of the trusted base.
+
+</Accordion>
+
+</Accordions>
 
 ## Full threat models
 

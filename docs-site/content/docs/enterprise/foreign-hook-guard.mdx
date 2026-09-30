@@ -1,6 +1,6 @@
 ---
 title: Foreign-hook guard
-description: How the standalone profile stops user and project hooks that DefenseClaw has not approved from changing an AI agent's tool call after inspection, which agents and files it covers on each OS, and how to approve or restore a hook.
+description: How DefenseClaw finds, removes and blocks hooks it did not install, how to approve a hook by digest, and what users see when a call is blocked.
 keywords:
   - DefenseClaw foreign hooks
   - hook rewrite
@@ -60,39 +60,39 @@ Codex's on Windows, which DefenseClaw always sets; see
    Claude Code's `settings.json` files, so the guard scans those for them.
 4. **Keeps a session blocked until the agent restarts.** Agents read their
    hooks when a session starts and keep running them after the file
-   changes; OpenCode and Amp load plugins once per process. So
-   `defenseclaw-hook` records a snapshot of the foreign-hook state at session
-   start. If an unapproved hook or plugin is present then, the rest of that
-   session's tool calls stay denied, even after the hook is removed. The
-   block also covers sessions the same agent process clears, compacts or
-   resumes into, because they keep the hooks the process loaded. Remove the
-   hook, then restart the agent: a new agent process starts clean, including
-   one that resumes the old session. A session start whose agent process
-   DefenseClaw cannot identify starts clean only under a new session ID,
-   because the agent loaded its hooks from the files DefenseClaw just
-   checked; one that reuses a blocked session's ID (a resume or compact)
-   keeps the block, and the denial says to start a new session. A block ends 7 days
-   after it was recorded; denials in between do not extend it. A hook that
-   appears after the session started denies the calls that find it but does
-   not block the session: once it is removed, the next call is allowed. This
-   applies with `foreign_hooks: remove`, the default. The gateway keeps the
-   snapshots in its protected data directory, under `foreign-hook-sessions/`,
-   keyed by the caller's verified uid or SID, so deleting files in the home
-   does not clear a block. Each account keeps at most 512 records; when that
-   is full, the gateway removes the oldest records that hold no block, and it
-   refuses a new session (denying its calls) only while live blocks alone
-   fill the store. If the gateway cannot read or write a snapshot, the call
-   is denied. When the guardian removes an unapproved hook, it also records
-   the removal (account, connector, file and time) in its protected
-   directory, `foreign-hook-removals.json` next to its authorization ledger.
-   The gateway then denies the calls of that account's agent processes for
-   that connector, and for any other connector that loads the same file
-   (Cursor and Devin load `~/.claude/settings.json`), that started before
-   the removal, naming the file: they may have loaded the hook, and an agent
-   that sends its session-start event only with the first prompt (Hermes)
-   takes its snapshot after the file was cleaned. Restart the agent to clear
-   it. Agents started after the removal, other accounts and other connectors
-   are not affected, and the record lasts 7 days.
+   changes, and OpenCode and Amp load plugins once per process. So
+   `defenseclaw-hook` records a snapshot of the foreign-hook state at
+   session start. This applies with `foreign_hooks: remove`, the default.
+   - **What is blocked.** If an unapproved hook or plugin is present at
+     session start, the rest of that session's tool calls stay denied, even
+     after the hook is removed. The block also covers sessions the same agent
+     process clears, compacts or resumes into.
+   - **How to clear it.** Remove the hook, then restart the agent. A new
+     agent process starts clean, including one that resumes the old session.
+     If DefenseClaw cannot identify the agent process, only a new session ID
+     starts clean; a resume or compact keeps the block, and the denial says
+     to start a new session.
+   - **How long it lasts.** A block ends 7 days after it was recorded.
+     Denials in between do not extend it.
+   - **Hooks added later.** A hook that appears after the session started
+     denies the calls that find it, but does not block the session. Once it
+     is removed, the next call is allowed.
+   - **Where blocks are kept.** The gateway keeps the snapshots in its
+     protected data directory, under `foreign-hook-sessions/`, keyed by the
+     caller's verified uid or SID, so deleting files in the home does not
+     clear a block. Each account keeps at most 512 records. When the store
+     is full, the gateway drops the oldest records that hold no block; it
+     refuses new sessions only while live blocks alone fill it. If the
+     gateway cannot read or write a snapshot, the call is denied.
+   - **After the guardian removes a hook.** The guardian records the removal
+     (account, connector, file and time) in `foreign-hook-removals.json`
+     next to its authorization ledger. The gateway then denies calls from
+     that account's agent processes that started before the removal, for
+     that connector and for any connector that loads the same file (Cursor
+     and Devin load `~/.claude/settings.json`). Those processes may have
+     loaded the hook, and Hermes takes its snapshot only with the first
+     prompt. Restart the agent to clear it. Other accounts, other connectors
+     and agents started later are not affected. The record lasts 7 days.
 5. **Follows redirected user config.** An agent whose environment moves its
    user configuration (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`,
    `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `APPDATA`,
@@ -291,14 +291,12 @@ for a user and repository. Each line shows the connector, `blocked`,
 `reported` or `allowlisted`, the scope, the file and `sha256:<digest>`.
 
 ```bash
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
 ```
 
-On macOS use `DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml`
-and `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows:
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows:
 
 ```powershell
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user alice --project C:\src\repo
 ```
 

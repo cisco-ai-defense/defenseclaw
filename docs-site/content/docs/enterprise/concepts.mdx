@@ -1,6 +1,6 @@
 ---
 title: Enterprise concepts
-description: A glossary of the terms used in DefenseClaw's enterprise deployment docs, from profiles and the lifecycle to enrollment, machine policy, health fields, and the Windows, Linux, and macOS security terms.
+description: Definitions of the DefenseClaw enterprise terms, including profiles, lifecycle, services, enrollment, connectors, health fields and platform terms.
 keywords:
   - DefenseClaw enterprise glossary
   - managed_enterprise
@@ -228,21 +228,12 @@ lock whatever the setting says.
 ### Foreign hook
 
 A hook or plugin that DefenseClaw did not install and that is not on the
-allowlist (`allowed_hooks`, a list of SHA-256 digests). A foreign hook that runs
-after DefenseClaw could change a tool call that DefenseClaw already allowed.
+`allowed_hooks` digest allowlist.
 
 ### Foreign-hook guard
 
-The protection against [foreign hooks](#foreign-hook). It covers Cursor, GitHub
-Copilot, Devin, OpenCode, and Amp, Hermes on Linux and macOS, and also Codex
-and Claude Code when their `managed_hooks_only` setting is not `enforce`. With the default
-`foreign_hooks: remove`, the guardian removes foreign entries from the user's
-config, and `defenseclaw-hook` blocks tool calls while an unapproved one is in
-the user or project config. The OpenCode and Amp plugins ask
-`defenseclaw-hook` for the same decision when they load and before each tool
-call, and DefenseClaw's Hermes hook asks before each Hermes tool call. A session that started while an unapproved hook was present stays
-blocked until the agent restarts, for at most 7 days. See
-[Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
+The protection that removes [foreign hooks](#foreign-hook) and blocks tool calls
+while one is present. See [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
 
 ### Peer verification
 
@@ -272,23 +263,13 @@ pending. It does not check that any user is enrolled.
 
 ### security_complete
 
-A stricter field of the lifecycle result. On Linux and macOS it adds the
-sensor helper and requires no errors. On Windows it requires a healthy
-deployment with at least one of Codex, Claude Code, or Cursor turned on. With
-Claude Code on, it also requires a current administrator attestation that
-Claude Code runs DefenseClaw's managed hooks. On every OS an installed agent
-that runs without DefenseClaw hooks (`agent_unprotected`,
-`hook_contract_unverified`) makes it `false`. See
-[Health fields](/docs/enterprise/operations#health-fields).
+A stricter field of the lifecycle result: `false` when the deployment has errors
+or an installed agent runs without DefenseClaw's hooks. See [Health fields](/docs/enterprise/operations#health-fields).
 
 ### Observe and action modes
 
-`guardrail.mode`. In `observe` mode policy verdicts never block: DefenseClaw
-records every decision, including what it would have blocked. In `action` mode
-it enforces. The deployment's own checks apply in both modes: a tool call is
-still refused while an unapproved foreign hook is present (with
-`foreign_hooks: remove`), or when the user is not enrolled where enrollment is
-enforced. You can also set the mode per agent under `guardrail.connectors`.
+`guardrail.mode`: `observe` records every decision without blocking on policy
+verdicts, and `action` enforces them.
 
 ### Cisco AI Defense
 
@@ -299,14 +280,18 @@ optional: set `enterprise.inspection.ai_defense.enabled: true` and
 `ai-defense-api-key`), then store the API key as a protected credential under
 that name. See [Cisco AI Defense key](/docs/enterprise/ai-defense-key).
 
-### CMID
+### Cisco Secure Client profile
+
+These terms apply only to the [Secure Client profile](#secure-client-profile).
+
+#### CMID
 
 Secure Client's cloud machine identity. In the Secure Client profile the
 gateway uses it to authenticate to Cisco AI Defense; on Windows the
 `DefenseClawCMIDBroker` service brokers it. The standalone profile does not
 use it.
 
-### AVC
+#### AVC
 
 The Cisco Secure Client packaging and signing pipeline. It signs and ships the
 Secure Client profile's Windows Setup. The standalone profile does not use it.
