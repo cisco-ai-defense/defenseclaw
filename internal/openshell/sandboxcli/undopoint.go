@@ -44,16 +44,19 @@ import (
 // acceptChanges tells the daemon the user kept the changes made on top of
 // sb's current snapshot, the one they were reviewed against (best effort:
 // without it, the next start keeps the undo point, which only loses
-// convenience).
-func (a *App) acceptChanges(ctx context.Context, api API, sb *sandboxapi.Sandbox) {
+// convenience). It reports false when the daemon did not record it, which
+// it warns about.
+func (a *App) acceptChanges(ctx context.Context, api API, sb *sandboxapi.Sandbox) bool {
 	if sb == nil || sb.Snapshot == nil || sb.Snapshot.CreatedAt.IsZero() || !sb.Snapshot.UndoneAt.IsZero() {
 		// An undone snapshot has no changes on top to accept.
-		return
+		return true
 	}
 	if _, err := api.Accept(ctx, sb.Name, sandboxapi.AcceptRequest{Snapshot: sb.Snapshot.CreatedAt}); err != nil {
 		a.warn("could not record that you kept the changes (" + apiError(err).Error() + "); the next start keeps the undo point, and `" +
 			CommandName + " start " + sb.Name + " --new-snapshot` takes a new one")
+		return false
 	}
+	return true
 }
 
 // acceptedUndoPoint is the snapshot the user accepted the changes on top

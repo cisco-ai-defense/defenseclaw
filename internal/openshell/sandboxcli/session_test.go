@@ -604,6 +604,15 @@ func TestSessionSummary(t *testing.T) {
 			}
 		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"}, not: []string{"+changed"},
 			check: func(t *testing.T, ta *testApp) { has(t, ta.err.String(), "+changed") }},
+		// The daemon could not record the acceptance: the undo point stays,
+		// and the line after the warning does not say otherwise.
+		{name: "keeping is not recorded", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " has another undo point by now"}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
+			not: []string{"the next session takes a new undo point"}},
 		{name: "connect --shell", input: "y\n", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "r2c1-cp", Shell: true}) },
 			setup: func(ta *testApp) {
 				ta.term.hooks = nil
