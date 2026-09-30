@@ -1521,6 +1521,7 @@ class SetupPanelModel:
                 self.wizard_status[best] = "checked"
             self._wizard_run_started.pop(best, None)
             return
+        self._status_before_check.pop(best, None)
         self.wizard_status[best] = "done" if success else "failed"
         self._wizard_run_started.pop(best, None)
 
@@ -1589,8 +1590,8 @@ class SetupPanelModel:
         doctor = tuple(args[:2]) == ("sandbox", "doctor")
         category = "info" if doctor else "setup"
         label = "sandbox doctor" if doctor else "setup " + name
-        if doctor:
-            self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
+        # A cancelled run (or a finished check) puts this status back.
+        self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()

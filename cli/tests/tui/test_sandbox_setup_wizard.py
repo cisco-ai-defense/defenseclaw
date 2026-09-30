@@ -213,6 +213,22 @@ def test_a_cancelled_run_is_not_a_failure() -> None:
     assert model.wizard_status[SetupWizard.SANDBOX] == before
 
 
+def test_cancelling_a_rerun_keeps_the_earlier_result() -> None:
+    model = SetupPanelModel({}, os_name="linux")
+    model.wizard_status[SetupWizard.SANDBOX] = "done"
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    action = model.submit_wizard_form()
+    assert model.wizard_status[SetupWizard.SANDBOX] == "running..."
+    model.mark_wizard_complete(action.intent.args, success=False, cancelled=True)
+    assert model.wizard_status[SetupWizard.SANDBOX] == "done"
+    # A finished run drops the saved status, so a later cancel can't bring it back.
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    action = model.submit_wizard_form()
+    model.mark_wizard_complete(action.intent.args, success=False)
+    assert model.wizard_status[SetupWizard.SANDBOX] == "failed"
+    assert SetupWizard.SANDBOX not in model._status_before_check
+
+
 def _run_doctor(model: SetupPanelModel, *, success: bool = True):
     model.open_goal_menu(SetupWizard.SANDBOX)
     model.form_fields = _set(model.form_fields, "Action", "doctor")
