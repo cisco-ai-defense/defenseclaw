@@ -576,18 +576,9 @@ deleted.
   like Kiro CLI's, by session, tool name and tool arguments; measured on the
   pinned 1.0.88, a call a hook denied or the user refused sends no
   `postToolUse`. Devin CLI is still not paired (not measured). Both drivers.
-- Kiro CLI 2.x: a DefenseClaw verdict that took longer than about ten
-  seconds let the tool run, on the host and in a Kiro sandbox. DefenseClaw's
-  agent hooks set no `timeout_ms`, and Kiro ignores a hook past its default
-  timeout (measured on 2.24.1: a `preToolUse` hook that took 12 s to block
-  did not stop the tool). Every DefenseClaw agent hook now sets
-  `timeout_ms` 30000; the gateway rewrites a host agent at its next start,
-  and the Kiro sandbox image rebuilds.
-- Kiro CLI on the host: an agent that Kiro upgraded to its universal (V2 +
-  V3) format, which `kiro-cli --v3` offers at start and `/upgrade-agent`
-  does, lost the hooks you had added to it at DefenseClaw's next setup, and
-  teardown left DefenseClaw's entries in it. Setup, verification and
-  teardown now read that format and change only DefenseClaw's own entries.
+- The Kiro CLI sandbox image rebuilds: its agent hooks now set
+  `timeout_ms` 30000, so a slow verdict no longer lets the tool run (see
+  Kiro CLI tool hooks).
 
 ### OpenShell sandbox lifecycle and configuration
 
@@ -729,6 +720,18 @@ deleted.
   connector setup at every start, so the first start after an upgrade
   rewrites DefenseClaw's own entries in place; entries the operator added
   are left as they are. Measured against kiro-cli 2.24.1 on Linux.
+- Kiro CLI 2.x: a DefenseClaw verdict that took longer than about ten
+  seconds let the tool run, on the host and in a Kiro sandbox. DefenseClaw's
+  agent hooks set no `timeout_ms`, and Kiro ignores a hook past its default
+  timeout (measured on 2.24.1: a `preToolUse` hook that took 12 s to block
+  did not stop the tool). Every DefenseClaw agent hook now sets
+  `timeout_ms` 30000; the gateway rewrites a host agent at its next start,
+  and the Kiro sandbox image rebuilds.
+- Kiro CLI on the host: an agent that Kiro upgraded to its universal (V2 +
+  V3) format, which `kiro-cli --v3` offers at start and `/upgrade-agent`
+  does, lost the hooks you had added to it at DefenseClaw's next setup, and
+  teardown left DefenseClaw's entries in it. Setup, verification and
+  teardown now read that format and change only DefenseClaw's own entries.
 
 ### Renamed and removed connectors
 
