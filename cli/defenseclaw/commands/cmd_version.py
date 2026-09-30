@@ -229,12 +229,17 @@ def _openclaw_configured() -> bool:
     """Whether OpenClaw is one of the configured connectors.
 
     The plugin row is OpenClaw's; on an install of other connectors it is
-    neither missing nor drifting. A config that cannot be read keeps the row.
+    neither missing nor drifting. Before ``defenseclaw init`` there is no
+    config and nothing is configured yet. A config that cannot be read keeps
+    the row.
     """
     try:
         from defenseclaw import config as config_module
 
-        return "openclaw" in config_module.load().active_connectors()
+        cfg = config_module.load()
+        if getattr(cfg, "_source_config_version", None) == 0 and not config_module.config_path().exists():
+            return False
+        return "openclaw" in cfg.active_connectors()
     except Exception:  # noqa: BLE001 - version must run with any config state.
         return True
 

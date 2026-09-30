@@ -44,7 +44,15 @@ def main() -> None:
 
 
 def _notice(argv: list[str]) -> None:
-    from defenseclaw.update_notice import maybe_print
+    # `uninstall --binaries` removes the environment this process runs from,
+    # so the notice module may be gone by now: a finished uninstall printed a
+    # ModuleNotFoundError traceback and exited 1.
+    if argv and argv[0] == "uninstall":
+        return
+    try:
+        from defenseclaw.update_notice import maybe_print
+    except ImportError:
+        return
 
     maybe_print(argv)
 

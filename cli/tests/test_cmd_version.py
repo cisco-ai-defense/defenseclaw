@@ -198,6 +198,13 @@ class VersionCommandTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             pl.assert_not_called()
 
+    def test_plugin_is_not_used_before_init(self):
+        # Before init the defaults name OpenClaw, but nothing is configured.
+        cfg = Mock(active_connectors=lambda: ["openclaw"], _source_config_version=0)
+        with patch("defenseclaw.config.load", return_value=cfg), \
+             patch("defenseclaw.config.config_path", return_value=Mock(exists=lambda: False)):
+            self.assertFalse(cmd_version._openclaw_configured())
+
 
 if __name__ == "__main__":
     unittest.main()

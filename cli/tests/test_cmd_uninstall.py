@@ -420,14 +420,18 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 "C:\\Users\\test\\.local\\bin\\defenseclaw-hook.exe",
             ),
         )
+        present = set(plan.binary_targets[:2])
         with (
             patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
+            patch.object(cmd_uninstall.os.path, "lexists", side_effect=present.__contains__),
             capture_click_output() as output,
         ):
             cmd_uninstall._render_plan(plan, dry_run=True)
         rendered = output.getvalue()
-        for target in plan.binary_targets:
+        for target in present:
             self.assertIn(target, rendered)
+        # A launcher that was never installed is not in the plan.
+        self.assertNotIn(plan.binary_targets[2], rendered)
         self.assertIn("deferred cleanup", rendered)
 
     def test_windows_stop_uses_exact_gateway_and_waits_for_release(self):

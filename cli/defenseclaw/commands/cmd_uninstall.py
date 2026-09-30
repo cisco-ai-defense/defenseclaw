@@ -630,8 +630,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
     click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
     if plan.remove_binaries:
+        # Only the launchers that are there: the owned-name list also names
+        # optional ones (scanner APIs, litellm) that most installs never had.
         for target in plan.binary_targets:
-            click.echo(f"      {ux.dim('·')} {target}")
+            if os.path.lexists(target):
+                click.echo(f"      {ux.dim('·')} {target}")
     if _requires_deferred_cleanup(plan):
         click.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
     click.echo()

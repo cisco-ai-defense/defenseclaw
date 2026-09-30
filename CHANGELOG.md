@@ -71,6 +71,12 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **`uninstall --all --binaries` ends cleanly, and its plan lists only
+  what is there.** After removing everything, the command printed a
+  `ModuleNotFoundError` traceback and exited 1, because the update notice
+  it runs at exit had just been removed. The plan also listed launchers
+  that were never installed. `defenseclaw version` before `init` shows the
+  OpenClaw plugin as `(not used)` instead of `missing`.
 - **Doctor names more of what it finds on Linux.** A `Sidecar API` row no
   longer passes when the process answering on the API port is not your
   verified gateway; it warns and, on Linux, names the account holding the
