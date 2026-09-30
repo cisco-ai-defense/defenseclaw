@@ -37,6 +37,7 @@ from typing import Any
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
     PROXY_CONNECTORS,
+    REGISTERED_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNVERSIONED,
@@ -47,6 +48,7 @@ from defenseclaw.connector_contracts import (
 )
 
 _COMPONENT_NAMES = ("cli", "gateway", "plugin")
+_CONNECTOR_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/+-]{0,127}$")
 
 
@@ -367,18 +369,17 @@ def assess_connector_health(
     signals = _normalized_discovery_signals(discovery)
     findings: list[ConnectorHealthFinding] = []
     for connector in active:
-        public_name = (
-            connector if connector in PROXY_CONNECTORS or connector in HOOK_CONTRACTS else "unregistered-connector"
-        )
+        registered = connector in PROXY_CONNECTORS or connector in HOOK_CONTRACTS or connector in REGISTERED_CONNECTORS
+        public_name = connector if registered or _CONNECTOR_NAME_RE.fullmatch(connector) else "unregistered-connector"
         ranges = _supported_ranges(connector)
 
-        if connector not in PROXY_CONNECTORS and connector not in HOOK_CONTRACTS:
+        if not registered:
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,
                     status=HealthStatus.UNSUPPORTED,
                     reason_code="connector-contract-unregistered",
-                    summary="Active connector has no registered DefenseClaw compatibility contract",
+                    summary=f"Active connector {public_name} has no registered DefenseClaw compatibility contract",
                     remediations=(_interactive_setup_choice(public_name, experimental=True),),
                 )
             )
@@ -415,14 +416,40 @@ def assess_connector_health(
         compatibility = resolve_connector_contract(connector, raw_version)
 
         if compatibility.status == STATUS_NOT_GATED:
+            proxy = connector in PROXY_CONNECTORS
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,
                     status=HealthStatus.SUPPORTED,
-                    reason_code="proxy-connector-not-version-gated",
-                    summary=f"{public_name} uses a proxy contract and is not agent-version gated",
+                    reason_code="proxy-connector-not-version-gated" if proxy else "connector-not-version-gated",
+                    summary=(
+                        f"{public_name} uses a proxy contract and is not agent-version gated"
+                        if proxy
+                        else f"{public_name} is not agent-version gated"
+                    ),
                     installed_version=_safe_semver_from_agent(raw_version),
-                    capabilities=ConnectorCapabilities(connection_kind="proxy"),
+                    capabilities=ConnectorCapabilities(connection_kind="proxy" if proxy else "hook"),
+                )
+            )
+            continue
+
+        if compatibility.status == STATUS_KNOWN and compatibility.contract is not None and compatibility.untested:
+            contract = compatibility.contract
+            newest = _safe_token(compatibility.newest_tested.lstrip("<"))
+            findings.append(
+                ConnectorHealthFinding(
+                    connector=public_name,
+                    status=HealthStatus.SUPPORTED,
+                    reason_code="connector-version-untested-newer",
+                    summary=(
+                        f"{public_name} is an untested newer version"
+                        + (f" (tested versions end at {newest})" if newest else "")
+                        + "; no known problems"
+                    ),
+                    installed_version=_safe_semver_from_agent(raw_version),
+                    contract_id=_safe_token(contract.contract_id),
+                    supported_agent_ranges=ranges,
+                    capabilities=_contract_capabilities(contract),
                 )
             )
             continue
@@ -466,7 +493,9 @@ def assess_connector_health(
                     connector=public_name,
                     status=HealthStatus.UNSUPPORTED,
                     reason_code="connector-version-outside-contract",
-                    summary=f"{public_name} agent version is outside the registered contract ranges",
+                    summary=(
+                        f"{public_name} agent version is below the supported floor or on the known-broken list"
+                    ),
                     installed_version=normalized,
                     supported_agent_ranges=ranges,
                     remediations=_unsupported_connector_remediations(public_name, ranges),

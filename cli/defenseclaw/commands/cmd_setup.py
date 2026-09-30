@@ -4927,7 +4927,13 @@ def _check_connector_version_supported_for_setup(
         return True
 
     if compatibility.status == STATUS_KNOWN:
-        if emit:
+        if emit and compatibility.untested:
+            ux.ok(
+                f"{label}: version {version_display} is an untested newer version "
+                f"(tested versions end at {compatibility.newest_tested.lstrip('<')}); "
+                f"no known problems, using {contract}."
+            )
+        elif emit:
             ux.ok(f"{label}: version {version_display} is supported by {contract}.")
         return True
 
@@ -13142,9 +13148,19 @@ def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) ->
         compatibility = resolve_connector_contract(normalize_connector(connector), raw_version)
     except Exception:  # noqa: BLE001 - diagnostics must not mask the gate result.
         return f"protected lock {invariant} is invalid"
+    version = raw_version or "an unreported version"
+    if (
+        compatibility.untested
+        and isinstance(entry, dict)
+        and entry.get("compatibility_status") == STATUS_UNKNOWN
+    ):
+        # A lock written before untested newer versions were accepted.
+        return (
+            f"the protected lock predates this build's support for {connector} {version} "
+            f"({compatibility.reason}); run `defenseclaw-gateway restart` to refresh it"
+        )
     if compatibility.status == STATUS_NOT_GATED or (compatibility.contract and compatibility.supported):
         return f"protected lock {invariant} is invalid"
-    version = raw_version or "an unreported version"
     return (
         f"no reviewed hook contract covers {connector} {version}; "
         f"the protected lock records that correctly. Pin a contract for this version in "

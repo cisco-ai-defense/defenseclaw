@@ -153,7 +153,7 @@ func windowsStandaloneUnreadableExecutable(candidate string) string {
 // that user instead of failing the reconcile, and withholding enrollment
 // publication, for everyone.
 func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (bool, string) {
-	if resolution := connector.ResolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
+	if resolution := resolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
 		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
 	}
 	if minimum := windowsEnterpriseStandaloneAgentMinimum(connectorName); minimum != "" {
@@ -174,7 +174,7 @@ func windowsStandalonePerUserAdmission(profileHome, connectorName, version strin
 	if _, perUser := windowsStandalonePerUserConnector(connectorName); !perUser {
 		return true, ""
 	}
-	if resolution := connector.ResolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
+	if resolution := resolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
 		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
 	}
 	if _, reason := windowsStandalonePerUserManagedExecutable(profileHome, connectorName); reason != "" {

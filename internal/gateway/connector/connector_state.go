@@ -1560,6 +1560,18 @@ func HookContractChangedByDefenseClawRelease(previous, current HookContractLockE
 		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
 }
 
+// HookContractAgentUpdateAdmitted reports whether drift is an agent update to
+// a version that still resolves to a hook contract (tested, or an untested
+// newer version with no known problems). Admission refreshes the lock for it
+// instead of refusing. Secure Client (strict resolution) refuses every agent
+// change as before.
+func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || StrictHookContractResolution() {
+		return false
+	}
+	return current.CompatibilityStatus == HookCompatibilityKnown && strings.TrimSpace(current.ContractID) != ""
+}
+
 // AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
 // recorded when a DefenseClaw release last admitted the connector. A refusal
 // for an unchanged agent comes from the running release's own contract table,
