@@ -27,7 +27,7 @@ def test_helper_refuses_a_path_gateway_another_account_can_replace(tmp_path, mon
     shared.chmod(0o777)
     marker = tmp_path / "stub-ran"
     stub = shared / GATEWAY_BIN_NAME
-    stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    stub.write_text(f"#!/bin/sh\n: > '{marker}'\n")
     stub.chmod(0o755)
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
     monkeypatch.setenv("PATH", str(shared))
@@ -35,6 +35,12 @@ def test_helper_refuses_a_path_gateway_another_account_can_replace(tmp_path, mon
     with pytest.raises(config_inspect.ConfigInspectError, match="refusing to run"):
         config_inspect.inspect_v8_config("validate", config_path=str(tmp_path / "config.yaml"))
     assert not marker.exists()
+
+    # This account's own folder is used, also below a root-owned sticky /tmp.
+    shared.chmod(0o755)
+    with pytest.raises(config_inspect.ConfigInspectError, match="malformed JSON"):
+        config_inspect.inspect_v8_config("validate", config_path=str(tmp_path / "config.yaml"))
+    assert marker.exists()
 
 
 def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:

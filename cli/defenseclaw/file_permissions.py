@@ -668,7 +668,15 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
                 "gateway executable ancestor is not a directory",
                 code=UNSAFE_PATH_NOT_REGULAR_FILE,
             )
-        if parent_info.st_uid not in {0, current_uid} or stat.S_IMODE(parent_info.st_mode) & 0o022:
+        # A root-owned sticky directory such as /tmp is writable by everyone,
+        # but only an entry's owner can rename or remove it, so nobody else
+        # can replace this account's folder inside it (the gateway's own
+        # directory check allows it too). Without this, every config check
+        # failed for a home under /tmp.
+        root_sticky = parent_info.st_uid == 0 and parent_info.st_mode & stat.S_ISVTX
+        if parent_info.st_uid not in {0, current_uid} or (
+            stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky
+        ):
             raise UnsafePathError(
                 "gateway executable ancestor is writable by an untrusted principal",
                 code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
