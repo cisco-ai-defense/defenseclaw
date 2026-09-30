@@ -1,19 +1,19 @@
 ---
 title: Multi-connector
-description: One DefenseClaw gateway enforces guardrail policy for N hook connectors at once — each with its own mode, fail mode, HILT, block message, and rule pack — under guardrail.connectors. Add a connector with setup <connector> → "Add", and claw.mode flips to multi.
+description: Run one DefenseClaw gateway for several hook connectors, each with its own mode, fail mode and rule pack, and add or replace connectors.
 keywords:
   - DefenseClaw multi-connector
   - guardrail.connectors
-  - claw.mode multi
+  - DefenseClaw replace connector
   - DefenseClaw per-connector policy
   - defenseclaw guardrail --connector
 ---
 
-A single DefenseClaw gateway can enforce guardrail policy for **several hook connectors at once** — Codex, Claude Code, Antigravity, and the other hook-based agents — each with its own independent posture. This is the multi-connector model. It replaces the older "one active connector at a time" mental model: you no longer have to switch wiring to protect a second agent.
+A single DefenseClaw gateway can enforce guardrail policy for **several hook connectors at once** — Codex, Claude Code, Antigravity, and the other hook-based agents — each with its own independent posture. This is the multi-connector model. To protect a second agent, add it; you do not have to switch away from the first one.
 
 <Video
   src="multi-connector"
-  caption="One gateway governing Claude Code and Antigravity at once. These examples are tool calls, so each reaches its connector's documented synchronous PreToolUse gate: a benign `echo` flows through, a HIGH-severity `chmod 777` finding can request native confirmation, and a CRITICAL credential-read finding can return deny. Antigravity ask/deny authority does not extend to its other four lifecycle events. Every verdict is attributed per connector in the Splunk pane. The demo closes by deleting each agent's hook config and watching DefenseClaw's self-heal detect the tamper and reinstall the hooks automatically (connector-hook-tampered → connector-hook-repaired)."
+  caption="One gateway enforcing policy for Claude Code and Antigravity at the same time."
 />
 
 <Callout type="info">
@@ -25,9 +25,6 @@ Multi-connector is a **hook-connector** feature. The proxy-backed connectors (Op
 Each connector you add gets an entry under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`. The gateway resolves policy **per connector**: when a hook event arrives tagged with its connector source, the gateway looks up that connector's override block and falls back to the global `guardrail.*` values for anything the block leaves unset.
 
 ```yaml title="~/.defenseclaw/config.yaml (two connectors)"
-claw:
-  mode: multi                  # set automatically once >1 connector is active
-
 guardrail:
   enabled: true
   mode: action                 # global default — inherited by any connector that doesn't override
@@ -47,30 +44,41 @@ guardrail:
 
 Every field under a connector is optional. An unset field **inherits the global value**, so a connector block only needs to carry what differs.
 
-## `claw.mode` becomes `multi`
+## Add a connector
 
-`claw.mode` records which connector is "active" on a single-connector install. The moment a second connector is active, DefenseClaw sets `claw.mode: multi`. This sentinel also surfaces in telemetry: the OTel resource attribute `defenseclaw.claw.mode` reports `multi` so dashboards and SIEM rules can tell a fan-out gateway apart from a single-connector one. See [Configuration → guardrail.connectors](/docs/reference/configuration) for the full schema.
-
-## Adding a connector (Add vs Replace)
-
-Run the hook setup for the connector you want to add:
+Run the setup alias for the connector you want to add:
 
 ```bash
 defenseclaw setup codex
 ```
 
-If a different connector is already wired, the wizard asks whether to **Add** or **Replace**:
+When another hook connector is already configured, setup asks what to do:
 
-<Cards>
-  <Card title="Add" description="Keep the existing connector(s) wired and layer the new one in. The gateway now enforces both; claw.mode flips to multi. This is the multi-connector path." />
-  <Card title="Replace" description="Tear down the previous connector's wiring and make the new one the single active connector. Use this only when you no longer want the old connector wired." />
-</Cards>
+```text
+  DefenseClaw is already configured for: claudecode
+  You are setting up: codex
+    [a] Add     — run it alongside the existing connector(s) (multi-connector)
+    [r] Replace — switch to only this connector
+    [c] Cancel  — make no changes
+  Choose [a]:
+```
 
-Choose **Add** to build a multi-connector install. Each added connector starts from the global guardrail defaults; tune it afterward with the per-connector CLI (below).
+Add is the default. The existing connectors keep their settings, and the new one gets its own
+`guardrail.connectors.<name>` block. It starts from the global guardrail defaults. Tune it afterward with the
+per-connector CLI below.
+
+With `--yes` and no `--replace`, setup adds the connector without asking. Scripts that run
+`defenseclaw setup <connector> --yes` never remove other hook connectors.
+
+Use `--mode observe` or `--mode action` to set the new connector's mode during setup:
+
+```bash
+defenseclaw setup codex --mode observe
+```
 
 ### Stand up several at once with `defenseclaw init`
 
-The Add/Replace flow above is the **incremental** path — layer in one connector at a time. To stand up a multi-connector install in a single pass, use [`defenseclaw init`](/docs/get-started/quickstart): it auto-detects every installed hook connector, configures them **all in `observe`**, and asks you to name the action-mode subset in one question. Everything you have lands under `guardrail.connectors.<name>` in one go; tune individual connectors afterward with the per-connector CLI below.
+The Add flow above is the **incremental** path — layer in one connector at a time. To stand up a multi-connector install in a single pass, use [`defenseclaw init`](/docs/get-started/quickstart): it auto-detects every installed hook connector, configures them **all in `observe`**, and asks you to name the action-mode subset in one question. Everything you have lands under `guardrail.connectors.<name>` in one go; tune individual connectors afterward with the per-connector CLI below.
 
 For scripted or non-interactive setups, the same fan-out is available through two init-only flags — `--observe-all` (every detected hook connector in observe) and `--action-connectors codex,claudecode` (the named subset in action, composable with `--observe-all`):
 
@@ -81,6 +89,61 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 <Callout type="info">
 `init` only fans out to **hook** connectors. Proxy connectors (OpenClaw, ZeptoClaw) are detected but excluded from the observe-all set — they can't be multi peers — and `init` points you at `defenseclaw setup <proxy>` to configure them on their own.
 </Callout>
+
+## Replace a connector
+
+Replace removes the other hook connectors from DefenseClaw and leaves only the one you are setting up. Use it when
+a workstation moves from one agent to another and you do not want both protected.
+
+Choose **[r] Replace** at the prompt, or pass `--replace`:
+
+```bash
+defenseclaw setup codex --replace
+```
+
+Without `--yes`, `--replace` asks you to confirm before it removes the other connectors. Add `--yes` to skip the
+confirmation in scripts:
+
+```bash
+defenseclaw setup codex --replace --yes
+```
+
+The proxy connectors (OpenClaw and ZeptoClaw) cannot run next to other connectors. Setting up a hook connector on a
+host that only has a proxy connector asks for a plain confirmation and then replaces it.
+
+<Callout type="info">
+The audit database is shared by all connectors. Adding, replacing or removing a connector keeps the audit history,
+and each audit row keeps its connector name.
+</Callout>
+
+### Remove one connector
+
+To stop protecting one connector without setting up another, remove it:
+
+```bash
+defenseclaw setup remove codex
+```
+
+The gateway restarts and removes that connector's hooks. Pass `--no-restart` to restart it later.
+
+DefenseClaw refuses to remove the last connector, because the gateway would then protect nothing. Pass `--force` if
+that is what you want. DefenseClaw stays installed; use `defenseclaw uninstall` to remove it:
+
+```bash
+defenseclaw setup remove codex --force
+```
+
+To turn a connector off for a while and keep its settings, use `defenseclaw guardrail disable --connector codex`
+instead. See [Disabling](/docs/setup/guardrail/disabling).
+
+### Check the result
+
+```bash
+defenseclaw status
+defenseclaw doctor
+```
+
+`status` lists every active connector and its mode. `doctor` reports leftover hook or config problems.
 
 ## Per-connector overrides
 
@@ -149,7 +212,8 @@ create one.
 
 ## See also
 
-- [Changing connectors](/docs/setup/guardrail/switching-connectors) — add, reconfigure, remove, or replace connector wiring
-- [Setup Guardrail](/docs/setup/guardrail) — the central setup command and the Add/Replace prompt
+- [Quick aliases](/docs/setup/guardrail/aliases) — the setup alias for each connector and the shared flags
+- [Disabling](/docs/setup/guardrail/disabling) — turn a connector off and roll back its hooks
+- [Setup Guardrail](/docs/setup/guardrail) — the central setup command
 - [Reference → Configuration](/docs/reference/configuration) — the `guardrail.connectors` schema
 - [Observability](/docs/observability) — filtering telemetry by the `connector` dimension
