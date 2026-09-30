@@ -320,14 +320,19 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos rotate-cred
 The rotation moves every user to the new key before the key takes effect:
 
 1. **Check.** Nothing changes until the gateway reports that it serves the
-   current key alone and a fresh guardian reconcile leaves every enrolled
-   user current. A user the guardian cannot protect, including one whose own
-   home blocks it (`guardian_target_user_path`), stops the rotation with
-   `rotation_failed`. Fix that user or remove them from enrollment, then
-   rotate again; for an account that was deleted, `repair` removes its rows
-   at once. A user whose home is not available yet does not block the
-   rotation; the guardian gives them the new credentials when the home
-   appears.
+   current key alone and a fresh guardian reconcile leaves every user who
+   holds a credential current. A target the guardian cannot protect holds
+   a credential when it was protected before, because the gateway keeps
+   accepting the credentials the guardian wrote for it then. Such a target,
+   including one whose own home blocks it (`guardian_target_user_path`),
+   stops the rotation with `rotation_failed`. Fix that user or remove them
+   from enrollment, then rotate again. A target that holds no credential
+   does not stop the rotation. That covers an agent the guardian never
+   protected, such as a version without a verified hook contract
+   (`hook_contract_unverified`), an account that no longer exists, and a
+   home that is not available yet. The rotation lists these targets in
+   `changes` as skipped. The guardian gives them credentials from the new
+   key once it can protect them.
 2. **Stage.** The new key is written next to the current one. From then on
    the gateway accepts the credentials of both keys, and it must prove that
    it accepts each user's new credentials before any user is moved.
@@ -348,8 +353,9 @@ next lifecycle action (for example `reconcile`) completes a rotation that had
 already committed or rolls back one that had not, and reports
 `rotation_recovered`. The result names keys only by a prefix of their
 SHA-256. A rotation that committed lists in `changes` the new and the
-previous key and how many targets and users it moved. If you interrupt the
-command, it prints the `reconcile` command to run.
+previous key, how many targets and users it moved, and the targets it
+skipped. If you interrupt the command, it prints the `reconcile` command to
+run.
 
 What users see:
 
