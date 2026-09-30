@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,6 +75,9 @@ func TestKiroInstallPreSeedsItsEmbeddingModel(t *testing.T) {
 // interpreter leaves it to the harness: the step says so, writes nothing
 // (not the model directory either) and the build goes on.
 func TestZipModelInstallChecksEveryFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox shims run in the Linux sandbox image, not on native Windows")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 is required")
