@@ -234,10 +234,7 @@ func bakedSecret(files []connector.SandboxFile, extra map[string]string) string 
 		if v == "" {
 			continue
 		}
-		secret := slices.Contains(runFileSecretEnv, k)
-		if u, err := url.Parse(v); err == nil && urlCredential(u) {
-			secret = true
-		}
+		secret := slices.Contains(runFileSecretEnv, k) || CredentialURL(v)
 		if secret && filesCarry(files, v) {
 			return k
 		}
@@ -701,6 +698,16 @@ func mcpCredential(s connector.SandboxMCPServer) bool {
 		}
 	}
 	return false
+}
+
+// CredentialURL reports a value that is a URL carrying a credential
+// (urlCredential), such as a --env base URL with a user name and password
+// or a key in its query. The daemon refuses to bake one into a run image
+// (bakedSecret); the CLI withholds one from what it sends before the
+// create.
+func CredentialURL(v string) bool {
+	u, err := url.Parse(v)
+	return err == nil && urlCredential(u)
 }
 
 // urlCredential reports a URL that looks like it carries a credential:
