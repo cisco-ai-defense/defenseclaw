@@ -474,6 +474,14 @@ func TestUnblockRefusals(t *testing.T) {
 		!strings.Contains(got.Message, "www.example.org is not blocked") {
 		t.Fatalf("host that is not blocked = %+v", got)
 	}
+	// The large-upload block refuses hosts the policy itself allows, which
+	// only an unblock lifts: with it on, such a host is not "not blocked".
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.BlockLargeUploads = true })
+	if got := unblock(sandboxapi.UnblockRequest{Host: "files.example.net", Sandbox: "openbox"}); got.Code != sandboxapi.CodeAdminViolation ||
+		got.Violation == nil || got.Violation.Constraint != "openshell.admin.allow_unblock" || strings.Contains(got.Message, "is not blocked") {
+		t.Fatalf("host under the large-upload block = %+v", got)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.BlockLargeUploads = false })
 	if got := unblock(sandboxapi.UnblockRequest{Host: "www.example.net", Sandbox: "strictbox"}); got.Violation == nil ||
 		got.Violation.Constraint == "openshell.admin.allow_unblock" || !strings.Contains(got.Violation.Detail, "defenseclaw sandbox approvals") {
 		t.Fatalf("strict sandbox = %+v", got)

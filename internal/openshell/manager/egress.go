@@ -327,9 +327,11 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		return nil, err
 	}
 	if err := triage.CheckUnblock(eff, host); err != nil {
-		if unblocksOff(err) && eff.DecideEgress(host, 0).Allowed {
+		if unblocksOff(err) && !eff.Egress.BlockLargeUploads && eff.DecideEgress(host, 0).Allowed {
 			// Nothing to lift: the organization's refusal of unblocks
 			// would only send the user to the administrator for nothing.
+			// The large-upload block refuses hosts the policy allows, which
+			// only an unblock would lift, so under it the refusal stands.
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
 				"%s is not blocked: the sandbox policy lets the sandbox reach it, so there is nothing to unblock", host)
 		}
