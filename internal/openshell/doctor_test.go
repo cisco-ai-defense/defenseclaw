@@ -537,6 +537,34 @@ func TestDoctorChecks(t *testing.T) {
 			}},
 		{name: "gateway stopped", setup: func(f *doctorFixture) { unit("inactive", "enabled")(f); f.fake.SetHealth(false, "0.1.1") },
 			want: []checkWant{{"gateway-version", fail, "unhealthy"}}, fix: &fixWant{command: start, auto: true}},
+		// No gateway service to start: the fix is the install, which the
+		// doctor does not run (it offered `systemctl --user enable --now`,
+		// or on a Mac `brew services start` of a formula that is not
+		// installed, which fails).
+		{name: "gateway down without its service", setup: func(f *doctorFixture) {
+			service("LoadState=not-found\nActiveState=inactive\nSubState=dead\n", nil)(f)
+			health(errors.New("connection refused"))(f)
+		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
+			fix: &fixWant{command: install, manual: true, text: "install OpenShell, whose openshell-gateway service runs the gateway"}},
+		{name: "macOS gateway down without OpenShell", setup: func(f *doctorFixture) {
+			f.onBrew()
+			f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
+			f.found["openshell"] = false
+			f.runner.OnFunc("brew services", func(_ context.Context, c openshell.Command) ([]byte, error) {
+				f.t.Errorf("ran %v without the formula", c.Args)
+				return []byte("Error: Formula `openshell` is not installed."), errors.New("brew: exit status 1")
+			})
+			health(errors.New("connection refused"))(f)
+		}, want: []checkWant{{"gateway-version", fail, "connection refused"}},
+			fix: &fixWant{command: install, manual: true, text: "install OpenShell, whose nvidia/openshell/openshell service runs the gateway"},
+			then: func(t *testing.T, _ *doctorFixture, r *openshell.DoctorReport) {
+				outcomes, err := r.ApplyFixes(context.Background(), func(c openshell.Check) (bool, error) { return true, nil })
+				for _, o := range outcomes {
+					if o.ID == openshell.CheckIDGatewayVersion || o.Error != "" {
+						t.Fatalf("ApplyFixes = %+v, %v", outcomes, err)
+					}
+				}
+			}},
 		// A gateway that refuses DefenseClaw's credentials is registered
 		// again instead.
 		{name: "credentials refused", setup: health(&types.StatusError{Code: types.ErrorUnauthenticated, Message: "client certificate not trusted"}),
@@ -928,7 +956,9 @@ func TestDoctorApplyFixesConsent(t *testing.T) {
 	if err != nil || strings.Join(asked, ",") != "gateway-service,bind-mounts" {
 		t.Fatalf("asked about %v, %v", asked, err)
 	}
-	if len(outcomes) != 1 || outcomes[0].Applied || !strings.Contains(outcomes[0].Error, "Job failed") {
+	// The outcome carries the title the consent question names the check
+	// by, for the line that reports it.
+	if len(outcomes) != 1 || outcomes[0].Applied || !strings.Contains(outcomes[0].Error, "Job failed") || outcomes[0].Title != "Gateway service" {
 		t.Fatalf("outcomes = %+v", outcomes)
 	}
 	if st, _ := f.doctor.Gateway.Read(); st.BindMounts.Enabled() {

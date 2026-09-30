@@ -1188,6 +1188,28 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 }
 
+// TestDoctorFixNamesChecksAsItAsked: `doctor --fix` asked `Fix "Gateway":
+// start the gateway?` and then reported "✗ gateway-version: brew services
+// start …", naming the check by its id; the outcome lines name it by the
+// title the question used.
+func TestDoctorFixNamesChecksAsItAsked(t *testing.T) {
+	ta := newTestApp(t, "y\ny\n")
+	ta.IO.TTY = true
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDGatewayVersion)
+		c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering"
+		c.Fix = &openshell.Fix{Summary: "start the gateway", Automatic: true, Apply: func(context.Context) error {
+			return errors.New("brew services start nvidia/openshell/openshell: exit status 1")
+		}}
+		m := r.Get(openshell.CheckIDMTLS)
+		m.Status, m.Fix = openshell.StatusWarn, &openshell.Fix{Summary: "drop group write access", Automatic: true, Apply: func(context.Context) error { return nil }}
+	})
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true})
+	has(t, ta.output(), `Fix "Gateway": start the gateway? [Y/n]`, `✓ fixed "mTLS files"`,
+		`✗ could not fix "Gateway": brew services start nvidia/openshell/openshell: exit status 1`)
+	lacks(t, ta.output(), "gateway-version:", "fixed mtls-permissions")
+}
+
 // TestDoctorVerdict pins the doctor's last line: not "ready" while
 // sandboxes are turned off, and no image to build for a harness the
 // organization forbids.

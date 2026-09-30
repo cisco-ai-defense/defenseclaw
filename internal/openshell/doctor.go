@@ -209,9 +209,11 @@ func (r *DoctorReport) String() string {
 	return b.String()
 }
 
-// FixOutcome reports one ApplyFixes attempt.
+// FixOutcome reports one ApplyFixes attempt. Title is the check's, which
+// the consent question names it by.
 type FixOutcome struct {
 	ID      string `json:"id"`
+	Title   string `json:"title"`
 	Applied bool   `json:"applied"`
 	Error   string `json:"error,omitempty"`
 }
@@ -232,7 +234,7 @@ func (r *DoctorReport) ApplyFixes(ctx context.Context, consent func(Check) (bool
 		if !ok {
 			continue
 		}
-		o := FixOutcome{ID: c.ID}
+		o := FixOutcome{ID: c.ID, Title: c.Title}
 		if err := c.Fix.Apply(ctx); err != nil {
 			o.Error = err.Error()
 		} else {
@@ -895,14 +897,29 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 }
 
 // gatewayRecoveryFix restarts a gateway that runs but does not answer
-// (starting it again would do nothing) and starts one that is stopped.
+// (starting it again would do nothing) and starts one that is stopped. With
+// no gateway service to start (serviceMissing), OpenShell's installer is
+// what puts one there: `brew services start` of a formula that is not
+// installed fails ("Formula `openshell` is not installed").
 func (r *doctorRun) gatewayRecoveryFix() *Fix {
-	if r.service != nil && r.service.Active {
+	switch {
+	case r.serviceMissing() && r.report.OpenShellOutsideFormula():
+		return &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
+	case r.serviceMissing():
+		return &Fix{Summary: "install OpenShell, whose " + r.service.Unit + " service runs the gateway", Command: installOpenShellCommand}
+	case r.service != nil && r.service.Active:
 		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	}
 	start := r.startCommand()
 	return &Fix{Summary: "start the gateway", Command: start.String(), Automatic: true, Apply: r.runAndWait(start, true)}
 }
+
+// serviceMissing reports that the service manager has no gateway service:
+// the nvidia/openshell/openshell formula (macOS) or the openshell-gateway
+// user unit (Linux) is not installed, so DefenseClaw has none to start or
+// restart the gateway through, whether no gateway runs or one runs another
+// way. It is false when the service's state is unknown.
+func (r *doctorRun) serviceMissing() bool { return r.service != nil && !r.service.Installed }
 
 // credentialFailure reports an error from the gateway refusing
 // DefenseClaw's TLS credentials, or from the credentials themselves,

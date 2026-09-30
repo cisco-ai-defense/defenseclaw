@@ -550,6 +550,8 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, fail, "openshell-driver-vm is not installed")
 		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"))
+		// Not `brew services start` of the formula that is not installed.
+		wantOutsideFormulaFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"))
 	})
 }
 

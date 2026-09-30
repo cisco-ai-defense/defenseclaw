@@ -1341,7 +1341,12 @@ the sandbox ports, the DefenseClaw daemon, the sandbox hooks, the harness
 images, the shell wrappers and your organization's policy. Every failed
 check names its fix.
 `--fix` applies the fixes that need only your user (such as starting or
-restarting the gateway, or turning bind mounts on), after asking.
+restarting the gateway, or turning bind mounts on), after asking, and reports
+each one by the check's name, as its question does. With no gateway service
+installed (the `nvidia/openshell` formula on a Mac, the `openshell-gateway`
+user unit on Linux) it has no gateway to start: the **Gateway** check's fix
+is then `defenseclaw sandbox setup --install-openshell`, which `--fix` does
+not run.
 
 On a Mac the doctor also checks the MicroVM driver: `e2fsprogs` and the
 driver's signature for Apple's Hypervisor (**vm-driver**), that the gateway
