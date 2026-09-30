@@ -33,6 +33,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ from defenseclaw.connector_paths import (
     devin_hook_config_path,
     hermes_config_path,
     omnigent_config_path,
+    opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
 
@@ -1541,6 +1543,16 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
+        if loose := opencode_writable_plugin_folder([path]):
+            # The gateway will not install its plugin there and does not
+            # start; `setup opencode` would fail the same way.
+            return StepResult(
+                "Connector",
+                "warn",
+                f"{loose} can be written by other accounts, so the gateway does not install the "
+                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
+                f"chmod go-w {shlex.quote(loose)}",
+            )
         return StepResult(
             "Connector",
             "warn",

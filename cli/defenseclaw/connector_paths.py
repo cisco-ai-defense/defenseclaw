@@ -3034,6 +3034,30 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
     return _dedup(files)
 
 
+def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
+    """Return a folder of an OpenCode plugin destination that group or other can write.
+
+    The gateway refuses to install its plugin there and does not start.
+    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
+    as 0775. Only the folders inside the home directory are checked.
+    """
+    if os.name == "nt":
+        return ""
+    home = os.path.realpath(os.path.expanduser("~"))
+    for plugin_path in plugin_paths:
+        folder = os.path.dirname(os.path.realpath(plugin_path))
+        while folder.startswith(home + os.sep):
+            try:
+                mode = os.lstat(folder).st_mode
+            except OSError:
+                folder = os.path.dirname(folder)
+                continue
+            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
+                return folder
+            folder = os.path.dirname(folder)
+    return ""
+
+
 def _opencode_config_dir() -> str:
     raw = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
     if raw:

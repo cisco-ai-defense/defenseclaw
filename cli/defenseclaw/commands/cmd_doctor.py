@@ -76,6 +76,7 @@ from defenseclaw.connector_paths import (
     hermes_profile_unsupported_reason,
     normalize,
     omnigent_config_path,
+    opencode_writable_plugin_folder,
     rule_paths,
 )
 from defenseclaw.context import AppContext, pass_ctx
@@ -4197,28 +4198,6 @@ def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
 
 
-def _opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
-    """Return a folder of an OpenCode plugin destination that group or other can write.
-
-    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
-    as 0775. Only the folders inside the home directory are checked.
-    """
-    if os.name == "nt":
-        return ""
-    home = os.path.realpath(os.path.expanduser("~"))
-    for plugin_path in plugin_paths:
-        folder = os.path.dirname(os.path.realpath(plugin_path))
-        while folder.startswith(home + os.sep):
-            try:
-                mode = os.lstat(folder).st_mode
-            except OSError:
-                folder = os.path.dirname(folder)
-                continue
-            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
-                return folder
-            folder = os.path.dirname(folder)
-    return ""
-
 
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     """Report whether the managed OpenCode bridge actually loaded.
@@ -5436,7 +5415,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
     if not present:
-        if connector == "opencode" and (loose := _opencode_writable_plugin_folder(candidates)):
+        if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
             # The gateway refuses to publish the plugin into a folder other
             # accounts can write, and stops; the other rows only showed the
             # gateway down.
