@@ -186,6 +186,9 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	}
 	// The organization's refusals come first; then what this gateway
 	// cannot do, and what the run needs from this terminal.
+	if err := a.dockerDesktopRefusal(ctx, drv); err != nil {
+		return err
+	}
 	if len(o.Context) > 0 && !drv.HostMounts {
 		return fmt.Errorf("--context mounts a folder into the sandbox read-only, and %s; run without --context (the agent works on a copy of this folder only)",
 			mountRefusal(drv))
@@ -636,6 +639,33 @@ func (a *App) checkNameFree(ctx context.Context, api API, name string, headless 
 		return nil
 	}
 	return apiError(err)
+}
+
+// dockerDesktopRefusal refuses a run, before its image is built or its
+// sandbox is made, on a Mac whose gateway runs the docker driver on Docker
+// Desktop: its sandboxes run on the kernel of Docker Desktop's Linux VM,
+// which has no Landlock, so OpenShell's supervisor fails every one of them
+// (the doctor's Landlock and compute driver checks say the same). It asks
+// Docker only in that case, one `docker info` and no Landlock probe. A
+// Docker VM that may have Landlock (Colima, OrbStack), and a Docker that
+// does not answer, are left to try, as on Linux.
+func (a *App) dockerDesktopRefusal(ctx context.Context, d openshell.Driver) error {
+	if a.GOOS != "darwin" || d.Name != openshell.DriverDocker {
+		return nil
+	}
+	if engine, err := a.DockerEngine(ctx); err != nil || !openshell.IsDockerDesktop(engine) {
+		return nil
+	}
+	return withNextStep(errors.New("no sandbox can start on this gateway: it runs sandboxes on the docker driver, and Docker Desktop's Linux VM "+
+		"has no Landlock, which OpenShell sandboxes need; nothing was built or created"),
+		"run sandboxes in OpenShell MicroVMs, which have their own kernel: `"+CommandName+" setup` switches the gateway to them (or `"+
+			CommandName+" doctor --fix`; details: "+setupTroubleshootingURL+")")
+}
+
+// withNextStep puts DefenseClaw's way on after err on a line of its own
+// ("  → …"), where it is not lost at the end of what OpenShell said.
+func withNextStep(err error, step string) error {
+	return fmt.Errorf("%w\n  → %s", err, step)
 }
 
 // landlockHint completes, on macOS, a sandbox that ended in the error

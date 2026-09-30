@@ -398,8 +398,10 @@ deleted.
   offers `brew install e2fsprogs`, and writes `compute_driver = "vm"` and the
   sandbox identity (your uid and gid) in one plan with one restart;
   `sandbox doctor` gains the `vm-driver`, `vm-identity` and `vm-resources`
-  checks. On a Mac still on the Docker driver, a run that fails OpenShell's
-  Landlock check names the switch.
+  checks. On a Mac still on the Docker driver, `sandbox run` on Docker
+  Desktop refuses before it builds an image or makes a sandbox (one `docker
+  info`), and a run on another Docker VM that fails OpenShell's Landlock
+  check names the switch too.
 - With OpenShell's release binaries outside Homebrew, a gateway that answers
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,

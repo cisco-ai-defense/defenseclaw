@@ -586,6 +586,24 @@ func TestDoctorFollowsTheDriverTheGatewayRuns(t *testing.T) {
 	expectCheck(t, r, openshell.CheckIDGatewayDriver, openshell.StatusSkip, "")
 }
 
+// DockerEngineOS is the one `docker info` a run on a docker-driver Mac
+// makes to tell Docker Desktop (refused up front) from another Docker VM.
+func TestDockerEngineOS(t *testing.T) {
+	r := &openshelltest.Runner{}
+	r.On("docker info --format {{.OperatingSystem}}", "Docker Desktop\n", nil)
+	got, err := openshell.DockerEngineOS(context.Background(), r)
+	if err != nil || got != "Docker Desktop" || !openshell.IsDockerDesktop(got) {
+		t.Fatalf("DockerEngineOS = %q, %v", got, err)
+	}
+	r.On("docker info", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n", errors.New("exit status 1"))
+	if got, err := openshell.DockerEngineOS(context.Background(), r); err == nil || got != "" || !strings.Contains(err.Error(), "Cannot connect") {
+		t.Fatalf("DockerEngineOS of a Docker that does not answer = %q, %v", got, err)
+	}
+	if openshell.IsDockerDesktop("Ubuntu 24.04.2 LTS") {
+		t.Fatal("Colima's engine taken for Docker Desktop")
+	}
+}
+
 // TestDoctorOnADockerMac: on a Mac whose gateway runs the docker driver,
 // sandboxes run on the Docker VM's kernel. Without Landlock there the
 // driver check fails with a fix that switches the gateway to MicroVMs,

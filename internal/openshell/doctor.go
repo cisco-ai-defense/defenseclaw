@@ -646,7 +646,7 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 	}
 	r.docker = true
 	r.report.DockerVersion, r.report.DockerRootDir = info.ServerVersion, info.DockerRootDir
-	r.desktop = strings.Contains(info.OperatingSystem, "Docker Desktop")
+	r.desktop = IsDockerDesktop(info.OperatingSystem)
 	c.Detail = fmt.Sprintf("Docker %s (%s)", info.ServerVersion, info.OperatingSystem)
 	major, _ := strconv.Atoi(strings.SplitN(info.ServerVersion, ".", 2)[0])
 	switch {

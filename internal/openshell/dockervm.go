@@ -109,6 +109,23 @@ func dockerVMLandlock(ctx context.Context, run Runner, images []string) (abi int
 	return 0, kernel, fmt.Errorf("landlock_create_ruleset failed with errno %s", strings.Join(answer[1:], " "))
 }
 
+// DockerEngineOS is the operating system `docker info` reports for the
+// engine the docker CLI talks to: "Docker Desktop" on Docker Desktop, the
+// VM's distribution under Colima. It is one short call, with none of the
+// Landlock probe's container.
+func DockerEngineOS(ctx context.Context, run Runner) (string, error) {
+	out, err := run.Output(ctx, Command{Name: "docker", Args: []string{"info", "--format", "{{.OperatingSystem}}"}, Timeout: 15 * time.Second})
+	if err != nil {
+		return "", fmt.Errorf("docker info: %v: %s", err, lastLine(out))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// IsDockerDesktop reports an engine operating system (DockerEngineOS, or
+// docker info's OperatingSystem) of Docker Desktop, whose Linux VM kernel
+// (linuxkit) is built without Landlock.
+func IsDockerDesktop(engineOS string) bool { return strings.Contains(engineOS, "Docker Desktop") }
+
 // lastLine is the last non-empty line of a command's output.
 func lastLine(out []byte) string {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")

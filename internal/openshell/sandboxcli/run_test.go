@@ -429,6 +429,50 @@ func TestRunSaysWhyTheSandboxDidNotStart(t *testing.T) {
 	}
 }
 
+// On a Mac whose gateway ran the docker driver on Docker Desktop, `sandbox
+// run` built the harness image and made a sandbox before OpenShell's
+// supervisor failed it on the Landlock the VM does not have, a certain
+// failure (the Docker driver check of the #1019 retest). It is refused up
+// front now, with the doctor's way on, on a line of its own; another Docker
+// VM, one that does not answer, and Linux are left to try as before.
+func TestRunRefusesDockerDesktopUpFront(t *testing.T) {
+	const refusal = "no sandbox can start on this gateway: it runs sandboxes on the docker driver, and Docker Desktop's Linux VM has no Landlock, " +
+		"which OpenShell sandboxes need; nothing was built or created\n" +
+		"  → run sandboxes in OpenShell MicroVMs, which have their own kernel: `defenseclaw sandbox setup` switches the gateway to them " +
+		"(or `defenseclaw sandbox doctor --fix`; details: " + setupTroubleshootingURL + ")"
+	for _, c := range []struct {
+		goos, driver, engine string
+		refused              bool
+		asked                int
+	}{
+		{"darwin", "docker", "Docker Desktop", true, 1},
+		{"darwin", "", "Docker Desktop", true, 1}, // a daemon too old to name its driver drove docker
+		{"darwin", "docker", "Ubuntu 24.04.2 LTS", false, 1},
+		{"darwin", "docker", "", false, 1},
+		{"darwin", "vm", "Docker Desktop", false, 0},
+		{"linux", "docker", "Docker Desktop", false, 0},
+	} {
+		ta := newTestApp(t, "")
+		ta.GOOS, ta.dockerEngine = c.goos, c.engine
+		ta.daemon.status.Gateway.Driver = c.driver
+		// A run let through ends at the create.
+		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeUpstream, Message: "create reached"}
+		err := ta.Run(bg, RunOptions{Harness: "claude"})
+		creates := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes)
+		switch {
+		case c.refused && (err == nil || err.Error() != refusal):
+			t.Fatalf("%+v: Run = %v\nwant %s", c, err, refusal)
+		case c.refused && (len(creates) != 0 || len(ta.copy.steps) != 0 || strings.Contains(ta.output(), "Starting")):
+			t.Fatalf("%+v: a refused run created %d sandboxes and staged %v:\n%s", c, len(creates), ta.copy.steps, ta.output())
+		case !c.refused && (err == nil || !strings.HasPrefix(err.Error(), "create reached") || len(creates) != 1):
+			t.Fatalf("%+v: Run = %v (%d creates), want it to reach the create", c, err, len(creates))
+		}
+		if ta.dockerAsked != c.asked {
+			t.Fatalf("%+v: docker asked %d times, want %d", c, ta.dockerAsked, c.asked)
+		}
+	}
+}
+
 func TestRunNestedRunsNatively(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.env["DEFENSECLAW_SANDBOX_ID"] = "sb-1"

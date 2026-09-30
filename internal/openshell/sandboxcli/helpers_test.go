@@ -830,6 +830,10 @@ type testApp struct {
 	// diskProbed the path it was last asked about.
 	diskFree   uint64
 	diskProbed string
+	// dockerEngine is the operating system App.DockerEngine reports ("":
+	// not Docker Desktop), and dockerAsked how often it was asked.
+	dockerEngine string
+	dockerAsked  int
 }
 
 // newTestApp is an App wired to fakes, whose daemon holds sandboxes and
@@ -884,7 +888,11 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		WSL:        func() bool { return false },
 		Geteuid:    func() int { return 1000 },
 		DiskFree:   func(p string) (uint64, error) { ta.diskProbed = p; return ta.diskFree, nil },
-		Sleep:      func(context.Context, time.Duration) error { return nil },
+		DockerEngine: func(context.Context) (string, error) {
+			ta.dockerAsked++
+			return ta.dockerEngine, nil
+		},
+		Sleep: func(context.Context, time.Duration) error { return nil },
 		OpenShell: func(context.Context) (openshell.Client, *openshell.Registration, error) {
 			return nil, nil, io.ErrClosedPipe
 		},
