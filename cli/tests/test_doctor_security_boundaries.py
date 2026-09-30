@@ -542,6 +542,11 @@ def test_component_diagnosis_gate_and_lifecycle_use_one_controller(
         )
 
     monkeypatch.setattr(cmd_version.subprocess, "check_output", check_output)
+    monkeypatch.setattr(
+        cmd_version,
+        "run_pinned_executable",
+        lambda argv, **_kwargs: SimpleNamespace(stdout=check_output(argv)),
+    )
     executed: list[tuple[str, str]] = []
 
     def run(argv, **_kwargs):
@@ -648,6 +653,11 @@ def test_action_rechecks_current_controller_after_running_record_exits(
         return f"defenseclaw-gateway version {version}\n"
 
     monkeypatch.setattr(cmd_version.subprocess, "check_output", check_output)
+    monkeypatch.setattr(
+        cmd_version,
+        "run_pinned_executable",
+        lambda argv, **_kwargs: SimpleNamespace(stdout=check_output(argv)),
+    )
     restart = Mock(return_value=True)
     monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", restart)
 

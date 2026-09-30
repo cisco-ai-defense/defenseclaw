@@ -43,6 +43,28 @@ def test_helper_refuses_a_path_gateway_another_account_can_replace(tmp_path, mon
     assert marker.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable custody")
+def test_helper_runs_the_checked_file_not_a_path_swapped_after_the_check(tmp_path, monkeypatch) -> None:
+    """The helper ran its checked path again, so a swap right after the check ran another file (#643)."""
+    marker = tmp_path / "stub-ran"
+    stub = tmp_path / "stub"
+    stub.write_text(f"#!/bin/sh\n: > '{marker}'\n")
+    stub.chmod(0o755)
+    gateway = tmp_path / "defenseclaw-gateway"
+    gateway.write_text("#!/bin/sh\nexit 0\n")
+    gateway.chmod(0o755)
+
+    def checked_then_swapped() -> str:
+        gateway.unlink()
+        gateway.symlink_to(stub)
+        return str(gateway)
+
+    monkeypatch.setattr(config_inspect, "resolve_trusted_gateway_binary", checked_then_swapped)
+    with pytest.raises(config_inspect.ConfigInspectError):
+        config_inspect.inspect_v8_config("validate", config_path=str(tmp_path / "config.yaml"))
+    assert not marker.exists()
+
+
 def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
     payload = {
         "wire_version": 2,
@@ -57,7 +79,7 @@ def test_effective_bridge_uses_versioned_go_helper_without_shell() -> None:
     }
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="/opt/bin/defenseclaw-gateway"),
-        patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=json.dumps(payload))) as run,
+        patch.object(config_inspect, "run_pinned_executable", return_value=_completed(stdout=json.dumps(payload))) as run,
     ):
         result = config_inspect.inspect_v8_config(
             "effective",
@@ -99,8 +121,8 @@ def test_explicit_target_gateway_bypasses_installed_binary_resolution() -> None:
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary") as resolve,
         patch.object(
-            config_inspect.subprocess,
-            "run",
+            config_inspect,
+            "run_pinned_executable",
             return_value=_completed(stdout=json.dumps(payload)),
         ) as run,
     ):
@@ -120,7 +142,7 @@ def test_bridge_rejects_protocol_drift_and_never_echoes_helper_stdout() -> None:
     hidden = "DO-NOT-ECHO-SECRET"
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
-        patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=hidden)),
+        patch.object(config_inspect, "run_pinned_executable", return_value=_completed(stdout=hidden)),
         pytest.raises(config_inspect.ConfigInspectError) as caught,
     ):
         config_inspect.inspect_v8_config("validate", config_path="config.yaml")
@@ -133,7 +155,7 @@ def test_bridge_rejects_protocol_drift_and_never_echoes_helper_stdout() -> None:
     }
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
-        patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=json.dumps(incompatible))),
+        patch.object(config_inspect, "run_pinned_executable", return_value=_completed(stdout=json.dumps(incompatible))),
         pytest.raises(config_inspect.ConfigInspectError, match="protocol is incompatible"),
     ):
         config_inspect.inspect_v8_config("validate", config_path="config.yaml")
@@ -151,8 +173,8 @@ def test_validation_refusal_preserves_exact_safe_field_and_reason() -> None:
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(
-            config_inspect.subprocess,
-            "run",
+            config_inspect,
+            "run_pinned_executable",
             return_value=_completed(stdout=json.dumps(failure), stderr=secret, returncode=1),
         ),
         pytest.raises(config_inspect.ConfigInspectError) as caught,
@@ -177,8 +199,8 @@ def test_validation_refusal_rejects_multiline_structured_diagnostic() -> None:
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(
-            config_inspect.subprocess,
-            "run",
+            config_inspect,
+            "run_pinned_executable",
             return_value=_completed(stdout=json.dumps(failure), stderr="", returncode=1),
         ),
         pytest.raises(config_inspect.ConfigInspectError) as caught,
@@ -199,8 +221,8 @@ def test_bridge_missing_binary_and_timeout_are_actionable() -> None:
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.object(
-            config_inspect.subprocess,
-            "run",
+            config_inspect,
+            "run_pinned_executable",
             side_effect=subprocess.TimeoutExpired(["gateway"], timeout=15),
         ),
         pytest.raises(config_inspect.ConfigInspectError, match="timed out"),
@@ -225,8 +247,8 @@ def test_validation_environment_overrides_are_process_only_and_value_safe() -> N
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
         patch.dict(config_inspect.os.environ, {"PRESERVED": "ambient"}, clear=True),
         patch.object(
-            config_inspect.subprocess,
-            "run",
+            config_inspect,
+            "run_pinned_executable",
             return_value=_completed(stdout=json.dumps(payload)),
         ) as run,
     ):
@@ -270,8 +292,8 @@ def test_validation_environment_drops_execution_control_from_ambient_and_overrid
             clear=True,
         ),
         patch.object(
-            config_inspect.subprocess,
-            "run",
+            config_inspect,
+            "run_pinned_executable",
             return_value=_completed(stdout=json.dumps(payload)),
         ) as run,
     ):
@@ -305,7 +327,7 @@ def test_invalid_validation_environment_never_starts_helper_or_echoes_value(
 ) -> None:
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
-        patch.object(config_inspect.subprocess, "run") as run,
+        patch.object(config_inspect, "run_pinned_executable") as run,
         pytest.raises(config_inspect.ConfigInspectError) as caught,
     ):
         config_inspect.inspect_v8_config(
@@ -321,7 +343,7 @@ def test_reference_and_schema_use_embedded_go_artifacts() -> None:
     schema = {"$schema": "https://json-schema.org/draft/2020-12/schema", "$defs": {"observability": {}}}
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
-        patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout=json.dumps(schema))) as run,
+        patch.object(config_inspect, "run_pinned_executable", return_value=_completed(stdout=json.dumps(schema))) as run,
     ):
         rendered = config_inspect.config_v8_schema()
     assert json.loads(rendered) == schema
@@ -329,7 +351,7 @@ def test_reference_and_schema_use_embedded_go_artifacts() -> None:
 
     with (
         patch.object(config_inspect, "resolve_trusted_gateway_binary", return_value="gateway"),
-        patch.object(config_inspect.subprocess, "run", return_value=_completed(stdout="# reference\n")) as run,
+        patch.object(config_inspect, "run_pinned_executable", return_value=_completed(stdout="# reference\n")) as run,
     ):
         assert config_inspect.config_v8_reference("yaml") == "# reference\n"
     assert run.call_args.args[0] == [

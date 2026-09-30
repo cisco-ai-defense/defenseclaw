@@ -41,6 +41,7 @@ import click
 import defenseclaw
 from defenseclaw import gateway, ux
 from defenseclaw.paths import bundled_extensions_dir
+from defenseclaw.pinned_exec import run_pinned_executable
 
 
 # Matches the semantic version format we ship (MAJOR.MINOR.PATCH plus
@@ -97,7 +98,7 @@ def _gateway_component() -> Component:
     return _gateway_component_for_binary(gateway.resolve_gateway_binary())
 
 
-def _gateway_component_for_binary(bin_path: str | None) -> Component:
+def _gateway_component_for_binary(bin_path: str | None, *, pinned: bool = False) -> Component:
     """Interrogate one exact gateway binary selected by a trusted caller.
 
     Doctor lifecycle compatibility checks use this entrypoint so the version
@@ -114,12 +115,24 @@ def _gateway_component_for_binary(bin_path: str | None) -> Component:
         )
 
     try:
-        out = subprocess.check_output(
-            [bin_path, "--version"],
-            stderr=subprocess.STDOUT,
-            timeout=5,
-            text=True,
-        )
+        if pinned:
+            # Doctor probes the controller its repair would run: run the
+            # checked file itself, not whatever the path names by then.
+            out = run_pinned_executable(
+                [bin_path, "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=5,
+                text=True,
+                check=True,
+            ).stdout
+        else:
+            out = subprocess.check_output(
+                [bin_path, "--version"],
+                stderr=subprocess.STDOUT,
+                timeout=5,
+                text=True,
+            )
     except subprocess.TimeoutExpired:
         return Component(
             name="gateway",

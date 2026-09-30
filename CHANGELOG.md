@@ -145,6 +145,9 @@ rest also reach per-user installs.
   a binary in a folder any account could write was run five times per
   `doctor --fix`. `DEFENSECLAW_GATEWAY_BIN` is used as it is. The doctor
   repair names such a binary instead of reporting `binary not found`.
+  These helpers and doctor's gateway version check now run the checked
+  file itself, as the lifecycle commands do, so a path swapped right after
+  the check is not run.
 - **Doctor's own audit record no longer goes to another account's
   listener.** Doctor's checks refused to send the gateway token to a process
   that is not the verified gateway, but the action record it writes at the
