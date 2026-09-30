@@ -181,8 +181,15 @@ func TestSetupUsesAGatewayRunAnotherWay(t *testing.T) {
 				if len(ta.gateway.written) != 1 || !ta.gateway.written[0].Manual {
 					t.Fatalf("written = %+v", ta.gateway.written)
 				}
+				// No sandbox runs (TestSetupSaysTheRestartYouMakeStopsSandboxes
+				// names running ones).
+				stops := "restarting it stops every sandbox on it\n"
+				if mac {
+					stops = "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first " +
+						"(`defenseclaw sandbox stop NAME`, which flushes its disk), or what it wrote since its last sync is lost\n"
+				}
 				has(t, out, "✓ gateway configuration written; it takes effect when you restart the gateway\n",
-					"⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it)\n")
+					"⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "+stops)
 				if p := ta.gateway.planned[0]; mac && (p.ComputeDriver != openshell.DriverVM || p.VMIdentity == nil) || !mac && (!p.EnableBindMounts || p.Env[openshell.EnvTelemetryEnabled] != "false") {
 					t.Fatalf("plan = %+v", p)
 				}
@@ -253,6 +260,61 @@ func TestSetupSaysAnUnwrittenChangeNeedsSetup(t *testing.T) {
 			lacks(t, out, "once it restarts on them", "so it runs the MicroVM driver", "so it runs on the change above")
 		})
 	}
+}
+
+// TestSetupSaysTheRestartYouMakeStopsSandboxes (fu2 review 5): setup
+// writes a change for a gateway run by hand and leaves its restart to the
+// user, but neither its plan nor its last line said that the restart stops
+// every sandbox on the gateway, and on a Mac's MicroVM gateway a sandbox
+// stopped without a flush loses what it wrote since its last sync (the
+// flush DefenseClaw's own restarts make first). Both say so now, and the
+// last line names the sandboxes running on it.
+func TestSetupSaysTheRestartYouMakeStopsSandboxes(t *testing.T) {
+	for _, mac := range []bool{true, false} {
+		goos, input := "darwin", "\n"
+		if !mac {
+			// The mounts and telemetry questions come first.
+			goos, input = "linux", "\n\n\n"
+		}
+		t.Run(goos, func(t *testing.T) {
+			ta := setupApp(t, input, "", false)
+			ta.GOOS = goos
+			ta.HostDoctor = unmanagedReport(mac, true)
+			ta.gateway.applyRes = &openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: ta.ConfigPath}}}
+			ta.App.Gateway = onDriver{ta.gateway, map[bool]openshell.ComputeDriver{true: openshell.DriverVM, false: ""}[mac]}
+			runningOn(t, ta, 2)
+			ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+			out := ta.output()
+			const last = "⚠ restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); "
+			if !mac {
+				has(t, out, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it\n",
+					last+"restarting it stops every sandbox on it, and 2 sandboxes run on it now (dc-claude-theirs-a, dc-claude-theirs-b)\n")
+				lacks(t, out, "flushes")
+				return
+			}
+			has(t, out, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: first stop the MicroVM sandboxes "+
+				"running on it with `defenseclaw sandbox stop NAME`, which flushes their disks, or what they wrote since their last sync is lost\n",
+				last+"restarting it stops every sandbox on it: first stop the MicroVM sandboxes running on it (dc-claude-theirs-a, dc-claude-theirs-b) "+
+					"with `defenseclaw sandbox stop NAME`, which flushes their disks, or what they wrote since their last sync is lost\n")
+			if ta.gateway.restarts != 0 || ta.gateway.applied != 0 || len(ta.gateway.written) != 1 {
+				t.Fatalf("restarts %d, applied %d, written %d", ta.gateway.restarts, ta.gateway.applied, len(ta.gateway.written))
+			}
+		})
+	}
+}
+
+// onDriver is a gateway whose configuration selects driver, as Plan says.
+type onDriver struct {
+	*fakeGateway
+	driver openshell.ComputeDriver
+}
+
+func (g onDriver) Plan(ctx context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error) {
+	plan, err := g.fakeGateway.Plan(ctx, ch)
+	if err == nil && ch.ComputeDriver != "" {
+		plan.ComputeDriver, plan.FromDriver = ch.ComputeDriver, g.driver
+	}
+	return plan, err
 }
 
 // TestTeardownRestoresTheFilesOfAGatewayRunAnotherWay: the gateway files

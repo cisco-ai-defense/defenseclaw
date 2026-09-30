@@ -450,7 +450,11 @@ deleted.
   asked about as `Write this change? DefenseClaw cannot restart this
   gateway: …`, written without a restart, and ends with `restart the
   OpenShell gateway yourself, the way you started it, so it runs on the
-  change above`; teardown restores those files the same way. Until that
+  change above`, adding that the restart stops every sandbox on the
+  gateway and, on the MicroVM driver, to first stop the running ones it
+  names with `defenseclaw sandbox stop NAME`, which flushes their disks
+  (DefenseClaw cannot flush them before a restart it does not make);
+  teardown restores those files the same way. Until that
   restart the doctor's bind-mounts, telemetry and vm-identity checks warn
   that the gateway has not been restarted since the change (on Linux the
   gateway's start comes from `pgrep` and `ps`, as no unit reports it), and

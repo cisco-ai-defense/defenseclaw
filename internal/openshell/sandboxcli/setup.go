@@ -588,7 +588,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			CommandName + " run " + cmd + "`")
 		return nil
 	case restartYourself:
-		a.warn("restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it)")
+		// No flush comes first, as with a restart of DefenseClaw's
+		// (consentGatewayRestart): the sandboxes are the user's to stop.
+		a.warn("restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); " +
+			a.manualRestartStops(ctx, rep.Driver == openshell.DriverVM, nil))
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil

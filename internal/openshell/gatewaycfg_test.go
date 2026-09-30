@@ -604,9 +604,28 @@ func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
 	}
 	plan.Manual = true
 	text := plan.String()
-	if !strings.Contains(text, "then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it)") ||
-		strings.Contains(text, "systemctl") {
+	if !strings.Contains(text, "then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it); "+
+		"restarting it stops every sandbox on it\n") || strings.Contains(text, "systemctl") {
 		t.Fatalf("plan:\n%s", text)
+	}
+	// The restart of a MicroVM gateway it does not make, DefenseClaw
+	// cannot flush first: the plan says to stop its sandboxes, which
+	// flushes them (fu2 review 5). A switch from docker stops docker
+	// sandboxes, which keep what they wrote.
+	files := []*openshell.FileChange{{Path: "/cfg/gateway.toml", Summary: []string{"sandbox_uid = 501"}}}
+	for _, tc := range []struct {
+		from, to openshell.ComputeDriver
+		want     string
+	}{
+		{openshell.DriverVM, openshell.DriverVM, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: " +
+			"first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME`, which flushes their disks, or what they wrote since their last sync is lost\n"},
+		{openshell.DriverDocker, openshell.DriverVM, "on the vm compute driver (DefenseClaw cannot restart it), which stops every sandbox on it; " +
+			"sandboxes made on the docker driver cannot start again"},
+	} {
+		p := &openshell.GatewayPlan{Files: files, Manual: true, ComputeDriver: tc.to, FromDriver: tc.from}
+		if text := p.String(); !strings.Contains(text, tc.want) || tc.from == openshell.DriverDocker && strings.Contains(text, "flushes") {
+			t.Fatalf("%s to %s plan:\n%s", tc.from, tc.to, text)
+		}
 	}
 	res, err := f.cfg.Write(context.Background(), plan)
 	if err != nil || res.Restarted || len(res.Files) != 2 || f.restarts() != 0 || f.flushes != 0 || f.probes != 2 {

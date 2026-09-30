@@ -698,6 +698,13 @@ type GatewayPlan struct {
 	Manual bool `json:"manual,omitempty"`
 }
 
+// manualRestartFlushFirst is what to do before restarting by hand a
+// gateway on the MicroVM driver that no gateway service runs (a Manual
+// plan): the restart stops its sandboxes without the flush DefenseClaw's
+// restarts make first (FlushSandboxes), and `sandbox stop` flushes.
+const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME`, which flushes their disks, " +
+	"or what they wrote since their last sync is lost"
+
 // switchesDriver reports whether the plan moves the gateway to another
 // compute driver.
 func (p *GatewayPlan) switchesDriver() bool {
@@ -734,12 +741,20 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "      %s\n", strings.TrimRight(l, " "))
 		}
 	}
+	// The restart of a gateway no service runs is its user's: DefenseClaw
+	// cannot flush the MicroVM sandboxes first, which a stop without a
+	// flush empties of what they wrote since their last sync.
+	flushFirst := ""
+	if p.FromDriver == DriverVM {
+		flushFirst = ": " + manualRestartFlushFirst
+	}
 	switch {
 	case p.Manual && p.switchesDriver():
-		fmt.Fprintf(&b, "  then you restart the gateway, the way you started it, on the %s compute driver (DefenseClaw cannot restart it); "+
-			"sandboxes made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.ComputeDriver, p.FromDriver)
+		fmt.Fprintf(&b, "  then you restart the gateway, the way you started it, on the %s compute driver (DefenseClaw cannot restart it), which stops every sandbox on it%s; "+
+			"sandboxes made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.ComputeDriver, flushFirst, p.FromDriver)
 	case p.Manual:
-		b.WriteString("  then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it)\n")
+		b.WriteString("  then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it" +
+			flushFirst + "\n")
 	case p.switchesDriver():
 		fmt.Fprintf(&b, "  then restart the gateway (%s) on the %s compute driver; running sandboxes stop, and sandboxes "+
 			"made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.Restart, p.ComputeDriver, p.FromDriver)
