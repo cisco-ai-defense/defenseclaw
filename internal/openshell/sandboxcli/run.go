@@ -1757,7 +1757,12 @@ func resumeGrants(o RunOptions, sb *sandboxapi.Sandbox) []string {
 
 // uploadBlockText is the banner's Uploads line: what the large-upload block
 // (egress.block_large_uploads) cuts, when it is on in the effective policy,
-// else "". The network label ("open + blocklist") says nothing of it.
+// else "". The network label ("open + blocklist") says nothing of it. The
+// proxy only reports an upload to a host that is exempt from the block
+// (egress.exemptFromUploadBlock): one the user unblocked, one on an allow
+// list (openshell.egress.allow, a custom or required pack's egress.allow),
+// or one on the organization's allowed list (egress.allow_only), which the
+// line names when it lists hosts.
 func uploadBlockText(policy []sandboxapi.Setting) string {
 	block, ok := settingOf(policy, "egress.block_large_uploads")
 	if !ok || block.Value != "true" {
@@ -1767,11 +1772,15 @@ func uploadBlockText(policy []sandboxapi.Setting) string {
 	if mb, err := strconv.Atoi(settingValue(policy, "egress.large_upload_mb")); err == nil && mb > 0 {
 		size = "an upload of more than " + egress.FormatThreshold(int64(mb)<<20)
 	}
+	except := "hosts you allowed or unblocked"
+	if only := settingValue(policy, "egress.allow_only"); only != "" && only != "(none)" {
+		except = "hosts you or your organization allowed, or you unblocked"
+	}
 	whose := "the large-upload block"
 	if block.Source == string(packs.SourceAdmin) {
 		whose = "your organization's large-upload block"
 	}
-	return size + " to a host the sandbox has not contacted before is cut (" + whose + ")"
+	return size + " to a host the sandbox has not contacted before is cut, except to " + except + " (" + whose + ")"
 }
 
 func networkLabel(sb *sandboxapi.Sandbox) string {

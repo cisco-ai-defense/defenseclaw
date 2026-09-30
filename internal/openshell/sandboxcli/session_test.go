@@ -1494,19 +1494,26 @@ func TestConnectPassesTheRunsOptionsAndBanner(t *testing.T) {
 // run banner said only "network: open + blocklist". Its Uploads line names
 // what the block cuts, from the policy the sandbox runs under, on a run and
 // on a connect; the organization's block says whose it is.
+//
+// The block only reports an upload to a host the user unblocked or an allow
+// list names (egress.exemptFromUploadBlock): the line said every first
+// upload over the threshold is cut, with files.example.net on
+// openshell.egress.allow (PR 1022 review of N4).
 func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
-	const cut = "Uploads   an upload of more than 1 MiB to a host the sandbox has not contacted before is cut"
-	policy := func(source string) func(sandboxapi.ExplainRequest, *sandboxapi.Explain) {
+	const cut = "Uploads   an upload of more than 1 MiB to a host the sandbox has not contacted before is cut, except to "
+	policy := func(source string, extra ...sandboxapi.Setting) func(sandboxapi.ExplainRequest, *sandboxapi.Explain) {
 		return func(_ sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
 			ex.Settings = append(ex.Settings, sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "1", Source: "user"},
 				sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true", Source: source})
+			ex.Settings = append(ex.Settings, extra...)
 		}
 	}
 	ta := newTestApp(t, "")
 	noChanges(ta)
-	ta.daemon.onExplain = policy("user")
+	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "files.example.net", Source: "user"},
+		sandboxapi.Setting{Key: "egress.allow_only", Value: "(none)", Source: "admin"})
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
-	has(t, ta.output(), "network: open + blocklist\n", cut+" (the large-upload block)\n")
+	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts you allowed or unblocked (the large-upload block)\n")
 
 	ta = newTestApp(t, "")
 	noChanges(ta)
@@ -1514,10 +1521,10 @@ func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
 	var asked []string
 	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
 		asked = append(asked, req.Sandbox)
-		policy("admin")(req, ex)
+		policy("admin", sandboxapi.Setting{Key: "egress.allow_only", Value: "files.example.net, *.corp.example", Source: "admin"})(req, ex)
 	}
 	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "box"}))
-	has(t, ta.output(), cut+" (your organization's large-upload block)\n")
+	has(t, ta.output(), cut+"hosts you or your organization allowed, or you unblocked (your organization's large-upload block)\n")
 	if !slices.Equal(asked, []string{"box"}) {
 		t.Fatalf("explained %q, want the connected sandbox's policy", asked)
 	}
