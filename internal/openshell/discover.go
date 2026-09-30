@@ -38,7 +38,8 @@ var (
 	// ErrNoGateway means no gateway registration exists: OpenShell is not
 	// installed, or its gateway was never registered with the CLI.
 	ErrNoGateway = errors.New("openshell: no gateway registration found")
-	// ErrGatewayNotFound means a pinned gateway name has no registration.
+	// ErrGatewayNotFound means the chosen gateway has no registration: a
+	// pinned name without one, or a directory without metadata.json.
 	ErrGatewayNotFound = errors.New("openshell: gateway registration not found")
 	// ErrRemoteGateway means the registration points at a remote gateway,
 	// which DefenseClaw does not drive.
@@ -402,6 +403,11 @@ func findRegistration(userDir, systemDir, name string) (string, RegistrationSour
 func loadRegistration(dir, name string, source RegistrationSource) (*Registration, error) {
 	path := filepath.Join(dir, metadataFile)
 	data, err := safefile.ReadRegularFileBounded(path, maxMetadataBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		// A gateway that has started writes its client certificates here
+		// before anything registers it.
+		return nil, fmt.Errorf("%w: %q has no %s in %s", ErrGatewayNotFound, name, metadataFile, dir)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("openshell: read %s: %w", path, err)
 	}
