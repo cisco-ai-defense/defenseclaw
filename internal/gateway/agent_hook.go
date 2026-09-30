@@ -2343,7 +2343,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 		verdictAction = agentReviewAction
 	}
 	safeReason = agentVerdictReason(verdictAction, reason, safeReason, notificationSinkPolicy(policy))
-	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
+	additional := genericHookAdditionalContext(req.ConnectorName, req.HookEventName, mode, rawAction, severity, safeReason, wouldBlock)
 	if agent := confirmWithoutAskAgent(req.ConnectorName, rawAction, mode, req.HookEventName); action == "block" && agent != "" {
 		safeReason = agentConfirmUnavailableReason(agent, reason, agentDisplayReason(reason, notificationSinkPolicy(policy)), notificationSinkPolicy(policy))
 	}
@@ -2472,19 +2472,26 @@ func copilotHookOutput(event, action, rawAction, reason, additional string) map[
 	return nil
 }
 
-func genericHookAdditionalContext(connectorName, rawAction, severity, reason string, wouldBlock bool) string {
+func genericHookAdditionalContext(connectorName, event, mode, rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	// Both branches keep the "a <SEVERITY> <connector> hook finding"
+	// Every branch keeps the "a <SEVERITY> <connector> hook finding"
 	// phrase so telemetry consumers that grep on that prefix (T5.9
 	// finding: earlier revision dropped the "a" from the block path
 	// and consumers keyed on "a HIGH" / "a CRITICAL" stopped matching)
-	// continue to match either shape. The lead clause differs to keep
+	// continue to match any shape. The lead clause differs to keep
 	// the block-mode intent unambiguous ("would block ..." reads
 	// distinctly from "observed ...").
 	lead := "DefenseClaw observed"
-	if wouldBlock {
+	switch {
+	case wouldBlock && mode == "action" && connectorName == "amp" && canonicalEvent(event) == "agentstart":
+		// Amp cannot block a prompt, so in action mode this hidden notice
+		// is what DefenseClaw does about a blocking rule. Saying it "would
+		// block this in action mode" read as observe mode; tell the model
+		// the request must not be carried out instead.
+		lead = "This request matched a DefenseClaw blocking rule and must not be carried out:"
+	case wouldBlock:
 		lead = "DefenseClaw would block this in action mode:"
 	}
 	finding := fmt.Sprintf("a %s %s hook finding", severity, connectorName)
