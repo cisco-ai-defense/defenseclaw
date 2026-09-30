@@ -183,18 +183,44 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 
 	// 3. OpenShell. On macOS DefenseClaw starts and restarts the gateway
-	// through the Homebrew formula's service. An OpenShell installed
-	// another way is found, but its gateway is not one DefenseClaw can
-	// restart, and the installer, finding its CLI, would change nothing.
+	// through the Homebrew formula's service, on Linux through the
+	// openshell-gateway user unit. An OpenShell installed another way is
+	// found, but its gateway is not one DefenseClaw can restart, and
+	// DefenseClaw's install step (openshell.Installer.Install), finding its
+	// supported CLI, would not run NVIDIA's installer, which would install
+	// the formula or set up the unit. Setup names where that OpenShell is,
+	// as the doctor's CLI row does, and says what comes before the install:
+	// run now, `--install-openshell` comes back here.
+	found := strings.TrimSpace("OpenShell " + rep.CLIVersion)
+	if rep.CLIPath != "" {
+		found += " at " + rep.CLIPath
+	}
 	if a.GOOS == "darwin" && rep.OpenShellOutsideFormula() {
 		a.bad("Gateway service: the " + openshell.GatewayFormula + " Homebrew formula is not installed")
-		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The OpenShell " +
-			rep.CLIVersion + " found here was installed another way, so DefenseClaw cannot restart its gateway: stop that gateway " +
-			"and remove that OpenShell, then run `" + CommandName + " setup --install-openshell`")
+		a.note("→ on macOS DefenseClaw starts and restarts the OpenShell gateway through that formula's service. The " + found +
+			" was installed another way, so DefenseClaw cannot restart its gateway, and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. " +
+			"First stop that gateway and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, which installs the formula")
 		return &Silent{Err: fmt.Errorf("on macOS OpenShell must come from the %s Homebrew formula", openshell.GatewayFormula)}
 	}
-	if cli := rep.Get(openshell.CheckIDCLI); cli == nil || cli.Status == openshell.StatusFail ||
-		failed(rep, openshell.CheckIDGatewayVersion) || failed(rep, openshell.CheckIDGatewayService) {
+	// On Linux a gateway run by hand gets no further either: the gateway
+	// changes of step 4 go through the unit's environment
+	// (GatewayConfigurator.Plan), and its restarts through systemd.
+	if a.GOOS == "linux" && rep.OpenShellOutsideUnit() {
+		a.bad("Gateway service: the " + openshell.GatewayService + " user service is not installed")
+		a.note("→ on Linux DefenseClaw starts and restarts the OpenShell gateway through that user service, which NVIDIA's installer sets up. The " + found +
+			" was installed another way, without it, and DefenseClaw's install step would find it and skip NVIDIA's installer, installing nothing. " +
+			"First stop its gateway if one runs and remove that OpenShell; then run `" + CommandName + " setup --install-openshell`, " +
+			"which runs NVIDIA's installer and sets up the service")
+		return &Silent{Err: fmt.Errorf("on Linux OpenShell must come with the %s user service NVIDIA's installer sets up", openshell.GatewayService)}
+	}
+	// The install is offered only where DefenseClaw's install step would
+	// run NVIDIA's installer: no CLI, or one it upgrades
+	// (DoctorReport.OpenShellInstallNeeded). Over a supported CLI it
+	// installs nothing, so a failed Gateway or Gateway service check is
+	// the doctor's fix's, which the loop below prints (a stopped service
+	// is started, a gateway of another release than the CLI is restarted
+	// through its service).
+	if rep.OpenShellInstallNeeded() {
 		install := o.InstallOpenShell
 		if !install && !o.NonInteractive {
 			// On macOS the installer installs a Homebrew formula, without sudo.
@@ -220,8 +246,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		res, err := inst.Install(ctx)
 		if errors.Is(err, openshell.ErrHomebrewInstall) {
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
-			a.note("→ Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. " +
-				"Update them as it says, then run `" + CommandName + " setup` again (see " + setupTroubleshootingURL + ")")
+			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 		}
 		if err != nil {
@@ -234,7 +259,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		rep = a.runDoctor(ctx)
 	}
-	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion} {
+	// A stopped service leaves the gateway not answering, whose fix (start
+	// it) comes first; with the gateway answering, the service's own fix.
+	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
+		openshell.CheckIDGatewayService} {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
@@ -510,6 +538,24 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	return nil
 }
 
+// homebrewInstallHint says what to update when Homebrew did not install
+// the nvidia/openshell formula. With current Command Line Tools selected,
+// what it refuses is an older /Applications/Xcode.app, which it checks
+// even so ("Your Xcode (26.2) at /Applications/Xcode.app is too outdated.
+// Please update to Xcode 27.0 (or delete it)."): updating the Command Line
+// Tools would not help.
+func homebrewInstallHint(err error) string {
+	again := "run `" + CommandName + " setup` again (see " + setupTroubleshootingURL + ")"
+	var hb *openshell.HomebrewInstallError
+	if !errors.As(err, &hb) || !hb.Tools.OutdatedXcodeApp() {
+		return "Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants. Update them as it says, then " + again
+	}
+	t := hb.Tools
+	return fmt.Sprintf("Homebrew says why above. The Command Line Tools %s, which xcode-select selects, are current for macOS %s, "+
+		"but Homebrew checks Xcode %s at %s even so: update that Xcode (from the App Store) or delete it, as Homebrew says; "+
+		"updating the Command Line Tools does not help. Then %s", openshell.ShortVersion(t.CLT), t.MacOS, t.Xcode, t.XcodeApp, again)
+}
+
 // consentGatewayRestart decides whether setup restarts the OpenShell
 // gateway to apply its configuration. The gateway is shared: a restart
 // drops the connections of every sandbox on it, of every owner and data
@@ -754,10 +800,16 @@ func failed(rep *openshell.DoctorReport, id string) bool {
 
 // machineLine is "✓ linux/arm64  ✓ Landlock …  ✓ Docker 29.4  ✗ OpenShell not installed".
 func (a *App) machineLine(rep *openshell.DoctorReport) string {
+	// On a Mac without OpenShell the MicroVM driver is missing for the same
+	// reason, and the formula the install brings it with: one mark, not
+	// "✗ MicroVM driver  ✗ OpenShell not installed".
+	cli, driver := rep.Get(openshell.CheckIDCLI), rep.Get(openshell.CheckIDVMDriver)
+	withoutDriver := cli != nil && cli.Status == openshell.StatusFail && rep.CLIVersion == "" && driver != nil && driver.Status == openshell.StatusFail &&
+		rep.MicroVM != nil && rep.MicroVM.DriverBinary == "" && !rep.MicroVM.DriverRunning
 	var parts []string
 	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDLandlock, openshell.CheckIDDocker, openshell.CheckIDVMDriver, openshell.CheckIDCLI} {
 		c := rep.Get(id)
-		if c == nil || c.Status == openshell.StatusSkip {
+		if c == nil || c.Status == openshell.StatusSkip || (id == openshell.CheckIDVMDriver && withoutDriver) {
 			continue
 		}
 		label, mark := c.Title, a.mark(c.Status != openshell.StatusFail)
@@ -786,6 +838,14 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 					label += " " + rep.CLIVersion
 				}
 				label += " is not from Homebrew's nvidia/openshell formula"
+			case a.GOOS == "linux" && rep.OpenShellOutsideUnit():
+				label, mark = "OpenShell", a.mark(false)
+				if rep.CLIVersion != "" {
+					label += " " + rep.CLIVersion
+				}
+				label += " has no " + openshell.GatewayService + " user service"
+			case withoutDriver:
+				label = "OpenShell and its MicroVM driver not installed"
 			case c.Status == openshell.StatusFail:
 				label = "OpenShell not installed"
 				if rep.CLIVersion != "" {

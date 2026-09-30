@@ -4732,27 +4732,42 @@ class SandboxMachineCheck:
     openshell_needed: bool = False
     openshell_detail: str = ""
     error: str = ""
-    # On macOS, an OpenShell installed another way than the Homebrew
-    # formula, which setup refuses (it would install nothing over it).
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux), which setup
+    # refuses (its install step would install nothing over it).
     openshell_refused: bool = False
+    # With OpenShell installed (a supported CLI, or one newer than
+    # supported), the failing check whose doctor's fix openshell_detail
+    # gives: installing OpenShell would change nothing. Setup stops on a
+    # CLI or gateway one before it installs anything; a "vm-driver" one it
+    # fixes with the install's consent (e2fsprogs) or stops on.
+    openshell_attention: str = ""
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+# The checks setup stops on, in its order, when it does not install
+# OpenShell (sandboxcli/setup.go, after step 3).
+_SETUP_STOPS = ("openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-service")
 
 
 def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> SandboxMachineCheck:
     """Summarize a ``sandbox doctor --json`` report (or why it did not run).
 
-    OpenShell counts as needed exactly when ``sandbox setup`` would install
-    it: the CLI is missing or unsupported, or the gateway service or its
-    version check failed (sandboxcli/setup.go). On a MicroVM (vm) gateway,
-    or a Mac whose docker driver has no Landlock (which setup switches to
-    MicroVMs), a failed ``vm-driver`` check counts too: setup installs
-    e2fsprogs or has the driver signed with the same consent. A MicroVM
-    mounts no host folders, so the bind-mount check is left out there. On
-    macOS an OpenShell installed another way than the Homebrew formula is
-    refused, as setup refuses it (it would install nothing over it), and a
-    gateway service that warns is shown with its detail.
+    OpenShell counts as needed exactly when ``sandbox setup`` offers to
+    install it: where its install step runs NVIDIA's installer, for a CLI
+    missing or one it upgrades (the report's ``openshell_install``,
+    DoctorReport.OpenShellInstallNeeded). With OpenShell installed, any
+    other failing check is not the install's (it would install nothing):
+    the first one setup stops on, a gateway's before a MicroVM driver's,
+    is shown with the doctor's fix (``openshell_attention``). On a MicroVM
+    (vm) gateway, or a Mac whose docker driver has no Landlock (which setup
+    switches to MicroVMs), that includes a failed ``vm-driver`` check. A
+    MicroVM mounts no host folders, so the bind-mount check is left out
+    there. An OpenShell installed another way than the Homebrew formula
+    (macOS) or without the openshell-gateway user unit (Linux) is refused,
+    as setup refuses it (its install step would install nothing over it),
+    and a gateway service that warns is shown with its detail.
     """
 
     if not isinstance(report, Mapping):
@@ -4768,6 +4783,15 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
 
     def detail(check_id: str) -> str:
         return str((checks.get(check_id) or {}).get("detail") or "").strip()
+
+    def fix_of(check_id: str) -> str:
+        """The doctor's fix of a check, as setup prints it, else its detail."""
+        fix = (checks.get(check_id) or {}).get("fix")
+        fix = fix if isinstance(fix, Mapping) else {}
+        summary, command = str(fix.get("summary") or "").strip(), str(fix.get("command") or "").strip()
+        if not summary:
+            return detail(check_id)
+        return summary + (f" (`{command}`)" if command else "")
 
     # The driver the gateway runs, else the one its files configure
     # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
@@ -4794,45 +4818,76 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     cli = status("openshell-cli")
     service = report.get("service")
     service = service if isinstance(service, Mapping) else {}
-    # On macOS setup refuses an OpenShell installed another way than the
-    # Homebrew formula whose service runs the gateway
-    # (DoctorReport.OpenShellOutsideFormula): it would install nothing.
-    refused = cli not in {"", "fail"} and service.get("manager") == "brew" and not service.get("installed")
-    needed = not refused and (
-        cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
-    )
+    # Setup refuses an OpenShell installed another way than the Homebrew
+    # formula (macOS) or without the openshell-gateway user unit (Linux)
+    # whose service runs the gateway (DoctorReport.OpenShellOutsideFormula,
+    # .OpenShellOutsideUnit): its install step would find it and install
+    # nothing.
+    without_service = cli not in {"", "fail"} and not service.get("installed")
+    outside_unit = without_service and service.get("manager") == "systemd"
+    refused = outside_unit or (without_service and service.get("manager") == "brew")
+    # A doctor older than openshell_install: a failed CLI check.
+    install = report.get("openshell_install")
+    needed = not refused and (install if isinstance(install, bool) else cli in {"", "fail"})
+    # Else the first failing check setup stops on, with the doctor's fix.
+    attention = "" if refused or needed else next((i for i in _SETUP_STOPS if status(i) == "fail"), "")
     version = str(report.get("cli_version") or "").strip()
     name = f"OpenShell {version}" if version else "OpenShell"
-    if refused:
+    if outside_unit:
+        # As setup says it (sandboxcli/setup.go), naming where it is.
+        where = str(report.get("cli_path") or "").strip()
+        openshell = (
+            f"{name}{f' at {where}' if where else ''} was installed another way, without the openshell-gateway "
+            "user service DefenseClaw runs the gateway through on Linux (NVIDIA's installer sets it up), "
+            "so DefenseClaw's install step would find it and install nothing: stop its gateway if one runs "
+            "and remove that OpenShell, then install OpenShell here, which runs NVIDIA's installer "
+            "and sets up the service"
+        )
+        parts.append(f"✗ {name} has no openshell-gateway user service")
+    elif refused:
         openshell = (
             f"{name} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
             "whose service DefenseClaw runs the gateway through: stop its gateway and remove it, then install OpenShell here"
         )
         parts.append(f"✗ {name} is not from Homebrew's nvidia/openshell formula")
+    elif attention == "openshell-cli":
+        # One newer than supported, which the install step does not downgrade.
+        openshell = f"OpenShell needs attention: {fix_of(attention) or 'not supported'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not supported"))
+    elif attention:
+        # A stopped gateway service is started, a gateway of another
+        # release than the CLI restarted through its service.
+        openshell = f"the OpenShell gateway needs attention: {fix_of(attention) or 'not answering'}"
+        gateway = str(report.get("gateway_version") or "").strip()
+        if attention == "gateway-version" and gateway and gateway != version:
+            parts.append(f"✗ {name}, but the gateway runs {gateway}")
+        elif status("gateway-service") == "fail":
+            # A gateway that answers while the service is stopped is run
+            # by something else.
+            parts.append("✗ OpenShell gateway service stopped" if gateway else "✗ OpenShell gateway not running")
+        else:
+            parts.append("✗ OpenShell gateway needs attention")
     elif not needed:
         openshell = f"{name} is installed"
         if status("gateway-service") == "warn":
             parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
         else:
             parts.append(f"✓ {name}")
-    elif cli in {"", "fail"} and "not on PATH" in detail("openshell-cli"):
+    elif "not on PATH" in detail("openshell-cli"):
         openshell = "OpenShell is not installed"
         parts.append("✗ OpenShell not installed")
-    elif cli in {"", "fail"}:
+    else:
         openshell = f"OpenShell needs attention: {detail('openshell-cli') or 'not found'}"
         parts.append("✗ OpenShell " + (detail("openshell-cli") or "not found"))
-    else:
-        failed = "gateway-service" if status("gateway-service") == "fail" else "gateway-version"
-        openshell = f"the OpenShell gateway needs attention: {detail(failed) or 'not running'}"
-        parts.append("✗ OpenShell gateway " + ("not running" if failed == "gateway-service" else "needs an update"))
     vm_driver = status("vm-driver") if microvm else ""
     if vm_driver == "pass":
         parts.append("✓ MicroVM driver")
     elif vm_driver in {"warn", "fail"}:
         parts.append(f"{_DOCTOR_GLYPHS[vm_driver]} MicroVM driver: {detail('vm-driver') or vm_driver}")
-    if vm_driver == "fail" and not needed and not refused:
-        needed = True
-        openshell = f"the MicroVM driver needs attention: {detail('vm-driver') or 'not ready'}"
+    # Setup gets to the MicroVM driver past the gateway checks only.
+    if vm_driver == "fail" and not needed and not refused and not attention:
+        attention = "vm-driver"
+        openshell = f"the MicroVM driver needs attention: {fix_of('vm-driver') or 'not ready'}"
     mounts = "" if microvm else status("bind-mounts")
     if mounts == "pass":
         parts.append("✓ bind mounts")
@@ -4842,7 +4897,11 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     # One check per line: joined on one line, the checks after the first
     # few were cut off at 80 columns.
     return SandboxMachineCheck(
-        summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell, openshell_refused=refused
+        summary="\n".join(parts),
+        openshell_needed=needed,
+        openshell_detail=openshell,
+        openshell_refused=refused,
+        openshell_attention=attention,
     )
 
 
@@ -4935,10 +4994,26 @@ def sandbox_wizard_fields(
         machine_line = machine.summary
         install = "yes"
         install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_attention == "vm-driver":
+        # Under the install's consent setup installs e2fsprogs and signs
+        # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
+        machine_line = machine.summary
+        install = "no"
+        install_hint = (
+            f"{machine.openshell_detail}; OpenShell is installed, and yes lets setup install e2fsprogs "
+            "(brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
+        )
+    elif machine.openshell_attention:
+        # The doctor's fix: installing OpenShell would change nothing.
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; installing OpenShell would change nothing."
     else:
         machine_line = machine.summary
         install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
-    if macos:
+    # Setup gets to e2fsprogs only past the OpenShell and gateway checks: not
+    # where it refuses the OpenShell or stops on a gateway fix.
+    stops = machine is not None and (machine.openshell_refused or machine.openshell_attention != "")
+    if macos and not stops:
         install_hint += e2fsprogs
     fields += [
         WizardFormField(

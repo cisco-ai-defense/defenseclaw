@@ -434,11 +434,13 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			return err
 		}
 		if o.Output != OutputJSON {
+			// Named as the question named them (`Fix "Gateway": …?`), not
+			// by their ids.
 			for _, out := range outcomes {
 				if out.Applied {
-					a.ok("fixed " + out.ID)
+					a.ok(fmt.Sprintf("fixed %q", out.Title))
 				} else if out.Error != "" {
-					a.bad(out.ID + ": " + out.Error)
+					a.bad(fmt.Sprintf("could not fix %q: %s", out.Title, out.Error))
 				}
 			}
 		}
@@ -452,8 +454,11 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 			OK bool `json:"ok"`
 			// Ready is OK with sandboxes turned on (sandboxesOff).
 			Ready bool `json:"ready"`
+			// OpenShellInstall is when setup offers the OpenShell install
+			// (DoctorReport.OpenShellInstallNeeded), which the TUI presets.
+			OpenShellInstall bool `json:"openshell_install"`
 			*openshell.DoctorReport
-		}{rep.OK(), rep.OK() && !off, rep})
+		}{rep.OK(), rep.OK() && !off, rep.OpenShellInstallNeeded(), rep})
 	}
 	a.printDoctor(rep)
 	if !rep.OK() {

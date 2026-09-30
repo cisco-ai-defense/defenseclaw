@@ -91,6 +91,10 @@ const (
 	// gateway has not been restarted on yet. It lives in the config
 	// directory and survives a crash between the write and the restart.
 	restartPendingFile = ".defenseclaw-restart-pending"
+	// releaseRestartFile records a restart of the gateway service that
+	// left a gateway of another release than the CLI (the doctor's
+	// Gateway fix, releaseRestart), which the doctor does not offer again.
+	releaseRestartFile = ".defenseclaw-release-restart"
 
 	maxGatewayFileBytes = 1 << 20
 )
