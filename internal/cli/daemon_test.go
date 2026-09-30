@@ -56,6 +56,11 @@ func TestRunRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.
 	if err != nil {
 		t.Fatalf("start CLI restart probe: %v", err)
 	}
+	// Register before any Fatalf so a failed wait never leaks the probe.
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
+		_ = d.Stop(3 * time.Second)
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(marker); err == nil {
@@ -68,10 +73,6 @@ func TestRunRestartRefusesUnsafeIdentityBeforeStoppingHealthyGateway(t *testing.
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("probe marker was not created: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
-		_ = d.Stop(3 * time.Second)
-	})
 
 	watchdogPath := filepath.Join(dataDir, daemon.WatchdogPIDFileName)
 	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {
@@ -98,6 +99,11 @@ func TestRunStartRefusesUnsafeIdentityBeforeAlreadyRunningFastPath(t *testing.T)
 	if err != nil {
 		t.Fatalf("start CLI start probe: %v", err)
 	}
+	// Register before any Fatalf so a failed wait never leaks the probe.
+	t.Cleanup(func() {
+		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
+		_ = d.Stop(3 * time.Second)
+	})
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(marker); err == nil {
@@ -110,10 +116,6 @@ func TestRunStartRefusesUnsafeIdentityBeforeAlreadyRunningFastPath(t *testing.T)
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("probe marker was not created: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.Remove(filepath.Join(dataDir, daemon.WatchdogPIDFileName))
-		_ = d.Stop(3 * time.Second)
-	})
 
 	watchdogPath := filepath.Join(dataDir, daemon.WatchdogPIDFileName)
 	if err := os.WriteFile(watchdogPath, []byte("malformed-watchdog-identity\n"), 0o600); err != nil {

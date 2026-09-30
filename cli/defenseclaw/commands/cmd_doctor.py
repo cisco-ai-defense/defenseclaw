@@ -266,6 +266,7 @@ class _DoctorResult:
         "mode",
         "passive",
         "quiet",
+        "gateway_down",
     )
 
     def __init__(
@@ -288,6 +289,10 @@ class _DoctorResult:
         self.mode = mode
         self.passive = passive
         self.quiet = quiet
+        # "stopped" or "foreign" once the Sidecar API row explained that this
+        # account's gateway is not serving the API port; later rows that would
+        # only repeat it stay quiet.
+        self.gateway_down = ""
 
     def set_section(self, section: str) -> None:
         self.section = section.strip() or "general"
@@ -1224,9 +1229,17 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
         return RepairDecision("blocked", reason, blockers=(reason,))
     try:
         validation = inspect_v8_config("validate", config_path=str(config_path))
-    except (ConfigInspectError, OSError, ValueError) as exc:
+    except ConfigInspectError as exc:
+        # ConfigInspectError text is bounded and display-safe; it names the
+        # real problem (for example the folder that fails the custody check).
         reason = (
-            f"{type(exc).__name__}: canonical-v8 configuration preflight failed; "
+            f"configuration check failed: {exc}; "
+            "run `defenseclaw config validate` before applying repairs"
+        )
+        return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
+    except (OSError, ValueError):
+        reason = (
+            "canonical-v8 configuration preflight failed; "
             "run `defenseclaw config validate` before applying repairs"
         )
         return RepairDecision("blocked", reason, blockers=("canonical-v8 validation failed",))
@@ -2186,6 +2199,53 @@ def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str
     return ", ".join(names)
 
 
+def _gateway_port_holder(cfg) -> str:
+    """Name the process that listens on the configured API port, or ""."""
+    port = cfg.gateway.api_port
+    others = _linux_foreign_listener_accounts(port)
+    if others:
+        return f"another account ({others})"
+    try:
+        listener = _managed_gateway_listener_evidence(port, host=_gateway_api_host(cfg))
+    except Exception:  # noqa: BLE001 - inspection is best effort
+        return ""
+    if listener.status != "ok" or listener.pid <= 0:
+        return ""
+    try:
+        executable = GatewayEvidence().process(listener.pid).executable
+    except Exception:  # noqa: BLE001
+        executable = ""
+    name = os.path.basename(executable) if executable else ""
+    return f"PID {listener.pid}" + (f" ({name})" if name else "")
+
+
+def _foreign_gateway_port_holder(cfg) -> str:
+    """Name the API port holder when it is not this account's verified gateway."""
+    holder = _gateway_port_holder(cfg)
+    if not holder:
+        return ""
+    try:
+        if _trusted_gateway_listener(cfg).trusted:
+            return ""
+    except Exception:  # noqa: BLE001 - an unverifiable holder is still foreign
+        pass
+    return holder
+
+
+def _foreign_gateway_port_detail(cfg, holder: str) -> str:
+    return (
+        f"{_gateway_api_host(cfg)}:{cfg.gateway.api_port} is held by {holder}, not by this account's gateway. "
+        "Stop that process or set gateway.api_port to a free port, then run `defenseclaw-gateway start`"
+    )
+
+
+def _token_probe_failure(code: int, body: str) -> str:
+    """Describe a failed token-bearing probe; a refused send is not a transport failure."""
+    if code == 0 and body.endswith(_GATEWAY_TOKEN_REFUSED):
+        return "the token was not sent: " + body[: -len(_GATEWAY_TOKEN_REFUSED)]
+    return "transport failure" if code == 0 else f"HTTP {code}"
+
+
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     bind = _gateway_api_host(cfg)
     url = _gateway_api_url(cfg, "/health")
@@ -2198,8 +2258,15 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     )
     if code == 200:
         trust = _trusted_gateway_listener(cfg)
+        holder = "" if trust.trusted else _gateway_port_holder(cfg)
         if trust.trusted:
             _emit("pass", "Sidecar API", f"{bind}:{cfg.gateway.api_port}", r=r)
+        elif holder:
+            # Another process's /health says nothing about this account's
+            # gateway, so its subsystem rows are not shown.
+            _emit("fail", "Sidecar API", f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})", r=r)
+            r.gateway_down = "foreign"
+            return None
         else:
             # /health is public: any process on the port answers it. This row
             # passed while another account's listener held the API port.
@@ -2314,6 +2381,15 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
             _emit("warn", "Sidecar health JSON", detail, r=r)
+    elif code == 0 and "refused" in body.lower():
+        _emit(
+            "fail",
+            "Sidecar API",
+            f"the gateway is not running (nothing listens on {bind}:{cfg.gateway.api_port}). "
+            "Start it: `defenseclaw-gateway start` or `defenseclaw doctor --fix`",
+            r=r,
+        )
+        r.gateway_down = "stopped"
     else:
         _emit("fail", "Sidecar API", f"not reachable on port {cfg.gateway.api_port}", r=r)
     return None
@@ -2335,6 +2411,11 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
             r=r,
         )
         return False
+
+    if r.gateway_down:
+        # The Sidecar API row already says the gateway is stopped or that the
+        # port belongs to another process; the token is not sent either way.
+        return True
 
     trust = _trusted_gateway_listener(cfg)
     if not trust.trusted:
@@ -2895,7 +2976,7 @@ def _authenticated_origin_main_gateway_lifecycle_trust(
         bound_peer=endpoint_trust,
     )
     if code != 200:
-        detail = "transport failure" if code == 0 else f"HTTP {code}"
+        detail = _token_probe_failure(code, body)
         return _GatewayTrust(
             "unbound_home",
             f"origin/main gateway runtime-home authentication failed ({detail})",
@@ -4451,6 +4532,8 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     if not token:
         return "warn", "runtime load unverified: authenticated gateway token is unavailable"
     trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted and trust.code == "missing":
+        return "warn", "runtime load not checked: the gateway is not running"
     if not trust.trusted:
         return "warn", f"runtime load unverified: {trust.detail}"
 
@@ -11229,7 +11312,7 @@ def _untrusted_gateway_on_path(search_path: str) -> str:
     try:
         trusted_posix_executable_path(found)
     except UnsafePathError as exc:
-        return f"refusing to run {found}: {exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
+        return f"refusing to run {found}: {exc}"
     return ""
 
 
@@ -11336,7 +11419,22 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
     )
     reason = next((candidate for candidate in safe_reasons if candidate in rendered), "")
     if not repaired and not reason:
-        reason = "managed lifecycle did not reach verified readiness"
+        # The gateway's own start refusal (for example a port held by another
+        # process) is fixed, secret-free text; pass it through.
+        for line in output.getvalue().splitlines():
+            for marker in ("cannot start the gateway: ", "cannot restart the gateway: "):
+                if marker in line:
+                    reason = line[line.index(marker):].strip()[:400]
+                    break
+            if reason:
+                break
+    if not repaired and not reason and "opencode" in _doctor_active_connectors(cfg):
+        # The gateway stops when OpenCode's plugin folder is writable by
+        # other accounts; name the folder instead of a generic readiness line.
+        if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
+            reason = f"{loose} can be written by other accounts; run `chmod go-w {shlex.quote(loose)}`"
+    if not repaired and not reason:
+        reason = "managed lifecycle did not reach verified readiness; see the failed rows above"
     return repaired, reason
 
 
@@ -11468,7 +11566,7 @@ def _fix_gateway_token_drift(
             return ("fail", runtime_detail)
         auth_rejected = code in {401, 403, 503}
         if not auth_rejected:
-            detail = "transport failure" if code == 0 else f"HTTP {code}"
+            detail = _token_probe_failure(code, body)
             return (
                 "fail",
                 f"trusted gateway authentication verification was unavailable ({detail}); "
@@ -11694,6 +11792,9 @@ def _fix_gateway_service(
     reason = ""
     process_trust: _GatewayTrust | None = None
     inspected_fingerprint: tuple[int, int, int, int, bytes] | None = None
+    foreign_holder = _foreign_gateway_port_holder(cfg) if code == 200 else ""
+    if foreign_holder:
+        return ("fail", _foreign_gateway_port_detail(cfg, foreign_holder))
     if code == 200:
         try:
             health = json.loads(body)

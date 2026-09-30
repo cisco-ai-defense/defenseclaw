@@ -198,7 +198,10 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	if err != nil || info.PID != pid {
 		return false
 	}
-	return d.verifyProcessForAuthenticatedMigration(info)
+	// A current record whose executable was replaced while it ran has the same
+	// standing: stop and restart may reach it only through the authenticated
+	// control plane.
+	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info)
 }
 
 // verifyProcess verifies every identity signal present in a PID record. It
@@ -274,10 +277,35 @@ func (d *Daemon) verifyReplacedExecutable(info pidInfo) bool {
 		return false
 	}
 	executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
-	if err != nil || executable != info.Executable+" (deleted)" {
+	if err != nil || (executable != info.Executable+" (deleted)" && !IsRetiredInstallCopy(info.Executable, executable)) {
 		return false
 	}
 	return d.verifyStartIdentity(info)
+}
+
+// IsRetiredInstallCopy reports whether live is the copy of the recorded
+// executable that a source install moved into its retirement custody beside
+// it (".defenseclaw-install-custody/retired-<sha256>") while the process ran.
+// The rename keeps the running inode, so Linux shows the custody path rather
+// than " (deleted)"; without this, `make all` over a running gateway lost
+// track of it and the next restart found the port held.
+func IsRetiredInstallCopy(recorded, live string) bool {
+	live = strings.TrimSuffix(live, " (deleted)")
+	custody := filepath.Dir(live)
+	if recorded == "" || filepath.Base(custody) != ".defenseclaw-install-custody" ||
+		filepath.Dir(custody) != filepath.Dir(recorded) {
+		return false
+	}
+	digest, ok := strings.CutPrefix(filepath.Base(live), "retired-")
+	if !ok || len(digest) != 64 {
+		return false
+	}
+	for _, c := range digest {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Daemon) verifyExecutableForAuthenticatedMigration(info pidInfo) bool {

@@ -33,6 +33,38 @@ func openAuditDBFileNoFollow(path string, create, _ bool) (*os.File, error) {
 	return file, nil
 }
 
+// auditDBPinnedFileDeleted reports that a pinned file is no longer linked
+// anywhere, as after SQLite deletes a WAL or SHM file on its last close.
+func auditDBPinnedFileDeleted(file *os.File) (bool, error) {
+	links, err := auditDBPinnedLinkCount(file)
+	return links == 0, err
+}
+
+// validateAuditDBSidecarLinkCount refuses a sidecar that is a hard link to
+// another file. SQLite never creates one.
+func validateAuditDBSidecarLinkCount(file *os.File) error {
+	links, err := auditDBPinnedLinkCount(file)
+	if err != nil {
+		return err
+	}
+	if links != 1 {
+		return fmt.Errorf("audit: database file has %d hard links, expected exactly 1", links)
+	}
+	return nil
+}
+
+func auditDBPinnedLinkCount(file *os.File) (uint64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("audit: database file link count is unavailable")
+	}
+	return uint64(stat.Nlink), nil
+}
+
 func auditDBPlatformFileNeedsHardening(*os.File) (bool, error) { return false, nil }
 
 // Preserve the Unix sidecar repair seam: chmod/permission hardening remains
