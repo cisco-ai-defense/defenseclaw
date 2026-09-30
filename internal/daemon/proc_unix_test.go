@@ -204,3 +204,24 @@ func TestProtectedDaemonPIDsDistinguishesMissingFromMalformedIdentity(t *testing
 		t.Fatalf("valid identity files = (%d, %d, %v), want (1234, 5678, nil)", tracked, watchdog, err)
 	}
 }
+
+// The daemon child starts from the file this process runs, not from the
+// install path, which could name another file by then (#643).
+func TestDaemonChildStartsFromTheRunningFile(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := daemonExecPath(executable)
+	if runtime.GOOS != "linux" {
+		if got != executable {
+			t.Fatalf("daemonExecPath = %q, want %q", got, executable)
+		}
+		return
+	}
+	running, errRunning := os.Stat(got)
+	named, errNamed := os.Stat(executable)
+	if got != "/proc/self/exe" || errRunning != nil || errNamed != nil || !os.SameFile(running, named) {
+		t.Fatalf("daemonExecPath = %q (%v, %v), want /proc/self/exe naming the running file", got, errRunning, errNamed)
+	}
+}

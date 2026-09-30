@@ -666,8 +666,8 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		a.emitToolInvocationEventV8(ctx, meta, "call", codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), "", nil)
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(codexToolArgs(req)))
-		a.rememberHookToolInvocation(meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
-		captureHookToolCall(ctx, meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
+		invocationID := a.rememberHookToolInvocation(meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
+		captureHookToolCall(ctx, meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), invocationID)
 	case "PostToolUse":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn(ctx, "codex", req.SessionID, req.TurnID), a.lastHookPromptID(ctx, "codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
 		meta.ToolID = req.ToolUseID
@@ -782,8 +782,8 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 		a.emitToolInvocationEventV8(ctx, meta, "call", req.ToolName, stringFromJSONRaw(req.ToolArgs), "", nil)
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, req.ToolName, hookSpawnIntentRequested, stringFromJSONRaw(req.ToolArgs))
-		a.rememberHookToolInvocation(meta, req.ToolName, stringFromJSONRaw(req.ToolArgs))
-		captureHookToolCall(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs))
+		invocationID := a.rememberHookToolInvocation(meta, req.ToolName, stringFromJSONRaw(req.ToolArgs))
+		captureHookToolCall(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), invocationID)
 		a.emitInferredDelegatedAgentTransitions(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), true)
 	case isResultLikeEvent(req.HookEventName):
 		meta.PromptID = firstNonEmpty(
@@ -875,8 +875,8 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		a.emitToolInvocationEventV8(ctx, meta, "call", claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)), "", nil)
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, claudeCodeToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(claudeCodeToolArgs(req)))
-		a.rememberHookToolInvocation(meta, claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)))
-		captureHookToolCall(ctx, meta, claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)))
+		invocationID := a.rememberHookToolInvocation(meta, claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)))
+		captureHookToolCall(ctx, meta, claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)), invocationID)
 	case "PermissionDenied":
 		meta.PromptID = a.lastHookPromptID(ctx, "claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
@@ -2179,13 +2179,17 @@ func hookToolInvocationKey(meta llmEventMeta, tool string) string {
 	}, "\x00")
 }
 
-func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, arguments string) {
+// rememberHookToolInvocation queues a pending tool call and returns its
+// invocation id, so a decision on this request can find this call even when
+// the connector sends no tool-call ID and an older call with the same tool is
+// still pending in the turn.
+func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, arguments string) string {
 	if a == nil || strings.TrimSpace(tool) == "" {
-		return
+		return ""
 	}
 	key := hookToolInvocationKey(meta, tool)
 	if strings.Trim(key, "\x00") == "" {
-		return
+		return ""
 	}
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
@@ -2201,7 +2205,7 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 		pending.argumentsOriginalBytes = int64(len(arguments))
 		pending.argumentsTruncated = len(boundedArguments) < len(arguments)
 		a.hookToolInvocations[key] = []hookToolInvocation{pending}
-		return
+		return pending.id
 	}
 	for len(a.hookToolInvocationOrder) >= hookPromptCacheMaxEntries {
 		oldest := a.hookToolInvocationOrder[0]
@@ -2214,34 +2218,46 @@ func (a *APIServer) rememberHookToolInvocation(meta llmEventMeta, tool, argument
 		}
 	}
 	startedAt := time.Now()
+	id := stableLLMEventID(
+		"hook-tool-invocation", key, strconv.FormatInt(startedAt.UnixNano(), 10), arguments,
+	)
 	a.hookToolInvocationOrder = append(a.hookToolInvocationOrder, key)
 	a.hookToolInvocations[key] = append(a.hookToolInvocations[key], hookToolInvocation{
-		id: stableLLMEventID(
-			"hook-tool-invocation", key, strconv.FormatInt(startedAt.UnixNano(), 10), arguments,
-		),
-		meta: meta, tool: tool, arguments: boundedArguments,
+		id: id, meta: meta, tool: tool, arguments: boundedArguments,
 		argumentsOriginalBytes: int64(len(arguments)),
 		argumentsTruncated:     len(boundedArguments) < len(arguments),
 		startedAt:              startedAt,
 	})
+	return id
 }
 
+// takeHookToolInvocation removes a pending call: the one invocationID names,
+// or else the oldest with this key. A named call that is gone yields no
+// snapshot, never another call's arguments.
 func (a *APIServer) takeHookToolInvocation(
-	meta llmEventMeta, tool, result string,
+	meta llmEventMeta, tool, invocationID string,
 ) (hookToolInvocation, bool) {
 	key := hookToolInvocationKey(meta, tool)
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	queue := a.hookToolInvocations[key]
-	var snapshot hookToolInvocation
-	if len(queue) > 0 {
-		snapshot = queue[0]
+	index := 0
+	if invocationID != "" {
+		index = -1
+		for i := range queue {
+			if queue[i].id == invocationID {
+				index = i
+				break
+			}
+		}
 	}
-	if len(queue) > 0 {
+	var snapshot hookToolInvocation
+	if index >= 0 && index < len(queue) {
+		snapshot = queue[index]
 		if len(queue) == 1 {
 			delete(a.hookToolInvocations, key)
 		} else {
-			a.hookToolInvocations[key] = queue[1:]
+			a.hookToolInvocations[key] = append(queue[:index:index], queue[index+1:]...)
 		}
 		for i, candidate := range a.hookToolInvocationOrder {
 			if candidate == key {
@@ -2257,10 +2273,18 @@ func (a *APIServer) takeHookToolInvocation(
 func (a *APIServer) emitHookToolSpan(
 	ctx context.Context, meta llmEventMeta, tool, fallbackArguments, result string, exitCode *int,
 ) context.Context {
+	return a.emitHookToolSpanFor(ctx, meta, tool, "", fallbackArguments, result, exitCode)
+}
+
+// emitHookToolSpanFor ends the span of the pending call invocationID names
+// ("" for the oldest pending call with this key).
+func (a *APIServer) emitHookToolSpanFor(
+	ctx context.Context, meta llmEventMeta, tool, invocationID, fallbackArguments, result string, exitCode *int,
+) context.Context {
 	if a == nil || strings.TrimSpace(tool) == "" {
 		return ctx
 	}
-	snapshot, emit := a.takeHookToolInvocation(meta, tool, result)
+	snapshot, emit := a.takeHookToolInvocation(meta, tool, invocationID)
 	if !emit {
 		return ctx
 	}

@@ -252,6 +252,14 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeChange, err.Error())
 			return 0
 		}
+		if record == nil && l.opts.PayloadDir == "" && !l.opts.FromPackage {
+			// Staged before the first install (a credential the config
+			// references): the install applies it.
+			r.Noop = true
+			r.NoopReason = "not_installed"
+			r.AddWarning(codeNotInstalled, "DefenseClaw enterprise is not installed yet; the change is stored and the first install applies it")
+			return 0
+		}
 	}
 
 	switch l.opts.Action {
@@ -902,10 +910,24 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if err := env.settleSecretModes(ctx, account); err != nil {
+		return failAndRollback(codeApply, err)
+	}
 	changed, err := l.applyFiles(p)
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if record != nil {
+		// An edit made in place (the config-apply trigger) is never rewritten,
+		// so applyFiles does not name it; the result still says it was applied.
+		if p.configFromInstalled && p.config.SHA != record.ConfigSHA256 {
+			l.noteChange("applied the edited %s", env.Layout.ConfigPath)
+		}
+		if p.secretsSHA != record.SecretsSHA256 {
+			l.noteChange("applied the changed secrets")
+		}
+	}
+	changesApplied := len(r.Changes) > changesBefore
 	// Vendor machine policy goes in before the services start so the
 	// gateway loads a descriptor that names exactly the connectors whose
 	// hooks are in place.
@@ -948,8 +970,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeActivate, err)
 		}
 		for _, unit := range units {
-			if unit.Activate && !contains(previouslyActive, unit.Name) && env.Services.Active(ctx, unit) {
+			if !unit.Activate || !env.Services.Active(ctx, unit) {
+				continue
+			}
+			switch {
+			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
+			case changesApplied && unit.Kind == "gateway":
+				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
 	} else {

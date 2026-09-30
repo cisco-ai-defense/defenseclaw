@@ -12291,23 +12291,27 @@ def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
     ):
         return ("skip", "declined by user")
 
-    gw = shutil.which("defenseclaw-gateway")
+    # The custody-checked gateway, run through the file that was checked
+    # (#643): never whatever `defenseclaw-gateway` PATH resolves first.
+    gw = _watchdog_lifecycle_executable()
     if not gw:
-        return ("warn", "defenseclaw-gateway not on PATH — install the binary and re-run")
+        return ("warn", "no verified defenseclaw-gateway executable is installed — install it and re-run")
 
     cleaned: list[str] = []
     failed: list[str] = []
-    import subprocess as _sub
 
     for name in inactive_residue:
         try:
-            proc = _sub.run(
+            proc = run_pinned_executable(
                 [gw, "connector", "teardown", "--connector", name],
                 capture_output=True,
                 text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
                 timeout=60,
+                check=False,
             )
-        except (OSError, _sub.TimeoutExpired) as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             failed.append(f"{name}: {exc}")
             continue
         if proc.returncode == 0:
