@@ -136,12 +136,23 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 		// pull that started the sandbox): its log is kept as it is.
 		return
 	}
-	if run.State == runRunning {
-		m.logf("sandbox %s: the stop ends its detached run, which was still going", name)
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "run_interrupted",
-			Message: "sandbox " + name + "'s detached run was still going; the stop ended it unfinished, and its log is kept " +
-				"(`defenseclaw sandbox logs " + name + "`)"})
+	kept := m.readRunLog(ctx, gw, name, meta)
+	if run.State != runRunning {
+		return
 	}
+	m.logf("sandbox %s: the stop ends its detached run, which was still going", name)
+	msg := "sandbox " + name + "'s detached run was still going; the stop ended it unfinished"
+	if kept {
+		msg += ", and its log is kept (`defenseclaw sandbox logs " + name + "`)"
+	} else {
+		msg += "; its log could not be kept"
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "run_interrupted", Message: msg})
+}
+
+// readRunLog reads the end of the latest run's log out of the sandbox and
+// keeps it with meta; it reports whether it did.
+func (m *Manager) readRunLog(ctx context.Context, gw *Gateway, name string, meta keptRun) bool {
 	readCtx, cancel := context.WithTimeout(ctx, runLogWait+5*time.Second)
 	defer cancel()
 	res, err := gw.Client.Exec(readCtx, name, []string{"/bin/sh", "-c", runLogScript, "defenseclaw-run-log", harness.RunDir,
@@ -150,17 +161,19 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 	switch {
 	case err != nil:
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
-		return
+		return false
 	case res.ExitCode == 0:
 		log = res.Stdout
 	case res.ExitCode != 3:
 		// 3: the run left no log; the rest is kept all the same.
 		m.logf("sandbox %s: keep the log of its detached run: the read exited with status %d", name, res.ExitCode)
-		return
+		return false
 	}
 	if err := m.saveRunLog(name, meta, log); err != nil {
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
+		return false
 	}
+	return true
 }
 
 // keptAlready reports whether the kept run log is of the run meta

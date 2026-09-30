@@ -20,6 +20,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,6 +190,31 @@ func TestStopWithoutALiveRun(t *testing.T) {
 	}
 	if n := len(e.events("quietbox", sandboxapi.ActivityLifecycle, "run_interrupted")); n != 0 {
 		t.Fatalf("%d run_interrupted events for a run that was not going", n)
+	}
+}
+
+// A run the stop ended whose log could not be read is said so, and the stop
+// goes ahead.
+func TestStopSaysWhenARunsLogWasNotKept(t *testing.T) {
+	e := liveEnv(t, "lostbox", nil)
+	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if slices.Contains(call.Command, "defenseclaw-run-log") {
+			return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
+		}
+		// The harness's end found a detached run still going.
+		return openshelltest.ExecResponse{Stdout: []byte("run=running\nrun_started=1790000000\nexited\n")}
+	})
+	e.stopBox("lostbox")
+	if got := e.get("lostbox"); got.Phase != "stopped" {
+		t.Fatalf("phase = %s", got.Phase)
+	}
+	if !slices.ContainsFunc(e.events("lostbox", sandboxapi.ActivityLifecycle, "run_interrupted"), func(ev sandboxapi.ActivityEvent) bool {
+		return strings.Contains(ev.Message, "its log could not be kept")
+	}) {
+		t.Fatal("the feed does not say the run's log was lost")
+	}
+	if _, err := e.m.RunLog(t.Context(), "lostbox", 0); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("run log = %v", err)
 	}
 }
 
