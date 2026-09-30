@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -104,20 +105,35 @@ func (r *teardownRunner) Run(_ context.Context, name string, args ...string) (Co
 // kickstart -k fallback both failed with exit 37.
 func TestLaunchdStopWaitsForTeardownBeforeStart(t *testing.T) {
 	gateway := Unit{Name: labelGateway, Kind: "gateway"}
-	for _, stop := range []bool{true, false} {
-		runner := &teardownRunner{printsLeft: 3}
-		manager := &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
-		if stop {
-			if err := manager.Stop(context.Background(), gateway); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := manager.Start(context.Background(), gateway); err != nil {
-			t.Fatalf("stop=%v: start: %v (calls %v)", stop, err, runner.calls)
-		}
-		if got := runner.calls[len(runner.calls)-1]; got != "bootstrap" || contains(runner.calls, "kickstart") {
-			t.Fatalf("stop=%v: calls %v, want a bootstrap after the job is gone and no kickstart", stop, runner.calls)
-		}
+	restore := launchdTeardownWait
+	defer func() { launchdTeardownWait = restore }()
+
+	runner := &teardownRunner{printsLeft: 3}
+	manager := &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+	if err := manager.Stop(context.Background(), gateway); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background(), gateway); err != nil || contains(runner.calls, "kickstart") {
+		t.Fatalf("start after stop: %v (calls %v), want a bootstrap once the job is gone", err, runner.calls)
+	}
+
+	// Stop gave up waiting: Start waits for its own bootout to finish.
+	launchdTeardownWait = 0
+	runner = &teardownRunner{printsLeft: 2}
+	manager = &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+	_ = manager.Stop(context.Background(), gateway)
+	launchdTeardownWait = time.Minute
+	if err := manager.Start(context.Background(), gateway); err != nil || contains(runner.calls, "kickstart") {
+		t.Fatalf("start after an unfinished stop: %v (calls %v)", err, runner.calls)
+	}
+
+	// A job this manager did not boot out keeps the kickstart fallback, with
+	// no wait.
+	runner = &teardownRunner{printsLeft: 1}
+	manager = &launchdManager{env: &Env{GOOS: "darwin", Runner: runner, PollInterval: time.Millisecond}}
+	_ = manager.Start(context.Background(), gateway)
+	if !slices.Equal(runner.calls, []string{"bootstrap", "kickstart"}) {
+		t.Fatalf("start of a job it did not stop: calls %v", runner.calls)
 	}
 }
 

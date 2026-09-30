@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -317,6 +318,11 @@ var darwinUnits = []Unit{
 
 type launchdManager struct {
 	env *Env
+
+	mu sync.Mutex
+	// bootedOut are the jobs this manager booted out; only their EALREADY
+	// is a teardown still in progress.
+	bootedOut map[string]bool
 }
 
 func (m *launchdManager) Units() []Unit { return append([]Unit{}, darwinUnits...) }
@@ -337,8 +343,8 @@ func (m *launchdManager) Start(ctx context.Context, unit Unit) error {
 		return err
 	}
 	err := bootstrap()
-	if err != nil && launchdBusy(err) && m.waitUnloaded(ctx, unit) {
-		// A bootout of the same job was still finishing.
+	if err != nil && launchdBusy(err) && m.wasBootedOut(unit) && m.waitUnloaded(ctx, unit) {
+		// This manager's bootout of the job was still finishing.
 		err = bootstrap()
 	}
 	if err != nil && launchdAlreadyLoaded(err) {
@@ -356,16 +362,30 @@ func (m *launchdManager) Stop(ctx context.Context, unit Unit) error {
 	if err != nil && launchdNotLoaded(err) {
 		return nil
 	}
-	if (err == nil || launchdBusy(err)) && m.waitUnloaded(ctx, unit) {
-		return nil
+	if err == nil || launchdBusy(err) {
+		m.mu.Lock()
+		if m.bootedOut == nil {
+			m.bootedOut = map[string]bool{}
+		}
+		m.bootedOut[unit.Name] = true
+		m.mu.Unlock()
+		if m.waitUnloaded(ctx, unit) {
+			return nil
+		}
 	}
 	return err
+}
+
+func (m *launchdManager) wasBootedOut(unit Unit) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.bootedOut[unit.Name]
 }
 
 // launchdTeardownWait bounds the wait for launchd to remove a job it is
 // booting out. launchd kills a job that ignores SIGTERM after its exit
 // timeout (20 seconds by default).
-const launchdTeardownWait = 30 * time.Second
+var launchdTeardownWait = 30 * time.Second
 
 // waitUnloaded reports whether launchd stopped knowing the job within
 // launchdTeardownWait.
