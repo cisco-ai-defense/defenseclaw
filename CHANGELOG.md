@@ -71,6 +71,13 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Uninstall removes the empty OpenCode folders DefenseClaw created.** The
+  gateway's install watcher creates missing `plugin`, `skill` and `skills`
+  folders under `~/.config/opencode`, and a per-user uninstall left them
+  behind, empty. The watcher now lists the OpenCode folders it creates in
+  the DefenseClaw data directory, and the OpenCode teardown removes each one
+  that is still empty. Folders with content, folders outside the OpenCode
+  config folder and folders DefenseClaw did not create stay.
 - **Kiro's hook file goes when its version key is gone.** Teardown still
   left `~/.kiro/hooks/defenseclaw.json` as an empty `{"hooks": []}` when the
   file had lost its `version` key (as `uninstall --purge` on macOS found in
