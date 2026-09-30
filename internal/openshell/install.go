@@ -199,11 +199,19 @@ type Installer struct {
 	MaxScriptBytes int64
 	// GOOS is the platform installed on (default runtime.GOOS).
 	GOOS string
+	// E2fsprogsDirs are where OpenShell's MicroVM driver looks for
+	// e2fsprogs on a Mac (Doctor.E2fsprogsDirs; default the Homebrew kegs
+	// it knows): the plan says setup installs it next only when it is not
+	// there.
+	E2fsprogsDirs []string
 }
 
 func (i *Installer) defaults() {
 	if i.GOOS == "" {
 		i.GOOS = runtime.GOOS
+	}
+	if i.E2fsprogsDirs == nil {
+		i.E2fsprogsDirs = e2fsprogsDirs
 	}
 	if i.HTTPClient == nil {
 		i.HTTPClient = netguard.SafeHTTPClient(2 * time.Minute)
@@ -305,7 +313,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
-	if i.GOOS == "darwin" {
+	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
+		// Setup offers it once OpenShell is installed only where the
+		// doctor does not find it: a Mac that has it gets no note.
 		plan.Notes = append(plan.Notes, "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, "+
 			"which the formula does not install ("+InstallE2fsprogsCommand+"; setup offers it next)")
 	}

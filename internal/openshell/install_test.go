@@ -447,13 +447,28 @@ func TestInstallerPreparesTheMicroVMDriver(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "brew postinstall nvidia/openshell/openshell: exit status 1: Error: nvidia/openshell/openshell is not installed") {
 		t.Fatalf("ResignVMDriver = %v", err)
 	}
-	// The macOS install plan says the driver needs e2fsprogs too.
-	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-	f.inst.GOOS = "darwin"
-	if _, err := f.inst.Install(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(f.out.String(), "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs") {
-		t.Fatalf("plan:\n%s", f.out.String())
+	// The macOS install plan says the driver needs e2fsprogs too, which
+	// setup offers next, only when it is missing: it said so on a Mac
+	// whose e2fsprogs was installed, where setup offers nothing.
+	keg := filepath.Join(t.TempDir(), "opt", "e2fsprogs", "sbin")
+	const note = "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, which the formula does not install " +
+		"(brew install e2fsprogs; setup offers it next)"
+	for _, installed := range []bool{false, true} {
+		if installed {
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				if err := os.MkdirAll(keg, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeExecutable(t, filepath.Join(keg, tool))
+			}
+		}
+		f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f.inst.GOOS, f.inst.E2fsprogsDirs = "darwin", []string{keg}
+		if _, err := f.inst.Install(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(f.out.String(), note) == installed {
+			t.Fatalf("e2fsprogs installed %t, plan:\n%s", installed, f.out.String())
+		}
 	}
 }
