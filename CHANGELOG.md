@@ -148,6 +148,9 @@ rest also reach per-user installs.
   prompt text directly, so a prompt ending in a command could be read, and
   run, as that command with the notice's words appended. The notice now
   starts on its own lines and says it is not part of the request.
+  In action mode it also no longer says DefenseClaw "would block this in
+  action mode": it says the request matched a blocking rule and must not be
+  carried out.
 - **Amp shell commands get the same rule checks as Claude Code and Codex.**
   Amp's Bash tool sends its command as `cmd`, which the command analysis did
   not read, so every Amp command was judged only by the text-pattern
