@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -185,6 +186,11 @@ type hookStats struct {
 	toolCalls   int64
 	toolBlocked int64
 	lastBlocked string
+	// events counts the verdicts per hook event name (hookLabel of the
+	// harness's name), at most sandboxapi.MaxHookEvents names; otherEvents
+	// counts the rest (countEvent).
+	events      map[string]int64
+	otherEvents int64
 	// tampered counts tool calls that ran without a DefenseClaw verdict.
 	tampered   int64
 	lastTamper time.Time
@@ -612,6 +618,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
 		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, LastBlocked: b.hooks.lastBlocked,
+		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,

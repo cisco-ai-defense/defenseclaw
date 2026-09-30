@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,6 +101,12 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// The verdicts per hook event, the most frequent first (#956).
+		{"events", func(h *sandboxapi.HookCoverage) {
+			h.Events = map[string]int64{"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "UserPromptSubmit": 3}
+			h.OtherEvents = 1
+		}, "4 calls, 1 blocked", []string{
+			"Hook events   PreToolUse 12 · PostToolUse 11 · UserPromptSubmit 3 · SessionStart 2 · Stop 2 · other events 1\n"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -110,6 +117,15 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			has(t, ta.output(), c.list)
 			ta.ok(t, ta.fresh().Status(bg, "box", OutputText))
 			has(t, ta.output(), c.status...)
+			if sb.Hooks.Events == nil {
+				lacks(t, ta.output(), "Hook events")
+			}
+			ta.ok(t, ta.fresh().Status(bg, "box", OutputJSON))
+			var got sandboxapi.Sandbox
+			if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || !maps.Equal(got.Hooks.Events, sb.Hooks.Events) ||
+				got.Hooks.OtherEvents != sb.Hooks.OtherEvents {
+				t.Fatalf("status json hooks = %+v (%v), want events %v and %d other", got.Hooks, err, sb.Hooks.Events, sb.Hooks.OtherEvents)
+			}
 		})
 	}
 }

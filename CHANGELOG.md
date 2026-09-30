@@ -640,6 +640,16 @@ deleted.
   (`openshell.binary`, an `openshell.egress` pattern) is placed by the
   Python mirror of those checks. Messages still never contain the rejected
   value.
+- `sandbox status NAME` counts the hook verdicts per hook event, under the
+  harness's own event names (#956): a `Hook events` row reads `PreToolUse
+  12 · PostToolUse 11 · UserPromptSubmit 3 · Stop 2`, most frequent first.
+  Until now it gave only the totals (requests, tool calls, blocks), so a
+  harness whose `PostToolUse` or `Stop` hooks never fired looked the same as
+  one whose did. The daemon keeps the counts with the sandbox's other hook
+  counters, in the API's `hooks.events` (the JSON output too), at most 48
+  names a sandbox, cut to 64 bytes, with the rest in `hooks.other_events`.
+  The details of the TUI Sandboxes panel and the macOS app show the same
+  row. Both drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 

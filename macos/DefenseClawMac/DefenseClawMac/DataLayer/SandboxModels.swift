@@ -88,6 +88,11 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     var pendingApprovals = 0
     var toolCalls = 0
     var toolBlocked = 0
+    /// The hook verdicts per hook event, as the harness names it, the most
+    /// frequent first ("PreToolUse 12"); otherHookEvents counts those past
+    /// the daemon's cap.
+    var hookEvents: [String] = []
+    var otherHookEvents = 0
     var lastBlocked = ""
     var tampered = 0
     var hooksSilent = false
@@ -126,6 +131,13 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     }
 
     var uptimeText: String { running ? SandboxFormat.duration(uptimeSeconds) : "—" }
+
+    /// "PreToolUse 12 · PostToolUse 11 · Stop 2", as `sandbox status` shows
+    /// it (the TUI's SandboxRow.hook_events_text).
+    var hookEventsText: String {
+        (hookEvents + (otherHookEvents > 0 ? ["other events \(otherHookEvents)"] : [])).joined(separator: " · ")
+    }
+    var hookEventsLabel: String { hookEventsText.isEmpty ? "—" : hookEventsText }
 
     /// The failed hook calls, as the daemon's hook.failed event words them
     /// (the TUI's SandboxRow.hook_failure_alert).
@@ -577,6 +589,12 @@ enum SandboxDecoding {
         row.pendingApprovals = int(d["pending_approvals"])
         row.toolCalls = int(hooks["tool_calls"])
         row.toolBlocked = int(hooks["tool_blocked"])
+        row.hookEvents = dict(hooks["events"])
+            .map { (name: $0.key, count: int($0.value)) }
+            .filter { !$0.name.isEmpty && $0.count > 0 }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.name < $1.name }
+            .map { "\($0.name) \($0.count)" }
+        row.otherHookEvents = int(hooks["other_events"])
         row.lastBlocked = str(hooks["last_blocked"])
         row.tampered = int(hooks["tampered"])
         row.hooksSilent = (hooks["silent"] as? Bool) ?? false

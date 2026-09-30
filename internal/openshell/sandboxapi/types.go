@@ -281,6 +281,15 @@ type HookCoverage struct {
 	HookRequests int64 `json:"hook_requests"`
 	ToolCalls    int64 `json:"tool_calls"`
 	ToolBlocked  int64 `json:"tool_blocked"`
+	// Events counts the hook verdicts per hook event, under the name the
+	// harness sends (PreToolUse, preToolUse, tool.execute.before, ...).
+	// Their sum can be below HookRequests: a post refused before a verdict
+	// (malformed, outside the hook contract) or answered again from a
+	// retried post's first answer has no event. The names come from the
+	// workload, so a sandbox keeps at most MaxHookEvents of them; verdicts
+	// for further names count in OtherEvents.
+	Events      map[string]int64 `json:"events,omitempty"`
+	OtherEvents int64            `json:"other_events,omitempty"`
 	// LastBlocked is the plain reason of the most recent denied tool call
 	// (rule ID, title and what to do instead; never matched content).
 	LastBlocked string `json:"last_blocked,omitempty"`
@@ -318,6 +327,11 @@ type HookCoverage struct {
 	// rather than HooksUnreachableWarning.
 	NoHookYet bool `json:"no_hook_yet,omitempty"`
 }
+
+// MaxHookEvents bounds the hook event names HookCoverage.Events keeps for
+// one sandbox. Every harness's hook contract has fewer events (Claude
+// Code's, the largest, has 29).
+const MaxHookEvents = 48
 
 // Endpoint is an OpenShell EndpointStatus: the last network result of a
 // configured credentialed endpoint (a credential that never bound shows up
