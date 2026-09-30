@@ -16,11 +16,7 @@ DefenseClaw is the **enforcement and evidence layer** for AI coding agents. It s
 
 ## Three modes, one command
 
-<Cards>
-  <Card title="Observe" description="Log everything, block nothing. Use this for the first week." />
-  <Card title="Action" description="Enforce the configured severity policy. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM." />
-  <Card title="HITL" description="Pause eligible actions on native-ask events. Other connector events preserve the confirm intent in audit and apply an immediate fallback." />
-</Cards>
+DefenseClaw runs in observe, action or action with human approval (HITL). Action mode blocks CRITICAL findings by default and alerts on MEDIUM and above. See [Human-in-the-loop](/docs/hitl) for how the modes compose.
 
 ## Why a separate sidecar?
 
@@ -28,14 +24,14 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 - The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, Codex's `config.toml`, Cursor's `hooks.json`, OpenClaw's plugin).
 - One audit log covers every agent the operator runs.
-- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HILT, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HITL, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/setup/guardrail/multi-connector).
 
 ## Where DefenseClaw sits
 
 <Flow
   direction="TB"
   compact
-  caption="One Python CLI for the operator. One Go gateway for the data path. One TypeScript plugin per agent that needs in-process integration."
+  caption="One Python CLI for the operator. One Go gateway for the data path. A hook, plugin or proxy connector per agent."
 >
   <Node id="op" kind="operator">{`Operator\n(you)`}</Node>
   <Node id="cli" kind="generic">{`defenseclaw CLI\nPython`}</Node>
@@ -44,33 +40,22 @@ Inserting an inspection step inside the agent process means every agent has to g
   <Node id="sinks" kind="datastore">{`Sinks\nSQLite · JSONL ·\nOTLP · Splunk · webhooks`}</Node>
   <Edge from="op" to="cli" />
   <Edge from="cli" to="gateway" label="config · restart" />
-  <Edge from="agent" to="gateway" variant="bidirectional" label="hooks or proxy" />
+  <Edge from="agent" to="gateway" variant="bidirectional" label="hook · plugin · proxy" />
   <Edge from="gateway" to="sinks" />
   <Edge from="op" to="gateway" variant="bidirectional" label="TUI · HITL" />
 </Flow>
 
 ## Sandboxed agents
 
-DefenseClaw judges what an agent does; on its own it does not isolate the
-agent. On the host, the agent keeps your user's access to files and the
-network. To isolate it, run it in an NVIDIA OpenShell 0.1 sandbox with
-`defenseclaw sandbox run <command>`, for example `defenseclaw sandbox run
-claude`: OpenShell supplies the isolation boundary, and DefenseClaw keeps
-checking every tool call through its hook ingress and filters web traffic
-through its egress proxy. Claude Code, Codex, GitHub Copilot CLI, OpenCode
-and Kiro CLI run today on Linux, and as a preview on macOS; Cursor Agent, Amp
-and Devin CLI are unverified and cannot run yet. The
-[sandbox guide](/docs/setup/sandbox) covers setup, runs, undo and review.
+DefenseClaw judges what an agent does, but it does not isolate the agent on its own. To isolate an agent, run it in an NVIDIA OpenShell sandbox with `defenseclaw sandbox run <command>`. See [which harnesses can run](/docs/setup/sandbox#which-harnesses-can-run).
 
 ## What DefenseClaw is not
 
-<Callout type="warn">
-DefenseClaw does not prove an agent's behaviour is safe. It improves safety by combining static scanner results, runtime inspection, policy decisions, and audit trails. High-risk deployments should pair it with human review, least-privilege credentials, sandboxing, CI gates, and production monitoring.
-</Callout>
+DefenseClaw does not prove an agent's behavior is safe. See [Scope and limitations](/docs#scope-and-limitations).
 
-## Next
+## Next steps
 
 <Cards>
-  <Card title="Install" href="/docs/get-started/install" description="One curl command, or build from source." />
+  <Card title="Install" href="/docs/get-started/install" description="One command on macOS, Linux or Windows." />
   <Card title="Quickstart" href="/docs/get-started/quickstart" description="Zero-prompt first-run setup." />
 </Cards>

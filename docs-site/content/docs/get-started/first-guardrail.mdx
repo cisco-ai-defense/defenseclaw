@@ -1,5 +1,5 @@
 ---
-title: First guardrail in 5 minutes
+title: First guardrail in a few minutes
 description: An end-to-end walkthrough — install, pick Claude Code, switch to action mode, and safely verify a destructive-command rule against a disposable path.
 keywords:
   - first DefenseClaw guardrail
@@ -10,7 +10,10 @@ keywords:
 
 This walkthrough ends with DefenseClaw refusing to remove a disposable
 directory under `/var/tmp`. The example is intentionally harmless even if the
-guardrail is misconfigured.
+guardrail is misconfigured. It takes a few minutes.
+
+The sequence is: install, run the first-run setup (`quickstart` or `init`),
+wire Claude Code with `setup claude-code`, then turn on action mode.
 
 <Callout type="info" title="macOS/Linux walkthrough">
 This fixture intentionally exercises the POSIX-specific `CMD-RM-RF` rule and
@@ -30,6 +33,20 @@ a Windows policy rule that the default pack does not ship.
 ```bash
 curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode
 ```
+
+</Step>
+
+<Step>
+
+### Run the first-run setup
+
+```bash
+defenseclaw quickstart --connector claudecode
+```
+
+This writes the config, seeds the audit database and starts the gateway. To
+answer the questions yourself, run `defenseclaw init` instead. See
+[Quickstart](/docs/get-started/quickstart).
 
 </Step>
 
@@ -108,7 +125,9 @@ In a second terminal you'll see the audit event land. List recent alerts:
 defenseclaw alerts --limit 10
 ```
 
-```
+This output is illustrative; your columns and values can differ:
+
+```text
 #   SEVERITY   TIMESTAMP             ACTION  TARGET                              DETAILS
 1   CRITICAL   2026-05-08 14:02:11   block   rm -rf /var/tmp/defenseclaw-demo-empty   CMD-RM-RF
 ```
@@ -162,7 +181,7 @@ CRITICAL findings are not eligible for HITL approval.
   <Message from="cc" to="u"  kind="return" label="I can't run that — DefenseClaw blocked it." />
 </Sequence>
 
-## Next
+## Next steps
 
 <Cards>
   <Card title="Setup Guardrail (full reference)" href="/docs/setup/guardrail" description="Every flag, every option, every consequence." />

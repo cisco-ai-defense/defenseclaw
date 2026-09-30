@@ -13,8 +13,7 @@ DefenseClaw has a native, per-user Windows x64 (`amd64`) distribution. It
 installs a local gateway, native hook launcher, CLI, TUI, scanners, and managed
 Python runtime. Connector availability, setup, paths, and platform-specific
 quirks live on the [connector pages](/docs/connectors#platform-support), next
-to the equivalent macOS/Linux guidance. A supported availability label does
-not populate validation evidence or certify an official-client run.
+to the equivalent macOS/Linux guidance.
 
 For centrally managed endpoints, use [enterprise deployment](/docs/enterprise)
 instead. It installs administrator-owned Windows services. The
@@ -38,7 +37,7 @@ native agent at a WSL installation, or mix native and WSL connector homes.
 
 | Status | Meaning in this guide |
 | --- | --- |
-| **Supported** | Implemented and available through the ordinary native Windows x64 install. This availability label does not populate validation metadata or claim authentic client evidence. |
+| **Supported** | Implemented and available through the ordinary native Windows x64 install. |
 | **Limited** | Supported only on the stated surface, with optional configuration, an extra dependency, or a narrower guarantee. |
 | **Unsupported** | Rejected, unavailable, or outside the native Windows product contract. |
 | **Not applicable** | A platform-specific concept is intentionally absent from the Windows design. |
@@ -56,13 +55,10 @@ can protect and observe only events the installed agent emits through a
 documented hook, awaited policy, or native telemetry surface.
 
 <Cards>
-  <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, install, upgrade, rollback, repair, and uninstall." />
   <Card title="Choose a connector" href="/docs/connectors#platform-support" description="Compare macOS/Linux and native Windows support, then open one connector's setup and quirks." />
   <Card title="Enterprise deployment" href="/docs/enterprise" description="Administrator-owned services for Intune or any MDM, with the standalone and Secure Client profiles." />
   <Card title="Capabilities" href="/docs/capability-matrix" description="Connector enforcement, native ask, fail-closed, and subprocess capabilities." />
   <Card title="CLI commands" href="/docs/reference/cli" description="Canonical command reference with platform-specific availability notes." />
-  <Card title="Windows security model" href="/docs/get-started/windows/telemetry-security" description="Loopback authentication, local audit, scoped credentials, release provenance, and recovery guarantees." />
-  <Card title="Paths and troubleshooting" href="/docs/get-started/windows/paths-troubleshooting" description="Filesystem reference, safe diagnostics, terminal guidance, and verification checklists." />
 </Cards>
 
 ## Native architecture
@@ -95,8 +91,8 @@ the authentication, redaction, and local-storage boundaries.
 | Windows ARM64, including x64 emulation | **Not certified** | Releases publish no ARM64 build. |
 | Machine-wide install or MSI | **Unsupported** | `install.ps1` installs for the current user only. For a machine-wide deployment, see [enterprise deployment](/docs/enterprise). |
 | Windows model-proxy connectors | **Unsupported** | The native Windows gateway supports connector hook, plugin, and awaited-policy lanes, not the guardrail-proxy lifecycle. |
-| A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
-| Sandbox commands and OpenShell sandboxes | **Unsupported** | `sandbox legacy-cleanup` and the removed legacy standalone sandbox it cleans up are Linux-only. The OpenShell sandbox integration in development refuses to render sandbox image files on Windows hosts. |
+| A remote agent-to-DefenseClaw gateway topology | **Not certified** | The supported connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
+| Sandbox commands and OpenShell sandboxes | **Unsupported** | `sandbox legacy-cleanup` and the removed legacy standalone sandbox it cleans up are Linux-only. OpenShell sandboxes do not run on native Windows. |
 | `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
 | Machine services from the per-user install | **Unsupported** | The per-user install never installs services. The separate enterprise lifecycle installs machine services: see the [standalone profile](/docs/enterprise/windows) or the [Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout). |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
@@ -117,5 +113,8 @@ Windows user, follow its Windows setup tab, and do not copy a WSL data
 directory, hook scripts, tokens, virtual environment, gateway binary, or
 connector configuration into the Windows profile.
 
-Continue with [Install and maintain](/docs/get-started/windows/install-lifecycle),
-then use the [post-install checklist](/docs/get-started/windows/paths-troubleshooting#post-install-checklist).
+## Next steps
+
+- [Install and maintain](/docs/get-started/windows/install-lifecycle)
+- [Post-install checklist](/docs/get-started/windows/paths-troubleshooting#post-install-checklist)
+- [Telemetry and security](/docs/get-started/windows/telemetry-security)
