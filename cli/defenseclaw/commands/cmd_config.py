@@ -47,7 +47,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_validate_v8
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -362,7 +362,14 @@ def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
     if exc.field_path != "$":
         return str(exc)
     try:
-        load_validate_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
+        # Read no more than the canonical validator does: an over-limit
+        # source keeps its refusal, and is never read whole (the mirror
+        # would only refuse it for its size too).
+        with open(cfg_path, "rb") as stream:
+            raw = stream.read(MAX_SOURCE_BYTES + 1)
+        if len(raw) > MAX_SOURCE_BYTES:
+            return str(exc)
+        load_validate_v8(raw, source_name=cfg_path)
     except V8ConfigError as mirror:
         return f"candidate field={mirror.path}; reason=[{mirror.keyword}] {mirror.corrective_action}"
     except (OSError, RuntimeError, ValueError):
