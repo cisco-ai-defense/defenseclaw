@@ -250,6 +250,14 @@ rest also reach per-user installs.
   stopped at its gateway-stop phase, because `stop` refuses there. A
   per-user install left over from before the managed deployment is now
   removed.
+- **A Windows purge removes each account's DefenseClaw folder (enterprise
+  standalone).** Setup `/uninstall PURGE=1` and `uninstall --purge`, run as
+  LocalSystem, now remove each enrolled account's `%USERPROFILE%\.defenseclaw`,
+  including its per-user hook tokens, whether or not the account is signed
+  in. As on Linux and macOS, only the inert hook stubs a running agent may
+  still call and the account's own hooks the foreign-hook policy moved aside
+  stay. The `per_user_state_remaining` warning names each folder the purge
+  could not remove, with the reason.
 - **Amp's `async_shell_command` is inspected like its bash tool.** Commands
   an Amp release ran through `async_shell_command` got no command facts, so
   a rule that needs them was recorded but did not block.
