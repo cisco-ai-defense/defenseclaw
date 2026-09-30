@@ -200,9 +200,15 @@ func TestStopWithoutALiveRun(t *testing.T) {
 }
 
 // A run the stop ended whose log could not be read is said so, and the stop
-// goes ahead.
+// goes ahead. The log kept of an earlier run is not shown as this one's.
 func TestStopSaysWhenARunsLogWasNotKept(t *testing.T) {
 	e := liveEnv(t, "lostbox", nil)
+	b := e.boxOf("lostbox")
+	e.m.mu.Lock()
+	id := b.sandboxID()
+	e.m.mu.Unlock()
+	must(t, e.m.saveRunLog("lostbox", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
+		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
 	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if slices.Contains(call.Command, "defenseclaw-run-log") {
 			return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}

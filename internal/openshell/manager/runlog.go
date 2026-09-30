@@ -136,6 +136,11 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run detac
 		// pull that started the sandbox): its log is kept as it is.
 		return
 	}
+	// The log kept of an earlier run goes first: a read that fails must not
+	// leave it to be shown as this run's.
+	if err := m.dropRunLogMeta(name); err != nil {
+		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
+	}
 	kept := m.readRunLog(ctx, gw, name, meta)
 	if run.State != runRunning {
 		return
@@ -204,14 +209,26 @@ func (m *Manager) saveRunLog(name string, meta keptRun, log []byte) error {
 	if err != nil {
 		return err
 	}
-	dir := m.runLogDir(name)
-	if err := os.Remove(filepath.Join(dir, runLogMetaFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := m.dropRunLogMeta(name); err != nil {
 		return err
 	}
+	dir := m.runLogDir(name)
 	if err := safefile.WritePrivate(filepath.Join(dir, runLogFile), log); err != nil {
 		return err
 	}
 	return safefile.WritePrivate(filepath.Join(dir, runLogMetaFile), data)
+}
+
+// dropRunLogMeta removes the metadata of the kept run log, which hides the
+// log: a log without metadata is never shown.
+func (m *Manager) dropRunLogMeta(name string) error {
+	if !openshell.ValidSandboxName(name) || name == recordDirName {
+		return fmt.Errorf("%w: sandbox %q", openshell.ErrInvalidName, name)
+	}
+	if err := os.Remove(filepath.Join(m.runLogDir(name), runLogMetaFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // removeRunLog removes a gone sandbox's kept run log.
