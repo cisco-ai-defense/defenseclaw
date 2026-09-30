@@ -122,6 +122,11 @@ rest also reach per-user installs.
   Claude Code, Codex and Hermes teardowns do. A Kiro session that cached
   the path stops posting to the gateway until it restarts; setup writes
   the active script again.
+- **Blocked spans keep the rule title.** The status message and block event
+  of a blocked span showed a shipped rule's title as a redacted token
+  (`matched: <RULE-ID>:<redacted ...>`). A reason made only of shipped rule
+  IDs and their catalog titles is now kept as written; other reasons are
+  still scrubbed.
 - **AI discovery records name the user.** The `ai_component.discovered`,
   `changed` and `removed` records carry `user.id`,
   `defenseclaw.user.id_kind` and `defenseclaw.user.name` when the signal

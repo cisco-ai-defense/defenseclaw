@@ -29,7 +29,7 @@ type hookGuardrailOutcome struct {
 // hookGuardrailOutcomeFor maps a connector-facing hook decision onto the
 // outcome vocabulary. Allow, including an observe-mode would-block, has none.
 func hookGuardrailOutcomeFor(action, severity, reason string, ruleIDs []string) (hookGuardrailOutcome, bool) {
-	outcome := hookGuardrailOutcome{Reason: redaction.ForSinkReason(strings.TrimSpace(reason)), At: time.Now().UTC()}
+	outcome := hookGuardrailOutcome{Reason: guardrailSpanReason(strings.TrimSpace(reason)), At: time.Now().UTC()}
 	switch normalizeHookActionLabel(action) {
 	case "block":
 		outcome.Action = "block"
@@ -50,6 +50,20 @@ func hookGuardrailOutcomeFor(action, severity, reason string, ruleIDs []string) 
 		outcome.Severity = string(normalized.Severity)
 	}
 	return outcome, true
+}
+
+// guardrailSpanReason is the reason a guardrail span carries. A reason made
+// only of shipped rule IDs and their exact catalog titles
+// (trustedBuiltInMatchReason) is DefenseClaw-authored and stays readable, as
+// on agent and notification surfaces; the sink scrub turned "matched:
+// <RULE-ID>:SSH authorized keys mutation" into a redacted token. Any other
+// reason, and every reason under a managed (Secure Client) redaction policy,
+// keeps the scrub.
+func guardrailSpanReason(reason string) string {
+	if !managedEnterpriseActive.Load() && trustedBuiltInMatchReason(reason) {
+		return reason
+	}
+	return redaction.ForSinkReason(reason)
 }
 
 // hookToolCallCapture records the tool call a hook request remembered for

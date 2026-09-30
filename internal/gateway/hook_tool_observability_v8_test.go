@@ -443,7 +443,7 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 		agentHookResponse{
 			Action: "block", Severity: "CRITICAL", RuleIDs: []string{"C2-METADATA-AWS"},
 			Reason:       "DefenseClaw blocked this action (rule C2-METADATA-AWS: AWS metadata endpoint)",
-			SourceReason: "matched: C2-METADATA-AWS: AWS metadata endpoint (SSRF)",
+			SourceReason: "matched: C2-METADATA-AWS:AWS metadata endpoint (SSRF)",
 		}, time.Millisecond)
 
 	for name, capture := range map[string]*hookModelV8OTLPCapture{"otlp": otlp, "galileo": galileo} {
@@ -458,6 +458,11 @@ func TestHookToolV8BlockedCallCarriesGuardrailBlockOnEveryDestination(t *testing
 		}
 		if tool == nil || tool.Status.GetCode() != tracepb.Status_STATUS_CODE_ERROR {
 			t.Fatalf("%s: blocked tool span=%+v, want status ERROR", name, tool)
+		}
+		// A shipped rule's catalog title is DefenseClaw's own text: it stays
+		// readable instead of a redacted token.
+		if !strings.Contains(tool.Status.GetMessage(), "C2-METADATA-AWS:AWS metadata endpoint (SSRF)") {
+			t.Errorf("%s: blocked tool span status message=%q, want the rule id and title", name, tool.Status.GetMessage())
 		}
 		attributes := hookModelV8ProtoAttributes(tool)
 		for key, want := range map[string]string{
