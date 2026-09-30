@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -67,7 +68,7 @@ type DeveloperTools struct {
 // delete it)."): updating or removing it is the fix, not the Command Line
 // Tools. A version that could not be read does not count.
 func (d *DeveloperTools) OutdatedXcodeApp() bool {
-	if d == nil || d.XcodeApp == "" || d.Xcode == "" || filepath.Clean(d.Selected) != CommandLineTools {
+	if d == nil || d.XcodeApp == "" || d.Xcode == "" || path.Clean(d.Selected) != CommandLineTools {
 		return false
 	}
 	xcode, clt, ok := homebrewMinimums(d.MacOS)

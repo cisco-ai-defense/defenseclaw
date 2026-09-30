@@ -202,13 +202,15 @@ func TestRunStateMarkNeverWritesToAFullFIFO(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	held, err := os.OpenFile(fifo, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	// A raw descriptor: an *os.File of a FIFO is in the runtime poller,
+	// whose Write waits for room instead of failing with EAGAIN.
+	held, err := syscall.Open(fifo, syscall.O_RDWR|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer held.Close()
-	for {
-		if _, err := held.Write(make([]byte, 4096)); err != nil {
+	defer syscall.Close(held)
+	for chunk := make([]byte, 4096); ; {
+		if _, err := syscall.Write(held, chunk); err != nil {
 			break
 		}
 	}
