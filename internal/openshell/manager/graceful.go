@@ -156,6 +156,7 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.D
 	m.mu.Lock()
 	name, harnessName := b.rec.Name, b.rec.Harness
 	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	tamper := b.tamperStop
 	m.mu.Unlock()
 	if !ready {
 		return none
@@ -175,16 +176,23 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) harness.D
 	execCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	ticks := int(harnessExitWait / (100 * time.Millisecond))
+	// A tamper stop does not look at the run: its run directory is the
+	// workload's, whose files can hold an open (a lease), and the stop keeps
+	// no log of it anyway (keepRunLog).
+	runs := harness.RunDir
+	if tamper {
+		runs = ""
+	}
 	// What the script printed before a failure still counts: a flush that
 	// the exec's timeout cut short comes after the run's lines.
 	streamed := &headBuffer{limit: harnessEndOutput}
 	res, err := gw.Client.Exec(execCtx, name, []string{"/bin/sh", "-c", script, "defenseclaw-end-harness", spec.InstallRoot(),
-		strconv.Itoa(ticks), harness.RunDir}, openshell.ExecOptions{Timeout: timeout, Attempts: 1, MaxOutputBytes: harnessEndOutput, Stdout: streamed})
+		strconv.Itoa(ticks), runs}, openshell.ExecOptions{Timeout: timeout, Attempts: 1, MaxOutputBytes: harnessEndOutput, Stdout: streamed})
 	if err != nil {
 		m.logf("sandbox %s: ask the harness to exit before the stop: %v", name, err)
 		end := parseHarnessEnd(streamed.Bytes())
 		run := end.Run
-		if end.Harness == "" && run.State == sandboxapi.RunNone {
+		if end.Harness == "" && run.State == sandboxapi.RunNone && !tamper {
 			// The script did not get as far as saying whether there is a
 			// run: ask on its own, so a run the stop ends is still marked
 			// and its log kept.

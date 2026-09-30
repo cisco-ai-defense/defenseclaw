@@ -1342,8 +1342,12 @@ run directory is the workload's: every read opens a file read-write (which
 never waits on a FIFO), reads it only when what it opened is a regular file,
 and reads a bounded part of it, and the log read is bounded at ten seconds.
 Every stop goes through this: the CLI's, the TUI's, the macOS app's, undo's
-and a tamper stop's, except that a tamper stop keeps no log (it waits on
-nothing the workload controls; the feed says the log was not kept). The CLI
+and a tamper stop's, except that a tamper stop neither looks at the run
+nor keeps its log, and forgets the log kept of an earlier run (it waits on
+nothing the workload controls, whose run files can hold an open). The
+stop's interrupted mark goes through a descriptor checked to be a regular
+file, after it has said how the run stands, so a FIFO swapped in for
+`latest.exit` gets no write. The CLI
 only asks first, on a terminal, before `sandbox stop` ends a run still
 going. `sandbox logs` names the run a kept log is of (its start), and still
 shows a log an earlier CLI kept in `cli/run.log`, said to be that CLI's,

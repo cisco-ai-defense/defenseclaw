@@ -687,8 +687,9 @@ deleted.
   by `latest.pid` and a command line naming `latest.exit`), says so on the
   activity feed (`run_interrupted`), and keeps the last 1 MiB of the run's
   log under `<data_dir>/sandboxes/<name>/runlog/` (reading only a regular
-  file, bounded, after it publishes `stopping`; a tamper stop keeps none, so
-  it waits on nothing the workload controls); `sandbox logs` of a
+  file, bounded, after it publishes `stopping`; a tamper stop neither
+  looks at the run nor keeps its log, so it waits on nothing the workload
+  controls); `sandbox logs` of a
   stopped sandbox reads it from the new `GET
   /api/v1/sandbox/sandboxes/{name}/logs`, and still shows (as such) a log an earlier
   CLI kept, until the sandbox starts again. Keeping the changes at the end of a session is recorded through

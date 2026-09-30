@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -188,6 +189,42 @@ func TestRunStateNeverWaitsOnTheWorkload(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// The stop's mark goes through rs_open's checked descriptor: a FIFO swapped
+// in as latest.exit after the look, which the workload holds open with its
+// buffer full, gets no write that would wait for a reader, and the run's
+// lines are printed before the mark.
+func TestRunStateMarkNeverWritesToAFullFIFO(t *testing.T) {
+	d := t.TempDir()
+	fifo := filepath.Join(d, "latest.exit")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	held, err := os.OpenFile(fifo, os.O_RDWR|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	for {
+		if _, err := held.Write(make([]byte, 4096)); err != nil {
+			break
+		}
+	}
+	for _, sh := range shells(t) {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		script := RunReadFunc + `( rs_open "$1" && printf 'interrupted\n' >&3 ) 2>/dev/null; echo done` + "\n"
+		start := time.Now()
+		out, err := exec.CommandContext(ctx, sh, "-c", script, "sh", fifo).Output()
+		cancel()
+		if err != nil || string(out) != "done\n" || time.Since(start) > 5*time.Second {
+			t.Fatalf("%s: the mark on a full FIFO: %q, %v after %s", sh, out, err, time.Since(start))
+		}
+	}
+	src := RunStateFunc
+	if strings.Index(src, `echo "run_started=$rs_started"`) > strings.Index(src, `printf 'interrupted\n' >&3`) {
+		t.Fatal("run_state marks the run before it says how it stands")
 	}
 }
 

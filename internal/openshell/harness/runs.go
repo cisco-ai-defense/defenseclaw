@@ -92,8 +92,10 @@ const RunAliveFunc = RunReadFunc + `run_alive() {
 // run_exit=<status> once it holds one, run=interrupted when the run ended
 // without one (a stop ended it, or the sandbox stopped under it); then
 // run_started=<epoch seconds>. With mark, a run that has no status yet is
-// marked interrupted in latest.exit first (a stop is about to end it); the
-// mark is written read-write too, so a FIFO swapped in cannot hold it.
+// then marked interrupted in latest.exit (a stop is about to end it), after
+// the lines are printed, so a mark held up still leaves them said: the mark
+// goes through rs_open's descriptor, checked to be a regular file, so a
+// FIFO swapped in (whose full buffer would hold a write) gets none.
 const RunStateFunc = RunAliveFunc + `run_state() {
   rs_d=$1; rs_mark=$2
   [ -e "$rs_d/latest.pid" ] || [ -e "$rs_d/latest.log" ] || return 0
@@ -103,13 +105,15 @@ const RunStateFunc = RunAliveFunc + `run_state() {
   if [ -n "$rs_exit" ]; then
     rs_exit=$(printf '%s' "$rs_exit" | tr -dc 'A-Za-z0-9_.-')
     [ "$rs_exit" = interrupted ] || { rs_run=exited; echo "run_exit=$rs_exit"; }
-  elif [ "$rs_mark" = mark ] && [ -e "$rs_d/latest.pid" ] &&
-    { [ ! -e "$rs_d/latest.exit" ] || { [ -f "$rs_d/latest.exit" ] && [ ! -s "$rs_d/latest.exit" ]; }; }; then
-    { printf 'interrupted\n' 1<>"$rs_d/latest.exit"; } 2>/dev/null
   fi
   rs_started=$(rs_read "$rs_d/latest.started" 32 | tr -dc 0-9)
   echo "run=$rs_run"
   echo "run_started=$rs_started"
+  if [ -z "$rs_exit" ] && [ "$rs_mark" = mark ] && [ -e "$rs_d/latest.pid" ] &&
+    { [ ! -e "$rs_d/latest.exit" ] || { [ -f "$rs_d/latest.exit" ] && [ ! -s "$rs_d/latest.exit" ]; }; }; then
+    ( rs_open "$rs_d/latest.exit" && printf 'interrupted\n' >&3 ) 2>/dev/null
+  fi
+  return 0
 }
 `
 

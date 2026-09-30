@@ -103,14 +103,24 @@ func (b *box) sandboxID() string {
 // is interrupted by the stop, and the feed says so. Best effort: the stop
 // goes ahead whatever happens here. A stop of a sandbox whose hooks were
 // tampered with (hooks.on_tamper: stop) keeps no log: the log is the
-// workload's, and that stop waits on nothing the workload controls.
+// workload's, and that stop waits on nothing the workload controls, so it
+// does not look at the run either (endHarness), and the log kept of an
+// earlier run goes, since it may not be the latest run's.
 func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harness.DetachedRun) {
+	m.mu.Lock()
+	name, id := b.rec.Name, b.sandboxID()
+	tamper := b.tamperStop
+	m.mu.Unlock()
+	if tamper {
+		if err := m.dropRunLogMeta(name); err != nil {
+			m.logf("sandbox %s: forget the log kept of an earlier detached run: %v", name, err)
+		}
+		m.logf("sandbox %s: the log of a detached run is not kept: the stop is for hook tampering", name)
+		return
+	}
 	if run.State == sandboxapi.RunNone {
 		return
 	}
-	m.mu.Lock()
-	name, id := b.rec.Name, b.sandboxID()
-	m.mu.Unlock()
 	meta := keptRun{SandboxID: id, State: sandboxapi.RunInterrupted, KeptAt: m.now().UTC()}
 	if run.State == sandboxapi.RunExited {
 		meta.State, meta.Exit = sandboxapi.RunExited, run.Exit
@@ -128,15 +138,7 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harne
 	if err := m.dropRunLogMeta(name); err != nil {
 		m.logf("sandbox %s: keep the log of its detached run: %v", name, err)
 	}
-	m.mu.Lock()
-	tamper := b.tamperStop
-	m.mu.Unlock()
-	kept := false
-	if tamper {
-		m.logf("sandbox %s: the log of its detached run is not kept: the stop is for hook tampering", name)
-	} else {
-		kept = m.readRunLog(ctx, gw, name, meta)
-	}
+	kept := m.readRunLog(ctx, gw, name, meta)
 	if run.State != sandboxapi.RunRunning {
 		return
 	}
@@ -145,8 +147,6 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harne
 	switch {
 	case kept:
 		msg += ", and its log is kept (`defenseclaw sandbox logs " + name + "`)"
-	case tamper:
-		msg += "; its log was not kept, since the sandbox was stopped for tampering with its hooks"
 	default:
 		msg += "; its log could not be kept"
 	}

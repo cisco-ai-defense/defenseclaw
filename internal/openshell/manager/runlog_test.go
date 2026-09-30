@@ -352,11 +352,11 @@ func TestParseHarnessEnd(t *testing.T) {
 	}
 }
 
-// A tamper stop does not wait on anything the workload controls: the log of
-// the run it ends is the workload's output, in the workload's run
-// directory, where a FIFO or an endless file can hold a read (here the read
-// never answers). The run is still marked interrupted and the feed says the
-// log was not kept, and no earlier run's log is shown for it.
+// A tamper stop does not wait on anything the workload controls: the run
+// it ends, its log and its marks are in the workload's run directory,
+// whose files can hold a read or an open (here the read never answers), so
+// the stop neither looks at the run nor reads its log, and no earlier
+// run's log is shown for it.
 func TestATamperStopDoesNotReadTheRunLog(t *testing.T) {
 	e := newEnv(t, nil)
 	e.live(sandboxapi.CreateRequest{Name: "tamperlog", Pack: "balanced"})
@@ -386,13 +386,8 @@ func TestATamperStopDoesNotReadTheRunLog(t *testing.T) {
 	if took := time.Since(began); reads.Load() != 0 || took > 10*time.Second {
 		t.Fatalf("the tamper stop read the run log %d times and took %s", reads.Load(), took)
 	}
-	if data, err := os.ReadFile(filepath.Join(going, "latest.exit")); err != nil || string(data) != "interrupted\n" {
-		t.Fatalf("latest.exit = %q, %v; want the run marked interrupted", data, err)
-	}
-	if !slices.ContainsFunc(e.events("tamperlog", sandboxapi.ActivityLifecycle, "run_interrupted"), func(ev sandboxapi.ActivityEvent) bool {
-		return strings.Contains(ev.Message, "its log was not kept")
-	}) {
-		t.Fatal("the feed does not say the tamper stop kept no log of the run")
+	if _, err := os.Stat(filepath.Join(going, "latest.exit")); !os.IsNotExist(err) {
+		t.Fatalf("the tamper stop wrote into the run directory: %v", err)
 	}
 	if _, err := e.m.RunLog(t.Context(), "tamperlog", 0); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		t.Fatalf("run log after the tamper stop = %v, want none", err)
