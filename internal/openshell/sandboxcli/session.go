@@ -251,10 +251,10 @@ var promptFirst = map[string]bool{
 
 // watchNotices follows the sandbox during the session and announces what
 // must not wait until the end: an ask waiting for the user, a blocked
-// destination, a finding (an alert, hook tamper), a quarantined nested
-// repository, a DefenseClaw daemon that does not answer, and hooks that
-// do not reach DefenseClaw (the daemon's verdict, or no hook by the end of
-// the hook window).
+// destination, a large upload, a finding (an alert, hook tamper), a
+// quarantined nested repository, a DefenseClaw daemon that does not
+// answer, and hooks that do not reach DefenseClaw (the daemon's verdict,
+// or no hook by the end of the hook window).
 func (s *session) watchNotices(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var since uint64
@@ -346,6 +346,8 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.blockNotice(ev)
 	case sandboxapi.ActivityEgressUnblocked:
 		s.onUnblock(ev.Host)
+	case sandboxapi.ActivityEgressLargeUpload:
+		s.largeUploadNotice(ev)
 	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityHookFailed:
 		// A hook of the session reached DefenseClaw.
 		s.sawHooks.Store(true)
@@ -459,6 +461,18 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	delete(s.unblockedHosts, host)
 	s.noticeMu.Unlock()
 	s.noticeWith("block "+ev.Host, text, n)
+}
+
+// largeUploadNotice announces a large upload only the report saw (the
+// large-upload block was off, or the destination is exempt from it), once
+// per host, as the feed words it: "⚠ large upload to files.example.net
+// (more than 25 MiB)".
+func (s *session) largeUploadNotice(ev sandboxapi.ActivityEvent) {
+	if ev.Host == "" {
+		return
+	}
+	text := "⚠ " + largeUploadText(ev)
+	s.notice("large upload "+strings.ToLower(ev.Host), text, text)
 }
 
 // onUnblock records that host was unblocked for this sandbox (or for every

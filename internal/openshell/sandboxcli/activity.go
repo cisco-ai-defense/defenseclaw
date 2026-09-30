@@ -108,13 +108,7 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			b.WriteString(a.dim("  → unblock: " + CommandName + " unblock " + ev.Host + scope))
 		}
 	case sandboxapi.ActivityEgressLargeUpload:
-		// Reported as it crossed the threshold, before it ended: what had
-		// gone up then (the report's bytes) is not what it sent (RT U4).
-		size := humanBytes(ev.BytesUp)
-		if ev.Threshold > 0 {
-			size = "more than " + egress.FormatThreshold(ev.Threshold)
-		}
-		b.WriteString(a.style("⚠", ansiYellow) + " large upload to " + hostPort(ev) + " (" + size + ")")
+		b.WriteString(a.style("⚠", ansiYellow) + " " + largeUploadText(ev))
 	case sandboxapi.ActivityApprovalRequested:
 		// The destination always shows: nobody should approve one they
 		// cannot see. The daemon's message says why it is an ask.
@@ -190,6 +184,18 @@ func reasonText(token string) string {
 		return text
 	}
 	return strings.ReplaceAll(token, "_", " ")
+}
+
+// largeUploadText is an egress.large_upload report without its ⚠: "large
+// upload to files.example.net (more than 25 MiB)". It is reported as it
+// crosses the threshold, before it ends: what had gone up then (the
+// report's bytes) is not what it sent (RT U4).
+func largeUploadText(ev sandboxapi.ActivityEvent) string {
+	size := humanBytes(ev.BytesUp)
+	if ev.Threshold > 0 {
+		size = "more than " + egress.FormatThreshold(ev.Threshold)
+	}
+	return "large upload to " + hostPort(ev) + " (" + size + ")"
 }
 
 func hostPort(ev sandboxapi.ActivityEvent) string {

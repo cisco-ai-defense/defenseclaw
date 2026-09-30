@@ -358,21 +358,32 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		{Seq: 8, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "cut.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
 			Reason:      "This destination is blocked since this sandbox tried to send more than 10 MiB to it, a destination it had not contacted before.",
 			Unblockable: true},
+		// A large upload only the report saw (the block off): the summary
+		// listed the ⚠ rule finding but not this ⚠ (PR 1022 live retest
+		// N2). Once per host.
+		{Seq: 9, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "httpbin.io", Port: 443, BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		{Seq: 10, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "HTTPBIN.io", Port: 443, BytesUp: 1<<20 + 9, Threshold: 1 << 20},
 	}
+	large := "⚠ large upload to httpbin.io (more than 1 MiB)"
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
 	upload := "✗ DefenseClaw blocked a large upload to files.example.net (this sandbox tried to send more than 10 MiB to a destination it had not " +
 		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
 	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
 		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "cut.example.net") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "httpbin.io") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
-	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") {
+	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") ||
+		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") {
 		t.Fatalf("live output = %q", live)
 	}
-	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
+	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict",
+		large+"\n")
+	if out := ta.output(); strings.Count(out, "large upload to httpbin.io") != 1 || strings.Contains(out, "HTTPBIN.io") {
+		t.Errorf("the large upload is summarised once:\n%s", out)
+	}
 	if out := ta.output(); strings.Index(out, "Session ended") > strings.Index(out, block) {
 		t.Errorf("the notices come before the summary line:\n%s", out)
 	}

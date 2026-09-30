@@ -403,8 +403,10 @@ port on your machine, a private address, a destination the profile does not
 list) with its destination and the `sandbox approve` command that answers it
 from another terminal (or `defenseclaw tui`, key `7`, then `t` for the Asks
 view); a destination DefenseClaw blocked, with the `sandbox unblock` command
-that lifts the block; a finding such as an alert on a tool call or hook
-tamper; a quarantined nested repository; and a DefenseClaw daemon that
+that lifts the block; a large upload the block did not cut (`⚠ large upload
+to files.example.net (more than 25 MiB)`, with the block off or for a
+destination exempt from it); a finding such as an alert on a tool call or
+hook tamper; a quarantined nested repository; and a DefenseClaw daemon that
 does not answer (the hooks fail closed until it is back). The harness draws
 its own screen, so these notices go to the terminal's title and, where the
 terminal has them, a desktop notification, and ring the bell, instead of
