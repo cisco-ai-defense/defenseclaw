@@ -264,6 +264,11 @@ func TestUntestedNewerVersionPolicy(t *testing.T) {
 	if !HookContractCompatibilityDrifted(previous, current) || !HookContractAgentUpdateAdmitted(previous, current) {
 		t.Fatal("a compatible agent update must drift and be admitted")
 	}
+	sameAgent := previous
+	sameAgent.ContractID = "hermes-hooks-retired"
+	if HookContractAgentUpdateAdmitted(sameAgent, HookContractLockEntry{Connector: "hermes", RawAgentVersion: previous.RawAgentVersion, NormalizedAgentVersion: previous.NormalizedAgentVersion, ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}) {
+		t.Fatal("a contract change without an agent update must not be admitted as one")
+	}
 	current.CompatibilityStatus, current.ContractID = HookCompatibilityUnknown, ""
 	if HookContractAgentUpdateAdmitted(previous, current) {
 		t.Fatal("an update to an unknown version must not be admitted")

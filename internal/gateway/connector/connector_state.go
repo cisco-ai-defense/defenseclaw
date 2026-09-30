@@ -1563,10 +1563,15 @@ func HookContractChangedByDefenseClawRelease(previous, current HookContractLockE
 // HookContractAgentUpdateAdmitted reports whether drift is an agent update to
 // a version that still resolves to a hook contract (tested, or an untested
 // newer version with no known problems). Admission refreshes the lock for it
-// instead of refusing. Secure Client (strict resolution) refuses every agent
+// instead of refusing. A contract change without an agent version change is
+// not an update, and Secure Client (strict resolution) refuses every agent
 // change as before.
 func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" || StrictHookContractResolution() {
+		return false
+	}
+	if stableRawAgentVersionForContract(previous) == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion {
 		return false
 	}
 	return current.CompatibilityStatus == HookCompatibilityKnown && strings.TrimSpace(current.ContractID) != ""
