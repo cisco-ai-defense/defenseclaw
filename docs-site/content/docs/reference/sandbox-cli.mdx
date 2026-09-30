@@ -742,8 +742,9 @@ Without a name, shows the sandbox subsystem: whether it is on and reachable,
 the OpenShell gateway, the listener addresses, the default pack and profile,
 the organization policy, and counts. With a name, shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
-policy, hook tamper tier, hook traffic and the last blocked tool call, the
-tool calls that ran without a DefenseClaw verdict (hook tamper), egress
+policy, hook tamper tier, hook traffic, the verdicts per hook event under
+the harness's own event names ("Hook events  PreToolUse 12 · PostToolUse 11
+· Stop 2"), the last blocked tool call, the tool calls that ran without a DefenseClaw verdict (hook tamper), egress
 totals (destinations contacted and blocked, each counted once, as the
 activity feed names them; the JSON also has `blocked_requests`), credential
 endpoints, the undo point, waiting asks, nested

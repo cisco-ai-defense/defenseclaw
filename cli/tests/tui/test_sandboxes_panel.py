@@ -253,6 +253,22 @@ def test_a_run_image_is_in_the_details() -> None:
     assert "Run image" not in dict(_model().detail_pairs()[1])
 
 
+def test_hook_events_are_in_the_details() -> None:
+    hooks = {
+        "tool_calls": 12,
+        "events": {"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "bad": "x", "": 4},
+        "other_events": 1,
+    }
+    row = decode_sandbox({**RUNNING, "hooks": hooks})
+    assert row is not None
+    assert row.hook_events == (("PreToolUse", 12), ("PostToolUse", 11), ("SessionStart", 2), ("Stop", 2))
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**RUNNING, "hooks": hooks}], [])
+    pairs = dict(model.detail_pairs()[1])
+    assert pairs["Hook events"] == "PreToolUse 12 · PostToolUse 11 · SessionStart 2 · Stop 2 · other events 1"
+    assert "Hook events" not in dict(_model().detail_pairs()[1])
+
+
 def test_a_failed_refresh_keeps_the_last_good_snapshot() -> None:
     model = _model()
     model.fetched_at = datetime.now(timezone.utc) - timedelta(seconds=90)

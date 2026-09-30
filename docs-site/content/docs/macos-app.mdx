@@ -107,7 +107,8 @@ The panel has four parts:
 - **Sandboxes:** a table with Name, Phase, Harness, Pack/Profile, Mode, Up,
   Sites (contacted and blocked) and Alerts (hover for the list).
 - **The selected sandbox:** its harness, project, skip-permissions mode, tool
-  calls, last tool block, undo, the run image when it has one (on a MicroVM
+  calls, hook events (the verdicts per hook event, such as
+  `PreToolUse 12 · PostToolUse 11 · Stop 2`), last tool block, undo, the run image when it has one (on a MicroVM
   gateway, the image its harness settings are baked into) and alerts, with
   these actions:
   - **Stop…** asks first, then runs `defenseclaw sandbox stop <name> --yes`;

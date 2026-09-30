@@ -232,6 +232,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		cov += a.style(" — NOT REACHING DefenseClaw since "+sb.Hooks.UnreachableSince.Local().Format("15:04:05"), ansiRed)
 	}
 	row("Hook traffic", cov)
+	row("Hook events", hookEventsText(sb.Hooks))
 	if n := sb.Hooks.Tampered; n > 0 {
 		// A post-tool hook whose tool DefenseClaw denied or never saw: the
 		// hooks were tampered with (hooks.on_tamper decides what follows).
@@ -279,6 +280,29 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	if sb.Orphaned {
 		a.warn("DefenseClaw holds no binding for this sandbox; its hooks cannot authenticate. Delete it.")
 	}
+}
+
+// hookEventsText is the verdicts per hook event, the most frequent first:
+// "PreToolUse 12 · PostToolUse 11 · Stop 2"; "" before the first verdict.
+func hookEventsText(h sandboxapi.HookCoverage) string {
+	names := make([]string, 0, len(h.Events))
+	for name := range h.Events {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if ni, nj := h.Events[names[i]], h.Events[names[j]]; ni != nj {
+			return ni > nj
+		}
+		return names[i] < names[j]
+	})
+	parts := make([]string, 0, len(names)+1)
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s %d", sandboxapi.DisplayText(name), h.Events[name]))
+	}
+	if h.OtherEvents > 0 {
+		parts = append(parts, fmt.Sprintf("other events %d", h.OtherEvents))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func shortDigest(d string) string {

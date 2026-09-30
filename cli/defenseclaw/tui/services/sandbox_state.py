@@ -352,6 +352,10 @@ class SandboxRow:
     pending_approvals: int = 0
     tool_calls: int = 0
     tool_blocked: int = 0
+    # The hook verdicts per hook event, as the harness names it, the most
+    # frequent first; other_hook_events counts those past the daemon's cap.
+    hook_events: tuple[tuple[str, int], ...] = ()
+    other_hook_events: int = 0
     last_blocked: str = ""
     tampered: int = 0
     hooks_silent: bool = False
@@ -401,6 +405,14 @@ class SandboxRow:
         if not self.running:
             return "-"
         return format_duration(self.uptime_seconds)
+
+    @property
+    def hook_events_text(self) -> str:
+        """``PreToolUse 12 · PostToolUse 11 · Stop 2``, as ``sandbox status`` shows it."""
+        parts = [f"{name} {count}" for name, count in self.hook_events]
+        if self.other_hook_events:
+            parts.append(f"other events {self.other_hook_events}")
+        return " · ".join(parts)
 
     @property
     def hook_failure_alert(self) -> str:
@@ -460,6 +472,12 @@ def _tool_calls_text(row: SandboxRow) -> str:
     return str(row.tool_calls)
 
 
+def _hook_events(raw: Any) -> tuple[tuple[str, int], ...]:
+    """The ``hooks.events`` counts, the most frequent first, then by name."""
+    counts = [(_text(name), _int(count)) for name, count in _dict(raw).items()]
+    return tuple(sorted((c for c in counts if c[0] and c[1] > 0), key=lambda c: (-c[1], c[0])))
+
+
 def decode_sandbox(raw: Any) -> SandboxRow | None:
     item = _dict(raw)
     name = _text(item.get("name")).strip()
@@ -497,6 +515,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
         tool_blocked=_int(hooks.get("tool_blocked")),
+        hook_events=_hook_events(hooks.get("events")),
+        other_hook_events=_int(hooks.get("other_events")),
         last_blocked=_text(hooks.get("last_blocked")),
         tampered=_int(hooks.get("tampered")),
         hooks_silent=bool(hooks.get("silent")),
@@ -1710,6 +1730,8 @@ class SandboxesPanelModel:
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked)"),
         ]
+        if row.hook_events_text:
+            pairs.append(("Hook events", row.hook_events_text))
         if row.last_blocked:
             pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:

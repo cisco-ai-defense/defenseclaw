@@ -208,6 +208,7 @@ struct SandboxesView: View {
                 ("Project", row.project.isEmpty ? "—" : "\(row.project) → \(row.workdir) (\(row.workdirMode))"),
                 ("Skip-permissions", row.yolo ? "on" : "off"),
                 ("Tool calls", "\(row.toolCalls) (\(row.toolBlocked) blocked)"),
+                ("Hook events", row.hookEventsLabel),
                 ("Last tool block", row.lastBlocked.isEmpty ? "—" : row.lastBlocked),
                 ("Undo", row.undoLabel),
             ] + (row.runImage.isEmpty ? [] : [("Run image", row.runImage)]))

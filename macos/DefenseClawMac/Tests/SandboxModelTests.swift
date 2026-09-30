@@ -38,6 +38,7 @@ struct SandboxModelTests {
         copyRowsPullAndUndoTheLastApply()
         unreachableHooksAreAnAlertAndANotification()
         failedHookCallsAreAnAlert()
+        hookEventsAreCountedPerEvent()
         unblockedDestinationsAreNoLongerOffered()
         askTextIsTheDaemonsSentence()
         anAskShowsEveryPortItOpens()
@@ -287,6 +288,19 @@ struct SandboxModelTests {
         expect(SandboxDecoding.sandbox(running)?.hookFailed == 0, "no failures by default")
         let event = SandboxDecoding.event(["seq": 1, "kind": "hook.failed", "message": "✗ a hook call failed (HTTP 429)"])
         expect(event?.glyph == "✗" && event?.summary == "a hook call failed (HTTP 429)", "hook.failed event line")
+    }
+
+    private static func hookEventsAreCountedPerEvent() {
+        var raw = running
+        raw["hooks"] = ["tool_calls": 12, "other_events": 1, "events": [
+            "Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "bad": "x", "": 4,
+        ]]
+        let row = SandboxDecoding.sandbox(raw)
+        expect(row?.hookEvents == ["PreToolUse 12", "PostToolUse 11", "SessionStart 2", "Stop 2"],
+               "most frequent first, then by name: \(row?.hookEvents ?? [])")
+        expect(row?.hookEventsText == "PreToolUse 12 · PostToolUse 11 · SessionStart 2 · Stop 2 · other events 1",
+               "the status line (the TUI's wording): \(row?.hookEventsText ?? "")")
+        expect(SandboxDecoding.sandbox(stopped)?.hookEventsLabel == "—", "no events before the first verdict")
     }
 
     private static func unblockedDestinationsAreNoLongerOffered() {

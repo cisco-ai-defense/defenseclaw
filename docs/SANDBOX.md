@@ -1855,6 +1855,21 @@ entry at once and then at most one every 10 seconds per sandbox, summing up
 the failures in between. Tool calls and blocks count only verdicts, so a
 failed pre-tool hook is not among them.
 
+The hook coverage also counts the verdicts per hook event, under the name
+the harness sends (`PreToolUse`, `preToolUse`, `tool.execute.before`,
+`session.idle` …), in `events`. `sandbox status` shows them most frequent
+first ("Hook events  PreToolUse 12 · PostToolUse 11 · UserPromptSubmit 3 ·
+Stop 2"), and so do the details of the TUI Sandboxes panel and the macOS
+app. The names come from the workload, so the daemon keeps at most 48 per
+sandbox, cut to 64 bytes and stripped of control characters; verdicts for
+further names count in `other_events` ("other events 3"). Every harness's
+hook contract has fewer events (Claude Code's, the largest, has 29). The
+sum can be lower than `hook_requests`: a post refused before a verdict
+(malformed, outside the contract) or a retried post answered from its first
+answer has no event. The counts live as long as the other hook counters:
+they survive a stop and start, and start over for a new sandbox of the name
+and when the daemon restarts.
+
 **Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
 sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends
 OTLP to the ingress, the skip of the dangerous-mode prompt, and Claude's own
