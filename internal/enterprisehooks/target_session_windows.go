@@ -60,3 +60,33 @@ func requireWindowsEnterpriseDeferredTargetPendingPlatform(target ManifestTarget
 		},
 	)
 }
+
+func requireWindowsEnterpriseTargetUnselectedPlatform(target ManifestTarget) error {
+	if !target.IsEnabled() {
+		return errors.New("enterprise hooks: selection proof requires an enabled manifest target")
+	}
+	connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
+	switch connectorName {
+	case "codex", "claudecode", "cursor":
+	default:
+		return fmt.Errorf(
+			"enterprise hooks: selection proof does not support connector %q",
+			target.Connector,
+		)
+	}
+	_, targetSID, err := validateWindowsEnterpriseHome(target.UserHome, target.SID)
+	if err != nil {
+		return err
+	}
+	selector, _, exists, err := readWindowsManagedRuntimeSelector(connectorName, true)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if _, selected := windowsManagedRuntimeSelectorTargetForSID(selector, targetSID.String()); selected {
+		return errors.New("enterprise hooks: target already has a selected managed runtime")
+	}
+	return nil
+}

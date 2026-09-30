@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestReadStateHappyPath(t *testing.T) {
@@ -91,12 +94,121 @@ func TestWriteStateRejectsUnknownLiteral(t *testing.T) {
 	}
 }
 
-func TestPathForStateRoot(t *testing.T) {
-	// Ensures callers don't have to know FileName; the layout is a
-	// single-source-of-truth join.
-	got := PathForStateRoot("/tmp/dc/hook-guardian")
-	want := filepath.Join("/tmp/dc/hook-guardian", FileName)
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
+// TestPathForDataDirUsesProtectedAuthorizationDir pins the single
+// writer/reader helper (issue #896): the state file lives in the protected
+// hook guardian authorization directory the services are configured with,
+// and never inside the gateway-writable data_dir.
+func TestPathForDataDirUsesProtectedAuthorizationDir(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "runtime")
+	authDir := filepath.Join(root, "hook-guardian-state")
+
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authDir)
+	if got, want := PathForDataDir(dataDir), filepath.Join(authDir, FileName); got != want {
+		t.Fatalf("configured authorization dir: got %q, want %q", got, want)
+	}
+
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, "")
+	got := PathForDataDir(dataDir)
+	if want := filepath.Join(dataDir+"-hook-guardian", FileName); got != want {
+		t.Fatalf("default authorization dir: got %q, want %q", got, want)
+	}
+	if rel, err := filepath.Rel(dataDir, got); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("state path %q is inside the gateway-writable data_dir %q", got, dataDir)
+	}
+}
+
+func TestEncodeMatchesWriteStateBody(t *testing.T) {
+	for _, state := range []string{StateWaitingForTargets, StateReady} {
+		body, err := Encode(state)
+		if err != nil {
+			t.Fatalf("Encode(%q): %v", state, err)
+		}
+		path := filepath.Join(t.TempDir(), FileName)
+		if err := WriteState(path, state); err != nil {
+			t.Fatalf("WriteState(%q): %v", state, err)
+		}
+		written, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(written) != string(body) {
+			t.Fatalf("WriteState body %q != Encode body %q", written, body)
+		}
+	}
+	if _, err := Encode("waiting_for_config"); err == nil {
+		t.Fatal("Encode accepted a literal the sidecar cannot map")
+	}
+}
+
+// TestReadCurrentStateExpiresStaleReady pins the freshness rule the gateway
+// applies (issue #896 review): the readiness file survives guardian restarts
+// and non-purge uninstall, so a `ready` the guardian stopped re-publishing
+// (crash, kill, reinstall before the new guardian started) must fall back to
+// the safe default instead of being honored forever.
+func TestReadCurrentStateExpiresStaleReady(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := WriteState(path, StateReady); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := info.ModTime()
+
+	for _, tc := range []struct {
+		name string
+		now  time.Time
+		want string
+	}{
+		{"just_published", written, StateReady},
+		{"within_max_age", written.Add(ReadyMaxAge - time.Second), StateReady},
+		{"older_than_max_age", written.Add(ReadyMaxAge + time.Second), StateUnknown},
+		{"clock_stepped_back_past_max_age", written.Add(-ReadyMaxAge - time.Second), StateUnknown},
+	} {
+		if got := ReadCurrentState(path, tc.now); got != tc.want {
+			t.Errorf("%s: ReadCurrentState = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// ReadState keeps its age-free contract for callers that only need the
+	// literal.
+	if got := ReadState(path); got != StateReady {
+		t.Fatalf("ReadState = %q, want ready", got)
+	}
+
+	// Re-publishing refreshes the age.
+	old := written.Add(-2 * ReadyMaxAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadCurrentState(path, time.Now()); got != StateUnknown {
+		t.Fatalf("aged ready = %q, want unknown", got)
+	}
+	if err := WriteState(path, StateReady); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadCurrentState(path, time.Now()); got != StateReady {
+		t.Fatalf("re-published ready = %q, want ready", got)
+	}
+}
+
+func TestReadCurrentStateWaitingIsAgeIndependent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	if err := WriteState(path, StateWaitingForTargets); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-10 * ReadyMaxAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadCurrentState(path, time.Now()); got != StateWaitingForTargets {
+		t.Fatalf("aged waiting_for_targets = %q, want waiting_for_targets", got)
+	}
+	if got := ReadCurrentState(filepath.Join(t.TempDir(), FileName), time.Now()); got != StateUnknown {
+		t.Fatalf("missing file = %q, want unknown", got)
+	}
+	if got := ReadCurrentState(t.TempDir(), time.Now()); got != StateUnknown {
+		t.Fatalf("directory = %q, want unknown", got)
 	}
 }

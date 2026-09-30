@@ -3,7 +3,7 @@
 ## Target identity and review scope
 
 - Repository: `defenseclaw`
-- Baseline commit: `439a01b54632f9a1a13478fda13562693ec2a36f`
+- AVC 5.1.22.3763 signed-payload source commit: `33257f3c4bf06ee364104899eec68f4cf255f660`
 - Review target: the working-tree implementation of native Windows
   managed-enterprise services, lifecycle commands, protected state, per-user
   hook reconciliation, and its certification harness
@@ -128,7 +128,7 @@ not an administrator authority even though it is a machine service.
 | Per-user hook footprint | Confined to the manifest SID's canonical profile; exact protected OWNER RIGHTS DACL; regular files have one NTFS link; repairable after target-user tamper |
 | Codex machine requirements | Exact `%ProgramData%\OpenAI\Codex\requirements.toml`, ten managed hook groups, protected ownership/ACL preimage records, and guardian-repaired enrollment state |
 | Claude Code managed policy | DefenseClaw-owned protected drop-in and ownership state; effective precedence verified with the real approved Claude client |
-| Agent application-control attestation | Protected schema-v2 evidence for approved-client rules and Claude effective-policy verification |
+| Agent application-control attestation | Protected schema-v3 evidence for approved-client rules and Claude effective-policy verification |
 | Gateway and guardian logs | Separate ACL domains so the less-trusted gateway cannot alter guardian evidence |
 
 ## Threat actors and assumptions
@@ -223,6 +223,10 @@ not an administrator authority even though it is a machine service.
 9. It publishes service-writable diagnostic state and a separately protected
    authorization ledger. Removed or disabled targets are revoked from the
    ledger.
+10. A newly discovered, deferred target whose user has no active WTS session
+    and has never been protected remains unready. When it has no selected
+    managed runtime, the guardian may stage and publish the other targets
+    without enrolling that SID. Other failures still withhold publication.
 
 ### Hook request
 
@@ -276,8 +280,8 @@ not an administrator authority even though it is a machine service.
 | W-30 | Uninstall removes a shared vendor tree, another administrator's setting, or a value that changed after install | Record exact ownership and preimages; remove/restore only a current value still equal to the DefenseClaw-owned postimage; preserve shared parents and unrelated content | Install over absent and preexisting shared parents, mutate unrelated values, uninstall and purge, then compare preserved parents/preimages and require only owned Codex/Claude wiring to be absent |
 | W-31 | A certification-only `CODEX_HOME` leaks into the machine environment or either service and changes production behavior | Treat `-CertificationCodexHome` only as an exact unsigned-scope marker and pass it solely to a disposable actual-Codex child; machine, coordinator, gateway, and guardian environments omit `CODEX_HOME` | Before/after machine-environment snapshot, service registry environment inspection, hostile `USERPROFILE` decoys, and exact cleanup of the alternate child without enumerating or mutating live `.codex` |
 | W-32 | A disabled, removed, or deleted-account SID remains enrolled in native machine policy and can keep invoking the hook | Reconcile authorization and native connector state to exact enabled-manifest equality. Remove the final owned Claude policy/state transactionally, retain any per-user runtime only as inert data, and reject the stale SID before credential use | Disable the only Claude row (and repeat with an unavailable account/profile), reconcile, require exact zero Claude authorization and absent owned machine policy/state, then invoke as the former SID and require a causal non-enrollment failure with no audit event |
-| W-33 | Valid application-control evidence is reused as proof that Claude's managed hooks are effective | Keep client process control and effective Claude policy as independent fields and transactions. Structural files, hashes, owners, and DACLs cannot set the effective-policy field | Preserve byte-exact application-control evidence while deleting the Claude policy and require effective-policy health to fail independently; run the real client with hostile precedence before accepting a separate manifest-bound Claude attestation |
-| W-34 | Install, a core-only test, or stale evidence claims production security before a live Claude run against the current manifest | Initial install always leaves Claude effective-policy and aggregate security incomplete. Only production `Repair -AttestClaudeEffectivePolicy` after the live hostile-precedence proof may persist schema-v2, manifest-hash-bound evidence; core certification forbids persistence | Assert phase-one Install/Status/Verify remain incomplete, run the real Claude proof, perform the attested Repair, then require aggregate completion. Change the manifest or use `-ClaudeOnly` and require the claim to be absent/incomplete |
+| W-33 | Valid application-control evidence is reused as proof that Claude's managed hooks are effective | Keep client process control and effective Claude policy as independent fields and transactions. Structural files, hashes, owners, and DACLs cannot set the effective-policy field | Preserve byte-exact application-control evidence while deleting the Claude policy and require effective-policy health to fail independently; run the real client with hostile precedence before accepting a separate Claude-policy-bound attestation |
+| W-34 | Install, a core-only test, or stale evidence claims production security before a live Claude run against the current Claude policy | Initial install always leaves Claude effective-policy and aggregate security incomplete, and refuses `-AttestClaudeEffectivePolicy` before any work. Only production `Repair -AttestClaudeEffectivePolicy` after the live hostile-precedence proof may persist schema-v3 evidence bound to the DefenseClaw Claude machine-policy and hook-binary digests; core certification forbids persistence. Evidence for another policy identity, or schema-v2 manifest-bound evidence, reports unverified with a reason and is retired by the next mutating transaction, never re-bound; an explicit attested Repair still rebinds after recovering an interrupted transaction | Assert phase-one Install/Status/Verify remain incomplete, run the real Claude proof, perform the attested Repair, then require aggregate completion. Rewrite `targets.yaml` for a new enrollment and require the claim to remain; replace the Claude policy fragment or hook binary, or use `-ClaudeOnly`, and require the claim to be absent/incomplete |
 | W-35 | Target races a validated token, sidecar, contract, helper, or hook artifact into a huge sparse file, reparse point, hard link, or changing same-name object while the guardian reads it | Managed-only stable handle readers with no-reparse/single-link validation and format-specific byte ceilings; constant-memory double-pass artifact hashing; managed helpers always overwrite exact embedded bytes; authorized oversized regular obstructions are quarantined and recreated under the target token | One-TiB sparse exact-compare test; managed token/sidecar/contract/digest bounded-read tests; managed-versus-unmanaged helper test; authorized oversized-obstruction auto-heal with quarantine cleanup |
 | W-36 | A planned stop or interrupted activation races an `SC_ACTION_RESTART` that SCM already queued, reviving the gateway without a fresh guardian or against a partially replaced deployment | Durable servicing intent; both services disabled before stop; fresh monotonic 65-second drain while disabled; durable activation phase that invalidates old quiescence timestamps; guardian demand start plus a newly published reconcile before gateway demand start; readiness before automatic start; every recovery path reasserts disabled/stopped and begins a new drain | Executable latent-restart model plus crash injection before and after every activation transition in Windows PowerShell 5.1 and PowerShell 7; no gateway becomes startable before fresh guardian evidence |
 | W-37 | A crash after committed uninstall or during purge removes the metadata needed to authenticate a retry, or generic dispatcher initialization recreates a deleted Program Files tree | Authenticate and route uninstall/purge recovery before generic layout creation; keep a protected tombstone/purge receipt outside the recursively deleted root until deletion succeeds; remove authentication metadata last; make committed uninstall and partial purge retries idempotent; never initialize the install tree on a tombstone path | Crash injection at each teardown, tombstone, and purge phase; retry with the install root absent and with partially deleted state; exact proof that services/policy stay removed, shared vendor parents survive, and no managed root is recreated |
@@ -398,7 +402,10 @@ not an administrator authority even though it is a machine service.
    profile contains a supported CLI (parity with macOS
    `render-targets.sh`; see
    `internal/enterprisehooks/agent_version_windows.go` for the per-connector
-   probe). Managed-enterprise deployments are administrator-controlled at
+   probe). Newly discovered rows are deferred. A signed-out user with no
+   managed runtime may remain a reported failure until first sign-in, while
+   the guardian can stage and publish the other eligible targets.
+   Managed-enterprise deployments are administrator-controlled at
    the *policy* layer — which connectors are pushed, and which SID scope
    the guardian authorization ledger accepts — not at the per-device
    authorization layer. Three residual sub-risks follow from this posture:
@@ -518,7 +525,7 @@ artifacts:
 - real Claude 2.1.207 user/project precedence runs and a real Codex hostile
   shell run; Codex passes only with managed hook contact or a blocked
   operation, never merely because the fake shell executable was blocked;
-- a phase-one incomplete Install followed by a manifest-bound
+- a phase-one incomplete Install followed by a Claude-policy-bound
   `Repair -AttestClaudeEffectivePolicy` only after the live Claude proof;
 - evidence inspection and proof that disposable services, users, roots, and
   user-profile fixtures were restored or removed;

@@ -209,6 +209,21 @@ func windowsCodexMachineHash(data []byte) string {
 }
 
 func windowsCodexManagedHookCommand(hookBinary string) string {
+	// The 0.8.6 hook reads the Codex event from stdin. Its GUI-subsystem
+	// launcher must be waited on so PowerShell returns its block exit code.
+	script := strings.Join([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
+			" -ArgumentList @('hook','--connector','codex','--enterprise-managed') -NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+	}, "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// windowsCodexLegacyManagedHookCommand is the non-waiting command emitted by
+// the earlier AVC payload. Reconcile replaces it, and uninstall still owns it.
+func windowsCodexLegacyManagedHookCommand(hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -250,6 +265,10 @@ func parseWindowsCodexRequirements(raw []byte) (map[string]interface{}, error) {
 	return cfg, nil
 }
 
+// reconcileWindowsCodexRequirements merges the DefenseClaw managed hook matrix
+// into raw. The administrator's document is never re-marshaled: only missing
+// DefenseClaw-owned entries are inserted (see codex_machine_requirements_edit.go),
+// so comments, ordering and unrelated keys survive byte-for-byte.
 func reconcileWindowsCodexRequirements(
 	raw []byte,
 	opts WindowsCodexMachineRequirementsOptions,
@@ -258,89 +277,16 @@ func reconcileWindowsCodexRequirements(
 	if err != nil {
 		return nil, false, fmt.Errorf("parse Codex requirements: %w", err)
 	}
-
-	if existing, present := cfg["allow_managed_hooks_only"]; present {
-		value, ok := existing.(bool)
-		if !ok {
-			return nil, false, fmt.Errorf("allow_managed_hooks_only has unsupported type %T", existing)
-		}
-		if !value {
-			return nil, false, errors.New("allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation")
-		}
-	}
-	cfg["allow_managed_hooks_only"] = true
-
-	features, exists := cfg["features"].(map[string]interface{})
-	if existing, present := cfg["features"]; present && !exists {
-		return nil, false, fmt.Errorf("features has unsupported type %T", existing)
-	}
-	if !exists {
-		features = map[string]interface{}{}
-	}
-	if existing, present := features["hooks"]; present {
-		value, ok := existing.(bool)
-		if !ok {
-			return nil, false, fmt.Errorf("features.hooks has unsupported type %T", existing)
-		}
-		if !value {
-			return nil, false, errors.New("features.hooks=false conflicts with required DefenseClaw managed hooks")
-		}
-	}
-	features["hooks"] = true
-	cfg["features"] = features
-
-	hooks, exists := cfg["hooks"].(map[string]interface{})
-	if existing, present := cfg["hooks"]; present && !exists {
-		return nil, false, fmt.Errorf("hooks has unsupported type %T", existing)
-	}
-	if !exists {
-		hooks = map[string]interface{}{}
-	}
-	if _, present := hooks["state"]; present {
-		return nil, false, errors.New("hooks.state is not valid in DefenseClaw managed requirements")
-	}
-	if existing, present := hooks["windows_managed_dir"]; present {
-		value, ok := existing.(string)
-		if !ok {
-			return nil, false, fmt.Errorf("hooks.windows_managed_dir has unsupported type %T", existing)
-		}
-		if !sameWindowsCodexMachinePath(value, opts.ManagedDir) {
-			return nil, false, fmt.Errorf(
-				"hooks.windows_managed_dir=%q conflicts with protected managed directory %q",
-				value,
-				opts.ManagedDir,
-			)
-		}
-	}
-	hooks["windows_managed_dir"] = opts.ManagedDir
-
-	for _, expected := range codexHookGroups {
-		rawGroups, present := hooks[expected.eventType]
-		var groups []interface{}
-		if present {
-			var ok bool
-			groups, ok = rawGroups.([]interface{})
-			if !ok {
-				return nil, false, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
-			}
-		}
-		found := false
-		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
-		}
-		hooks[expected.eventType] = groups
-	}
-	cfg["hooks"] = hooks
-
-	rendered, err := toml.Marshal(cfg)
+	plan, err := mergeWindowsCodexRequirementsModel(cfg, opts)
 	if err != nil {
-		return nil, false, fmt.Errorf("marshal Codex requirements: %w", err)
+		return nil, false, err
+	}
+	rendered, err := renderWindowsCodexRequirementsMerge(raw, plan, opts)
+	if err != nil {
+		return nil, false, fmt.Errorf("edit Codex requirements: %w", err)
+	}
+	if err := requireWindowsCodexRequirementsModel(rendered, cfg); err != nil {
+		return nil, false, fmt.Errorf("edit Codex requirements: %w", err)
 	}
 	if len(rendered) > windowsCodexMachineRequirementsLimit {
 		return nil, false, fmt.Errorf(
@@ -352,6 +298,119 @@ func reconcileWindowsCodexRequirements(
 		return nil, false, fmt.Errorf("verify rendered Codex requirements: %w", err)
 	}
 	return rendered, !bytes.Equal(raw, rendered), nil
+}
+
+// mergeWindowsCodexRequirementsModel applies the DefenseClaw merge to the
+// parsed document in place and reports which owned entries it added or
+// normalized. The mutated cfg is the semantic contract the byte-level edit
+// must reproduce.
+func mergeWindowsCodexRequirementsModel(
+	cfg map[string]interface{},
+	opts WindowsCodexMachineRequirementsOptions,
+) (windowsCodexRequirementsMergePlan, error) {
+	var plan windowsCodexRequirementsMergePlan
+	if existing, present := cfg["allow_managed_hooks_only"]; present {
+		value, ok := existing.(bool)
+		if !ok {
+			return plan, fmt.Errorf("allow_managed_hooks_only has unsupported type %T", existing)
+		}
+		if !value {
+			return plan, errors.New("allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation")
+		}
+	} else {
+		plan.addManagedHooksOnly = true
+	}
+	cfg["allow_managed_hooks_only"] = true
+
+	features, exists := cfg["features"].(map[string]interface{})
+	if existing, present := cfg["features"]; present && !exists {
+		return plan, fmt.Errorf("features has unsupported type %T", existing)
+	}
+	if !exists {
+		features = map[string]interface{}{}
+	}
+	if existing, present := features["hooks"]; present {
+		value, ok := existing.(bool)
+		if !ok {
+			return plan, fmt.Errorf("features.hooks has unsupported type %T", existing)
+		}
+		if !value {
+			return plan, errors.New("features.hooks=false conflicts with required DefenseClaw managed hooks")
+		}
+	} else {
+		plan.addFeatureHooks = true
+	}
+	features["hooks"] = true
+	cfg["features"] = features
+
+	hooks, exists := cfg["hooks"].(map[string]interface{})
+	if existing, present := cfg["hooks"]; present && !exists {
+		return plan, fmt.Errorf("hooks has unsupported type %T", existing)
+	}
+	if !exists {
+		hooks = map[string]interface{}{}
+	}
+	if _, present := hooks["state"]; present {
+		return plan, errors.New("hooks.state is not valid in DefenseClaw managed requirements")
+	}
+	if existing, present := hooks["windows_managed_dir"]; present {
+		value, ok := existing.(string)
+		if !ok {
+			return plan, fmt.Errorf("hooks.windows_managed_dir has unsupported type %T", existing)
+		}
+		if !sameWindowsCodexMachinePath(value, opts.ManagedDir) {
+			return plan, fmt.Errorf(
+				"hooks.windows_managed_dir=%q conflicts with protected managed directory %q",
+				value,
+				opts.ManagedDir,
+			)
+		}
+		plan.replaceManagedDir = value != opts.ManagedDir
+	} else {
+		plan.addManagedDir = true
+	}
+	hooks["windows_managed_dir"] = opts.ManagedDir
+
+	for _, expected := range codexHookGroups {
+		rawGroups, present := hooks[expected.eventType]
+		var groups []interface{}
+		if present {
+			var ok bool
+			groups, ok = rawGroups.([]interface{})
+			if !ok {
+				return plan, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
+			}
+		}
+		kept := make([]interface{}, 0, len(groups))
+		var legacy []int
+		found := false
+		for index, candidate := range groups {
+			if windowsCodexMachineGroupIsLegacy(candidate, expected, opts.HookBinary) {
+				legacy = append(legacy, index)
+				continue
+			}
+			kept = append(kept, candidate)
+			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				found = true
+			}
+		}
+		if len(legacy) > 0 {
+			if plan.legacyGroups == nil {
+				plan.legacyGroups = map[string][]int{}
+				plan.legacyGroupCounts = map[string]int{}
+			}
+			plan.legacyGroups[expected.eventType] = legacy
+			plan.legacyGroupCounts[expected.eventType] = len(groups)
+			groups = kept
+		}
+		if !found {
+			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
+			plan.missingGroups = append(plan.missingGroups, expected)
+		}
+		hooks[expected.eventType] = groups
+	}
+	cfg["hooks"] = hooks
+	return plan, nil
 }
 
 func verifyWindowsCodexRequirementsBytes(
@@ -394,10 +453,13 @@ func verifyWindowsCodexRequirementsBytes(
 		if !ok {
 			return fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, hooks[expected.eventType])
 		}
-		found := 0
+		found, legacy := 0, 0
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
 				found++
+			}
+			if windowsCodexMachineGroupIsLegacy(candidate, expected, opts.HookBinary) {
+				legacy++
 			}
 		}
 		if found != 1 {
@@ -406,6 +468,9 @@ func verifyWindowsCodexRequirementsBytes(
 				expected.eventType,
 				found,
 			)
+		}
+		if legacy != 0 {
+			return fmt.Errorf("hooks.%s still has %d non-waiting DefenseClaw groups from an earlier release", expected.eventType, legacy)
 		}
 	}
 	return nil
@@ -419,6 +484,43 @@ func windowsCodexMachineGroupMatches(
 		timeout   int
 	},
 	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommand(hookBinary))
+}
+
+func windowsCodexMachineGroupIsLegacy(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexLegacyManagedHookCommand(hookBinary))
+}
+
+func windowsCodexMachineGroupOwned(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupMatches(raw, expected, hookBinary) ||
+		windowsCodexMachineGroupIsLegacy(raw, expected, hookBinary)
+}
+
+func windowsCodexMachineGroupHasCommand(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	command string,
 ) bool {
 	group, ok := raw.(map[string]interface{})
 	if !ok || len(group) != 1 && len(group) != 2 {
@@ -440,7 +542,6 @@ func windowsCodexMachineGroupMatches(
 	if !ok || len(handler) != 4 {
 		return false
 	}
-	command := windowsCodexManagedHookCommand(hookBinary)
 	if handler["type"] != "command" || handler["command"] != command ||
 		handler["command_windows"] != command {
 		return false
@@ -471,7 +572,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	for _, expected := range codexHookGroups {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 				return true, nil
 			}
 		}
@@ -493,6 +594,34 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		return nil, false, fmt.Errorf("parse stored Codex requirements preimage: %w", err)
 	}
 
+	// Delete only the DefenseClaw-owned expressions; the renderer proves the
+	// result equals the map-based removal before returning it.
+	plan := removeWindowsCodexRequirementsOwnedModel(cfg, base, opts)
+	rendered, err := renderWindowsCodexRequirementsRemoval(current, plan, cfg)
+	if err != nil {
+		return nil, false, fmt.Errorf("surgically clean Codex requirements: %w", err)
+	}
+	if len(rendered) > windowsCodexMachineRequirementsLimit {
+		return nil, false, fmt.Errorf(
+			"surgically cleaned Codex requirements exceed %d bytes",
+			windowsCodexMachineRequirementsLimit,
+		)
+	}
+	return rendered, !bytes.Equal(current, rendered), nil
+}
+
+// removeWindowsCodexRequirementsOwnedModel removes DefenseClaw-owned additions
+// from the parsed current document in place and reports what it deleted, so
+// the byte-level removal can delete exactly those expressions.
+func removeWindowsCodexRequirementsOwnedModel(
+	cfg map[string]interface{},
+	base map[string]interface{},
+	opts WindowsCodexMachineRequirementsOptions,
+) windowsCodexRequirementsRemovalPlan {
+	plan := windowsCodexRequirementsRemovalPlan{
+		removedGroups: map[string][]int{},
+		groupCounts:   map[string]int{},
+	}
 	hooks, cfgHooks := cfg["hooks"].(map[string]interface{})
 	baseHooks, baseHadHooks := base["hooks"].(map[string]interface{})
 	if cfgHooks {
@@ -501,13 +630,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					currentCount++
 				}
 			}
@@ -516,10 +645,12 @@ func removeWindowsCodexRequirementsOwnedChanges(
 				continue
 			}
 			filtered := make([]interface{}, 0, len(groups)-removeCount)
+			removed := make([]int, 0, removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if removeCount > 0 && windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					removeCount--
+					removed = append(removed, index)
 					continue
 				}
 				filtered = append(filtered, candidate)
@@ -527,6 +658,9 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			for left, right := 0, len(filtered)-1; left < right; left, right = left+1, right-1 {
 				filtered[left], filtered[right] = filtered[right], filtered[left]
 			}
+			sort.Ints(removed)
+			plan.removedGroups[expected.eventType] = removed
+			plan.groupCounts[expected.eventType] = len(groups)
 			if len(filtered) == 0 {
 				delete(hooks, expected.eventType)
 			} else {
@@ -547,11 +681,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 				if value, ok := hooks["windows_managed_dir"].(string); ok &&
 					sameWindowsCodexMachinePath(value, opts.ManagedDir) {
 					delete(hooks, "windows_managed_dir")
+					plan.removeManagedDir = true
 				}
 			}
 		}
 		if len(hooks) == 0 && !baseHadHooks {
 			delete(cfg, "hooks")
+			plan.removeHooksTable = true
 		} else {
 			cfg["hooks"] = hooks
 		}
@@ -562,6 +698,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 		if _, baselineSet := base["allow_managed_hooks_only"]; !baselineSet {
 			if value, ok := cfg["allow_managed_hooks_only"].(bool); ok && value {
 				delete(cfg, "allow_managed_hooks_only")
+				plan.removeManagedHooksOnly = true
 			}
 		}
 
@@ -572,27 +709,19 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			if !baseHadFeatures || !baselineSet {
 				if value, ok := features["hooks"].(bool); ok && value {
 					delete(features, "hooks")
+					plan.removeFeatureHooks = true
 				}
 			}
 			if len(features) == 0 && !baseHadFeatures {
 				delete(cfg, "features")
+				plan.removeFeaturesTable = true
 			} else {
 				cfg["features"] = features
 			}
 		}
 	}
 
-	rendered, err := toml.Marshal(cfg)
-	if err != nil {
-		return nil, false, fmt.Errorf("marshal surgically cleaned Codex requirements: %w", err)
-	}
-	if len(rendered) > windowsCodexMachineRequirementsLimit {
-		return nil, false, fmt.Errorf(
-			"surgically cleaned Codex requirements exceed %d bytes",
-			windowsCodexMachineRequirementsLimit,
-		)
-	}
-	return rendered, !bytes.Equal(current, rendered), nil
+	return plan
 }
 
 func windowsCodexHooksHaveManagedEntries(hooks map[string]interface{}) bool {

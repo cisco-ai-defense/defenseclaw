@@ -609,7 +609,7 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     assert "[switch]$AttestAgentApplicationControl" in installer
     assert "AttestCodexTrustedShellEnforcement" not in installer
     assert "AttestCodexApplicationControl" not in installer
-    assert "$script:AgentApplicationControlAttestationSchemaVersion = 2" in module
+    assert "$script:AgentApplicationControlAttestationSchemaVersion = 3" in module
     assert "agent_application_control_enforced = [bool]$Layout.AgentApplicationControlAttested" in module
     attestation_writer = module[
         module.index("function Write-DefenseClawAgentApplicationControlAttestation") : module.index(

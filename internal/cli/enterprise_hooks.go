@@ -59,6 +59,17 @@ var enterpriseHookTargetsWaitTimeout = 24 * time.Hour
 // non-inotify filesystems (network shares) that never fire events at all.
 var enterpriseHookTargetsWaitPoll = 30 * time.Second
 
+// enterpriseHookWatchReconcileOnce is the per-cycle reconcile the watch loop
+// runs. It is a seam so tests can drive the readiness state the loop
+// publishes for each reconcile outcome.
+var enterpriseHookWatchReconcileOnce = runEnterpriseHookReconcileOnce
+
+// enterpriseHookGuardianReadinessRefresh is how often the watch loop
+// re-publishes a ready state when no reconcile has published one, so the
+// gateway's guardianstate.ReadyMaxAge check never expires a healthy guardian
+// whatever its --interval.
+var enterpriseHookGuardianReadinessRefresh = guardianstate.RefreshInterval
+
 var (
 	enterpriseHookConnector     string
 	enterpriseHookUser          string
@@ -501,6 +512,10 @@ var (
 	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
+	// Reconcile-level seams for the enrollment publication gate (#894).
+	enterpriseHookReconcileAwaitingFirstSignIn = enterpriseHookTargetAwaitingFirstSignIn
+	enterpriseHookReconcileStageDeferred       = stageEnterpriseHookDeferredManagedPolicies
+	enterpriseHookReconcileSyncEnrollments     = syncEnterpriseHookManagedEnrollments
 )
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
@@ -1557,7 +1572,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
-	if err := syncEnterpriseHookManagedEnrollments(manifest, apiAddr, false); err != nil {
+	if err := enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, false); err != nil {
 		return run, fmt.Errorf(
 			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
 			err,
@@ -1570,10 +1585,16 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	pending := 0
 	repairs := 0
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
+	// awaitingSignIn holds the manifest indexes of failed targets that were
+	// never protected, have no managed runtime selected, and fail only
+	// because their user has no active session (see
+	// enterpriseHookTargetAwaitingFirstSignIn). They stay failures, but do
+	// not withhold the enrollment publication for every other target.
+	awaitingSignIn := map[int]struct{}{}
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
-	for _, target := range manifest.Targets {
+	for targetIndex, target := range manifest.Targets {
 		if !target.IsEnabled() {
 			continue
 		}
@@ -1586,6 +1607,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		token := ""
 		otlpToken := ""
 		var previousProtection enterpriseHookPreviousProtection
+		protectionKnown := false
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
 			row.SID = strings.TrimSpace(resolved.sid)
@@ -1600,6 +1622,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			)
 			if authorizationErr != nil {
 				err = authorizationErr
+			} else {
+				protectionKnown = true
 			}
 		}
 		if err == nil && target.IsDeferred() &&
@@ -1702,19 +1726,36 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			failures++
 			row.OK = false
 			row.Error = err.Error()
+			if protectionKnown && !previousProtection.PreviouslyProtected &&
+				enterpriseHookReconcileAwaitingFirstSignIn(target) {
+				awaitingSignIn[targetIndex] = struct{}{}
+			}
 		}
 		rows = append(rows, row)
 	}
 
+	// Stage deferred machine policy and publish the exact protected
+	// enrollment set only when every failure is a never-protected target
+	// that is merely waiting for its user's first sign-in. Those targets
+	// are left out of the publication, which is then exactly the
+	// publication for a manifest that does not list them yet: nothing is
+	// staged or enrolled for them, and nothing they hold is revoked
+	// because they hold no protected authorization and no selected
+	// runtime. The run still reports them as failures (#894). The exact
+	// publication is skipped (as before) when leaving them out would
+	// empty a connector's set, because an empty exact set tears down that
+	// connector's machine-wide hook policy.
 	var enrollmentErr error
-	if failures == 0 {
-		enrollmentErr = stageEnterpriseHookDeferredManagedPolicies(
-			manifest,
+	if failures == len(awaitingSignIn) {
+		publication := enterpriseHookManifestWithoutTargets(manifest, awaitingSignIn)
+		enrollmentErr = enterpriseHookReconcileStageDeferred(
+			publication,
 			pendingTargets,
 			apiAddr,
 		)
-		if enrollmentErr == nil {
-			enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+		if enrollmentErr == nil &&
+			!enterpriseHookPublicationDropsConnector(manifest, publication) {
+			enrollmentErr = enterpriseHookReconcileSyncEnrollments(publication, apiAddr, true)
 		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
@@ -1742,6 +1783,46 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	return run, nil
 }
 
+// enterpriseHookManifestWithoutTargets returns a copy of manifest whose
+// Targets omit the given indexes. The input manifest is not modified.
+func enterpriseHookManifestWithoutTargets(
+	manifest enterprisehooks.Manifest,
+	omit map[int]struct{},
+) enterprisehooks.Manifest {
+	if len(omit) == 0 {
+		return manifest
+	}
+	filtered := manifest
+	filtered.Targets = make([]enterprisehooks.ManifestTarget, 0, len(manifest.Targets))
+	for index, target := range manifest.Targets {
+		if _, skip := omit[index]; skip {
+			continue
+		}
+		filtered.Targets = append(filtered.Targets, target)
+	}
+	return filtered
+}
+
+// enterpriseHookPublicationDropsConnector reports whether publication has no
+// enabled target for a connector that manifest still has enabled targets for.
+func enterpriseHookPublicationDropsConnector(
+	manifest, publication enterprisehooks.Manifest,
+) bool {
+	remaining := map[string]int{}
+	for _, target := range publication.Targets {
+		if target.IsEnabled() {
+			remaining[strings.ToLower(strings.TrimSpace(target.Connector))]++
+		}
+	}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() &&
+			remaining[strings.ToLower(strings.TrimSpace(target.Connector))] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks watch: config is not loaded")
@@ -1755,6 +1836,23 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if enterpriseHookWatchDebounce <= 0 {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
+	// Guardian readiness (spec 003 REQ-19, #896). The state file outlives
+	// this process (it sits in the protected authorization directory, which
+	// survives restarts and non-purge uninstall), so retract any ready a
+	// previous guardian left before the first reconcile, publish the outcome
+	// of every reconcile, keep a ready fresh for the gateway's
+	// guardianstate.ReadyMaxAge check, and retract it again on the way out.
+	// A guardian killed before the deferred retraction still ages out.
+	readinessRefresh := time.NewTicker(enterpriseHookGuardianReadinessRefresh)
+	defer readinessRefresh.Stop()
+	publishedReadiness := guardianstate.StateWaitingForTargets
+	publishReadiness := func(state string) {
+		publishedReadiness = state
+		writeGuardianStateOrLog(cmd.ErrOrStderr(), state)
+		readinessRefresh.Reset(enterpriseHookGuardianReadinessRefresh)
+	}
+	publishReadiness(guardianstate.StateWaitingForTargets)
+	defer writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateWaitingForTargets)
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
@@ -1811,9 +1909,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	repairRetryNeeded := false
 	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
-		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
+		run, err := enterpriseHookWatchReconcileOnce(cmd.Context())
 		if err != nil {
 			repairRetryNeeded = true
+			publishReadiness(guardianReadinessAfterReconcile(run, err))
 			return false, err
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
@@ -1822,6 +1921,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// retry so the caller schedules a backoff attempt rather than
 			// waiting for the periodic interval to recover.
 			repairRetryNeeded = true
+			publishReadiness(guardianstate.StateWaitingForTargets)
 			return false, fmt.Errorf("enterprise hooks watch: synchronize watch directories: %w", err)
 		}
 		// Rebuild the owned-file allowlists from this run. The
@@ -1874,6 +1974,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if !repairRetryNeeded {
 			repairRetryDelay = 0
 		}
+		// runEnterpriseHookReconcileOnce returns a nil error for a run
+		// with failed targets or an unpublished state, so readiness is
+		// derived from the run, not from err alone.
+		publishReadiness(guardianReadinessAfterReconcile(run, nil))
 		// When the row set is byte-identical to the previous run,
 		// any Write/Chmod events still leaking past the normal
 		// settle window are tail-writes from our own reconcile
@@ -1917,10 +2021,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
-	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
-	// the guardian-side "ready" state so the sidecar's health surface
-	// (spec 003 REQ-19) can collapse to overall `ready`.
-	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	// Readiness was already published by reconcile(): ready only when the
+	// startup reconcile was clean. An unconditional ready here would mark
+	// the sidecar ready after a nil-error incomplete startup (Failures > 0
+	// or StateErr != nil).
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -2081,6 +2185,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			} else {
 				cancelRepairRetry()
 			}
+		case <-readinessRefresh.C:
+			if publishedReadiness == guardianstate.StateReady {
+				publishReadiness(guardianstate.StateReady)
+			}
 		case <-ticker.C:
 			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
@@ -2118,8 +2226,21 @@ func writeGuardianStateOrLog(w io.Writer, state string) {
 	if enterpriseHookManifest == "" {
 		return
 	}
-	statePath := guardianstate.PathForStateRoot(filepath.Dir(filepath.Clean(enterpriseHookManifest)))
-	if err := guardianstate.WriteState(statePath, state); err != nil {
+	if cfg == nil {
+		fmt.Fprintf(w, "[hook-guardian] warn: could not write %s state file: config is not loaded\n", state)
+		return
+	}
+	// Resolve through the same helper the gateway sidecar reads from
+	// (the protected authorization directory), not the manifest directory:
+	// the two are different directories in every shipped layout (#896).
+	statePath, err := writeEnterpriseHookGuardianReadinessState(cfg.DataDir, state)
+	if err != nil {
+		if state == guardianstate.StateWaitingForTargets && errors.Is(err, os.ErrNotExist) {
+			// No authorization directory means no readiness file the
+			// gateway could read: it already reports the same
+			// waiting_for_targets default, so there is nothing to retract.
+			return
+		}
 		fmt.Fprintf(w, "[hook-guardian] warn: could not write %s state file %s: %v\n", state, statePath, err)
 	}
 }

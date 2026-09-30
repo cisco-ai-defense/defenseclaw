@@ -27,7 +27,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -117,7 +116,9 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// the collapsing rule loaded (we reached this point AFTER
 	// loadGatewayConfigV8 succeeded — either directly or via the wait
 	// loop in rootPersistentPreRunE), wire the sidecar's guardian
-	// state reader against the well-known .state file path, and start
+	// state reader against the .state file in the protected guardian
+	// authorization directory (the same helper the guardian writes
+	// through), and start
 	// a periodic RefreshConfiguration ticker so a guardian-side
 	// transition surfaces without a daemon-side event.
 	//
@@ -127,10 +128,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// backward compatible with today.
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sc.Health().SetDaemonConfigLoaded(true)
-		statePath := guardianstate.PathForDataDir(cfg.DataDir)
-		sc.Health().SetGuardianStateReader(func() string {
-			return guardianstate.ReadState(statePath)
-		})
+		sc.Health().SetGuardianStateReader(newGuardianReadinessStateReader(cfg.DataDir))
 	}
 
 	// Local UDS gRPC server for external consumers. Only constructed

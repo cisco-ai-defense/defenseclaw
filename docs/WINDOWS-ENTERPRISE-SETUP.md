@@ -10,6 +10,7 @@ The executable embeds exact, SHA-256-bound copies of:
 
 - `defenseclaw-gateway.exe`;
 - `defenseclaw-hook.exe`;
+- `defenseclaw-cmid-broker.exe`;
 - `defenseclaw.exe`, the installed enterprise lifecycle CLI;
 - `install-enterprise.ps1`;
 - `DefenseClawEnterprise.psm1`.

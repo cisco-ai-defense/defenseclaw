@@ -4,10 +4,24 @@
 package connector
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
 )
+
+func TestWindowsCodexManagedHookCommandWaitsForExitCode(t *testing.T) {
+	command := windowsCodexManagedHookCommand(`C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-hook.exe`)
+	script := decodePowerShellEncodedCommandForTest(t, command)
+	for _, part := range []string{"Microsoft.PowerShell.Management\\Start-Process", "-NoNewWindow -Wait -PassThru", "exit $hookProcess.ExitCode", "--enterprise-managed"} {
+		if !strings.Contains(script, part) {
+			t.Fatalf("managed hook command is missing %q: %s", part, script)
+		}
+	}
+	if strings.Contains(script, "--hook-contract") {
+		t.Fatalf("0.8.6 hook must not be given a newer contract flag: %s", script)
+	}
+}
 
 func TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()

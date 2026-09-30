@@ -8520,7 +8520,7 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         -LiteralPath $script:AgentApplicationControlAttestationPath `
         -Raw |
         ConvertFrom-Json -ErrorAction Stop
-    if ([int]$attestation.schema_version -ne 2 -or
+    if ([int]$attestation.schema_version -ne 3 -or
         [string]$attestation.prerequisite -cne
             'wdac_or_applocker_approved_agent_client_rules' -or
         [bool]$attestation.agent_application_control_enforced -ne
@@ -8530,6 +8530,13 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         [string]$attestation.minimum_claude_version -cne '2.1.152' -or
         [bool]$attestation.claude_effective_policy_verified -ne
             $expectedClaudeAttestation -or
+        ([string]$attestation.claude_effective_policy_managed_policy_sha256 -cmatch
+            '^[0-9a-f]{64}$') -ne $expectedClaudeAttestation -or
+        ([string]$attestation.claude_effective_policy_hook_sha256 -cmatch
+            '^[0-9a-f]{64}$') -ne $expectedClaudeAttestation -or
+        $null -ne $attestation.PSObject.Properties[
+            'claude_effective_policy_manifest_sha256'
+        ] -or
         -not [bool]$attestation.certification_required -or
         [string]$attestation.attested_by_sid -notmatch '^S-1-5-' -or
         [string]::IsNullOrWhiteSpace([string]$attestation.attested_at)) {
@@ -8589,14 +8596,20 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
         throw "$Label machine requirements report omitted the exact ten events"
     }
 
+    # The gateway edits requirements.toml in place: keys it adds to an
+    # existing table carry a trailing "# managed by DefenseClaw" comment and
+    # strings are TOML literals ('...'), so the value checks accept a
+    # trailing comment and either quote style.
+    # TestWindowsHardeningHarnessAcceptsRenderedCodexRequirements
+    # (internal/gateway/connector) runs these patterns against the renderer.
     $raw = [IO.File]::ReadAllText($script:CodexRequirementsPath)
     if ([regex]::Matches(
         $raw,
-        '(?m)^allow_managed_hooks_only\s*=\s*true\s*$'
+        '(?m)^allow_managed_hooks_only\s*=\s*true[ \t]*(?:#[^\r\n]*)?\r?$'
     ).Count -ne 1 -or
         [regex]::Matches(
             $raw,
-            '(?ms)^\[features\]\s*\r?\n(?:[^\[]*\r?\n)*?hooks\s*=\s*true\s*$'
+            '(?ms)^\[features\][ \t]*(?:#[^\r\n]*)?\s*\r?\n(?:[^\[]*\r?\n)*?hooks\s*=\s*true[ \t]*(?:#[^\r\n]*)?\r?$'
         ).Count -ne 1 -or
         $raw -match '(?m)^\s*state\s*=' -or
         $raw -match '(?m)^\s*\[hooks\.state\]') {
@@ -8612,7 +8625,10 @@ function Assert-CodexMachinePolicyContract([string]$Label) {
     }
     if ([regex]::Matches($raw, '(?m)^command\s*=').Count -ne 10 -or
         [regex]::Matches($raw, '(?m)^command_windows\s*=').Count -ne 10 -or
-        [regex]::Matches($raw, '(?m)^type\s*=\s*"command"\s*$').Count -ne 10 -or
+        [regex]::Matches(
+            $raw,
+            '(?m)^type\s*=\s*(?:"command"|''command'')[ \t]*(?:#[^\r\n]*)?\r?$'
+        ).Count -ne 10 -or
         [regex]::Matches($raw, '(?m)^timeout\s*=').Count -ne 10) {
         throw "$Label requirements.toml does not have ten exact command handlers"
     }
@@ -21747,7 +21763,7 @@ targets:
             Add-Result `
                 'claude-effective-policy-evidence-persistence' `
                 'passed' `
-                'initial Install remained incomplete; only after the real hostile-precedence Claude proof did Repair receive -AttestClaudeEffectivePolicy, bind it to the protected manifest, and make aggregate security_complete=true' `
+                'initial Install remained incomplete; only after the real hostile-precedence Claude proof did Repair receive -AttestClaudeEffectivePolicy, bind it to the installed Claude policy and hook digests, and make aggregate security_complete=true' `
                 @{
                     live_proof = $claudeRun
                     repair = $attestedRepair.JSON

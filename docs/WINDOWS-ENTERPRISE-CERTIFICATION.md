@@ -29,7 +29,7 @@ evidence:
 | Shared Codex prerequisite | Explicit enterprise lifecycle securely creates missing `C:\ProgramData\OpenAI\Codex` parents with System/Administrators full control and Users read/traverse. Status and normal mode do not create them; unsafe preexisting owners/DACLs/reparse points fail without takeover; rollback removes only transaction-created empty directories; preexisting legitimate directories survive failure and purge. |
 | Codex machine policy | `%ProgramData%\OpenAI\Codex\requirements.toml` contains exactly ten managed hook groups and points only to the protected installed hook. Its protected enrollment state, ownership record, and ACL preimage are non-user-writable and guardian-repaired after deletion, event removal, or DACL drift. Managed enterprise never reads, writes, or patches `<profile>\.codex`. |
 | Codex policy serialization | `%ProgramData%\OpenAI\Codex\.defenseclaw-managed-hooks.lock` is Administrators-owned, protected, no-reparse, and single-link. Acquisition is bounded. The retired predictable Global mutex name is ignored even when a user pre-creates it; a user-held read lock may deny availability only until the bounded failure and later reconcile. |
-| Agent application control | Protected schema-v2 evidence attests approved signed clients and Claude effective policy. Approved clients start; explicitly supplied official old Codex/Claude and custom unsigned lookalikes are blocked. |
+| Agent application control | Protected schema-v3 evidence attests approved signed clients and Claude effective policy. Approved clients start; explicitly supplied official old Codex/Claude and custom unsigned lookalikes are blocked. |
 | Codex effective enforcement | The protected machine requirements point approved Codex directly to the shared `defenseclaw-hook.exe`; certification invokes the real client and requires managed hook contact or a blocked operation. |
 | Claude effective enforcement | The real approved Claude client must exercise the installed machine policy against a local no-auth Messages stub. Hostile user and project `disableAllHooks` settings cannot yield a green result unless a managed hook is observed or the client operation is blocked. A protected `90-defenseclaw.json` file alone is not acceptance evidence. |
 | Hook server identity | Scoped-token authentication is necessary but not sufficient. The connected loopback server PID must equal the exact live SCM gateway PID. A standard-user fake listener on the exact API port, including a gateway-restart bind race, cannot obtain an authenticated request or return a trusted allow verdict. |
@@ -342,9 +342,16 @@ The full harness is deliberately two-phase. Initial `Install` may report
 `claude_effective_policy_verified=false` and `security_complete=false`.
 The harness then runs the real approved Claude client with hostile user and
 project precedence. Only after that succeeds does it run `Repair` with
-`-AttestClaudeEffectivePolicy`; the protected schema-v2 evidence binds that
-proof to the current manifest hash. Only that second transaction may make
-aggregate `security_complete=true`.
+`-AttestClaudeEffectivePolicy`; the protected schema-v3 evidence binds that
+proof to the Claude policy identity it exercised: the SHA-256 of the
+DefenseClaw `90-defenseclaw.json` machine policy (which must match its
+DefenseClaw ownership sidecar) and of the installed `defenseclaw-hook.exe`.
+Only that second transaction may make aggregate `security_complete=true`.
+Enrollment changes that only rewrite `targets.yaml` keep the evidence current.
+A different policy fragment or hook binary, or schema-v2 evidence from an
+older release, reports `claude_effective_policy_verified=false` with
+`claude_effective_policy_stale_reason` instead of failing the lifecycle; the
+next Install, Upgrade, or Repair retires it until the proof is repeated.
 
 The public signed CLI maps one-to-one to those installer parameters. For the
 first transaction, use `defenseclaw enterprise windows install` with
@@ -356,7 +363,7 @@ use `defenseclaw enterprise windows repair` with the same protected release
 inputs, repeat that optional application-control attestation if used, and add
 `--attest-claude-effective-policy`. Then require both
 `enterprise windows status --json` and `enterprise windows verify --json` to
-report the manifest-bound effective-policy field and aggregate security true.
+report the policy-bound effective-policy field and aggregate security true.
 The CLI delegates to the same protected PowerShell transaction; it does not
 weaken elevation, signature, source-path, or action restrictions.
 Certification drives the clean first transaction through the protected staged
