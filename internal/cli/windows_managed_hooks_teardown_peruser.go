@@ -120,7 +120,11 @@ func removeWindowsManagedHooksStandalonePerUserWiring(identity windowsManagedHoo
 	// The Claude Code version floor drop-in goes with the rest of the
 	// standalone machine policy. A rollback does not put it back: the
 	// guardian's next reconcile does, once the rolled-back services start.
-	_, err = enterprisepolicy.RemoveWindowsClaudeVersionFloor(opts)
+	if _, err := enterprisepolicy.RemoveWindowsClaudeVersionFloor(opts); err != nil {
+		return err
+	}
+	// So do the WSL registry values DefenseClaw wrote.
+	_, err = enterprisepolicy.RemoveWindowsWSL(opts)
 	return err
 }
 

@@ -116,6 +116,20 @@ const (
 	ClaudeVersionFloorEnforce = "enforce"
 	ClaudeVersionFloorReport  = "report"
 	ClaudeVersionFloorOff     = "off"
+
+	// Windows WSL knobs (enterprise.machine_policy.windows_wsl).
+	WSLAgentSessionsBlock = "block"
+	WSLAgentSessionsAllow = "allow"
+
+	WSLPlatformLeave   = "leave"
+	WSLPlatformDisable = "disable"
+
+	WSLEditorSettingsRepair = "repair"
+	WSLEditorSettingsReport = "report"
+	WSLEditorSettingsAllow  = "allow"
+
+	WSLClaudeDesktopKeyMerge  = "merge"
+	WSLClaudeDesktopKeyCreate = "create"
 )
 
 // EnterpriseConnectorPolicy is one connector's machine policy settings. An
@@ -145,8 +159,52 @@ const versionFloorConnector = "claudecode"
 // EnterpriseMachinePolicyConfig holds the default connector policy and
 // per-connector overrides.
 type EnterpriseMachinePolicyConfig struct {
-	Default    EnterpriseConnectorPolicy            `mapstructure:"default"    yaml:"default,omitempty"`
-	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors" yaml:"connectors,omitempty"`
+	Default    EnterpriseConnectorPolicy            `mapstructure:"default"     yaml:"default,omitempty"`
+	Connectors map[string]EnterpriseConnectorPolicy `mapstructure:"connectors"  yaml:"connectors,omitempty"`
+	WindowsWSL EnterpriseWindowsWSLPolicy           `mapstructure:"windows_wsl" yaml:"windows_wsl,omitempty"`
+}
+
+// EnterpriseWindowsWSLPolicy governs agent sessions that run inside a WSL 2
+// distribution on a Windows standalone deployment, where Windows machine
+// policy does not reach. Other operating systems ignore it.
+type EnterpriseWindowsWSLPolicy struct {
+	// AgentSessions: block (default) keeps Claude Desktop WSL sessions off
+	// through HKLM\SOFTWARE\Policies\Claude\disableWslSessions; allow
+	// accepts them running without DefenseClaw.
+	AgentSessions string `mapstructure:"agent_sessions" yaml:"agent_sessions,omitempty"`
+	// Platform: leave (default), or disable, which sets
+	// HKLM\SOFTWARE\Policies\WSL\AllowWSL=0 and turns WSL off for every
+	// account (it also stops other WSL tooling, such as Docker Desktop's
+	// WSL backend).
+	Platform string `mapstructure:"platform" yaml:"platform,omitempty"`
+	// EditorSettings: repair (default) resets the Codex IDE extension's
+	// chatgpt.runCodexInWindowsSubsystemForLinux to false in each enrolled
+	// user's VS Code, VS Code Insiders and Cursor user settings; report
+	// only reports it; allow ignores it.
+	EditorSettings string `mapstructure:"editor_settings" yaml:"editor_settings,omitempty"`
+	// ClaudeDesktopKey: merge (default) adds disableWslSessions only when
+	// HKLM\SOFTWARE\Policies\Claude already holds machine policy; create
+	// also writes it into an empty key. Any value there makes Claude Desktop
+	// ignore every user's HKCU policy and local third-party configuration,
+	// so creating it is the administrator's explicit choice.
+	ClaudeDesktopKey string `mapstructure:"claude_desktop_key" yaml:"claude_desktop_key,omitempty"`
+}
+
+// WSL returns the effective Windows WSL policy with the defaults filled in.
+func (m EnterpriseMachinePolicyConfig) WSL() EnterpriseWindowsWSLPolicy {
+	pick := func(value, fallback string) string {
+		if value = strings.ToLower(strings.TrimSpace(value)); value != "" {
+			return value
+		}
+		return fallback
+	}
+	w := m.WindowsWSL
+	return EnterpriseWindowsWSLPolicy{
+		AgentSessions:    pick(w.AgentSessions, WSLAgentSessionsBlock),
+		Platform:         pick(w.Platform, WSLPlatformLeave),
+		EditorSettings:   pick(w.EditorSettings, WSLEditorSettingsRepair),
+		ClaudeDesktopKey: pick(w.ClaudeDesktopKey, WSLClaudeDesktopKeyMerge),
+	}
 }
 
 // ClaudeVersionFloor returns the effective Claude Code version floor mode
@@ -530,7 +588,7 @@ func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
 }
 
 func machinePolicyEmpty(m EnterpriseMachinePolicyConfig) bool {
-	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0
+	return connectorPolicyEmpty(m.Default) && len(m.Connectors) == 0 && m.WindowsWSL == (EnterpriseWindowsWSLPolicy{})
 }
 
 func connectorPolicyEmpty(p EnterpriseConnectorPolicy) bool {
@@ -617,6 +675,20 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return fmt.Errorf("config: enterprise.machine_policy.connectors key %q is not a connector name", name)
 		}
 		if err := validateConnectorPolicy("enterprise.machine_policy.connectors."+name, policy); err != nil {
+			return err
+		}
+	}
+	wsl := e.MachinePolicy.WindowsWSL
+	for _, knob := range []struct {
+		name, value string
+		allowed     []string
+	}{
+		{"agent_sessions", wsl.AgentSessions, []string{WSLAgentSessionsBlock, WSLAgentSessionsAllow}},
+		{"platform", wsl.Platform, []string{WSLPlatformLeave, WSLPlatformDisable}},
+		{"editor_settings", wsl.EditorSettings, []string{WSLEditorSettingsRepair, WSLEditorSettingsReport, WSLEditorSettingsAllow}},
+		{"claude_desktop_key", wsl.ClaudeDesktopKey, []string{WSLClaudeDesktopKeyMerge, WSLClaudeDesktopKeyCreate}},
+	} {
+		if err := oneOf("enterprise.machine_policy.windows_wsl."+knob.name, knob.value, knob.allowed...); err != nil {
 			return err
 		}
 	}

@@ -47,6 +47,7 @@ one can appear.
 | `lifecycle_busy` | all | Another lifecycle run holds the lock | Retry. Exit `75` or `1618` |
 | `not_root` | Linux, macOS | The action needs root | Run it with `sudo` or from the MDM agent |
 | `service_manager_unavailable` | Linux | systemd is not the init system (containers, WSL), or it is older than 239 | Use a supported host. See [Requirements](/docs/enterprise/linux#requirements) |
+| `wsl_distribution` | Linux | The host is a WSL distribution. A new install is refused; an existing deployment gets this as a warning | Uninstall it and govern WSL from Windows. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 | `state_unreadable` | Linux, macOS | The lifecycle state (`/var/lib/defenseclaw-enterprise` on Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS) cannot be read | Check that directory and the disk |
 | `already_installed` | Linux, macOS | `install` ran on a host that already has a deployment | Use `ensure`, `upgrade`, or `repair` |
 | `not_installed` | all | `upgrade`, `repair`, `reconcile`, or `verify` found no deployment | Install first. `ensure` installs when nothing is there |

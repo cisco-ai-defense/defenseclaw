@@ -71,6 +71,7 @@ func StandaloneOptions(layout managed.StandaloneLayout, programFiles, programDat
 		opts.Policies[name] = cfg.Enterprise.MachinePolicy.PolicyFor(name)
 	}
 	opts.ClaudeVersionFloor = cfg.Enterprise.MachinePolicy.ClaudeVersionFloor()
+	opts.WSL = cfg.Enterprise.MachinePolicy.WindowsWSL
 	return opts, opts.Validate()
 }
 

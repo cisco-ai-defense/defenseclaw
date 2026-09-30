@@ -496,6 +496,43 @@ func TestClaudeVersionFloorDefaultsToEnforce(t *testing.T) {
 	}
 }
 
+// enterprise.machine_policy.windows_wsl: defaults, the schema, the loader and
+// the standalone-only rule.
+func TestWindowsWSLPolicyValidation(t *testing.T) {
+	if got := (EnterpriseMachinePolicyConfig{}).WSL(); got != (EnterpriseWindowsWSLPolicy{AgentSessions: "block", Platform: "leave", EditorSettings: "repair", ClaudeDesktopKey: "merge"}) {
+		t.Fatalf("defaults: %+v", got)
+	}
+	const head = "config_version: 8\nenterprise:\n  machine_policy:\n    windows_wsl:\n"
+	for doc, ok := range map[string]bool{
+		head + "      agent_sessions: allow\n      platform: disable\n      editor_settings: report\n      claude_desktop_key: create\n": true,
+		head + "      platform: off\n":    false,
+		head + "      codex_app: block\n": false,
+	} {
+		document, err := ParseV8YAML("wsl.yaml", []byte(doc))
+		if err == nil {
+			err = validateV8Schema("wsl.yaml", document)
+		}
+		if (err == nil) != ok {
+			t.Errorf("schema on %q: %v", doc, err)
+		}
+	}
+	managedConfig := func(w EnterpriseWindowsWSLPolicy, profile string) Config {
+		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: profile, MachinePolicy: EnterpriseMachinePolicyConfig{WindowsWSL: w}}}
+	}
+	good := managedConfig(EnterpriseWindowsWSLPolicy{Platform: "disable"}, "standalone")
+	if err := resolveEnterpriseConfig(&good, "windows", ""); err != nil {
+		t.Fatalf("valid windows_wsl rejected: %v", err)
+	}
+	bad := managedConfig(EnterpriseWindowsWSLPolicy{EditorSettings: "delete"}, "standalone")
+	if err := resolveEnterpriseConfig(&bad, "windows", ""); err == nil || !strings.Contains(err.Error(), "enterprise.machine_policy.windows_wsl.editor_settings") {
+		t.Fatalf("a bad knob must be rejected by name, got %v", err)
+	}
+	secureClient := managedConfig(EnterpriseWindowsWSLPolicy{AgentSessions: "allow"}, "secure_client")
+	if err := resolveEnterpriseConfig(&secureClient, "windows", ""); err == nil || !strings.Contains(err.Error(), "apply only to the standalone profile") {
+		t.Fatalf("secure_client accepted windows_wsl: %v", err)
+	}
+}
+
 func TestClaudeVersionFloorValidation(t *testing.T) {
 	managedConfig := func(m EnterpriseMachinePolicyConfig) Config {
 		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: m}}

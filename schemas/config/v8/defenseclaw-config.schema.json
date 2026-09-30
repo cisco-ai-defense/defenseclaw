@@ -4452,6 +4452,42 @@
               "additionalProperties": {
                 "$ref": "#/$defs/enterpriseConnectorPolicy"
               }
+            },
+            "windows_wsl": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Windows standalone only: agent sessions inside a WSL 2 distribution (Claude Desktop WSL sessions, the Codex app and IDE extension in WSL mode). Other operating systems ignore it.",
+              "properties": {
+                "agent_sessions": {
+                  "type": "string",
+                  "enum": [
+                    "block",
+                    "allow"
+                  ]
+                },
+                "platform": {
+                  "type": "string",
+                  "enum": [
+                    "leave",
+                    "disable"
+                  ]
+                },
+                "editor_settings": {
+                  "type": "string",
+                  "enum": [
+                    "repair",
+                    "report",
+                    "allow"
+                  ]
+                },
+                "claude_desktop_key": {
+                  "type": "string",
+                  "enum": [
+                    "merge",
+                    "create"
+                  ]
+                }
+              }
             }
           }
         },

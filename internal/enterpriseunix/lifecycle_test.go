@@ -788,6 +788,32 @@ func TestDarwinRefusesNextToSecureClient(t *testing.T) {
 	requireError(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}), codeProfileConflict)
 }
 
+// A WSL distribution is not a boundary the Linux lifecycle can enforce: new
+// installs are refused and an existing deployment is reported.
+func TestLinuxInsideWSL(t *testing.T) {
+	markWSL := func(h *testHost) {
+		release := h.env.P("/proc/sys/kernel/osrelease")
+		if err := os.MkdirAll(filepath.Dir(release), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(release, []byte("5.15.167.4-microsoft-standard-WSL2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := newTestHost(t, "linux")
+	markWSL(fresh)
+	requireError(t, fresh.run(Options{Action: ActionEnsure, PayloadDir: fresh.payload("1.0.0")}), codeWSL)
+
+	installed := newTestHost(t, "linux")
+	requireOK(t, installed.run(Options{Action: ActionInstall, PayloadDir: installed.payload("1.0.0")}))
+	markWSL(installed)
+	status := installed.run(Options{Action: ActionStatus})
+	requireOK(t, status)
+	if !slices.ContainsFunc(status.Warnings, func(m enterprisestatus.Message) bool { return m.Code == codeWSL }) {
+		t.Fatalf("status must report the WSL deployment: %+v", status.Warnings)
+	}
+}
+
 func TestStatusAndVerify(t *testing.T) {
 	h := newTestHost(t, "linux")
 	status := h.run(Options{Action: ActionStatus})

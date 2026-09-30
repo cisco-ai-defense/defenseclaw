@@ -80,8 +80,9 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 }
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
-// machine policy and summary, and re-checks the Claude Code version floor
-// drop-in (inside the lifecycle's Claude Code policy lock). Failure is
+// machine policy and summary, re-checks the Claude Code version floor
+// drop-in (inside the lifecycle's Claude Code policy lock) and reconciles
+// the WSL agent-session registry policy. Failure is
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
 func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
@@ -101,6 +102,9 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
+	}
+	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
 	}
 }
 
@@ -372,6 +376,12 @@ func enterpriseHookStandalonePlatformFinish(ctx context.Context, stderr io.Write
 		enterpriseHookWindowsForeignCleanupState.fingerprint = fingerprint
 	}
 	enterpriseHookWindowsForeignCleanupState.Unlock()
+	// The Codex IDE extension's WSL switch is reset every pass, so a session
+	// the user moves into WSL comes back within a pass; reports wait for the
+	// cleanup interval.
+	for _, key := range order {
+		enterpriseHookWSLEditorPass(stderr, users[key].creds, now, due)
+	}
 	if !due {
 		return
 	}

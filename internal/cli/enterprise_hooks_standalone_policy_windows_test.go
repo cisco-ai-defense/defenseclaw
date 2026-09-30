@@ -83,10 +83,15 @@ func TestWindowsOpenCodeMachinePolicyCheckNamesTheManagedConfig(t *testing.T) {
 // Every guardian reconcile re-checks the Claude Code version floor, even
 // when the Go-owned policy fails, and only in the standalone profile.
 func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
-	previousOptions, previousFloor := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor
+	previousOptions, previousFloor, previousWSL := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL
 	t.Cleanup(func() {
-		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor = previousOptions, previousFloor
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL = previousOptions, previousFloor, previousWSL
 	})
+	wslCalls := 0
+	enterpriseHookWindowsWSL = func(enterprisepolicy.Options) (enterprisepolicy.State, error) {
+		wslCalls++
+		return enterprisepolicy.State{}, errors.New("registry denied")
+	}
 	standalone := false
 	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
 		return enterprisepolicy.Options{}, []string{"claudecode"}, standalone, nil
@@ -98,8 +103,8 @@ func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	}
 	var log bytes.Buffer
 	enterpriseHookStandalonePlatformPrepare(&log)
-	if len(calls) != 0 || log.Len() != 0 {
-		t.Fatalf("a Secure Client guardian must not touch the floor: %v %q", calls, log.String())
+	if len(calls) != 0 || wslCalls != 0 || log.Len() != 0 {
+		t.Fatalf("a Secure Client guardian must not touch the floor or the WSL policy: %v %d %q", calls, wslCalls, log.String())
 	}
 	standalone = true
 	enterpriseHookStandalonePlatformPrepare(&log)
@@ -108,5 +113,8 @@ func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "Claude Code version floor: lock timeout") {
 		t.Fatalf("a floor failure must be reported: %q", log.String())
+	}
+	if wslCalls != 1 || !strings.Contains(log.String(), "WSL agent sessions: registry denied") {
+		t.Fatalf("the WSL policy must be reconciled every pass and its failure reported: %d %q", wslCalls, log.String())
 	}
 }
