@@ -2172,6 +2172,8 @@ def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str
                     uids.add(int(fields[7]))
             except (IndexError, ValueError):
                 continue
+    if not uids:
+        return ""
     uids.discard(os.getuid())
     names = []
     for uid in sorted(uids):
