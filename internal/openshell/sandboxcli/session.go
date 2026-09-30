@@ -125,8 +125,10 @@ type session struct {
 	noticeKeys map[string]bool
 	titleSet   bool
 	// blockedHosts are the destinations the session announced blocked
-	// (blockNotice), which the summary counts.
-	blockedHosts map[string]bool
+	// (blockNotice), which the summary counts; unblockedHosts those of them
+	// unblocked since, whose summary line offers no unblock.
+	blockedHosts   map[string]bool
+	unblockedHosts map[string]bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -342,6 +344,8 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.askNotice(ctx, ev)
 	case sandboxapi.ActivityEgressBlocked:
 		s.blockNotice(ev)
+	case sandboxapi.ActivityEgressUnblocked:
+		s.onUnblock(ev.Host)
 	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityHookFailed:
 		// A hook of the session reached DefenseClaw.
 		s.sawHooks.Store(true)
@@ -432,18 +436,43 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	case why != "":
 		text += " (" + reasonText(why) + ")"
 	}
+	host := strings.ToLower(ev.Host)
+	n := sessionNotice{summary: text}
 	if ev.Unblockable {
+		// Once the host is unblocked the summary gives the block without
+		// the command (onUnblock).
+		n.host, n.unblocked = host, text+"; unblocked since"
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
+		n.summary = text
 	}
 	s.noticeMu.Lock()
 	if s.blockedHosts == nil {
 		s.blockedHosts = map[string]bool{}
 	}
 	if len(s.blockedHosts) < maxSeenEvents {
-		s.blockedHosts[strings.ToLower(ev.Host)] = true
+		s.blockedHosts[host] = true
 	}
+	// Blocked again after an unblock: the command applies again.
+	delete(s.unblockedHosts, host)
 	s.noticeMu.Unlock()
-	s.notice("block "+ev.Host, text, text)
+	s.noticeWith("block "+ev.Host, text, n)
+}
+
+// onUnblock records that host was unblocked for this sandbox (or for every
+// sandbox) during the session.
+func (s *session) onUnblock(host string) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return
+	}
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	if s.unblockedHosts == nil {
+		s.unblockedHosts = map[string]bool{}
+	}
+	if len(s.unblockedHosts) < maxSeenEvents {
+		s.unblockedHosts[host] = true
+	}
 }
 
 // harnessFetchReason is triage's reason for a denied request the harness

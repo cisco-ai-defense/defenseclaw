@@ -2803,6 +2803,11 @@ The manager (`watch.go`) turns the records into the feed and the counts:
 - The end-of-session summary reads the sandbox until its counts stop moving
   (at most three more reads, a second apart), because OpenShell reports the
   last denials a moment after the session ends.
+- The summary repeats a block with its unblock command only while the host
+  stays blocked: an `egress.unblocked` event of the sandbox on the feed
+  (a `sandbox unblock HOST --sandbox NAME`, `--always` with it) after the
+  block drops the command (`…; unblocked since`), and a block after the
+  unblock brings it back.
 
 ## Platform behaviours to design around
 

@@ -371,6 +371,41 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	}
 }
 
+// RT U6: the summary offered "→ unblock" for webhook.site and httpbin.org,
+// which were unblocked earlier in the session. A host unblocked for the
+// sandbox since its block is summarised without the command, and one
+// blocked again after that keeps it.
+func TestTheSummaryOffersNoUnblockOfAHostUnblockedSince(t *testing.T) {
+	ta := newTestApp(t, "")
+	stderr := liveErr(ta)
+	noChanges(ta)
+	blocked := func(seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Seq: seq, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: host, Port: 443,
+			Category: "webhook_catcher", Unblockable: true}
+	}
+	unblocked := func(seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Seq: seq, Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: sbName, Host: host, Reason: "sandbox",
+			Message: "unblocked " + host + " for sandbox " + sbName}
+	}
+	ta.daemon.live = []sandboxapi.ActivityEvent{
+		blocked(1, "webhook.site"), blocked(2, "Hooks.Example.COM"), blocked(3, "again.example.com"), blocked(4, "still.example.com"),
+		unblocked(5, "webhook.site"), unblocked(6, "hooks.example.com"), unblocked(7, "again.example.com"), blocked(8, "again.example.com"),
+		blocked(9, "last.example.com"),
+	}
+	ta.term.during = func() {
+		waitFor(t, "the last block", func() bool { return strings.Contains(stderr.String(), "last.example.com") })
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	cmd := func(host string) string {
+		return " → unblock: defenseclaw sandbox unblock " + host + " --sandbox " + sbName
+	}
+	has(t, ta.output(), "✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since\n",
+		"✗ DefenseClaw blocked Hooks.Example.COM (webhook catcher); unblocked since\n",
+		"✗ DefenseClaw blocked again.example.com (webhook catcher)"+cmd("again.example.com")+"\n",
+		"✗ DefenseClaw blocked still.example.com (webhook catcher)"+cmd("still.example.com")+"\n")
+	lacks(t, ta.output(), cmd("webhook.site"), cmd("Hooks.Example.COM"))
+}
+
 // Manual R2-2: while the daemon does not answer, the run says so (the hooks
 // fail closed meanwhile), then, as soon as it answers, that it is back, and
 // the summary keeps the outage.

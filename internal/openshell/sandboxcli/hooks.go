@@ -70,6 +70,10 @@ func errNoHooks() error {
 // end-of-session summary.
 type sessionNotice struct {
 	summary string
+	// host is the destination of a block the user can lift, and
+	// unblocked its line once the session saw host unblocked
+	// (session.unblockedHosts): the block, without the unblock command.
+	host, unblocked string
 }
 
 // notice announces msg while the harness owns the terminal, once per key
@@ -81,6 +85,12 @@ type sessionNotice struct {
 // bell (a harness may take the title back at once), and the summary
 // repeats it; a headless session prints a line on stderr.
 func (s *session) notice(key, msg, summary string) {
+	s.noticeWith(key, msg, sessionNotice{summary: summary})
+}
+
+// noticeWith is notice with the summary line n.
+func (s *session) noticeWith(key, msg string, n sessionNotice) {
+	summary := n.summary
 	msg = sandboxapi.DisplayText(msg)
 	tui := s.app.IO.TTY && !s.headless
 	s.noticeMu.Lock()
@@ -95,7 +105,7 @@ func (s *session) notice(key, msg, summary string) {
 		s.noticeKeys[key] = true
 	}
 	if summary != "" {
-		s.notices = append(s.notices, sessionNotice{summary: summary})
+		s.notices = append(s.notices, n)
 	}
 	push := tui && !s.titleSet
 	s.titleSet = s.titleSet || tui
@@ -156,19 +166,27 @@ const maxSummaryNotices = 6
 // while the harness owned the terminal.
 func (s *session) printNotices() {
 	s.noticeMu.Lock()
-	list := append([]sessionNotice(nil), s.notices...)
+	list := make([]string, 0, len(s.notices))
+	for _, n := range s.notices {
+		line := n.summary
+		if n.host != "" && s.unblockedHosts[n.host] {
+			// Unblocked since: no command to offer (RT U6).
+			line = n.unblocked
+		}
+		list = append(list, line)
+	}
 	s.noticeMu.Unlock()
 	a := s.app
-	for i, n := range list {
+	for i, line := range list {
 		if i == maxSummaryNotices {
 			a.note(fmt.Sprintf("… %d more: %s activity --sandbox %s", len(list)-i, CommandName, s.sb.Name))
 			break
 		}
 		style := ansiYellow
-		if strings.HasPrefix(n.summary, "✗") {
+		if strings.HasPrefix(line, "✗") {
 			style = ansiRed
 		}
-		a.line(a.style(n.summary, style))
+		a.line(a.style(line, style))
 	}
 }
 

@@ -705,7 +705,10 @@ Keep changes? [Y] keep  [u] undo everything  [d] show diff
 
 The network counts are sites (destinations): the new ones the sandbox
 reached, and the ones blocked during the session, each counted once however
-often it was tried and listed below with `✗`. An invalid destination (a
+often it was tried and listed below with `✗`. A site you unblocked for the
+sandbox later in the session is listed without the unblock command
+(``✗ DefenseClaw blocked webhook.site:443 (webhook catcher); unblocked
+since``). An invalid destination (a
 host name without a dot, such as a mistyped `curl echo`) counts as blocked
 too. The counts cover everything in the sandbox while the session ran,
 `sandbox exec` commands from another terminal included. `sandbox status NAME`

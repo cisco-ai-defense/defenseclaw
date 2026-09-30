@@ -375,8 +375,10 @@ deleted.
   `PostToolUse`, Copilot CLI `postToolUse`/`postToolUseFailure`, Cursor
   `postToolUse` and Devin `PostToolUse`. Each refusal is told once, and only
   to the sandbox whose proxy credential made the request. A host unblocked
-  since is left out. The audit row's `extra.sandbox_egress_refused` names
-  what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
+  since is left out; so is the unblock command from the end-of-session
+  summary of a host unblocked later in that session (`✗ DefenseClaw
+  blocked webhook.site (webhook catcher); unblocked since`). The audit
+  row's `extra.sandbox_egress_refused` names what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
   OmniGent have no post-tool context field, so there only the terminal's
   live notice reports the block. Both drivers.
 
