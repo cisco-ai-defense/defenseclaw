@@ -159,16 +159,17 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 		Resolver:  resolver,
 		HomeRoots: []string{homes},
 		UIDMin:    uid, UIDMax: uid + 1,
-		Discover: func(_ context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
+		DiscoverSurfaces: func(_ context.Context, account unixidentity.Account, connectors []string) (UnixDiscovery, error) {
 			discovered[account.Name] = map[string]string{}
-			versions := map[string]string{}
+			// alice has codex and only the Kiro IDE (no kiro-cli).
+			versions := map[string]string{KiroIDEDiscoveryKey: "1.2.4"}
 			for _, conn := range connectors {
 				discovered[account.Name][conn] = "asked"
 				if conn == "codex" {
 					versions[conn] = "0.150.0"
 				}
 			}
-			return versions, map[string]string{"claudecode": "not installed"}, nil
+			return UnixDiscovery{Versions: versions, Reasons: map[string]string{"claudecode": "not installed"}}, nil
 		},
 		MachineVersion: func(conn string) string {
 			if conn == "claudecode" {
@@ -177,7 +178,7 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 			return ""
 		},
 	}
-	cfg := enumeratorConfig("codex", "claudecode")
+	cfg := enumeratorConfig("codex", "claudecode", "kiro")
 	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +193,7 @@ func TestEnumerateUnixFiltersAndAutoEnrolls(t *testing.T) {
 			t.Fatalf("a user whose home does not exist yet must be deferred: %+v", target)
 		}
 	}
-	want := []string{"alice/codex/0.150.0", "newbie/claudecode/2.1.300"}
+	want := []string{"alice/codex/0.150.0", "alice/kiro/1.2.4" + KiroIDEVersionSuffix, "newbie/claudecode/2.1.300"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("rows = %v, want %v (skipped: %v)", got, want, report.Skipped)
 	}

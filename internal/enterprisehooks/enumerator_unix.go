@@ -509,8 +509,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			if err != nil {
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
-			report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)
 		}
+		report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)
 		for _, conn := range surfaceOnly {
 			unprotected, refused := unixSurfaceOnlyRefusals(account, conn, versions[conn], surfaces[conn], enrollment.UnverifiedVersionsFor(conn))
 			report.Unprotected = append(report.Unprotected, unprotected...)
