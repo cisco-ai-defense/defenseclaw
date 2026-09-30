@@ -918,11 +918,13 @@ var continueArgs = map[string]string{
 var ownResumeHint = map[string]string{
 	"claudecode": "claude --resume",
 	"codex":      "codex resume",
-	"copilot":    "copilot --resume",
-	"kiro":       "kiro-cli --resume-id",
-	"hermes":     "hermes --resume",
-	"openhands":  "openhands --resume",
-	"omnigent":   "omnigent run",
+	// OpenCode's exit screen: "Continue  opencode -s ses_<id>".
+	"opencode":  "opencode -s",
+	"copilot":   "copilot --resume",
+	"kiro":      "kiro-cli --resume-id",
+	"hermes":    "hermes --resume",
+	"openhands": "openhands --resume",
+	"omnigent":  "omnigent run",
 	// agy: "Resume with -c (or command below): agy --conversation=<id>".
 	"antigravity": "agy --conversation",
 }

@@ -27,6 +27,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -44,6 +45,11 @@ type ImageService interface {
 	// image for the MicroVM driver (image.BuildSpec.MicroVM), the one a
 	// gateway on that driver boots.
 	Build(ctx context.Context, spec *harness.Spec, microVM, force bool, log io.Writer) (image.Record, bool, error)
+	// Preflight returns the refusal Build would return before docker
+	// build runs (image.Builder.Preflight): a pinned harness version that
+	// is not an exact release or has no reviewed hook contract for
+	// sandboxes, or, when it would build, a docker without BuildKit.
+	Preflight(ctx context.Context, spec *harness.Spec, microVM, force bool) error
 	// Current reports whether spec's image for the MicroVM driver
 	// (microVM) or the docker driver is built and hook-verified (the daemon
 	// uses it without building).
@@ -109,6 +115,11 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, for
 		return rec, true, fmt.Errorf("the %s image %s was built but its hooks did not verify", h.DisplayName, rec.Tag)
 	}
 	return rec, true, nil
+}
+
+func (b *builderImages) Preflight(ctx context.Context, h *harness.Spec, microVM, force bool) error {
+	builder := &image.Builder{Docker: image.CLI{}, Store: b.store(), Log: io.Discard}
+	return builder.Preflight(ctx, b.spec(h, microVM), image.BuildOptions{Force: force})
 }
 
 func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
@@ -274,26 +285,28 @@ func (a *App) ImageBuild(ctx context.Context, o ImageBuildOptions) error {
 }
 
 func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force, verbose bool) error {
+	// A build refused before docker build runs (a harness_versions pin
+	// that is not an exact release or has no reviewed contract, a docker
+	// without BuildKit) says only why: no build starts, and the last
+	// build's log stays.
+	if err := a.Images.Preflight(ctx, spec, microVM, force); err != nil {
+		return fmt.Errorf("%s image: %w", spec.DisplayName, err)
+	}
 	var log io.Writer = io.Discard
-	logPath := ""
+	var file *lazyLog
 	if verbose {
 		log = a.IO.Out
 	} else {
-		dir := filepath.Join(a.dataDir(), "logs")
-		if err := os.MkdirAll(dir, 0o700); err == nil {
-			logPath = filepath.Join(dir, "sandbox-image-"+spec.Name+".log")
-			if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
-				defer f.Close()
-				log = f
-			}
-		}
+		file = &lazyLog{path: filepath.Join(a.dataDir(), "logs", "sandbox-image-"+spec.Name+".log")}
+		defer file.Close()
+		log = file
 	}
 	a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
 	started := a.Now()
 	rec, built, err := a.Images.Build(ctx, spec, microVM, force, log)
 	if err != nil {
-		// A build refused before docker build ran has nothing in its log.
-		if logPath != "" && !errors.Is(err, image.ErrNoBuildKit) {
+		// A build that failed before docker wrote anything has no log.
+		if logPath := file.opened(); logPath != "" {
 			// A failed docker build ends with the last lines docker
 			// printed, one per line: the log path goes after them.
 			sep := " "
@@ -333,6 +346,56 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 	return nil
 }
 
+// lazyLog is a build log that is created (or emptied) by its first write,
+// so a build that writes nothing keeps the previous build's log. One that
+// cannot be opened discards what it gets.
+type lazyLog struct {
+	path string
+	mu   sync.Mutex
+	f    *os.File
+	err  error
+}
+
+func (l *lazyLog) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f == nil && l.err == nil {
+		if l.err = os.MkdirAll(filepath.Dir(l.path), 0o700); l.err == nil {
+			l.f, l.err = os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		}
+	}
+	if l.err != nil {
+		return len(p), nil
+	}
+	return l.f.Write(p)
+}
+
+// opened is the log's path once a write created it, else "".
+func (l *lazyLog) opened() string {
+	if l == nil {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f == nil {
+		return ""
+	}
+	return l.path
+}
+
+// Close closes the log if a write opened it.
+func (l *lazyLog) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f == nil {
+		return nil
+	}
+	return l.f.Close()
+}
+
 // vmDiskShortage judges the free space where the gateway's compute driver d
 // would prepare a disk from spec's current image for d (or, with spec nil,
 // the image ref) for what, when d prepares one (the MicroVM driver): an error
@@ -363,18 +426,31 @@ func (a *App) vmDiskShortage(ctx context.Context, d openshell.Driver, spec *harn
 // MicroVM gateway boots only an image built for it, which answers
 // localhost itself; a docker gateway's images stay as they were.
 func (a *App) gatewayDriverNow(ctx context.Context) openshell.Driver {
+	if d, ok := a.gatewayDriverKnown(ctx); ok {
+		return d
+	}
+	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
+	return d
+}
+
+// gatewayDriverKnown is the compute driver gatewayDriverNow finds when the
+// daemon or the gateway's configuration says which (a configuration that
+// names none selects docker), and false when neither does.
+func (a *App) gatewayDriverKnown(ctx context.Context) (openshell.Driver, bool) {
 	if api, err := a.api(); err == nil {
 		if st, err := api.Status(ctx); err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
-			return gatewayDriver(st)
+			// A driver DefenseClaw does not drive (podman, say) is not
+			// known: nothing says which images it boots.
+			d, ok := openshell.LookupDriver(st.Gateway.Driver)
+			return d, ok
 		}
 	}
 	if st, err := a.Gateway.State(); err == nil && st != nil {
 		if d, ok := st.Driver(); ok {
-			return d
+			return d, true
 		}
 	}
-	d, _ := openshell.LookupDriver(string(openshell.DriverDocker))
-	return d
+	return openshell.Driver{}, false
 }
 
 // defaultHarnesses are the harnesses setup selects, and image commands and
@@ -418,7 +494,9 @@ type listedImage struct {
 
 // ImageList prints the recorded overlay images Docker still has, and names
 // the recorded ones it no longer has: the next run of their harness builds
-// them again, and `image prune` forgets their records.
+// them again, and `image prune` forgets their records. Each row says which
+// compute driver the image is for, and a note names those the gateway, when
+// its driver is known, does not boot.
 func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 	a.defaults()
 	recs, err := a.Images.List()
@@ -442,8 +520,13 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		a.note("no images yet; `" + CommandName + " image build` builds them")
 		return nil
 	}
+	// The gateway boots only the images built for its compute driver: a
+	// MicroVM one only the MicroVM images, a docker one only the others.
+	driver, driverKnown := a.gatewayDriverKnown(ctx)
+	microVMGateway := image.MicroVMTarget(driver)
 	rows := make([][]string, 0, len(recs))
 	var missing []string
+	unused := 0
 	for _, r := range recs {
 		if gone[r.Tag] {
 			missing = append(missing, fmt.Sprintf("%s (%s %s)", r.Tag, r.Connector, r.HarnessVersion))
@@ -453,10 +536,26 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 		if r.HookFireVerified {
 			verified = "yes"
 		}
-		rows = append(rows, []string{r.Tag, r.Connector, r.HarnessVersion, verified, fmt.Sprint(r.UID), r.BuiltAt.Local().Format("2006-01-02 15:04")})
+		target := "docker"
+		if r.MicroVM {
+			target = "MicroVM"
+		}
+		if driverKnown && r.MicroVM != microVMGateway {
+			unused++
+		}
+		rows = append(rows, []string{r.Tag, r.Connector, r.HarnessVersion, target, verified, fmt.Sprint(r.UID), r.BuiltAt.Local().Format("2006-01-02 15:04")})
 	}
 	if len(rows) > 0 {
-		a.table([]string{"TAG", "HARNESS", "VERSION", "HOOKS VERIFIED", "UID", "BUILT"}, rows)
+		a.table([]string{"TAG", "HARNESS", "VERSION", "FOR", "HOOKS VERIFIED", "UID", "BUILT"}, rows)
+	}
+	switch {
+	case unused == 0:
+	case microVMGateway:
+		a.note(fmt.Sprintf("this gateway runs sandboxes in MicroVMs (the vm driver) and boots only the MicroVM images: it does not use the %s for the docker driver, "+
+			"which `%s image prune` removes unless a sandbox runs one", plural(int64(unused), "image", "images"), CommandName))
+	default:
+		a.note(fmt.Sprintf("this gateway runs sandboxes on the docker driver and boots only the docker images: it does not use the %s for MicroVMs",
+			plural(int64(unused), "image", "images")))
 	}
 	if len(missing) > 0 {
 		a.note(fmt.Sprintf("recorded but no longer in Docker: %s; the next run of the harness builds its image again, and `%s image prune` forgets the record",
@@ -474,7 +573,10 @@ func (a *App) ImageList(ctx context.Context, format OutputFormat) error {
 // daemon they are left alone. So are the disks the MicroVM driver prepared
 // from the images it removed: with the list, the disk of each image ID it
 // removed, that no sandbox is recorded with and that Docker no longer
-// has, is removed too, and nothing else of OpenShell's image cache.
+// has, is removed too, and nothing else of OpenShell's image cache. With
+// the list, on a gateway known to boot only MicroVM images, the images
+// built for the docker driver (those recorded before MicroVM images
+// existed included) are superseded too (image.PruneOptions.MicroVMGateway).
 func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 	a.defaults()
 	opts := image.PruneOptions{DryRun: dryRun}
@@ -491,6 +593,9 @@ func (a *App) ImagePrune(ctx context.Context, dryRun bool) error {
 				}
 			}
 			opts.AliasRepository = vm.ImageRepository
+			if d, ok := a.gatewayDriverKnown(ctx); ok {
+				opts.MicroVMGateway = image.MicroVMTarget(d)
+			}
 		}
 	}
 	rep, err := a.Images.Prune(ctx, opts)

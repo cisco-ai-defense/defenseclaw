@@ -25,11 +25,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -191,6 +193,38 @@ func TestImageBuildSaysWhatCannotStartInAMicroVM(t *testing.T) {
 	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity"}}))
 	if strings.Contains(ta.output(), "MicroVM") {
 		t.Fatalf("a docker image build mentions MicroVMs:\n%s", ta.output())
+	}
+}
+
+// FIN-A-1: prune supersedes the docker driver's images only on a gateway
+// known to boot MicroVM images, and only with the daemon's list of the
+// images sandboxes run: a docker gateway, one DefenseClaw does not drive,
+// or a daemon that does not answer prunes as before.
+func TestImagePruneTakesTheGatewayDriversTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, daemon string
+		configured   openshell.ComputeDriver
+		noDaemon     bool
+		want         bool
+	}{
+		{name: "vm gateway", daemon: "vm", want: true},
+		{name: "docker gateway", daemon: "docker", configured: openshell.DriverVM},
+		{name: "daemon too old to say", configured: openshell.DriverVM, want: true},
+		{name: "a driver DefenseClaw does not drive", daemon: "podman"},
+		{name: "no daemon", noDaemon: true, configured: openshell.DriverVM},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.daemon
+			ta.gateway.state.ComputeDriver = tc.configured
+			if tc.noDaemon {
+				ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+			}
+			ta.ok(t, ta.ImagePrune(bg, true))
+			if opts := ta.images.pruned[0]; opts.MicroVMGateway != tc.want {
+				t.Fatalf("prune options = %+v, want MicroVMGateway=%t", opts, tc.want)
+			}
+		})
 	}
 }
 
@@ -356,6 +390,56 @@ func TestImageListNamesImagesGoneFromDocker(t *testing.T) {
 	}
 }
 
+// FIN-A-3: the list says which compute driver each image is for, and on a
+// gateway whose driver is known names the images it does not boot, as the
+// doctor does not count them: a MicroVM gateway's docker images (those
+// recorded before MicroVM images existed too), which prune removes, or a
+// docker gateway's MicroVM ones. A driver not known says nothing of it.
+func TestImageListSaysWhichImagesTheGatewayBoots(t *testing.T) {
+	for _, tc := range []struct {
+		name, daemon, want string
+		noGateway          bool
+	}{
+		{name: "vm gateway", daemon: "vm", want: "this gateway runs sandboxes in MicroVMs (the vm driver) and boots only the MicroVM images: " +
+			"it does not use the 2 images for the docker driver, which `defenseclaw sandbox image prune` removes unless a sandbox runs one"},
+		{name: "docker gateway", daemon: "docker", want: "this gateway runs sandboxes on the docker driver and boots only the docker images: " +
+			"it does not use the 1 image for MicroVMs"},
+		{name: "driver not known", noGateway: true},
+		// A driver DefenseClaw does not drive says nothing of which images
+		// its gateway boots (it used to be taken for docker).
+		{name: "driver DefenseClaw does not drive", daemon: "podman"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.daemon.status.Gateway.Driver = tc.daemon
+			if tc.noGateway {
+				ta.API = sandboxapi.NewClient("http://127.0.0.1:1", "x")
+				ta.gateway.stateErr = errors.New("no gateway configuration")
+			}
+			built := ta.Now()
+			ta.images.recs = []image.Record{
+				{Tag: "defenseclaw/sandbox:claudecode-vm-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, MicroVM: true, UID: 1000, BuiltAt: built},
+				{Tag: "defenseclaw/sandbox:claudecode-old-u1000", Connector: "claudecode", HarnessVersion: "2.1.156", HookFireVerified: true, UID: 1000, BuiltAt: built.Add(-1)},
+				{Tag: "defenseclaw/sandbox:codex-old-u1000", Connector: "codex", HarnessVersion: "0.146.0", HookFireVerified: true, UID: 1000, BuiltAt: built.Add(-2)},
+			}
+			ta.ok(t, ta.ImageList(bg, OutputText))
+			out := ta.output()
+			header, rows, _ := strings.Cut(out, "\n")
+			if !strings.Contains(header, "FOR") || !regexp.MustCompile(`claudecode-vm-u1000\s+claudecode\s+2\.1\.156\s+MicroVM\s+yes`).MatchString(rows) ||
+				!regexp.MustCompile(`codex-old-u1000\s+codex\s+0\.146\.0\s+docker\s+yes`).MatchString(rows) {
+				t.Fatalf("image list:\n%s", out)
+			}
+			if tc.want == "" {
+				if strings.Contains(out, "this gateway") {
+					t.Fatalf("a driver not known named the images the gateway boots:\n%s", out)
+				}
+			} else if !strings.Contains(out, tc.want) {
+				t.Fatalf("image list lacks %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 // `image build` on a MicroVM gateway warns when the volume the driver
 // prepares disks on is short of room for the new image's first start; on
 // docker, or with the room, it says nothing of it (OC-F1).
@@ -469,13 +553,54 @@ func TestImageBuildFailureShowsDockersLastLines(t *testing.T) {
 }
 
 // A build refused because docker would not use BuildKit never ran docker
-// build: its error says why and how to fix it, and names no build log.
+// build: its error says why and how to fix it, and names no build log,
+// and the last build's log stays.
 func TestImageBuildWithoutBuildKitNamesNoBuildLog(t *testing.T) {
 	ta := newTestApp(t, "")
+	logPath := filepath.Join(ta.dataDir(), "logs", "sandbox-image-claudecode.log")
+	writeFile(t, logPath, "the last build\n")
 	ta.images.buildErr = fmt.Errorf("openshell image: docker build defenseclaw/sandbox:claudecode-x-u1000: %w; install Docker's buildx plugin",
 		image.ErrNoBuildKit)
 	err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"claudecode"}})
 	if want := "Claude Code image: " + ta.images.buildErr.Error(); err == nil || err.Error() != want || !errors.Is(err, image.ErrNoBuildKit) {
 		t.Fatalf("ImageBuild error = %v, want %s", err, want)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != "the last build\n" {
+		t.Fatalf("build log after a build that wrote nothing = %q, %v", data, err)
+	}
+}
+
+// FIN-B-2: a harness_versions pin refused before docker runs (no reviewed
+// hook contract for sandboxes, not an exact release, a docker without
+// BuildKit) says only why: no "Building …" line, no build, no build log
+// named, and the last build's log stays.
+func TestImageBuildRefusedBeforeDockerRunsSaysOnlyWhy(t *testing.T) {
+	contract := harness.CheckContract("omnigent", "0.12.0")
+	_, release := harness.Hermes.InstallSteps("0.0.0-nonexistent")
+	for name, refusal := range map[string]error{
+		"contract":      fmt.Errorf("openshell image: %w", contract),
+		"exact release": fmt.Errorf("openshell image: %w", release),
+		"BuildKit":      fmt.Errorf("openshell image: docker build defenseclaw/sandbox:hermes-x-u1000: %w", image.ErrNoBuildKit),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			logPath := filepath.Join(ta.dataDir(), "logs", "sandbox-image-hermes.log")
+			writeFile(t, logPath, "the last build\n")
+			ta.images.preflightErr = refusal
+			err := ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"hermes"}})
+			if want := "Hermes Agent image: " + refusal.Error(); err == nil || err.Error() != want {
+				t.Fatalf("ImageBuild error = %v, want %s", err, want)
+			}
+			if out := ta.output(); strings.Contains(out, "Building") || len(ta.images.built) != 0 {
+				t.Fatalf("a refused build started (built %v):\n%s", ta.images.built, out)
+			}
+			if data, err := os.ReadFile(logPath); err != nil || string(data) != "the last build\n" {
+				t.Fatalf("build log after a refusal = %q, %v", data, err)
+			}
+		})
+	}
+	if contract == nil || !strings.Contains(contract.Error(), "harness version has no reviewed hook contract for sandboxes: omnigent 0.12.0") ||
+		release == nil || !strings.Contains(release.Error(), `version "0.0.0-nonexistent" is not an exact release`) {
+		t.Fatalf("refusals: %v; %v", contract, release)
 	}
 }

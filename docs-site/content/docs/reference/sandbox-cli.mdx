@@ -199,7 +199,11 @@ defenseclaw sandbox image list
 Builds and hook-checks the images of the named harnesses, or of
 `openshell.harnesses` (then Claude Code and Codex) when you name none. A
 current, checked image is kept unless you pass `--force`. The build log is
-written to `<data_dir>/logs/sandbox-image-<harness>.log`. On a MicroVM gateway
+written to `<data_dir>/logs/sandbox-image-<harness>.log`. Some builds are
+refused before docker runs: an `openshell.image.harness_versions` pin that is
+not an exact release, a pin with no reviewed hook contract for sandboxes, or a
+docker without BuildKit. Such a refusal says only why. It starts no build and
+keeps the previous build's log. On a MicroVM gateway
 it warns after a build when the volume of the driver's image cache lacks the
 room the first start of the new image needs (see `sandbox run`).
 
@@ -220,8 +224,15 @@ defenseclaw sandbox image build codex --force --verbose
 Lists the recorded harness images, newest first. An image removed from Docker
 (with `docker rmi`, say) is not in the table: a note names it, the next run of
 its harness builds the image again, and `sandbox image prune` forgets its
-record. With `--output json` every recorded image is listed, and one Docker no
-longer has carries `"missing": true`.
+record. The FOR column says which compute driver an image is for: `MicroVM`
+for the vm driver (a Mac's gateway), `docker` for the docker driver. Images
+recorded before DefenseClaw built MicroVM images are `docker`. A gateway boots
+only the images for its driver, and when the list can tell which driver that
+is, a note names the images the gateway does not use. The doctor does not
+count those as built, and on a MicroVM gateway `sandbox image prune` removes
+them. With `--output json` every recorded image is listed, with
+`"microvm": true` for a MicroVM image, and one Docker no longer has carries
+`"missing": true`.
 
 ```bash
 defenseclaw sandbox image list --output json
@@ -241,7 +252,12 @@ directory recorded, or that nothing recorded. It forgets, and names, the
 records of images Docker no longer has. On a MicroVM (vm) gateway it
 also removes the run images and aliases of superseded harness images, and only
 while the daemon answers: without its list of sandboxes it leaves them alone.
-With that list it also removes the MicroVM disk OpenShell prepared from each
+With that list, a MicroVM gateway's prune also counts every harness image built
+for the docker driver as superseded, however new it is (images recorded before
+DefenseClaw built MicroVM images are such images). Such an image goes with its
+run images and aliases unless a sandbox runs it. A docker gateway's prune, or
+one that cannot tell which driver the gateway runs, keeps the newest image of
+both kinds. With that list it also removes the MicroVM disk OpenShell prepared from each
 image it removed (about 5 GB each, in the `images` folder of the MicroVM
 driver's state directory, `~/.local/state/openshell/vm-driver` by default) and
 says how much it freed. It removes a disk only when Docker no longer has its
@@ -444,7 +460,8 @@ Hermes Agent and OmniGent, `-- resume --last` for Codex, `-- --resume` for
 Kiro CLI, `-- --resume --last` for OpenHands and `-- -c` for Antigravity. A
 plain `connect` starts a new conversation. The resume line the harness itself
 prints as it exits (`claude --resume <id>`, `codex resume <id>`,
-`copilot --resume=<id>`, `kiro-cli --resume-id <id>`, `hermes --resume <id>`,
+`opencode -s <id>`, `copilot --resume=<id>`, `kiro-cli --resume-id <id>`,
+`hermes --resume <id>`,
 `openhands --resume <id>`, `omnigent run … --resume <id>`,
 `agy --conversation=<id>`) works only inside the sandbox, where the
 conversation is: typed on this machine it does not reach it, unless the

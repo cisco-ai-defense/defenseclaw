@@ -94,6 +94,12 @@ func ClaudeCodeSandboxModelEnv() []string {
 	return append([]string(nil), claudeCodeSandboxModelEnv...)
 }
 
+// SandboxRunEnv names the variables of the creation environment the per-run
+// drop-in pins (SandboxRunEnvReader): the model-provider and model ones.
+func (c *ClaudeCodeConnector) SandboxRunEnv() []string {
+	return append(ClaudeCodeSandboxProviderEnv(), claudeCodeSandboxModelEnv...)
+}
+
 // SandboxRunFiles renders the per-run Claude Code files for the image target
 // describes:
 //

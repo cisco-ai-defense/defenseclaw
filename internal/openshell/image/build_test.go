@@ -424,6 +424,64 @@ func TestBuildRefusesADockerWithoutBuildKit(t *testing.T) {
 	}
 }
 
+// FIN-B-2: Preflight returns what Build refuses before docker build runs,
+// without building: a harness version that is not an exact release or has
+// no reviewed hook contract for sandboxes (docker is not asked), and, only
+// when Build would build, a docker without BuildKit. A cached image needs
+// no BuildKit, unless the build is forced.
+func TestPreflightReturnsWhatBuildRefusesBeforeDocker(t *testing.T) {
+	ctx := context.Background()
+	c := mustContext(t, testSpec(harness.ClaudeCode))
+	const id = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	for name, tc := range map[string]struct {
+		spec     func(*BuildSpec)
+		noBuildx bool
+		cached   bool
+		force    bool
+		want     string
+		docker   bool
+	}{
+		"not an exact release": {spec: func(s *BuildSpec) { s.Harness, s.HarnessVersion = harness.Hermes, "0.0.0-nonexistent" }, noBuildx: true,
+			want: `harness hermes: version "0.0.0-nonexistent" is not an exact release`},
+		"below the sandbox contract": {spec: func(s *BuildSpec) { s.Harness, s.HarnessVersion = harness.OmniGent, "0.12.0" }, noBuildx: true,
+			want: "harness version has no reviewed hook contract for sandboxes: omnigent 0.12.0"},
+		"no BuildKit":             {noBuildx: true, want: "docker build " + c.Tag + ": docker's buildx plugin is not available", docker: true},
+		"a cached image":          {noBuildx: true, cached: true, docker: true},
+		"a forced build":          {noBuildx: true, cached: true, force: true, want: "docker's buildx plugin is not available", docker: true},
+		"a docker with BuildKit":  {docker: true},
+		"a cached forced rebuild": {cached: true, force: true, docker: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			docker := &fakeDocker{noBuildx: tc.noBuildx, handler: func(args []string, _ []byte) (string, int) {
+				if tc.cached && args[0] == "image" && args[1] == "inspect" {
+					return id, 0
+				}
+				return "", 1
+			}}
+			b := &Builder{Docker: docker, Store: testStore(t)}
+			spec := testSpec(harness.ClaudeCode)
+			if tc.spec != nil {
+				tc.spec(&spec)
+			}
+			if tc.cached {
+				if err := b.Store.Put(recordFor(c, time.Now(), true)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := b.Preflight(ctx, spec, BuildOptions{Force: tc.force})
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("Preflight = %v, want %q", err, tc.want)
+			}
+			if n := docker.count("build"); n != 0 {
+				t.Fatalf("Preflight ran docker build %d times", n)
+			}
+			if !tc.docker && len(docker.calls) != 0 {
+				t.Fatalf("a refused version asked docker: %v", docker.calls)
+			}
+		})
+	}
+}
+
 // CLI runs docker in this process's environment, so that is where its
 // DOCKER_BUILDKIT comes from.
 func TestCLIReadsThisProcesssEnvironment(t *testing.T) {

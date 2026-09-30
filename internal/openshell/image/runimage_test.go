@@ -630,6 +630,110 @@ func TestPruneRunImages(t *testing.T) {
 	}
 }
 
+// FIN-A-1: on a MicroVM gateway an overlay image built for the docker
+// driver (as every image recorded before MicroVM images existed was) is
+// superseded however new it is. It goes with its run images and alias,
+// and so do their image IDs (the disks the vm driver prepared from them),
+// while the MicroVM image and its run image stay; a sandbox that still
+// runs the docker driver's image keeps it. A docker gateway's prune, or
+// one whose driver is not known, keeps the newest docker image as before.
+func TestPruneOnAMicroVMGatewaySupersedesTheDockerDriversImages(t *testing.T) {
+	setup := func(t *testing.T) (*Builder, *layerDaemon, Record, RunImage, RunImage, Record, RunImage) {
+		b, daemon, dockerRec := runBase(t)
+		ctx := context.Background()
+		// The run image and alias the vm driver made from it before the
+		// MicroVM flag existed.
+		dockerRun, err := b.RunImage(ctx, dockerRec, claudeRunFiles(`{"a":1}`), testAliasRepo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dockerAlias, err := b.AliasImage(ctx, dockerRec, testAliasRepo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The MicroVM image built after the upgrade, and its run image.
+		spec := testSpec(harness.ClaudeCode)
+		spec.MicroVM = true
+		c := mustContext(t, spec)
+		vmRec := recordFor(c, dockerRec.BuiltAt.Add(time.Hour), true)
+		vmRec.ImageID, vmRec.MicroVM, vmRec.MicroVMVerified = "sha256:"+strings.Repeat("2", 64), true, true
+		daemon.addBase(vmRec, c.Labels)
+		daemon.images[vmRec.ImageID] = fakeImage{layers: []string{"sha256:l1", "sha256:l2", "sha256:vm"}, labels: daemon.images[vmRec.ImageID].labels}
+		if err := b.Store.Put(vmRec); err != nil {
+			t.Fatal(err)
+		}
+		vmRun, err := b.RunImage(ctx, vmRec, claudeRunFiles(`{"a":1}`), testAliasRepo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dockerRec.Tag == vmRec.Tag || dockerRun.ImageID == vmRun.ImageID {
+			t.Fatalf("the docker and MicroVM images are not apart: %s %s", dockerRun.ImageID, vmRun.ImageID)
+		}
+		return b, daemon, dockerRec, dockerRun, dockerAlias, vmRec, vmRun
+	}
+	opts := PruneOptions{Repository: "e-defenseclaw-sandbox", AliasRepository: testAliasRepo}
+
+	t.Run("MicroVM gateway", func(t *testing.T) {
+		b, daemon, dockerRec, dockerRun, dockerAlias, vmRec, vmRun := setup(t)
+		o := opts
+		o.MicroVMGateway, o.DryRun = true, true
+		dry, err := b.Prune(context.Background(), o)
+		if err != nil || daemon.count("image", "rm") != 0 {
+			t.Fatalf("dry run = %+v, %v; %d removals", dry, err, daemon.count("image", "rm"))
+		}
+		o.DryRun = false
+		rep, err := b.Prune(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantRemoved := []string{dockerRec.Tag, dockerRun.Tag, dockerAlias.Tag}
+		wantIDs := []string{dockerRec.ImageID, dockerRun.ImageID}
+		slices.Sort(wantIDs)
+		if !slices.Equal(rep.Removed, wantRemoved) || !slices.Equal(dry.Removed, wantRemoved) ||
+			!slices.Equal(rep.RemovedImageIDs, wantIDs) || !slices.Equal(dry.RemovedImageIDs, wantIDs) {
+			t.Fatalf("removed %v (IDs %v), dry %v (IDs %v); want %v (IDs %v)", rep.Removed, rep.RemovedImageIDs, dry.Removed, dry.RemovedImageIDs, wantRemoved, wantIDs)
+		}
+		_, name, _ := strings.Cut(vmRec.Tag, ":")
+		vmAlias := testAliasRepo + ":" + name
+		if kept, want := slices.Sorted(slices.Values(rep.Kept)), slices.Sorted(slices.Values([]string{vmRec.Tag, vmRun.Tag, vmAlias})); !slices.Equal(kept, want) {
+			t.Fatalf("kept = %v, want the MicroVM image, its run image and its alias %v", kept, want)
+		}
+		if recs, _ := b.Store.List(); len(recs) != 1 || recs[0].Tag != vmRec.Tag {
+			t.Fatalf("records after prune = %+v", recs)
+		}
+		var runTags []string
+		runs, _ := b.Store.RunImages()
+		for _, r := range runs {
+			runTags = append(runTags, r.Tag)
+		}
+		if want := []string{vmRun.Tag, vmAlias}; !slices.Equal(slices.Sorted(slices.Values(runTags)), slices.Sorted(slices.Values(want))) {
+			t.Fatalf("run images after prune = %v, want %v", runTags, want)
+		}
+	})
+	t.Run("MicroVM gateway with a sandbox on the docker image", func(t *testing.T) {
+		b, _, dockerRec, dockerRun, dockerAlias, _, _ := setup(t)
+		o := opts
+		o.MicroVMGateway, o.DryRun, o.Keep = true, true, []string{dockerRun.Tag, dockerRec.ImageID}
+		rep, err := b.Prune(context.Background(), o)
+		if err != nil || len(rep.Removed) != 0 || len(rep.RemovedImageIDs) != 0 ||
+			!slices.Contains(rep.InUse, dockerRec.Tag) || !slices.Contains(rep.InUse, dockerRun.Tag) || !slices.Contains(rep.InUse, dockerAlias.Tag) {
+			t.Fatalf("prune keeping the docker image's sandbox = %+v, %v", rep, err)
+		}
+	})
+	t.Run("docker gateway or a driver not known", func(t *testing.T) {
+		b, _, dockerRec, dockerRun, dockerAlias, vmRec, vmRun := setup(t)
+		rep, err := b.Prune(context.Background(), opts)
+		if err != nil || len(rep.Removed) != 0 || len(rep.RemovedImageIDs) != 0 {
+			t.Fatalf("prune = %+v, %v", rep, err)
+		}
+		for _, tag := range []string{dockerRec.Tag, dockerRun.Tag, dockerAlias.Tag, vmRec.Tag, vmRun.Tag} {
+			if !slices.Contains(rep.Kept, tag) {
+				t.Fatalf("kept = %v, missing %s", rep.Kept, tag)
+			}
+		}
+	})
+}
+
 // A store that never made a run image (a docker gateway's) prunes as
 // before: docker is not asked about the driver's repositories.
 func TestPruneWithoutRunImagesListsOnlyTheOverlayRepository(t *testing.T) {

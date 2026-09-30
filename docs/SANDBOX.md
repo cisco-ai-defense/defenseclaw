@@ -201,8 +201,16 @@ not the driver's name or `runtime.GOOS`.
 - **Cost.** The first start of an image prepares a rootfs from it (about a
   minute, about 5 GB under `~/.local/state/openshell/vm-driver/images`,
   keyed by image ID and kept by OpenShell); a cached one starts in seconds.
-  The pre-create `Explain` reports `vm_first_boot`, which the CLI turns into
-  its "about a minute" note and a disk check before it stages the copy
+  The pre-create `Explain` reports `vm_first_boot`. For a harness with run
+  files (Claude Code, Codex) that depends on the run image of this run's
+  `--env`, credentials and model provider. The preflight renders it from
+  the newest sandbox's, so the CLI asks again once it has built the create
+  request, sending `sandboxapi.ExplainRun`. That holds the values of the
+  variables the run files read (`connector.SandboxRunEnvReader`), a
+  secret-looking or header variable by name only (`env_withheld`, which the
+  daemon counts as a first boot), and credential names, never their values.
+  The CLI turns the answer into its "about a minute" note and a disk check
+  before it stages the copy
   (`openshell.VMDiskShortage`: refused below the image's size plus 1 GiB,
   never below the doctor's 6 GiB `VMDiskFailBytes`, warned below twice that,
   never below 12 GiB; `image build` warns the same after a build). The
@@ -1512,7 +1520,13 @@ modes and owners are set in the tar headers) and streams it to
    hash and tag are those of the images before it, and its build fetches
    nothing more than it did. `MicroVM` is part of the content hash only
    when set, and of `images.json` (`microvm`), so the two kinds of image of
-   one harness never select or prune each other. (The digest-pinned base
+   one harness never select each other, and prune keeps the newest of each
+   kind. The exception is a gateway known to run the vm driver
+   (`PruneOptions.MicroVMGateway`, set only with the daemon's sandbox list):
+   it never boots a docker driver image again, so its prune removes every
+   docker driver image, however new, with its run images, aliases and
+   prepared disks, unless a sandbox runs it. Records from before
+   `microvm` existed are docker driver images. (The digest-pinned base
    has `curl` but not `jq`, so every build still runs `apt-get update` and
    installs the archive's current `jq` there.)
 2. Installs the harness at a version whose Linux hook contract is known. Any
@@ -1553,8 +1567,11 @@ legacy builder, before `docker build` runs. It reads `DOCKER_BUILDKIT` as
 docker does: any value that is set, spaces and all, must parse as a boolean,
 or `docker build` refuses to run, so the build is refused too. A failed build
 returns an `image.BuildError` whose message ends with the last 40 lines (at
-most 8 KiB) docker printed, terminal escapes and control characters removed
-and anything shaped like a credential redacted. It reaches the CLI's error,
+most 8 KiB) docker printed. Each line is shortened to 300 characters and
+ends in "…" when cut, because docker's last line repeats the whole failing
+`RUN` command (6.9 KB for Hermes) and would otherwise push out the lines that
+say why it failed. Terminal escapes and control characters are removed,
+and anything shaped like a credential is redacted. It reaches the CLI's error,
 the daemon's create error and its `OPENSHELL_IMAGE_BUILD_FAILED` log line,
 because the daemon builds without a build log. The create's
 `OPENSHELL_SANDBOX_FAILED` line and its failed sandbox-health record

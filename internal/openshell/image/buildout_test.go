@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestOutputTailIsBounded: whatever docker writes, and in whatever pieces,
@@ -39,8 +40,8 @@ func TestOutputTailIsBounded(t *testing.T) {
 			b.WriteString(strings.Repeat("x", 300) + "\nERROR: failed to build\n")
 			tail := &outputTail{}
 			write(tail, b.String())
-			if len(tail.buf) > 2*buildTailBytes {
-				t.Fatalf("the tail holds %d bytes", len(tail.buf))
+			if len(tail.lines) > 2*buildTailKeep {
+				t.Fatalf("the tail holds %d lines", len(tail.lines))
 			}
 			got := tail.String()
 			lines := strings.Split(got, "\n")
@@ -56,6 +57,73 @@ func TestOutputTailIsBounded(t *testing.T) {
 	_, _ = short.Write([]byte("\n\nstep 1\n\n  \nERROR: boom\n"))
 	if got := short.String(); got != "step 1\nERROR: boom" {
 		t.Fatalf("short tail = %q", got)
+	}
+}
+
+// FIN-B-1: docker's last line repeats the whole failing RUN command (6.9 KB
+// for Hermes, whose RUN carries base64 shims). Each line is shortened to
+// 300 characters, so that line no longer takes the 8 KiB from the lines
+// that say why the command failed. A line longer than the tail keeps as
+// written ends without its last word, which may be a credential cut short.
+func TestOutputTailShortensLongLines(t *testing.T) {
+	run := `/bin/sh -c set -eu; printf '%s' '` + strings.Repeat("IyEvYmluL3NoCmV4ZWMgIiRAIgo=", 250) + `' | base64 -d > /usr/local/bin/shim`
+	var b strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&b, "#7 0.%03d Resolved %d packages\n", i, i)
+	}
+	b.WriteString("#7 1.279   × No solution found when resolving dependencies:\n" +
+		"#7 1.279   ╰─▶ Because there is no version of hermes-agent==0.20.99 and you require hermes-agent==0.20.99, we can conclude that your requirements are unsatisfiable.\n" +
+		"#7 ERROR: process \"" + run + "\" did not complete successfully: exit code: 1\n" +
+		"------\n > [4/9] RUN " + run + ":\n------\n" +
+		"Dockerfile:14\n--------------------\n  14 | >>> RUN " + run + "\n--------------------\n" +
+		"ERROR: failed to build: failed to solve: process \"" + run + "\" did not complete successfully: exit code: 1\n" +
+		"View build details: docker-desktop://dashboard/build/default/default/abc\n")
+	if len(run) < 6<<10 {
+		t.Fatalf("the RUN command is only %d bytes", len(run))
+	}
+	for name, write := range map[string]func(tail *outputTail, data string){
+		"one write": func(tail *outputTail, data string) { _, _ = tail.Write([]byte(data)) }, "odd pieces": writeInPieces(7), "lines": writeInPieces(0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tail := &outputTail{}
+			write(tail, b.String())
+			got := tail.String()
+			if len(got) > buildTailBytes || !strings.Contains(got, "× No solution found when resolving dependencies:") ||
+				!strings.Contains(got, "there is no version of hermes-agent==0.20.99") || !strings.HasSuffix(got, "\nView build details: docker-desktop://dashboard/build/default/default/abc") {
+				t.Fatalf("tail (%d bytes):\n%s", len(got), got)
+			}
+			for _, line := range strings.Split(got, "\n") {
+				if n := utf8.RuneCountInString(line); n > buildLineRunes+3 {
+					t.Fatalf("a line of %d characters: %q", n, line)
+				}
+			}
+			// The long ERROR lines are shortened to their start and their
+			// end, which keeps the exit code docker ends them with.
+			if !strings.Contains(got, "\nERROR: failed to build: failed to solve: process \"/bin/sh -c set -eu; printf '%s' 'IyEv") ||
+				!strings.Contains(got, " … ") ||
+				!strings.Contains(got, "did not complete successfully: exit code: 1\nView build details") ||
+				!strings.Contains(got, "did not complete successfully: exit code: 1\n------") {
+				t.Fatalf("the ERROR lines lost their start or their exit code:\n%s", got)
+			}
+		})
+	}
+
+	// A line a little past the start the tail keeps, which escapes can
+	// fill, is kept whole in its end, so a credential in it is redacted
+	// whole.
+	cut := &outputTail{}
+	_, _ = cut.Write([]byte(strings.Repeat("\x1b[0m", (buildLineBytes-12)/4) + "ok, key sk-ant-api03-" + strings.Repeat("Ab9_", 10) + " end\nnext\n"))
+	if got := cut.String(); got != "ok, key [redacted] end\nnext" {
+		t.Fatalf("a line past the kept start = %q", got)
+	}
+	// Past the start and the end both, the middle is dropped: each side
+	// leaves out the word the gap cuts, and the end keeps the exit code
+	// of a step that printed nothing else (an out-of-memory kill).
+	gap := &outputTail{}
+	_, _ = gap.Write([]byte(strings.Repeat("\x1b[0m", (buildLineBytes-12)/4) + "ok, key sk-ant-api03-" + strings.Repeat("Ab9_", buildLineEndBytes) +
+		" did not complete successfully: exit code: 137\nnext\n"))
+	if got := gap.String(); got != "ok, key …\n… did not complete successfully: exit code: 137\nnext" {
+		t.Fatalf("a line past the kept start and end = %q", got)
 	}
 }
 

@@ -77,6 +77,8 @@ type fakeDaemon struct {
 	// onStatus runs before the status is returned (the daemon notices a
 	// change).
 	onStatus func(st *sandboxapi.Status)
+	// onExplain, when set, edits the explain answer to a request.
+	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
 	createMCP        *sandboxapi.MCPSummary
 	createWarnings   []string
@@ -223,7 +225,11 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(d.status)
 	case path == sandboxapi.PathPolicyExplain:
-		reply(d.explain)
+		ex := d.explain
+		if d.onExplain != nil {
+			d.onExplain(sandboxapi.ParseExplainQuery(r.URL.Query()), &ex)
+		}
+		reply(ex)
 	case path == sandboxapi.PathApprovals && r.Method == http.MethodGet:
 		var out []sandboxapi.Approval
 		for _, a := range d.approvals {
@@ -540,6 +546,14 @@ type fakeImages struct {
 	// set, fails it.
 	buildOutput string
 	buildErr    error
+	// preflightErr, when set, is Preflight's refusal.
+	preflightErr error
+}
+
+func (f *fakeImages) Preflight(context.Context, *harness.Spec, bool, bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.preflightErr
 }
 
 func (f *fakeImages) Current(spec *harness.Spec, _ bool) (bool, error) {
@@ -764,11 +778,19 @@ type fakeGateway struct {
 	rollbacks []*openshell.GatewayApplyResult
 	applyRes  *openshell.GatewayApplyResult
 	restarts  int
+	// stateErr, when set, fails State (a configuration that cannot be read).
+	stateErr error
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
 
-func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) { s := f.state; return &s, nil }
+func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) {
+	if f.stateErr != nil {
+		return nil, f.stateErr
+	}
+	s := f.state
+	return &s, nil
+}
 
 func (f *fakeGateway) Plan(_ context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error) {
 	f.planned = append(f.planned, ch)

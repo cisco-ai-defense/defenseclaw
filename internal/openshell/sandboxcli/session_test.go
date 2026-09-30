@@ -540,6 +540,10 @@ func TestSessionSummary(t *testing.T) {
 		// Every harness that can continue gets the line, after its own
 		// host-useless hint (cert copilot:F7, kiro:KR-F4, hermes:HERMES-4,
 		// openhands:MAC-OSH-OH-7).
+		// OpenCode's exit screen shows "Continue  opencode -s ses_<id>"
+		// (OC-7, FIN-B-3).
+		{name: "continue opencode", opts: RunOptions{Harness: "opencode"}, setup: continueHint("sk-mock", false),
+			want: []string{"→ " + cont + " -- --continue (the `opencode -s …` OpenCode printed above works only inside the sandbox)"}},
 		{name: "continue copilot", opts: RunOptions{Harness: "copilot"}, setup: continueHint("sk-mock", false),
 			want: []string{"-- --continue (the `copilot --resume …` GitHub Copilot CLI printed above works only inside the sandbox)"}},
 		{name: "continue copilot without a turn", opts: RunOptions{Harness: "copilot"}, setup: noTurn("sk-mock", false),

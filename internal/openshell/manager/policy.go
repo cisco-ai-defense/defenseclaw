@@ -827,7 +827,7 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 	}
 	if req.Sandbox == "" {
 		// Only the daemon knows the image a new sandbox would boot.
-		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff)
+		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff, req.Run)
 	}
 	return out, nil
 }

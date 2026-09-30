@@ -23,9 +23,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -1286,6 +1288,70 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 				}
 			}, not: []string{"copy mode:", limitsIgnoredText, "does not apply", "Copying"}},
 	})
+}
+
+// FIN-A-2: on MicroVMs the run image a run boots, and so whether its first
+// start prepares a disk, depends on its --env and credentials, which the
+// preflight took from the newest sandbox. The daemon is asked again with
+// this run's: the values of the variables the run files read, a value that
+// could be a secret by name only, and the credentials by name, never a
+// secret. Its answer decides the note. A harness without run files, or a
+// docker gateway, is not asked again.
+func TestRunAsksAboutTheFirstBootOfItsOwnRunFiles(t *testing.T) {
+	const endpoint = "http://host.openshell.internal:39942"
+	run := RunOptions{Harness: "claude", Credentials: []string{"STRIPE_API_KEY=api.stripe.com"},
+		Env: []string{"ANTHROPIC_BASE_URL=" + endpoint, "ANTHROPIC_CUSTOM_HEADERS=Authorization: Bearer hdr-test-value", "FOO=bar"}}
+	setup := func(t *testing.T, driver string) *testApp {
+		ta := newTestApp(t, "a\n")
+		ta.daemon.status.Gateway.Driver = driver
+		ta.env["ANTHROPIC_API_KEY"] = "sk-test-not-a-secret"
+		ta.env["STRIPE_API_KEY"] = "stripe-test-value"
+		// The newest sandbox's disk is prepared; this run's is not.
+		ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+			ex.VMFirstBoot = req.Run != nil && req.Run.Env["ANTHROPIC_BASE_URL"] == endpoint
+		}
+		return ta
+	}
+	explains := func(ta *testApp) []call { return ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain) }
+
+	ta := setup(t, "vm")
+	ta.ok(t, ta.Run(bg, run))
+	has(t, ta.output(), "Starting a Claude Code sandbox… (the first start prepares its MicroVM disk: about a minute)")
+	calls := explains(ta)
+	if len(calls) != 2 || strings.Contains(calls[0].Query, "run=") {
+		t.Fatalf("explain calls = %+v", calls)
+	}
+	for _, secret := range []string{"sk-test-not-a-secret", "stripe-test-value", "hdr-test-value", "FOO"} {
+		if strings.Contains(calls[1].Query, secret) {
+			t.Fatalf("the explain of the run's files sent %q: %s", secret, calls[1].Query)
+		}
+	}
+	q, err := url.ParseQuery(calls[1].Query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &sandboxapi.ExplainRun{Env: map[string]string{"ANTHROPIC_BASE_URL": endpoint}, EnvWithheld: []string{"ANTHROPIC_CUSTOM_HEADERS"},
+		Credentials: []string{"ANTHROPIC_API_KEY", "STRIPE_API_KEY"}, LLMProfile: profiles.AnthropicID}
+	if got := sandboxapi.ParseExplainQuery(q); got.Harness != "claudecode" || !reflect.DeepEqual(got.Run, want) {
+		t.Fatalf("explain of the run's files = %+v, run %+v; want run %+v", got, got.Run, want)
+	}
+
+	// The same inputs as a prepared disk's: no note.
+	ta = setup(t, "vm")
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) { ex.VMFirstBoot = req.Run == nil }
+	ta.ok(t, ta.Run(bg, run))
+	lacks(t, ta.output(), "prepares its MicroVM disk")
+
+	// Hooks-only OpenCode has no run files; docker prepares no disk.
+	for name, tc := range map[string]struct{ driver, harness string }{"no run files": {"vm", "opencode"}, "docker": {"docker", "claude"}} {
+		ta := setup(t, tc.driver)
+		o := run
+		o.Harness = tc.harness
+		ta.ok(t, ta.Run(bg, o))
+		if n := len(explains(ta)); n != 1 {
+			t.Fatalf("%s: %d explain calls", name, n)
+		}
+	}
 }
 
 // An upload that openshell reported done but the sandbox does not have
