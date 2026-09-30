@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,6 +101,12 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// The verdicts per hook event, the most frequent first (#956).
+		{"events", func(h *sandboxapi.HookCoverage) {
+			h.Events = map[string]int64{"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "UserPromptSubmit": 3}
+			h.OtherEvents = 1
+		}, "4 calls, 1 blocked", []string{
+			"Hook events   PreToolUse 12 · PostToolUse 11 · UserPromptSubmit 3 · SessionStart 2 · Stop 2 · other events 1\n"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -110,6 +117,15 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			has(t, ta.output(), c.list)
 			ta.ok(t, ta.fresh().Status(bg, "box", OutputText))
 			has(t, ta.output(), c.status...)
+			if sb.Hooks.Events == nil {
+				lacks(t, ta.output(), "Hook events")
+			}
+			ta.ok(t, ta.fresh().Status(bg, "box", OutputJSON))
+			var got sandboxapi.Sandbox
+			if err := json.Unmarshal(ta.out.Bytes(), &got); err != nil || !maps.Equal(got.Hooks.Events, sb.Hooks.Events) ||
+				got.Hooks.OtherEvents != sb.Hooks.OtherEvents {
+				t.Fatalf("status json hooks = %+v (%v), want events %v and %d other", got.Hooks, err, sb.Hooks.Events, sb.Hooks.OtherEvents)
+			}
 		})
 	}
 }
@@ -135,6 +151,20 @@ func TestActivityRendering(t *testing.T) {
 		{Seq: 11, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 429 Too Many Requests",
 			Message: "✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)"},
 		{Seq: 12, Time: at, Kind: sandboxapi.ActivityHookFailed, Sandbox: "box", Reason: "HTTP 403 Forbidden"},
+		// The large-upload block names the threshold the upload crossed.
+		{Seq: 13, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "files.example.net", Category: sandboxapi.CategoryLargeUpload,
+			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true},
+		// Reported as it crossed the threshold (RT U4: the line gave the
+		// bytes sent then, 1.0 MiB of an upload of 1.9 MiB); an older
+		// daemon's report names no threshold.
+		{Seq: 14, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "drop.example.net", BytesUp: 30 << 20},
+		{Seq: 15, Time: at, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: "box", Host: "httpbin.io", BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		// After a cut, an HTTPS and a plain-HTTP request to the host read as
+		// one line twice (PR 1022 live retest N3): the port tells them apart.
+		{Seq: 16, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 443, Method: "CONNECT",
+			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
+		{Seq: 17, Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "box", Host: "httpbin.org", Port: 80, Method: "GET",
+			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -151,6 +181,12 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2",
 		"12:01:02 ✗ 3 hook calls failed (last: HTTP 429 Too Many Requests), so the harness's actions were blocked (hooks fail closed)",
 		"12:01:02 ✗ a hook call failed (HTTP 403 Forbidden), so the harness's action was blocked",
+		"12:01:02 ✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)" +
+			"  → unblock: defenseclaw sandbox unblock files.example.net --sandbox box",
+		"12:01:02 ⚠ large upload to drop.example.net (30.0 MiB)",
+		"12:01:02 ⚠ large upload to httpbin.io (more than 1 MiB)",
+		"12:01:02 ✗ httpbin.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
+		"12:01:02 ✗ httpbin.org:80 (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -426,6 +462,8 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta.copy.pending = map[string]workspace.CopyWork{"live": workspace.CopyWorkUnpulled}
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"live"}}))
 	lacks(t, ta.output(), "never pulled")
+	// Its undo point goes with it unless kept; a copy has none to name.
+	has(t, ta.output(), "Delete sandbox live (its providers, credentials and, unless --keep-snapshot, its undo point)? [y/N]")
 	// Teardown lists it in its plan (a dry run changes nothing).
 	ta = newTestApp(t, "", copySandbox("fix-tests"))
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
@@ -561,7 +599,7 @@ func TestExecAndLogs(t *testing.T) {
 			return 0, "log line\nmore\n"
 		case isRunStatus(cmd):
 			// The run started a minute ago; the sandbox's last hook is now.
-			return 0, fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", time.Now().Add(-time.Minute).Unix())
+			return 0, fmt.Sprintf("run_started=%d\nrun=exited\nrun_exit=0\n", time.Now().Add(-time.Minute).Unix())
 		case cmd[0] == "false":
 			return 7, ""
 		}
@@ -642,7 +680,7 @@ func TestLogsCannotDriveTheTerminal(t *testing.T) {
 				ta.daemon.add(sb)
 				ta.stream.answer = func(argv []string) (int, string) {
 					if isRunStatus(sandboxCommand(argv)) {
-						return 0, "state=running\n"
+						return 0, "run=running\n"
 					}
 					return 0, c.log
 				}
@@ -1287,6 +1325,25 @@ func TestPolicyOutputFormatting(t *testing.T) {
 	has(t, out, "more; -o json lists all)", "Organization constraints (openshell.admin)",
 		"required_pack          strict", "allow_yolo             false", "require_copy_for       ~/clients/*", "egress_allow_only      *.github.com",
 		"egress.allow: 1 entry outside the organization's allow-only list: not reachable")
+}
+
+// `policy show` says when large uploads to first-seen hosts are cut, and at
+// what size; `policy explain` lists the administrator's block among the
+// organization constraints.
+func TestPolicyShowsTheLargeUploadBlock(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings,
+		sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "10", Source: "pack", Origin: "pack balanced"},
+		sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "false", Source: "pack", Origin: "pack balanced"})
+	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{}))
+	lacks(t, ta.output(), "egress.block_large_uploads")
+	ta.Cfg.OpenShell.Admin.BlockLargeUploads = true
+	ta.daemon.explain.Settings[len(ta.daemon.explain.Settings)-1] = sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true",
+		Source: "admin", Origin: "openshell.admin.block_large_uploads"}
+	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "egress.block_large_uploads  true (an upload of more than 10 MiB to a host the sandbox had not contacted is cut)")
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "openshell.admin.block_large_uploads", "Organization constraints (openshell.admin)", "block_large_uploads    true")
 }
 
 func TestPackCommands(t *testing.T) {

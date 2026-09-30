@@ -606,8 +606,9 @@ actor GatewayClient {
     // MARK: - OpenShell sandboxes (/api/v1/sandbox, internal/openshell/sandboxapi)
 
     static let sandboxPrefix = "/api/v1/sandbox/"
-    // Stop and undo run the CLI (SandboxesView), which checks for a detached
-    // run and keeps its log before it asks the daemon to stop the sandbox.
+    // Stop and undo run the CLI (SandboxesView), which says when the stop
+    // ends a detached run and remembers what a copy held as it stopped; the
+    // daemon's stop keeps the run's log for `sandbox logs`.
 
     func sandboxStatus() async throws -> SandboxStatus {
         let json = try await getJSON("/api/v1/sandbox/status")

@@ -433,6 +433,128 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 	}
 }
 
+// xcodeApp makes an Xcode.app of version (none when empty) and returns its
+// path.
+func xcodeApp(t *testing.T, version string) string {
+	t.Helper()
+	app := filepath.Join(t.TempDir(), "Xcode.app")
+	if err := os.MkdirAll(filepath.Join(app, "Contents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if version != "" {
+		plist := "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>BuildVersion</key>\n\t<string>2</string>\n" +
+			"\t<key>CFBundleShortVersionString</key>\n\t<string>" + version + "</string>\n\t<key>CFBundleVersion</key>\n\t<string>24553</string>\n</dict>\n</plist>\n"
+		if err := os.WriteFile(filepath.Join(app, "Contents", "version.plist"), []byte(plist), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return app
+}
+
+// TestHomebrewFailureReportsTheDeveloperTools: Homebrew refused NVIDIA's
+// formula on a Mac with "Your Xcode (26.2) at /Applications/Xcode.app is too
+// outdated. Please update to Xcode 27.0 (or delete it).", while
+// xcode-select selected the Command Line Tools 27.0, which were current.
+// The failure carries what Homebrew checked, from sw_vers, xcode-select,
+// pkgutil and Xcode.app's version.plist, so setup can say that the fix is
+// that Xcode.app, not the Command Line Tools.
+func TestHomebrewFailureReportsTheDeveloperTools(t *testing.T) {
+	const clt = "/Library/Developer/CommandLineTools"
+	for _, tc := range []struct {
+		name, selected, cltVersion, xcode string
+		noXcode, outdated                 bool
+	}{
+		{name: "current tools, old Xcode.app", selected: clt, cltVersion: "27.0.0.0.1.1788430756", xcode: "26.2", outdated: true},
+		{name: "Xcode.app current", selected: clt, cltVersion: "27.0.0.0.1.1788430756", xcode: "27.0"},
+		{name: "tools old too", selected: clt, cltVersion: "26.2.0.0.1.1764812424", xcode: "26.2"},
+		{name: "Xcode.app selected", selected: "/Applications/Xcode.app/Contents/Developer", cltVersion: "27.0.0.0.1.1788430756", xcode: "26.2"},
+		{name: "no Xcode.app", selected: clt, cltVersion: "27.0.0.0.1.1788430756", noXcode: true},
+		{name: "Xcode.app version unknown", selected: clt, cltVersion: "27.0.0.0.1.1788430756"},
+		{name: "no tools", xcode: "26.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f.inst.GOOS = "darwin"
+			f.inst.XcodeApp = xcodeApp(t, tc.xcode)
+			if tc.noXcode {
+				f.inst.XcodeApp = filepath.Join(t.TempDir(), "Xcode.app")
+			}
+			f.runner.On("/bin/sh", "", errors.New("exit status 1"))
+			f.runner.On("sw_vers -productVersion", "27.0\n", nil)
+			if tc.selected != "" {
+				f.runner.On("xcode-select -p", tc.selected+"\n", nil)
+			} else {
+				f.runner.On("xcode-select -p", "xcode-select: error: unable to get active developer directory\n", errors.New("exit status 2"))
+			}
+			if tc.cltVersion != "" {
+				f.runner.On("pkgutil --pkg-info=com.apple.pkg.CLTools_Executables",
+					"package-id: com.apple.pkg.CLTools_Executables\nversion: "+tc.cltVersion+"\nvolume: /\nlocation: /\ninstall-time: 1790090818\n", nil)
+			}
+			_, err := f.inst.Install(context.Background())
+			var hb *openshell.HomebrewInstallError
+			if !errors.Is(err, openshell.ErrHomebrewInstall) || !errors.As(err, &hb) || hb.Tools == nil ||
+				err.Error() != "openshell: Homebrew could not install the nvidia/openshell formula (exit status 1)" {
+				t.Fatalf("Install = %v", err)
+			}
+			d := hb.Tools
+			if d.MacOS != "27.0" || d.Selected != tc.selected || d.CLT != tc.cltVersion || d.Xcode != tc.xcode || (d.XcodeApp == "") != tc.noXcode {
+				t.Fatalf("developer tools = %+v", d)
+			}
+			if d.OutdatedXcodeApp() != tc.outdated {
+				t.Fatalf("OutdatedXcodeApp = %t for %+v", !tc.outdated, d)
+			}
+			for _, c := range f.runner.Calls() {
+				if c.Name == "brew" || (c.Name == "xcode-select" && len(c.Args) != 1) {
+					t.Fatalf("ran %v", c)
+				}
+			}
+		})
+	}
+	if v := openshell.ShortVersion("27.0.0.0.1.1788430756"); v != "27.0" {
+		t.Fatalf("ShortVersion = %q", v)
+	}
+}
+
+// TestInstallPlanOnMacOSSaysWhatItChanges: on a Mac NVIDIA's script
+// updated Homebrew itself (Homebrew's auto-update: 7.0.7-12 to 7.0.7-38,
+// with homebrew/core and homebrew/cask), wrote the release's openshell.rb
+// over the tap's Formula/openshell.rb, and registered the "openshell"
+// gateway in ~/.config/openshell, none of which the plan said. It says so
+// now, and that no sudo is used.
+func TestInstallPlanOnMacOSSaysWhatItChanges(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS = "darwin"
+	res, err := f.inst.Install(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := f.out.String()
+	for _, want := range []string{
+		"  Privileges  none: the script runs Homebrew as you, without sudo\n",
+		"  Changes     Homebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)\n",
+		"              the release's openshell.rb replaces Formula/openshell.rb in the nvidia/openshell tap (created if missing)\n",
+		"              the script installs the nvidia/openshell/openshell formula and starts the gateway with brew services\n",
+		"              it registers that gateway as \"openshell\" in ~/.config/openshell, replacing a registration of that name\n",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("plan lacks %q:\n%s", want, plan)
+		}
+	}
+	if res.Plan.ConfigDir != filepath.Join("~", ".config", "openshell") {
+		t.Fatalf("plan config dir = %q", res.Plan.ConfigDir)
+	}
+	// Linux's plan is the package's.
+	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	if _, err := f.inst.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if plan := f.out.String(); strings.Contains(plan, "Homebrew") || !strings.Contains(plan, "the script uses sudo to install the openshell package") {
+		t.Fatalf("linux plan:\n%s", plan)
+	}
+}
+
 // TestInstallerPreparesTheMicroVMDriver: on a Mac the MicroVM driver needs
 // e2fsprogs and a Hypervisor signature, which the installer gets from
 // Homebrew once the user agreed; a failure says what Homebrew said.
@@ -447,13 +569,28 @@ func TestInstallerPreparesTheMicroVMDriver(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "brew postinstall nvidia/openshell/openshell: exit status 1: Error: nvidia/openshell/openshell is not installed") {
 		t.Fatalf("ResignVMDriver = %v", err)
 	}
-	// The macOS install plan says the driver needs e2fsprogs too.
-	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
-	f.inst.GOOS = "darwin"
-	if _, err := f.inst.Install(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(f.out.String(), "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs") {
-		t.Fatalf("plan:\n%s", f.out.String())
+	// The macOS install plan says the driver needs e2fsprogs too, which
+	// setup offers next, only when it is missing: it said so on a Mac
+	// whose e2fsprogs was installed, where setup offers nothing.
+	keg := filepath.Join(t.TempDir(), "opt", "e2fsprogs", "sbin")
+	const note = "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, which the formula does not install " +
+		"(brew install e2fsprogs; setup offers it next)"
+	for _, installed := range []bool{false, true} {
+		if installed {
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				if err := os.MkdirAll(keg, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeExecutable(t, filepath.Join(keg, tool))
+			}
+		}
+		f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f.inst.GOOS, f.inst.E2fsprogsDirs = "darwin", []string{keg}
+		if _, err := f.inst.Install(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(f.out.String(), note) == installed {
+			t.Fatalf("e2fsprogs installed %t, plan:\n%s", installed, f.out.String())
+		}
 	}
 }

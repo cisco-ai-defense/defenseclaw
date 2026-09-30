@@ -114,6 +114,10 @@ type InstallPlan struct {
 	Notes           []string
 	// GOOS is the platform the plan was made for.
 	GOOS string
+	// ConfigDir is the OpenShell configuration directory the script
+	// registers the gateway in, as the plan shows it (~ for the home
+	// directory).
+	ConfigDir string
 }
 
 // String renders the plan for the operator.
@@ -127,8 +131,14 @@ func (p *InstallPlan) String() string {
 	fmt.Fprintf(tw, "  Saved at\t%s\n", p.ScriptPath)
 	fmt.Fprintf(tw, "  Command\t%s\n", strings.Join(append(append([]string{}, p.Env...), p.Command...), " "))
 	if p.GOOS == "darwin" {
-		fmt.Fprintf(tw, "  Privileges\tthe script installs the nvidia/openshell Homebrew formula and starts\n")
-		fmt.Fprintf(tw, "  \tthe gateway with brew services\n")
+		// What NVIDIA's script changes besides the formula: Homebrew's own
+		// auto-update runs before its install, the script writes the
+		// release's formula into the tap, and it registers the gateway.
+		fmt.Fprintf(tw, "  Privileges\tnone: the script runs Homebrew as you, without sudo\n")
+		fmt.Fprintf(tw, "  Changes\tHomebrew may update itself and its taps first (its auto-update, when due; HOMEBREW_NO_AUTO_UPDATE=1 skips it)\n")
+		fmt.Fprintf(tw, "  \tthe release's openshell.rb replaces Formula/openshell.rb in the nvidia/openshell tap (created if missing)\n")
+		fmt.Fprintf(tw, "  \tthe script installs the nvidia/openshell/openshell formula and starts the gateway with brew services\n")
+		fmt.Fprintf(tw, "  \tit registers that gateway as %q in %s, replacing a registration of that name\n", DefaultGatewayName, p.ConfigDir)
 	} else {
 		fmt.Fprintf(tw, "  Privileges\tthe script uses sudo to install the openshell package, then enables and\n")
 		fmt.Fprintf(tw, "  \tstarts the openshell-gateway user service (systemd --user)\n")
@@ -199,11 +209,25 @@ type Installer struct {
 	MaxScriptBytes int64
 	// GOOS is the platform installed on (default runtime.GOOS).
 	GOOS string
+	// E2fsprogsDirs are where OpenShell's MicroVM driver looks for
+	// e2fsprogs on a Mac (Doctor.E2fsprogsDirs; default the Homebrew kegs
+	// it knows): the plan says setup installs it next only when it is not
+	// there.
+	E2fsprogsDirs []string
+	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
+	// version a failed install on a Mac reports (HomebrewInstallError).
+	XcodeApp string
 }
 
 func (i *Installer) defaults() {
 	if i.GOOS == "" {
 		i.GOOS = runtime.GOOS
+	}
+	if i.E2fsprogsDirs == nil {
+		i.E2fsprogsDirs = e2fsprogsDirs
+	}
+	if i.XcodeApp == "" {
+		i.XcodeApp = XcodeApp
 	}
 	if i.HTTPClient == nil {
 		i.HTTPClient = netguard.SafeHTTPClient(2 * time.Minute)
@@ -269,7 +293,7 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		return nil, fmt.Errorf("openshell: installer URL must be https, got %q", i.URL)
 	}
 	existing := i.findExisting(ctx)
-	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS}
+	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS, ConfigDir: i.configDir()}
 	if existing != nil && existing.Version != (Version{}) {
 		v := existing.Version
 		if err := CheckSupported(v); err == nil {
@@ -305,7 +329,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
 	}
-	if i.GOOS == "darwin" {
+	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
+		// Setup offers it once OpenShell is installed only where the
+		// doctor does not find it: a Mac that has it gets no note.
 		plan.Notes = append(plan.Notes, "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, "+
 			"which the formula does not install ("+InstallE2fsprogsCommand+"; setup offers it next)")
 	}
@@ -348,8 +374,10 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an
-			// Xcode or Command Line Tools older than the newest release.
-			return nil, fmt.Errorf("%w (%w)", ErrHomebrewInstall, err)
+			// Xcode or Command Line Tools older than the oldest it builds
+			// with on this macOS (homebrewMinimums): the error says which
+			// are here.
+			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp)}
 		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}
@@ -380,6 +408,25 @@ func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 func (i *Installer) ResignVMDriver(ctx context.Context) error {
 	i.defaults()
 	return brew(ctx, i.Runner, "postinstall", GatewayFormula)
+}
+
+// configDir is the OpenShell configuration directory the gateway is
+// registered in (Discover.ConfigDir, else UserConfigDir), with the home
+// directory as ~.
+func (i *Installer) configDir() string {
+	dir := i.Discover.ConfigDir
+	if dir == "" {
+		var err error
+		if dir, err = UserConfigDir(); err != nil {
+			return "~/.config/openshell"
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		if rel, err := filepath.Rel(home, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.Join("~", rel)
+		}
+	}
+	return dir
 }
 
 func existingVersion(e *ExistingInstall) string {

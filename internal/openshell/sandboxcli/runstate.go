@@ -33,7 +33,7 @@ import (
 )
 
 // What `sandbox run` remembers of the sandbox it created, in the CLI's
-// state (cliStateDir) next to the kept run log and the accepted undo point.
+// state (cliStateDir).
 // The daemon keeps the sandbox's policy, mounts and credentials; the run's
 // harness options and the names behind its banner are the CLI's. A later
 // session (`connect`, or a shell wrapper's resume) passes the options

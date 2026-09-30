@@ -742,7 +742,8 @@ func TestProxyLargeUploadAlert(t *testing.T) {
 	}
 	e := h.sink.wait(t, EventLargeUpload, 1)
 	if len(e) != 1 || e[0].Host != "example.com" || e[0].BytesUp <= 1024 || !e[0].FirstSeen || e[0].Terminated ||
-		e[0].Category != CategoryLargeUpload || e[0].BindingID != "binding-one" || e[0].TunnelID == "" {
+		e[0].Category != CategoryLargeUpload || e[0].BindingID != "binding-one" || e[0].TunnelID == "" ||
+		!strings.Contains(e[0].Reason, "More than 1024 bytes was sent") {
 		t.Errorf("large_upload events = %+v", e)
 	}
 }
@@ -791,9 +792,64 @@ func TestProxyLargeUploadBlock(t *testing.T) {
 		})
 	}
 	h := newHarness(t, uploadBlock(0))
-	if got := h.proxy.largeUploadReason(Principal{LargeUploadBytes: 3 << 20}); !strings.Contains(got, "More than 3 MiB was sent") {
+	if got := h.proxy.largeUploadReason(Principal{LargeUploadBytes: 3 << 20}, false); !strings.Contains(got, "More than 3 MiB was sent") {
 		t.Errorf("reason for a 3 MiB threshold = %q", got)
 	}
+	// The block stops the upload before it crosses: it says what was tried.
+	if got := h.proxy.largeUploadReason(Principal{LargeUploadBytes: 3 << 20}, true); got !=
+		"This sandbox tried to send more than 3 MiB to a destination it had not contacted before." {
+		t.Errorf("reason of the block for a 3 MiB threshold = %q", got)
+	}
+}
+
+// A sandbox whose policy blocks large uploads (Principal.BlockLargeUploads)
+// has its upload cut at its own threshold while another sandbox on the same
+// proxy, whose policy only reports them, keeps uploading. The cut's event
+// carries the threshold it crossed and says an unblock lifts the block.
+func TestProxyLargeUploadBlockPerSandbox(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) { c.counter = &CounterOptions{LargeUploadBytes: 1 << 20} })
+	sinkAddr, received := startSink(t)
+	h.dialer.route(443, sinkAddr)
+	blocking := h.addPrincipal(Principal{BindingID: "binding-two", SandboxID: "sb-2", SandboxName: "sb-two",
+		LargeUploadBytes: 1024, BlockLargeUploads: true})
+
+	conn, br := h.openTunnelTo(blocking, "example.com:443")
+	upload(conn, br, 4096)
+	e := h.sink.wait(t, EventLargeUpload, 1)[0]
+	// At most the threshold left: the reason says what the sandbox tried,
+	// not that more was sent.
+	if e.SandboxName != "sb-two" || !e.Terminated || !e.Unblockable || e.Threshold != 1024 || e.BytesUp > 1024 ||
+		!strings.Contains(e.Reason, "tried to send more than 1024 bytes") || strings.Contains(e.Reason, "was sent") {
+		t.Errorf("large_upload event of the blocking sandbox = %+v", e)
+	}
+	// A later request sends nothing of the kind: its refusal says why the
+	// destination is blocked (RT U5: it repeated "tried to send more
+	// than", for a GET that sent nothing).
+	if resp, b := h.refused(blocking, "example.com:443"); resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload ||
+		b.Reason != "This destination is blocked since this sandbox tried to send more than 1024 bytes to it, a destination it had not contacted before." {
+		t.Fatalf("tunnel after the block = %d %+v", resp.status, b)
+	}
+
+	before := received()
+	conn, br = h.openTunnelTo(h.cred, "example.com:443")
+	upload(conn, br, 4096)
+	eventually(t, "the reporting sandbox's upload to arrive", func() bool { return received()-before >= 4096 })
+	if got := h.sink.ofKind(EventLargeUpload); len(got) != 1 {
+		t.Errorf("large_upload events = %+v, want only the blocking sandbox's", got)
+	}
+}
+
+// openTunnelTo opens a CONNECT tunnel to target with cred and sends a TLS
+// ClientHello for its host, as a client's first flight, without waiting
+// for an answer (the upstream may only read).
+func (h *harness) openTunnelTo(cred Credential, target string) (net.Conn, *bufio.Reader) {
+	h.t.Helper()
+	host, _, _ := net.SplitHostPort(target)
+	conn, br, resp := h.connect(target, basicAuth(cred), helloFor(host))
+	if resp.status != http.StatusOK {
+		h.t.Fatalf("CONNECT %s = %d %s", target, resp.status, resp.body)
+	}
+	return conn, br
 }
 
 // upload sends n bytes up an established tunnel, half-closes it and waits
@@ -834,7 +890,8 @@ func TestProxyLargeUploadBlockAtFlaggedAddress(t *testing.T) {
 	for _, host := range []string{"known.example", "fresh.example"} {
 		resp, b := h.refused(h.cred, host+":443")
 		if resp.status != http.StatusForbidden || b.Category != CategoryLargeUpload || !b.Unblockable ||
-			!strings.Contains(b.Reason, "destinations at "+publicV4) || !strings.Contains(b.HowToUnblock, "sandbox unblock "+host) {
+			b.Reason != "This destination is blocked since this sandbox tried to send more than 1024 bytes to destinations at "+publicV4+" it had not contacted before." ||
+			!strings.Contains(b.HowToUnblock, "sandbox unblock "+host) {
 			t.Errorf("CONNECT %s after the address total crossed = %d %+v", host, resp.status, b)
 		}
 	}
@@ -863,11 +920,23 @@ func TestProxyLargeUploadBlockAbsoluteForm(t *testing.T) {
 	must(t, err)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || decodeBlock(t, body).Category != CategoryLargeUpload {
+	// The answer to the upload the block cut says what it tried.
+	if b := decodeBlock(t, body); resp.StatusCode != http.StatusForbidden || b.Category != CategoryLargeUpload ||
+		b.Reason != "This sandbox tried to send more than 1024 bytes to a destination it had not contacted before." {
 		t.Fatalf("large POST = %d %s", resp.StatusCode, body)
 	}
 	if got.Load() > 1024 {
 		t.Errorf("upstream received %d bytes", got.Load())
+	}
+	// A GET after it sent nothing: the destination is blocked because of
+	// the POST.
+	resp, err = h.clientFor(h.cred, nil).Get("http://example.com/status")
+	must(t, err)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if b := decodeBlock(t, body); resp.StatusCode != http.StatusForbidden ||
+		b.Reason != "This destination is blocked since this sandbox tried to send more than 1024 bytes to it, a destination it had not contacted before." {
+		t.Fatalf("GET after the cut = %d %s", resp.StatusCode, body)
 	}
 }
 

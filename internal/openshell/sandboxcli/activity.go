@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -92,7 +93,11 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		b.WriteString(a.style("✓", ansiGreen) + " " + hostPort(ev))
 	case sandboxapi.ActivityEgressBlocked:
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
-		if why := firstNonEmpty(ev.Category, ev.Reason); why != "" {
+		switch why := firstNonEmpty(ev.Category, ev.Reason); {
+		case ev.Category == sandboxapi.CategoryLargeUpload:
+			// The proxy's reason names the threshold the upload crossed.
+			b.WriteString(" (" + sandboxapi.LargeUploadBlockedText(ev.Reason) + ")")
+		case why != "":
 			b.WriteString(" (" + reasonText(why) + ")")
 		}
 		if ev.Unblockable && ev.Host != "" {
@@ -103,7 +108,7 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			b.WriteString(a.dim("  → unblock: " + CommandName + " unblock " + ev.Host + scope))
 		}
 	case sandboxapi.ActivityEgressLargeUpload:
-		b.WriteString(a.style("⚠", ansiYellow) + " large upload to " + hostPort(ev) + " (" + humanBytes(ev.BytesUp) + ")")
+		b.WriteString(a.style("⚠", ansiYellow) + " " + largeUploadText(hostPort(ev), ev))
 	case sandboxapi.ActivityApprovalRequested:
 		// The destination always shows: nobody should approve one they
 		// cannot see. The daemon's message says why it is an ask.
@@ -181,11 +186,23 @@ func reasonText(token string) string {
 	return strings.ReplaceAll(token, "_", " ")
 }
 
-func hostPort(ev sandboxapi.ActivityEvent) string {
-	if ev.Port != 0 && ev.Port != 443 && ev.Port != 80 {
-		return ev.Host + ":" + strconv.Itoa(ev.Port)
+// largeUploadText is an egress.large_upload report to dest (the feed's
+// hostPort, a session's host) without its ⚠: "large upload to
+// files.example.net (more than 25 MiB)". It is reported as it crosses the
+// threshold, before it ends: what had gone up then (the report's bytes) is
+// not what it sent (RT U4).
+func largeUploadText(dest string, ev sandboxapi.ActivityEvent) string {
+	size := humanBytes(ev.BytesUp)
+	if ev.Threshold > 0 {
+		size = "more than " + egress.FormatThreshold(ev.Threshold)
 	}
-	return ev.Host
+	return "large upload to " + dest + " (" + size + ")"
+}
+
+// hostPort is ev's destination as the feed names it (sandboxapi.HostPort):
+// its port shows unless that is 443.
+func hostPort(ev sandboxapi.ActivityEvent) string {
+	return sandboxapi.HostPort(ev.Host, ev.Port)
 }
 
 // ApprovalsOptions are the `sandbox approvals` flags.

@@ -4621,6 +4621,13 @@ _GATEWAY_RESTART_NOTE = (
     "restarts the OpenShell gateway, which drops the connections of every running sandbox; "
     "while sandboxes run, setup skips the restart (apply it later with: defenseclaw sandbox doctor --fix)."
 )
+# The gateway of an OpenShell installed another way than the one whose
+# service DefenseClaw restarts it through: setup writes the change, and its
+# user restarts it (DoctorReport.GatewayUnmanaged).
+_GATEWAY_MANUAL_RESTART_NOTE = (
+    "is written to the gateway's configuration; DefenseClaw cannot restart this gateway, "
+    "so you restart it yourself, the way you started it, to apply it."
+)
 
 # The largest auth.json sandboxcli.codexAuthKey reads.
 _CODEX_AUTH_MAX_BYTES = 1 << 20
@@ -4732,27 +4739,46 @@ class SandboxMachineCheck:
     openshell_needed: bool = False
     openshell_detail: str = ""
     error: str = ""
-    # On macOS, an OpenShell installed another way than the Homebrew
-    # formula, which setup refuses (it would install nothing over it).
-    openshell_refused: bool = False
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux), whose gateway
+    # DefenseClaw cannot start or restart (DoctorReport.GatewayUnmanaged):
+    # setup uses it while it answers and writes a gateway change for the
+    # user to restart it on. Installing OpenShell would change nothing.
+    openshell_unmanaged: bool = False
+    # With OpenShell installed (a supported CLI, or one newer than
+    # supported), the failing check whose doctor's fix openshell_detail
+    # gives: installing OpenShell would change nothing. Setup stops on a
+    # CLI or gateway one before it installs anything; a "vm-driver" one it
+    # fixes with the install's consent (e2fsprogs) or stops on.
+    openshell_attention: str = ""
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+# The checks setup stops on, in its order, when it does not install
+# OpenShell (sandboxcli/setup.go, after step 3).
+_SETUP_STOPS = ("openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-service")
 
 
 def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> SandboxMachineCheck:
     """Summarize a ``sandbox doctor --json`` report (or why it did not run).
 
-    OpenShell counts as needed exactly when ``sandbox setup`` would install
-    it: the CLI is missing or unsupported, or the gateway service or its
-    version check failed (sandboxcli/setup.go). On a MicroVM (vm) gateway,
-    or a Mac whose docker driver has no Landlock (which setup switches to
-    MicroVMs), a failed ``vm-driver`` check counts too: setup installs
-    e2fsprogs or has the driver signed with the same consent. A MicroVM
-    mounts no host folders, so the bind-mount check is left out there. On
-    macOS an OpenShell installed another way than the Homebrew formula is
-    refused, as setup refuses it (it would install nothing over it), and a
-    gateway service that warns is shown with its detail.
+    OpenShell counts as needed exactly when ``sandbox setup`` offers to
+    install it: where its install step runs NVIDIA's installer, for a CLI
+    missing or one it upgrades (the report's ``openshell_install``,
+    DoctorReport.OpenShellInstallNeeded). With OpenShell installed, any
+    other failing check is not the install's (it would install nothing):
+    the first one setup stops on, a gateway's before a MicroVM driver's,
+    is shown with the doctor's fix (``openshell_attention``). On a MicroVM
+    (vm) gateway, or a Mac whose docker driver has no Landlock (which setup
+    switches to MicroVMs), that includes a failed ``vm-driver`` check. A
+    MicroVM mounts no host folders, so the bind-mount check is left out
+    there. An OpenShell installed another way than the Homebrew formula
+    (macOS) or without the openshell-gateway user unit (Linux) is marked,
+    as setup marks it: setup uses its gateway while it answers (the user
+    restarts it after a gateway change) and stops, with the doctor's fix,
+    where that gateway does not answer. A gateway service that warns is
+    shown with its detail.
     """
 
     if not isinstance(report, Mapping):
@@ -4768,6 +4794,15 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
 
     def detail(check_id: str) -> str:
         return str((checks.get(check_id) or {}).get("detail") or "").strip()
+
+    def fix_of(check_id: str) -> str:
+        """The doctor's fix of a check, as setup prints it, else its detail."""
+        fix = (checks.get(check_id) or {}).get("fix")
+        fix = fix if isinstance(fix, Mapping) else {}
+        summary, command = str(fix.get("summary") or "").strip(), str(fix.get("command") or "").strip()
+        if not summary:
+            return detail(check_id)
+        return summary + (f" (`{command}`)" if command else "")
 
     # The driver the gateway runs, else the one its files configure
     # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
@@ -4794,45 +4829,79 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     cli = status("openshell-cli")
     service = report.get("service")
     service = service if isinstance(service, Mapping) else {}
-    # On macOS setup refuses an OpenShell installed another way than the
-    # Homebrew formula whose service runs the gateway
-    # (DoctorReport.OpenShellOutsideFormula): it would install nothing.
-    refused = cli not in {"", "fail"} and service.get("manager") == "brew" and not service.get("installed")
-    needed = not refused and (
-        cli in {"", "fail"} or status("gateway-version") == "fail" or status("gateway-service") == "fail"
-    )
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux) whose service runs
+    # the gateway (DoctorReport.GatewayUnmanaged): setup uses its gateway
+    # while it answers, and stops on the doctor's fix where it does not.
+    # Its install step would find the CLI and install nothing.
+    without_service = cli not in {"", "fail"} and not service.get("installed")
+    manager = service.get("manager")
+    unmanaged = without_service and manager in {"systemd", "brew"}
+    # A doctor older than openshell_install: a failed CLI check.
+    install = report.get("openshell_install")
+    needed = not unmanaged and (install if isinstance(install, bool) else cli in {"", "fail"})
+    # Else the first failing check setup stops on, with the doctor's fix.
+    attention = "" if needed else next((i for i in _SETUP_STOPS if status(i) == "fail"), "")
     version = str(report.get("cli_version") or "").strip()
     name = f"OpenShell {version}" if version else "OpenShell"
-    if refused:
+    if unmanaged:
+        # As setup's machine line marks it (sandboxcli/setup.go), and says
+        # what it does with its gateway, naming where that OpenShell is.
+        where = str(report.get("cli_path") or "").strip()
+        if manager == "systemd":
+            parts.append(f"⚠ {name} has no openshell-gateway user service")
+            how = ", without the openshell-gateway user service DefenseClaw starts and restarts the gateway through on Linux"
+        else:
+            parts.append(f"⚠ {name} is not from Homebrew's nvidia/openshell formula")
+            how = (
+                " than the nvidia/openshell/openshell Homebrew formula, whose service DefenseClaw starts "
+                "and restarts the gateway through"
+            )
         openshell = (
-            f"{name} was installed another way than the nvidia/openshell/openshell Homebrew formula, "
-            "whose service DefenseClaw runs the gateway through: stop its gateway and remove it, then install OpenShell here"
+            f"{name}{f' at {where}' if where else ''} was installed another way{how}: setup uses its gateway "
+            "as it runs, but DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, "
+            "the way you started it"
         )
-        parts.append(f"✗ {name} is not from Homebrew's nvidia/openshell formula")
+    if attention == "openshell-cli":
+        # One newer than supported, which the install step does not downgrade.
+        openshell = f"OpenShell needs attention: {fix_of(attention) or 'not supported'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not supported"))
+    elif attention:
+        # A stopped gateway service is started, a gateway of another
+        # release than the CLI restarted through its service.
+        openshell = f"the OpenShell gateway needs attention: {fix_of(attention) or 'not answering'}"
+        gateway = str(report.get("gateway_version") or "").strip()
+        if attention == "gateway-version" and gateway and gateway != version:
+            parts.append(f"✗ {name}, but the gateway runs {gateway}")
+        elif status("gateway-service") == "fail":
+            # A gateway that answers while the service is stopped is run
+            # by something else.
+            parts.append("✗ OpenShell gateway service stopped" if gateway else "✗ OpenShell gateway not running")
+        else:
+            parts.append("✗ OpenShell gateway needs attention")
+    elif unmanaged:
+        pass
     elif not needed:
         openshell = f"{name} is installed"
         if status("gateway-service") == "warn":
             parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
         else:
             parts.append(f"✓ {name}")
-    elif cli in {"", "fail"} and "not on PATH" in detail("openshell-cli"):
+    elif "not on PATH" in detail("openshell-cli"):
         openshell = "OpenShell is not installed"
         parts.append("✗ OpenShell not installed")
-    elif cli in {"", "fail"}:
+    else:
         openshell = f"OpenShell needs attention: {detail('openshell-cli') or 'not found'}"
         parts.append("✗ OpenShell " + (detail("openshell-cli") or "not found"))
-    else:
-        failed = "gateway-service" if status("gateway-service") == "fail" else "gateway-version"
-        openshell = f"the OpenShell gateway needs attention: {detail(failed) or 'not running'}"
-        parts.append("✗ OpenShell gateway " + ("not running" if failed == "gateway-service" else "needs an update"))
     vm_driver = status("vm-driver") if microvm else ""
     if vm_driver == "pass":
         parts.append("✓ MicroVM driver")
     elif vm_driver in {"warn", "fail"}:
         parts.append(f"{_DOCTOR_GLYPHS[vm_driver]} MicroVM driver: {detail('vm-driver') or vm_driver}")
-    if vm_driver == "fail" and not needed and not refused:
-        needed = True
-        openshell = f"the MicroVM driver needs attention: {detail('vm-driver') or 'not ready'}"
+    # Setup gets to the MicroVM driver past the gateway checks only.
+    if vm_driver == "fail" and not needed and not attention:
+        attention = "vm-driver"
+        openshell = f"the MicroVM driver needs attention: {fix_of('vm-driver') or 'not ready'}"
     mounts = "" if microvm else status("bind-mounts")
     if mounts == "pass":
         parts.append("✓ bind mounts")
@@ -4842,7 +4911,11 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     # One check per line: joined on one line, the checks after the first
     # few were cut off at 80 columns.
     return SandboxMachineCheck(
-        summary="\n".join(parts), openshell_needed=needed, openshell_detail=openshell, openshell_refused=refused
+        summary="\n".join(parts),
+        openshell_needed=needed,
+        openshell_detail=openshell,
+        openshell_unmanaged=unmanaged,
+        openshell_attention=attention,
     )
 
 
@@ -4928,18 +5001,38 @@ def sandbox_wizard_fields(
     elif machine.error:
         machine_line = machine.summary
         install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
-    elif machine.openshell_refused:
-        machine_line = machine.summary
-        install, install_hint = "no", f"{machine.openshell_detail}."
     elif machine.openshell_needed:
         machine_line = machine.summary
         install = "yes"
         install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_attention == "vm-driver":
+        # Under the install's consent setup installs e2fsprogs and signs
+        # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
+        machine_line = machine.summary
+        install = "no"
+        install_hint = (
+            f"{machine.openshell_detail}; OpenShell is installed, and yes lets setup install e2fsprogs "
+            "(brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
+        )
+    elif machine.openshell_attention:
+        # The doctor's fix: installing OpenShell would change nothing.
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; installing OpenShell would change nothing."
     else:
         machine_line = machine.summary
         install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
-    if macos:
+    # Setup gets to e2fsprogs only past the OpenShell and gateway checks: not
+    # where it stops on a gateway fix.
+    stops = machine is not None and machine.openshell_attention != ""
+    if macos and not stops:
         install_hint += e2fsprogs
+    # A gateway no gateway service runs is its user's to restart
+    # (DoctorReport.GatewayUnmanaged): setup writes the change.
+    unmanaged = machine is not None and machine.openshell_unmanaged
+    restart_note = _GATEWAY_MANUAL_RESTART_NOTE if unmanaged else _GATEWAY_RESTART_NOTE
+    microvm_restart = (
+        "; you restart the gateway yourself, the way you started it" if unmanaged else " and restarts it once"
+    )
     fields += [
         WizardFormField(
             "Credentials",
@@ -4974,8 +5067,9 @@ def sandbox_wizard_fields(
                 "section",
                 value="every run works on a copy",
                 hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
-                'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream) and restarts it '
-                "once. MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
+                + microvm_restart
+                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
                 "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
                 "and 5 GB).",
                 visible_when=is_setup,
@@ -4991,7 +5085,7 @@ def sandbox_wizard_fields(
                 default="yes",
                 hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
                 "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
-                "Turning bind mounts on " + _GATEWAY_RESTART_NOTE,
+                "Turning bind mounts on " + restart_note,
                 visible_when=is_setup,
             ),
             WizardFormField(
@@ -5000,7 +5094,7 @@ def sandbox_wizard_fields(
                 no_flag="--upstream-telemetry",
                 value="yes",
                 default="yes",
-                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + _GATEWAY_RESTART_NOTE,
+                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + restart_note,
                 visible_when=is_setup,
             ),
         ]
@@ -7583,6 +7677,8 @@ def openshell_admin_locks(cfg: object | Mapping[str, Any] | None) -> dict[str, s
     if _admin_value(admin, "allow_unblock") is False:
         reason = "unblocking and allow entries are not allowed"
         lock(("openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"), reason)
+    if _admin_value(admin, "block_large_uploads") is True:
+        lock(("openshell.egress.block_large_uploads",), "your organization blocks large uploads to first-seen hosts")
     for entry in _admin_value(admin, "locked", ()) or ():
         keys = _OPENSHELL_LOCKED_CONFIG_KEYS.get(str(entry).strip())
         if keys:
@@ -7621,6 +7717,8 @@ def _openshell_admin_summary(cfg: object | Mapping[str, Any] | None) -> str:
         value = _admin_value(admin, name)
         if isinstance(value, bool):
             parts.append(f"{name}={'true' if value else 'false'}")
+    if _admin_value(admin, "block_large_uploads") is True:
+        parts.append("block_large_uploads=true")
     for name in ("allowed_harnesses", "egress_block", "egress_allow_only", "require_copy_for", "locked"):
         values = [str(item) for item in (_admin_value(admin, name, ()) or ()) if str(item).strip()]
         if values:
@@ -7643,6 +7741,12 @@ def _openshell_locked_value(cfg: object | Mapping[str, Any] | None, key: str, va
         return f"{shown} → copy by policy"
     if key == "openshell.mcp.host_ports" and _admin_value(admin, "allow_host_ports") is False and value:
         return f"{shown} → none by policy"
+    if (
+        key == "openshell.egress.block_large_uploads"
+        and _admin_value(admin, "block_large_uploads") is True
+        and value != "true"
+    ):
+        return f"{shown} → on by policy"
     return f"{shown} (locked)"
 
 
@@ -7744,6 +7848,12 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         field("Egress Unblocked", "openshell.egress.unblocked", hint="'Always' unblocks the daemon wrote, comma-separated."),
         field("Egress Ports", "openshell.egress.ports", hint="Proxy ports, comma-separated; empty inherits."),
         field("Large Upload MB", "openshell.egress.large_upload_mb", "int", hint="First-seen-host upload alert; 0 inherits."),
+        field(
+            "Block Large Uploads",
+            "openshell.egress.block_large_uploads",
+            "bool",
+            hint="Also cut that upload and refuse the host until it is unblocked; off follows the pack.",
+        ),
         field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
         field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
         field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),

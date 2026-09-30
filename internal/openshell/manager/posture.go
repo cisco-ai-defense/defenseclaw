@@ -31,7 +31,9 @@ import (
 type posture struct {
 	pack, digest, profile, network, approvals, workdir string
 	yolo                                               bool
-	adminBlock, allowOnly, block                       []string
+	// blockUploads is the large-upload block (egress.block_large_uploads).
+	blockUploads                 bool
+	adminBlock, allowOnly, block []string
 	// admin names the settings an openshell.admin constraint decided.
 	admin map[string]bool
 }
@@ -39,7 +41,8 @@ type posture struct {
 func postureOf(eff *packs.Effective) *posture {
 	p := &posture{
 		profile: eff.Profile, network: eff.NetworkMode, approvals: eff.Approvals, workdir: eff.Workspace.Mode, yolo: eff.Yolo,
-		adminBlock: slices.Clone(eff.Egress.AdminBlock), allowOnly: slices.Clone(eff.Egress.AllowOnly), block: slices.Clone(eff.Egress.Block),
+		blockUploads: eff.Egress.BlockLargeUploads,
+		adminBlock:   slices.Clone(eff.Egress.AdminBlock), allowOnly: slices.Clone(eff.Egress.AllowOnly), block: slices.Clone(eff.Egress.Block),
 		admin: map[string]bool{},
 	}
 	if eff.Pack != nil {
@@ -88,6 +91,10 @@ func (p *posture) changes(q *posture) (out []string, org bool) {
 	}
 	if p.workdir != q.workdir {
 		add("workdir.mode", "project "+p.workdir+" → "+q.workdir+" (from the next sandbox)")
+	}
+	if p.blockUploads != q.blockUploads {
+		add("egress.block_large_uploads", "large uploads to first-seen hosts "+
+			onOff(p.blockUploads, "blocked", "reported")+" → "+onOff(q.blockUploads, "blocked", "reported"))
 	}
 	for _, list := range []struct {
 		name        string

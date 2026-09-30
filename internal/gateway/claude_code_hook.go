@@ -574,6 +574,86 @@ func claudeCodeToolName(req claudeCodeHookRequest) string {
 	return "ClaudeCodeTool"
 }
 
+// claudeCodeAgentTool is the name of Claude Code's subagent tool (Task in
+// releases before the 2.1.154 contract floor).
+const claudeCodeAgentTool = "Agent"
+
+// claudeCodeSpawnedAgentID is the subagent a finished Agent call ran. Claude
+// Code's PostToolUse for its Agent tool reports it as tool_response.agentId,
+// the agent_id every hook of that subagent carries; a backgrounded call
+// reports it at launch, with status async_launched (measured on 2.1.156,
+// #957). Any other tool's response is that tool's output and names no agent.
+func claudeCodeSpawnedAgentID(req claudeCodeHookRequest) string {
+	if req.HookEventName != "PostToolUse" || req.ToolName != claudeCodeAgentTool ||
+		strings.TrimSpace(req.MCPServerName) != "" {
+		return ""
+	}
+	response, _ := req.ToolResponse.(map[string]interface{})
+	return firstHookIdentityString(response, "agentId")
+}
+
+// claudeCodeBatchCall is one call of a PostToolBatch.
+type claudeCodeBatchCall struct {
+	ToolName  string `json:"tool_name"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+}
+
+// maxClaudeCodeBatchCalls bounds the calls read from one PostToolBatch.
+const maxClaudeCodeBatchCalls = 64
+
+// claudeCodeToolBatch names a PostToolBatch's tool record. Claude Code sends
+// it once every call of one model turn is resolved, after each call's own
+// PostToolUse or PostToolUseFailure, and lists the calls in tool_calls by the
+// tool_name and tool_use_id their PreToolUse carried; a call the user refused
+// at Claude's permission prompt appears only here (measured on 2.1.156,
+// #957). The event names no tool of its own and is no call's result: it is
+// recorded as a tool_batch whose input lists its calls by name and ID, under
+// an ID derived from theirs. A call's own name and ID would count the call
+// twice, and give a failed call a second outcome, "completed", next to its
+// PostToolUseFailure.
+func claudeCodeToolBatch(req claudeCodeHookRequest) (calls []claudeCodeBatchCall, toolName, toolID string) {
+	items, _ := req.ToolCalls.([]interface{})
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if len(calls) == maxClaudeCodeBatchCalls {
+			break
+		}
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		call := claudeCodeBatchCall{
+			ToolName:  firstHookIdentityString(entry, "tool_name"),
+			ToolUseID: firstHookIdentityString(entry, "tool_use_id"),
+		}
+		if call.ToolName == "" {
+			continue
+		}
+		calls = append(calls, call)
+		ids = append(ids, call.ToolUseID)
+	}
+	if len(calls) == 0 {
+		return nil, claudeCodeToolBatchName, ""
+	}
+	return calls, claudeCodeToolBatchName, stableLLMEventID("tool", append([]string{"claudecode", req.SessionID, "batch"}, ids...)...)
+}
+
+// claudeCodeToolBatchName labels a PostToolBatch's tool record.
+const claudeCodeToolBatchName = "tool_batch"
+
+// claudeCodeToolBatchArguments is the input a PostToolBatch's tool record
+// carries: the batch's calls by name and ID.
+func claudeCodeToolBatchArguments(calls []claudeCodeBatchCall) string {
+	if len(calls) == 0 {
+		return "{}"
+	}
+	body, err := json.Marshal(map[string]interface{}{"tool_calls": calls})
+	if err != nil {
+		return "{}"
+	}
+	return string(body)
+}
+
 func claudeCodeToolArgs(req claudeCodeHookRequest) json.RawMessage {
 	if req.ToolInput == nil {
 		return json.RawMessage(`{}`)

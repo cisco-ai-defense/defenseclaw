@@ -327,9 +327,11 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		return nil, err
 	}
 	if err := triage.CheckUnblock(eff, host); err != nil {
-		if unblocksOff(err) && eff.DecideEgress(host, 0).Allowed {
+		if unblocksOff(err) && !eff.Egress.BlockLargeUploads && eff.DecideEgress(host, 0).Allowed {
 			// Nothing to lift: the organization's refusal of unblocks
 			// would only send the user to the administrator for nothing.
+			// The large-upload block refuses hosts the policy allows, which
+			// only an unblock would lift, so under it the refusal stands.
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
 				"%s is not blocked: the sandbox policy lets the sandbox reach it, so there is nothing to unblock", host)
 		}
@@ -498,7 +500,15 @@ func newEgressSink(m *Manager) *egressSink {
 // EgressEvent implements egress.EventSink.
 func (s *egressSink) EgressEvent(e egress.Event) {
 	it := sinkItem{ev: e}
+	if e.Kind == egress.EventLargeUpload && e.Terminated {
+		// An upload the large-upload block cut: the agent sees only the
+		// broken connection too (EgressRefusals).
+		s.m.refusals.note(e, s.m.now())
+	}
 	if e.Kind == egress.EventBlocked {
+		// Every refusal, before the telemetry's folding and pacing: the
+		// agent is told of what its own calls hit (EgressRefusals).
+		s.m.refusals.note(e, s.m.now())
 		ok, repeats := s.admitBlocked(e)
 		if !ok {
 			return
@@ -690,10 +700,13 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		}
 		if blocked || e.FirstSeen {
 			kind := sandboxapi.ActivityEgressAllowed
-			msg := "✓ " + e.Host
+			// The port tells an HTTPS request from a plain-HTTP one to
+			// the same host, which are refused one by one.
+			where := sandboxapi.HostPort(e.Host, e.Port)
+			msg := "✓ " + where
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
-				msg = "✗ " + e.Host + " (" + categoryText(e) + ")" + more
+				msg = "✗ " + where + " (" + categoryText(e) + ")" + more
 			}
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
@@ -702,22 +715,73 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			})
 		}
 	case egress.EventLargeUpload:
-		severity := "MEDIUM"
 		if e.Terminated {
-			severity = "HIGH"
+			m.largeUploadBlocked(ctx, ident, e)
+			return
+		}
+		remediation := "Review what the agent uploaded; block the destination if it is not expected " +
+			"(openshell.egress.block_large_uploads: true cuts such uploads)."
+		if p, ok := m.creds.Lookup(e.BindingID); ok && p.BlockLargeUploads {
+			// Under the block only an exempt destination is reported.
+			remediation = "Review what the agent uploaded. The large-upload block is on, but " + e.Host +
+				" is exempt from it (an unblock, an allow entry or your organization's allowed list names it), so the upload was only reported; " +
+				"remove that entry if the destination is not expected."
+		}
+		// The proxy reports the upload as it crosses the threshold, before
+		// it ends: it sent more than the threshold, and BytesUp is only
+		// what had gone up then.
+		size := fmt.Sprintf("%d bytes", e.BytesUp)
+		if e.Threshold > 0 {
+			size = "more than " + egress.FormatThreshold(e.Threshold)
 		}
 		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
-			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: severity,
-			Title:       "Large upload to a first-seen destination",
-			Description: fmt.Sprintf("%s sent %d bytes to %s, which it had not contacted before.", e.SandboxName, e.BytesUp, e.Host),
-			Evidence:    truncate(e.Reason, 512), TargetRef: e.Host,
-			Remediation: "Review what the agent uploaded; block the destination if it is not expected.",
-			Timestamp:   e.Time,
+			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "MEDIUM",
+			Title: "Large upload to a first-seen destination",
+			Description: fmt.Sprintf("%s sent %s to %s, which it had not contacted before (%d bytes as it crossed the threshold).",
+				e.SandboxName, size, e.Host, e.BytesUp),
+			Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation,
+			Timestamp: e.Time,
 		})
 		m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: e.SandboxName,
-			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Severity: severity,
-			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%d bytes)", e.Host, e.BytesUp)})
+			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Threshold: e.Threshold, Severity: "MEDIUM",
+			Reason:  truncate(e.Reason, 300),
+			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%s)", sandboxapi.HostPort(e.Host, e.Port), size)})
 	}
+}
+
+// largeUploadBlocked records and shows an upload the large-upload block cut
+// (egress.block_large_uploads): a HIGH finding, a blocked egress record,
+// and a ✗ in the feed that names the threshold and, when an unblock lifts
+// the block, offers it. The proxy refuses the sandbox's later tunnels to
+// the destination with the same category, each an ordinary blocked event.
+func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
+	threshold := egress.FormatThreshold(e.Threshold)
+	remediation := "Review what the agent tried to upload. If the destination is expected, unblock it for the sandbox: " +
+		"defenseclaw sandbox unblock " + e.Host + " --sandbox " + e.SandboxName + "."
+	if !e.Unblockable {
+		remediation = "Review what the agent tried to upload. Your organization does not allow unblocks; " +
+			"ask your administrator if the destination is expected."
+	}
+	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "HIGH",
+		Title: "Large upload to a first-seen destination blocked",
+		Description: fmt.Sprintf("%s tried to send more than %s to %s, which it had not contacted before; "+
+			"the large-upload block cut the upload (%d bytes had been sent) and refuses further requests there.",
+			e.SandboxName, threshold, e.Host, e.BytesUp),
+		Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation, Timestamp: e.Time,
+	})
+	if err := m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
+		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
+		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
+		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
+	}); err != nil {
+		m.logf("egress telemetry: %v", err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
+		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
+		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),
+		Message: "✗ " + sandboxapi.HostPort(e.Host, e.Port) + " (" + sandboxapi.LargeUploadBlockedText(e.Reason) + ")"})
 }
 
 func egressScheme(e egress.Event) string {
@@ -765,6 +829,8 @@ func policyOutcome(e egress.Event) string {
 
 func categoryText(e egress.Event) string {
 	switch {
+	case e.Category == egress.CategoryLargeUpload:
+		return sandboxapi.LargeUploadBlockedText(e.Reason)
 	case e.Entry != "":
 		return strings.ReplaceAll(string(e.Category), "_", " ") + ": " + e.Entry
 	case e.Category != "":

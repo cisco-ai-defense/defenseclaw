@@ -144,6 +144,19 @@ def reason_label(text: str) -> str:
     return REASON_LABELS.get(text, text.replace("_", " "))
 
 
+# sandboxapi.CategoryLargeUpload: the category of the egress.blocked events of
+# the large-upload block (egress.block_large_uploads).
+LARGE_UPLOAD_CATEGORY = "large_upload"
+
+
+def large_upload_blocked_text(reason: str) -> str:
+    """sandboxapi.LargeUploadBlockedText: the proxy's sentence, which names the threshold, as the block's words."""
+    clause = reason.strip().removesuffix(".")
+    if not clause:
+        return "large upload blocked"
+    return "large upload blocked: " + clause[:1].lower() + clause[1:]
+
+
 # How a sandbox tool verdict's reason starts (gateway.sandboxVerdictReason):
 # "Blocked by DefenseClaw rule ID: Title." or "Blocked by DefenseClaw
 # policy.", then advice written for the agent ("... or ask the user to ..."),
@@ -279,7 +292,13 @@ def format_duration(seconds: int) -> str:
 
 
 def host_port(host: str, port: int) -> str:
-    if port and port not in (80, 443):
+    """sandboxapi.HostPort: the host, with its port unless that is 443 (HTTPS)
+    or unknown. Plain HTTP reads host:80, so an HTTPS and an HTTP refusal of
+    one host are told apart. An IPv6 literal with its port is bracketed
+    ("[fd00:ec2::254]:80"; "fd00:ec2::254:80" is another address)."""
+    if port and port != 443:
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
         return f"{host}:{port}"
     return host
 
@@ -352,6 +371,10 @@ class SandboxRow:
     pending_approvals: int = 0
     tool_calls: int = 0
     tool_blocked: int = 0
+    # The hook verdicts per hook event, as the harness names it, the most
+    # frequent first; other_hook_events counts those past the daemon's cap.
+    hook_events: tuple[tuple[str, int], ...] = ()
+    other_hook_events: int = 0
     last_blocked: str = ""
     tampered: int = 0
     hooks_silent: bool = False
@@ -366,6 +389,9 @@ class SandboxRow:
     last_hook_failure: str = ""
     orphaned: bool = False
     undo_available: bool = False
+    # The user kept the last session's changes (the daemon's accept): the
+    # next start takes a new undo point, whoever starts the sandbox.
+    undo_accepted: bool = False
     nested_repos: tuple[NestedRepoRow, ...] = ()
     warnings: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
@@ -398,6 +424,14 @@ class SandboxRow:
         if not self.running:
             return "-"
         return format_duration(self.uptime_seconds)
+
+    @property
+    def hook_events_text(self) -> str:
+        """``PreToolUse 12 · PostToolUse 11 · Stop 2``, as ``sandbox status`` shows it."""
+        parts = [f"{name} {count}" for name, count in self.hook_events]
+        if self.other_hook_events:
+            parts.append(f"other events {self.other_hook_events}")
+        return " · ".join(parts)
 
     @property
     def hook_failure_alert(self) -> str:
@@ -457,6 +491,12 @@ def _tool_calls_text(row: SandboxRow) -> str:
     return str(row.tool_calls)
 
 
+def _hook_events(raw: Any) -> tuple[tuple[str, int], ...]:
+    """The ``hooks.events`` counts, the most frequent first, then by name."""
+    counts = [(_text(name), _int(count)) for name, count in _dict(raw).items()]
+    return tuple(sorted((c for c in counts if c[0] and c[1] > 0), key=lambda c: (-c[1], c[0])))
+
+
 def decode_sandbox(raw: Any) -> SandboxRow | None:
     item = _dict(raw)
     name = _text(item.get("name")).strip()
@@ -494,6 +534,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
         tool_blocked=_int(hooks.get("tool_blocked")),
+        hook_events=_hook_events(hooks.get("events")),
+        other_hook_events=_int(hooks.get("other_events")),
         last_blocked=_text(hooks.get("last_blocked")),
         tampered=_int(hooks.get("tampered")),
         hooks_silent=bool(hooks.get("silent")),
@@ -504,6 +546,7 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         last_hook_failure=_text(hooks.get("last_hook_failure")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
+        undo_accepted=bool(snapshot) and _time(snapshot.get("accepted_at")) is not None,
         nested_repos=nested,
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
@@ -564,6 +607,8 @@ class ActivityRow:
     @property
     def why(self) -> str:
         """The block's category or reason in plain words ("webhook catcher")."""
+        if self.category == LARGE_UPLOAD_CATEGORY:
+            return large_upload_blocked_text(self.reason)
         return reason_label(self.category or self.reason)
 
     @property
@@ -1087,9 +1132,9 @@ class SandboxesPanelModel:
             self._toasted[key] = clock
             why = f" ({row.category or row.reason})" if (row.category or row.reason) else ""
             where = f" in {row.sandbox}" if row.sandbox else ""
-            return SandboxNotice(
-                "warn", f"✗ {host_port(row.host, row.port)} blocked{where}{why}. Sandboxes panel (7): u to unblock"
-            )
+            # An unblockable block holds the host on every port: the port of
+            # the first request would say it stops there.
+            return SandboxNotice("warn", f"✗ {row.host} blocked{where}{why}. Sandboxes panel (7): u to unblock")
         if row.kind == "approval.requested":
             where = f"{row.sandbox}: " if row.sandbox else ""
             return SandboxNotice("warn", f"? {where}{row.summary}. Sandboxes panel (7): press a to review")
@@ -1706,6 +1751,8 @@ class SandboxesPanelModel:
             ("Sites", f"{row.destinations} contacted, {row.blocked} blocked"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked)"),
         ]
+        if row.hook_events_text:
+            pairs.append(("Hook events", row.hook_events_text))
         if row.last_blocked:
             pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:
@@ -1715,6 +1762,9 @@ class SandboxesPanelModel:
         if row.copy_mode:
             pairs.append(("Pull", "P brings the work back: it shows the changes, then applies them or makes a branch"))
             pairs.append(("Undo", "reverts the last pull --apply (U)"))
+        elif row.undo_available and row.undo_accepted:
+            kept = "the last session's changes were kept, so the next start takes a new undo point"
+            pairs.append(("Undo", f"available (U); {kept}"))
         else:
             pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))
         for alert in row.alerts:

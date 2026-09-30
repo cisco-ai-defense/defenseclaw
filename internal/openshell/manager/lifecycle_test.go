@@ -904,7 +904,7 @@ func TestEndHarnessScriptMarksTheDetachedRun(t *testing.T) {
 	end := func(args ...string) {
 		t.Helper()
 		out, err := exec.Command("/bin/sh", append([]string{"-c", endHarnessScript, "defenseclaw-end-harness", root, "1"}, args...)...).Output()
-		if err != nil || strings.TrimSpace(string(out)) != "none" {
+		if err != nil || parseHarnessEnd(out).Harness != "none" {
 			t.Fatalf("script = %q, %v", out, err)
 		}
 	}

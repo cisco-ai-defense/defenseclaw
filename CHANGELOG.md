@@ -362,6 +362,33 @@ deleted.
   reason keep their verdict. The
   audit row's reason names the rule that was not applied, and
   `extra.sandbox_egress_unblocked` the unblocks. Both drivers.
+- A sandboxed agent is told why the egress proxy refused an HTTPS
+  destination (#954). The proxy answers a refused `CONNECT` with a 403 whose
+  body clients never show (`curl: (56) CONNECT tunnel failed, response
+  403`), so the agent saw only a connection error. Now the post-tool hook of
+  the sandbox's next shell or fetch tool call adds a short note to the
+  model's context. It names each destination the proxy refused in the last
+  two minutes and why, and gives the user's `sandbox unblock HOST --sandbox
+  NAME` command when an unblock lifts the refusal, or says who can allow
+  it. The note tells the agent not to try another way. An upload the
+  large-upload block cut on an HTTPS tunnel, which the tool sees only as a
+  broken connection (`curl: (56) Failure when receiving data from the
+  peer`), is told the same way, once and in the same window: `DefenseClaw's
+  egress policy cut this sandbox's upload to HOST after 996 KiB, because it
+  is a destination this sandbox had not contacted before (the large-upload
+  block); the upload did not complete, …`, with the unblock command when an
+  unblock lifts it (a live test's agent had answered "Uploaded the file.").
+  The harness hooks
+  that carry it are Claude Code `PostToolUse`/`PostToolUseFailure`, Codex
+  `PostToolUse`, Copilot CLI `postToolUse`/`postToolUseFailure`, Cursor
+  `postToolUse` and Devin `PostToolUse`. Each refusal is told once, and only
+  to the sandbox whose proxy credential made the request. A host unblocked
+  since is left out; so is the unblock command from the end-of-session
+  summary of a host unblocked later in that session (`✗ DefenseClaw
+  blocked webhook.site (webhook catcher); unblocked since`). The audit
+  row's `extra.sandbox_egress_refused` names what was told. Hermes, Kiro, OpenCode, OpenHands, Amp, Antigravity and
+  OmniGent have no post-tool context field, so there only the terminal's
+  live notice reports the block. Both drivers.
 
 ### OpenShell sandboxes on macOS (MicroVM driver)
 
@@ -412,11 +439,34 @@ deleted.
   on the vm driver no longer fails the doctor: `vm-driver` passes on the
   driver it runs (naming the binary when found), and `gateway-service` warns,
   saying how the gateway runs (a launchd label, or started by hand, which
-  does not start at login) and that DefenseClaw cannot restart it. Its fix
-  is the one setup, which refuses such an OpenShell, gives: stop that
-  gateway and remove that OpenShell, then `sandbox setup
-  --install-openshell` installs the formula; the TUI's machine check says
-  the same instead of "✓ OpenShell". A driver outside the formula's keg that lacks the Hypervisor entitlement
+  does not start at login) and that DefenseClaw cannot restart it. Setup
+  uses such a gateway too, as the doctor does, on a Mac and on Linux with
+  an OpenShell that came without the `openshell-gateway` user unit (whose
+  gateway-service check now warns the same way): its machine line marks
+  `⚠ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula` (or
+  `has no openshell-gateway user service`), it warns that DefenseClaw
+  cannot start or restart that gateway, and it goes on. A gateway change
+  it needs (MicroVM sandbox user or resources, bind mounts, telemetry) is
+  asked about as `Write this change? DefenseClaw cannot restart this
+  gateway: …`, written without a restart, and ends with `restart the
+  OpenShell gateway yourself, the way you started it, so it runs on the
+  change above`, adding that the restart stops every sandbox on the
+  gateway and, on the MicroVM driver, to first stop the running ones it
+  names with `defenseclaw sandbox stop NAME`, which flushes their disks
+  (DefenseClaw cannot flush them before a restart it does not make);
+  teardown restores those files the same way. Until that
+  restart the doctor's bind-mounts, telemetry and vm-identity checks warn
+  that the gateway has not been restarted since the change (on Linux the
+  gateway's start comes from `pgrep` and `ps`, as no unit reports it), and
+  with no gateway process found they warn that DefenseClaw cannot tell
+  whether it was, instead of reporting the change loaded. Setup stops
+  only where it would have to start that gateway (none answers), with the
+  doctor's fix: start it yourself, or, for a gateway DefenseClaw starts
+  and restarts, remove that OpenShell and run `sandbox setup
+  --install-openshell`. Before, setup refused such an OpenShell up front
+  (`✗ OpenShell 0.1.1 is not from Homebrew's nvidia/openshell formula`,
+  exit 1) while the doctor said `✓ ready for sandboxes`. The TUI's
+  machine check says what setup says. A driver outside the formula's keg that lacks the Hypervisor entitlement
   gets a fix that names it; `doctor --fix` and setup re-sign only the
   formula's driver (`brew postinstall` signs no other).
   The doctor's disk line counts only the MicroVM disks prepared from images,
@@ -486,7 +536,10 @@ deleted.
   sandbox, `delete` of the stopped one no longer warns that it "may hold work
   … it was not checked". A later pull of a state that went to a branch or
   patch file counts as brought back too. Every driver, Linux `--copy`
-  included.
+  included. Its question no longer names an undo point a copy does not
+  have: `Delete sandbox fix-tests (its providers and credentials)?`, where
+  a mount-mode sandbox's still adds `unless --keep-snapshot, its undo
+  point`.
 - `sandbox pull --branch`, `--branch-name` and `--patch-out FILE` are checked
   before the sandbox is started: a branch that holds other work, a patch
   file that exists and a branch for a folder without git are refused before
@@ -604,6 +657,20 @@ deleted.
 - The Kiro CLI sandbox image rebuilds: its agent hooks now set
   `timeout_ms` 30000, so a slow verdict no longer lets the tool run (see
   Kiro CLI tool hooks).
+- Claude Code's `Agent` (subagent) calls are recorded in full (#957), on the
+  host and in sandboxes. Claude Code 2.1.156 sends the call's `PostToolUse`
+  after the subagent's own hooks. It reached the gateway, but its
+  correlation failed as stale, so the audit had no decision and no end for
+  the call, and the `PostToolBatch` recorded as `ClaudeCodeTool` was its
+  only result. Main-agent hooks, which carry no `agent_id`, also lost their
+  agent while a subagent's cursor was active (an interrupted subagent's
+  stays active), and each later prompt gave the main agent a new ID. Now
+  every hook is recorded and the main agent keeps one ID. Each subagent's
+  calls carry the subagent's ID and type, with the main agent as parent at
+  depth 1, also for parallel `Agent` calls. The correlation ledger links
+  each subagent to the `Agent` call that ran it (`caused_by`,
+  `spawned-agent-tool-result`). A `PostToolBatch` is recorded as a
+  `tool_batch` listing its calls. Both drivers.
 
 ### OpenShell sandbox lifecycle and configuration
 
@@ -649,6 +716,72 @@ deleted.
   (`openshell.binary`, an `openshell.egress` pattern) is placed by the
   Python mirror of those checks. Messages still never contain the rejected
   value.
+- The daemon now does the detached-run and undo-point bookkeeping the CLI
+  did alone (#947), so the TUI, the macOS app, a tamper stop
+  (`hooks.on_tamper: stop`) and `undo` get it too. Every stop of a running
+  sandbox marks a detached run still going interrupted (its runner is found
+  by `latest.pid` and a command line naming `latest.exit`), says so on the
+  activity feed (`run_interrupted`), and keeps the last 1 MiB of the run's
+  log under `<data_dir>/sandboxes/<name>/runlog/` (reading only a regular
+  file, bounded, after it publishes `stopping`; a tamper stop neither
+  looks at the run nor keeps its log, so it waits on nothing the workload
+  controls); `sandbox logs` of a
+  stopped sandbox reads it from the new `GET
+  /api/v1/sandbox/sandboxes/{name}/logs`, and still shows (as such) a log an earlier
+  CLI kept, until the sandbox starts again. Keeping the changes at the end of a session is recorded through
+  the new `POST /api/v1/sandbox/sandboxes/{name}/accept` instead of
+  `cli/accepted.json` (one an earlier CLI wrote is honoured once), so the
+  next start takes a new undo point whoever starts the sandbox, and the
+  sandbox's snapshot carries `accepted_at` (the TUI and the macOS app say
+  so). The accept names the snapshot and the sandbox's `session` (a count of
+  its starts) it reviewed, so a keep answered after another start, whose
+  changes nobody reviewed, is refused. A start with `--no-snapshot` now uses the acceptance up, so that
+  session's changes keep the undo point at the next start; a start that fails
+  before the sandbox runs keeps it. The CLI still
+  asks before `sandbox stop` ends a run, and reads the same from the user's
+  side. The Python client has `sandbox_run_log` and
+  `accept_sandbox_changes`. Both drivers.
+- `sandbox status NAME` counts the hook verdicts per hook event, under the
+  harness's own event names (#956): a `Hook events` row reads `PreToolUse
+  12 · PostToolUse 11 · UserPromptSubmit 3 · Stop 2`, most frequent first.
+  Until now it gave only the totals (requests, tool calls, blocks), so a
+  harness whose `PostToolUse` or `Stop` hooks never fired looked the same as
+  one whose did. The daemon keeps the counts with the sandbox's other hook
+  counters, in the API's `hooks.events` (the JSON output too), at most 48
+  names a sandbox, cut to 64 bytes, with the rest in `hooks.other_events`.
+  The details of the TUI Sandboxes panel and the macOS app show the same
+  row. Both drivers.
+- Large uploads to first-seen hosts can now be blocked, not only reported
+  (#967). The egress proxy already cut such uploads when asked, but nothing
+  asked. The pack key `egress.block_large_uploads`,
+  `openshell.egress.block_large_uploads: true` (every sandbox; `false`, the
+  default, follows the pack) and `openshell.admin.block_large_uploads: true`
+  (every sandbox; a pack's `large_upload_mb: 0` gets 25 MiB, and a higher
+  threshold is lowered to 25 MiB or the required pack's own) turn it on;
+  each sandbox's proxy credential carries its own, and a configuration change
+  reaches running sandboxes, whose feed says so. The upload is stopped before
+  the chunk that crosses the threshold, and later requests to that host, or to
+  other new hosts under its domain or at its address, get a 403 of category
+  `large_upload`, whose reason says why the destination is blocked rather
+  than repeat the upload (`This destination is blocked since this sandbox
+  tried to send more than 10 MiB to it, …`; a `GET` sends nothing), as the
+  run's live notice of it does (`✗ DefenseClaw blocked HOST (…)`). The feed shows a ✗ with the threshold and the unblock
+  command (`✗ files.example.net (large upload blocked: this sandbox tried to
+  send more than 10 MiB to a destination it had not contacted before)`) instead of
+  the ⚠ report, `sandbox run` announces it, the finding is HIGH, and the
+  egress audit records the cut as blocked (`SANDBOX_EGRESS_LARGE_UPLOAD`).
+  Unblocked hosts and those on an allow list the user or the administrator
+  wrote are only reported; an unblock lifts the block. With a threshold of 0
+  there is nothing to cut, so the block is off, and `sandbox policy explain`
+  says so. The ⚠ report without the block, made as the upload crosses the
+  threshold, now says `more than` it (`⚠ large upload to files.example.net
+  (more than 25 MiB)`, with `threshold` on the event) instead of the bytes
+  sent by then, which read `(1.0 MiB)` for a 1.9 MiB upload. `sandbox policy
+  explain` shows `egress.block_large_uploads` and where it came from, and
+  `policy show` the threshold. In the Python config, the v8 schema, and the
+  TUI and macOS app config editors, which show the key read-only under the
+  administrator's switch; the TUI and app feeds name the threshold. Both
+  drivers.
 
 ### Legacy OpenShell standalone sandbox removed
 

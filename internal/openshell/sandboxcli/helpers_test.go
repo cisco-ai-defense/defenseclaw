@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,11 @@ type fakeDaemon struct {
 	// daemon's, until it is closed (the daemon went away) or the client
 	// leaves.
 	hold chan struct{}
+	// runLogs are the detached-run logs the daemon kept (GET …/logs), and
+	// stopRunLogs the one a stop of the sandbox keeps, as the daemon's
+	// stop keeps the log of the run it finds.
+	runLogs     map[string]*sandboxapi.RunLog
+	stopRunLogs map[string]*sandboxapi.RunLog
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -146,7 +152,8 @@ func runsHarness(argv []string) bool {
 }
 
 func newFakeDaemon(t *testing.T) *fakeDaemon {
-	d := &fakeDaemon{sandboxes: map[string]*sandboxapi.Sandbox{}, errors: map[string]*sandboxapi.Error{}}
+	d := &fakeDaemon{sandboxes: map[string]*sandboxapi.Sandbox{}, errors: map[string]*sandboxapi.Error{},
+		runLogs: map[string]*sandboxapi.RunLog{}, stopRunLogs: map[string]*sandboxapi.RunLog{}}
 	d.status = sandboxapi.Status{Enabled: true, Available: true, IngressAddr: "127.0.0.1:18971", EgressAddr: "127.0.0.1:18972",
 		Gateway: &sandboxapi.Gateway{Name: "openshell", Endpoint: "https://127.0.0.1:17670", Workspace: "default", Version: "0.1.1", Healthy: true},
 		Pack:    "open", Profile: "open"}
@@ -326,7 +333,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		sb := &sandboxapi.Sandbox{Name: name, ID: "sb-" + name, Harness: req.Harness, HarnessName: harnessName(req.Harness),
 			Phase: "ready", Profile: "open", NetworkMode: "open", Yolo: !req.Safe, WorkdirMode: mode, Project: req.Project,
-			Workdir: workdir, Launch: sandboxapi.Launch{Yolo: !req.Safe}, TamperTier: "managed", CreatedAt: time.Now()}
+			Workdir: workdir, Launch: sandboxapi.Launch{Yolo: !req.Safe}, TamperTier: "managed", CreatedAt: time.Now(), Session: 1}
 		if req.LLM != nil {
 			sb.Launch.CredentialProfile = req.LLM.Profile
 		}
@@ -351,6 +358,17 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch {
+		case r.Method == http.MethodGet && verb == "logs":
+			kept, ok := d.runLogs[name]
+			if !ok {
+				fail(sandboxapi.CodeNotFound, "no log of a detached run of sandbox "+name+" was kept")
+				return
+			}
+			out := *kept
+			if n, _ := strconv.Atoi(r.URL.Query().Get("lines")); n > 0 {
+				out.Log = string(harness.LastLines([]byte(out.Log), n))
+			}
+			reply(out)
 		case r.Method == http.MethodGet:
 			if d.onGet != nil {
 				d.onGet(sb)
@@ -358,19 +376,58 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			reply(sb)
 		case r.Method == http.MethodDelete:
 			delete(d.sandboxes, name)
+			delete(d.runLogs, name)
 			reply(sandboxapi.DeleteResponse{Name: name, Deleted: true})
 		case verb == "stop":
+			if kept, ok := d.stopRunLogs[name]; ok && sb.Phase == "ready" {
+				log := *kept
+				log.Name, log.KeptAt = name, time.Now()
+				d.runLogs[name] = &log
+			}
 			sb.Phase = "stopped"
 			reply(sb)
 		case verb == "start":
 			var req sandboxapi.StartRequest
 			_ = json.Unmarshal(body, &req)
-			sb.Phase = "ready"
-			fresh := req.NewSnapshot || !d.pendingChanges || !sb.Snapshot.UndoneAt.IsZero()
-			if sb.WorkdirMode == "mount" && sb.Snapshot != nil && !req.NoSnapshot && fresh {
-				// A new session's snapshot replaces the undo point.
-				sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: sb.Snapshot.Kind, CreatedAt: time.Now()}
+			if sb.Phase != "ready" {
+				sb.Session++
 			}
+			sb.Phase = "ready"
+			if sb.WorkdirMode == "mount" && sb.Snapshot != nil {
+				// Like the manager: a start takes a new snapshot unless
+				// changes nobody undid or accepted sit on the undo point, and
+				// uses an acceptance up.
+				fresh := req.NewSnapshot || !d.pendingChanges || !sb.Snapshot.UndoneAt.IsZero() || !sb.Snapshot.AcceptedAt.IsZero()
+				switch {
+				case !req.NoSnapshot && fresh:
+					sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: sb.Snapshot.Kind, CreatedAt: time.Now()}
+				case !sb.Snapshot.AcceptedAt.IsZero():
+					snap := *sb.Snapshot
+					snap.AcceptedAt = time.Time{}
+					sb.Snapshot = &snap
+				}
+			}
+			reply(sb)
+		case verb == "accept":
+			var req sandboxapi.AcceptRequest
+			_ = json.Unmarshal(body, &req)
+			switch {
+			case sb.Phase == "ready":
+				fail(sandboxapi.CodeConflict, "sandbox "+name+" is running; stop it before accepting its changes")
+				return
+			case sb.Snapshot == nil:
+				fail(sandboxapi.CodeNotFound, "sandbox "+name+" has no undo point")
+				return
+			case !req.Snapshot.IsZero() && !req.Snapshot.Equal(sb.Snapshot.CreatedAt):
+				fail(sandboxapi.CodeConflict, "sandbox "+name+" has another undo point by now")
+				return
+			case req.Session != 0 && req.Session != sb.Session:
+				fail(sandboxapi.CodeConflict, "sandbox "+name+" was started again since its changes were reviewed")
+				return
+			}
+			snap := *sb.Snapshot
+			snap.AcceptedAt = time.Now()
+			sb.Snapshot = &snap
 			reply(sb)
 		case verb == "review":
 			rev := d.review
@@ -772,9 +829,11 @@ func (f *fakeCopy) Apply(_ context.Context, o workspace.ApplyOptions) (*workspac
 
 // fakeGateway is an in-memory GatewayService.
 type fakeGateway struct {
-	state     openshell.GatewayConfigState
-	planned   []openshell.GatewayChanges
-	applied   int
+	state   openshell.GatewayConfigState
+	planned []openshell.GatewayChanges
+	applied int
+	// written are the plans Write wrote, without a restart.
+	written   []*openshell.GatewayPlan
 	rollbacks []*openshell.GatewayApplyResult
 	applyRes  *openshell.GatewayApplyResult
 	restarts  int
@@ -802,10 +861,19 @@ func (f *fakeGateway) Apply(context.Context, *openshell.GatewayPlan) (*openshell
 	return f.applyRes, nil
 }
 
+func (f *fakeGateway) Write(_ context.Context, plan *openshell.GatewayPlan) (*openshell.GatewayApplyResult, error) {
+	f.written = append(f.written, plan)
+	return f.applyRes, nil
+}
+
 func (f *fakeGateway) Rollback(_ context.Context, res *openshell.GatewayApplyResult) error {
 	f.rollbacks = append(f.rollbacks, res)
 	return nil
 }
+
+// NoService: a gateway service runs this gateway (noServiceGateway is one
+// without).
+func (f *fakeGateway) NoService(context.Context) bool { return false }
 
 // testApp wires an App to fakes.
 type testApp struct {
@@ -1114,7 +1182,7 @@ func runAnswers(ta *testApp, state, log string) {
 		switch {
 		case len(cmd) > 2 && cmd[0] == "sh" && cmd[2] == runStateScript:
 			return 0, state
-		case len(cmd) > 2 && cmd[0] == "sh" && (cmd[2] == runMarkScript || cmd[2] == runFollowScript):
+		case len(cmd) > 2 && cmd[0] == "sh" && cmd[2] == runFollowScript:
 			return 0, log
 		case len(cmd) > 0 && cmd[0] == "tail":
 			return 0, log

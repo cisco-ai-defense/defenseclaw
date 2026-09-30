@@ -98,28 +98,42 @@ func (r *doctorRun) launchdLabel(ctx context.Context, pid int) string {
 	return ""
 }
 
-// unmanagedService judges, on a Mac, a gateway that Homebrew's service does
-// not run: OpenShell's release binaries (the ones the formula downloads)
-// started by a LaunchAgent of the user's own, or by hand. DefenseClaw
-// starts and restarts the gateway through Homebrew's service only, and
-// setup refuses an OpenShell installed another way (the installer would
-// find its CLI and install nothing), so the fix is setup's: stop that
-// gateway, remove that OpenShell, then install the formula. A healthy
-// gateway warns (its sandboxes run, but DefenseClaw cannot restart it)
-// and says how it runs instead of "not installed".
+// unmanagedService judges a gateway that DefenseClaw's gateway service does
+// not run: on a Mac OpenShell's release binaries (the ones the formula
+// downloads) started by a LaunchAgent of the user's own, or by hand; on
+// Linux an OpenShell that came without the openshell-gateway user unit.
+// DefenseClaw starts and restarts the gateway through that service only.
+// A healthy gateway warns (its sandboxes run and setup uses it, but
+// DefenseClaw cannot start or restart it) and, on a Mac, says how it runs
+// instead of "not installed"; with none answering the check fails, as
+// setup stops there. Either way the fix is unmanagedFix, the user's.
 func (r *doctorRun) unmanagedService(ctx context.Context) {
 	c := r.report.Get(CheckIDGatewayService)
-	if r.GOOS != "darwin" || c == nil || r.service == nil || r.service.Installed {
+	if c == nil || r.service == nil || r.service.Installed {
 		return
 	}
-	if r.report.OpenShellOutsideFormula() {
-		c.Fix = &Fix{Summary: OpenShellOutsideFormulaFix, Command: installOpenShellCommand}
+	healthy := r.gateway != nil && r.gateway.Healthy
+	if r.report.GatewayUnmanaged() {
+		first := startYourself
+		if healthy {
+			first = restartYourself
+		}
+		c.Fix = r.unmanagedFix(first)
 	}
-	if r.gateway == nil || !r.gateway.Healthy {
+	switch {
+	case !healthy:
+		return
+	case r.GOOS != "darwin" && !r.report.GatewayUnmanaged():
+		// No OpenShell CLI to use its gateway with: the install sets the
+		// unit up.
+		return
+	case r.GOOS != "darwin":
+		c.Status = StatusWarn
+		c.Detail = r.service.Unit + " is not installed; the gateway that answers runs another way, so DefenseClaw cannot start or restart it"
 		return
 	}
-	notBrew := "not Homebrew's " + GatewayFormula + " service"
 	c.Status = StatusWarn
+	notBrew := "not Homebrew's " + GatewayFormula + " service"
 	gw := r.gatewayProcess(ctx)
 	if gw == nil {
 		c.Detail = "the gateway answers, but " + notBrew + " runs it (DefenseClaw could not tell what does), so DefenseClaw cannot restart it"

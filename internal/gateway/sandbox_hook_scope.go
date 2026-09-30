@@ -258,6 +258,9 @@ type sandboxCoverage struct {
 	// unblocked names the egress unblocks ("host:scope") that lifted the
 	// request's destination rules (liftUnblockedDestinations).
 	unblocked []string
+	// refused names the egress refusals ("host:category") the request's
+	// answer told the agent of (addSandboxEgressRefusals).
+	refused []string
 }
 
 type sandboxCoverageContextKey struct{}
@@ -329,6 +332,9 @@ func sandboxHookAuditExtra(ctx context.Context) map[string]string {
 	}
 	if lifted := sandboxEgressUnblocks(ctx); len(lifted) > 0 {
 		extra[sandboxEgressUnblockExtra] = strings.Join(lifted, ",")
+	}
+	if refused := sandboxEgressRefused(ctx); len(refused) > 0 {
+		extra[sandboxEgressRefusalExtra] = strings.Join(refused, ",")
 	}
 	return extra
 }

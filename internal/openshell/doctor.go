@@ -85,6 +85,7 @@ const (
 	CheckIDTelemetry         = "telemetry"
 	CheckIDPortPrefix        = "port-"
 	installOpenShellCommand  = "defenseclaw sandbox setup --install-openshell"
+	setupCommand             = "defenseclaw sandbox setup"
 )
 
 // CheckStatus is a doctor verdict.
@@ -132,11 +133,13 @@ type Check struct {
 type DoctorReport struct {
 	Checks []Check `json:"checks"`
 	// Facts gathered on the way, for display.
-	Registration   *Registration `json:"registration,omitempty"`
-	CLIVersion     string        `json:"cli_version,omitempty"`
-	GatewayVersion string        `json:"gateway_version,omitempty"`
-	DockerVersion  string        `json:"docker_version,omitempty"`
-	DockerRootDir  string        `json:"docker_root_dir,omitempty"`
+	Registration *Registration `json:"registration,omitempty"`
+	CLIVersion   string        `json:"cli_version,omitempty"`
+	// CLIPath is the openshell the CLI check found on PATH.
+	CLIPath        string `json:"cli_path,omitempty"`
+	GatewayVersion string `json:"gateway_version,omitempty"`
+	DockerVersion  string `json:"docker_version,omitempty"`
+	DockerRootDir  string `json:"docker_root_dir,omitempty"`
 	// Service is the gateway service as its manager reports it.
 	Service *ServiceState `json:"service,omitempty"`
 	// Driver is the compute driver sandboxes run on: the one the gateway
@@ -163,17 +166,56 @@ func (r *DoctorReport) OK() bool {
 
 // OpenShellOutsideFormula reports a Mac whose OpenShell CLI was installed
 // another way than the Homebrew formula DefenseClaw runs the gateway
-// through: setup refuses it (the installer would find the CLI and install
-// nothing), and OpenShellOutsideFormulaFix is the way on.
+// through (from the release binaries, say): see GatewayUnmanaged.
 func (r *DoctorReport) OpenShellOutsideFormula() bool {
 	cli := r.Get(CheckIDCLI)
 	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "brew" && !r.Service.Installed
 }
 
-// OpenShellOutsideFormulaFix is what to do about OpenShellOutsideFormula,
-// before installOpenShellCommand.
-const OpenShellOutsideFormulaFix = "on macOS DefenseClaw starts and restarts the gateway through the " + GatewayFormula +
-	" Homebrew formula's service: stop that gateway and remove the OpenShell installed another way, then install the formula"
+// OpenShellOutsideUnit reports a Linux host whose supported OpenShell CLI
+// came without the openshell-gateway user unit DefenseClaw starts and
+// restarts the gateway through: it was installed another way than NVIDIA's
+// installer (from the release binaries, say). See GatewayUnmanaged.
+func (r *DoctorReport) OpenShellOutsideUnit() bool {
+	cli := r.Get(CheckIDCLI)
+	return cli != nil && cli.Status != StatusFail && r.Service != nil && r.Service.Manager == "systemd" && !r.Service.Installed
+}
+
+// GatewayUnmanaged reports an OpenShell installed another way than the one
+// whose service DefenseClaw starts and restarts the gateway through
+// (OpenShellOutsideFormula on a Mac, OpenShellOutsideUnit on Linux): its
+// gateway runs by hand, or under something of the user's. DefenseClaw uses
+// that gateway while it answers, but cannot start or restart it: setup
+// writes a gateway change for its operator to restart the gateway on, and
+// stops only where it would have to start it. installOpenShellCommand
+// alone does not bring the service: DefenseClaw's install step finds the
+// supported CLI and does not run NVIDIA's installer.
+func (r *DoctorReport) GatewayUnmanaged() bool {
+	return r.OpenShellOutsideFormula() || r.OpenShellOutsideUnit()
+}
+
+// OpenShellInstallNeeded reports whether DefenseClaw's install step
+// (Installer.Install) would run NVIDIA's installer on this host: no
+// OpenShell CLI, one whose release it cannot read, or one older than
+// SupportedMin, which it upgrades. Over a supported CLI it installs
+// nothing, and one newer than supported it refuses, so there every other
+// failing check (the gateway, its service, the MicroVM driver) is its
+// fix's, not the install's. Setup offers the install only then, and the
+// TUI presets it only then (`sandbox doctor --json` reports it as
+// openshell_install).
+func (r *DoctorReport) OpenShellInstallNeeded() bool {
+	cli := r.Get(CheckIDCLI)
+	switch {
+	case cli == nil:
+		return true
+	case cli.Status != StatusFail:
+		return false
+	case r.CLIVersion == "":
+		return true
+	}
+	v, err := ParseVersion(r.CLIVersion)
+	return err != nil || v.Compare(mustParse(SupportedBelow)) < 0
+}
 
 // Get returns the check with id, or nil.
 func (r *DoctorReport) Get(id string) *Check {
@@ -209,9 +251,11 @@ func (r *DoctorReport) String() string {
 	return b.String()
 }
 
-// FixOutcome reports one ApplyFixes attempt.
+// FixOutcome reports one ApplyFixes attempt. Title is the check's, which
+// the consent question names it by.
 type FixOutcome struct {
 	ID      string `json:"id"`
+	Title   string `json:"title"`
 	Applied bool   `json:"applied"`
 	Error   string `json:"error,omitempty"`
 }
@@ -232,7 +276,7 @@ func (r *DoctorReport) ApplyFixes(ctx context.Context, consent func(Check) (bool
 		if !ok {
 			continue
 		}
-		o := FixOutcome{ID: c.ID}
+		o := FixOutcome{ID: c.ID, Title: c.Title}
 		if err := c.Fix.Apply(ctx); err != nil {
 			o.Error = err.Error()
 		} else {
@@ -347,11 +391,11 @@ func (d *Doctor) defaults() {
 	if d.Dial == nil {
 		d.Dial = func(reg *Registration) (Client, error) { return Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second}) }
 	}
-	if d.Gateway == nil {
-		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover}
-	}
 	if d.CLI == "" {
 		d.CLI = DefaultBinary
+	}
+	if d.Gateway == nil {
+		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath}
 	}
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI
@@ -509,6 +553,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.checkGateway(ctx)
 	r.macChecks(ctx)
 	r.unmanagedService(ctx)
+	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
 	r.report.Driver = r.driver()
@@ -895,13 +940,309 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 }
 
 // gatewayRecoveryFix restarts a gateway that runs but does not answer
-// (starting it again would do nothing) and starts one that is stopped.
+// (starting it again would do nothing) and starts one that is stopped. With
+// no gateway service to start (serviceMissing), OpenShell's installer is
+// what puts one there: `brew services start` of a formula that is not
+// installed fails ("Formula `openshell` is not installed"). Where an
+// OpenShell installed another way is there, its gateway is the user's to
+// start (unmanagedFix).
 func (r *doctorRun) gatewayRecoveryFix() *Fix {
-	if r.service != nil && r.service.Active {
+	switch {
+	case r.serviceMissing() && r.report.GatewayUnmanaged():
+		return r.unmanagedFix(startYourself)
+	case r.serviceMissing():
+		return &Fix{Summary: "install OpenShell, whose " + r.service.Unit + " service runs the gateway", Command: installOpenShellCommand}
+	case r.service != nil && r.service.Active:
 		return &Fix{Summary: "restart the gateway", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
 	}
 	start := r.startCommand()
 	return &Fix{Summary: "start the gateway", Command: start.String(), Automatic: true, Apply: r.runAndWait(start, true)}
+}
+
+// serviceMissing reports that the service manager has no gateway service:
+// the nvidia/openshell/openshell formula (macOS) or the openshell-gateway
+// user unit (Linux) is not installed, so DefenseClaw has none to start or
+// restart the gateway through, whether no gateway runs or one runs another
+// way. It is false when the service's state is unknown.
+func (r *doctorRun) serviceMissing() bool { return r.service != nil && !r.service.Installed }
+
+// unmanagedFix is the fix of an OpenShell installed another way than the
+// one whose service DefenseClaw starts and restarts the gateway through
+// (DoctorReport.GatewayUnmanaged), which the doctor cannot take: first is
+// what to do with that OpenShell's gateway, which its user runs. The other
+// way on is a gateway DefenseClaw runs, for which that OpenShell goes
+// first: DefenseClaw's install step would find its CLI and install
+// nothing.
+func (r *doctorRun) unmanagedFix(first string) *Fix {
+	found := strings.TrimSpace("OpenShell " + r.report.CLIVersion)
+	if r.report.CLIPath != "" {
+		found += " at " + r.report.CLIPath
+	}
+	service, install := "Homebrew's "+GatewayFormula+" service", "install the formula"
+	if r.GOOS != "darwin" {
+		service, install = "the "+GatewayService+" user service, which NVIDIA's installer sets up", "install OpenShell with NVIDIA's installer"
+	}
+	return &Fix{Summary: first + ". DefenseClaw starts and restarts the gateway only through " + service + ", and the " + found +
+		" was installed another way. For a gateway DefenseClaw starts and restarts, stop that one and remove that OpenShell " +
+		"(DefenseClaw's install step would find it and install nothing), then " + install,
+		Command: installOpenShellCommand}
+}
+
+// unmanagedFix's first steps: for an unmanaged gateway that answers, and
+// for one that does not.
+const (
+	restartYourself = "after a gateway change, restart this gateway yourself, the way you started it"
+	startYourself   = "start that OpenShell's gateway yourself, the way you started it before"
+)
+
+// gatewayVersionFix is the fix of a gateway that answers with an
+// unsupported OpenShell release, or another one than the CLI's. install
+// (installOpenShellCommand) is it only where NVIDIA's installer would run:
+// with no CLI, or one it upgrades. A supported CLI DefenseClaw's install
+// step finds, and installs nothing (Installer.Install), so the gateway
+// that answers is not the one that CLI's install runs: the gateway service
+// is restarted, so that it runs the gateway installed with the CLI, which
+// is automatic only where that service runs the gateway, and only once for
+// these releases: after a restart that left them (releaseRestarted), the
+// service runs another OpenShell's gateway (otherOpenShellFix). Without
+// the service, the gateway of an OpenShell installed another way is the
+// user's to replace (unmanagedFix).
+func (r *doctorRun) gatewayVersionFix(install *Fix) *Fix {
+	if r.cli == (Version{}) || CheckSupported(r.cli) != nil {
+		return install
+	}
+	release := gatewayRelease(r.gateway)
+	answers := "the gateway that answers runs " + describeRelease(release) + ", not the OpenShell " + r.cli.String() +
+		" installed here, so installing OpenShell would change nothing"
+	service := r.serviceName()
+	switch {
+	case r.serviceMissing() && r.report.GatewayUnmanaged():
+		return r.unmanagedFix(answers + ": stop that gateway, then start the OpenShell " + r.cli.String() + " one yourself")
+	case r.service != nil && r.service.Installed && r.service.Active && r.releaseRestarted(release):
+		return r.otherOpenShellFix(release)
+	case r.service != nil && r.service.Installed && r.service.Active:
+		return &Fix{Summary: answers + ": restart " + service + " so it runs the gateway installed with the CLI",
+			Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.restartOnCLIRelease}
+	case r.service != nil && r.service.Installed:
+		// The service is stopped: something else runs that gateway, and
+		// the service's would not get its port.
+		return &Fix{Summary: answers + ", and " + service + " is stopped, so something else runs that gateway: stop it, then start the service",
+			Command: r.startCommand().String()}
+	}
+	return &Fix{Summary: answers + ": stop that gateway, then start the OpenShell " + r.cli.String() + " gateway"}
+}
+
+// stoppedServiceAnswers gives the Gateway service check of an installed
+// service that is stopped while a healthy gateway answers anyway its way
+// on: something else runs that gateway, whose port the service's would
+// not get, and the start's wait would take the other gateway for the
+// started one and call the fix done. It runs after checkGateway, which
+// asks the gateway.
+func (r *doctorRun) stoppedServiceAnswers() {
+	c := r.report.Get(CheckIDGatewayService)
+	if c == nil || c.Status != StatusFail || r.service == nil || !r.service.Installed || r.service.Active ||
+		r.gateway == nil || !r.gateway.Healthy || r.reg == nil {
+		return
+	}
+	c.Fix = &Fix{Summary: r.serviceName() + " is stopped, but a gateway answers at " + r.reg.Endpoint +
+		": something else runs it, and the service's gateway would not get its port. Stop that gateway, then start the service",
+		Command: r.startCommand().String()}
+}
+
+// serviceName names the gateway service DefenseClaw starts and restarts
+// the gateway through.
+func (r *doctorRun) serviceName() string {
+	if r.GOOS == "darwin" {
+		return "Homebrew's " + GatewayFormula + " service"
+	}
+	return "the " + GatewayService + " user service"
+}
+
+// gatewayRelease is the release a gateway answers with: its version, else
+// the raw one it reported.
+func gatewayRelease(h *GatewayHealth) string {
+	if h.Version != (Version{}) {
+		return h.Version.String()
+	}
+	return h.RawVersion
+}
+
+// describeRelease names a gatewayRelease: "OpenShell 0.0.40", or an
+// unrecognized one quoted.
+func describeRelease(release string) string {
+	if v, err := ParseVersion(release); err == nil {
+		return "OpenShell " + v.String()
+	}
+	return "an unrecognized OpenShell release (" + strconv.Quote(release) + ")"
+}
+
+// otherOpenShellFix is the way on once a restart of the gateway service
+// left a gateway of release, another than the supported CLI's: the service
+// runs another OpenShell's gateway, which another restart would not
+// change, and the install does not replace while the CLI is found
+// (Installer.Install). That other OpenShell goes first, its gateway
+// stopped, since removing its files leaves the running one answering;
+// without it setup says what comes next.
+func (r *doctorRun) otherOpenShellFix(release string) *Fix {
+	return &Fix{Summary: r.serviceName() + " runs another OpenShell's gateway: restarted, it still answers with " + describeRelease(release) +
+		", not the OpenShell " + r.cli.String() + " of the CLI at " + r.report.CLIPath +
+		". Stop that gateway (`" + r.stopCommand().String() + "`) and remove that other OpenShell, then install OpenShell " + SupportedMin,
+		Command: installOpenShellCommand}
+}
+
+// stopCommand stops the gateway service.
+func (r *doctorRun) stopCommand() serviceCommand {
+	if r.GOOS == "darwin" {
+		return serviceCommand{"brew", []string{"services", "stop", GatewayFormula}}
+	}
+	return serviceCommand{"systemctl", []string{"--user", "stop", GatewayService}}
+}
+
+// restartOnCLIRelease restarts the gateway service (gatewayVersionFix) and
+// asks the restarted gateway its release. When it is still not the CLI's,
+// the service runs another OpenShell's gateway: the error is that way on
+// (otherOpenShellFix), and the restart is recorded so the doctor does not
+// offer it again for these releases (releaseRestarted). The restart's
+// wait (WaitForGateway) fails at once on an unsupported release, which is
+// that answer too; one that could not restart the gateway (the service
+// manager refused, or the sandboxes could not be flushed) tells nothing.
+func (r *doctorRun) restartOnCLIRelease(ctx context.Context) error {
+	err := r.Gateway.Restart(ctx)
+	if errors.Is(err, errRestartCommand) || errors.Is(err, ErrUnflushed) {
+		return err
+	}
+	var release string
+	var unsupported *ErrUnsupportedVersion
+	if errors.As(err, &unsupported) {
+		release = unsupported.Found.String()
+	} else {
+		h, herr := r.healthNow(ctx)
+		switch {
+		case herr != nil && err == nil:
+			return herr
+		case herr != nil || !h.Healthy:
+			return err
+		case h.Version.Compare(r.cli) == 0:
+			if err == nil {
+				r.forgetReleaseRestart()
+			}
+			return err
+		}
+		release = gatewayRelease(h)
+	}
+	r.recordReleaseRestart(release)
+	fix := r.otherOpenShellFix(release)
+	return fmt.Errorf("%s with `%s`", fix.Summary, fix.Command)
+}
+
+// healthNow asks the gateway of the registration the doctor checked.
+func (r *doctorRun) healthNow(ctx context.Context) (*GatewayHealth, error) {
+	client, err := r.Dial(r.reg)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	return client.Health(ctx)
+}
+
+// releaseRestart is a restart of the gateway service that left a gateway
+// of Gateway's release, not the CLI's (restartOnCLIRelease), recorded in
+// the gateway's configuration directory (releaseRestartFile).
+type releaseRestart struct {
+	Gateway string `json:"gateway"`
+	CLI     string `json:"cli"`
+	CLIPath string `json:"cli_path"`
+}
+
+func (r *doctorRun) releaseRestartPath() (string, error) {
+	if err := r.Gateway.defaults(); err != nil {
+		return "", err
+	}
+	return filepath.Join(r.Gateway.Dir, releaseRestartFile), nil
+}
+
+// releaseRestarted reports a restart recorded for a gateway of release
+// and this CLI: restarting again would bring the same gateway back. A
+// release or CLI that changed since (an OpenShell removed or installed)
+// is another mismatch, whose restart is offered again, and a gateway
+// that stopped answering, or answers with the CLI's release, ends the
+// record (checkGateway): a later mismatch gets one restart again.
+func (r *doctorRun) releaseRestarted(release string) bool {
+	path, err := r.releaseRestartPath()
+	if err != nil {
+		return false
+	}
+	data, err := safefile.ReadRegularFileBounded(path, 4<<10)
+	var got releaseRestart
+	if err != nil || json.Unmarshal(data, &got) != nil {
+		return false
+	}
+	return got == releaseRestart{Gateway: release, CLI: r.cli.String(), CLIPath: r.report.CLIPath}
+}
+
+func (r *doctorRun) recordReleaseRestart(release string) {
+	path, err := r.releaseRestartPath()
+	if err != nil {
+		return
+	}
+	data, err := json.Marshal(releaseRestart{Gateway: release, CLI: r.cli.String(), CLIPath: r.report.CLIPath})
+	if err != nil || os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	_ = safefile.Write(path, append(data, '\n'))
+}
+
+func (r *doctorRun) forgetReleaseRestart() {
+	if path, err := r.releaseRestartPath(); err == nil {
+		_ = os.Remove(path)
+	}
+}
+
+// nothingToRestart reports no gateway service and no gateway answering:
+// no gateway runs to restart, and the configuration on disk is what the
+// one OpenShell's install starts loads.
+func (r *doctorRun) nothingToRestart() bool {
+	return r.serviceMissing() && (r.gateway == nil || !r.gateway.Healthy)
+}
+
+// takesEffectOnStart says when a gateway setting takes effect where no
+// gateway runs (nothingToRestart).
+const takesEffectOnStart = "it takes effect once the gateway is installed and started"
+
+// gatewayChangeFix is the fix of a gateway setting, which the gateway
+// loads when it starts: change is what to change, which apply writes
+// before it restarts the gateway, or "" (apply nil) when the configuration
+// on disk only needs loading; after ends the summary (a reason, or a
+// parenthesis). DefenseClaw restarts the gateway only through its service.
+// Without one (serviceMissing) the fix is the operator's, and says when
+// the change takes effect: once a gateway is installed and started where
+// none runs, or when the one run another way is restarted that way. It is
+// nil with no change and no gateway: there is nothing to do.
+func (r *doctorRun) gatewayChangeFix(change, after string, apply func(context.Context) error) *Fix {
+	end := func(s string) string {
+		switch {
+		case after == "":
+			return s
+		case change == "" && r.serviceMissing():
+			return s + ", " + after
+		}
+		return s + " " + after
+	}
+	switch {
+	case !r.serviceMissing() && change == "":
+		return &Fix{Summary: end("restart the gateway"), Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+	case !r.serviceMissing():
+		return &Fix{Summary: end(change + " and restart the gateway"), Automatic: true, RestartsGateway: true, Apply: apply}
+	case r.nothingToRestart() && change == "":
+		return nil
+	case r.nothingToRestart():
+		return &Fix{Summary: end(change) + "; " + takesEffectOnStart}
+	}
+	how := "restart the gateway the way you started it"
+	if change != "" {
+		how = change + ", then " + how
+	}
+	return &Fix{Summary: end(how) + "; DefenseClaw restarts it only through the " + r.service.Unit + " service, which is not installed"}
 }
 
 // credentialFailure reports an error from the gateway refusing
@@ -924,6 +1265,7 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 		c.Status, c.Detail, c.Fix = StatusFail, r.CLI+" is not on PATH", install
 		return
 	}
+	r.report.CLIPath = path
 	out, err := r.Runner.Output(ctx, Command{Name: path, Args: []string{"--version"}, Timeout: 30 * time.Second})
 	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
 	v, perr := VersionFromOutput(line)
@@ -934,6 +1276,11 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 	r.cli, r.report.CLIVersion = v, v.String()
 	if err := CheckSupported(v); err != nil {
 		c.Status, c.Detail, c.Fix = StatusFail, err.Error(), install
+		if v.Compare(mustParse(SupportedBelow)) >= 0 {
+			// Installer.Install refuses a newer CLI: it does not downgrade.
+			c.Fix = &Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell " + v.String() +
+				", then install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+		}
 		return
 	}
 	c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s", v, path)
@@ -1072,6 +1419,9 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		r.gateway, err = client.Health(ctx)
 	}
 	if err != nil || !r.gateway.Healthy {
+		if err == nil || !credentialFailure(err) {
+			r.forgetReleaseRestart()
+		}
 		version.Status = StatusFail
 		switch {
 		case err != nil && credentialFailure(err):
@@ -1091,13 +1441,16 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	r.report.GatewayVersion = r.gateway.RawVersion
 	if err := r.gateway.CheckVersion(); err != nil {
 		version.Status, version.Detail = StatusFail, err.Error()
-		version.Fix = &Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand})
 	} else if r.cli != (Version{}) && r.cli.Compare(r.gateway.Version) != 0 {
 		version.Status = StatusWarn
 		version.Detail = fmt.Sprintf("gateway %s but CLI %s; keep them on the same release", r.gateway.Version, r.cli)
-		version.Fix = &Fix{Summary: "reinstall OpenShell so the CLI and gateway match", Command: installOpenShellCommand}
+		version.Fix = r.gatewayVersionFix(&Fix{Summary: "reinstall OpenShell so the CLI and gateway match", Command: installOpenShellCommand})
 	} else {
 		version.Status, version.Detail = StatusPass, fmt.Sprintf("%s healthy at %s", r.gateway.Version, r.reg.Endpoint)
+		if r.cli != (Version{}) {
+			r.forgetReleaseRestart()
+		}
 	}
 
 	info, err := client.GatewayInfo(ctx)
@@ -1147,7 +1500,7 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		// what it started with.
 		c.Status = StatusWarn
 		c.Detail = fmt.Sprintf("%s, but its configuration selects vm (OpenShell MicroVM): the gateway has not been restarted since", r.running.Name)
-		c.Fix = &Fix{Summary: "restart the gateway to run sandboxes in MicroVMs", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+		c.Fix = r.gatewayChangeFix("", "to run sandboxes in MicroVMs", nil)
 	case mac && r.landlock == StatusFail:
 		c.Status = StatusFail
 		c.Detail = fmt.Sprintf("%s: the Linux VM Docker runs in has no usable Landlock, so no sandbox can start on it", r.running.Name)
@@ -1173,12 +1526,16 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
-	restart := &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+	if errors.Is(envErr, ErrNoGatewayService) {
+		// A gateway run another way: its environment is not known, and
+		// its settings are the files DefenseClaw reads.
+		env, envErr = nil, nil
+	}
 	if d, known := r.traits(); known && !d.HostMounts {
 		// Nothing to enable, and no reason to edit docker settings or
 		// restart the gateway for them.
 		mounts.Status, mounts.Detail = StatusSkip, d.MountRefusal+": every run works on a copy"
-		r.telemetryCheck(&tele, st, envErr)
+		r.telemetryCheck(ctx, &tele, st, envErr)
 		return
 	}
 	// Bind mounts reach any host path through the gateway's root Docker
@@ -1203,14 +1560,21 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		}
 		mounts.Detail = fmt.Sprintf("disabled in %s; only --copy sandboxes work", st.TOMLPath)
 		switch why := errors.Join(blocked, unverified); {
+		case why == nil && r.serviceMissing():
+			// A gateway run another way, which DefenseClaw cannot restart
+			// on the change: setup writes it, and its operator restarts it.
+			mounts.Fix = r.gatewayChangeFix("let sandboxes mount the project folder: `"+setupCommand+"` enables bind mounts in "+st.TOMLPath, "", nil)
 		case why == nil:
 			mounts.Fix = &Fix{Summary: "let sandboxes mount the project folder (edits gateway.toml with a backup and restarts the gateway)", Automatic: true,
 				RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{EnableBindMounts: true})}
 		default:
 			mounts.Fix = &Fix{Summary: "DefenseClaw enables bind mounts only on a gateway reachable by you alone over mTLS; fix this first: " + why.Error()}
 		}
+	case r.restartPending(ctx, st) && r.nothingToRestart():
+		mounts.Status, mounts.Detail = StatusPass, "enabled in "+st.TOMLPath+"; "+takesEffectOnStart
 	case r.restartPending(ctx, st):
-		mounts.Status, mounts.Detail, mounts.Fix = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed", restart
+		mounts.Status, mounts.Detail = StatusWarn, "enabled in "+st.TOMLPath+", but the gateway has not been restarted since it changed"
+		mounts.Fix = r.gatewayChangeFix("", "to load its changed configuration", nil)
 		if r.gatewayStartedAt(ctx).IsZero() {
 			// No start time known: DefenseClaw's mark says only that no
 			// restart of its own followed its change.
@@ -1218,17 +1582,29 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		}
 	case unverified != nil && r.gateway != nil && r.gateway.Healthy:
 		mounts.Status, mounts.Detail = StatusWarn, "enabled, but DefenseClaw could not confirm that only you can reach the gateway: "+unverified.Error()
+	case r.startUnknown(ctx):
+		// Setup writes the change for a gateway run another way, and its
+		// user restarts it: without its start, "enabled" may be only the
+		// file's.
+		mounts.Status, mounts.Detail = StatusWarn, "enabled in "+st.TOMLPath+", "+restartUnknown
+		mounts.Fix = r.gatewayChangeFix("", "if you have not since "+filepath.Base(st.TOMLPath)+" changed", nil)
 	default:
 		mounts.Status, mounts.Detail = StatusPass, "enabled for the docker driver"
 	}
-	r.telemetryCheck(&tele, st, envErr)
+	r.telemetryCheck(ctx, &tele, st, envErr)
 }
 
 // telemetryCheck compares OpenShell's usage telemetry with
-// openshell.upstream_telemetry.
-func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr error) {
+// openshell.upstream_telemetry. The setting is gateway.env's, which a
+// gateway no gateway service runs has loaded only once its user restarted
+// it after the file changed (manual).
+func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *GatewayConfigState, envErr error) {
 	on := st.TelemetryEnabled()
 	state := map[bool]string{true: "on", false: "off"}[on]
+	manual := st.EnvExists && r.serviceMissing() && !r.nothingToRestart()
+	// Only gateway.env holds the setting.
+	envOnly := *st
+	envOnly.TOMLModTime = time.Time{}
 	switch {
 	case r.GOOS == "darwin":
 		// The Homebrew service's wrapper sources gateway.env before it
@@ -1241,8 +1617,15 @@ func (r *doctorRun) telemetryCheck(tele *Check, st *GatewayConfigState, envErr e
 		want := strconv.FormatBool(*r.WantTelemetry)
 		tele.Status = StatusWarn
 		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
-		tele.Fix = &Fix{Summary: "set " + EnvTelemetryEnabled + "=" + want + " in gateway.env and restart the gateway", Automatic: true,
-			RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}})}
+		tele.Fix = r.gatewayChangeFix("set "+EnvTelemetryEnabled+"="+want+" in gateway.env", "",
+			r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}}))
+	case manual && r.restartPending(ctx, &envOnly):
+		tele.Status = StatusWarn
+		tele.Detail = "OpenShell usage telemetry is " + state + " in " + st.EnvPath + ", but the gateway has not been restarted since it changed"
+		tele.Fix = r.gatewayChangeFix("", "with the variables in "+filepath.Base(st.EnvPath)+" in its environment, to load them", nil)
+	case manual && r.startUnknown(ctx):
+		tele.Status, tele.Detail = StatusWarn, "OpenShell usage telemetry is "+state+" in "+st.EnvPath+", "+restartUnknown
+		tele.Fix = r.gatewayChangeFix("", "with the variables in "+filepath.Base(st.EnvPath)+" in its environment, if you have not since it changed", nil)
 	default:
 		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
 	}
@@ -1267,7 +1650,7 @@ func (r *doctorRun) bindMountSafety(ctx context.Context, st *GatewayConfigState,
 	if r.reg == nil || r.regErr != nil {
 		return nil, errors.New("the gateway registration is unusable")
 	}
-	if err := gatewayExposure(r.reg, st, env); err != nil {
+	if err := gatewayExposure(r.reg, st, env, r.serviceMissing()); err != nil {
 		return err, nil
 	}
 	if r.gateway == nil || !r.gateway.Healthy {
@@ -1317,26 +1700,23 @@ func restartPending(st *GatewayConfigState, started time.Time, approx bool) bool
 const psStartSlack = 2 * time.Second
 
 // gatewayStartedAt is when the running gateway started, to tell what
-// configuration it loaded: the service's start (systemd), else on a Mac the
-// start of the openshell-gateway process ps lists, which Homebrew's
+// configuration it loaded: the service's start (systemd), else the start
+// of this user's openshell-gateway process (gatewayPID), which Homebrew's
 // service does not report and a gateway run another way has no service
 // for. It is zero when neither is known.
 func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
 	if r.service != nil && !r.service.StartedAt.IsZero() {
 		return r.service.StartedAt
 	}
-	if r.GOOS != "darwin" {
-		return time.Time{}
-	}
 	if r.startedDone {
 		return r.started
 	}
 	r.startedDone = true
-	gw := r.gatewayProcess(ctx)
-	if gw == nil {
+	pid := r.gatewayPID(ctx)
+	if pid == 0 {
 		return time.Time{}
 	}
-	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-o", "etime=", "-p", strconv.Itoa(gw.pid)}, Timeout: 10 * time.Second})
+	out, err := r.Runner.Output(ctx, Command{Name: "ps", Args: []string{"-o", "etime=", "-p", strconv.Itoa(pid)}, Timeout: 10 * time.Second})
 	if err != nil {
 		return time.Time{}
 	}
@@ -1349,6 +1729,50 @@ func (r *doctorRun) gatewayStartedAt(ctx context.Context) time.Time {
 	r.started, r.startedApprox = time.Now().Add(-up-time.Second), true
 	return r.started
 }
+
+// gatewayPID is the process of this user's running openshell-gateway, or
+// 0: on a Mac the one ps lists (gatewayProcess), on Linux the first whose
+// command line pgrep matches (gatewayCommandLine). Linux's ps -o comm= is
+// the name cut to 15 characters, which processes cannot tell from another.
+func (r *doctorRun) gatewayPID(ctx context.Context) int {
+	switch r.GOOS {
+	case "darwin":
+		if gw := r.gatewayProcess(ctx); gw != nil {
+			return gw.pid
+		}
+		return 0
+	case "linux":
+	default:
+		return 0
+	}
+	out, err := r.Runner.Output(ctx, Command{Name: "pgrep", Args: []string{"-u", strconv.Itoa(r.Geteuid()), "-f", gatewayCommandLine},
+		Timeout: 10 * time.Second})
+	if err != nil {
+		return 0
+	}
+	first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+	pid, err := strconv.Atoi(strings.TrimSpace(first))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// gatewayCommandLine is the pattern pgrep -f finds a gateway's process by:
+// a command line whose first word is openshell-gateway, with its path or
+// without.
+const gatewayCommandLine = "^([^ ]*/)?" + GatewayBinary + "( |$)"
+
+// startUnknown reports a gateway that answers, which no gateway service
+// runs, and whose start DefenseClaw could not find (gatewayStartedAt):
+// whether its user restarted it on the configuration on disk is not
+// known.
+func (r *doctorRun) startUnknown(ctx context.Context) bool {
+	return r.serviceMissing() && !r.nothingToRestart() && r.gatewayStartedAt(ctx).IsZero()
+}
+
+// restartUnknown ends the detail of a gateway setting where startUnknown.
+const restartUnknown = "but DefenseClaw cannot tell whether the gateway was restarted on it: it found no start time for that gateway, which runs another way"
 
 // parseElapsed reads ps's etime, "[[dd-]hh:]mm:ss".
 func parseElapsed(s string) (time.Duration, bool) {

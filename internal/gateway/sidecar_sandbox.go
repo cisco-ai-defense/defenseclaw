@@ -234,6 +234,18 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		EgressUnblock: func(b sandboxauth.Binding, host string) (string, bool) {
 			return mgr.EgressUnblock(b.ID, b.SandboxName, host)
 		},
+		EgressRefusals: func(b sandboxauth.Binding) []SandboxEgressRefusal {
+			refused := mgr.EgressRefusals(b.ID, b.SandboxName)
+			if len(refused) == 0 {
+				return nil
+			}
+			out := make([]SandboxEgressRefusal, 0, len(refused))
+			for _, r := range refused {
+				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
+					Cut: r.Cut, Sent: r.Sent})
+			}
+			return out
+		},
 	}); err != nil {
 		return nil, err
 	}
@@ -242,6 +254,9 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		_ = api.SetSandboxIngress(SandboxIngressConfig{})
 		return nil, fmt.Errorf("egress policy: %w", err)
 	}
+	// The counter's threshold is only the default: each sandbox's proxy
+	// credential carries its resolved policy's threshold and large-upload
+	// block (egress.block_large_uploads), so no block is set counter-wide.
 	proxy, err := egress.New(egress.Options{
 		Auth: mgr.EgressAuthenticator(), Decider: decider, Sink: mgr.EgressSink(),
 		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),

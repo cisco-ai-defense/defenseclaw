@@ -163,8 +163,12 @@ These are the settings each pack controls. The
   the only ports a connection request can open.
 - **Large-upload alert** (`egress.large_upload_mb`): report an upload of more
   than this many MiB to a host the sandbox hasn't contacted before. `0` turns
-  the report off. The upload itself is not cut off; see
-  [Large-upload alert](#large-upload-alert-threshold).
+  the report off. The upload itself is not cut off unless the pack blocks
+  large uploads; see [Large-upload alert](#large-upload-alert-threshold).
+- **Large-upload block** (`egress.block_large_uploads`): also cut that upload
+  and refuse later requests to the host, until you unblock it. Off unless
+  the pack, `openshell.egress.block_large_uploads`, or your organization turns
+  it on.
 - **Workspace mode** (`workspace.mode`): `mount` shares the project folder
   live. `copy` gives the agent a copy, and its changes come back as a patch or
   branch.
@@ -350,6 +354,7 @@ added. Copy the registry and source hosts you need from
 | `egress.allow` | No | `[]` | Host patterns, but never one that covers a whole top-level domain such as `*.com` or `*.co.uk`, or an address range wider than `/8` (IPv4) or `/16` (IPv6). At most 1024. |
 | `egress.ports` | No | `[80, 443]` | Ports 1–65535; duplicates are dropped. At least one unless `network.mode` is `deny`; a `deny` pack that lists none gets 80 and 443 when a profile turns the proxy on. At most 64. |
 | `egress.large_upload_mb` | No | `25` | 0–1048576; `0` turns the report off. |
+| `egress.block_large_uploads` | No | `false` | `true` also cuts the upload that crosses `large_upload_mb` and refuses later requests to that host until it is unblocked. With `large_upload_mb: 0` there is no report to act on, so the block is off. |
 | `workspace.mode` | Yes | | `mount` or `copy`. |
 | `workspace.masks` | No | `[]` | Project globs. At most 1024. |
 | `workspace.unmask` | No | `[]` | Project globs. At most 1024. |
@@ -501,8 +506,10 @@ unset follows the pack. Some settings merge instead of replacing:
 
 The size keys `openshell.workdir.max_upload_mb` and
 `openshell.egress.large_upload_mb` replace the pack's value when they are above
-0. `openshell.workdir.git_depth` and `openshell.workdir.on_exit` are not part of
-a pack.
+0. `openshell.egress.block_large_uploads: true` turns the large-upload block on
+over any pack; `false` (the default) follows the pack, so it can't turn a
+pack's block off. `openshell.workdir.git_depth` and `openshell.workdir.on_exit`
+are not part of a pack.
 
 ### Large-upload alert threshold
 
@@ -515,6 +522,43 @@ traffic doesn't pass the proxy, so there is nothing to report.) A change to
 either key reaches running sandboxes on the next config reload, with the
 rest of their egress policy. The report is an activity event and a finding;
 the upload itself is not cut off.
+
+To cut it off, turn on the large-upload block:
+
+```yaml
+openshell:
+  egress:
+    large_upload_mb: 10
+    block_large_uploads: true
+```
+
+With the block on, DefenseClaw stops the upload before the chunk that would
+take it past the threshold, and refuses the sandbox's later connections to
+that host (and to other new hosts under the same domain or at the same
+address, so rotating names doesn't get around it). The activity feed shows a
+✗ with the threshold:
+
+```
+✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)  → unblock: defenseclaw sandbox unblock files.example.net --sandbox myapp-claude-7f3a
+```
+
+A later request there, which may send nothing (a `GET`), is refused with
+``this destination is blocked since this sandbox tried to send more than 10
+MiB to it, a destination it had not contacted before``.
+
+The finding is HIGH, and the egress audit records the cut as blocked
+(`SANDBOX_EGRESS_LARGE_UPLOAD`). Hosts you unblocked, hosts on an allow list
+you or your administrator wrote (`openshell.egress.allow`, a custom pack's
+`egress.allow`, `openshell.admin.egress_allow_only`), and hosts you unblock
+after the cut are exempt: uploads there are only reported. The balanced
+pack's curated allowlist doesn't exempt a host, so with the block on, a first
+push or package publish of more than the threshold to `github.com` or
+`registry.npmjs.org` is cut too. Add such hosts to `openshell.egress.allow`
+before turning the block on, or unblock them for the sandbox when the cut
+happens. The count starts again when the DefenseClaw daemon restarts.
+`sandbox policy explain` shows `egress.block_large_uploads` and where it
+came from, and `openshell.admin.block_large_uploads` turns the block on for
+every sandbox.
 
 Because `openshell.profile` replaces the pack's profile, it can loosen a pack
 as well as tighten it. For example, `profile: open` on the `strict` pack turns
@@ -629,6 +673,7 @@ openshell:
     allowed_harnesses: []      # only these harnesses may run; empty allows all
     egress_block: []           # host globs that are always blocked (a name covers its subdomains)
     egress_allow_only: []      # the only host globs any sandbox may reach
+    block_large_uploads: false # true: every sandbox's large uploads to new hosts are cut
     require_copy_for: []       # project path globs that must run in copy mode
     max_resources:             # ceilings for every sandbox
       cpu: ""                  # "2", "1.5", or "500m"
@@ -789,6 +834,28 @@ openshell:
       - github.com
       - codeload.github.com
       - artifacts.example.com
+```
+
+### `block_large_uploads`
+
+`block_large_uploads: true` turns the
+[large-upload block](#large-upload-alert-threshold) on for every sandbox,
+whatever its pack and the user's `openshell.egress.block_large_uploads` say:
+an upload of more than the sandbox's threshold to a host it hadn't contacted
+before is cut, and later requests there are refused. It also keeps the report
+the block acts on: a pack with `large_upload_mb: 0` gets the default 25 MiB
+threshold, a threshold above 25 MiB (a pack's or the user's
+`openshell.egress.large_upload_mb`) is lowered to 25 MiB, or to the
+`required_pack`'s own threshold when that is higher, and a user who chose
+such a pack or value is told. Users can still lift the
+block for one host with `defenseclaw sandbox unblock`, unless
+`allow_unblock` is `false`. Hosts on `egress_allow_only` are exempt. `false`,
+or leaving it out, adds no limit.
+
+```yaml
+openshell:
+  admin:
+    block_large_uploads: true
 ```
 
 ### `require_copy_for`

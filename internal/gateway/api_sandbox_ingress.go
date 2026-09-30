@@ -148,6 +148,13 @@ type SandboxIngressConfig struct {
 	// hosts it reports is an allow (liftUnblockedDestinations). Nil lifts
 	// nothing. It runs on the request goroutine and must not block.
 	EgressUnblock func(binding sandboxauth.Binding, host string) (scope string, ok bool)
+	// EgressRefusals returns the destinations the sandbox's egress proxy
+	// refused a CONNECT to shortly before, that its agent has not been told
+	// of, and marks them told. The post-tool hook of a shell or fetch tool
+	// call adds them to its context (addSandboxEgressRefusals): the 403
+	// body of a refused CONNECT never reaches the agent. Nil tells nothing.
+	// It runs on the request goroutine and must not block.
+	EgressRefusals func(binding sandboxauth.Binding) []SandboxEgressRefusal
 	// OnHookFailure observes every authenticated hook or inspect post the
 	// ingress answered with a status outside 2xx. Sandbox hooks fail closed
 	// on such an answer, so the harness did not do what the hook was about.
@@ -218,6 +225,9 @@ type sandboxIngressState struct {
 	// egressUnblock is the manager's unblock lookup
 	// (SandboxIngressConfig.EgressUnblock).
 	egressUnblock func(sandboxauth.Binding, string) (string, bool)
+	// egressRefusals is the manager's refusal lookup
+	// (SandboxIngressConfig.EgressRefusals).
+	egressRefusals func(sandboxauth.Binding) []SandboxEgressRefusal
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -266,6 +276,7 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		onListening:    cfg.OnListening,
 		onHookFailure:  cfg.OnHookFailure,
 		egressUnblock:  cfg.EgressUnblock,
+		egressRefusals: cfg.EgressRefusals,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())

@@ -270,6 +270,23 @@ func (a *APIServer) applySandboxVerdictReason(
 	if !sandboxHookForConnector(ctx, connectorName) {
 		return resp
 	}
+	resp = a.sandboxVerdictWithReason(ctx, profile, connectorName, req, rawBody, payload, resp)
+	// The destinations the sandbox's egress proxy just refused, which the
+	// tool could not see the reason for (#954).
+	return a.addSandboxEgressRefusals(ctx, profile, connectorName, req, rawBody, payload, resp)
+}
+
+// sandboxVerdictWithReason is applySandboxVerdictReason for a sandbox
+// request, before the egress refusals.
+func (a *APIServer) sandboxVerdictWithReason(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) agentHookResponse {
 	// A verdict of destination rules alone, for destinations the user
 	// unblocked for this sandbox, is an allow: the proxy lets the sandbox
 	// reach them (#954).
@@ -356,30 +373,54 @@ func (a *APIServer) renderSandboxVerdict(
 ) agentHookResponse {
 	resp.SourceReason = hookSourceReason(resp)
 	resp.Reason = plain
+	var cc *claudeCodeHookRequest
 	switch profile.Name {
 	case "claudecode":
-		cc := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+		decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+		cc = &decoded
 		resp.AdditionalContext = claudeCodeAdditionalContext(
-			resp.RawAction, resp.Severity, plain, resp.WouldBlock && claudeCodeCanEnforce(cc),
+			resp.RawAction, resp.Severity, plain, resp.WouldBlock && claudeCodeCanEnforce(decoded),
 		)
-		resp.HookOutput = claudeCodeOutput(cc, resp.Action, resp.RawAction, plain, resp.AdditionalContext)
 	case "codex":
 		resp.AdditionalContext = codexAdditionalContext(resp.RawAction, resp.Severity, plain, resp.Mode, resp.WouldBlock)
+	default:
+		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
+	}
+	resp.HookOutput = sandboxHookOutput(ctx, profile, req, rawBody, payload, cc, resp)
+	return resp
+}
+
+// sandboxHookOutput renders the harness output of a sandbox verdict from
+// its action, reason and additional context. cc is the Claude Code request
+// when the caller decoded it already.
+func sandboxHookOutput(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	cc *claudeCodeHookRequest,
+	resp agentHookResponse,
+) map[string]interface{} {
+	switch profile.Name {
+	case "claudecode":
+		if cc == nil {
+			decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+			cc = &decoded
+		}
+		return claudeCodeOutput(*cc, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+	case "codex":
 		outputRawAction := resp.RawAction
 		if resp.Mode != "action" && resp.AdditionalContext == "" {
 			outputRawAction = resp.Action
 		}
-		resp.HookOutput = codexOutput(req.HookEventName, resp.Action, outputRawAction, plain, resp.AdditionalContext)
-	default:
-		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
-		if profile.Respond != nil {
-			resp.HookOutput = profile.Respond(connector.HookRespondInput{
-				Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,
-				Reason: plain, AdditionalContext: resp.AdditionalContext, Caps: profile.Capabilities,
-			}).Output
-		} else {
-			resp.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
-		}
+		return codexOutput(req.HookEventName, resp.Action, outputRawAction, resp.Reason, resp.AdditionalContext)
 	}
-	return resp
+	if profile.Respond != nil {
+		return profile.Respond(connector.HookRespondInput{
+			Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,
+			Reason: resp.Reason, AdditionalContext: resp.AdditionalContext, Caps: profile.Capabilities,
+		}).Output
+	}
+	return hookOutputFor(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext, profile.Capabilities)
 }

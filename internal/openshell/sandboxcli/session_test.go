@@ -20,6 +20,7 @@ package sandboxcli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -41,8 +42,7 @@ import (
 // as the next session's base.
 func unaccepted(t *testing.T, ta *testApp, name string) {
 	t.Helper()
-	dir, _ := ta.cliStateDir(name)
-	if _, err := os.Stat(filepath.Join(dir, "accepted.json")); err == nil {
+	if ta.calls("POST", name+"/accept") != 0 {
 		t.Fatal("changes nobody may accept yet were accepted as the next session's base")
 	}
 }
@@ -283,9 +283,14 @@ func TestHeadlessSessionOnATerminalAsksToKeepChanges(t *testing.T) {
 			if asked := strings.Contains(ta.output(), "Keep changes?"); asked != tty || len(ta.term.runs) != 0 {
 				t.Fatalf("asked = %v, terminal runs %d:\n%s", asked, len(ta.term.runs), ta.output())
 			}
+			if accepts := ta.bodies("POST", "m1-a/accept"); len(accepts) != map[bool]int{true: 1, false: 0}[tty] ||
+				(tty && !strings.Contains(accepts[0], `"snapshot_created_at":"`)) {
+				t.Fatalf("accepts = %q; the changes must be accepted against the reviewed snapshot: %t", accepts, tty)
+			}
 			ta.ok(t, ta.Start(bg, "m1-a", StartOptions{}))
-			if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || strings.Contains(starts[1], `"new_snapshot":true`) != tty {
-				t.Fatalf("starts = %q; the second must ask for a new snapshot: %t", starts, tty)
+			// The daemon takes the new snapshot of accepted changes itself.
+			if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
+				t.Fatalf("starts = %q", starts)
 			}
 		})
 	}
@@ -338,7 +343,10 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 	stderr := liveErr(ta)
 	noChanges(ta)
 	ta.daemon.live = []sandboxapi.ActivityEvent{
-		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 443, Category: "webhook_catcher", Unblockable: true},
+		// The block holds the host on every port: the notice, once per
+		// host, said "webhook.site:80" after a plain-HTTP request came
+		// first, though HTTPS was blocked too (PR 1022 review of N3).
+		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 80, Category: "webhook_catcher", Unblockable: true},
 		{Seq: 2, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "webhook.site", Port: 443, Category: "webhook_catcher", Unblockable: true},
 		{Seq: 3, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "raw.githubusercontent.com", Reason: harnessFetchReason},
 		{Seq: 4, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "HIGH", Reason: "tool_alert", Host: "webhook.site",
@@ -346,20 +354,107 @@ func TestBlocksAndFindingsAreAnnouncedAndSummarised(t *testing.T) {
 		{Seq: 5, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "HIGH", Reason: reasonHookTamper,
 			Message: "⚠ hook tamper: Bash ran without a DefenseClaw verdict; the sandbox keeps running (hooks.on_tamper: alert)"},
 		{Seq: 6, Kind: sandboxapi.ActivityFinding, Sandbox: sbName, Severity: "INFO", Reason: "note", Message: "nothing to see"},
+		{Seq: 7, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "files.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
+			Reason: "This sandbox tried to send more than 10 MiB to a destination it had not contacted before.", Unblockable: true, BytesUp: 10 << 20},
+		// A request the block refused after a cut before the session sent
+		// nothing: not "a large upload" (RT U5).
+		{Seq: 8, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "cut.example.net", Port: 443, Category: sandboxapi.CategoryLargeUpload,
+			Reason:      "This destination is blocked since this sandbox tried to send more than 10 MiB to it, a destination it had not contacted before.",
+			Unblockable: true},
+		// A large upload only the report saw (the block off): the summary
+		// listed the ⚠ rule finding but not this ⚠ (PR 1022 live retest
+		// N2). Once per host.
+		{Seq: 9, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "httpbin.io", Port: 80, BytesUp: 1<<20 + 512, Threshold: 1 << 20},
+		{Seq: 10, Kind: sandboxapi.ActivityEgressLargeUpload, Sandbox: sbName, Host: "HTTPBIN.io", Port: 443, BytesUp: 1<<20 + 9, Threshold: 1 << 20},
+		// A port the proxy does not carry is what is blocked: it shows.
+		{Seq: 11, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "example.org", Port: 8443, Category: "port_not_allowed"},
+		// So does a closed port on this machine, whose alias keeps its
+		// other ports, and an OpenShell denial, which is per host and port:
+		// the notice said "blocked host.openshell.internal", and a second
+		// closed port went unannounced (PR 1022 review of fix 4).
+		{Seq: 12, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 5432, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 13, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 6379, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 14, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "db.example.net", Port: 6379, Source: sandboxapi.SourceOpenShell,
+			Reason: "transparent_tcp_mapping_denied"},
+		// Port 443 is named too when the port is what is blocked; a triage
+		// rejection of an OpenShell proposal carries the proxy's host-wide
+		// category, so it names the host (PR 1022 final review).
+		{Seq: 15, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "host.openshell.internal", Port: 443, Reason: sandboxapi.ReasonHostPortClosed},
+		{Seq: 16, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "paste.example.net", Port: 80, Source: sandboxapi.SourceOpenShell,
+			Category: "blocklisted", Unblockable: true},
 	}
+	large := "⚠ large upload to httpbin.io (more than 1 MiB)"
+	port := "✗ DefenseClaw blocked example.org:8443 (port not allowed)"
 	block := "✗ DefenseClaw blocked webhook.site (webhook catcher) → unblock: defenseclaw sandbox unblock webhook.site --sandbox " + sbName
+	upload := "✗ DefenseClaw blocked a large upload to files.example.net (this sandbox tried to send more than 10 MiB to a destination it had not " +
+		"contacted before) → unblock: defenseclaw sandbox unblock files.example.net --sandbox " + sbName
+	refused := "✗ DefenseClaw blocked cut.example.net (this destination is blocked since this sandbox tried to send more than 10 MiB to it, " +
+		"a destination it had not contacted before) → unblock: defenseclaw sandbox unblock cut.example.net --sandbox " + sbName
 	ta.term.during = func() {
-		waitFor(t, "the tamper notice", func() bool { return strings.Contains(stderr.String(), "hook tamper") })
+		waitFor(t, "the last notice", func() bool { return strings.Contains(stderr.String(), "paste.example.net") })
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
 	live := stderr.String()
-	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") {
+	for _, where := range []string{"host.openshell.internal:5432", "host.openshell.internal:6379", "db.example.net:6379", "host.openshell.internal:443",
+		"paste.example.net (blocklisted)"} {
+		if !strings.Contains(live, "✗ DefenseClaw blocked "+where) {
+			t.Errorf("no notice names %s:\n%q", where, live)
+		}
+	}
+	if strings.Contains(live, "paste.example.net:80") {
+		t.Errorf("a host-wide triage rejection names the first request's port:\n%q", live)
+	}
+	if strings.Count(live, "\x1b]9;DefenseClaw: "+block+"\a") != 1 || strings.Contains(live, "raw.githubusercontent.com") || strings.Contains(live, "nothing to see") ||
+		strings.Count(live, "\x1b]9;DefenseClaw: "+large+"\a") != 1 || strings.Contains(live, "HTTPBIN.io") ||
+		strings.Count(live, "\x1b]9;DefenseClaw: "+port+"\a") != 1 {
 		t.Fatalf("live output = %q", live)
 	}
-	has(t, ta.output(), block, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict")
+	has(t, ta.output(), block, upload, refused, "⚠ webhook.site: alert on Bash: known exfil destination (C2-WEBHOOK-SITE)", "⚠ hook tamper: Bash ran without a DefenseClaw verdict",
+		large+"\n")
+	if out := ta.output(); strings.Count(out, "large upload to httpbin.io") != 1 || strings.Contains(out, "HTTPBIN.io") {
+		t.Errorf("the large upload is summarised once:\n%s", out)
+	}
+	if out := ta.output() + live; strings.Contains(out, "webhook.site:80") || strings.Contains(out, "httpbin.io:80") {
+		t.Errorf("a notice once per host names the first request's port:\n%s", out)
+	}
 	if out := ta.output(); strings.Index(out, "Session ended") > strings.Index(out, block) {
 		t.Errorf("the notices come before the summary line:\n%s", out)
 	}
+}
+
+// RT U6: the summary offered "→ unblock" for webhook.site and httpbin.org,
+// which were unblocked earlier in the session. A host unblocked for the
+// sandbox since its block is summarised without the command, and one
+// blocked again after that keeps it.
+func TestTheSummaryOffersNoUnblockOfAHostUnblockedSince(t *testing.T) {
+	ta := newTestApp(t, "")
+	stderr := liveErr(ta)
+	noChanges(ta)
+	blocked := func(seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Seq: seq, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: host, Port: 443,
+			Category: "webhook_catcher", Unblockable: true}
+	}
+	unblocked := func(seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Seq: seq, Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: sbName, Host: host, Reason: "sandbox",
+			Message: "unblocked " + host + " for sandbox " + sbName}
+	}
+	ta.daemon.live = []sandboxapi.ActivityEvent{
+		blocked(1, "webhook.site"), blocked(2, "Hooks.Example.COM"), blocked(3, "again.example.com"), blocked(4, "still.example.com"),
+		unblocked(5, "webhook.site"), unblocked(6, "hooks.example.com"), unblocked(7, "again.example.com"), blocked(8, "again.example.com"),
+		blocked(9, "last.example.com"),
+	}
+	ta.term.during = func() {
+		waitFor(t, "the last block", func() bool { return strings.Contains(stderr.String(), "last.example.com") })
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	cmd := func(host string) string {
+		return " → unblock: defenseclaw sandbox unblock " + host + " --sandbox " + sbName
+	}
+	has(t, ta.output(), "✗ DefenseClaw blocked webhook.site (webhook catcher); unblocked since\n",
+		"✗ DefenseClaw blocked Hooks.Example.COM (webhook catcher); unblocked since\n",
+		"✗ DefenseClaw blocked again.example.com (webhook catcher)"+cmd("again.example.com")+"\n",
+		"✗ DefenseClaw blocked still.example.com (webhook catcher)"+cmd("still.example.com")+"\n")
+	lacks(t, ta.output(), cmd("webhook.site"), cmd("Hooks.Example.COM"))
 }
 
 // Manual R2-2: while the daemon does not answer, the run says so (the hooks
@@ -493,7 +588,22 @@ func TestSessionSummary(t *testing.T) {
 					sb.Egress = sandboxapi.EgressStats{Destinations: 2}
 				})
 			}
-		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted"}, not: []string{"hooks are not reaching"}},
+		}, want: []string{"Session ended · 1 tool call since the daemon restarted · 2 new sites contacted since then"}, not: []string{"hooks are not reaching"}},
+		// PR 1022 live retest N1: the daemon restarted twice during the
+		// session, which left its counters at zero rather than below the
+		// session's start, and the summary read "0 tool calls · 0 new sites
+		// contacted" after 7 tool calls. Its start time says it restarted.
+		{name: "a daemon restart that left no counter lower", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(5 * time.Minute)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls since the daemon restarted at " + time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04") +
+			" · 0 new sites contacted since then"}},
+		{name: "a daemon started before the session", opts: claude, setup: noChanges, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.mu.Lock()
+			ta.daemon.status.StartedAt = ta.Now().Add(-time.Hour)
+			ta.daemon.mu.Unlock()
+		}, want: []string{"Session ended · 0 tool calls · 0 new sites contacted"}, not: []string{"restarted"}},
 		{name: "the harness failed before its hooks", opts: claude, exit: 1, setup: func(ta *testApp) {
 			noChanges(ta)
 			ta.term.hooks, ta.term.code = nil, 1
@@ -596,6 +706,27 @@ func TestSessionSummary(t *testing.T) {
 			}
 		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"}, not: []string{"+changed"},
 			check: func(t *testing.T, ta *testApp) { has(t, ta.err.String(), "+changed") }},
+		// The daemon could not record the acceptance: the undo point stays,
+		// and the line after the warning does not say otherwise.
+		{name: "keeping is not recorded", input: "y\n", opts: claude, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/accept"] = &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+				Message: "sandbox " + sbName + " has another undo point by now"}
+		}, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"could not record that you kept the changes", "✓ kept: the changes stay in the folder"},
+			not: []string{"the next session takes a new undo point"}},
+		// The accept names the snapshot and the session it reviewed: the
+		// daemon refuses it once another start came in between.
+		{name: "keeping names the reviewed session", input: "y\n", opts: claude, during: func(_ *testing.T, ta *testApp) {
+			ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Snapshot.CreatedAt = time.Now() })
+		}, want: []string{"✓ kept: the changes stay in the folder, and the next session takes a new undo point"},
+			check: func(t *testing.T, ta *testApp) {
+				var req sandboxapi.AcceptRequest
+				calls := ta.daemon.callsTo("POST", sandboxapi.PathSandboxes+"/"+sbName+"/accept")
+				if len(calls) != 1 || json.Unmarshal(calls[0].Body, &req) != nil || req.Session != 1 || req.Snapshot.IsZero() {
+					t.Fatalf("accept = %+v, want the reviewed snapshot and session 1", req)
+				}
+			}},
 		{name: "connect --shell", input: "y\n", do: func(ta *testApp) error { return ta.Connect(bg, ConnectOptions{Name: "r2c1-cp", Shell: true}) },
 			setup: func(ta *testApp) {
 				ta.term.hooks = nil
@@ -685,8 +816,46 @@ func TestSessionHookWarnings(t *testing.T) {
 			not:  []string{"hooks are not reaching"}, notLive: []string{"hooks are not reaching"}},
 		{name: "kiro the daemon found unreachable", opts: kiro, setup: quiet(0), exit: ExitHooksUnreachable,
 			during: unreachable("r2c1-kiro", "no hook request")},
+		// PR 1022 review of N1: a daemon restart during the session left
+		// the new daemon's counters at zero, and the session said none of
+		// its hooks reached DefenseClaw (Copilot CLI, after 7 allowed tool
+		// calls, without the continue line; Claude Code with
+		// ExitHooksUnreachable). That cannot be told.
+		{name: "a copilot session across a daemon restart", opts: RunOptions{Harness: "copilot"}, setup: func(ta *testApp) {
+			quiet(time.Hour)(ta)
+			ta.env["OPENAI_API_KEY"] = "sk-mock"
+		}, during: restartedAt(5 * time.Minute),
+			want: []string{"Session ended · 0 tool calls since the daemon restarted at " + restartClock, restartNote, "continue this conversation"},
+			not:  []string{"no hook of this session reached", "not reaching"}},
+		{name: "a claude session across a daemon restart", opts: RunOptions{Harness: "claude"}, setup: func(ta *testApp) {
+			quiet(10 * time.Millisecond)(ta)
+			restartedAt(5*time.Minute)(t, ta) // before the hook window ends
+		}, during: func(*testing.T, *testApp) { time.Sleep(50 * time.Millisecond) }, // past the window
+			want: []string{restartNote, "continue this conversation"}, not: []string{"not reaching"}, notLive: []string{"not reaching"}},
+		// The new daemon's own verdict still counts.
+		{name: "a daemon restart and the new daemon's verdict", opts: RunOptions{Harness: "claude"}, setup: quiet(time.Hour), exit: ExitHooksUnreachable,
+			during: func(t *testing.T, ta *testApp) {
+				restartedAt(5*time.Minute)(t, ta)
+				unreachable(sbName, "the hook token was refused")(t, ta)
+			}, want: []string{"✗ " + hooksWarningText("the hook token was refused")}, not: []string{"cannot tell"}},
 	})
 }
+
+// restartedAt makes the fake daemon one that started that long after the
+// session did (at 12:00): it restarted during the session.
+func restartedAt(after time.Duration) func(*testing.T, *testApp) {
+	return func(_ *testing.T, ta *testApp) {
+		ta.daemon.mu.Lock()
+		ta.daemon.status.StartedAt = ta.Now().Add(after)
+		ta.daemon.mu.Unlock()
+	}
+}
+
+var (
+	restartClock = time.Date(2026, 9, 27, 12, 5, 0, 0, time.UTC).Local().Format("15:04")
+	restartNote  = "the DefenseClaw daemon restarted during the session (at " + restartClock + ") and keeps no hook counts across a restart, " +
+		"so DefenseClaw cannot tell whether this session's hooks reached it"
+)
 
 // Manual R2-11: Ctrl-C at the keep/undo question does not end the process
 // silently: it says the changes stay and undo still reverts them, stops
@@ -711,7 +880,7 @@ func TestKeepQuestionCtrlCSaysWhatIsLeft(t *testing.T) {
 
 func TestLogsChecksTheRunsHooks(t *testing.T) {
 	started := time.Now().Add(-time.Minute)
-	exited := fmt.Sprintf("started=%d\nstate=exited\nexit=0\n", started.Unix())
+	exited := fmt.Sprintf("run_started=%d\nrun=exited\nrun_exit=0\n", started.Unix())
 	for _, c := range []struct {
 		name    string
 		status  string // the run-state script's answer
@@ -725,10 +894,10 @@ func TestLogsChecksTheRunsHooks(t *testing.T) {
 		{"never a hook, the daemon knows why", exited,
 			sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "OpenShell refused the hooks' connections"}, ExitHooksUnreachable,
 			"(OpenShell refused the hooks' connections). Run: defenseclaw sandbox doctor"},
-		{"run of an older version, no start", "started=\nstate=exited\nexit=0\n", sandboxapi.HookCoverage{}, ExitHooksUnreachable,
+		{"run of an older version, no start", "run_started=\nrun=exited\nrun_exit=0\n", sandboxapi.HookCoverage{}, ExitHooksUnreachable,
 			"every tool call is being blocked"},
-		{"run of an older version with hooks", "state=exited\nexit=0\n", sandboxapi.HookCoverage{HookRequests: 1, LastHookAt: time.Now()}, 0, ""},
-		{"still going, unreachable", "started=1\nstate=running\n", sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "no hook request"}, 0,
+		{"run of an older version with hooks", "run=exited\nrun_exit=0\n", sandboxapi.HookCoverage{HookRequests: 1, LastHookAt: time.Now()}, 0, ""},
+		{"still going, unreachable", "run_started=1\nrun=running\n", sandboxapi.HookCoverage{Unreachable: true, UnreachableReason: "no hook request"}, 0,
 			"every tool call is being blocked (no hook request)"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -754,22 +923,6 @@ func TestLogsChecksTheRunsHooks(t *testing.T) {
 				has(t, ta.output(), "DefenseClaw hooks are not reaching the daemon", c.warning)
 			}
 		})
-	}
-}
-
-func TestParseDetachedRun(t *testing.T) {
-	for in, want := range map[string]detachedRun{
-		"state=none\n":                          {State: runNone},
-		"started=1790000000\nstate=running\n":   {State: runRunning, Started: 1790000000},
-		"started=\nstate=exited\nexit=3\n":      {State: runExited, Exit: "3"},
-		"started=17\nstate=interrupted\n":       {State: runInterrupted, Started: 17},
-		" state=exited \n exit=0 \n garbage \n": {State: runExited, Exit: "0"},
-		"state=bogus\n":                         {State: runNone},
-		"":                                      {State: runNone},
-	} {
-		if got := parseDetachedRun(in); got != want {
-			t.Errorf("parseDetachedRun(%q) = %+v, want %+v", in, got, want)
-		}
 	}
 }
 
@@ -814,15 +967,15 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 		want               []string
 		detached           bool // no undo and no keep question under the run
 	}{
-		{name: "detached run going", phase: "ready", state: "started=1790000000\nstate=running\n", detached: true,
+		{name: "detached run going", phase: "ready", state: "run_started=1790000000\nrun=running\n", detached: true,
 			want: []string{"Sandbox m1-b keeps running: its detached run is still going", "logs m1-b -f",
 				"the detached run in m1-b is still going; review or undo once it ends"}},
-		{name: "detached run going, --rm", phase: "ready", state: "state=running\n", rm: true, detached: true,
+		{name: "detached run going, --rm", phase: "ready", state: "run=running\n", rm: true, detached: true,
 			want: []string{"m1-b is not deleted (--rm): its detached run is still going"}},
-		{name: "running, no run", phase: "ready", state: "state=none\n", want: []string{"Sandbox m1-b keeps running (it was running when you connected)",
+		{name: "running, no run", phase: "ready", state: "", want: []string{"Sandbox m1-b keeps running (it was running when you connected)",
 			"m1-b is still running (it was running when you connected); changes it makes after this point are not in this review",
 			"Keep changes?", "the undo point stays, since m1-b keeps running"}},
-		{name: "stopped before the session", phase: "stopped", state: "state=none\n", stops: 1,
+		{name: "stopped before the session", phase: "stopped", state: "", stops: 1,
 			want: []string{"Sandbox kept (stopped) → resume: defenseclaw sandbox connect m1-b"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -846,18 +999,22 @@ func TestConnectLeavesARunningSandboxRunning(t *testing.T) {
 }
 
 // `sandbox stop` on a sandbox whose detached run is still going asks first
-// on a terminal, marks the run interrupted and keeps its log on this
-// machine, where `sandbox logs` reads it once the sandbox is stopped (manual
-// test M1). Deleting the sandbox drops what the CLI kept of it.
+// on a terminal; the daemon's stop marks the run interrupted and keeps its
+// log on this machine, which `sandbox logs` reads once the sandbox is
+// stopped (manual test M1). The CLI no longer does either itself, so a stop
+// from the TUI, the macOS app or a tamper stop keeps it the same way.
 func TestStopWithALiveDetachedRun(t *testing.T) {
 	const log = "working on it\nstill working\n"
-	going := "started=1790000000\nstate=running\n"
+	going := "run_started=1790000000\nrun=running\n"
+	daemonKeeps := func(ta *testApp) {
+		ta.daemon.stopRunLogs["box"] = &sandboxapi.RunLog{State: sandboxapi.RunInterrupted, StartedAt: time.Unix(1790000000, 0), Log: log}
+	}
 	t.Run("declined", func(t *testing.T) {
 		ta := newTestApp(t, "n\n", sampleSandbox("box"))
 		runAnswers(ta, going, log)
 		ta.ok(t, ta.Stop(bg, StopOptions{Name: "box"}))
-		if ta.calls("POST", "box/stop") != 0 || ranScript(ta, runMarkScript) {
-			t.Fatal("the sandbox was stopped, or its run marked, although the user kept the run going")
+		if ta.calls("POST", "box/stop") != 0 {
+			t.Fatal("the sandbox was stopped although the user kept the run going")
 		}
 		has(t, ta.output(), "box's detached run (started ", "Stop anyway? [y/N]", "box keeps running")
 	})
@@ -872,59 +1029,83 @@ func TestStopWithALiveDetachedRun(t *testing.T) {
 			ta := newTestApp(t, c.in)
 			ta.IO.TTY = c.tty
 			ta.daemon.add(sampleSandbox("box"))
+			daemonKeeps(ta)
 			runAnswers(ta, going, log)
 			ta.ok(t, ta.Stop(bg, StopOptions{Name: "box", Yes: c.yes}))
-			if ta.calls("POST", "box/stop") != 1 || !ranScript(ta, runMarkScript) {
-				t.Fatal("the run was not marked interrupted and the sandbox stopped")
+			if ta.calls("POST", "box/stop") != 1 {
+				t.Fatal("the sandbox was not stopped")
+			}
+			if cmds := ta.stream.commands(); slices.ContainsFunc(cmds, func(c string) bool { return strings.Contains(c, `> "$d/latest.exit"`) }) {
+				t.Fatalf("the CLI marked the run itself (the daemon's stop does): %q", cmds)
 			}
 			has(t, ta.output(), "is still going; stopping the sandbox ends it")
 			if strings.Contains(ta.output(), "Stop anyway?") != c.asks {
 				t.Fatalf("asked = %t:\n%s", !c.asks, ta.output())
 			}
-			// Stopped, the kept log is what `logs` shows.
+			// Stopped, the daemon's kept log is what `logs` shows.
 			ta.out.Reset()
 			ta.stream.runs = nil
 			ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
-			has(t, ta.output(), "still working", "the log kept when it stopped", "the run did not finish")
+			// It says which run the log is of: the one that started then.
+			has(t, ta.output(), "still working", "the log of its detached run started "+ta.clock(time.Unix(1790000000, 0))+", kept when it stopped",
+				"the run did not finish")
 			lacks(t, ta.output(), "working on it")
 			if len(ta.stream.runs) != 0 {
 				t.Fatalf("logs of a stopped sandbox ran %q in it", ta.stream.commands())
 			}
-			dir, _ := ta.cliStateDir("box")
-			if _, err := os.Stat(filepath.Join(dir, "run.log")); err != nil {
-				t.Fatalf("kept log: %v", err)
-			}
-			ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"box"}, Yes: true}))
-			if _, err := os.Stat(dir); !os.IsNotExist(err) {
-				t.Fatalf("the kept state outlived the sandbox: %v", err)
+			if logs := ta.daemon.callsTo("GET", sandboxapi.PathSandboxes+"/box/logs"); len(logs) != 1 || logs[0].Query != "lines=1" {
+				t.Fatalf("logs calls = %+v", logs)
 			}
 		})
 	}
 }
 
-// A kept log belongs to one sandbox: a later sandbox of the same name does
-// not show it, and a stopped sandbox without one says how to read its log.
-// Without the kept marker, a run whose process is gone reads "did not
-// finish", not "still going".
+// A stopped sandbox without a kept log says how to read its log; a log an
+// earlier CLI kept on this machine (before the daemon kept them) is still
+// shown, said to be that CLI's, for its own sandbox only, and the daemon's
+// wins over it. Once the daemon has seen the sandbox start since (its
+// session count), every stop since was the daemon's: the earlier CLI's log
+// is older than the latest stop and is not shown as its log. Without the
+// kept marker, a run whose process is gone reads "did not finish", not
+// "still going".
 func TestLogsOfAStoppedSandbox(t *testing.T) {
 	ta := newTestApp(t, "")
 	sb := sampleSandbox("box")
-	ta.daemon.add(sb)
-	ta.ok(t, ta.saveRunLog(&sb, detachedRun{State: runExited, Exit: "0"}, []byte("done\n")))
-	sb.Phase, sb.ID = "stopped", "sb-another-box"
+	sb.Phase = "stopped"
 	ta.daemon.add(sb)
 	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept", "defenseclaw sandbox start box")
+	dir, _ := ta.cliStateDir("box")
+	writeFile(t, filepath.Join(dir, "run.json"), `{"state":"exited","exit":"0","sandbox_id":"sb-box","name":"box","saved_at":"2026-09-29T10:00:00Z"}`)
+	writeFile(t, filepath.Join(dir, "run.log"), "earlier\ndone\n")
+	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 1}))
+	has(t, ta.output(), "done", "the log an earlier DefenseClaw CLI kept when it stopped", "the run exited with status 0")
+	lacks(t, ta.output(), "earlier\n")
+	ta.out.Reset()
+	started := sb
+	started.Session = 1
+	ta.daemon.add(started)
+	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
+	ta.daemon.add(sb)
+	ta.out.Reset()
+	ta.daemon.runLogs["box"] = &sandboxapi.RunLog{Name: "box", State: sandboxapi.RunInterrupted, KeptAt: time.Now(), Log: "newer\n"}
+	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))
+	has(t, ta.output(), "newer", "the run did not finish")
+	lacks(t, ta.output(), "done")
+	delete(ta.daemon.runLogs, "box")
+	sb.ID = "sb-another-box"
+	ta.daemon.add(sb)
+	wantErr(t, ta.Logs(bg, LogsOptions{Name: "box"}), "no log of a detached run was kept")
 
 	ta = newTestApp(t, "")
 	ta.IO.TTY = false
 	ta.daemon.add(sampleSandbox("box"))
-	runAnswers(ta, "started=1790000000\nstate=interrupted\n", "partial\n")
+	runAnswers(ta, "run_started=1790000000\nrun=interrupted\n", "partial\n")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box"}))
 	has(t, ta.output(), "the run did not finish")
 	lacks(t, ta.output(), "still going")
 	// The pid check is the run-state script's; -f stops once the run is gone.
-	has(t, runStateScript, `kill -0 "$pid"`, "/proc/$pid/cmdline", "grep -q latest.exit", "state=interrupted")
-	has(t, runFollowScript, `while alive && [ ! -s "$d/latest.exit" ]`, `kill "$t"`)
+	has(t, runStateScript, `kill -0 "$rs_pid"`, "/proc/$rs_pid/cmdline", "grep -q latest.exit", "run=interrupted")
+	has(t, runFollowScript, `while run_alive "$d" && [ ! -s "$d/latest.exit" ]`, `kill "$t"`)
 }
 
 // A detached Claude Code run streams its events, which `logs` renders; a
@@ -993,11 +1174,15 @@ func TestResumeKeepsAnUnacceptedUndoPoint(t *testing.T) {
 	has(t, ta.output(), "kept the undo point from "+ta.clock(earlier),
 		"undo point from "+ta.clock(earlier)+" kept → `defenseclaw sandbox undo m1-a` reverts every session since")
 	lacks(t, ta.output(), "undo point taken")
-	// The user kept the changes: the next connect asks for a new snapshot.
+	// The user kept the changes, which the daemon records against the undo
+	// point they were reviewed against: its next start takes a new one.
+	if accepts := ta.bodies("POST", "m1-a/accept"); len(accepts) != 1 || !strings.Contains(accepts[0], `"snapshot_created_at":"2026-09-27T09:30:00Z"`) {
+		t.Fatalf("accepts = %q", accepts)
+	}
 	ta.out.Reset()
 	ta.daemon.edit("m1-a", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" })
 	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "m1-a"}))
-	if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || !strings.Contains(starts[1], `"new_snapshot":true`) {
+	if starts := ta.bodies("POST", "m1-a/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
 		t.Fatalf("start after keeping = %q", starts)
 	}
 	has(t, ta.output(), "undo point taken → `defenseclaw sandbox undo m1-a` restores it")
@@ -1035,6 +1220,38 @@ func TestStartTakesAFreshSnapshotWhenNothingIsOnTop(t *testing.T) {
 		}
 		has(t, ta.output(), c.want...)
 		lacks(t, ta.output(), c.not)
+	}
+}
+
+// An acceptance an earlier CLI recorded on this machine (cli/accepted.json),
+// before the daemon kept them, still makes the next start take a new undo
+// point, once; one for another snapshot is not honoured.
+func TestStartHonoursAnEarlierCLIsAcceptance(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.TTY = false
+	sb := sampleSandbox("box")
+	sb.Phase = "stopped"
+	taken := time.Date(2026, 9, 27, 9, 30, 0, 0, time.UTC)
+	sb.Snapshot = &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: taken}
+	ta.daemon.add(sb)
+	ta.daemon.pendingChanges = true
+	dir, _ := ta.cliStateDir("box")
+	accepted := filepath.Join(dir, "accepted.json")
+	writeFile(t, accepted, `{"sandbox_id":"sb-box","snapshot_created_at":"2026-09-27T09:30:00Z"}`)
+	ta.ok(t, ta.Start(bg, "box", StartOptions{}))
+	if starts := ta.bodies("POST", "box/start"); len(starts) != 1 || !strings.Contains(starts[0], `"new_snapshot":true`) {
+		t.Fatalf("start = %q", starts)
+	}
+	if _, err := os.Stat(accepted); !os.IsNotExist(err) {
+		t.Fatalf("the used acceptance is still there: %v", err)
+	}
+	ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
+		sb.Phase, sb.Snapshot = "stopped", &sandboxapi.SnapshotInfo{Kind: "git", CreatedAt: taken.Add(time.Hour)}
+	})
+	writeFile(t, accepted, `{"sandbox_id":"sb-box","snapshot_created_at":"2026-09-27T09:30:00Z"}`)
+	ta.ok(t, ta.Start(bg, "box", StartOptions{}))
+	if starts := ta.bodies("POST", "box/start"); len(starts) != 2 || strings.Contains(starts[1], "snapshot") {
+		t.Fatalf("start with another snapshot's acceptance = %q", starts)
 	}
 }
 
@@ -1344,6 +1561,58 @@ func TestConnectPassesTheRunsOptionsAndBanner(t *testing.T) {
 	has(t, ta.output(), "Model     mock-model", "OPENAI_API_KEY comes from --credential", "Secret    OPENAI_API_KEY → host.openshell.internal:38221 only")
 }
 
+// PR 1022 live retest N4: with openshell.egress.block_large_uploads on, the
+// run banner said only "network: open + blocklist". Its Uploads line names
+// what the block cuts, from the policy the sandbox runs under, on a run and
+// on a connect; the organization's block says whose it is.
+//
+// The block only reports an upload to a host the user unblocked or an allow
+// list names (egress.exemptFromUploadBlock): the line said every first
+// upload over the threshold is cut, with files.example.net on
+// openshell.egress.allow (PR 1022 review of N4).
+func TestBannerNamesTheLargeUploadBlock(t *testing.T) {
+	const cut = "Uploads   an upload of more than 1 MiB to a host the sandbox has not contacted before is cut, except to "
+	policy := func(source string, extra ...sandboxapi.Setting) func(sandboxapi.ExplainRequest, *sandboxapi.Explain) {
+		return func(_ sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+			ex.Settings = append(ex.Settings, sandboxapi.Setting{Key: "egress.large_upload_mb", Value: "1", Source: "user"},
+				sandboxapi.Setting{Key: "egress.block_large_uploads", Value: "true", Source: source})
+			ex.Settings = append(ex.Settings, extra...)
+		}
+	}
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.onExplain = policy("user", sandboxapi.Setting{Key: "egress.allow", Value: "files.example.net", Source: "user"},
+		sandboxapi.Setting{Key: "egress.allow_only", Value: "(none)", Source: "admin"})
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	// The exemptions are the user's own: a built-in pack's curated allow
+	// entries come from a feed, which the block cuts (PR 1022 final
+	// review), and the organization may turn the user's off.
+	has(t, ta.output(), "network: open + blocklist\n", cut+"hosts you allowed or unblocked, where your organization lets you (the large-upload block)\n")
+
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.daemon.add(sampleSandbox("box"))
+	var asked []string
+	ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+		asked = append(asked, req.Sandbox)
+		policy("admin", sandboxapi.Setting{Key: "egress.allow_only", Value: "files.example.net, *.corp.example", Source: "admin"})(req, ex)
+	}
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "box"}))
+	// With the organization's allowed list, every host the sandbox reaches
+	// is on it and exempt: nothing is cut.
+	has(t, ta.output(), "Uploads   an upload of more than 1 MiB is reported, not cut: every host this sandbox may reach is on your "+
+		"organization's allowed list, which your organization's large-upload block exempts\n")
+	if !slices.Equal(asked, []string{"box"}) {
+		t.Fatalf("explained %q, want the connected sandbox's policy", asked)
+	}
+
+	// Off (the default), there is no line.
+	ta = newTestApp(t, "")
+	noChanges(ta)
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	lacks(t, ta.output(), "Uploads ")
+}
+
 // The connect banner of a sandbox the CLI remembers nothing of keeps its
 // Model line, named by the variable its credential came from, not the
 // provider profile's id (manual R2-7, L10).
@@ -1440,8 +1709,10 @@ func TestDeleteKnowsTheSessionChangedNothing(t *testing.T) {
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Name: "copybox"}))
 	has(t, ta.output(), "the sandbox changed nothing")
 	ta.ok(t, ta.fresh().Delete(bg, DeleteOptions{Names: []string{"copybox"}}))
-	has(t, ta.output(), "Delete sandbox copybox (its providers, credentials and, unless --keep-snapshot, its undo point)?")
-	lacks(t, ta.output(), "may hold work")
+	// A copy has no undo point to keep or delete (RT U8: the question
+	// named one, "unless --keep-snapshot, its undo point").
+	has(t, ta.output(), "Delete sandbox copybox (its providers and credentials)? ")
+	lacks(t, ta.output(), "may hold work", "undo point")
 	// Once it ran again, it is not known to be clean.
 	ta = newTestApp(t, "n\n")
 	sb := copySandbox("copybox")
@@ -1549,5 +1820,25 @@ func TestWhatRunsInASandboxDropsItsStopMark(t *testing.T) {
 	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"true"}}))
 	if ta.cleanCopy(&stopped) {
 		t.Fatal("the mark outlived a command in the sandbox")
+	}
+}
+
+// An ask is for one host and port, 443 included; an IPv6 literal is
+// bracketed, or its port read as part of another address (PR 1022 review
+// of fix 3).
+func TestAskDestination(t *testing.T) {
+	for _, tc := range []struct {
+		ev   sandboxapi.ActivityEvent
+		want string
+	}{
+		{sandboxapi.ActivityEvent{Host: "api.example.com", Port: 443}, "api.example.com:443"},
+		{sandboxapi.ActivityEvent{Host: "fd00:ec2::254", Port: 80}, "[fd00:ec2::254]:80"},
+		{sandboxapi.ActivityEvent{Host: "[fd00:ec2::254]", Port: 80}, "[fd00:ec2::254]:80"},
+		{sandboxapi.ActivityEvent{Host: "host.openshell.internal"}, "host.openshell.internal"},
+		{sandboxapi.ActivityEvent{}, ""},
+	} {
+		if got := askDestination(tc.ev); got != tc.want {
+			t.Errorf("askDestination(%+v) = %q, want %q", tc.ev, got, tc.want)
+		}
 	}
 }

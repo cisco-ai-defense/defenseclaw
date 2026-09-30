@@ -722,6 +722,8 @@ func judgeEndpoint(ctx context.Context, ep Endpoint, allowedIPs []string, pol Po
 		// Not allowlisted: the approvals mode decides below.
 	}
 	if ep.Port != 0 && !containsInt(eff.Egress.Ports, ep.Port) {
+		// An unblock of the host would not lift it: the port stays refused.
+		d.Unblockable = false
 		return reject(d, ReasonPortNotAllowed, fmt.Sprintf(
 			"port %d is not an egress port (%s); use HTTPS, or open it with an explicit allow rule", ep.Port, joinInts(eff.Egress.Ports)))
 	}

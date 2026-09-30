@@ -42,6 +42,12 @@ type SandboxController interface {
 	Start(ctx context.Context, name string, req sandboxapi.StartRequest) (*sandboxapi.Sandbox, error)
 	Undo(ctx context.Context, name string, req sandboxapi.UndoRequest) (*sandboxapi.UndoResponse, error)
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
+	// Accept records that the user kept the changes on top of a stopped
+	// mounted sandbox's snapshot, so its next start takes a new one.
+	Accept(ctx context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error)
+	// RunLog returns the log of the latest detached run the daemon kept
+	// when it stopped the sandbox (its last lines lines; 0: all of it).
+	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
 	// ReportWorkspace records a copy-mode workspace step the CLI ran.
 	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
@@ -107,6 +113,13 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		return c.Get(ctx, r.PathValue("name"))
 	}))
+	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/logs", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		lines, err := sandboxapi.ParseRunLogLines(r.URL.Query())
+		if err != nil {
+			return nil, err
+		}
+		return c.RunLog(ctx, r.PathValue("name"), lines)
+	}))
 	mux.HandleFunc("DELETE "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		var req sandboxapi.DeleteRequest
 		if err := decodeSandboxBody(r, &req, true); err != nil {
@@ -135,6 +148,12 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 				return nil, err
 			}
 			return c.Undo(ctx, name, req)
+		case "accept":
+			var req sandboxapi.AcceptRequest
+			if err := decodeSandboxBody(r, &req, true); err != nil {
+				return nil, err
+			}
+			return c.Accept(ctx, name, req)
 		case "review":
 			var req sandboxapi.ReviewRequest
 			if err := decodeSandboxBody(r, &req, true); err != nil {

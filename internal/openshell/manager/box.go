@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -185,6 +186,11 @@ type hookStats struct {
 	toolCalls   int64
 	toolBlocked int64
 	lastBlocked string
+	// events counts the verdicts per hook event name (hookLabel of the
+	// harness's name), at most sandboxapi.MaxHookEvents names; otherEvents
+	// counts the rest (countEvent).
+	events      map[string]int64
+	otherEvents int64
 	// tampered counts tool calls that ran without a DefenseClaw verdict.
 	tampered   int64
 	lastTamper time.Time
@@ -276,6 +282,9 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.started = m.now()
 		b.reach = hookReach{}
 		b.closedPorts = nil
+		if previous != audit.SandboxPhaseReady {
+			b.rec.Sessions++
+		}
 		// A restarted daemon that finds the sandbox still ready keeps the
 		// time it became ready (uptime); a real transition takes now.
 		if previous != audit.SandboxPhaseReady || b.rec.ReadyAt.IsZero() {
@@ -421,8 +430,9 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	bindingID := b.rec.BindingID
 	shared := sharedLimitsOf(b)
 	blocked := b.blockedHostList()
+	accepted := b.rec.Accepted
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID, blocked)
+	m.decorate(&v, proxy, bindingID, blocked, accepted)
 	views := []sandboxapi.Sandbox{v}
 	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
 	return views[0]
@@ -523,13 +533,14 @@ func (b *box) blockedHostList() []string {
 }
 
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's counts and the snapshot. The egress counts are destinations:
+// the proxy's counts and the snapshot, with its acceptance (accepted, the
+// record's Accepted) when it applies. The egress counts are destinations:
 // Destinations those the sandbox reached, Blocked those refused at least
 // once (by the DefenseClaw proxy or by OpenShell, whose refused
 // destinations openshellBlocked lists), the way the feed and a session's
 // ✗ lines name them; BlockedRequests counts the refused requests. Callers
 // must not hold Manager.mu.
-func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string) {
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string, accepted *acceptedSnapshot) {
 	blocked := make(map[string]struct{}, len(openshellBlocked))
 	for _, h := range openshellBlocked {
 		blocked[h] = struct{}{}
@@ -556,6 +567,9 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 		if snap.UndoneAt != nil {
 			info.UndoneAt = *snap.UndoneAt
 		}
+		if accepted.acceptedFor(snap, v.Session) {
+			info.AcceptedAt = accepted.At
+		}
 		v.Snapshot = info
 	}
 }
@@ -570,7 +584,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
 		RunImage: r.RunImage, RunImageID: r.RunImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
-		CreatedAt: r.CreatedAt, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
+		CreatedAt: r.CreatedAt, Session: r.Sessions, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
 		Launch:      sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
 		Credentials: slices.Clone(r.Credentials), HostPorts: slices.Clone(r.HostPorts),
@@ -612,6 +626,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	v.Hooks = sandboxapi.HookCoverage{
 		LastHookAt: b.hooks.lastHook, LastOTLPAt: b.hooks.lastOTLP, HookRequests: b.hooks.requests,
 		ToolCalls: b.hooks.toolCalls, ToolBlocked: b.hooks.toolBlocked, LastBlocked: b.hooks.lastBlocked,
+		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,

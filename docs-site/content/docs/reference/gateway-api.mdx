@@ -602,7 +602,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, and `daemon_uid` (the uid the daemon runs as; absent on Windows). |
+| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, `started_at` (when the sandbox runtime started: nothing keeps the sandboxes' hook and egress counters across a restart, so they count from then), and `daemon_uid` (the uid the daemon runs as; absent on Windows). |
 | `GET` | `/api/v1/sandbox/sandboxes` | — | `{"sandboxes": [Sandbox]}` |
 | `POST` | `/api/v1/sandbox/sandboxes` | `CreateRequest` | `Sandbox` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
@@ -611,6 +611,8 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/start` | Optional `{"no_snapshot": bool, "new_snapshot": bool}`; `409 conflict` when the sandbox is already running | `Sandbox` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/undo` | Optional `{"preview", "keep_refs", "stop", "restart"}` (all bool) | `UndoResponse`: the workspace `result`, whether it `stopped` and `restarted` the sandbox, a `summary`, and a `review` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, and the `diff` when asked |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/accept` | Optional `{"snapshot_created_at": time, "session": int}`; `409 conflict` when the sandbox is running, its undo point was undone, it is another one than `snapshot_created_at` names, or the sandbox was started again since the `session` named; `400 invalid_request` for a copy-mode sandbox; `404 not_found` without an undo point | `Sandbox`, whose `snapshot` carries `accepted_at` |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}/logs` | Query `lines` (optional, 0 or absent for all of it); `404 not_found` when no log was kept | `RunLog`: `name`, `state` (`exited` or `interrupted`), `exit`, `started_at`, `kept_at`, `log` |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
 | `GET` | `/api/v1/sandbox/approvals` | Query `sandbox` (optional) | `{"approvals": [Approval]}` |
 | `POST` | `/api/v1/sandbox/approvals/{id}` | `ApprovalDecision` | `ApprovalResult`: the `approval`, whether it was `persisted`, a `message` |
@@ -648,15 +650,48 @@ when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
 (`image`, `image_id`, and on a MicroVM gateway the `run_image` and
 `run_image_id` it boots, which carries its run's harness settings) and
 `tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
-plain reason, tamper counts, and whether hooks are `silent` or
-`unreachable`), `endpoints` (the last result of each credentialed endpoint),
+plain reason, tamper counts, the verdicts per hook event under the
+harness's own event names in `events`, at most 48 names with the rest in
+`other_events`, and whether hooks are `silent` or `unreachable`),
+`endpoints` (the last result of each credentialed endpoint),
 `egress` totals, `pending_approvals`, the
-`workspace` and `mcp` banner views, `snapshot`, `violations` (settings the
+`workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
+up each time the daemon sees the sandbox become ready), `violations` (settings the
 policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
 nested-repository guard found in a mounted project). `launch` holds what the
 CLI needs to start the harness. `credentials` lists the sandbox's
 `--credential` bindings (`name`, `host` and `port`, never the value) and
 `host_ports` the host ports it may ask to reach: what a resume keeps.
+
+### Undo point and detached runs
+
+A mounted sandbox's `snapshot` is its undo point: `kind`, `ref`,
+`created_at`, `undone_at` once undo ran, and `accepted_at` once the user
+kept the changes made on top of it. Every `start` takes a fresh snapshot
+unless the folder still holds changes an earlier session made that nobody
+undid or accepted, which keeps the undo point so `undo` still reverts them,
+whoever starts the sandbox. `POST …/{name}/accept` records the acceptance of
+a stopped sandbox's changes (the CLI sends it when the user keeps them at the
+end of a session, with the `created_at` of the snapshot it reviewed them
+against and the sandbox's `session` then, so an accept after another start,
+whose changes nobody reviewed, is refused). The next start then takes a fresh
+snapshot and drops the acceptance; a start with `no_snapshot` keeps the old
+snapshot but drops the acceptance too. A start that fails while OpenShell
+still reports the sandbox stopped keeps the acceptance for the next one.
+`new_snapshot` on a start accepts the changes too.
+
+Every stop of a running sandbox (`…/stop`, `…/undo` with `stop`, and a
+tamper stop under `hooks.on_tamper: stop`) looks at the sandbox's latest
+detached run (`sandbox run --detach`) before it ends the harness. A run
+still going is marked interrupted, and the feed gets a `sandbox.lifecycle`
+event with reason `run_interrupted`. Once the harness has exited and the
+sandbox reads `stopping`, the daemon keeps the last 1 MiB of the run's log on
+the host (under `<data_dir>/sandboxes/<name>/runlog/`), which `GET
+…/{name}/logs` serves while the sandbox is stopped, and which `sandbox logs`
+of a stopped sandbox prints. A tamper stop keeps no log: it waits on nothing
+the workload controls, and its `run_interrupted` event says the log was not
+kept. The next stop that finds a run replaces it; a delete removes it.
+Bytes of the log that are not UTF-8 come back replaced.
 
 ### Approvals and unblocks
 
@@ -733,13 +768,13 @@ A `: keepalive` comment follows the replay and repeats every 15 seconds.
 Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 `sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
 (`dc-egress-proxy` or `openshell`), `category`, `rule`, `unblockable`,
-`bytes_up`, `bytes_down`, `approval_id`, `tool`, `event`, `phase`,
-`severity`, `reason`, and `message`.
+`bytes_up`, `bytes_down`, `threshold`, `approval_id`, `tool`, `event`,
+`phase`, `severity`, `reason`, and `message`.
 
 | `kind` | Meaning |
 | --- | --- |
-| `egress.allowed`, `egress.blocked` | A destination the egress proxy or OpenShell allowed or blocked. |
-| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before. |
+| `egress.allowed`, `egress.blocked` | A destination the egress proxy or OpenShell allowed or blocked. An upload the large-upload block cut, and later refused uploads to that host, are `egress.blocked` with `category: "large_upload"`. |
+| `egress.large_upload` | A large upload to a destination the sandbox hadn't contacted before, which only the report saw (the block was off, or the host is exempt). It is reported as it crosses the sandbox's `threshold`, before it ends: `bytes_up` is what had gone up then, and `message` says `more than` the threshold (``⚠ large upload to first-seen files.example.net (more than 25 MiB)``). |
 | `egress.unblocked` | An unblock was applied. |
 | `approval.requested`, `approval.resolved` | An ask was raised or answered. |
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
@@ -966,6 +1001,26 @@ It follows configuration changes with the rest of the sandbox's egress
 policy. The report is an
 `egress.large_upload` activity event and a finding; the upload itself is not
 cut off.
+
+With the large-upload block on (the pack's `egress.block_large_uploads`,
+`openshell.egress.block_large_uploads`, or
+`openshell.admin.block_large_uploads`), the proxy also cuts the tunnel or
+request before the chunk that crosses the threshold, and answers the
+sandbox's later requests to that host (or to other first-seen hosts under
+its domain or at its address) with a `403` of `category: "large_upload"`
+whose `reason` names the threshold. The cut is an `egress.blocked` activity
+event instead of `egress.large_upload`: `category` is `large_upload`,
+`reason` is the proxy's sentence ("This sandbox tried to send more than 10
+MiB to a destination it had not contacted before."; a later refusal, of a
+request that may send nothing, says "This destination is blocked since this
+sandbox tried to send more than 10 MiB to it, a destination it had not
+contacted before."; a report without the block says "More than 10 MiB was
+sent to a destination this sandbox had not contacted before."), `bytes_up` is what
+reached the destination (at most the threshold), `severity` is `HIGH`, and `unblockable` says whether
+`POST /api/v1/sandbox/egress/unblock` lifts the block for the host. Each later
+refusal is an ordinary `egress.blocked` event with that category. Hosts an
+unblock, an allow entry or `openshell.admin.egress_allow_only` names are
+exempt: their uploads are only reported.
 
 **Default per-sandbox limits.** 256 open connections, 256 concurrent tunnels
 or requests, and 50 new tunnels per second (burst 200), with 1024 connections

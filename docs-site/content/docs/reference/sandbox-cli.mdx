@@ -403,8 +403,10 @@ port on your machine, a private address, a destination the profile does not
 list) with its destination and the `sandbox approve` command that answers it
 from another terminal (or `defenseclaw tui`, key `7`, then `t` for the Asks
 view); a destination DefenseClaw blocked, with the `sandbox unblock` command
-that lifts the block; a finding such as an alert on a tool call or hook
-tamper; a quarantined nested repository; and a DefenseClaw daemon that
+that lifts the block; a large upload the block did not cut (`⚠ large upload
+to files.example.net (more than 25 MiB)`, with the block off or for a
+destination exempt from it); a finding such as an alert on a tool call or
+hook tamper; a quarantined nested repository; and a DefenseClaw daemon that
 does not answer (the hooks fail closed until it is back). The harness draws
 its own screen, so these notices go to the terminal's title and, where the
 terminal has them, a desktop notification, and ring the bell, instead of
@@ -697,8 +699,10 @@ server with `--no-tty` to get the prompt back at once.
 
 Shows the output of a detached run (`run --detach`) and whether the run is
 still going, finished (with its exit status) or was interrupted. `-f` follows
-the output until the run ends. Once the sandbox is stopped, it shows the log
-`stop` kept on this machine. The agent writes this log, so on a terminal
+the output until the run ends. Once the sandbox is stopped, it shows the last
+1 MiB of the log that DefenseClaw kept on this machine as it stopped the
+sandbox, whoever stopped it (`stop`, the TUI, the macOS app, `undo`, a tamper
+stop). The agent writes this log, so on a terminal
 its escape sequences (other than colors) and control characters print as
 `�` rather than acting on the terminal; piped or redirected to a file, the
 log is written as it is. A one-prompt `run --prompt` prints the harness's
@@ -740,8 +744,9 @@ Without a name, shows the sandbox subsystem: whether it is on and reachable,
 the OpenShell gateway, the listener addresses, the default pack and profile,
 the organization policy, and counts. With a name, shows that sandbox in
 detail: the harness and its version, phase, project folder, permissions mode,
-policy, hook tamper tier, hook traffic and the last blocked tool call, the
-tool calls that ran without a DefenseClaw verdict (hook tamper), egress
+policy, hook tamper tier, hook traffic, the verdicts per hook event under
+the harness's own event names ("Hook events  PreToolUse 12 · PostToolUse 11
+· Stop 2"), the last blocked tool call, the tool calls that ran without a DefenseClaw verdict (hook tamper), egress
 totals (destinations contacted and blocked, each counted once, as the
 activity feed names them; the JSON also has `blocked_requests`), credential
 endpoints, the undo point, waiting asks, nested
@@ -763,8 +768,8 @@ defenseclaw sandbox status myapp-7f3a --output json
 
 Stops a sandbox. It is kept, so `start` or `connect` can resume it. When a
 detached run is still going, `stop` asks first on a terminal (`--yes` skips
-the question; without a terminal it warns), marks the run interrupted and
-keeps its log for `sandbox logs`.
+the question; without a terminal it warns). The stop marks the run
+interrupted and keeps its log for `sandbox logs`, as every stop does.
 
 For a copy-mode sandbox that no detached run and no other session is using,
 `stop` first looks at its copy. When nothing in it is left to bring back (it
@@ -792,7 +797,8 @@ one was undone, or the folder hasn't changed since it. If an earlier
 session's changes are still in the folder, the old snapshot is kept, so
 `undo` can still revert them, and the activity feed says so. Changes you
 kept at the end of a session ("Keep changes?", `--yes` or `on_exit: keep`)
-count as accepted: the next `start` or `connect` takes a fresh snapshot.
+count as accepted: DefenseClaw records it, and the next start takes a fresh
+snapshot, whether `start`, `connect`, the TUI or the macOS app starts it.
 `--new-snapshot` accepts the changes and takes a fresh snapshot;
 `--no-snapshot` always keeps the old one. `start` says which undo point
 applies, and when it kept the old one, that stopping the sandbox and
@@ -846,8 +852,17 @@ Shows the activity feed of every sandbox, or one: destinations reached (✓)
 and blocked (✗), large uploads, unblocks, asks and their answers, blocked tool
 calls, findings such as hooks that stopped reaching DefenseClaw, lifecycle
 changes (a sandbox being created, becoming ready, stopping, or being deleted),
-and workspace events such as an undo or a copy-mode upload. A blocked
-destination that can be unblocked shows the `unblock` command to run. `-f`
+and workspace events such as an undo or a copy-mode upload. A destination
+shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
+`example.com:80`, so an HTTPS and an HTTP request refused at the same host
+are two different lines. An IPv6 address with its port is bracketed:
+`[fd00:ec2::254]:80`. A blocked destination that can be unblocked shows
+the `unblock` command to run. A large upload is a ⚠ report, made as it crosses the threshold, so it says `more than`
+it (`⚠ large upload to files.example.net (more than 25 MiB)`), or, with
+[the large-upload block](/docs/setup/sandbox-policy#large-upload-alert-threshold)
+on, a ✗ that names the threshold, such as `✗ files.example.net (large upload
+blocked: this sandbox tried to send more than 10 MiB to a destination it had
+not contacted before)`, with its `unblock` command. `-f`
 keeps following the feed. The daemon keeps a bounded buffer of recent events. Each event has a
 sequence number, and `--since` starts after one.
 
@@ -947,6 +962,12 @@ the proxy lets it reach, and the activity feed shows no finding for it. A
 call that names a subdomain you did not unblock, that another rule flags
 too, or that Cisco AI Defense or the LLM judge flags or blocks (even without
 naming a rule), keeps its verdict.
+
+The agent learns the command from DefenseClaw too. When the proxy refuses an
+HTTPS destination, the hook of the next shell or web-fetch tool call tells
+the agent the destination, why it is blocked, and the `sandbox unblock`
+command for you to run (Claude Code, Codex, Copilot CLI, Cursor and Devin).
+Once you unblock the host, the agent is no longer told of that block.
 
 ```bash
 defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a

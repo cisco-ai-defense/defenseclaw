@@ -253,6 +253,45 @@ func (c *Client) Undo(ctx context.Context, name string, req UndoRequest) (*UndoR
 	return &out, nil
 }
 
+// Accept records that the user kept the changes on top of a stopped
+// mounted sandbox's snapshot: its next start takes a new one.
+func (c *Client) Accept(ctx context.Context, name string, req AcceptRequest) (*Sandbox, error) {
+	var out Sandbox
+	if err := c.do(ctx, http.MethodPost, sandboxPath(name, "accept"), nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RunLog returns the log of the sandbox's latest detached run that the
+// daemon kept when it stopped the sandbox: its last lines lines (all of it
+// when lines is 0).
+func (c *Client) RunLog(ctx context.Context, name string, lines int) (*RunLog, error) {
+	var q url.Values
+	if lines > 0 {
+		q = url.Values{"lines": {strconv.Itoa(lines)}}
+	}
+	var out RunLog
+	if err := c.do(ctx, http.MethodGet, sandboxPath(name, "logs"), q, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ParseRunLogLines reads the ?lines query of GET /sandboxes/{name}/logs
+// (0: the whole kept log).
+func ParseRunLogLines(v url.Values) (int, error) {
+	s := strings.TrimSpace(v.Get("lines"))
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, Errorf(CodeInvalid, "lines must be a number of lines (0 for the whole log)")
+	}
+	return n, nil
+}
+
 // Review returns the end-of-session review of a mounted project.
 func (c *Client) Review(ctx context.Context, name string, req ReviewRequest) (*ReviewResponse, error) {
 	var out ReviewResponse

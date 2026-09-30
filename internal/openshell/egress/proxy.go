@@ -825,7 +825,7 @@ func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (
 	}
 	if !exemptFromUploadBlock(dec) && p.counter.uploadBlocked(pr, dec.Host) {
 		release()
-		refused := p.largeUploadRefusal(pr, d, dec, "")
+		refused := p.largeUploadRefusal(pr, d, dec, "", false)
 		return nil, &refused
 	}
 	return release, nil
@@ -833,14 +833,33 @@ func (p *Proxy) admit(r *http.Request, pr Principal, d *Decider, dec Decision) (
 
 // largeUploadRefusal is dec, made by d for pr, refused by the large-upload
 // block; scope names the domain or address total that crossed, empty for
-// the destination's own. An unblock of the destination lifts the block.
-func (p *Proxy) largeUploadRefusal(pr Principal, d *Decider, dec Decision, scope string) Decision {
+// the destination's own. cut marks the answer to the request whose upload
+// the block cut; any other request is refused because of that earlier
+// upload, which its reason says (a GET after the cut sends nothing). An
+// unblock of the destination lifts the block.
+func (p *Proxy) largeUploadRefusal(pr Principal, d *Decider, dec Decision, scope string, cut bool) Decision {
 	refused := blocked(dec, CategoryLargeUpload, SourceLimit, "")
-	refused.Reason, refused.Unblockable = p.largeUploadReason(pr), d.UnblocksAllowed()
-	if scope != "" {
-		refused.Reason = p.largeUploadScopeReason(pr, scope)
+	refused.Unblockable = d.UnblocksAllowed()
+	switch {
+	case cut && scope != "":
+		refused.Reason = p.largeUploadScopeReason(pr, scope, true)
+	case cut:
+		refused.Reason = p.largeUploadReason(pr, true)
+	default:
+		refused.Reason = p.largeUploadBlockedReason(pr, scope)
 	}
 	return refused
+}
+
+// largeUploadBlockedReason says why a request to a destination the
+// large-upload block holds is refused: an earlier upload to it (or to
+// scope's destinations) crossed pr's threshold.
+func (p *Proxy) largeUploadBlockedReason(pr Principal, scope string) string {
+	threshold := FormatThreshold(p.counter.thresholdFor(pr))
+	if scope != "" {
+		return fmt.Sprintf("This destination is blocked since this sandbox tried to send more than %s to %s it had not contacted before.", threshold, scope)
+	}
+	return fmt.Sprintf("This destination is blocked since this sandbox tried to send more than %s to it, a destination it had not contacted before.", threshold)
 }
 
 // exemptFromUploadBlock: destinations the user unblocked, or the operator
@@ -850,16 +869,32 @@ func exemptFromUploadBlock(dec Decision) bool {
 	return dec.Source == SourceUnblock || dec.Source == SourceOperator || dec.Source == SourceAdmin
 }
 
-func (p *Proxy) largeUploadReason(pr Principal) string {
-	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", formatBytes(p.counter.thresholdFor(pr)))
+// largeUploadReason says what crossed pr's large-upload threshold. The block
+// stops an upload before the chunk that would cross it, so under the block
+// (blocked) at most the threshold left: the sentence says what the sandbox
+// tried to send. The refusals after the cut say why the destination is
+// blocked instead (largeUploadBlockedReason).
+func (p *Proxy) largeUploadReason(pr Principal, blocked bool) string {
+	threshold := FormatThreshold(p.counter.thresholdFor(pr))
+	if blocked {
+		return fmt.Sprintf("This sandbox tried to send more than %s to a destination it had not contacted before.", threshold)
+	}
+	return fmt.Sprintf("More than %s was sent to a destination this sandbox had not contacted before.", threshold)
 }
 
-func (p *Proxy) largeUploadScopeReason(pr Principal, scope string) string {
-	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.",
-		formatBytes(p.counter.thresholdFor(pr)), scope)
+// largeUploadScopeReason is largeUploadReason for the total of scope (the
+// destinations under a domain, or at an address).
+func (p *Proxy) largeUploadScopeReason(pr Principal, scope string, blocked bool) string {
+	threshold := FormatThreshold(p.counter.thresholdFor(pr))
+	if blocked {
+		return fmt.Sprintf("This sandbox tried to send more than %s to %s it had not contacted before.", threshold, scope)
+	}
+	return fmt.Sprintf("More than %s was sent to %s this sandbox had not contacted before.", threshold, scope)
 }
 
-func formatBytes(n int64) string {
+// FormatThreshold is a large-upload threshold as refusals and events name
+// it: "25 MiB", or "1500 bytes" when it is not a whole number of MiB.
+func FormatThreshold(n int64) string {
 	const mib = 1 << 20
 	if n >= mib && n%mib == 0 {
 		return strconv.FormatInt(n/mib, 10) + " MiB"
@@ -926,7 +961,7 @@ func (p *Proxy) serveConnect(w http.ResponseWriter, r *http.Request) {
 		// refuse it now, with a body and an event, instead of cutting it
 		// silently after the 200.
 		_ = upstream.Close()
-		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(pr, d, dec, scope), start)
+		p.refuseRaw(conn, pr, http.MethodConnect, p.largeUploadRefusal(pr, d, dec, scope, false), start)
 		return
 	}
 	t := newTunnel(pr, cred, d, http.MethodConnect, dec, start, flow)
@@ -1216,15 +1251,20 @@ func (p *Proxy) emitFailed(pr Principal, method string, dec Decision, status int
 func (p *Proxy) emitLargeUpload(t *tunnel, v uploadVerdict) {
 	e := p.event(EventLargeUpload, t.principal, t.method, t.dec)
 	e.TunnelID = t.id
-	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason(t.principal)
+	e.Category, e.Source, e.Reason = CategoryLargeUpload, SourceLimit, p.largeUploadReason(t.principal, v.cut)
 	if v.scope != "" {
-		e.Reason = p.largeUploadScopeReason(t.principal, v.scope)
+		e.Reason = p.largeUploadScopeReason(t.principal, v.scope, v.cut)
 	}
-	e.BytesUp = v.total
+	e.BytesUp, e.Threshold = v.total, p.counter.thresholdFor(t.principal)
 	if d := t.flow.dest.Load(); d != nil {
 		e.BytesDown = d.down.Load()
 	}
 	e.FirstSeen, e.Terminated = true, v.cut
+	if v.cut {
+		// As for the refusals that follow (largeUploadRefusal): an unblock
+		// of the destination lifts the block.
+		e.Unblockable = t.policy().d.UnblocksAllowed()
+	}
 	e.Duration = time.Since(t.started)
 	p.emit(e)
 }

@@ -486,9 +486,12 @@ func (r *doctorRun) vmIdentityCheck(ctx context.Context) Check {
 	case have != want:
 		c.Status = StatusFail
 		c.Detail = fmt.Sprintf("the MicroVM driver would run sandboxes as %s; DefenseClaw's images are built for %s", have, want)
-		c.Fix = &Fix{Summary: fmt.Sprintf("set sandbox_uid = %d and sandbox_gid = %d under [openshell.drivers.vm] in %s and restart the gateway "+
-			"(gateway-wide: every MicroVM sandbox on it then runs as you)", want.UID, want.GID, r.config.TOMLPath),
-			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMIdentity: &want})}
+		c.Fix = r.gatewayChangeFix(fmt.Sprintf("set sandbox_uid = %d and sandbox_gid = %d under [openshell.drivers.vm] in %s", want.UID, want.GID, r.config.TOMLPath),
+			"(gateway-wide: every MicroVM sandbox on it then runs as you)", r.applyGateway(GatewayChanges{VMIdentity: &want}))
+	case r.nothingToRestart():
+		// No gateway runs, to restart or to have loaded it: the one
+		// OpenShell's install starts does.
+		c.Status, c.Detail = StatusPass, fmt.Sprintf("sandboxes run as %s, your user, once the gateway is installed and started (set in %s)", want, r.config.TOMLPath)
 	case r.restartPending(ctx, r.config):
 		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s, but the gateway has not been restarted since it changed", want, r.config.TOMLPath)
 		if r.gatewayStartedAt(ctx).IsZero() {
@@ -496,7 +499,10 @@ func (r *doctorRun) vmIdentityCheck(ctx context.Context) Check {
 			// restart of its own followed its change.
 			c.Detail = fmt.Sprintf("%s in %s; restart the gateway if you have not since it changed", want, r.config.TOMLPath)
 		}
-		c.Fix = &Fix{Summary: "restart the gateway to load its changed configuration", Command: r.Gateway.restartCommand().String(), Automatic: true, RestartsGateway: true, Apply: r.Gateway.Restart}
+		c.Fix = r.gatewayChangeFix("", "to load its changed configuration", nil)
+	case r.startUnknown(ctx):
+		c.Status, c.Detail = StatusWarn, fmt.Sprintf("%s in %s, %s", want, r.config.TOMLPath, restartUnknown)
+		c.Fix = r.gatewayChangeFix("", "if you have not since it changed", nil)
 	default:
 		c.Status, c.Detail = StatusPass, fmt.Sprintf("sandboxes run as %s, your user", want)
 	}
@@ -534,8 +540,8 @@ func (r *doctorRun) vmResourcesCheck() Check {
 		}
 		c.Status = StatusFail
 		c.Detail += "; your organization's openshell.admin.max_resources allows less, so every create is refused"
-		c.Fix = &Fix{Summary: "lower vcpus and mem_mib under [openshell.drivers.vm] in " + r.config.TOMLPath + " to the maximum and restart the gateway",
-			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMResources: &lower})}
+		c.Fix = r.gatewayChangeFix("lower vcpus and mem_mib under [openshell.drivers.vm] in "+r.config.TOMLPath+" to the maximum", "",
+			r.applyGateway(GatewayChanges{VMResources: &lower}))
 	default:
 		want := r.micro.Recommended
 		raise := VMResources{}
@@ -551,8 +557,8 @@ func (r *doctorRun) vmResourcesCheck() Check {
 		}
 		c.Status = StatusWarn
 		c.Detail += "; an agent that builds code may need more"
-		c.Fix = &Fix{Summary: fmt.Sprintf("raise them under [openshell.drivers.vm] in %s and restart the gateway (the disk is sparse on the host: it costs nothing until used)", r.config.TOMLPath),
-			Automatic: true, RestartsGateway: true, Apply: r.applyGateway(GatewayChanges{VMResources: &raise})}
+		c.Fix = r.gatewayChangeFix("raise them under [openshell.drivers.vm] in "+r.config.TOMLPath, "(the disk is sparse on the host: it costs nothing until used)",
+			r.applyGateway(GatewayChanges{VMResources: &raise}))
 	}
 	return c
 }
@@ -674,7 +680,10 @@ func (r *doctorRun) microVMFix() *Fix {
 	if r.config != nil {
 		where = r.config.TOMLPath
 	}
-	return &Fix{Summary: `run sandboxes in OpenShell MicroVMs: set compute_driver = "vm" and your user as the sandboxes' in ` + where +
-		` and restart the gateway (sandboxes made on the docker driver cannot start after the switch)`,
-		Command: "defenseclaw sandbox setup", Automatic: true, RestartsGateway: true, Apply: r.applyGateway(r.microVMChanges())}
+	fix := r.gatewayChangeFix(`run sandboxes in OpenShell MicroVMs: set compute_driver = "vm" and your user as the sandboxes' in `+where,
+		"(sandboxes made on the docker driver cannot start after the switch)", r.applyGateway(r.microVMChanges()))
+	if fix.Automatic {
+		fix.Command = "defenseclaw sandbox setup"
+	}
+	return fix
 }
