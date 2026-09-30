@@ -498,7 +498,7 @@ see also [Sandbox](/docs/setup/sandbox).
 | `defenseclaw sandbox review\|undo\|pull <name>` | Review a mounted project's changes, restore its pre-session snapshot, or bring a copy-mode sandbox's work back. |
 | `defenseclaw sandbox policy show\|explain\|suggest\|allow\|block` | Show where each setting of the sandbox policy comes from, suggest an allowlist, and edit the egress lists. |
 | `defenseclaw sandbox pack list\|show\|validate` | Inspect sandbox policy packs and their digests. |
-| `defenseclaw sandbox image build\|list\|prune` | Build, list, and prune the harness images. |
+| `defenseclaw sandbox image build\|list\|prune\|rm` | Build, list, prune, and remove the harness images. |
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
 | `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. |
