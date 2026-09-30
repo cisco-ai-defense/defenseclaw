@@ -109,6 +109,28 @@ func TestEgressRefusalsReachTheBindingsAgentOnce(t *testing.T) {
 	}
 }
 
+// A refusal belongs to the session whose agent made the request: a stop and
+// a start keep the sandbox's binding, and the new session's agent is not
+// told of what the proxy refused the one before.
+func TestEgressRefusalsEndWithTheSession(t *testing.T) {
+	e := newEnv(t, nil)
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "egbox"})
+	before := e.binding("egbox")
+	if status, _ := proxy.connect(t, "egbox", "webhook.site:443"); status != http.StatusForbidden {
+		t.Fatalf("CONNECT webhook.site = %d, want the proxy's refusal", status)
+	}
+	e.stopBox("egbox")
+	e.startBox("egbox", sandboxapi.StartRequest{})
+	after := e.binding("egbox")
+	if after.ID != before.ID {
+		t.Fatalf("the start made a new binding %s (was %s)", after.ID, before.ID)
+	}
+	if got := e.m.EgressRefusals(after.ID, after.SandboxName); len(got) != 0 {
+		t.Fatalf("the new session was told of the last one's refusals: %+v", got)
+	}
+}
+
 // The agent is told who can allow a destination: the unblock command only
 // while an unblock lifts the refusal, and otherwise who can, never a way
 // around it.

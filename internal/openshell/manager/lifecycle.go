@@ -465,7 +465,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// The harness starts with the sandbox: every tool call of the new
 	// session reaches this process, so its tool-call ledger is complete.
+	// The binding outlives the session, so the CONNECT refusals the last
+	// session's agent was never told of go: they are not the new agent's.
 	m.toolCalls.Begin(rec.BindingID)
+	m.refusals.forget(rec.BindingID)
 	m.mu.Lock()
 	b.tamperStop = false
 	m.mu.Unlock()
