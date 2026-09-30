@@ -1132,7 +1132,7 @@ func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map
 	if err != nil {
 		return err
 	}
-	if err := gatewayExposure(reg, st, env); err != nil {
+	if err := gatewayExposure(reg, st, env, env == nil && g.NoService(ctx)); err != nil {
 		return refuse(err)
 	}
 	if err := g.ProbeClientAuth(ctx, reg); err != nil {
@@ -1146,9 +1146,11 @@ func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map
 // as it does for the gateway. It returns ErrGatewayExposed for settings
 // that let in clients without the registration's certificate or listen
 // beyond loopback, and ErrGatewayMismatch when the registration reaches
-// another port than the service listens on, which only the service's
-// environment says: with none (env nil) the ports are not compared.
-func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]string) error {
+// another port than the service listens on (gateway.toml, or the
+// service's environment). With no gateway service (noService, env nil)
+// the ports are not compared: a gateway run by hand takes its port from an
+// environment of its own.
+func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]string, noService bool) error {
 	s := st.server
 	var issues []string
 	if v, ok := env[envDisableTLS]; ok && envFlag(v) || !ok && s.DisableTLS != nil && *s.DisableTLS {
@@ -1184,11 +1186,14 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	if len(issues) > 0 {
 		return fmt.Errorf("%w: %s", ErrGatewayExposed, strings.Join(issues, "; "))
 	}
-	if env == nil {
-		// No service environment to say where the gateway listens (one
-		// run by hand takes OPENSHELL_SERVER_PORT from its own, launchd
-		// cannot be asked): the registration and the client-auth probe
-		// of the gateway it reaches decide.
+	if env == nil && noService {
+		// No gateway service, so no environment to say where the gateway
+		// listens (one run by hand takes OPENSHELL_SERVER_PORT from its
+		// own): the registration and the client-auth probe of the gateway
+		// it reaches decide. A service whose environment cannot be read
+		// (Homebrew's, through launchd) is still compared with the
+		// registration, or the probe would judge another gateway than the
+		// one DefenseClaw edits.
 		return nil
 	}
 	if _, regPort, err := net.SplitHostPort(reg.Target()); err != nil || regPort != port {

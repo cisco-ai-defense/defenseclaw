@@ -1650,7 +1650,7 @@ func (r *doctorRun) bindMountSafety(ctx context.Context, st *GatewayConfigState,
 	if r.reg == nil || r.regErr != nil {
 		return nil, errors.New("the gateway registration is unusable")
 	}
-	if err := gatewayExposure(r.reg, st, env); err != nil {
+	if err := gatewayExposure(r.reg, st, env, r.serviceMissing()); err != nil {
 		return err, nil
 	}
 	if r.gateway == nil || !r.gateway.Healthy {

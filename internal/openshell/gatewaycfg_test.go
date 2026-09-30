@@ -693,6 +693,15 @@ func TestGatewayConfigTrustsTheProbeWithoutAServiceEnvironment(t *testing.T) {
 	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrBindMountsRefused) {
 		t.Fatalf("Plan on an exposed gateway = %v", err)
 	}
+	// Homebrew's service has an environment DefenseClaw cannot read either,
+	// but it is the gateway DefenseClaw edits: a registration on another
+	// port reaches another gateway, which the probe would judge instead.
+	f = setup(t, operatorTOML)
+	f.cfg.GOOS = "darwin"
+	f.cfg.BrewFormulaInstalled = func() bool { return true }
+	if _, err := f.cfg.Plan(context.Background(), bindMounts); !errors.Is(err, openshell.ErrGatewayMismatch) || f.probes != 0 {
+		t.Fatalf("Plan on Homebrew's gateway with a registration on another port = %v (probes %d)", err, f.probes)
+	}
 }
 
 // TestGatewayConfigRecordsPendingRestart covers a restart that never
